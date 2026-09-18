@@ -573,7 +573,7 @@ impl<'db, 'a> AcceptedCandidate<'db, 'a> {
             height,
             block_hash,
             self.overlay.journal_entries()?,
-        );
+        )?;
         let application_journal_bytes = application_journal.encode()?;
 
         // ── stage every canonical record through the overlay ────────────────
@@ -643,6 +643,21 @@ impl<'db, 'a> AcceptedCandidate<'db, 'a> {
         // binary that wrote no journal at all.
         self.overlay
             .put(cf::APPLICATION_JOURNAL, &jkey, &application_journal_bytes)?;
+
+        // The record format watermark, stamped in the SAME batch as the block.
+        //
+        // The scan over the journal family is exact only while the records are
+        // there, and pruning removes them. This row does not get pruned, so a
+        // node whose newer records have aged out still refuses a downgrade to a
+        // binary that cannot read the format it published under. Writing it on
+        // every publish rather than once keeps it exactly as durable as the
+        // chain — there is no window in which a block exists under a format the
+        // watermark does not cover.
+        self.overlay.put(
+            cf::META,
+            crate::journal::FORMAT_HIGH_WATER_META_KEY,
+            &crate::journal::format_high_water_stamp(),
+        )?;
 
         self.overlay.put(
             cf::META,

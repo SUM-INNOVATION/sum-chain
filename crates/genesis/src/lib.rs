@@ -532,6 +532,51 @@ pub struct ChainParams {
     #[serde(default)]
     pub compute_pool_enabled_from_height: Option<u64>,
 
+    /// Generic application-journal activation gate.
+    ///
+    /// **This journal's OWN gate.** It is deliberately not
+    /// [`Self::compute_pool_enabled_from_height`] or
+    /// [`Self::beacon_enabled_from_height`]: those two gate dormant consensus
+    /// subsystems, they stay closed, and `Genesis::validate` rejects any
+    /// `Some(_)` for them. Reusing one of those to switch on undo-journal
+    /// enforcement would have tied a node-local storage decision to a consensus
+    /// activation that changes which state a block commits.
+    ///
+    /// # What it gates, and what it does NOT
+    ///
+    /// It does **not** gate WRITING. `AcceptedCandidate::publish` writes a
+    /// record for every block it publishes, with no gate to leave unset — that
+    /// ungatedness is the specific defect this journal exists not to repeat, and
+    /// it is pinned by
+    /// `producer/the_write_side_is_ungated_so_no_configuration_can_leave_it_unwritten`.
+    ///
+    /// It gates the height from and above which a REVERT must find a record,
+    /// and above which the generic journal — not the four legacy per-subsystem
+    /// diffs — is the authoritative undo record for a block.
+    ///
+    /// * `None` (the default and the production rule) — **observed from the
+    ///   chain**: the boundary is the lowest height for which this database
+    ///   holds a record. A node that upgrades at height H publishes records from
+    ///   H upward, so the lowest stored height IS where its journal history
+    ///   begins, and the rule is right across an upgrade without anyone choosing
+    ///   a number. A hardcoded height cannot be: too low demands records for
+    ///   blocks an older binary published, too high leaves a window in which
+    ///   nothing is required. `None` here is therefore NOT "off"; there is no
+    ///   off.
+    /// * `Some(h)` — **pinned**: every node answers "from when is a record
+    ///   required" with `h` rather than with its own upgrade height. For a
+    ///   deployment that wants a uniform, operator-visible boundary.
+    ///
+    /// # Not consensus
+    ///
+    /// The records are node-local: never hashed into a block, never folded into
+    /// a state root, never sent over the wire. Two nodes disagreeing about this
+    /// value cannot fork on the difference — one of them simply refuses a reorg
+    /// the other would perform. That is why `Genesis::validate` admits `Some(_)`
+    /// here, unlike the two dormant subsystem gates beside it.
+    #[serde(default)]
+    pub application_journal_enabled_from_height: Option<u64>,
+
     /// Threshold-BLS beacon activation gate. `None` (default) = dormant.
     /// Fail-closed: a `ChainParams` deserialized in isolation *may* hold
     /// `Some(h)`, but every genesis loaded through the authoritative
@@ -876,6 +921,12 @@ impl Default for ChainParams {
             // (issue #118 foundation).
             compute_pool_enabled_from_height: None,
             beacon_enabled_from_height: None,
+            // Production default: the application-journal boundary is OBSERVED
+            // from this node's own journal history rather than pinned. Not an
+            // "off" position — the write side is ungated, so the first block a
+            // node publishes establishes the boundary and every block from there
+            // up is required to have a record.
+            application_journal_enabled_from_height: None,
             // Production-safe default: no beacon parameter surface (typed config
             // absent). The gate above stays dormant regardless.
             beacon_params: None,

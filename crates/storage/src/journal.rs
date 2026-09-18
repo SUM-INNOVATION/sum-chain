@@ -214,18 +214,50 @@ impl ApplicationJournal {
     /// [`crate::candidate::AcceptedCandidate::publish`], which takes `height`
     /// and `block_hash` from the single `&Block` it holds. There is no public
     /// expression that pairs an arbitrary entry list with an arbitrary block.
+    ///
+    /// # The uniqueness invariant, declared and checked
+    ///
+    /// A journal holds **one net entry per `(cf, key)`**: the pre-image is the
+    /// value at the START of the block and the after-image is the value the
+    /// block finally left, however many times execution wrote that key in
+    /// between. That is what the overlay produces — its pre-image map is
+    /// `HashMap<String, BTreeMap<Vec<u8>, _>>`, which admits each `(cf, key)`
+    /// once — and it is the property the CONSUMER needs, because it is what
+    /// makes "replay order" a non-question. With at most one entry per key no
+    /// two entries of one block can interact, so any deterministic order over
+    /// them yields the same state, and ascending `(cf, key)` is that order.
+    ///
+    /// The invariant is therefore not left to the shape of the producing type.
+    /// It is validated HERE, at the single point where entries become a journal,
+    /// and re-validated by [`Self::decode_for`] on the way back in. A duplicate
+    /// is an ERROR rather than a last-writer-wins merge: two entries for one key
+    /// mean the derivation lost track of which pre-image came first, and a
+    /// journal that cannot say that cannot undo the block.
     pub(crate) fn bind(
         height: BlockHeight,
         block_hash: Hash,
         mut entries: Vec<JournalEntry>,
-    ) -> Self {
+    ) -> Result<Self> {
         entries.sort();
-        Self {
+        for pair in entries.windows(2) {
+            if pair[0].cf == pair[1].cf && pair[0].key == pair[1].key {
+                return Err(invalid(format!(
+                    "application journal for block {block_hash} at height {height}: two \
+                     entries for column family {} key {}. A journal holds one NET entry \
+                     per (cf, key) — first pre-image, final value — so a duplicate means \
+                     the derivation lost which pre-image came first; refusing to publish \
+                     a record that cannot say what the block started from",
+                    pair[0].cf,
+                    hex::encode(&pair[0].key)
+                )));
+            }
+        }
+        Ok(Self {
             format_version: FORMAT_VERSION_V1,
             height,
             block_hash,
             entries,
-        }
+        })
     }
 
     pub fn format_version(&self) -> u16 {
@@ -476,6 +508,36 @@ pub enum ActivationSource {
     Pinned(BlockHeight),
 }
 
+impl ActivationSource {
+    /// The rule a node runs, from its own genesis parameter.
+    ///
+    /// `ChainParams::application_journal_enabled_from_height` is the generic
+    /// application journal's OWN activation gate — its own field, its own
+    /// semantics, and deliberately not `compute_pool_enabled_from_height` or
+    /// `beacon_enabled_from_height`, which gate two dormant consensus subsystems
+    /// and stay closed. Opening this one changes no block's contents: the
+    /// records are node-local, so it moves only the height from and above which
+    /// a REVERT must find one.
+    ///
+    /// * `None` — [`ActivationSource::ObservedFromChain`]. The default and the
+    ///   production rule. There is no "off" here: the write side is ungated, so
+    ///   the first block this binary publishes establishes the boundary, and
+    ///   every block from there up is required to have a record.
+    /// * `Some(h)` — [`ActivationSource::Pinned`]. For a deployment that wants
+    ///   every node to answer "from when is a journal required" with the same
+    ///   number rather than with its own upgrade height.
+    ///
+    /// `sumchain-storage` does not depend on `sumchain-genesis`, so the field
+    /// arrives as the `Option<BlockHeight>` it is and the translation lives
+    /// here, at one site, rather than at each caller.
+    pub fn from_configured_height(configured: Option<BlockHeight>) -> Self {
+        match configured {
+            Some(h) => ActivationSource::Pinned(h),
+            None => ActivationSource::ObservedFromChain,
+        }
+    }
+}
+
 /// The resolved boundary: the height at and above which a journal MUST exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JournalActivation {
@@ -623,15 +685,130 @@ pub fn highest_stored_format_version(db: &Database) -> Result<Option<u16>> {
 /// chain already committed to unwinding. Called at startup, it turns a silent
 /// future failure into a refusal to start.
 pub fn refuse_downgrade(db: &Database) -> Result<()> {
-    match highest_stored_format_version(db)? {
-        Some(v) if v > FORMAT_VERSION_V1 => Err(invalid(format!(
-            "this database holds application journals in record format version {v}, \
-             and this binary implements version {FORMAT_VERSION_V1}. It cannot revert \
-             a block written by the newer binary, so it refuses to start rather than \
-             discovering that during a reorg."
+    validate_startup(db).map(|_| ())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PERSISTED FORMAT STATE, AND THE STARTUP GATE
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// `META` key holding the highest record format version this database has ever
+/// had written into it.
+///
+/// # Why a persisted row and not only the scan
+///
+/// [`highest_stored_format_version`] derives the watermark from the records
+/// themselves, which is exact while the records are there. Pruning removes
+/// records (§7.4 of the contract, and [`crate::pruner`]), and a pruned database
+/// can reach a state where the newest surviving record is older than the newest
+/// record ever written — or where the family is empty entirely. At that point
+/// the scan says "nothing", and a downgrade that the records would have refused
+/// becomes silently permitted.
+///
+/// This row does not get pruned. It is stamped by every publish, in the SAME
+/// batch as the block, so it is exactly as durable as the chain it describes,
+/// and it is monotone by construction: a binary only ever writes its own
+/// version, and an older binary never gets far enough to write anything because
+/// this gate stops it first.
+pub const FORMAT_HIGH_WATER_META_KEY: &[u8] = b"application_journal/format_high_water";
+
+/// The value every publish stamps into [`FORMAT_HIGH_WATER_META_KEY`].
+pub(crate) fn format_high_water_stamp() -> [u8; 2] {
+    FORMAT_VERSION_V1.to_be_bytes()
+}
+
+/// The persisted high-water version, or `None` on a database that has never
+/// published a block through a binary that stamps it.
+pub fn persisted_format_high_water(db: &Database) -> Result<Option<u16>> {
+    match db.get(crate::db::cf::META, FORMAT_HIGH_WATER_META_KEY)? {
+        None => Ok(None),
+        Some(v) if v.len() == 2 => Ok(Some(u16::from_be_bytes([v[0], v[1]]))),
+        Some(v) => Err(invalid(format!(
+            "the application-journal format high-water row is {} byte(s); it is a \
+             2-byte big-endian format version, and a row of any other width means \
+             something other than this binary wrote it",
+            v.len()
         ))),
-        _ => Ok(()),
     }
+}
+
+/// What the startup gate found. Returned rather than logged, so a caller can
+/// report it and a test can assert on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JournalFormatState {
+    /// The record format this binary implements.
+    pub binary_version: u16,
+    /// The stamped watermark, which survives pruning.
+    pub persisted: Option<u16>,
+    /// The watermark derived from the records present right now.
+    pub scanned: Option<u16>,
+    /// The height at and above which a revert must find a journal, observed
+    /// from this database.
+    pub observed_boundary: Option<BlockHeight>,
+}
+
+impl JournalFormatState {
+    /// The version this database must be read at: the higher of the two
+    /// watermarks. `None` only on a database with no journal history at all.
+    pub fn effective_high_water(&self) -> Option<u16> {
+        match (self.persisted, self.scanned) {
+            (None, s) => s,
+            (p, None) => p,
+            (Some(p), Some(s)) => Some(p.max(s)),
+        }
+    }
+}
+
+/// The startup gate: refuse to run against journal history this binary cannot
+/// read, and report the format state to the caller.
+///
+/// # The operational rule this enforces
+///
+/// **Once a node has published a block under a record format, it must not be
+/// downgraded to a binary that implements an older one.** The prohibition is
+/// operational, not merely advisory, because the failure it prevents is silent
+/// and late: an old binary meeting a new record has no way to unwind the blocks
+/// that record describes, and it discovers that during a reorg, with the chain
+/// already committed to unwinding. The only safe recovery from that position is
+/// to resync.
+///
+/// Two watermarks, and the gate takes the higher:
+///
+/// * the **scan** ([`highest_stored_format_version`]) — exact over the records
+///   that are present;
+/// * the **stamp** ([`persisted_format_high_water`]) — survives pruning, so a
+///   database whose newer records have aged out still refuses the downgrade.
+///
+/// A database where the stamp is absent but records exist is not treated as a
+/// fault. That is the legitimate shape of a database published by a binary
+/// before stamping existed, and the scan still covers it.
+///
+/// Called from the node's boot sequence (`sumchain_node::node::Node::new`,
+/// immediately after the database is opened and before state, consensus or RPC
+/// are constructed), so the refusal happens before anything can act on history
+/// it cannot revert.
+pub fn validate_startup(db: &Database) -> Result<JournalFormatState> {
+    let state = JournalFormatState {
+        binary_version: FORMAT_VERSION_V1,
+        persisted: persisted_format_high_water(db)?,
+        scanned: highest_stored_format_version(db)?,
+        observed_boundary: lowest_journal_height(db)?,
+    };
+    if let Some(v) = state.effective_high_water() {
+        if v > FORMAT_VERSION_V1 {
+            return Err(invalid(format!(
+                "this database holds application journals in record format version {v} \
+                 (stamped: {:?}, present in records: {:?}), and this binary implements \
+                 version {FORMAT_VERSION_V1}. It cannot revert a block written by the \
+                 newer binary, so it refuses to start rather than discovering that \
+                 during a reorg. Downgrading a node that has published under a newer \
+                 record format is prohibited; recover by running the newer binary, or \
+                 by resyncing this node from an empty database.",
+                state.persisted, state.scanned
+            )));
+        }
+    }
+    Ok(state)
 }
 
 fn usize_of(n: u64) -> Result<usize> {
@@ -726,7 +903,7 @@ mod tests {
             entry("b", b"k1", Preimage::Absent),
             entry("a", b"k1", Preimage::Absent),
         ];
-        let j = ApplicationJournal::bind(7, h(1), entries);
+        let j = ApplicationJournal::bind(7, h(1), entries).unwrap();
         let keys: Vec<_> = j
             .entries()
             .iter()
@@ -758,7 +935,10 @@ mod tests {
                 entry("beta", b"\x00", Preimage::Absent),
             ];
             let entries = order.iter().map(|i| pool[*i].clone()).collect();
-            ApplicationJournal::bind(4, h(2), entries).encode().unwrap()
+            ApplicationJournal::bind(4, h(2), entries)
+                .unwrap()
+                .encode()
+                .unwrap()
         };
         assert_eq!(mk([0, 1, 2, 3]), mk([3, 2, 1, 0]));
         assert_eq!(mk([0, 1, 2, 3]), mk([2, 0, 3, 1]));
@@ -767,12 +947,14 @@ mod tests {
     /// An empty value is not an absent key. Both round-trip, and they differ.
     #[test]
     fn absent_before_and_empty_value_before_are_different_records() {
-        let absent = ApplicationJournal::bind(1, h(3), vec![entry("cf", b"k", Preimage::Absent)]);
+        let absent =
+            ApplicationJournal::bind(1, h(3), vec![entry("cf", b"k", Preimage::Absent)]).unwrap();
         let empty = ApplicationJournal::bind(
             1,
             h(3),
             vec![entry("cf", b"k", Preimage::Value(Vec::new()))],
-        );
+        )
+        .unwrap();
         assert_ne!(absent.encode().unwrap(), empty.encode().unwrap());
 
         let back = ApplicationJournal::decode_for(&absent.encode().unwrap(), 1, &h(3)).unwrap();
@@ -783,7 +965,8 @@ mod tests {
 
     #[test]
     fn a_record_refuses_the_wrong_block() {
-        let j = ApplicationJournal::bind(5, h(4), vec![entry("cf", b"k", Preimage::Absent)]);
+        let j =
+            ApplicationJournal::bind(5, h(4), vec![entry("cf", b"k", Preimage::Absent)]).unwrap();
         let bytes = j.encode().unwrap();
         assert!(ApplicationJournal::decode_for(&bytes, 5, &h(4)).is_ok());
 
@@ -806,7 +989,8 @@ mod tests {
                 entry("cf", b"k", Preimage::Value(b"old".to_vec())),
                 entry("df", b"k", Preimage::Absent),
             ],
-        );
+        )
+        .unwrap();
         let bytes = j.encode().unwrap();
         for cut in 0..bytes.len() {
             assert!(
@@ -819,7 +1003,8 @@ mod tests {
 
     #[test]
     fn trailing_bytes_are_refused() {
-        let j = ApplicationJournal::bind(5, h(4), vec![entry("cf", b"k", Preimage::Absent)]);
+        let j =
+            ApplicationJournal::bind(5, h(4), vec![entry("cf", b"k", Preimage::Absent)]).unwrap();
         let mut bytes = j.encode().unwrap();
         bytes.push(0);
         let err = ApplicationJournal::decode_for(&bytes, 5, &h(4)).unwrap_err();
@@ -828,7 +1013,8 @@ mod tests {
 
     #[test]
     fn an_unimplemented_format_version_is_refused_rather_than_guessed() {
-        let j = ApplicationJournal::bind(5, h(4), vec![entry("cf", b"k", Preimage::Absent)]);
+        let j =
+            ApplicationJournal::bind(5, h(4), vec![entry("cf", b"k", Preimage::Absent)]).unwrap();
         let mut bytes = j.encode().unwrap();
         // The version field sits directly after the magic.
         bytes[MAGIC.len()..MAGIC.len() + 2].copy_from_slice(&2u16.to_be_bytes());
@@ -853,7 +1039,7 @@ mod tests {
     fn a_non_canonically_ordered_record_is_refused() {
         let a = entry("aa", b"k", Preimage::Absent);
         let b = entry("bb", b"k", Preimage::Absent);
-        let good = ApplicationJournal::bind(1, h(5), vec![a.clone(), b.clone()]);
+        let good = ApplicationJournal::bind(1, h(5), vec![a.clone(), b.clone()]).unwrap();
         let bytes = good.encode().unwrap();
         assert!(ApplicationJournal::decode_for(&bytes, 1, &h(5)).is_ok());
 
@@ -866,6 +1052,40 @@ mod tests {
         };
         let err = ApplicationJournal::decode_for(&swapped.encode().unwrap(), 1, &h(5)).unwrap_err();
         assert!(err.to_string().contains("canonical order"), "{err}");
+    }
+
+    /// One net entry per `(cf, key)` is an invariant, not a hope.
+    ///
+    /// The overlay cannot produce a duplicate — its pre-image map is keyed by
+    /// `(family, key)` — so this reaches `bind` only through a future derivation
+    /// that lost the invariant. It is refused there rather than merged, because
+    /// a merge would have to pick one of two pre-images and neither is knowably
+    /// the one the block started from. That refusal is what lets the CONSUMER
+    /// stop caring about replay order: with at most one entry per key, any
+    /// deterministic order over the entries produces the same state.
+    #[test]
+    fn a_duplicate_cf_key_pair_is_refused_rather_than_merged() {
+        let err = ApplicationJournal::bind(
+            3,
+            h(7),
+            vec![
+                entry("cf", b"k", Preimage::Absent),
+                entry("cf", b"k", Preimage::Value(b"other".to_vec())),
+            ],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("one NET entry per"), "{err}");
+
+        // Same key, different family: not a duplicate.
+        assert!(ApplicationJournal::bind(
+            3,
+            h(7),
+            vec![
+                entry("cf_a", b"k", Preimage::Absent),
+                entry("cf_b", b"k", Preimage::Absent),
+            ],
+        )
+        .is_ok());
     }
 
     /// The after tag binds the family and the key, so a tag cannot be moved

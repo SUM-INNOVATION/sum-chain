@@ -935,3 +935,94 @@ fn a_binary_refuses_to_start_against_a_newer_record_format() {
         .expect_err("post-activation history in a newer format must refuse the downgrade");
     assert!(err.to_string().contains("refuses to start"), "{err}");
 }
+
+/// The format watermark is STAMPED, so it survives pruning away every record.
+///
+/// # Why the stamp exists
+///
+/// `highest_stored_format_version` derives the watermark from the records
+/// themselves, which is exact while the records are there. Pruning removes them
+/// — that is its job — and a pruned database can reach a state where the family
+/// is empty. At that point the scan says "nothing", and a downgrade the records
+/// would have refused becomes silently permitted: an older binary starts, runs,
+/// and discovers during a reorg that it cannot read the history it already
+/// committed to unwinding.
+///
+/// So `publish` stamps a `META` row in the same batch as the block, the row is
+/// not pruned, and `validate_startup` takes the HIGHER of the two watermarks.
+#[test]
+fn the_format_watermark_survives_pruning_away_every_record() {
+    let (d, _g) = db();
+    let block = block_at(500, 1);
+    publish_with(&d, &block, TEST_LIMIT, |view| {
+        view.put(cf::STATE, b"k", b"v")
+    })
+    .expect("publish");
+
+    let state = sumchain_storage::journal::validate_startup(&d).expect("this binary's own record");
+    assert_eq!(
+        state.persisted,
+        Some(sumchain_storage::journal::FORMAT_VERSION_V1),
+        "publish must stamp the format watermark"
+    );
+    assert_eq!(
+        state.scanned,
+        Some(sumchain_storage::journal::FORMAT_VERSION_V1)
+    );
+    assert_eq!(state.observed_boundary, Some(500));
+
+    // Raise the STAMP alone, as a newer binary would have, and then remove every
+    // record as pruning would.
+    d.put(
+        cf::META,
+        sumchain_storage::journal::FORMAT_HIGH_WATER_META_KEY,
+        &9u16.to_be_bytes(),
+    )
+    .unwrap();
+    d.delete(cf::APPLICATION_JOURNAL, &journal_key(500, &block.hash()))
+        .unwrap();
+
+    assert_eq!(
+        sumchain_storage::journal::highest_stored_format_version(&d).unwrap(),
+        None,
+        "the fixture must really have pruned every record, or this proves nothing"
+    );
+    let err = sumchain_storage::journal::validate_startup(&d).expect_err(
+        "a database whose newer records have been pruned must still refuse the downgrade",
+    );
+    assert!(err.to_string().contains("refuses to start"), "{err}");
+    assert!(
+        err.to_string().contains("Downgrading a node"),
+        "the refusal must state the operational rule and the recovery, not only \
+         that it refused: {err}"
+    );
+}
+
+/// The startup gate accepts a database with no journal history at all.
+///
+/// A fresh database has no records and no stamp. That is not a downgrade, it is
+/// a node that has published nothing, and refusing it would refuse every cold
+/// start. The boundary is `None`, which the consumer reads as "nothing is
+/// required yet" — and it stops being `None` the moment the first block
+/// publishes, because the write side has no gate to leave unset.
+#[test]
+fn a_database_with_no_journal_history_starts_and_requires_nothing() {
+    let (d, _g) = db();
+    let state = sumchain_storage::journal::validate_startup(&d).expect("a cold start is fine");
+    assert_eq!(state.persisted, None);
+    assert_eq!(state.scanned, None);
+    assert_eq!(state.observed_boundary, None);
+    assert_eq!(state.effective_high_water(), None);
+
+    let block = block_at(1, 1);
+    publish_with(&d, &block, TEST_LIMIT, |view| {
+        view.put(cf::STATE, b"k", b"v")
+    })
+    .expect("publish");
+    let state = sumchain_storage::journal::validate_startup(&d).expect("still fine");
+    assert_eq!(state.observed_boundary, Some(1));
+    assert_eq!(
+        state.effective_high_water(),
+        Some(sumchain_storage::journal::FORMAT_VERSION_V1)
+    );
+}

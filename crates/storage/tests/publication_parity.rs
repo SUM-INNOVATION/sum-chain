@@ -46,12 +46,39 @@ fn db() -> (Database, TempDir) {
     (Database::open_default(dir.path()).expect("open"), dir)
 }
 
-/// The complete contents of every canonical CF, as raw bytes.
+/// The complete contents of every canonical CF, as raw bytes — with ONE declared
+/// exception.
+///
+/// # The exception, and why it is not a loophole
+///
+/// `META[application_journal/format_high_water]` is a two-byte record-format
+/// watermark that `publish` stamps in the same batch as the block. It is not
+/// part of the canonical block set: it names nothing in the block, it is the
+/// same two bytes for every block a binary publishes, and the old route could
+/// not have written it because the old route predates the application journal
+/// entirely. Comparing it would be asking whether a route that did not exist
+/// wrote a row for a format that did not exist.
+///
+/// The application journal's own column family is excluded the same way, one
+/// level up: `CANONICAL_CFS` does not list `cf::APPLICATION_JOURNAL`. This is
+/// the same exclusion reaching into `META`, which the journal has to share
+/// because the watermark must survive pruning of that family (see
+/// `sumchain_storage::journal::FORMAT_HIGH_WATER_META_KEY`).
+///
+/// The exception is narrowed to that exact key, and
+/// `the_new_route_writes_exactly_what_the_old_route_wrote` asserts POSITIVELY
+/// that the new route wrote it — so excluding it cannot hide its disappearance,
+/// which is the failure mode an exclusion normally buys.
 fn snapshot(d: &Database) -> BTreeMap<(String, Vec<u8>), Vec<u8>> {
     let mut out = BTreeMap::new();
     for name in CANONICAL_CFS {
         if let Ok(it) = d.iter(name) {
             for (k, v) in it {
+                if *name == cf::META
+                    && k.as_ref() == sumchain_storage::journal::FORMAT_HIGH_WATER_META_KEY
+                {
+                    continue;
+                }
                 out.insert((name.to_string(), k.to_vec()), v.to_vec());
             }
         }
@@ -202,6 +229,31 @@ fn the_new_route_writes_exactly_what_the_old_route_wrote() {
 
     old_route(&old_db, &block, &receipts, account, contract);
     new_route(&new_db, &block, &receipts, account, contract);
+
+    // The one row `snapshot` excludes, asserted positively rather than left to
+    // the exclusion. The new route must write the format watermark, and the old
+    // route — which predates the application journal — must not.
+    assert_eq!(
+        new_db
+            .get(
+                cf::META,
+                sumchain_storage::journal::FORMAT_HIGH_WATER_META_KEY
+            )
+            .unwrap()
+            .as_deref(),
+        Some(&sumchain_storage::journal::FORMAT_VERSION_V1.to_be_bytes()[..]),
+        "publication must stamp the record-format watermark in the block's own batch"
+    );
+    assert!(
+        old_db
+            .get(
+                cf::META,
+                sumchain_storage::journal::FORMAT_HIGH_WATER_META_KEY
+            )
+            .unwrap()
+            .is_none(),
+        "the old route predates the application journal and cannot stamp anything"
+    );
 
     let old = snapshot(&old_db);
     let new = snapshot(&new_db);
