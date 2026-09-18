@@ -291,6 +291,31 @@ pub fn account_root_gate_open(params: &ChainParams, block_height: u64) -> bool {
 /// account-commitment side of the same invariant, in the stricter form the
 /// reorg horizon requires, called from [`crate::state::StateManager::init_from_genesis`]
 /// so that a chain cannot be INITIALISED on a pair that does not satisfy it.
+/// The one runtime activation check, used by BOTH a new chain and a restarted
+/// one.
+///
+/// Two entry points used to enforce different rules. `StateManager::init_from_genesis`
+/// called [`validate_account_root_activation`], which owns the two invariants
+/// the genesis crate cannot express -- `LEGACY_ROOT_COMPATIBILITY_HEIGHT` lives
+/// in `sumchain-storage` and `UNDO_RETENTION_FLOOR` in its pruner, and
+/// `sumchain-genesis` depends on neither. `Node::new` called
+/// `ChainParams::validate`, which owns the two it can. So a NEW chain checked
+/// the legacy window and the reorg horizon, and a RESTARTED chain did not.
+///
+/// A rule that binds only when a chain is created is not a rule. Both call this.
+///
+/// Order is deliberate and is asserted by
+/// `the_shared_validator_reports_the_ordering_fault_before_the_window_fault`:
+/// the structural faults first (is the journal gate pinned at all, does it
+/// precede the account gate), then the ones that need chain constants. A node
+/// whose pair is wrong in two ways should hear about the simpler one.
+pub fn validate_runtime_activation(params: &ChainParams) -> Result<()> {
+    params
+        .validate()
+        .map_err(|e| StateError::ActivationParams(e.to_string()))?;
+    validate_account_root_activation(params)
+}
+
 pub fn validate_account_root_activation(params: &ChainParams) -> Result<()> {
     let Some(account) = params.account_root_enabled_from_height else {
         // Dormant: the root formula is byte-for-byte the one an un-upgraded node

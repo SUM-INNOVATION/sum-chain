@@ -49,7 +49,7 @@ impl StateManager {
         // rather than at the activation boundary, where it would stop a chain
         // that has already been publishing. See
         // [`crate::account_root::validate_account_root_activation`].
-        crate::account_root::validate_account_root_activation(&genesis.params)?;
+        crate::account_root::validate_runtime_activation(&genesis.params)?;
 
         let store = StateStore::new(&self.db);
         let alloc = genesis

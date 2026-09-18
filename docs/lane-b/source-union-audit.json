@@ -1,0 +1,40 @@
+{
+ "head": "HEAD",
+ "parents": {
+  "lane-b/deploy-journal": {
+   "counts": {
+    "fn": 7854,
+    "pub_item": 2638,
+    "test": 3003,
+    "boundary_decl": 425,
+    "manifest_row": 2,
+    "activation": 20,
+    "err_variant": 629
+   },
+   "missing": {}
+  },
+  "lane-b/deploy-account": {
+   "counts": {
+    "fn": 7865,
+    "pub_item": 2642,
+    "test": 3013,
+    "boundary_decl": 425,
+    "manifest_row": 2,
+    "activation": 20,
+    "err_variant": 629
+   },
+   "missing": {
+    "fn": [
+     "a_reorg_across_the_journal_activation_boundary_decides_per_block",
+     "revert_block_state_diffs",
+     "the_legacy_revert_path_refuses_a_post_activation_block"
+    ],
+    "test": [
+     "a_reorg_across_the_journal_activation_boundary_decides_per_block",
+     "the_legacy_revert_path_refuses_a_post_activation_block"
+    ]
+   }
+  }
+ },
+ "missing_total": 5
+}

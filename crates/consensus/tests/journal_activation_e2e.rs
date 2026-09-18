@@ -230,10 +230,23 @@ async fn a_pinned_activation_height_is_accepted_and_journals_are_written_from_it
             (&bob, 10_000_000),
         ],
         Some(PINNED),
-        // The account commitment may open at or after the journal boundary, and
-        // this fixture opens it exactly there — the tightest legal pair, and the
-        // one the ordering invariant exists to permit.
-        Some(PINNED),
+        // The account commitment is NOT opened here. This test is about the
+        // journal gate alone, and it runs at height 2 because that is where a
+        // node fixture can actually produce blocks.
+        //
+        // The account gate cannot join it: `validate_account_root_activation`
+        // refuses any account activation at or below
+        // `LEGACY_ROOT_COMPATIBILITY_HEIGHT` (496,720), because below that an
+        // importing node ADOPTS a header root it disagrees with rather than
+        // refusing it, so a boundary down here would split the network in
+        // silence. An earlier version of this fixture opened both gates at
+        // height 2 and called it "the tightest legal pair"; it was never legal,
+        // and the two rules only met when the branches were merged.
+        //
+        // Coordinated activation of the pair is proved separately, at heights
+        // that satisfy both rules, by
+        // `a_coordinated_activation_pair_is_accepted_by_the_authoritative_loader`.
+        None,
     );
     assert_eq!(
         genesis.params.application_journal_enabled_from_height,
@@ -689,4 +702,154 @@ async fn a_node_at_its_disk_budget_refuses_to_produce_and_says_why() {
             .assess(u64::MAX),
         CapacityVerdict::Healthy
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Coordinated activation of the pair, at heights that satisfy both rules
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The two gates activate together, through the authoritative loader, at
+/// heights a release could actually use.
+///
+/// The fixture above runs at height 2 because a node fixture has to produce the
+/// blocks it tests. The account gate cannot go there, so the pair cannot be
+/// exercised by producing blocks: `LEGACY_ROOT_COMPATIBILITY_HEIGHT` is 496,720
+/// and producing half a million blocks in a test is not a thing worth doing.
+///
+/// What IS worth proving, and is what a release depends on, is that the
+/// authoritative loader accepts the pair a release would ship and refuses every
+/// neighbouring pair that breaks an invariant. That is a load-time property and
+/// needs no chain at all, so it is proved at the real heights rather than at
+/// convenient ones.
+///
+/// The three invariants, each pinned from both sides:
+///
+///   * the account gate is above `LEGACY_ROOT_COMPATIBILITY_HEIGHT`;
+///   * the journal gate precedes it by at least `UNDO_RETENTION_FLOOR`, so a
+///     reorg at the account boundary cannot walk back into history no generic
+///     journal covers;
+///   * the journal gate is pinned, not `None` -- `None` means "observed from
+///     this node's own chain", a node-local answer, and a commitment folded
+///     into the state root may not rest on one.
+#[test]
+fn a_coordinated_activation_pair_is_accepted_by_the_authoritative_loader() {
+    use sumchain_storage::candidate::LEGACY_ROOT_COMPATIBILITY_HEIGHT;
+    use sumchain_storage::pruner::UNDO_RETENTION_FLOOR;
+
+    let validator = KeyPair::generate();
+    let alloc = [(&validator, 100_000_000u128)];
+
+    // The shape a release would ship: account gate clear of the legacy window,
+    // journal gate a full reorg horizon below it.
+    let account = LEGACY_ROOT_COMPATIBILITY_HEIGHT + 1;
+    let journal = account - UNDO_RETENTION_FLOOR;
+    assert!(
+        account > LEGACY_ROOT_COMPATIBILITY_HEIGHT,
+        "the account gate must clear the window in which a mismatching root is adopted"
+    );
+    assert!(
+        journal + UNDO_RETENTION_FLOOR <= account,
+        "the journal must precede the account gate by a full reorg horizon"
+    );
+
+    let good = genesis_json_with_pinned_gate(&validator, &alloc, Some(journal), Some(account));
+    assert_eq!(
+        good.params.application_journal_enabled_from_height,
+        Some(journal)
+    );
+    assert_eq!(good.params.account_root_enabled_from_height, Some(account));
+
+    // Each neighbouring pair that breaks an invariant is refused before any
+    // block executes -- but NOT all by the same layer, and the split is
+    // recorded here rather than assumed.
+    //
+    //   `ChainParams::validate` (the genesis loader) owns the two rules it can
+    //   express from `sumchain-genesis`, which depends only on primitives and
+    //   crypto: the journal gate must be pinned when the account gate is set,
+    //   and it must not come after it.
+    //
+    //   `validate_account_root_activation` (in `sumchain-state`) owns the two
+    //   that need constants the genesis crate cannot see:
+    //   `LEGACY_ROOT_COMPATIBILITY_HEIGHT` lives in `sumchain-storage` and
+    //   `UNDO_RETENTION_FLOOR` in its pruner. It runs at chain init and at node
+    //   startup, both before any block executes.
+    //
+    // That is a real split across two crates. It is sound because both run
+    // before execution, and it is asserted rather than described: each rule
+    // below names the layer that must refuse it, and a rule that stopped being
+    // enforced anywhere would fail here.
+    let loader_refuses: &[(Option<u64>, Option<u64>, &str)] = &[
+        (None, Some(account), "journal gate observed rather than pinned"),
+        (
+            Some(account + 1),
+            Some(account),
+            "journal gate after the account gate",
+        ),
+    ];
+    for (j, a, why) in loader_refuses {
+        let mut params = ChainParams::default();
+        params.application_journal_enabled_from_height = *j;
+        params.account_root_enabled_from_height = *a;
+        let genesis = Genesis::new(
+            CHAIN_ID,
+            0,
+            vec![validator.public_key().to_base58()],
+            alloc
+                .iter()
+                .map(|(k, v)| (k.address().to_base58(), *v))
+                .collect::<HashMap<_, _>>(),
+            params,
+        );
+        let json = genesis.to_json().expect("serialize genesis");
+        assert!(
+            Genesis::from_json(&json).is_err(),
+            "the loader must refuse: {why} (journal={j:?}, account={a:?})"
+        );
+    }
+
+    // The two the loader cannot express, refused by the state-side validator
+    // that runs at chain init and at node startup.
+    let state_refuses: &[(Option<u64>, Option<u64>, &str)] = &[
+        (
+            Some(journal),
+            Some(LEGACY_ROOT_COMPATIBILITY_HEIGHT),
+            "account gate inside the legacy window",
+        ),
+        (
+            Some(account - UNDO_RETENTION_FLOOR + 1),
+            Some(account),
+            "journal gate closer than one reorg horizon",
+        ),
+    ];
+    for (j, a, why) in state_refuses {
+        let mut params = ChainParams::default();
+        params.application_journal_enabled_from_height = *j;
+        params.account_root_enabled_from_height = *a;
+        assert!(
+            sumchain_state::account_root::validate_account_root_activation(&params).is_err(),
+            "the state-side validator must refuse: {why} (journal={j:?}, account={a:?})"
+        );
+        // And the loader does NOT catch these -- asserted, so that if the rule
+        // is ever moved into the loader this test says so instead of passing
+        // quietly with one layer doing nothing.
+        let genesis = Genesis::new(
+            CHAIN_ID,
+            0,
+            vec![validator.public_key().to_base58()],
+            alloc
+                .iter()
+                .map(|(k, v)| (k.address().to_base58(), *v))
+                .collect::<HashMap<_, _>>(),
+            params,
+        );
+        assert!(
+            Genesis::from_json(&genesis.to_json().expect("serialize")).is_ok(),
+            "the genesis crate cannot see these constants, so it must not be \
+             the layer refusing {why} -- if it now does, move the assertion"
+        );
+    }
+
+    // The good pair passes BOTH layers.
+    sumchain_state::account_root::validate_account_root_activation(&good.params)
+        .expect("the release-shaped pair must pass the state-side validator too");
 }

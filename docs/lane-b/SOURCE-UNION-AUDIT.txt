@@ -1,0 +1,60 @@
+=== lane-b/deploy-journal ===
+  fn              7854
+  pub_item        2638
+  test            3003
+  boundary_decl    425
+  manifest_row       2
+  activation        20
+  err_variant      629
+=== lane-b/deploy-account ===
+  fn              7865   MISSING 3
+      - a_reorg_across_the_journal_activation_boundary_decides_per_block
+      - revert_block_state_diffs
+      - the_legacy_revert_path_refuses_a_post_activation_block
+  pub_item        2642
+  test            3013   MISSING 2
+      - a_reorg_across_the_journal_activation_boundary_decides_per_block
+      - the_legacy_revert_path_refuses_a_post_activation_block
+  boundary_decl    425
+  manifest_row       2
+  activation        20
+  err_variant      629
+
+total symbols missing from the union: 5
+machine-readable report: /tmp/union-audit.json
+
+CLASSIFICATION OF EVERY SYMBOL NOT PRESENT UNCHANGED
+====================================================
+All three are deliberate renames made by lane-b/deploy-journal. Each
+replacement was verified present in the integrated tree.
+
+  a_reorg_across_the_journal_activation_boundary_decides_per_block
+    -> a_reorg_crossing_the_journal_activation_boundary_is_refused_whole
+    RENAMED. The per-block classification policy became a whole-branch
+    refusal when the activation boundary became an irreversible checkpoint.
+    The test's per-block assertions were kept; only the conclusion changed.
+
+  revert_block_state_diffs
+    -> revert_pre_activation_block_state_diffs
+    RENAMED, and narrowed: it now takes a `PreActivationBlock` whose only
+    constructor returns None for any height the activation calls Required, so
+    the unsafe case is unrepresentable rather than refused at runtime.
+
+  the_legacy_revert_path_refuses_a_post_activation_block
+    -> a_post_activation_block_cannot_be_named_to_the_legacy_revert_path
+    RENAMED. Same guarantee, one layer earlier: the type refuses, so the test
+    no longer depends on the caller reaching a runtime check.
+
+WHY THIS AUDIT EXISTS
+=====================
+Merging the two release-blocker branches reported success twice while losing
+work. `git apply --3way` on one conflicted test file discarded 267 lines and
+still compiled, because the only symbol the loss broke was an import the
+dropped code alone used. Separately, a cherry-pick that stopped at a conflict
+left six of eight commits unapplied -- 77 symbols -- and the tree compiled,
+because the missing code was additive and nothing referenced it.
+
+A green compiler is not merge evidence. This audit enumerates every function,
+public item, test, execution-boundary declaration, manifest row, activation
+field and error variant in both parents and requires each to be present in the
+union or classified above.

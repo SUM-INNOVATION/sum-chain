@@ -155,6 +155,31 @@ impl Node {
         // survives pruning — so a node whose newer records have aged out still
         // refuses. Failing here fails startup, which is the whole point: the
         // alternative is failing later, silently, with state on the line.
+        // ── 1-4. the chain's activation gates, BEFORE the watermark ─────────
+        //
+        // Order is the requirement, not an accident. Every journal/account
+        // combination is rejected before this node reads or acts on the format
+        // watermark, because the watermark is a statement about records this
+        // node wrote under a configuration that must already be known sound. A
+        // node that acts on a watermark first is reasoning from data produced by
+        // a configuration it has not yet checked.
+        //
+        // ONE entry point, shared with `StateManager::init_from_genesis`.
+        // These used to differ: chain init called
+        // `validate_account_root_activation`, which owns the two invariants the
+        // genesis crate cannot express (`LEGACY_ROOT_COMPATIBILITY_HEIGHT` is in
+        // `sumchain-storage`, `UNDO_RETENTION_FLOOR` in its pruner), while
+        // `Node::new` called `ChainParams::validate`, which owns the two it can.
+        // So a NEW chain checked the legacy window and the reorg horizon and a
+        // RESTARTED chain did not. A rule that binds only at creation is not a
+        // rule.
+        //
+        // Nothing that processes a block exists yet: no `StateManager`, no
+        // executor, no mempool, no consensus engine. Asserted by
+        // `nothing_that_processes_a_block_is_built_before_activation_is_validated`.
+        sumchain_state::account_root::validate_runtime_activation(&genesis.params)
+            .map_err(|e| anyhow::anyhow!("chain activation parameters are unsound: {}", e))?;
+
         let journal_format = sumchain_storage::journal::validate_startup(&db)
             .map_err(|e| anyhow::anyhow!("application journal format check failed: {}", e))?;
         info!(
@@ -165,23 +190,6 @@ impl Node {
             journal_format.scanned,
             journal_format.observed_boundary,
         );
-
-        // ── the chain's activation gates, checked against each other ────────
-        //
-        // Before state, consensus or execution exist. `ChainParams::validate`
-        // holds the ordering
-        //
-        //     application_journal_enabled_from_height <= account_root_enabled_from_height
-        //
-        // among others. `Genesis::from_file` already validates, but `Node::new`
-        // also accepts a `Genesis` built in code, and a node that boots happily
-        // on an inconsistent pair and diverges at the boundary tens of thousands
-        // of blocks later is exactly the failure this check exists to eliminate.
-        // Cheap, pure, and it fails startup.
-        genesis
-            .params
-            .validate()
-            .map_err(|e| anyhow::anyhow!("genesis chain params are inconsistent: {}", e))?;
 
         // What this node can honestly revert, said at boot rather than
         // discovered at a refusal.

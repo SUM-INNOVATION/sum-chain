@@ -230,6 +230,15 @@ pub enum StateError {
     )]
     AccountRootActivationInsideLegacyWindow { height: u64, cutoff: u64 },
 
+    /// `ChainParams::validate` refused the pair.
+    ///
+    /// Distinct from the three `AccountRootActivation*` variants: those are the
+    /// rules that need chain constants `sumchain-genesis` cannot see. This one
+    /// carries the loader's own message, so a caller can tell which layer
+    /// refused without parsing prose.
+    #[error("chain activation parameters are inconsistent: {0}")]
+    ActivationParams(String),
+
     /// The account commitment was activated without a PINNED application-journal
     /// height.
     ///
