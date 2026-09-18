@@ -40,7 +40,8 @@ use sumchain_genesis::ChainParams;
 use sumchain_primitives::{Address, Block, BlockHeader, Hash, SignedTransaction, Transaction};
 use sumchain_state::executor::BlockExecutor;
 use sumchain_state::reorg_undo::{
-    stage_branch_unwind, BranchJournal, JournalLookup, SubsystemJournals, UndoRecord, UndoRefusal,
+    stage_branch_unwind, BranchJournal, JournalHeader, JournalLookup, MissingJournalPolicy,
+    SubsystemJournals, UndoRecord, UndoRefusal,
 };
 use sumchain_state::state::StateManager;
 use sumchain_storage::schema::BlockStore;
@@ -51,6 +52,14 @@ const CHAIN_ID: u64 = 1;
 const NO_FINALITY: u64 = 0;
 const DEEP: u64 = 1024;
 const NO_VALIDATORS: &[[u8; 32]] = &[];
+
+/// The strict missing-journal policy: a journal is required at every height.
+///
+/// Correct for the fixtures below because `ObservedJournal` records one for
+/// every block, including an empty block — which is exactly the POSITIVE
+/// nothing-to-undo record today's publisher does not write. Tests whose subject
+/// is the tolerant policy name it explicitly.
+const JOURNAL_REQUIRED: MissingJournalPolicy = MissingJournalPolicy::RequiredFrom(0);
 
 /// Fixed timestamp, so two independently-built genesis blocks are byte-equal.
 const GENESIS_TS: u64 = 1_000;
@@ -184,7 +193,14 @@ impl ObservedJournal {
 impl BranchJournal for ObservedJournal {
     fn lookup(&self, height: u64, block_hash: &Hash) -> JournalLookup {
         match self.per_block.get(&(height, *block_hash)) {
-            Some(r) => JournalLookup::Present(r.clone()),
+            Some(r) => JournalLookup::Present {
+                header: JournalHeader {
+                    height,
+                    block_hash: *block_hash,
+                    version: 0,
+                },
+                records: r.clone(),
+            },
             None => JournalLookup::Absent,
         }
     }
@@ -519,6 +535,7 @@ fn a_multi_block_reorg_converges_with_the_branch_it_adopted() {
         &plan,
         NO_VALIDATORS,
         &*a.journals(),
+        JOURNAL_REQUIRED,
     )
     .expect("execute_reorg");
 
@@ -586,8 +603,14 @@ fn unwinding_a_branch_restores_the_fork_point_byte_for_byte() {
     // The unwind, as `execute_reorg` composes it: one batch carrying the state
     // restore, the de-indexing and the head reset.
     let mut batch = node.db.batch();
-    let report = stage_branch_unwind(&node.db, &mut batch, &branch, &*node.journals())
-        .expect("unwind must be accepted");
+    let report = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &branch,
+        &*node.journals(),
+        JOURNAL_REQUIRED,
+    )
+    .expect("unwind must be accepted");
     for blk in &branch {
         sumchain_storage::candidate::stage_deindex(&mut batch, blk).expect("deindex");
     }
@@ -643,7 +666,8 @@ fn unwinding_oldest_first_would_land_on_an_intermediate_value() {
     let journals = node.journals();
     let mut batch = node.db.batch();
     for blk in &branch {
-        let JournalLookup::Present(records) = journals.lookup(blk.height(), &blk.hash()) else {
+        let JournalLookup::Present { records, .. } = journals.lookup(blk.height(), &blk.hash())
+        else {
             panic!("every published block must have a journal");
         };
         for r in &records {
@@ -731,6 +755,7 @@ fn two_siblings_at_one_height_reorg_to_and_from_without_contamination() {
             &plan,
             NO_VALIDATORS,
             &*node.journals(),
+            JOURNAL_REQUIRED,
         )
         .expect("execute_reorg");
         assert_eq!(
@@ -802,11 +827,11 @@ fn siblings_at_one_height_do_not_share_an_undo_journal() {
     // Both journals, read from the node that published each. Keyed by hash, the
     // two rows are distinct addresses; keyed by height they would be one.
     let ja = match a.subsystem_journals().lookup(1, &block_a.hash()) {
-        JournalLookup::Present(r) => r,
+        JournalLookup::Present { records, .. } => records,
         other => panic!("A's journal missing: {other:?}"),
     };
     let jb = match b.subsystem_journals().lookup(1, &block_b.hash()) {
-        JournalLookup::Present(r) => r,
+        JournalLookup::Present { records, .. } => records,
         other => panic!("B's journal missing: {other:?}"),
     };
     assert_ne!(ja, jb, "the two siblings must journal different mutations");
@@ -855,8 +880,15 @@ fn a_preimage_that_does_not_match_current_state_is_refused_loudly() {
     /// A journal that reports a post-image nothing wrote.
     struct Lying(Vec<UndoRecord>);
     impl BranchJournal for Lying {
-        fn lookup(&self, _h: u64, _b: &Hash) -> JournalLookup {
-            JournalLookup::Present(self.0.clone())
+        fn lookup(&self, h: u64, b: &Hash) -> JournalLookup {
+            JournalLookup::Present {
+                header: JournalHeader {
+                    height: h,
+                    block_hash: *b,
+                    version: 0,
+                },
+                records: self.0.clone(),
+            }
         }
         fn rows(&self, _h: u64, _b: &Hash) -> Vec<(String, Vec<u8>)> {
             Vec::new()
@@ -864,7 +896,7 @@ fn a_preimage_that_does_not_match_current_state_is_refused_loudly() {
     }
 
     let truthful = match node.journals().lookup(1, &block.hash()) {
-        JournalLookup::Present(r) => r,
+        JournalLookup::Present { records, .. } => records,
         other => panic!("expected a journal: {other:?}"),
     };
     let mut lying = truthful.clone();
@@ -874,8 +906,14 @@ fn a_preimage_that_does_not_match_current_state_is_refused_loudly() {
     let target_key = lying[0].key.clone();
 
     let mut batch = node.db.batch();
-    let err = stage_branch_unwind(&node.db, &mut batch, &[block.clone()], &Lying(lying))
-        .expect_err("a mismatching pre-image must be refused");
+    let err = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[block.clone()],
+        &Lying(lying),
+        JOURNAL_REQUIRED,
+    )
+    .expect_err("a mismatching pre-image must be refused");
     drop(batch);
 
     match &err {
@@ -904,8 +942,14 @@ fn a_preimage_that_does_not_match_current_state_is_refused_loudly() {
     // And the truthful journal over the same state is accepted, so the refusal
     // above is the check firing rather than the fixture being unusable.
     let mut batch = node.db.batch();
-    stage_branch_unwind(&node.db, &mut batch, &[block], &*node.journals())
-        .expect("the real journal must still be accepted");
+    stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[block],
+        &*node.journals(),
+        JOURNAL_REQUIRED,
+    )
+    .expect("the real journal must still be accepted");
     drop(batch);
 }
 
@@ -946,9 +990,12 @@ fn a_refusal_partway_through_a_branch_leaves_the_whole_branch_applied() {
     impl BranchJournal for LyingBelow<'_> {
         fn lookup(&self, h: u64, b: &Hash) -> JournalLookup {
             match self.inner.lookup(h, b) {
-                JournalLookup::Present(mut r) if h == self.lie_at => {
-                    r[0].after = Some(b"never written".to_vec());
-                    JournalLookup::Present(r)
+                JournalLookup::Present {
+                    header,
+                    mut records,
+                } if h == self.lie_at => {
+                    records[0].after = Some(b"never written".to_vec());
+                    JournalLookup::Present { header, records }
                 }
                 other => other,
             }
@@ -964,7 +1011,7 @@ fn a_refusal_partway_through_a_branch_leaves_the_whole_branch_applied() {
         lie_at: 2,
     };
     let mut batch = node.db.batch();
-    let err = stage_branch_unwind(&node.db, &mut batch, &branch, &journal)
+    let err = stage_branch_unwind(&node.db, &mut batch, &branch, &journal, JOURNAL_REQUIRED)
         .expect_err("the mismatch at height 2 must refuse the whole branch");
     drop(batch);
     assert!(
@@ -1000,7 +1047,7 @@ fn a_block_with_no_journal_refuses_the_unwind() {
     }
 
     let mut batch = node.db.batch();
-    let err = stage_branch_unwind(&node.db, &mut batch, &[block], &NoJournal)
+    let err = stage_branch_unwind(&node.db, &mut batch, &[block], &NoJournal, JOURNAL_REQUIRED)
         .expect_err("a block with no journal cannot be unwound");
     drop(batch);
     assert!(matches!(err, UndoRefusal::MissingJournal { .. }), "{err}");
@@ -1031,7 +1078,7 @@ fn an_unreadable_journal_is_refused_as_unreadable_not_as_absent() {
     }
 
     let mut batch = node.db.batch();
-    let err = stage_branch_unwind(&node.db, &mut batch, &[block], &Truncated)
+    let err = stage_branch_unwind(&node.db, &mut batch, &[block], &Truncated, JOURNAL_REQUIRED)
         .expect_err("an unreadable journal cannot be unwound");
     drop(batch);
     assert!(
@@ -1160,6 +1207,7 @@ fn a_reorg_crossing_an_activation_boundary_reproduces_both_sides() {
             &plan,
             NO_VALIDATORS,
             &*a.journals(),
+            JOURNAL_REQUIRED,
         )
         .unwrap_or_else(|e| panic!("reorg {name} failed: {e}"));
 
@@ -1225,7 +1273,14 @@ fn a_downgrade_across_an_activation_boundary_leaves_nothing_behind() {
     assert!(branch[0].height() >= 2, "the branch must reach the gate");
 
     let mut batch = node.db.batch();
-    stage_branch_unwind(&node.db, &mut batch, &branch, &*node.journals()).expect("unwind");
+    stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &branch,
+        &*node.journals(),
+        JOURNAL_REQUIRED,
+    )
+    .expect("unwind");
     for blk in &branch {
         sumchain_storage::candidate::stage_deindex(&mut batch, blk).expect("deindex");
     }
@@ -1300,7 +1355,14 @@ fn an_unwind_interrupted_before_commit_reopens_on_the_old_branch_and_retries_cle
     // ── the interruption ────────────────────────────────────────────────────
     {
         let mut batch = a.db.batch();
-        stage_branch_unwind(&a.db, &mut batch, &branch_a, &*a.journals()).expect("stage");
+        stage_branch_unwind(
+            &a.db,
+            &mut batch,
+            &branch_a,
+            &*a.journals(),
+            JOURNAL_REQUIRED,
+        )
+        .expect("stage");
         for blk in &branch_a {
             sumchain_storage::candidate::stage_deindex(&mut batch, blk).expect("deindex");
         }
@@ -1333,6 +1395,7 @@ fn an_unwind_interrupted_before_commit_reopens_on_the_old_branch_and_retries_cle
         &plan,
         NO_VALIDATORS,
         &*a.journals(),
+        JOURNAL_REQUIRED,
     )
     .expect("resume");
     assert_eq!(outcome.force_adopted, 0);
@@ -1390,6 +1453,7 @@ fn an_apply_interrupted_between_blocks_resumes_on_the_committed_prefix() {
             &plan,
             NO_VALIDATORS,
             &*a.journals(),
+            JOURNAL_REQUIRED,
         )
         .expect("reference reorg");
         a.snapshot()
@@ -1414,7 +1478,14 @@ fn an_apply_interrupted_between_blocks_resumes_on_the_committed_prefix() {
     // Unwind, then apply only the FIRST block of the new branch, then die.
     {
         let mut batch = a.db.batch();
-        stage_branch_unwind(&a.db, &mut batch, &plan.old_branch, &*a.journals()).expect("stage");
+        stage_branch_unwind(
+            &a.db,
+            &mut batch,
+            &plan.old_branch,
+            &*a.journals(),
+            JOURNAL_REQUIRED,
+        )
+        .expect("stage");
         for blk in &plan.old_branch {
             sumchain_storage::candidate::stage_deindex(&mut batch, blk).expect("deindex");
         }
@@ -1448,6 +1519,7 @@ fn an_apply_interrupted_between_blocks_resumes_on_the_committed_prefix() {
         &plan,
         NO_VALIDATORS,
         &*a.journals(),
+        JOURNAL_REQUIRED,
     )
     .expect("resume the apply");
     assert_eq!(
@@ -1636,6 +1708,7 @@ fn a_plan_whose_ancestor_is_missing_is_refused_before_any_write() {
         &plan,
         NO_VALIDATORS,
         &*node.journals(),
+        JOURNAL_REQUIRED,
     )
     .expect_err("a missing ancestor must be refused");
     assert!(
@@ -1683,6 +1756,7 @@ fn an_extension_applies_without_unwinding_anything() {
         &plan,
         NO_VALIDATORS,
         &*a.journals(),
+        JOURNAL_REQUIRED,
     )
     .expect("extension");
     assert_eq!(outcome.unwound.blocks, 0);
@@ -1751,14 +1825,14 @@ fn the_subsystem_journals_do_not_cover_every_family_a_block_writes() {
 
     // Ground truth: what the block actually changed.
     let truth = match node.journals().lookup(1, &block.hash()) {
-        JournalLookup::Present(r) => r,
+        JournalLookup::Present { records, .. } => records,
         other => panic!("the oracle must have recorded the block: {other:?}"),
     };
     assert!(!truth.is_empty(), "the block must have changed something");
 
     // What the journals the publisher wrote can account for.
     let claimed = match node.subsystem_journals().lookup(1, &block.hash()) {
-        JournalLookup::Present(r) => r,
+        JournalLookup::Present { records, .. } => records,
         other => panic!("the publisher must have written journals: {other:?}"),
     };
 
@@ -1805,6 +1879,7 @@ fn the_subsystem_journals_do_not_cover_every_family_a_block_writes() {
         &mut batch,
         &[block.clone()],
         &node.subsystem_journals(),
+        JOURNAL_REQUIRED,
     )
     .expect("the incomplete journal still unwinds what it covers");
     sumchain_state::reorg_undo::stage_head_reset(&mut batch, &genesis).unwrap();
@@ -1862,6 +1937,11 @@ fn a_reorg_driven_by_the_incomplete_journals_force_adopts_its_roots() {
         &plan,
         NO_VALIDATORS,
         &a.subsystem_journals(),
+        // The subsystem journals have no record for an empty block; the
+        // fixture's blocks are not empty, but the strict policy is what makes
+        // the force-adoption below attributable to the SUPPLY gap and not to a
+        // tolerated absence.
+        JOURNAL_REQUIRED,
     )
     .expect("the switch itself is not refused");
 
@@ -1903,6 +1983,7 @@ fn a_reorg_driven_by_the_incomplete_journals_force_adopts_its_roots() {
         &plan2,
         NO_VALIDATORS,
         &*a2.journals(),
+        JOURNAL_REQUIRED,
     )
     .expect("switch");
     assert_eq!(
@@ -1911,4 +1992,503 @@ fn a_reorg_driven_by_the_incomplete_journals_force_adopts_its_roots() {
         "a complete journal is the whole difference between a reorg whose result \
          is checked and one whose result is forgiven"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. The journal must agree with the block it was filed under
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A journal that decodes cleanly but names a DIFFERENT block is refused.
+///
+/// Addressing by `(height, block hash)` is what fixes issue #253, and it is not
+/// sufficient on its own: addressing is a key, and a key can be wrong — a
+/// producer bug, a half-migrated store, a row copied between databases. Nothing
+/// about a correctly-decoding record proves it belongs on the shelf it was found
+/// on unless the record says so itself.
+///
+/// So the record carries its own `(height, block hash)` and the reader checks
+/// them. This is the check firing: same height, wrong block. There is no way to
+/// tell which of the key and the record is right, so neither is trusted.
+#[test]
+fn a_journal_that_names_a_different_block_is_refused() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+    let block = node.produce(
+        Some(&genesis),
+        &proposer,
+        vec![transfer(&alice, &carol.address(), 1_000, 500, 0)],
+    );
+    let before = node.snapshot();
+
+    /// Reports a truthful record set under a header naming a sibling.
+    struct Misfiled {
+        records: Vec<UndoRecord>,
+        claims: Hash,
+    }
+    impl BranchJournal for Misfiled {
+        fn lookup(&self, h: u64, _b: &Hash) -> JournalLookup {
+            JournalLookup::Present {
+                header: JournalHeader {
+                    height: h,
+                    block_hash: self.claims,
+                    version: 0,
+                },
+                records: self.records.clone(),
+            }
+        }
+        fn rows(&self, _h: u64, _b: &Hash) -> Vec<(String, Vec<u8>)> {
+            Vec::new()
+        }
+    }
+
+    let records = match node.journals().lookup(1, &block.hash()) {
+        JournalLookup::Present { records, .. } => records,
+        other => panic!("expected a journal: {other:?}"),
+    };
+    let sibling = Hash::hash(b"a block at the same height that is not this one");
+    assert_ne!(sibling, block.hash());
+
+    let mut batch = node.db.batch();
+    let err = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[block],
+        &Misfiled {
+            records,
+            claims: sibling,
+        },
+        JOURNAL_REQUIRED,
+    )
+    .expect_err("a journal naming another block must be refused");
+    drop(batch);
+
+    assert!(
+        matches!(err, UndoRefusal::JournalIdentityMismatch { .. }),
+        "{err}"
+    );
+    assert!(
+        err.to_string().contains("cannot be applied to either"),
+        "the refusal must say that neither side is trusted: {err}"
+    );
+    assert_eq!(
+        node.snapshot(),
+        before,
+        "a refused unwind must write nothing, even when its records were correct"
+    );
+}
+
+/// A journal at a format version this reader does not understand is REFUSED,
+/// never partially decoded.
+///
+/// This is downgrade safety, and it is the reason the version field is in the
+/// contract at all. Once a store holds journals written above a reader's
+/// version — which is what an activation that changes the format produces — an
+/// older binary must stop rather than apply the parts it recognises. A
+/// partially-understood undo record applied to state is worse than no undo,
+/// because it looks like it worked.
+///
+/// The complement is asserted too: a version the reader DOES know is accepted,
+/// so this is a version check and not a blanket refusal.
+#[test]
+fn a_journal_at_an_unknown_format_version_is_refused() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+    let block = node.produce(
+        Some(&genesis),
+        &proposer,
+        vec![transfer(&alice, &carol.address(), 1_000, 500, 0)],
+    );
+    let before = node.snapshot();
+
+    struct AtVersion {
+        records: Vec<UndoRecord>,
+        version: u32,
+    }
+    impl BranchJournal for AtVersion {
+        fn lookup(&self, h: u64, b: &Hash) -> JournalLookup {
+            JournalLookup::Present {
+                header: JournalHeader {
+                    height: h,
+                    block_hash: *b,
+                    version: self.version,
+                },
+                records: self.records.clone(),
+            }
+        }
+        fn rows(&self, _h: u64, _b: &Hash) -> Vec<(String, Vec<u8>)> {
+            Vec::new()
+        }
+    }
+
+    let records = match node.journals().lookup(1, &block.hash()) {
+        JournalLookup::Present { records, .. } => records,
+        other => panic!("expected a journal: {other:?}"),
+    };
+
+    // A version from beyond this reader's knowledge.
+    let future = sumchain_state::reorg_undo::SUPPORTED_JOURNAL_VERSIONS
+        .iter()
+        .max()
+        .copied()
+        .expect("at least one supported version")
+        + 1;
+
+    let mut batch = node.db.batch();
+    let err = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[block.clone()],
+        &AtVersion {
+            records: records.clone(),
+            version: future,
+        },
+        JOURNAL_REQUIRED,
+    )
+    .expect_err("an unknown journal version must be refused");
+    drop(batch);
+    assert!(
+        matches!(err, UndoRefusal::UnsupportedJournalVersion { .. }),
+        "{err}"
+    );
+    assert!(
+        err.to_string().contains("looks like it worked"),
+        "the refusal must say why partial decoding is worse than stopping: {err}"
+    );
+    assert_eq!(node.snapshot(), before, "a refused unwind writes nothing");
+
+    // Every version the reader declares is accepted, so the refusal above is a
+    // version check and not a blanket one.
+    for known in sumchain_state::reorg_undo::SUPPORTED_JOURNAL_VERSIONS {
+        let mut batch = node.db.batch();
+        stage_branch_unwind(
+            &node.db,
+            &mut batch,
+            &[block.clone()],
+            &AtVersion {
+                records: records.clone(),
+                version: *known,
+            },
+            JOURNAL_REQUIRED,
+        )
+        .unwrap_or_else(|e| panic!("declared version {known} must be accepted: {e}"));
+        drop(batch);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 10. Missing journals: halting, and the compatibility rule
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A missing journal HALTS at or above the height the journal is required from,
+/// and is tolerated below it — counted, never silent.
+///
+/// The two are different node conditions. On history that predates the journal
+/// format a block legitimately has none, and there is nothing the node could
+/// have recorded. Once the format is active, absence is a damaged database, and
+/// unwinding past it leaves that block's effects applied under a chain that no
+/// longer contains it.
+///
+/// Tolerating is therefore not "fine". It is reported as
+/// `UnwindReport::tolerated_absences`, because a switch with a non-zero count
+/// has not fully unwound its abandoned branch, and a caller that treats it as
+/// though it had is asserting something nobody checked.
+#[test]
+fn a_missing_journal_halts_at_or_above_the_height_it_is_required_from() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+
+    let mut branch = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..3u64 {
+        let blk = node.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+        parent = blk.clone();
+        branch.push(blk);
+    }
+    let before = node.snapshot();
+
+    /// The real oracle, with the journal for one height withheld.
+    struct Withholding<'a> {
+        inner: &'a ObservedJournal,
+        withhold: u64,
+    }
+    impl BranchJournal for Withholding<'_> {
+        fn lookup(&self, h: u64, b: &Hash) -> JournalLookup {
+            if h == self.withhold {
+                JournalLookup::Absent
+            } else {
+                self.inner.lookup(h, b)
+            }
+        }
+        fn rows(&self, h: u64, b: &Hash) -> Vec<(String, Vec<u8>)> {
+            self.inner.rows(h, b)
+        }
+    }
+
+    let truth = node.journals();
+    // Withheld at the OLDEST block on the branch, which is the only position
+    // where tolerating one is coherent: the unwind runs newest-first, so an
+    // absence at the bottom is the last thing it reaches and no later record
+    // depends on it having been applied. An absence in the MIDDLE is a different
+    // story, and has its own test below.
+    let journal = Withholding {
+        inner: &truth,
+        withhold: 1,
+    };
+
+    // Required from height 1: the absence at 1 halts.
+    let mut batch = node.db.batch();
+    let err = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &branch,
+        &journal,
+        MissingJournalPolicy::RequiredFrom(1),
+    )
+    .expect_err("a journal required at this height and absent must halt");
+    drop(batch);
+    assert!(
+        matches!(err, UndoRefusal::MissingJournal { height: 1, .. }),
+        "{err}"
+    );
+    assert_eq!(node.snapshot(), before, "a halt writes nothing");
+
+    // Required only from height 2: the absence at 1 is below the line, so it is
+    // tolerated — and counted.
+    let mut batch = node.db.batch();
+    let report = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &branch,
+        &journal,
+        MissingJournalPolicy::RequiredFrom(2),
+    )
+    .expect("below the required height, absence is tolerated");
+    drop(batch);
+    assert_eq!(
+        report.tolerated_absences, 1,
+        "a tolerated absence must be REPORTED: the block's effects were not reverted"
+    );
+    assert_eq!(
+        report.blocks, 2,
+        "only two of the three blocks were unwound"
+    );
+
+    // And the tolerant-everywhere policy tolerates the same absence.
+    let mut batch = node.db.batch();
+    let report = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &branch,
+        &journal,
+        MissingJournalPolicy::ToleratedEverywhere,
+    )
+    .expect("tolerated everywhere");
+    drop(batch);
+    assert_eq!(report.tolerated_absences, 1);
+}
+
+/// Tolerating an absence in the MIDDLE of a branch makes every block below it
+/// fail current-value validation — and that is the check working, not a
+/// conflict between two rules.
+///
+/// Skipping a block leaves its mutations applied. The next block down journalled
+/// pre-images taken from a state where those mutations had not happened yet, so
+/// its post-images no longer describe what is in the rows. Applying them anyway
+/// would write values from a state the node is not in and never will be.
+///
+/// The refusal names the row, which is what makes it actionable. Worth pinning
+/// because it bounds what the compatibility rule can mean: an absence is only
+/// tolerable at the OLDEST end of a branch, where nothing below it depends on
+/// the skipped block having been reverted. Anywhere else, tolerating it and
+/// continuing is not a weaker guarantee — it is a refusal, deliberately.
+#[test]
+fn a_tolerated_absence_in_the_middle_of_a_branch_refuses_the_blocks_below_it() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+
+    let mut branch = Vec::new();
+    let mut parent = genesis;
+    for n in 0..3u64 {
+        let blk = node.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+        parent = blk.clone();
+        branch.push(blk);
+    }
+    let before = node.snapshot();
+
+    struct Withholding<'a> {
+        inner: &'a ObservedJournal,
+        withhold: u64,
+    }
+    impl BranchJournal for Withholding<'_> {
+        fn lookup(&self, h: u64, b: &Hash) -> JournalLookup {
+            if h == self.withhold {
+                JournalLookup::Absent
+            } else {
+                self.inner.lookup(h, b)
+            }
+        }
+        fn rows(&self, h: u64, b: &Hash) -> Vec<(String, Vec<u8>)> {
+            self.inner.rows(h, b)
+        }
+    }
+
+    let truth = node.journals();
+    let mut batch = node.db.batch();
+    let err = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &branch,
+        &Withholding {
+            inner: &truth,
+            withhold: 2,
+        },
+        MissingJournalPolicy::ToleratedEverywhere,
+    )
+    .expect_err(
+        "skipping height 2 leaves its mutations applied, so height 1's journal no longer \
+         describes the rows and must be refused",
+    );
+    drop(batch);
+    assert!(
+        matches!(err, UndoRefusal::CurrentValueMismatch { height: 1, .. }),
+        "the refusal must land on the block BELOW the skipped one: {err}"
+    );
+    assert_eq!(node.snapshot(), before, "a refused unwind writes nothing");
+}
+
+/// Tolerating a missing journal leaves that block's state APPLIED. Demonstrated,
+/// so the cost of the compatibility rule is on the record and not only in a
+/// doc comment.
+#[test]
+fn a_tolerated_absence_leaves_the_block_it_skipped_applied() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+    let block = node.produce(
+        Some(&genesis),
+        &proposer,
+        vec![transfer(&alice, &carol.address(), 1_000, 500, 0)],
+    );
+    let at_fork_balance = 10_000_000u128;
+    assert_ne!(node.balance(&alice.address()), at_fork_balance);
+
+    struct Nothing;
+    impl BranchJournal for Nothing {
+        fn lookup(&self, _h: u64, _b: &Hash) -> JournalLookup {
+            JournalLookup::Absent
+        }
+        fn rows(&self, _h: u64, _b: &Hash) -> Vec<(String, Vec<u8>)> {
+            Vec::new()
+        }
+    }
+
+    let mut batch = node.db.batch();
+    let report = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[block.clone()],
+        &Nothing,
+        MissingJournalPolicy::ToleratedEverywhere,
+    )
+    .expect("tolerated");
+    sumchain_state::reorg_undo::stage_head_reset(&mut batch, &genesis).unwrap();
+    batch.commit().unwrap();
+
+    assert_eq!(report.tolerated_absences, 1);
+    assert_eq!(report.records, 0, "nothing was reverted");
+    assert_eq!(
+        node.head().map(|h| h.hash()),
+        Some(genesis.hash()),
+        "the head moved back to the fork point"
+    );
+    assert_ne!(
+        node.balance(&alice.address()),
+        at_fork_balance,
+        "the head says the fork point and the state says otherwise; this is what \
+         `tolerated_absences` is reporting, and why a caller must not read a switch \
+         with a non-zero count as a completed unwind"
+    );
+}
+
+/// An empty block has no journal under today's publisher, which is why the live
+/// path cannot yet require one.
+///
+/// `JournalRecord::NothingToUndo` exists to say "this block mutated nothing" as
+/// a positive statement, and `publish` then writes NO row for it. On disk that is
+/// indistinguishable from a missing undo record — zero bytes either way — so a
+/// reader cannot tell "nothing to undo" from "undo record lost", and requiring a
+/// journal would refuse every reorg over an empty block.
+///
+/// That is a PRODUCER-side obligation: write the positive record. When it is
+/// met, `PoAEngine::import_reorg` moves from `ToleratedEverywhere` to
+/// `RequiredFrom(h)` and this test's expectation inverts.
+#[test]
+fn an_empty_block_has_no_journal_row_at_all() {
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    let genesis = node.produce(None, &proposer, Vec::new());
+    let empty = node.produce(Some(&genesis), &proposer, Vec::new());
+
+    assert!(
+        matches!(
+            node.subsystem_journals().lookup(1, &empty.hash()),
+            JournalLookup::Absent
+        ),
+        "if an empty block now has a journal row, the publisher writes a positive \
+         nothing-to-undo record and the live path can require one"
+    );
+
+    // The consequence: under the strict policy the switch halts.
+    let mut batch = node.db.batch();
+    let err = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[empty.clone()],
+        &node.subsystem_journals(),
+        JOURNAL_REQUIRED,
+    )
+    .expect_err("strict policy halts on an empty block today");
+    drop(batch);
+    assert!(matches!(err, UndoRefusal::MissingJournal { .. }), "{err}");
+
+    // And under the policy the live path actually uses, it is tolerated.
+    let mut batch = node.db.batch();
+    let report = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[empty],
+        &node.subsystem_journals(),
+        MissingJournalPolicy::ToleratedEverywhere,
+    )
+    .expect("the live policy tolerates it");
+    drop(batch);
+    assert_eq!(report.tolerated_absences, 1);
+    assert_eq!(report.records, 0);
 }

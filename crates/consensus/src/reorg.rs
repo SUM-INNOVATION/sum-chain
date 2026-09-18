@@ -35,7 +35,7 @@
 use sumchain_primitives::{Block, BlockHeight, Hash};
 use sumchain_state::executor::BlockExecutor;
 use sumchain_state::reorg_undo::{
-    stage_branch_unwind, stage_head_reset, BranchJournal, UnwindReport,
+    stage_branch_unwind, stage_head_reset, BranchJournal, MissingJournalPolicy, UnwindReport,
 };
 use sumchain_state::state::StateManager;
 use sumchain_storage::candidate::{stage_deindex, Acceptance};
@@ -291,6 +291,7 @@ pub fn execute_reorg(
     plan: &ReorgPlan,
     validators: &[[u8; 32]],
     journal: &dyn BranchJournal,
+    missing: MissingJournalPolicy,
 ) -> Result<ReorgOutcome> {
     let block_store = BlockStore::new(db);
     let ancestor = block_store
@@ -311,7 +312,7 @@ pub fn execute_reorg(
         UnwindReport::default()
     } else {
         let mut batch = db.batch();
-        let report = stage_branch_unwind(db, &mut batch, &plan.old_branch, journal)
+        let report = stage_branch_unwind(db, &mut batch, &plan.old_branch, journal, missing)
             .map_err(|e| ConsensusError::InvalidBlock(format!("reorg unwind refused: {e}")))?;
         // The inverse of publication's index writes, in the SAME batch. Lives in
         // `sumchain-storage` beside `publish`, so a family added to one and not
@@ -410,6 +411,7 @@ pub fn resume(
     plan: &ReorgPlan,
     validators: &[[u8; 32]],
     journal: &dyn BranchJournal,
+    missing: MissingJournalPolicy,
 ) -> Result<ReorgOutcome> {
     let block_store = BlockStore::new(db);
     let head = recorded_head(&block_store)?.ok_or_else(|| {
@@ -428,7 +430,7 @@ pub fn resume(
 
     // The head is still on the abandoned branch: nothing was committed.
     state.set_state_root(accumulator_of(&head));
-    execute_reorg(db, state, executor, plan, validators, journal)
+    execute_reorg(db, state, executor, plan, validators, journal, missing)
 }
 
 #[cfg(test)]

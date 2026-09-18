@@ -98,6 +98,40 @@ pub struct UndoRecord {
     pub after: Option<Vec<u8>>,
 }
 
+/// What a journal SAYS it is, independently of where it was filed.
+///
+/// A journal addressed by `(height, block hash)` is safe from the #253 defect
+/// only while the addressing is right. Addressing is a key, and a key can be
+/// wrong: a producer bug, a partially-migrated store, a row copied between
+/// databases. The record must therefore also CARRY its own identity, so a reader
+/// can check that the journal it received is the journal it asked for rather
+/// than trusting the shelf it was on.
+///
+/// `version` exists so the format can change across an activation boundary
+/// without ambiguity about which reader applies. A reader that does not know a
+/// version refuses it; it never guesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JournalHeader {
+    pub height: BlockHeight,
+    pub block_hash: Hash,
+    pub version: u32,
+}
+
+/// Journal format versions this reader understands.
+///
+/// Refusing an unknown version is the whole of downgrade safety. Once a store
+/// holds journals written at a version above this, an older reader must stop
+/// rather than decode what it can: a partially-understood undo record applied to
+/// state is worse than no undo at all, because it looks like it worked.
+pub const SUPPORTED_JOURNAL_VERSIONS: &[u32] = &[
+    // 0 — the unversioned per-subsystem journals. They carry no version field
+    // on the wire; `SubsystemJournals` reports 0 for them, which is a statement
+    // about what this tree writes today and not a field it reads back. See that
+    // type's documentation.
+    0, // 1 — the generic application journal, once it lands.
+    1,
+];
+
 /// What a journal lookup found. The three cases are distinct on purpose.
 ///
 /// `Absent` and `Unreadable` must never collapse into one: a block that mutated
@@ -106,13 +140,58 @@ pub struct UndoRecord {
 /// an undo that was required.
 #[derive(Debug, Clone)]
 pub enum JournalLookup {
-    /// No journal row for this block. The caller decides whether that is legal.
+    /// No journal row for this block. [`MissingJournalPolicy`] decides whether
+    /// that is legal.
     Absent,
-    /// A journal, decoded. May legitimately be empty.
-    Present(Vec<UndoRecord>),
+    /// A journal, decoded. May legitimately be empty — `records: []` with a
+    /// header present is the POSITIVE statement that the block mutated nothing,
+    /// which is a different claim from `Absent`.
+    Present {
+        header: JournalHeader,
+        records: Vec<UndoRecord>,
+    },
     /// A journal row exists and could not be turned into records — truncated,
     /// undecodable, or carrying a tag this reader does not understand.
     Unreadable(String),
+}
+
+/// What to do about a block on the abandoned branch that has NO journal.
+///
+/// Absence is not one condition. On a chain whose history predates the journal
+/// format, a block legitimately has none and there is nothing to undo that the
+/// node could have recorded. On a chain where the format is active, absence is a
+/// damaged database, and unwinding past it leaves that block's effects applied
+/// under a chain that no longer contains it — silently, forever.
+///
+/// So the policy is explicit and the caller must state it. There is no default:
+/// a default here would be a consensus-relevant decision made by whichever call
+/// site forgot to think about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingJournalPolicy {
+    /// A journal is REQUIRED from `height` onward. At or above it, absence
+    /// halts the unwind. Below it, absence is tolerated as pre-activation
+    /// history, counted in [`UnwindReport::tolerated_absences`] and logged —
+    /// and the block's effects stay applied, which is why it is counted.
+    RequiredFrom(BlockHeight),
+    /// Absence is tolerated at EVERY height, counted and logged.
+    ///
+    /// This is what the current storage format forces, and it is a weakness
+    /// rather than a choice. The publisher writes no row at all for
+    /// `JournalRecord::NothingToUndo`, so "this block mutated nothing" and "this
+    /// block's undo record is missing" are the same bytes on disk — zero of
+    /// them. Until the producer writes a POSITIVE nothing-to-undo record, no
+    /// reader can tell the two apart, and halting on absence would refuse every
+    /// reorg over an empty block.
+    ToleratedEverywhere,
+}
+
+impl MissingJournalPolicy {
+    fn tolerates(&self, height: BlockHeight) -> bool {
+        match self {
+            MissingJournalPolicy::RequiredFrom(from) => height < *from,
+            MissingJournalPolicy::ToleratedEverywhere => true,
+        }
+    }
 }
 
 /// The producer side of the contract, reduced to what an unwind needs.
@@ -121,7 +200,7 @@ pub enum JournalLookup {
 /// can answer them is usable by every part of this module regardless of how it
 /// stores anything.
 pub trait BranchJournal {
-    /// This block's records, IN THE ORDER THE BLOCK APPLIED THEM.
+    /// This block's header and records, IN THE ORDER THE BLOCK APPLIED THEM.
     ///
     /// The unwind reverses them, so a producer that returns them in an
     /// unspecified or unstable order makes the unwind's result unspecified too.
@@ -175,6 +254,39 @@ pub enum UndoRefusal {
         reason: String,
     },
 
+    /// The journal decoded, and says it belongs to a different block.
+    ///
+    /// Addressing by `(height, block hash)` is not enough on its own: a key can
+    /// be wrong. This is the record disagreeing with the shelf it was on, and it
+    /// is refused rather than reconciled — there is no way to know which of the
+    /// two is right.
+    #[error(
+        "refusing to undo block {block} at height {height}: its journal says it belongs to \
+         block {record_block} at height {record_height}; a journal filed under one block and \
+         describing another cannot be applied to either"
+    )]
+    JournalIdentityMismatch {
+        height: BlockHeight,
+        block: Hash,
+        record_height: BlockHeight,
+        record_block: Hash,
+    },
+
+    /// The journal is at a format version this reader does not understand.
+    ///
+    /// Refused, never partially decoded. See [`SUPPORTED_JOURNAL_VERSIONS`].
+    #[error(
+        "refusing to undo block {block} at height {height}: its journal is format version \
+         {version}, and this reader understands only {supported:?}; a partially-understood \
+         undo record is worse than none, because applying it looks like it worked"
+    )]
+    UnsupportedJournalVersion {
+        height: BlockHeight,
+        block: Hash,
+        version: u32,
+        supported: &'static [u32],
+    },
+
     #[error("storage error during unwind: {0}")]
     Storage(#[from] StorageError),
 }
@@ -190,6 +302,13 @@ pub struct UnwindReport {
     /// separately so a test can assert validation was not skipped, rather than
     /// inferring it from the absence of a failure.
     pub checks: u64,
+    /// Blocks whose journal was ABSENT and whose absence the policy tolerated.
+    ///
+    /// Each one is a block whose effects on state were NOT undone. A switch with
+    /// a non-zero count here has not fully unwound its abandoned branch, and a
+    /// caller that treats it as if it had is asserting something that was not
+    /// checked.
+    pub tolerated_absences: u64,
 }
 
 /// Database reads that see this unwind's own staged writes.
@@ -271,6 +390,7 @@ pub fn stage_branch_unwind(
     batch: &mut WriteBatch<'_>,
     branch: &[Block],
     journal: &dyn BranchJournal,
+    missing: MissingJournalPolicy,
 ) -> Result<UnwindReport, UndoRefusal> {
     let mut view = StagedView::new(db);
     let mut report = UnwindReport::default();
@@ -281,13 +401,26 @@ pub fn stage_branch_unwind(
         let height = block.height();
         let hash = block.hash();
 
-        let records = match journal.lookup(height, &hash) {
-            JournalLookup::Present(r) => r,
+        let (header, records) = match journal.lookup(height, &hash) {
+            JournalLookup::Present { header, records } => (header, records),
             JournalLookup::Absent => {
-                return Err(UndoRefusal::MissingJournal {
+                if !missing.tolerates(height) {
+                    return Err(UndoRefusal::MissingJournal {
+                        height,
+                        block: hash,
+                    });
+                }
+                // Tolerated, and said out loud. This block's effects on state
+                // stay applied under a chain that no longer contains it, which
+                // is a fact about the node, not a detail.
+                tracing::warn!(
                     height,
-                    block: hash,
-                })
+                    block = %hash,
+                    "unwinding past a block with no undo journal: its effects on state are \
+                     NOT reverted, and remain applied under a chain that no longer contains it"
+                );
+                report.tolerated_absences += 1;
+                continue;
             }
             JournalLookup::Unreadable(reason) => {
                 return Err(UndoRefusal::UnreadableJournal {
@@ -297,6 +430,27 @@ pub fn stage_branch_unwind(
                 })
             }
         };
+
+        // ── the journal must agree with the block it was asked for ──────────
+        //
+        // Addressing by hash is not enough on its own, because addressing is a
+        // key and a key can be wrong. Checked before a single record is read.
+        if header.height != height || header.block_hash != hash {
+            return Err(UndoRefusal::JournalIdentityMismatch {
+                height,
+                block: hash,
+                record_height: header.height,
+                record_block: header.block_hash,
+            });
+        }
+        if !SUPPORTED_JOURNAL_VERSIONS.contains(&header.version) {
+            return Err(UndoRefusal::UnsupportedJournalVersion {
+                height,
+                block: hash,
+                version: header.version,
+                supported: SUPPORTED_JOURNAL_VERSIONS,
+            });
+        }
 
         // Last record first, for the same reason the blocks run newest-first.
         for record in records.iter().rev() {
@@ -494,7 +648,23 @@ impl BranchJournal for SubsystemJournals<'_> {
         }
 
         if any {
-            JournalLookup::Present(out)
+            JournalLookup::Present {
+                // Echoed from the KEY, not read back from the record.
+                //
+                // The four per-subsystem journals carry no identity and no
+                // version on the wire: `(height, block_hash)` lives only in the
+                // row key, so this adapter can only report what it looked up,
+                // and the identity check in `stage_branch_unwind` is a tautology
+                // for this producer. Saying that here is the point — the check
+                // is real for any producer that puts the fields IN the record,
+                // and this one is declared as not yet doing so.
+                header: JournalHeader {
+                    height,
+                    block_hash: *block_hash,
+                    version: 0,
+                },
+                records: out,
+            }
         } else {
             JournalLookup::Absent
         }

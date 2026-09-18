@@ -19,7 +19,7 @@ use sumchain_primitives::{
     Block, BlockHeader, BlockHeight, Hash, SignedTransaction, Timestamp,
     ValidatorSet, ValidatorSetEntry, ValidatorStatus,
 };
-use sumchain_state::reorg_undo::SubsystemJournals;
+use sumchain_state::reorg_undo::{MissingJournalPolicy, SubsystemJournals};
 use sumchain_state::{BlockExecutor, Mempool, StateManager};
 use sumchain_storage::{
     BlockStore, Database, DelegationStore, StakingStore, TxStore, ValidatorSetStore,
@@ -815,6 +815,17 @@ impl PoAEngine {
             &plan,
             active_validators,
             &journals,
+            // Absence is tolerated, and that is forced rather than chosen. The
+            // publisher writes NO row for `JournalRecord::NothingToUndo`, so a
+            // block that mutated nothing and a block whose undo record is
+            // missing are the same zero bytes on disk. Halting on absence would
+            // therefore refuse every reorg over an empty block.
+            //
+            // This becomes `RequiredFrom(h)` the moment the producer writes a
+            // POSITIVE nothing-to-undo record and genesis declares the height
+            // from which it does. Until then the count is surfaced instead: a
+            // switch with tolerated absences has not fully unwound its branch.
+            MissingJournalPolicy::ToleratedEverywhere,
         )?;
 
         // Only after the switch is durable.
@@ -841,6 +852,15 @@ impl PoAEngine {
             new_head = %hash,
             "chain reorganization"
         );
+        if outcome.unwound.tolerated_absences > 0 {
+            warn!(
+                count = outcome.unwound.tolerated_absences,
+                "the reorg unwound past {} block(s) with no undo journal; their effects on \
+                 state were NOT reverted and remain applied under a chain that no longer \
+                 contains them",
+                outcome.unwound.tolerated_absences
+            );
+        }
         if outcome.force_adopted > 0 {
             // Said separately, and loudly. A block adopted under the historical
             // compatibility window had its header root published despite the
