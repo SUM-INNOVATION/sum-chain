@@ -41,36 +41,6 @@ use crate::{Result, StateError, StateManager};
 /// number with nothing to compare it against.
 pub const MAX_NFT_BATCH_MINT_REQUESTS: usize = 512;
 
-/// One value per chain-defined activation height this executor is gated on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct NftGates {
-    /// An operation naming an absent collection or token, or carrying an
-    /// undecodable payload, produces a `Failed` receipt instead of making the
-    /// whole block unexecutable. ACTIVATION-AUDIT row OV-?? / the receipt-failure
-    /// rule.
-    pub receipt_failure: bool,
-    /// A transaction's sizing inputs are checked against a limit BEFORE the
-    /// value they size is built: an oversized payload is refused before it is
-    /// decoded, and a `BatchMint` naming more than
-    /// [`MAX_NFT_BATCH_MINT_REQUESTS`] tokens is refused before the loop that
-    /// rebuilds the owner index once per request. ACTIVATION-AUDIT row AL-9.
-    pub allocation_bound: bool,
-}
-
-impl NftGates {
-    /// Every gate closed -- the release configuration today.
-    pub const CLOSED: Self = Self {
-        receipt_failure: false,
-        allocation_bound: false,
-    };
-
-    /// Every gate open. For the gated half of a mixed-version test.
-    pub const OPEN: Self = Self {
-        receipt_failure: true,
-        allocation_bound: true,
-    };
-}
-
 /// Result of executing an NFT operation
 #[derive(Debug)]
 pub struct NftExecutionResult {
@@ -135,6 +105,53 @@ impl NftExecutionResult {
 /// handle is gone is for there to be no receiver at all.
 pub struct NftExecutor;
 
+/// The activation decisions an NFT transaction executes under.
+///
+/// [`NftExecutor::execute`] derives it from `ChainParams`;
+/// [`NftExecutor::execute_with_gates`] takes it directly, which is how a test
+/// drives an ungated node and a gated node over the same transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NftGates {
+    /// A block-level denial becomes a charged `Failed` receipt.
+    /// ACTIVATION-AUDIT NFT receipt-failure row.
+    pub receipt_failure: bool,
+    /// An approval or a metadata rewrite answers to the token's owner, its
+    /// `locked` flag and its collection.
+    /// ACTIVATION-AUDIT rows OV-12, OV-13 and OV-14.
+    pub token_authority: bool,
+    /// A transaction's sizing inputs are checked against a limit BEFORE the
+    /// value they size is built: an oversized payload is refused before it is
+    /// decoded, and a `BatchMint` naming more than
+    /// [`MAX_NFT_BATCH_MINT_REQUESTS`] tokens is refused before the loop that
+    /// rebuilds the owner index once per request. ACTIVATION-AUDIT row AL-9.
+    pub allocation_bound: bool,
+}
+
+impl NftGates {
+    /// Every gate closed -- the release configuration today.
+    pub const CLOSED: Self = Self {
+        receipt_failure: false,
+        token_authority: false,
+        allocation_bound: false,
+    };
+
+    /// Every gate open. For the gated half of a mixed-version test.
+    pub const OPEN: Self = Self {
+        receipt_failure: true,
+        token_authority: true,
+        allocation_bound: true,
+    };
+
+    /// Derive the decisions from the chain's parameters at `block_height`.
+    pub fn from_params(params: &ChainParams, block_height: u64) -> Self {
+        Self {
+            receipt_failure: NftExecutor::receipt_failure_gate_open(params, block_height),
+            token_authority: NftExecutor::token_authority_gate_open(params, block_height),
+            allocation_bound: NftExecutor::allocation_bound_gate_open(params, block_height),
+        }
+    }
+}
+
 impl NftExecutor {
     /// Get current timestamp in milliseconds (now uses block timestamp for determinism)
     fn now_ms(block_timestamp: u64) -> u64 {
@@ -195,6 +212,36 @@ impl NftExecutor {
         matches!(Self::receipt_failure_activation(params), Some(h) if block_height >= h)
     }
 
+    /// The activation height for the NFT token-authority rules.
+    ///
+    /// Reads `params.nft_token_authority_enabled_from_height`, and nothing else.
+    /// `None` -- the default, and what a genesis written before the field
+    /// existed resolves to -- closes the gate, so a node executes exactly what
+    /// it executed before the field was declared.
+    ///
+    /// Below the gate (ACTIVATION-AUDIT rows OV-12, OV-13 and OV-14):
+    ///
+    ///   * `UpdateMetadata` accepts the token's CREATOR, which never changes, so
+    ///     the minter rewrites the metadata of a token it sold;
+    ///   * `locked` is consulted by transfer and burn only, so a locked token is
+    ///     still approvable and its metadata still rewritable;
+    ///   * `Approve` never reads the collection, so an approval is recorded on a
+    ///     token in a collection that forbids transfers.
+    ///
+    /// At and above it a metadata rewrite requires the current owner, a locked
+    /// token refuses both, and an approval refuses a non-transferable
+    /// collection.
+    #[inline]
+    fn token_authority_activation(params: &ChainParams) -> Option<u64> {
+        params.nft_token_authority_enabled_from_height
+    }
+
+    /// Whether the NFT token-authority rules are active at `block_height`.
+    #[inline]
+    pub fn token_authority_gate_open(params: &ChainParams, block_height: u64) -> bool {
+        matches!(Self::token_authority_activation(params), Some(h) if block_height >= h)
+    }
+
     /// The errors the receipt-failure rule converts into a `Failed` receipt.
     ///
     /// Deliberately narrow. Storage and encoding errors are node-local faults
@@ -237,10 +284,7 @@ impl NftExecutor {
             proposer,
             fee,
             block_timestamp,
-            NftGates {
-                receipt_failure: Self::receipt_failure_gate_open(params, block_height),
-                allocation_bound: Self::allocation_bound_gate_open(params, block_height),
-            },
+            NftGates::from_params(params, block_height),
         )
     }
 
@@ -278,6 +322,7 @@ impl NftExecutor {
             block_timestamp,
             NftGates {
                 receipt_failure: receipt_failure_gate_open,
+                token_authority: false,
                 allocation_bound: false,
             },
         )
@@ -286,9 +331,16 @@ impl NftExecutor {
     /// Execute an NFT operation with every activation decision supplied
     /// directly.
     ///
-    /// [`Self::execute_with_gate`] is the one-gate spelling this replaced, kept
-    /// so that every mixed-version test written against the receipt-failure gate
-    /// still drives the seam it was written for. It supplies
+    /// The superset of [`Self::execute_with_gate`], which named only the
+    /// receipt-failure decision because it was the only one. Two more arrived
+    /// from two directions and both are separate heights: token authority (rows
+    /// OV-12, OV-13 and OV-14) changes which transactions inside a valid block
+    /// succeed, where receipt-failure changes whether a block EXISTS at all;
+    /// and the allocation bound (row AL-9) is one rule shared with DocClass.
+    ///
+    /// `execute_with_gate` is kept as the one-gate spelling so every
+    /// mixed-version test written against the receipt-failure gate still drives
+    /// the seam it was written for. It supplies `token_authority: false` and
     /// `allocation_bound: false`, which is that binary's behaviour.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_with_gates(
@@ -420,6 +472,7 @@ impl NftExecutor {
                 &nft_data.collection_id,
                 nft_data.token_id,
                 &nft_data.data,
+                gates.token_authority,
             ),
             NftOperation::SetApprovalForAll => {
                 // For simplicity, we don't implement operator approvals in MVP
@@ -436,6 +489,7 @@ impl NftExecutor {
                 &nft_data.collection_id,
                 nft_data.token_id,
                 &nft_data.data,
+                gates.token_authority,
             ),
             NftOperation::TransferCollectionOwnership => Self::execute_transfer_collection(
                 view,
@@ -832,6 +886,7 @@ impl NftExecutor {
         collection_id: &[u8; 32],
         token_id: u64,
         data: &[u8],
+        token_authority_gate_open: bool,
     ) -> Result<NftExecutionResult> {
         // Get token
         let mut token = Self::v_get_token(view, collection_id, token_id)?
@@ -840,6 +895,25 @@ impl NftExecutor {
         // Check ownership
         if token.owner != *sender {
             return Ok(NftExecutionResult::failure("Not token owner".to_string()));
+        }
+
+        // OV-14: below the gate this arm never reads the collection, so an
+        // approval is recorded on a token in a collection that forbids
+        // transfers -- an approval to do a thing the collection does not allow.
+        // OV-13: `locked` is read by transfer and burn only, so a locked token
+        // is still approvable. Both are the same question the transfer arm
+        // already asks, asked here too.
+        if token_authority_gate_open {
+            let collection = Self::v_get_collection(view, collection_id)?
+                .ok_or_else(|| StateError::BlockValidation("Collection not found".to_string()))?;
+            if !collection.transferable {
+                return Ok(NftExecutionResult::failure(
+                    "Collection does not allow transfers".to_string(),
+                ));
+            }
+            if token.locked {
+                return Ok(NftExecutionResult::failure("Token is locked".to_string()));
+            }
         }
 
         // Deserialize approval data
@@ -910,6 +984,7 @@ impl NftExecutor {
         collection_id: &[u8; 32],
         token_id: u64,
         data: &[u8],
+        token_authority_gate_open: bool,
     ) -> Result<NftExecutionResult> {
         // Get collection
         let collection = Self::v_get_collection(view, collection_id)?
@@ -926,7 +1001,21 @@ impl NftExecutor {
             .ok_or_else(|| StateError::BlockValidation("Token not found".to_string()))?;
 
         // Only owner or creator can update
-        if token.owner != *sender && token.creator != *sender {
+        //
+        // OV-12: `creator` is stamped at mint and never changes, so below the
+        // gate the minter rewrites the metadata of a token it sold, for the life
+        // of the token. OV-13: `locked` is read by transfer and burn only, so a
+        // locked token's metadata is still rewritable. At and above the gate the
+        // current owner, and nobody else, may rewrite, and a locked token
+        // refuses.
+        if token_authority_gate_open {
+            if token.owner != *sender {
+                return Ok(NftExecutionResult::failure("Not token owner".to_string()));
+            }
+            if token.locked {
+                return Ok(NftExecutionResult::failure("Token is locked".to_string()));
+            }
+        } else if token.owner != *sender && token.creator != *sender {
             return Ok(NftExecutionResult::failure(
                 "Not owner or creator".to_string(),
             ));

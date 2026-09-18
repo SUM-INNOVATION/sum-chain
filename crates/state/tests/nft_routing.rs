@@ -3196,3 +3196,311 @@ fn an_ungated_node_cannot_execute_the_block_a_gated_node_roots() {
     // receipt to fold, and therefore no root: the divergence is a halt, not a
     // quiet difference in a digest.
 }
+
+// ── Class 8: NFT token authority, and its activation ─────────────────────────
+//
+// `docs/lane-a/ACTIVATION-AUDIT.md` rows OV-12, OV-13 and OV-14. One gate,
+// because they are one question asked of three different arms: what does a
+// token-mutating operation READ before it writes?
+//
+//   * OV-12 -- `UpdateMetadata` accepts `token.creator`, which is stamped at
+//     mint and never changes, so the minter rewrites the metadata of a token it
+//     sold, for the life of the token.
+//   * OV-13 -- `locked` is read by `execute_transfer` and `execute_burn` only,
+//     so a locked token is still approvable and still rewritable.
+//   * OV-14 -- `Approve` makes no `v_get_collection` call at all, so an approval
+//     is recorded on a token in a collection that forbids transfers.
+//
+// Gated on `nft_token_authority_enabled_from_height`, and NOT on
+// `nft_receipt_failure_enabled_from_height`: the receipt-failure gate decides
+// whether a block EXISTS, this one decides which transactions inside a valid
+// block succeed. Two blast radii, two heights, and `NftGates` carries both.
+//
+// Activating a subset is not a smaller change, it is an incoherent one: an
+// owner-only metadata rule still lets a LOCKED token be rewritten, and a lock
+// check on approval buys nothing while the collection that forbids transfers is
+// never read.
+//
+// The three pinning tests above -- `the_creator_can_rewrite_metadata_of_a_token_it_no_longer_owns`,
+// `a_locked_token_can_still_be_approved_and_rewritten` and
+// `approve_never_reads_the_collection` -- are untouched and still pass. They
+// drive `execute_tx`, whose params leave this gate closed, which is the release
+// configuration.
+
+use sumchain_state::NftGates;
+
+/// Drive one NFT operation through the gate seam.
+fn nft_at(
+    view: &mut ExecutionView<'_, '_>,
+    sender: &Address,
+    cid: [u8; 32],
+    token_id: u64,
+    op: NftOperation,
+    data: Vec<u8>,
+    gates: NftGates,
+) -> sumchain_state::NftExecutionResult {
+    let proposer = Address::new([9; 20]);
+    NftExecutor::execute_with_gates(
+        view,
+        &params(),
+        sender,
+        &NftTxData {
+            collection_id: cid,
+            token_id,
+            operation: op,
+            data,
+        },
+        &proposer,
+        100,
+        TS,
+        gates,
+    )
+    .unwrap()
+}
+
+/// Both gates, with receipt-failure held CLOSED so only token authority moves.
+///
+/// Holding the other gate still is the point: a test that opened both could not
+/// say which one produced the difference it observed.
+/// Spelled with `..CLOSED` rather than field by field: a gate added to
+/// `NftGates` later must leave this pair differing in exactly one decision,
+/// and listing the fields makes that a compile error somebody then fixes by
+/// guessing. The allocation-bound gate arrived and this is what it cost.
+const TOKEN_AUTHORITY: [NftGates; 2] = [
+    NftGates {
+        token_authority: false,
+        ..NftGates::CLOSED
+    },
+    NftGates {
+        token_authority: true,
+        ..NftGates::CLOSED
+    },
+];
+
+/// OV-12: `creator` never changes, so the minter never stops being able to write.
+#[test]
+fn the_creator_rewrites_a_token_it_sold_only_below_the_gate() {
+    for gates in TOKEN_AUTHORITY {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let creator = KeyPair::generate();
+        let holder = Address::new([0xB1; 20]);
+        fund(&db, &creator, 100_000_000);
+        let cid = [7u8; 32];
+        seed_collection(
+            &db,
+            &creator.address(),
+            &cid,
+            &CollectionConfig {
+                metadata_updatable: true,
+                ..transferable()
+            },
+        );
+
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        assert!(
+            nft_at(
+                &mut view,
+                &creator.address(),
+                cid,
+                0,
+                NftOperation::Mint,
+                mint_payload(creator.address()),
+                gates
+            )
+            .success
+        );
+        assert!(
+            nft_at(
+                &mut view,
+                &creator.address(),
+                cid,
+                1,
+                NftOperation::Transfer,
+                transfer_payload(holder),
+                gates
+            )
+            .success,
+            "the creator sells it under either gate"
+        );
+
+        let rewrite = nft_at(
+            &mut view,
+            &creator.address(),
+            cid,
+            1,
+            NftOperation::UpdateMetadata,
+            b"rewritten".to_vec(),
+            gates,
+        );
+        assert_eq!(
+            rewrite.success, !gates.token_authority,
+            "the creator rewrites a token it no longer owns, until the gate"
+        );
+
+        let token = NftExecutor::v_get_token(&view, &cid, 1).unwrap().unwrap();
+        assert_eq!(token.owner, holder, "the holder owns it either way");
+        assert_eq!(
+            token.metadata == b"rewritten".to_vec(),
+            !gates.token_authority,
+            "and only below the gate does the metadata carry the creator's write"
+        );
+    }
+}
+
+/// OV-13: the lock stops transfers and burns, and nothing else.
+#[test]
+fn a_locked_token_is_approvable_and_rewritable_only_below_the_gate() {
+    for gates in TOKEN_AUTHORITY {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let creator = KeyPair::generate();
+        fund(&db, &creator, 100_000_000);
+        let cid = [7u8; 32];
+        seed_collection(
+            &db,
+            &creator.address(),
+            &cid,
+            &CollectionConfig {
+                metadata_updatable: true,
+                ..transferable()
+            },
+        );
+
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        for (token_id, op, data) in [
+            (0u64, NftOperation::Mint, mint_payload(creator.address())),
+            (1, NftOperation::LockToken, Vec::new()),
+        ] {
+            assert!(
+                nft_at(
+                    &mut view,
+                    &creator.address(),
+                    cid,
+                    token_id,
+                    op,
+                    data,
+                    gates
+                )
+                .success,
+                "{op:?} under either gate"
+            );
+        }
+
+        let spender = Address::new([0xAB; 20]);
+        let approved = nft_at(
+            &mut view,
+            &creator.address(),
+            cid,
+            1,
+            NftOperation::Approve,
+            approve_payload(Some(spender)),
+            gates,
+        );
+        let rewritten = nft_at(
+            &mut view,
+            &creator.address(),
+            cid,
+            1,
+            NftOperation::UpdateMetadata,
+            b"still writable".to_vec(),
+            gates,
+        );
+        assert_eq!(
+            (approved.success, rewritten.success),
+            (!gates.token_authority, !gates.token_authority),
+            "a locked token takes an approval and a metadata rewrite, until the gate"
+        );
+
+        let token = NftExecutor::v_get_token(&view, &cid, 1).unwrap().unwrap();
+        assert!(token.locked, "locked under either gate");
+        assert_eq!(
+            token.approved,
+            if gates.token_authority {
+                None
+            } else {
+                Some(spender)
+            }
+        );
+        assert_eq!(
+            token.metadata == b"still writable".to_vec(),
+            !gates.token_authority
+        );
+    }
+}
+
+/// OV-14: an approval to do a thing the collection forbids.
+#[test]
+fn an_approval_is_recorded_on_a_soulbound_token_only_below_the_gate() {
+    for gates in TOKEN_AUTHORITY {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let creator = KeyPair::generate();
+        let spender = KeyPair::generate();
+        for kp in [&creator, &spender] {
+            fund(&db, kp, 100_000_000);
+        }
+        let cid = [7u8; 32];
+        seed_collection(
+            &db,
+            &creator.address(),
+            &cid,
+            &CollectionConfig {
+                transferable: false,
+                ..transferable()
+            },
+        );
+
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        assert!(
+            nft_at(
+                &mut view,
+                &creator.address(),
+                cid,
+                0,
+                NftOperation::Mint,
+                mint_payload(creator.address()),
+                gates
+            )
+            .success,
+            "minting into a soulbound collection is allowed under either gate"
+        );
+
+        let approved = nft_at(
+            &mut view,
+            &creator.address(),
+            cid,
+            1,
+            NftOperation::Approve,
+            approve_payload(Some(spender.address())),
+            gates,
+        );
+        assert_eq!(
+            approved.success, !gates.token_authority,
+            "an approval that can never be exercised is recorded, until the gate"
+        );
+        assert_eq!(
+            approved.error.as_deref(),
+            if gates.token_authority {
+                Some("Collection does not allow transfers")
+            } else {
+                None
+            },
+            "and above the gate it is refused for the reason the transfer arm gives"
+        );
+        assert_eq!(
+            NftExecutor::v_get_token(&view, &cid, 1)
+                .unwrap()
+                .unwrap()
+                .approved,
+            if gates.token_authority {
+                None
+            } else {
+                Some(spender.address())
+            }
+        );
+    }
+}

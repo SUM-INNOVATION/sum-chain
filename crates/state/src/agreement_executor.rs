@@ -158,28 +158,63 @@ pub struct AgreementGates {
     /// Executor-written timestamps are the block's, not a literal zero.
     /// ACTIVATION-AUDIT row TS-5.
     pub real_block_timestamp: bool,
+    /// Signature rows and the parties' `signed` flags agree.
+    /// ACTIVATION-AUDIT rows OV-28 and OV-29.
+    pub signature_integrity: bool,
 }
 
 impl AgreementGates {
     /// Every gate closed -- the release configuration today.
     pub const CLOSED: Self = Self {
         real_block_timestamp: false,
+        signature_integrity: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
     pub const OPEN: Self = Self {
         real_block_timestamp: true,
+        signature_integrity: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
     pub fn from_params(params: &ChainParams, block_height: BlockHeight) -> Self {
         Self {
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
+            signature_integrity: AgreementExecutor::signature_integrity_gate_open(
+                params,
+                block_height,
+            ),
         }
     }
 }
 
 impl AgreementExecutor {
+    /// The activation height for the Agreement signature-integrity rules.
+    ///
+    /// Reads `params.agreement_signature_integrity_enabled_from_height`, and
+    /// nothing else. `None` -- the default, and what a genesis written before
+    /// the field existed resolves to -- closes the gate, so a node executes
+    /// exactly what it executed before the field was declared.
+    ///
+    /// Below the gate (ACTIVATION-AUDIT rows OV-28 and OV-29) a signature naming
+    /// a party the agreement does not bind is stored anyway and rewrites the
+    /// agreement row while flipping no flag, and `RevokeSignature` deletes the
+    /// signature row and leaves the party's `signed` flag set. At and above it
+    /// the signature must name a bound party, and revoking one clears that
+    /// party's flag and walks an `Executed` agreement back to
+    /// `PendingSignatures`.
+    #[inline]
+    fn signature_integrity_activation(params: &ChainParams) -> Option<u64> {
+        params.agreement_signature_integrity_enabled_from_height
+    }
+
+    /// Whether the Agreement signature-integrity rules are active at
+    /// `block_height`.
+    #[inline]
+    pub fn signature_integrity_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::signature_integrity_activation(params), Some(h) if block_height >= h)
+    }
+
     /// Execute an Agreement transaction.
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
@@ -345,6 +380,30 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Signature already exists"));
                 }
 
+                // OV-28: below the gate a signature naming a party the agreement
+                // does not bind is stored anyway, and `v_mark_party_signed`
+                // rewrites the agreement row -- bumping `updated_at` -- while
+                // matching nobody and flipping no flag. The signature family then
+                // holds rows for parties the agreement has never heard of.
+                if gates.signature_integrity {
+                    let party_hash = signature.party_ref.as_hash();
+                    let agreement = match Self::v_get_agreement(view, &signature.agreement_id)? {
+                        Some(a) => a,
+                        None => {
+                            return Ok(AgreementExecutionResult::failure("Agreement not found"))
+                        }
+                    };
+                    if !agreement
+                        .parties
+                        .iter()
+                        .any(|p| p.party_ref.as_hash() == party_hash)
+                    {
+                        return Ok(AgreementExecutionResult::failure(
+                            "Signer is not a party to this agreement",
+                        ));
+                    }
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -368,14 +427,27 @@ impl AgreementExecutor {
                 let d: RevokeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if Self::v_get_signature(view, &d.signature_id)?.is_none() {
-                    return Ok(AgreementExecutionResult::failure("Signature not found"));
-                }
+                let existing = match Self::v_get_signature(view, &d.signature_id)? {
+                    Some(sig) => sig,
+                    None => return Ok(AgreementExecutionResult::failure("Signature not found")),
+                };
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 Self::v_delete_signature(view, &d.signature_id)?;
+                // OV-29: below the gate the signature row goes and the party's
+                // `signed` flag stays, so an agreement promoted to `Executed` by
+                // that very signature stays `Executed` with the signature gone,
+                // and nothing anywhere recomputes it.
+                if gates.signature_integrity {
+                    Self::v_unmark_party_signed(
+                        view,
+                        &existing.agreement_id,
+                        &existing.party_ref.as_hash(),
+                        block_timestamp,
+                    )?;
+                }
                 Ok(AgreementExecutionResult::success())
             }
 

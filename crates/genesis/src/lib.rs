@@ -980,6 +980,29 @@ pub struct ChainParams {
     /// attacker refused by the DocClass bound simply moves to the NFT one.
     /// There is no configuration in which an operator wants one and not the
     /// other.
+    /// The Tax proof store and its subject index stop disagreeing.
+    ///
+    /// Three defects that share one invariant, and therefore one height
+    /// (ACTIVATION-AUDIT rows OV-1, OV-2 and OV-3):
+    ///
+    ///   * `IssueClaim` is a blind overwrite. The proof id is chosen by the
+    ///     sender, so any active issuer replaces any existing proof, and the
+    ///     replaced proof's subject-index entry is left pointing at a row whose
+    ///     subject is now somebody else's.
+    ///   * `RevokeClaim` reads its 32-byte payload field as a PROOF ID while
+    ///     calling it a subject nullifier, so a revocation naming a subject
+    ///     finds nothing and a revocation naming a proof id succeeds.
+    ///   * deleting a proof removes the proof row and leaves the subject-index
+    ///     entry, so the index grows without bound and points at rows that are
+    ///     gone.
+    ///
+    /// At and above the gate `IssueClaim` refuses a proof id already present,
+    /// `RevokeClaim` resolves its payload through the subject index and revokes
+    /// every proof recorded for that subject, and each deletion removes the
+    /// matching index entry. Separating them would leave the subsystem
+    /// inconsistent in a new way rather than an old one: index cleanup without
+    /// the keying fix cleans the wrong subject, and the keying fix without index
+    /// cleanup makes the dangling entries accumulate faster.
     ///
     /// Production-safe default `None`, which is what an absent field resolves
     /// to and what every genesis written before this gate existed carries.
@@ -992,6 +1015,105 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub subsystem_allocation_bound_enabled_from_height: Option<u64>,
+    pub tax_proof_lifecycle_enabled_from_height: Option<u64>,
+
+    /// An NFT approval or metadata rewrite answers to the same authority a
+    /// transfer does.
+    ///
+    /// Three defects that are one question — which state does a token-mutating
+    /// arm consult before it writes — and therefore one height
+    /// (ACTIVATION-AUDIT rows OV-12, OV-13 and OV-14):
+    ///
+    ///   * `UpdateMetadata` accepts the token's CREATOR, which never changes, so
+    ///     the minter rewrites the metadata of a token it sold, for the life of
+    ///     the token.
+    ///   * the `locked` flag is read by transfer and burn only, so a locked
+    ///     token is still approvable and its metadata still rewritable.
+    ///   * `Approve` never reads the collection, so an approval is recorded on a
+    ///     token in a collection that forbids transfers.
+    ///
+    /// At and above the gate `UpdateMetadata` requires the current owner, and
+    /// both `Approve` and `UpdateMetadata` refuse a locked token, and `Approve`
+    /// refuses a non-transferable collection. Activating a subset leaves the
+    /// hole the other two describe: an owner-only metadata rule still lets a
+    /// locked token be rewritten, and a lock check on approval is worth nothing
+    /// while the collection that forbids transfers is never read.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub nft_token_authority_enabled_from_height: Option<u64>,
+
+    /// Agreement signature rows and the parties' `signed` flags agree.
+    ///
+    /// Two halves of one invariant, and therefore one height (ACTIVATION-AUDIT
+    /// rows OV-28 and OV-29):
+    ///
+    ///   * a signature naming a party the agreement does not bind is stored
+    ///     anyway, and rewrites the agreement row while flipping no flag;
+    ///   * `RevokeSignature` deletes the signature row and leaves the party's
+    ///     `signed` flag set, so an agreement stays `Executed` with the
+    ///     signature that executed it gone.
+    ///
+    /// At and above the gate a signature must name a bound party, and revoking
+    /// one clears that party's flag and returns an agreement that was `Executed`
+    /// only because it was fully signed to `PendingSignatures`. Activating
+    /// either alone leaves the two records disagreeing: flag-clearing without
+    /// the party check can clear a flag some other signature set, and the party
+    /// check without flag-clearing still lets a revocation strand an `Executed`
+    /// status.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub agreement_signature_integrity_enabled_from_height: Option<u64>,
+
+    /// A Healthcare write consults the row it is about to change.
+    ///
+    /// Two arms that write unconditionally, and therefore one height
+    /// (ACTIVATION-AUDIT rows OV-17 and OV-20):
+    ///
+    ///   * `RenewMembership` sets `status = Active` whatever the status was, so
+    ///     a membership terminated a transaction earlier is active again by the
+    ///     end of the block;
+    ///   * `RemoveNetworkAffiliation` and `RemoveDependent` write the row and
+    ///     the index whether or not the thing being removed was ever there, so
+    ///     removing an affiliation a provider never had CREATES an empty index
+    ///     row and bumps `updated_at` on a row nothing changed.
+    ///
+    /// At and above the gate renewal refuses a membership that is `Cancelled`,
+    /// `Terminated` or `Expired` — the statuses a renewal must not silently
+    /// undo — and both removals are no-ops when there is nothing to remove.
+    /// They share a height because they are one rule stated twice: a write arm
+    /// must read the row before it decides, and an operator who enabled one
+    /// while leaving the other would still be running a subsystem whose writes
+    /// do not depend on what is there.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub healthcare_state_precondition_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -1329,6 +1451,14 @@ impl Default for ChainParams {
             subsystem_block_timestamp_enabled_from_height: None,
             subsystem_tx_index_enabled_from_height: None,
             subsystem_allocation_bound_enabled_from_height: None,
+            // Production-safe default: the tax proof store and its subject index stop disagreeing — dormant.
+            tax_proof_lifecycle_enabled_from_height: None,
+            // Production-safe default: an nft approval or metadata rewrite answers to the owner, the lock and the collection — dormant.
+            nft_token_authority_enabled_from_height: None,
+            // Production-safe default: agreement signature rows and the parties' signed flags agree — dormant.
+            agreement_signature_integrity_enabled_from_height: None,
+            // Production-safe default: a healthcare write consults the row it is about to change — dormant.
+            healthcare_state_precondition_enabled_from_height: None,
         }
     }
 }
@@ -1654,6 +1784,22 @@ impl ChainParams {
             (
                 "subsystem_allocation_bound_enabled_from_height",
                 self.subsystem_allocation_bound_enabled_from_height,
+            ),
+            (
+                "tax_proof_lifecycle_enabled_from_height",
+                self.tax_proof_lifecycle_enabled_from_height,
+            ),
+            (
+                "nft_token_authority_enabled_from_height",
+                self.nft_token_authority_enabled_from_height,
+            ),
+            (
+                "agreement_signature_integrity_enabled_from_height",
+                self.agreement_signature_integrity_enabled_from_height,
+            ),
+            (
+                "healthcare_state_precondition_enabled_from_height",
+                self.healthcare_state_precondition_enabled_from_height,
             ),
         ]
     }

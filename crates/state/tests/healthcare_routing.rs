@@ -4492,3 +4492,330 @@ fn a_consent_revocation_stamps_a_real_time_only_at_the_gate() {
         );
     }
 }
+
+// ── Class 8: the Healthcare state precondition, and its activation ───────────
+//
+// `docs/lane-a/ACTIVATION-AUDIT.md` rows OV-17 and OV-20. One gate, because
+// they are one rule stated twice: a write arm must read the row before it
+// decides what to write.
+//
+//   * OV-17 -- `v_renew_membership` sets `status = Active` unconditionally, so a
+//     renewal is also an un-suspension, an un-termination and an
+//     un-cancellation. `ReinstateMembership` is the operation that exists for
+//     exactly that, and it DOES have a status guard (`Suspended` only); renewal
+//     walks around it, and there is no reversal path at all for `Terminated` or
+//     `Cancelled`.
+//   * OV-20 -- `v_remove_network_affiliation` and `v_remove_dependent` write the
+//     row and the index whether or not the thing being removed was ever there.
+//     Their add mirrors are `contains`-guarded and write nothing when there is
+//     nothing to do; the removes are not, so removing an affiliation a provider
+//     never had CREATES an empty index row where the plan had none.
+//
+// Gated on `healthcare_state_precondition_enabled_from_height`, and NOT on
+// `healthcare_authorization_enabled_from_height`: authorization decides WHO may
+// act, this decides whether an action that is allowed does anything. An operator
+// can sequence them, and the tests below hold authorization fixed so the
+// difference they observe is attributable to one gate.
+//
+// The pinning tests above -- `renewing_a_terminated_membership_makes_it_active_again`
+// and `removing_an_affiliation_that_was_never_there_still_stages_an_empty_index`
+// -- are untouched and still pass: they drive `execute_tx`, whose params leave this
+// gate closed, which is the release configuration.
+
+/// Both values of the state-precondition gate, with authorization and the block
+/// timestamp held CLOSED so only one decision moves.
+const PRECONDITION: [HealthcareGates; 2] = [
+    HealthcareGates {
+        authorization: false,
+        real_block_timestamp: false,
+        state_precondition: false,
+    },
+    HealthcareGates {
+        authorization: false,
+        real_block_timestamp: false,
+        state_precondition: true,
+    },
+];
+
+/// OV-17: renewal is the un-terminate the subsystem does not otherwise have.
+#[test]
+fn a_terminated_membership_is_renewed_back_to_active_only_below_the_gate() {
+    #[derive(serde::Serialize)]
+    struct MembershipId {
+        membership_id: [u8; 32],
+    }
+    #[derive(serde::Serialize)]
+    struct Renewal {
+        membership_id: [u8; 32],
+        new_expiry: u64,
+    }
+
+    for gates in PRECONDITION {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        let addr = issuer.address();
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        assert!(
+            healthcare_at(
+                &mut view,
+                &addr,
+                HealthcareOperation::RegisterProvider,
+                &provider(0xA8, addr, vec![]),
+                gates
+            )
+            .success
+        );
+        assert!(
+            healthcare_at(
+                &mut view,
+                &addr,
+                HealthcareOperation::IssueMembership,
+                &membership(0xA9, 0xA8, addr),
+                gates
+            )
+            .success
+        );
+        assert!(
+            healthcare_at(
+                &mut view,
+                &addr,
+                HealthcareOperation::TerminateMembership,
+                &MembershipId {
+                    membership_id: [0xA9; 32],
+                },
+                gates
+            )
+            .success,
+            "terminating works under either gate"
+        );
+        assert_eq!(
+            HealthcareExecutor::v_get_membership(&view, &[0xA9u8; 32])
+                .unwrap()
+                .unwrap()
+                .status,
+            MembershipStatus::Terminated
+        );
+
+        let renewed = healthcare_at(
+            &mut view,
+            &addr,
+            HealthcareOperation::RenewMembership,
+            &Renewal {
+                membership_id: [0xA9; 32],
+                new_expiry: 9_999_999,
+            },
+            gates,
+        );
+        assert_eq!(
+            renewed.success, !gates.state_precondition,
+            "a terminated membership is renewed, until the gate"
+        );
+
+        let m = HealthcareExecutor::v_get_membership(&view, &[0xA9u8; 32])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            m.status,
+            if gates.state_precondition {
+                MembershipStatus::Terminated
+            } else {
+                MembershipStatus::Active
+            },
+            "below the gate a terminated membership is Active again, with no \
+             transition check anywhere"
+        );
+        assert_eq!(
+            m.expiry,
+            if gates.state_precondition {
+                Some(9_000_000)
+            } else {
+                Some(9_999_999)
+            },
+            "and above it the refusal happens before any write"
+        );
+    }
+}
+
+/// OV-17, the other half: renewal of a membership nothing terminated is
+/// unaffected by the gate.
+///
+/// A gate that refused every renewal would pass the test above and be useless.
+#[test]
+fn an_active_membership_renews_under_either_gate() {
+    #[derive(serde::Serialize)]
+    struct Renewal {
+        membership_id: [u8; 32],
+        new_expiry: u64,
+    }
+
+    for gates in PRECONDITION {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        let addr = issuer.address();
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        assert!(
+            healthcare_at(
+                &mut view,
+                &addr,
+                HealthcareOperation::RegisterProvider,
+                &provider(0xAA, addr, vec![]),
+                gates
+            )
+            .success
+        );
+        assert!(
+            healthcare_at(
+                &mut view,
+                &addr,
+                HealthcareOperation::IssueMembership,
+                &membership(0xAB, 0xAA, addr),
+                gates
+            )
+            .success
+        );
+
+        assert!(
+            healthcare_at(
+                &mut view,
+                &addr,
+                HealthcareOperation::RenewMembership,
+                &Renewal {
+                    membership_id: [0xAB; 32],
+                    new_expiry: 9_999_999,
+                },
+                gates
+            )
+            .success,
+            "an ACTIVE membership renews under either gate"
+        );
+        let m = HealthcareExecutor::v_get_membership(&view, &[0xABu8; 32])
+            .unwrap()
+            .unwrap();
+        assert_eq!(m.status, MembershipStatus::Active);
+        assert_eq!(m.expiry, Some(9_999_999));
+    }
+}
+
+/// OV-20: a removal of something that was never there.
+#[test]
+fn removing_what_was_never_there_writes_a_row_only_below_the_gate() {
+    #[derive(serde::Serialize)]
+    struct Affiliation {
+        provider_id: [u8; 32],
+        plan_id: [u8; 32],
+    }
+    #[derive(serde::Serialize)]
+    struct Dependent {
+        membership_id: [u8; 32],
+        dependent_commitment: [u8; 32],
+    }
+
+    for gates in PRECONDITION {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        let addr = issuer.address();
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        assert!(
+            healthcare_at(
+                &mut view,
+                &addr,
+                HealthcareOperation::RegisterProvider,
+                &provider(0x4D, addr, vec![]),
+                gates
+            )
+            .success
+        );
+        assert!(
+            healthcare_at(
+                &mut view,
+                &addr,
+                HealthcareOperation::IssueMembership,
+                &membership(0x4E, 0x4D, addr),
+                gates
+            )
+            .success
+        );
+        let provider_before = HealthcareExecutor::v_get_provider(&view, &[0x4Du8; 32])
+            .unwrap()
+            .unwrap();
+        let membership_before = HealthcareExecutor::v_get_membership(&view, &[0x4Eu8; 32])
+            .unwrap()
+            .unwrap();
+
+        // Neither removal has anything to remove. Both still report success --
+        // the gate changes what is WRITTEN, not whether the transaction stands,
+        // and the fee is charged either way exactly as the add mirrors charge it.
+        assert!(
+            healthcare_at(
+                &mut view,
+                &addr,
+                HealthcareOperation::RemoveNetworkAffiliation,
+                &Affiliation {
+                    provider_id: [0x4D; 32],
+                    plan_id: PLAN_B,
+                },
+                gates
+            )
+            .success
+        );
+        assert!(
+            healthcare_at(
+                &mut view,
+                &addr,
+                HealthcareOperation::RemoveDependent,
+                &Dependent {
+                    membership_id: [0x4E; 32],
+                    dependent_commitment: [0xEE; 32],
+                },
+                gates
+            )
+            .success
+        );
+
+        // The index row a plan never had.
+        assert_eq!(
+            view.get(cf::HEALTHCARE_PROVIDER_NETWORK_INDEX, &PLAN_B)
+                .unwrap()
+                .as_deref()
+                .map(<[u8]>::to_vec),
+            if gates.state_precondition {
+                None
+            } else {
+                Some(bincode::serialize(&Vec::<[u8; 32]>::new()).unwrap())
+            },
+            "below the gate an EMPTY list is staged at a plan the provider was \
+             never in; above it nothing is written at all"
+        );
+        assert_eq!(
+            families_changed(&db, &view).contains(&cf::HEALTHCARE_PROVIDER_NETWORK_INDEX),
+            !gates.state_precondition
+        );
+
+        // And the two rows themselves: `updated_at` bumped for nothing.
+        let provider_after = HealthcareExecutor::v_get_provider(&view, &[0x4Du8; 32])
+            .unwrap()
+            .unwrap();
+        let membership_after = HealthcareExecutor::v_get_membership(&view, &[0x4Eu8; 32])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            provider_after == provider_before,
+            gates.state_precondition,
+            "the provider row is rewritten for nothing, until the gate"
+        );
+        assert_eq!(
+            membership_after == membership_before,
+            gates.state_precondition,
+            "and so is the membership row"
+        );
+    }
+}

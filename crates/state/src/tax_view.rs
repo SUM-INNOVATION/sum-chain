@@ -150,6 +150,39 @@ impl TaxExecutor {
             .map_err(StateError::Storage)
     }
 
+    /// Every proof recorded for `subject_nullifier`, and the index row itself.
+    ///
+    /// The gated counterpart of [`TaxExecutor::v_delete_proof`], and the whole
+    /// of ACTIVATION-AUDIT row OV-3: a deletion that leaves the index behind is
+    /// what makes `TAX_SUBJECT_INDEX` grow without bound and point at rows that
+    /// are gone. Removing the index row rather than rewriting a shortened list
+    /// is deliberate -- the subject has no proofs left, and an empty list row is
+    /// a row an absent subject would not have (the asymmetry OV-15 records in
+    /// the NFT indexes, not reintroduced here).
+    ///
+    /// Returns how many proof rows were removed. An id the index names but the
+    /// proof family does not hold -- a danger left by a pre-activation deletion
+    /// -- is counted as removed and does not fail the call: the index row goes
+    /// either way, which is precisely the repair.
+    ///
+    /// Reachable only through the gate. `v_delete_proof` is untouched, so a node
+    /// below the activation height writes exactly what it wrote before.
+    pub fn v_delete_subject_proofs(
+        view: &mut ExecutionView<'_, '_>,
+        subject_nullifier: &[u8; 32],
+    ) -> Result<usize> {
+        let ids = Self::v_get_subject_proof_ids(view, subject_nullifier)?;
+        for id in &ids {
+            view.delete(cf::TAX_PROOFS, proof_key(id))
+                .map_err(StateError::Storage)?;
+        }
+        if !ids.is_empty() {
+            view.delete(cf::TAX_SUBJECT_INDEX, subject_index_key(subject_nullifier))
+                .map_err(StateError::Storage)?;
+        }
+        Ok(ids.len())
+    }
+
     pub fn v_get_subject_proof_ids(
         view: &ExecutionView<'_, '_>,
         subject_nullifier: &[u8; 32],

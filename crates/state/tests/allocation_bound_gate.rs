@@ -128,11 +128,17 @@ const DOC_BOUND: DocClassGates = DocClassGates {
 };
 
 /// The same isolation on the NFT side: `NftGates::OPEN` would also open the
-/// receipt-failure rule, which changes an `Err` into a `Failed` receipt.
+/// receipt-failure rule, which changes an `Err` into a `Failed` receipt, and
+/// the token-authority rules, which decide who may rewrite a token.
+///
+/// Spelled with `..CLOSED` rather than field by field, so that a gate added to
+/// `NftGates` later leaves this fixture isolating exactly what it says it
+/// isolates instead of failing to compile and inviting whoever fixes it to
+/// guess. That is how it broke when the token-authority gate arrived.
 const NFT_CLOSED: NftGates = NftGates::CLOSED;
 const NFT_BOUND: NftGates = NftGates {
     allocation_bound: true,
-    receipt_failure: false,
+    ..NftGates::CLOSED
 };
 
 // ── DocClass fixtures ───────────────────────────────────────────────────────
