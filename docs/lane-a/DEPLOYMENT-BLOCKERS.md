@@ -18,22 +18,36 @@ purpose.
 
 | subsystem | commit | inventory |
 |---|---|---|
-| PolicyAccount | `855ec009` | in the commit message |
-| Messaging + sponsored registration | `e293b03a` | in the commit message |
-| Tax | `1c5494c` | in the commit message |
-| Employment (SRC-88X) | `623e41f` (was `04eb5bc`) | in the commit message |
-| Legal (SRC-85X) | `ddc4985` (was `026447f`) | in the commit message |
-| Finance (SRC-89X) | `d570469` (was `0706862`) | in the commit message |
+| PolicyAccount | `855ec009` | transcribed in full below |
+| Messaging + sponsored registration | `e293b03a` | transcribed in full below |
+| Tax | `1c5494c` | transcribed in full below |
+| Employment (SRC-88X) | `623e41f` (was `04eb5bc`) | transcribed in full below |
+| Legal (SRC-85X) | `ddc4985` (was `026447f`) | transcribed in full below |
+| Finance (SRC-89X) | `d570469` (was `0706862`) | transcribed in full below |
 | Agreement (SRC-84X) | `2249ca8` | transcribed in full below |
 | Property (SRC-86X) | this wave | transcribed in full below |
 | Healthcare (SRC-87X) | this wave | transcribed in full below |
 | NFT (SUM-721) | this wave | transcribed in full below |
 | DocClass (SRC-80X/81X) | this wave | transcribed in full below |
 
-Agreement, property, healthcare, NFT and DocClass are transcribed here. The six earlier
-inventories are recorded in their own commit messages and have not been copied
-into this file; a pointer is not a transcription, and listing them here from
-memory would be worse than listing them not at all.
+All eleven inventories are transcribed here. The six that lived only inside a
+commit message -- PolicyAccount, messaging, tax, employment, legal and finance
+-- were copied from those messages and from nothing else. A pointer is not a
+transcription, and listing them from memory would be worse than listing them
+not at all, so where a message is thin, silent or circular the entry says so
+instead of filling the gap.
+
+Every entry in those six sections carries a tag naming its source commit and
+its evidence class:
+
+  * PINNING TEST -- the message names a test that pins the claim. The tag also
+    records where that test is in this tree, because a name that no longer
+    resolves is exactly the drift this file exists to expose.
+  * MEASUREMENT -- the message gives measured numbers and no test name.
+  * SOURCE-ONLY -- asserted in prose, with neither.
+
+Where a message gives both a test name and measured numbers, the entry is
+tagged PINNING TEST and the numbers stay in the claim.
 
 Employment, legal and finance were reviewed to an earlier and weaker bar than
 this wave, and their rows above carry the SHA they now have on this branch, not
@@ -45,6 +59,499 @@ recorded here rather than implied away: neither employment nor legal committed a
 per-mutation battery document. Their commit messages report 52/52 and 56/56
 killed, but that record is not auditable in the tree, and this branch does not
 make it so. Finance's battery is at `docs/lane-a/FINANCE-MUTATION-BATTERY.md`.
+
+That paragraph predates `c91f370` on this branch, which added
+`docs/lane-a/EMPLOYMENT-MUTATION-BATTERY.md` and
+`docs/lane-a/LEGAL-MUTATION-BATTERY.md`. Its historical claim stands -- neither
+original commit shipped a battery document -- and it is left exactly as written
+rather than rewritten here.
+
+## PolicyAccount
+
+Source: `855ec009`, "state: move policy accounts onto the execution view". The
+byte-identical message is also carried by `cece16c`; `855ec009` itself sits on
+no branch in this tree, and both resolve.
+
+The first thing to record is an absence. This message carries NO
+deferred-defect inventory. It has no "deferred defects", no "inherited risk"
+and no equivalent section; it names no behaviour it reproduced without fixing,
+and it pins no inherited semantics with a test. The status row that used to
+read "in the commit message" pointed at something that does not exist in that
+form. What follows is everything in the message that bears on whether this can
+ship. It is not a defect list for policy accounts, and it should not be read as
+one.
+
+### The unfinished migration
+
+  * 166 manifest rows remain across ten subsystems -- docclass 46,
+    messaging 25 (plus the sponsored-registration row in `executor.rs`),
+    nft 17, healthcare 16, property 14, agreement 12, finance 11, legal 10,
+    employment 8, tax 6. "The application journal is still gated on that
+    reaching zero."
+    [`855ec009` | measurement]
+
+### A committed read left in place
+
+  * The submit-proposal RPC helper "derives a proposal id from the account's
+    committed nonce while building a transaction for the caller. That was
+    committed-only before this commit and is committed-only after it; the
+    executor still recomputes the id at execution time against the nonce the
+    candidate holds."
+    AMBIGUOUS, and left unresolved here: the message names this deliberately
+    ("because 'audit the committed twins' should not stop at counting them")
+    but does not call it a defect, does not say it is reproduced deliberately,
+    and attaches no test to it.
+    [`855ec009` | source-only]
+
+### A build that is not clean
+
+  * "Build clean apart from sumchain-rpc's lib-test target, at the same three
+    server.rs sites (9805, 9906, 10512) the routing commit left there." All six
+    messages transcribed in this group name the same three sites and all six
+    call them pre-existing.
+    [`855ec009` | source-only]
+
+Two things this commit FIXED rather than deferred, recorded so they are not
+mistaken for open entries: the split commit point, where a wrapped policy
+action staged into the block's candidate while the nonce increment and the
+proposal's `Executed` status went straight to RocksDB, so "an abandoned block
+kept the authorisation and lost the effect"; and the committed duplicate and
+nonce reads that guarded it, which moved to the candidate in the same commit.
+
+## Messaging + sponsored registration
+
+Source: `e293b03a`, "state: move messaging onto the execution view".
+
+Like PolicyAccount, this message carries NO deferred-defect inventory: no
+section names a behaviour reproduced without fixing. It is the only one of the
+six that fixes two defects outright inside the migration commit.
+
+### The unfinished migration
+
+  * "140 committed manifest rows remain across nine subsystems: docclass 46,
+    nft 17, healthcare 16, property 14, agreement 12, finance 11, legal 10,
+    employment 8, tax 6. Every one is a write an unaccepted block can still
+    make, and the application journal is still gated on that reaching zero."
+    [`e293b03a` | measurement]
+
+### Replay protection that does not rest on the account nonce
+
+  * "this dispatch arm does NOT advance the account nonce for most messaging
+    operations -- only the two send paths do. The messaging sender nonce is
+    this subsystem's own replay guard, which makes its candidate-correctness
+    load-bearing rather than incidental."
+    AMBIGUOUS, and left unresolved here: the message states this as a property
+    that surprised its author, not as a defect, and attaches no test to it as a
+    defect claim.
+    [`e293b03a` | source-only]
+
+Fixed here rather than carried forward, recorded so they are not read as open:
+`is_admin` returned `bool` around `if let Ok(Some(admin))`, so a decode failure
+or a storage error fell through to the GENESIS-configured admin and "no caller
+could tell" -- `v_is_admin` returns `Result<bool>` now; and
+`execute_sponsored_register_v1` asked `has_public_key` of the database, "so two
+sponsored registrations for the same address in one block would both pass the
+check and the second would overwrite the first".
+
+## Tax
+
+Source: `1c5494c`, "state: move tax onto the execution view". The message's own
+heading is "Inherited risk, none of it fixed by this commit"; it closes that
+section with "Deployment remains blocked on all of it." Eleven items: nine
+numbered, then two the message calls resource items. The numbering below is the
+message's own. None of the nine numbered items names a test.
+
+### Missing authorization and no-op verification
+
+  1. "Anyone can self-register an ACTIVE issuer with an arbitrary class,
+     including TaxAuthority, and then issue claims."
+     [`1c5494c` | source-only]
+  2. "Claim-type registration, update and deprecation have no authority check."
+     [`1c5494c` | source-only]
+  6. "`VerifyProof` performs no verification: it charges the fee and reports
+     success."
+     [`1c5494c` | source-only]
+
+### Overwrite and dangling-index paths
+
+  3. "`IssueClaim` can overwrite an existing proof id, leaving the old subject
+     index pointing at the replacement."
+     [`1c5494c` | source-only]
+  4. "`RevokeClaim` uses a subject nullifier as a proof id." Spelled out
+     earlier in the same message: it "passes a `subject_nullifier` where the
+     proof store expects a `proof_id`. Both are `[u8; 32]`, so it compiles and
+     keys the wrong row."
+     [`1c5494c` | source-only]
+  5. "Proof deletion leaves the subject index dangling and permanently
+     growing." Earlier: "`v_delete_proof` removes ONLY the proof row. The
+     subject-index entry stays, pointing at a proof that is gone, exactly as
+     the committed twin leaves it."
+     [`1c5494c` | source-only]
+
+Items 4 and 5 are the two the message separately calls "reproduced
+deliberately, not fixed", and says of them: "Each now has a test that asserts
+the behaviour in both directions, so changing either is a deliberate act with a
+failing test attached rather than a silent correction inside a migration." IT
+NAMES NEITHER TEST. The mutation summary likewise counts "2 preserved defects"
+and names nothing. Marked rather than resolved: no test name can be attached to
+these two from the message, so both stay source-only.
+
+### Untrusted payload metadata
+
+  7. "Disclosure and other variable-length tax payloads bypass the available
+     schema validation and have no field-specific bounds."
+     [`1c5494c` | source-only]
+  8. "Both tax dispatch paths pass block timestamp 0, so status changes persist
+     an incorrect `updated_at`."
+     [`1c5494c` | source-only]
+  9. "`TaxTxData.recipient` is ignored entirely."
+     [`1c5494c` | source-only]
+
+### Unrestricted allocation from untrusted input
+
+  * The subject index. "`v_add_to_subject_index` decodes an accumulating
+    `Vec<ProofId>`, searches it linearly, appends and reserializes -- per
+    claim, unbounded across blocks. That is the committed algorithm, reproduced
+    line for line. Routing neither introduces the growth nor bounds it." The
+    resource item requires "an activation-gated bound with below/at/above tests
+    and compatibility handling for existing oversized rows". Pinned at ONE
+    measured size: ~20,000 ids, refused by a 4,096 B ceiling with a limit error
+    AFTER reaching the index replacement, the candidate-visible index still
+    byte-identical to the committed one, canonical state untouched; with room,
+    all 20,000 existing ids preserved in order and one appended. The message
+    states its own scope limit: "It cannot show that arbitrary input never
+    reaches an allocator abort: the value is built before the ceiling is
+    charged."
+    -- a_640_kib_subject_index_is_refused_by_the_ceiling_without_canonical_change
+    [`1c5494c` | pinning test | present in `crates/state/tests/tax_routing.rs`]
+
+  The same section records a cost of the candidate model rather than of tax,
+  and it is transcribed here because it is a deployment-relevant property and
+  not a defect: "The candidate also holds both pre-image and replacement, so
+  peak memory per row is higher than on the committed path -- a property of the
+  candidate model this lane adopted, not of tax."
+
+### Unbounded reads
+
+  * "the tax RPC list methods, which scan whole column families into `Vec`s
+    with no pagination."
+    [`1c5494c` | source-only]
+
+## Employment (SRC-88X)
+
+Source: `04eb5bc`, "state: move employment onto the execution view". The same
+message, differing only in that its section headings were dropped, is at
+`623e41f` on this branch; both resolve. Eleven deferred defects, numbered as
+the message numbers them: "Found while migrating, reproduced EXACTLY, pinned by
+tests that assert the current behaviour in both directions, and NOT fixed: each
+one changes transaction validity, which is a consensus change and belongs in
+separate activation-gated work."
+
+### Missing authorization and no-op verification
+
+  4. MISSING AUTHORITY RE-CHECK. "Only `CreateEmployment` and
+     `CreateIncomeAttestation` require an active issuer. Every mutation of an
+     existing credential or attestation checks only that the sender is the
+     recorded issuer, so a suspended or revoked issuer keeps full control of
+     everything it ever issued."
+     -- a_suspended_issuer_can_still_revoke_but_not_create
+     [`04eb5bc` | pinning test | present in
+     `crates/state/tests/employment_routing.rs`]
+  5. NO-OP VERIFICATION. "`UpdateIssuer`'s `issuer.issuer_address != *sender`
+     cannot fire: the row is fetched BY `sender` and the store keys it by
+     `issuer_address`, so the two are equal for every row this executor can
+     write." The only one of the eleven the message states without a test.
+     [`04eb5bc` | source-only]
+  6. NO-OP VERIFICATION. "`VerifyProof` charges the fee, advances the nonce and
+     verifies nothing -- not even that the proof exists."
+     -- verify_proof_charges_a_fee_and_verifies_nothing
+     [`04eb5bc` | pinning test | present in
+     `crates/state/tests/employment_routing.rs`]
+
+### Lifecycle paths and dangling indexes
+
+  2. DANGLING INDEX ENTRIES. "`update_status` and `revoke` rewrite only the
+     credential row; the three indexes built at creation keep pointing at a
+     credential that is now `Ended`."
+     -- revoking_a_credential_leaves_all_three_index_entries_behind
+     -- an_update_and_a_revoke_rewrite_only_the_credential_row
+     [`04eb5bc` | pinning test | both present, the first in
+     `crates/state/tests/employment_routing.rs` and the second in
+     `crates/storage/tests/employment_codec_parity.rs`]
+  3. "The same for income attestations: revocation touches neither income
+     index."
+     -- a_revoked_attestation_keeps_its_key_and_its_two_index_rows
+     [`04eb5bc` | pinning test | present in
+     `crates/storage/tests/employment_codec_parity.rs`]
+
+The message does not say which suite any of its named tests lives in. Two of
+the three above are in the codec-parity suite, which asserts raw key and value
+bytes at the storage layer rather than driving a transaction through dispatch.
+Recorded, not resolved: the names all resolve, and what they assert is a
+different instrument from the routing tests the other items name.
+
+### Untrusted payload metadata
+
+  1. PLACEHOLDER BLOCK TIMESTAMP. "Both dispatch arms pass a literal `0` where
+     `block_timestamp` belongs, so every `updated_at` an employment status
+     update writes is zero." The test "also shows the executor threads a real
+     timestamp when given one -- the defect is in the call, not in the
+     routing".
+     -- every_status_update_records_a_zero_timestamp_through_dispatch
+     [`04eb5bc` | pinning test | present in
+     `crates/state/tests/employment_routing.rs`]
+  9. "`EmploymentTxData.recipient` is ignored by every employment operation."
+     [`04eb5bc` | source-only]
+
+### Unrestricted allocation, and unbounded reads
+
+  8. UNBOUNDED GROWTH. "The five index values are `Vec<[u8; 32]>` lists that
+     are decoded, linearly searched, appended to and reserialized on every
+     write, and nothing bounds them." Pinned "at one size ... which is a
+     measurement of one point, not a bound".
+     -- a_640_kib_employee_index_is_refused_by_the_ceiling_without_canonical_change
+     [`04eb5bc` | pinning test | present in
+     `crates/state/tests/employment_routing.rs`]
+ 11. UNBOUNDED QUERY COST. "The committed employment RPC query methods are
+     unpaginated and take no limit. `employment_list_issuers` scans the whole
+     issuer family and collects it; `employment_get_credentials_by_employee`,
+     `..._by_employer`, `..._by_employee_address`, their `active` variants,
+     `employment_get_income_attestations_by_subject` and `..._by_holder_address`
+     each decode an ENTIRE index vector (defect 8) and then collect every
+     referenced record into a second vector, and the `active`/`valid` variants
+     build the full list before filtering it. Both memory and response size grow
+     with the chain, with nothing in the request able to bound them."
+     [`04eb5bc` | source-only]
+
+### History and corruption handling
+
+  7. CORRUPTION READ AS PRESENCE. "`SubmitProof`'s only read of the proof
+     family is a `contains` that never decodes, so a corrupt row refuses the
+     submission instead of erroring. Not 'read as absence', but not a decode
+     either." The test "also shows the accessor itself does propagate".
+     -- a_corrupt_proof_row_refuses_the_submission_rather_than_erroring
+     [`04eb5bc` | pinning test | present in
+     `crates/state/tests/employment_routing.rs`]
+ 10. "The employment event log is dead: `EmploymentEventStore` exists and
+     `EmploymentEvent` has nine variants, but no operation emits one, so
+     EMPLOYMENT_SYSTEM_EVENTS is never written by execution." The message says
+     its row shape "is still routed through a shared builder and codec, and
+     pinned by the codec parity suite", naming a suite but no test.
+     [`04eb5bc` | source-only]
+
+## Legal (SRC-85X)
+
+Source: `026447f`, "state: move legal onto the execution view". The message at
+`ddc4985` on this branch is byte-identical to it; both resolve. Ten deferred
+defects, numbered as the message numbers them: "All pre-existing, reproduced
+EXACTLY, and pinned in both directions by tests in `legal_routing.rs`. Fixing
+any of them changes transaction validity, which is a consensus change and
+belongs in separate activation-gated work." Every one of the ten carries a test
+name, which no other message in this group manages.
+
+### Missing authorization and no-op verification
+
+  1. "`ConsolidateCase` has NO authority check. Any funded account can attach
+     one stranger's case to another's and move the second to `Consolidated`.
+     Every other case operation checks `case.issuer_address == sender`."
+     -- consolidate_case_has_no_authority_check
+     [`026447f` | pinning test | present in
+     `crates/state/tests/legal_routing.rs`]
+  2. "`TransferCase` has NO authority check either. Pinned against `CloseCase`,
+     which does check, so the gap is shown to be specific."
+     -- transfer_case_has_no_authority_check
+     [`026447f` | pinning test | present in
+     `crates/state/tests/legal_routing.rs`]
+  5. "`VerifyProof` verifies nothing. It charges the fee, advances the nonce,
+     reads no proof and returns success -- for a payload that is not even a
+     proof id. The answer is identical with a proof present."
+     -- verify_proof_verifies_nothing_and_still_charges_the_fee
+     [`026447f` | pinning test | present in
+     `crates/state/tests/legal_routing.rs`]
+
+### Overwrite and invalid-transition paths
+
+  3. "`SupersedeOrder` has no authority check AND no duplicate guard: a
+     stranger can supersede an order and, in the same transaction, OVERWRITE a
+     different existing order by reusing its id. Pinned against `IssueOrder`,
+     which does refuse a duplicate."
+     -- supersede_order_overwrites_an_existing_order_without_a_guard
+     [`026447f` | pinning test | present in
+     `crates/state/tests/legal_routing.rs`]
+  4. "`SupersedeEvent` does not verify the new event's case exists, so it
+     creates a case->event index entry under a case id that was never anchored
+     -- a dangling index entry. Pinned against `RecordEvent`, which does
+     verify."
+     -- supersede_event_indexes_under_a_case_that_need_not_exist
+     [`026447f` | pinning test | present in
+     `crates/state/tests/legal_routing.rs`]
+  7. "A repeated `ConsolidateCase` is a paid no-op: the append is skipped when
+     the relation is already recorded, and `updated_at` is only written inside
+     that branch, so the row is byte-identical while the fee and the nonce are
+     still charged."
+     -- a_repeated_consolidation_is_a_paid_no_op
+     [`026447f` | pinning test | present in
+     `crates/state/tests/legal_routing.rs`]
+
+### Untrusted payload metadata
+
+  6. "Both dispatch arms pass a literal `0` where the executor expects
+     `block_timestamp` (and `0` for `tx_index`), so EVERY status transition
+     stamps `updated_at = 0`, overwriting the timestamp the anchor stored."
+     -- a_status_transition_stamps_a_zero_timestamp
+     [`026447f` | pinning test | present in
+     `crates/state/tests/legal_routing.rs`]
+
+### Unrestricted allocation from untrusted input
+
+  9. "The three index families are unbounded accumulating `Vec<[u8; 32]>`
+     values with a linear `contains` on every append. Routing reproduces this
+     exactly; it neither introduces the growth nor bounds it." The deferred
+     item itself names no test; the same message's coverage section names three
+     and gives the measurement -- each index "measured at ~640 KiB (20,000
+     ids): under a 4,096-byte ceiling the replacement is refused with a limit
+     error WITH the primary row already staged, and both the candidate-visible
+     and the canonical index are byte-identical to the seeded value; with room,
+     all 20,000 existing ids are preserved in order ... and exactly one is
+     appended", with the scope limit stated: "it measures ONE size and cannot
+     show that arbitrary input never reaches an allocator abort, because the
+     replacement value is built before the ceiling is charged."
+     -- a_640_kib_jurisdiction_index_is_refused_by_the_ceiling_then_appended_to
+     -- a_640_kib_case_event_index_is_refused_by_the_ceiling_then_appended_to
+     -- a_640_kib_case_order_index_is_refused_by_the_ceiling_then_appended_to
+     [`026447f` | pinning test | all three present in
+     `crates/state/tests/legal_routing.rs`]
+
+### History and corruption handling
+
+  8. "The duplicate guards use `contains`, never `get`, so a CORRUPT row reads
+     as present and refuses rather than erroring. Safe direction, and
+     preserved: upgrading it would turn today's refusals into block-level
+     errors."
+     -- a_presence_guard_reads_a_corrupt_row_as_present_not_absent
+     [`026447f` | pinning test | present in
+     `crates/state/tests/legal_routing.rs`]
+ 10. "`LegalEventStore` exists for `cf::LEGAL_SYSTEM_EVENTS` and no executor
+     operation ever calls it, so the legal journal is empty on every chain.
+     `LegalTxData.recipient`, `_tx_index` and `_tx_hash` are likewise accepted
+     and ignored. Asserted empty after publication in
+     `published_rows_satisfy_the_committed_scans`."
+     -- published_rows_satisfy_the_committed_scans
+     [`026447f` | pinning test | present in
+     `crates/state/tests/legal_routing.rs`]
+     The named test covers the empty-journal half of this item only. The
+     message attaches no test to the ignored-field half, and none is assumed
+     here.
+
+## Finance (SRC-89X)
+
+Source: `0706862`, "state: move finance onto the execution view". The same
+message, differing only in that its section headings were dropped, is at
+`d570469` on this branch; both resolve. "Fourteen. Each changes transaction
+validity or RPC response shape, so a fix is a consensus or interface change and
+belongs in separate activation-gated work." The numbering below is the
+message's own.
+
+NOT ONE OF THE FOURTEEN NAMES A TEST. Finance is the only subsystem in this
+file whose deferred-defect list carries no test name at all, even though the
+same message reports a 40-test routing suite and a 12-test codec-parity suite.
+Every item below is therefore source-only except the one that carries measured
+numbers, and not one of them can be checked against this tree by name. That is
+not a claim that the tests are absent; it is the record that the message does
+not let anyone find them.
+
+### Missing authorization and no-op verification
+
+  1. "Any sender can self-register as any finance issuer class.
+     `RegisterIssuer` checks exactly one thing about authority -- that the
+     profile names the SENDER. A key generated a second ago can register itself
+     as a `CentralBank` and attest KYC in the same block."
+     [`0706862` | source-only]
+  3. "Update and revoke paths never recheck the issuer. Every `Create*`
+     requires REGISTERED + ACTIVE + a permitted CLASS; every `Update*` and
+     `Revoke*` checks only that the credential's stored `issuer_address` equals
+     the sender. A REVOKED issuer keeps full control of everything it ever
+     issued."
+     [`0706862` | source-only]
+  4. "`UpdateIssuer`'s `issuer.issuer_address != *sender` check is a no-op: the
+     row is keyed by `sender`, so the field always equals it."
+     [`0706862` | source-only]
+  6. "`SubmitProof` has no authority check at all -- no issuer, no credential
+     reference validation, no signature. Anyone who pays the fee writes any
+     proof envelope."
+     [`0706862` | source-only]
+  7. "`VerifyProof` charges a fee, advances the nonce, and verifies nothing: it
+     succeeds for a proof id that does not exist."
+     [`0706862` | source-only]
+
+### Invalid-transition, overwrite and fee-accounting paths
+
+  2. "`UpdateIssuer` accepts any status the sender asks for, including `Active`
+     from `Revoked`. That is precisely the guard `ReactivateIssuer` exists to
+     enforce (`Suspended` only), walked around."
+     [`0706862` | source-only]
+  5. "A status change never rewrites the jurisdiction index, so a revoked
+     issuer stays listed under its jurisdiction and `get_by_jurisdiction` keeps
+     returning it."
+     [`0706862` | source-only]
+  8. "`UpdateAddressProof` refuses BEFORE the fee and nonce writes, so unlike
+     every other refusal in this subsystem it charges nothing."
+     [`0706862` | source-only]
+
+### Untrusted payload metadata
+
+ 10. "Both finance dispatch arms pass a literal `0` where the block timestamp
+     belongs, so every routed update, suspension, revocation and reactivation
+     stamps `updated_at = 0`. The block's real timestamp reaches `execute_tx`
+     and is thrown away."
+     [`0706862` | source-only]
+ 11. "`registered_at_height`, `created_at`, `valid_from` and `expiry` are
+     stored verbatim from the submitted payload and never compared to the
+     block."
+     [`0706862` | source-only]
+ 14. "`FinanceTxData::recipient` is read by no finance operation."
+     [`0706862` | source-only]
+
+### Unrestricted allocation from untrusted input
+
+ 12. "The four index values are unbounded: every entry appends to one bincode
+     list that is decoded, linearly searched, appended to and reserialized on
+     every write. Nothing ever removes an entry -- revocation rewrites the
+     credential in place and the id stays indexed. Measured, not bounded: see
+     the four large-index tests above." Those four tests are described in the
+     same message and named nowhere in it: "the KYC, address-proof and
+     bank-standing subject indexes at 640,008 bytes (20,000 existing ids) and
+     the jurisdiction index at 400,008 bytes (20,000 existing addresses)", each
+     proving "refusal at the replacement write under a 4,096-byte ceiling WITH
+     the primary row already staged", the candidate-visible and canonical index
+     byte-identical after the refusal, and with room every existing entry
+     surviving in order with exactly one appended. The scope limit is the
+     message's own: each test "measures one size and cannot prove arbitrarily
+     large input never reaches an allocator abort".
+     [`0706862` | measurement]
+
+### Unbounded reads
+
+ 13. "`FinanceStore::issuers().list_active()` and `get_by_jurisdiction()` are
+     unpaginated and unbounded. Neither takes a limit, an offset or a cursor,
+     so neither has any shape in which an RPC caller could ask for less;
+     response size and work per call are set by how much the chain has
+     accumulated."
+     [`0706862` | source-only]
+
+### Corruption handling
+
+  9. "Every `exists` guard is a presence check with no decode, matching
+     `Database::contains`. A CORRUPT row therefore reads as PRESENT and refuses
+     the transaction as a duplicate -- the exact inverse of the `v_get_*`
+     readers. `FINANCE_PROOFS` is read ONLY this way, so nothing on the
+     execution path ever decodes a `FinanceProofEnvelope`."
+     AMBIGUOUS, and left unresolved here: the message's coverage section says
+     "The ninth, FINANCE_PROOFS, is pinned separately -- see the deferred
+     defects", and the deferred defect it points at names no test. The pin is a
+     forward reference to a backward reference, and nothing in the message
+     closes the loop.
+     [`0706862` | source-only]
 
 ## Agreement (SRC-84X)
 
@@ -727,3 +1234,22 @@ cursor.
   * `DocClassStore::verify_credential` checks expiry, validity window,
     revocation status and whether the issuer may still issue. It checks no
     signature and no proof, and no execution path calls it.
+
+## What this file now is
+
+All eleven subsystem inventories are in this file and none of them is a pointer
+any more. Fifty-one entries were transcribed above from the six earlier commit
+messages -- three from `855ec009`, two from `e293b03a`, eleven from `1c5494c`,
+eleven from `04eb5bc`, ten from `026447f` and fourteen from `0706862` -- of
+which eighteen are pinned by a named test, three rest on measured numbers with
+no test named, and thirty are prose assertions with neither. Twenty-one
+distinct test names appear across those entries and all twenty-one still exist
+in this tree under the name their message gave them, so nothing in the six
+earlier inventories has drifted out from under its pin. Nothing here was
+recovered from memory: where a message asserts a test without naming it, names
+a measurement without a test, or points at its own pointer, the entry records
+that and stays where the evidence leaves it. The two absences are the loudest
+part of the record -- PolicyAccount and messaging carry no deferred-defect
+inventory at all, and finance's fourteen name no test at all, so for those
+three subsystems this file transcribes an assertion and not evidence.
+Deployment remains blocked on every entry above.
