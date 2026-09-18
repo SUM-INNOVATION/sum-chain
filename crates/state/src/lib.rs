@@ -3,6 +3,7 @@
 //! State management and transaction execution for SUM Chain.
 //! Handles account balances, nonces, and transaction application.
 
+pub mod account_root;
 pub mod agreement_executor;
 pub mod agreement_view;
 pub mod beacon_executor;
@@ -197,6 +198,18 @@ pub enum StateError {
 
     #[error("Deserialization error: {0}")]
     DeserializationError(String),
+
+    /// The scan feeding the account-state commitment yielded an address that
+    /// was not strictly greater than the previous one.
+    ///
+    /// The commitment is an ascending-address fold, so the order is part of the
+    /// value. Folding an out-of-order scan anyway would produce a different,
+    /// perfectly plausible digest and a silent chain split; this fails the block
+    /// instead. Unreachable through RocksDB or the overlay's merged iterator,
+    /// both of which yield keys in ascending order — which is exactly why the
+    /// assumption is worth checking rather than commenting.
+    #[error("account-state commitment: scan out of order (previous {previous}, got {got})")]
+    AccountScanOutOfOrder { previous: String, got: String },
 }
 
 pub type Result<T> = std::result::Result<T, StateError>;

@@ -3680,6 +3680,33 @@ impl BlockExecutor {
             data.extend_from_slice(beacon_digest.as_bytes());
         }
 
+        // Commit ACCOUNT STATE — balances and nonces — but ONLY at/after the
+        // account-commitment activation gate (see `crate::account_root`).
+        //
+        // Everything above this line folds header fields, receipt outcomes and
+        // the gated subsystem digests. None of them reads an account row. Below
+        // this gate, therefore, the authoritative commitment does not cover the
+        // account family at all: two nodes can disagree about every balance on
+        // the chain and publish identical block hashes, and the chain cannot
+        // tell. `crates/state/tests/account_state_root.rs` demonstrates exactly
+        // that, and demonstrates this branch closing it.
+        //
+        // Gate-closed is the production default
+        // (`account_root_enabled_from_height == None`, closed at every height),
+        // so the formula stays byte-for-byte what an un-upgraded node computes
+        // and pre-activation roots match. Opening it is consensus-breaking and
+        // coordinated, exactly like the contracts gate above.
+        //
+        // Over the CANDIDATE, not committed state: this block's own account
+        // transition — every debit, credit, nonce bump and proposer fee — is
+        // staged in the view, and a root computed over the parent's accounts
+        // while publishing the child's rows would disagree with the state every
+        // validator stores.
+        if crate::account_root::account_root_gate_open(&self.params, block.height()) {
+            let account_digest = crate::account_root::v_account_state_digest(view)?;
+            data.extend_from_slice(account_digest.as_bytes());
+        }
+
         // Mix with previous state root (from before this block's execution)
         data.extend_from_slice(self.state.state_root().as_bytes());
 

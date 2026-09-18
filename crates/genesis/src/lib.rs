@@ -323,6 +323,33 @@ pub struct ChainParams {
     #[serde(default)]
     pub contracts_enabled_from_height: Option<u64>,
 
+    /// Block height at which the ACCOUNT-STATE COMMITMENT enters the block
+    /// state root (balances and nonces). `None` (the default) = the account
+    /// digest is not folded at any height and the root formula is byte-for-byte
+    /// the one an un-upgraded node computes; `Some(h)` = every block at height
+    /// `h` or above folds it.
+    ///
+    /// This closes a consensus hole rather than enabling a subprotocol. Below
+    /// the gate the authoritative commitment does not cover account state at
+    /// all: `compute_block_state_root` never reads the account rows, so two
+    /// nodes can disagree about every balance on the chain and still publish
+    /// identical block hashes. Any state-root-based verification — light
+    /// client, fast-sync check, fraud proof — is blind to account state until
+    /// this is set.
+    ///
+    /// Production safety: `#[serde(default)]` resolves a missing field to
+    /// `None`, so an existing mainnet `genesis.json` upgraded to a
+    /// commitment-aware binary keeps producing byte-identical roots until
+    /// operators coordinate an explicit activation height. Adding a field to
+    /// the root is consensus-breaking: above the activation height an
+    /// un-upgraded node computes a different root for the same block and
+    /// rejects it, which is the intended, detectable, coordinated split.
+    /// Mirrors the V2/OmniNode/Education/Contracts activation pattern.
+    ///
+    /// Dev: set to `Some(0)` to commit to account state from genesis.
+    #[serde(default)]
+    pub account_root_enabled_from_height: Option<u64>,
+
     /// Block height at which on-chain governance v1 activates. `None` =
     /// disabled forever; `Some(h)` = `TxPayload::Governance` operations
     /// execute from block `h` onward. Below the gate they are rejected free
@@ -871,6 +898,11 @@ impl Default for ChainParams {
             // coordinated, consensus-breaking validator upgrade (changes the
             // state-root formula); never set in default/mainnet config.
             contracts_enabled_from_height: None,
+            // Production-safe default: the account-state commitment is NOT
+            // folded into the block state root. Activation is a coordinated,
+            // consensus-breaking validator upgrade (it adds a field to the
+            // root); never set in default/mainnet config without one.
+            account_root_enabled_from_height: None,
             // Production-safe default: on-chain governance dormant. Activation
             // is a coordinated validator upgrade; never set in default/mainnet
             // config. See docs/specs/GOVERNANCE-V1.md.
