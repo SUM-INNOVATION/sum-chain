@@ -123,8 +123,7 @@ use std::path::{Path, PathBuf};
 /// `employment_executor.rs`, `legal_executor.rs` or `finance_executor.rs`
 /// survives, and no `EMPLOYMENT_*`, `LEGAL_*` or `FINANCE_*` family remains in
 /// the execution set.
-const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
-];
+const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[];
 
 /// Occurrences, not rows: a caller reaching the same mutator three times is
 /// three places to fix.
@@ -146,14 +145,11 @@ const LEDGER_CF_COUNT: usize = 0;
 ///
 /// Both of these are `pub` with no production caller anywhere in the workspace —
 /// verified by grep, not by this resolver — so excluding them is correct.
-const UNREACHED_MUTATORS: &[(&str, &str, &str)] = &[
-    (
-        "crates/state/src/state.rs",
-        "StateManager::revert_state_diff",
-        "pub, no production caller: the reorg path uses revert_block_state_diffs",
-    ),
-];
-
+const UNREACHED_MUTATORS: &[(&str, &str, &str)] = &[(
+    "crates/state/src/state.rs",
+    "StateManager::revert_state_diff",
+    "pub, no production caller: the reorg path uses revert_block_state_diffs",
+)];
 
 /// Column families declared in `sumchain_storage::cf` that nothing reads or
 /// writes anywhere in the workspace.
@@ -280,19 +276,35 @@ const ARMS: &[(&str, ArmKind, &str)] = &[
     ("Nft", ArmKind::Overlay, "nft_executor.rs -> nft_view"),
     ("NodeRegistry", ArmKind::Overlay, "node_registry.rs"),
     ("NodeRegistryV2", ArmKind::Overlay, "node_registry.rs"),
-    ("PolicyAccount", ArmKind::Overlay, "policy_account_executor.rs -> policy_account_view"),
+    (
+        "PolicyAccount",
+        ArmKind::Overlay,
+        "policy_account_executor.rs -> policy_account_view",
+    ),
     (
         "Property",
         ArmKind::Overlay,
         "property_executor.rs -> property_view",
     ),
-    ("Staking", ArmKind::Overlay, "staking_executor.rs -> StakingExecutor::v_* -> candidate"),
+    (
+        "Staking",
+        ArmKind::Overlay,
+        "staking_executor.rs -> StakingExecutor::v_* -> candidate",
+    ),
     ("StorageMetadata", ArmKind::Overlay, "storage_metadata.rs"),
     ("StorageMetadataV2", ArmKind::Overlay, "storage_metadata.rs"),
     ("Supply", ArmKind::Overlay, "supply.rs"),
     ("Tax", ArmKind::Overlay, "tax_executor.rs -> tax_view"),
-    ("Token", ArmKind::Overlay, "token_executor.rs -> TokenExecutor::v_* -> candidate"),
-    ("Transfer", ArmKind::Overlay, "executor.rs fee/transfer -> StateManager::v_transfer -> candidate cf::STATE"),
+    (
+        "Token",
+        ArmKind::Overlay,
+        "token_executor.rs -> TokenExecutor::v_* -> candidate",
+    ),
+    (
+        "Transfer",
+        ArmKind::Overlay,
+        "executor.rs fee/transfer -> StateManager::v_transfer -> candidate cf::STATE",
+    ),
 ];
 
 /// What 27 of the 30 arms do with the account row they debit. The fee debit,
@@ -320,9 +332,7 @@ const ACCOUNT_WRITE_IS_UNIVERSAL: &str =
 
 /// The workspace root: `crates/state/..`.
 fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
 /// Crates whose `src/` is test scaffolding rather than production code.
@@ -540,7 +550,9 @@ fn skip_ws(b: &[u8], mut i: usize) -> usize {
 /// yields `Arc`, `&mut TokenStore<'_>` yields `TokenStore`. `Arc`/`Vec`/`Option`
 /// and friends are unwrapped so `Arc<Database>` resolves to `Database`.
 fn type_head(s: &str) -> Option<String> {
-    const WRAPPERS: &[&str] = &["Arc", "Rc", "Box", "Option", "Vec", "RwLock", "Mutex", "Result"];
+    const WRAPPERS: &[&str] = &[
+        "Arc", "Rc", "Box", "Option", "Vec", "RwLock", "Mutex", "Result",
+    ];
     let b = s.as_bytes();
     let mut i = 0;
     while i < b.len() {
@@ -587,7 +599,9 @@ fn index_file(file: &str, src: &str, idx: &mut Index) {
             Some(k) => &head[k + 5..],
             None => head,
         };
-        let Some(ty) = type_head(subject) else { continue };
+        let Some(ty) = type_head(subject) else {
+            continue;
+        };
         let Some(close) = matching(src, open, b'{', b'}') else {
             continue;
         };
@@ -620,7 +634,9 @@ fn index_file(file: &str, src: &str, idx: &mut Index) {
         let entry = idx.fields.entry(name).or_default();
         for line in src[open + 1..close].split(',') {
             let line = line.trim();
-            let Some(colon) = line.find(':') else { continue };
+            let Some(colon) = line.find(':') else {
+                continue;
+            };
             let fname = line[..colon].trim();
             let fname = fname.rsplit(' ').next().unwrap_or(fname); // drop `pub`
             if fname.is_empty() || !ident_start(fname.as_bytes()[0]) {
@@ -709,7 +725,6 @@ fn build_index(sources: &BTreeMap<String, String>) -> Index {
     idx
 }
 
-
 // ── Binding resolution ─────────────────────────────────────────────────────
 //
 // A receiver is resolved by TYPE, never by the name `db`. That is what makes
@@ -724,7 +739,9 @@ fn bindings(idx: &Index, f: &Fun) -> HashMap<String, String> {
     // Parameters: `name: &mut Arc<Type>`.
     for part in split_top_level(&f.params, ',') {
         let part = part.trim();
-        let Some(colon) = part.find(':') else { continue };
+        let Some(colon) = part.find(':') else {
+            continue;
+        };
         let name = part[..colon].trim();
         if name.is_empty() || !ident_start(name.as_bytes()[0]) {
             continue;
@@ -974,7 +991,10 @@ fn call_offsets<'a>(
 /// helper — `fn persist(&self) { self.db.put(..) }`, called from twenty places —
 /// leaves the caller with no `db.put` in its body and no reduction in what a
 /// block can commit.
-fn mutator_closure(idx: &Index, sinks: &HashMap<usize, BTreeSet<Cf>>) -> HashMap<usize, BTreeSet<Cf>> {
+fn mutator_closure(
+    idx: &Index,
+    sinks: &HashMap<usize, BTreeSet<Cf>>,
+) -> HashMap<usize, BTreeSet<Cf>> {
     let mut cfs: HashMap<usize, BTreeSet<Cf>> = sinks.clone();
     // `(owner, name) -> callers` is rebuilt each round from resolved edges.
     let mut changed = true;
@@ -1113,7 +1133,8 @@ fn resolved_calls(idx: &Index, f: &Fun) -> Vec<(usize, usize)> {
                             push(&id, &m1, j, &mut out);
                             if let Some(c2) = matching(&f.body, qq, b'(', b')') {
                                 if f.body[qq + 1..c2].trim().is_empty() {
-                                    if let Some(ret) = idx.accessors.get(&(id.clone(), m1.clone())) {
+                                    if let Some(ret) = idx.accessors.get(&(id.clone(), m1.clone()))
+                                    {
                                         let mut r = skip_ws(b, c2 + 1);
                                         if b.get(r) == Some(&b'.') {
                                             r = skip_ws(b, r + 1);
@@ -1291,10 +1312,30 @@ enum Class {
 /// by the FIRST class whose roots reach it, in this order, so a helper shared
 /// between execution and genesis counts as execution.
 const ROOTS: &[(Class, &str, &str, &str)] = &[
-    (Class::Execution, "crates/state/src/executor.rs", "BlockExecutor", "execute_block"),
-    (Class::Genesis, "crates/state/src/state.rs", "StateManager", "init_from_genesis"),
-    (Class::ReorgUndo, "crates/state/src/state.rs", "StateManager", "revert_block_state_diffs"),
-    (Class::OperatorTooling, "crates/node/src/main.rs", "", "main"),
+    (
+        Class::Execution,
+        "crates/state/src/executor.rs",
+        "BlockExecutor",
+        "execute_block",
+    ),
+    (
+        Class::Genesis,
+        "crates/state/src/state.rs",
+        "StateManager",
+        "init_from_genesis",
+    ),
+    (
+        Class::ReorgUndo,
+        "crates/state/src/state.rs",
+        "StateManager",
+        "revert_block_state_diffs",
+    ),
+    (
+        Class::OperatorTooling,
+        "crates/node/src/main.rs",
+        "",
+        "main",
+    ),
 ];
 
 /// Whole crates that are an entry surface for RPC and mempool admission.
@@ -1339,10 +1380,7 @@ fn root_indices(idx: &Index, class: Class) -> Vec<usize> {
             continue;
         }
         for (k, f) in idx.funs.iter().enumerate() {
-            if f.file == *file
-                && f.name == *name
-                && f.owner.as_deref().unwrap_or("") == *owner
-            {
+            if f.file == *file && f.name == *name && f.owner.as_deref().unwrap_or("") == *owner {
                 out.push(k);
             }
         }
@@ -1456,9 +1494,7 @@ fn all_sites(idx: &Index, closure: &HashMap<usize, BTreeSet<Cf>>) -> Vec<Site> {
                 continue;
             };
             let key = (f.file.clone(), qualified(f), qualified(&idx.funs[target]));
-            let e = acc
-                .entry(key)
-                .or_insert((class, BTreeSet::new(), 0));
+            let e = acc.entry(key).or_insert((class, BTreeSet::new(), 0));
             e.1.extend(cfs.iter().cloned());
             e.2 += 1;
         }
@@ -1496,7 +1532,10 @@ fn analyse() -> Vec<Site> {
 }
 
 fn execution_of(sites: &[Site]) -> Vec<&Site> {
-    sites.iter().filter(|s| s.class == Class::Execution).collect()
+    sites
+        .iter()
+        .filter(|s| s.class == Class::Execution)
+        .collect()
 }
 
 /// Total occurrences, not rows: a caller reaching the same mutator twice is two
@@ -1565,7 +1604,9 @@ fn dispatch_arms(src: &str) -> Vec<(String, String)> {
                             let end = rest
                                 .find('{')
                                 .and_then(|o| matching(rest, o, b'{', b'}').map(|e| e + 1))
-                                .unwrap_or_else(|| rest.find(',').map(|c| c + 1).unwrap_or(rest.len()));
+                                .unwrap_or_else(|| {
+                                    rest.find(',').map(|c| c + 1).unwrap_or(rest.len())
+                                });
                             rest[..end].to_string()
                         })
                         .unwrap_or_default();
@@ -1606,8 +1647,15 @@ fn dump_manifest() {
     for s in &sites {
         *per_class.entry(s.class).or_default() += s.count;
     }
-    eprintln!("rows={} occurrences={}", execution_of(&sites).len(), execution_total(&sites));
-    let cfs: BTreeSet<&Cf> = execution_of(&sites).iter().flat_map(|s| s.cfs.iter()).collect();
+    eprintln!(
+        "rows={} occurrences={}",
+        execution_of(&sites).len(),
+        execution_total(&sites)
+    );
+    let cfs: BTreeSet<&Cf> = execution_of(&sites)
+        .iter()
+        .flat_map(|s| s.cfs.iter())
+        .collect();
     eprintln!("cfs={}", cfs.len());
     for (c, n) in &per_class {
         eprintln!("  {c:?}: {n}");
@@ -1756,8 +1804,17 @@ fn the_committed_column_family_count_does_not_grow() {
         .filter(|s| s.class == Class::Execution)
         .flat_map(|s| s.cfs.iter())
         .collect();
-    assert!(
-        cfs.len() <= LEDGER_CF_COUNT,
+    // Expressed as a saturating overshoot rather than `cfs.len() <=
+    // LEDGER_CF_COUNT`. The guarantee is identical -- fail if execution can
+    // reach MORE families than recorded -- but at the floor the comparison
+    // becomes `usize <= 0`, which clippy reads as an absurd extreme comparison.
+    // The floor is exactly where this guard matters most: with
+    // LEDGER_CF_COUNT at 0, `over` is non-zero for ANY execution-reachable
+    // committed application family, so a single one fails the test.
+    let over = cfs.len().saturating_sub(LEDGER_CF_COUNT);
+    assert_eq!(
+        over,
+        0,
         "block execution can now commit to {} column families, up from {}. The \
          application journal has to cover every one of them.",
         cfs.len(),
@@ -1808,9 +1865,7 @@ fn non_execution_paths_are_classified() {
     }
     let unexpected: Vec<_> = counted
         .keys()
-        .filter(|c| {
-            **c != Class::Execution && !EXPECTED.iter().any(|(e, _, _)| e == *c)
-        })
+        .filter(|c| **c != Class::Execution && !EXPECTED.iter().any(|(e, _, _)| e == *c))
         .collect();
     assert!(
         unexpected.is_empty(),
@@ -1847,8 +1902,14 @@ fn every_dispatcher_arm_is_declared() {
         "ARMS lists families the executor no longer dispatches: {stale:?}"
     );
 
-    let overlay = ARMS.iter().filter(|(_, k, _)| *k == ArmKind::Overlay).count();
-    let committed = ARMS.iter().filter(|(_, k, _)| *k == ArmKind::Committed).count();
+    let overlay = ARMS
+        .iter()
+        .filter(|(_, k, _)| *k == ArmKind::Overlay)
+        .count();
+    let committed = ARMS
+        .iter()
+        .filter(|(_, k, _)| *k == ArmKind::Committed)
+        .count();
     let mixed = ARMS.iter().filter(|(_, k, _)| *k == ArmKind::Mixed).count();
     assert_eq!(
         (overlay, committed, mixed),
@@ -1943,7 +2004,10 @@ fn each_arms_kind_is_derived_from_what_it_can_reach() {
             params: dispatch.params.clone(),
             body,
         };
-        let roots: Vec<usize> = resolved_calls(&idx, &arm).into_iter().map(|(k, _)| k).collect();
+        let roots: Vec<usize> = resolved_calls(&idx, &arm)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
         let seen = reachable(&idx, &roots);
         let entry = reached.entry(payload).or_default();
         for k in seen.iter().filter(|k| committing.contains(k)) {
@@ -1955,7 +2019,10 @@ fn each_arms_kind_is_derived_from_what_it_can_reach() {
         "no arm bodies were analysed — the derivation proved nothing"
     );
 
-    let excused: BTreeSet<&str> = COMMITS_OUTSIDE_THE_MANIFEST.iter().map(|(a, _)| *a).collect();
+    let excused: BTreeSet<&str> = COMMITS_OUTSIDE_THE_MANIFEST
+        .iter()
+        .map(|(a, _)| *a)
+        .collect();
     let mut wrong = Vec::new();
     for (payload, kind, _) in ARMS {
         let Some(hits) = reached.get(*payload) else {
@@ -2027,9 +2094,7 @@ fn every_arm_stages_its_account_write_and_none_commits_one() {
             .funs
             .iter()
             .enumerate()
-            .filter(|(_, f)| {
-                f.file == file && f.owner.as_deref() == Some(owner) && f.name == name
-            })
+            .filter(|(_, f)| f.file == file && f.owner.as_deref() == Some(owner) && f.name == name)
             .map(|(k, _)| k)
             .collect();
         assert_eq!(hits.len(), 1, "expected exactly one {owner}::{name}");
@@ -2063,7 +2128,10 @@ fn every_arm_stages_its_account_write_and_none_commits_one() {
             params: dispatch.params.clone(),
             body,
         };
-        let roots: Vec<usize> = resolved_calls(&idx, &arm).into_iter().map(|(k, _)| k).collect();
+        let roots: Vec<usize> = resolved_calls(&idx, &arm)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
         let seen = reachable(&idx, &roots);
         if seen.contains(&staged) {
             stages.insert(payload.clone());
@@ -2080,8 +2148,10 @@ fn every_arm_stages_its_account_write_and_none_commits_one() {
     );
 
     let all: BTreeSet<String> = ARMS.iter().map(|(n, _, _)| n.to_string()).collect();
-    let declared: BTreeSet<String> =
-        NO_ACCOUNT_WRITE.iter().map(|(n, _)| n.to_string()).collect();
+    let declared: BTreeSet<String> = NO_ACCOUNT_WRITE
+        .iter()
+        .map(|(n, _)| n.to_string())
+        .collect();
     let silent: Vec<_> = all
         .difference(&stages)
         .filter(|n| !declared.contains(*n))
@@ -2213,7 +2283,10 @@ impl BlockExecutor {
 fn sources_with(caller: &str) -> BTreeMap<String, String> {
     with_root(BTreeMap::from([
         fake_library(),
-        ("crates/state/src/probe_executor.rs".to_string(), caller.to_string()),
+        (
+            "crates/state/src/probe_executor.rs".to_string(),
+            caller.to_string(),
+        ),
     ]))
 }
 
@@ -2231,6 +2304,45 @@ fn execution_count(caller: &str) -> usize {
         .iter()
         .filter(|s| s.class == Class::Execution)
         .count()
+}
+
+/// The floor guard bites: with `LEDGER_CF_COUNT` at zero, ONE reachable
+/// committed application family is enough to fail it.
+///
+/// `the_committed_column_family_count_does_not_grow` compares a saturating
+/// overshoot against zero rather than writing `cfs.len() <= LEDGER_CF_COUNT`,
+/// because at the floor that comparison is `usize <= 0` and clippy reads it as
+/// absurd. The guarantee has to survive the rewrite, and asserting it against
+/// the real tree proves nothing now that the real tree has no such family. So
+/// this drives the same analyser over a synthetic source that DOES have one and
+/// checks the arithmetic the guard performs.
+#[test]
+fn the_floor_guard_fails_for_a_single_reachable_committed_family() {
+    let reachable = execution_count(
+        r#"
+impl Probe {
+    fn execute(&self, db: &Database) -> Result<()> {
+        let store = StateStore::new(db);
+        store.put_account(b"k", b"v")
+    }
+}
+"#,
+    );
+    assert_eq!(
+        reachable, 1,
+        "the synthetic source must be reachable at all"
+    );
+
+    // The guard's expression, with the constant at its floor.
+    let at_floor = reachable.saturating_sub(0);
+    assert_ne!(
+        at_floor, 0,
+        "with LEDGER_CF_COUNT at 0 a single execution-reachable committed \
+         application family must make the overshoot non-zero, and so must fail \
+         the guard"
+    );
+    // And it stays quiet when nothing is reachable.
+    assert_eq!(0usize.saturating_sub(0), 0);
 }
 
 #[test]
@@ -2272,7 +2384,10 @@ impl<'a> StateStore<'a> {
 }
 "#;
     let sources = with_root(BTreeMap::from([
-        ("crates/storage/src/schema.rs".to_string(), library_with_helper.to_string()),
+        (
+            "crates/storage/src/schema.rs".to_string(),
+            library_with_helper.to_string(),
+        ),
         (
             "crates/state/src/probe_executor.rs".to_string(),
             r#"
@@ -2314,7 +2429,10 @@ impl<'a> StateStore<'a> {
 }
 "#;
     let sources = with_root(BTreeMap::from([
-        ("crates/storage/src/schema.rs".to_string(), renamed_library.to_string()),
+        (
+            "crates/storage/src/schema.rs".to_string(),
+            renamed_library.to_string(),
+        ),
         (
             "crates/state/src/probe_executor.rs".to_string(),
             r#"
@@ -2332,7 +2450,10 @@ impl Probe {
         .iter()
         .filter(|s| s.class == Class::Execution)
         .count();
-    assert_eq!(n, 1, "renaming the database receiver must not hide the write");
+    assert_eq!(
+        n, 1,
+        "renaming the database receiver must not hide the write"
+    );
 }
 
 /// A call split across lines is still one call.
@@ -2357,7 +2478,10 @@ impl<'a> StateStore<'a> {
 }
 "#;
     let sources = with_root(BTreeMap::from([
-        ("crates/storage/src/schema.rs".to_string(), multiline_library.to_string()),
+        (
+            "crates/storage/src/schema.rs".to_string(),
+            multiline_library.to_string(),
+        ),
         (
             "crates/state/src/probe_executor.rs".to_string(),
             r#"
@@ -2403,7 +2527,10 @@ impl<'a> BitmapStore<'a> {
 }
 "#;
     let sources = with_root(BTreeMap::from([
-        ("crates/storage/src/schema.rs".to_string(), variable_cf_library.to_string()),
+        (
+            "crates/storage/src/schema.rs".to_string(),
+            variable_cf_library.to_string(),
+        ),
         (
             "crates/state/src/probe_executor.rs".to_string(),
             r#"
@@ -2418,8 +2545,15 @@ impl Probe {
         ),
     ]));
     let sites = analyse_sources(sources);
-    let exec: Vec<&Site> = sites.iter().filter(|s| s.class == Class::Execution).collect();
-    assert_eq!(exec.len(), 1, "a runtime-chosen family must not drop the write");
+    let exec: Vec<&Site> = sites
+        .iter()
+        .filter(|s| s.class == Class::Execution)
+        .collect();
+    assert_eq!(
+        exec.len(),
+        1,
+        "a runtime-chosen family must not drop the write"
+    );
     assert_eq!(
         exec[0].cfs,
         BTreeSet::from([
@@ -2444,7 +2578,10 @@ impl<'a> OpaqueStore<'a> {
 }
 "#;
     let sources = with_root(BTreeMap::from([
-        ("crates/storage/src/schema.rs".to_string(), opaque_library.to_string()),
+        (
+            "crates/storage/src/schema.rs".to_string(),
+            opaque_library.to_string(),
+        ),
         (
             "crates/state/src/probe_executor.rs".to_string(),
             r#"
@@ -2458,7 +2595,10 @@ impl Probe {
         ),
     ]));
     let sites = analyse_sources(sources);
-    let exec: Vec<&Site> = sites.iter().filter(|s| s.class == Class::Execution).collect();
+    let exec: Vec<&Site> = sites
+        .iter()
+        .filter(|s| s.class == Class::Execution)
+        .collect();
     assert_eq!(exec.len(), 1);
     assert_eq!(exec[0].cfs, BTreeSet::from([Cf::Variable]));
 }
@@ -2482,7 +2622,10 @@ impl<'a> DocClassStore<'a> {
 }
 "#;
     let sources = with_root(BTreeMap::from([
-        ("crates/storage/src/docclass_store.rs".to_string(), faceted_library.to_string()),
+        (
+            "crates/storage/src/docclass_store.rs".to_string(),
+            faceted_library.to_string(),
+        ),
         (
             "crates/state/src/probe_executor.rs".to_string(),
             r#"
@@ -2497,9 +2640,15 @@ impl Probe {
         ),
     ]));
     let sites = analyse_sources(sources);
-    let exec: Vec<&Site> = sites.iter().filter(|s| s.class == Class::Execution).collect();
+    let exec: Vec<&Site> = sites
+        .iter()
+        .filter(|s| s.class == Class::Execution)
+        .collect();
     assert_eq!(exec.len(), 1, "the accessor hop must be followed");
-    assert_eq!(exec[0].cfs, BTreeSet::from([Cf::Named("IDENTITY".to_string())]));
+    assert_eq!(
+        exec[0].cfs,
+        BTreeSet::from([Cf::Named("IDENTITY".to_string())])
+    );
 }
 
 /// A store reached through a struct field, not a local binding.
@@ -2593,11 +2742,20 @@ impl Probe {
 "#;
     // As it stands: the overlay file is excluded, so neither line is a site.
     let excluded = analyse_sources(with_root(BTreeMap::from([
-        ("crates/storage/src/overlay.rs".to_string(), overlay.to_string()),
-        ("crates/state/src/probe_executor.rs".to_string(), caller.to_string()),
+        (
+            "crates/storage/src/overlay.rs".to_string(),
+            overlay.to_string(),
+        ),
+        (
+            "crates/state/src/probe_executor.rs".to_string(),
+            caller.to_string(),
+        ),
     ])));
     assert_eq!(
-        excluded.iter().filter(|s| s.class == Class::Execution).count(),
+        excluded
+            .iter()
+            .filter(|s| s.class == Class::Execution)
+            .count(),
         0,
         "staging into the overlay, and publishing it, are the migration target"
     );
@@ -2611,10 +2769,16 @@ impl Probe {
             "crates/storage/src/overlay.rs".to_string(),
             overlay.replace("into_batch", "some_other_write"),
         ),
-        ("crates/state/src/probe_executor.rs".to_string(), caller.to_string()),
+        (
+            "crates/state/src/probe_executor.rs".to_string(),
+            caller.to_string(),
+        ),
     ])));
     assert_eq!(
-        not_excluded.iter().filter(|s| s.class == Class::Execution).count(),
+        not_excluded
+            .iter()
+            .filter(|s| s.class == Class::Execution)
+            .count(),
         1,
         "without the exclusion the publish reads as a committed execution write"
     );
@@ -2744,8 +2908,14 @@ impl<'a> NftStore<'a> {
 "#;
     let run = |probe: &str| {
         analyse_sources(with_root(BTreeMap::from([
-            ("crates/storage/src/schema.rs".to_string(), library.to_string()),
-            ("crates/state/src/probe_executor.rs".to_string(), probe.to_string()),
+            (
+                "crates/storage/src/schema.rs".to_string(),
+                library.to_string(),
+            ),
+            (
+                "crates/state/src/probe_executor.rs".to_string(),
+                probe.to_string(),
+            ),
         ])))
     };
     let before = run(BEFORE);
@@ -2760,12 +2930,23 @@ impl<'a> NftStore<'a> {
             .len()
     };
     assert_eq!(count(&before), count(&after), "the totals are identical...");
-    assert_eq!(families(&before), families(&after), "...and so is the family count");
+    assert_eq!(
+        families(&before),
+        families(&after),
+        "...and so is the family count"
+    );
 
     let identity = |v: &[Site]| {
         execution_of(v)
             .iter()
-            .map(|s| (s.file.clone(), s.caller.clone(), s.callee.clone(), cf_list(&s.cfs)))
+            .map(|s| {
+                (
+                    s.file.clone(),
+                    s.caller.clone(),
+                    s.callee.clone(),
+                    cf_list(&s.cfs),
+                )
+            })
             .collect::<Vec<_>>()
     };
     assert_ne!(
