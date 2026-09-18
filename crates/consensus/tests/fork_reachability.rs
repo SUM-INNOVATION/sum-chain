@@ -17,40 +17,38 @@
 //! (`crates/consensus/src/engine.rs`) genuinely wants to switch, which at equal
 //! height means `candidate.hash() < head.hash()`, and imports B's block into A.
 //!
-//! # Observed outcome on `main`: (2) `Ok`, and the reorg path actually ran
+//! # Outcome: (2) `Ok`, and the reorg path actually runs
 //!
 //! This is *not* the outcome the issue's first hypothesis predicted. A depth-1
-//! sibling is expected to die on the state-root check in
+//! sibling was expected to die on the state-root check in
 //! `PoAEngine::do_import_block`, because `BlockExecutor::compute_block_state_root`
 //! mixes the node's *current* state root into a chained accumulator: A computes
 //! B's block on top of A's already-applied height-1 state, so the computed root
 //! cannot equal the root B derived from the genesis state.
 //!
-//! It does mismatch. It is then **forgiven**: `do_import_block` carries a
+//! It does mismatch. It is then **forgiven**: acceptance carries a
 //! `height <= 496720` historical-exception branch that downgrades a state-root
-//! mismatch to a `warn!` and force-adopts the header's root. Height 1 is inside
-//! that window, so the block is accepted, fork choice switches, and
-//! `handle_reorg` runs.
+//! mismatch to a warning and force-adopts the header's root. Height 1 is inside
+//! that window, so the block is accepted, fork choice switches, and the reorg
+//! path runs. [`depth1_sibling_import_reaches_the_reorg_path`] pins that
+//! classification.
 //!
-//! What `handle_reorg` then reverts is the wrong block. `save_state_diff` keys
-//! `cf::STATE_DIFFS` by height alone — no block hash — so importing B's block
-//! **overwrites A's height-1 undo journal with B's own changes** before the
-//! reorg is triggered. `revert_block_state_diffs(1)` therefore undoes B's
-//! changes (the block being adopted) and leaves A's changes (the block being
-//! orphaned) permanently applied, then deletes the row. Node A ends with B's
-//! block as its head and A's block's state in its account store.
+//! # What the reorg then does
+//!
+//! It converges. [`reorged_node_must_converge_with_the_chain_it_adopted_issue_253`]
+//! asserts the property the issue is about — after adopting a chain, a node
+//! holds that chain's account state — and it passes. That test's own
+//! documentation records the two defects that had to be fixed to get there, and
+//! the one gap that remains outside what it measures.
 //!
 //! # How to run
 //!
 //! ```text
 //! cargo test -p sumchain-consensus --test fork_reachability -- --nocapture
-//! cargo test -p sumchain-consensus --test fork_reachability -- --ignored --nocapture
 //! ```
 //!
-//! The first runs the classification test, which passes on `main`. The second
-//! runs [`reorged_node_must_converge_with_the_chain_it_adopted_issue_253`],
-//! which is `#[ignore]`d because it **fails on current `main`** — that failure
-//! is the finding, not a broken test.
+//! Both tests are ordinary tests. Neither is `#[ignore]`d any more: the second
+//! was, for as long as it described a defect rather than a property.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -642,36 +640,58 @@ async fn depth1_sibling_import_reaches_the_reorg_path() {
     );
 }
 
-/// **Expected to FAIL on current `main`. The failure IS the finding.**
+/// After adopting a chain, a node holds that chain's state.
 ///
-/// Issue #253. After node A imports node B's height-1 sibling, A adopts B's
-/// block as its head — `best_block_hash()` returns B's hash, `BlockStore`'s
-/// latest hash and height point at B's block. A therefore claims to be on B's
-/// chain, and must hold B's chain's state.
+/// Issue #253. Node A imports node B's height-1 sibling, fork choice switches,
+/// and A's head becomes B's block. A therefore claims to be on B's chain, and
+/// must hold B's chain's account state.
 ///
-/// It does not. `save_state_diff` writes `cf::STATE_DIFFS` keyed by
-/// `height.to_be_bytes()` alone, with no block hash, so `do_import_block`
-/// overwrote A's height-1 undo journal with **B's** changes before triggering
-/// the reorg. `handle_reorg` then called `revert_block_state_diffs(1)`, which
-/// read that row and undid B's changes — the block being adopted — while A's
-/// own height-1 changes, the ones being orphaned, were never recorded anywhere
-/// after the overwrite and stay permanently applied.
+/// # What used to happen, and why this test was `#[ignore]`d
 ///
-/// Net effect on A: head = B's block, state = A's block. Two nodes at the same
-/// head with different account state. This is a consensus split that the state
-/// root will not catch at any height inside the `height <= 496720` exception
-/// window, and that the accumulator will carry forward into every later block.
+/// Two defects, in sequence.
 ///
-/// This test asserts the property that *should* hold — after adopting a chain,
-/// a node's state equals that chain's state — and therefore fails until #253 is
-/// fixed. It is `#[ignore]`d so the suite stays green; run it to reproduce:
+/// First, `cf::STATE_DIFFS` was keyed by `height.to_be_bytes()` alone. Two
+/// siblings at one height named ONE undo row, so importing B overwrote A's
+/// journal with B's changes before the reorg could read it. The revert then
+/// undid B's changes — the block being ADOPTED — and left A's, the ones being
+/// orphaned, permanently applied. Re-keying the journals by `(height, block
+/// hash)` fixed that: A's own journal survives B's import and the revert now
+/// consumes the right record.
 ///
-/// ```text
-/// cargo test -p sumchain-consensus --test fork_reachability -- --ignored --nocapture
-/// ```
+/// That was not enough, and this test kept failing for a second reason. The
+/// reorg import path executed the arriving block and then DROPPED the
+/// candidate — no acceptance, no publication. Once execution moved behind
+/// `ApplicationOverlay`, dropping the candidate discards every state write it
+/// made, so B's block's state was never committed at all; only its journal,
+/// block row, transactions and receipts were. Its own comment, "new chain
+/// blocks are already applied during import", had stopped being true. A ended
+/// on B's block with the GENESIS state: A's changes correctly reverted, B's
+/// never applied.
+///
+/// # What happens now
+///
+/// The reorg arm resolves the fork with `plan_reorg`, unwinds the abandoned
+/// branch newest-first from its per-block journals with each pre-image
+/// validated against the value the journal says the block left, restores the
+/// accumulator from the ancestor's header, and applies the adopted branch
+/// through the ordinary publication path. See `sumchain_consensus::reorg`.
+///
+/// # What this test does and does not cover
+///
+/// It compares ACCOUNT state — every row in `cf::STATE` under the `acct`
+/// prefix — between A and B. Those now agree exactly.
+///
+/// It does not compare every column family, and one of them still diverges:
+/// `cf::SUPPLY` is written by every block and journalled by nothing, so the
+/// unwind cannot restore it. Because `SupplyStore::v_state_digest` is folded
+/// into the block state root, the replayed root for B's block does not equal
+/// its header's, and at height 1 — inside the `height <= 496720` compatibility
+/// window — that mismatch is force-adopted rather than refused. The reorg
+/// reports it as `ReorgOutcome::force_adopted` and the engine logs it, but
+/// nothing here fails on it. That gap is a PRODUCER-side obligation on the
+/// undo journal, measured and pinned in
+/// `reorg_execution.rs::the_subsystem_journals_do_not_cover_every_family_a_block_writes`.
 #[tokio::test]
-#[ignore = "issue #253: FAILS on main by design — after a depth-1 reorg, node A's head is B's \
-            block but its state is A's block's. Run with --ignored to reproduce the evidence."]
 async fn reorged_node_must_converge_with_the_chain_it_adopted_issue_253() {
     let ev = run_probe().await;
     println!("{}", ev.report());
@@ -686,14 +706,12 @@ async fn reorged_node_must_converge_with_the_chain_it_adopted_issue_253() {
     let divergence = ev.divergence();
     assert!(
         divergence.is_empty(),
-        "issue #253 CONFIRMED: node A adopted B's block {} as its head (import returned `{}`, \
-         ConsensusEvent::Reorg depth={:?}), but {} account(s) on A disagree with node B, which \
-         is on that very block. A's own orphaned height-1 changes were never reverted, because \
-         cf::STATE_DIFFS is keyed by height alone and B's import OVERWROTE A's undo journal \
-         before handle_reorg read it — so the revert undid B's changes instead of A's, then \
-         deleted the row (height-1 journal after import: {} bytes). \
+        "node A adopted B's block {} as its head (import returned `{}`, \
+         ConsensusEvent::Reorg depth={:?}), but {} account(s) on A disagree with node B, \
+         which is on that very block. A node cannot be on a chain and not hold its state. \
+         Height-1 undo journal after the import: {} bytes. \
          Divergent accounts (A post-import vs B):\n      {}\n\
-         For reference, A's own pre/post-import residue was {} account(s):\n      {}{}",
+         For reference, A's own pre/post-import change was {} account(s):\n      {}{}",
         ev.b_hash,
         ev.import_result,
         ev.reorg_depth,

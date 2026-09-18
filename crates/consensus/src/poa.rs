@@ -19,13 +19,17 @@ use sumchain_primitives::{
     Block, BlockHeader, BlockHeight, Hash, SignedTransaction, Timestamp,
     ValidatorSet, ValidatorSetEntry, ValidatorStatus,
 };
+use sumchain_state::reorg_undo::SubsystemJournals;
 use sumchain_state::{BlockExecutor, Mempool, StateManager};
-use sumchain_storage::{BlockStore, Database, DelegationStore, ReceiptStore, StakingStore, TxIndexStore, TxStore, ValidatorSetStore};
+use sumchain_storage::{
+    BlockStore, Database, DelegationStore, StakingStore, TxStore, ValidatorSetStore,
+};
 use tokio::sync::broadcast;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::engine::{ConsensusEngine, ConsensusEvent, ForkChoice, LongestChainForkChoice};
+use crate::reorg::{execute_reorg, plan_reorg};
 use crate::{ConsensusError, Result};
 
 /// Proof of Authority consensus engine
@@ -44,6 +48,15 @@ enum Admission {
     /// ancestor-based whole-branch execution, not the one-block publisher.
     Reorg,
 }
+
+/// Upper bound on how far the ancestor walk may travel.
+///
+/// An allocation bound, not a consensus rule: `plan_reorg` walks both branches
+/// into memory, and a malformed or hostile branch must not be able to make that
+/// unbounded. What actually limits how deep a switch may go is finality, which
+/// is checked separately and refuses a walk below the finalized height. This
+/// only stops a walk that would never meet.
+const MAX_REORG_WALK: u64 = 4_096;
 
 pub struct PoAEngine {
     /// Database
@@ -643,17 +656,7 @@ impl PoAEngine {
             }
 
             Admission::Reorg => {
-                // NOT the one-block publisher. A reorg is one decision over a
-                // whole branch: the candidate must be built by executing every
-                // block from the common ancestor and committed once. Publishing
-                // the new head alone would leave the abandoned branch's state
-                // applied beneath it.
-                //
-                // Until that package lands, the pre-existing sequence is kept
-                // verbatim. It is not atomic and does not become so by sitting
-                // next to code that is.
-                self.import_reorg_legacy(block, &block_store, height, hash, &active_validators)
-                    .await?;
+                self.import_reorg(block, &block_store, &active_validators)?;
             }
         }
 
@@ -745,140 +748,123 @@ impl PoAEngine {
         Ok(())
     }
 
-    /// The pre-existing reorg import sequence, preserved verbatim.
+    /// Switch to a branch that wins fork choice but does not extend the head.
     ///
-    /// Not atomic, and it does not become atomic by sitting beside code that is.
-    /// A reorg is one decision over a whole branch — the candidate must be built
-    /// by executing every block from the common ancestor and committed once —
-    /// and the one-block publisher cannot express that. Replaced by the
-    /// ancestor-based package.
-    async fn import_reorg_legacy(
+    /// A reorg is ONE decision over a whole branch, and the one-block publisher
+    /// cannot express it: publishing the new head alone leaves the abandoned
+    /// branch's state applied beneath it.
+    ///
+    /// The sequence this replaces did exactly that, and worse. It executed the
+    /// arriving block and then DROPPED the candidate — no acceptance, no
+    /// publication — so since execution moved behind the overlay the adopted
+    /// block's state was never committed at all; only its journal, block row,
+    /// transactions and receipts were. It then reverted the abandoned branch
+    /// oldest-first, which leaves the intermediate value for any key more than
+    /// one block touched, through an ancestor walk that did not terminate on a
+    /// missing parent. Its own comment — "new chain blocks are already applied
+    /// during import" — had stopped being true.
+    ///
+    /// What happens instead, in order:
+    ///
+    /// 1. Retain the arriving block, so the ancestor walk can see it.
+    /// 2. [`plan_reorg`] resolves the fork BY HASH and refuses a gap, a switch
+    ///    below finality, or a walk past the allocation bound — before anything
+    ///    is written.
+    /// 3. [`execute_reorg`] unwinds the abandoned branch newest-first from its
+    ///    per-block journals, validating each pre-image against the value the
+    ///    journal says the block left, in ONE batch that also carries the
+    ///    de-indexing and the head reset; restores the accumulator from the
+    ///    ancestor's header; and applies the adopted branch through the ordinary
+    ///    publication path, one atomic batch per block.
+    ///
+    /// Nothing outside this arm changes. A block that extends the head or loses
+    /// fork choice takes the same path it did before.
+    fn import_reorg(
         &self,
         block: Block,
         block_store: &BlockStore<'_>,
-        height: BlockHeight,
-        hash: Hash,
         active_validators: &[[u8; 32]],
     ) -> Result<()> {
-        let execution =
-            self.executor
-                .execute_block(&block, self.state.state_root(), active_validators)?;
-        let state_root = execution.computed_root();
-        let (executed, state_diff, contract_diff) = execution.into_parts();
+        let hash = block.hash();
+        let height = block.height();
 
-        if block.header.state_root != state_root {
-            if height <= 496720 {
-                warn!(
-                    "State root mismatch at height {} (historical bug window) - \
-                     adopting header root to align accumulator for next block",
-                    height
-                );
-                self.state.set_state_root(block.header.state_root);
-            } else {
-                return Err(ConsensusError::InvalidBlock(format!(
-                    "State root mismatch at height {}: header={}, computed={}",
-                    height, block.header.state_root, state_root
-                )));
-            }
-        }
-
+        // The ancestor walk reads `BLOCKS`, so the arriving block has to be
+        // there. Keyed by its own hash, so it cannot shadow anything; `publish`
+        // writes the same row again when the branch is adopted.
         block_store.put(&block)?;
 
-        let tx_store = TxStore::new(&self.db);
-        let receipt_store = ReceiptStore::new(&self.db);
-        let tx_index_store = TxIndexStore::new(&self.db);
-        for (tx_index, tx) in block.transactions.iter().enumerate() {
-            tx_store.put(tx)?;
-            if let Err(e) = tx_index_store.index_transaction(tx, height, tx_index as u32) {
-                warn!("Failed to index transaction {}: {}", tx.hash(), e);
-            }
-        }
-        for receipt in executed.receipts() {
-            receipt_store.put(receipt)?;
-        }
+        let old_head = self
+            .best_block
+            .read()
+            .clone()
+            .ok_or_else(|| ConsensusError::InvalidBlock(
+                "classified as a reorg with no current best block;                  a switch needs something to switch away from".to_string(),
+            ))?;
 
-        let block_hash = block.hash();
-        self.state
-            .save_state_diff(height, &block_hash, state_diff)?;
-        self.state
-            .save_contract_state_diff(height, &block_hash, contract_diff)?;
+        let finalized = block_store.get_finalized_height()?.unwrap_or(0);
+        let plan = plan_reorg(block_store, &old_head, &block, finalized, MAX_REORG_WALK)?;
 
-        let current_best = self.best_block.read().clone();
-        if let Some(old_best) = &current_best {
-            let reorg_depth = self.handle_reorg(old_best, &block).await?;
-            let _ = self.event_tx.send(ConsensusEvent::Reorg {
-                old_head: old_best.hash(),
-                new_head: block.hash(),
-                depth: reorg_depth,
-            });
-        }
+        // The four per-subsystem journals the publisher writes. See
+        // `sumchain_state::reorg_undo`: the unwind depends only on their SHAPE,
+        // so a generic application journal substitutes here and nowhere else.
+        let journals = SubsystemJournals::new(&self.db);
+        let outcome = execute_reorg(
+            &self.db,
+            &self.state,
+            &self.executor,
+            &plan,
+            active_validators,
+            &journals,
+        )?;
 
-        block_store.set_latest_hash(&hash)?;
-        block_store.set_latest_height(height)?;
-        *self.best_block.write() = Some(block.clone());
-
-        let tx_hashes: Vec<Hash> = block.transactions.iter().map(|tx| tx.hash()).collect();
-        self.mempool.remove_batch(&tx_hashes);
-
-        let _ = self.event_tx.send(ConsensusEvent::BlockImported(block));
-        Ok(())
-    }
-
-    /// Handle chain reorganization
-    async fn handle_reorg(&self, old_head: &Block, new_head: &Block) -> Result<u64> {
-        // Find common ancestor
-        let block_store = BlockStore::new(&self.db);
-
-        let mut old_chain = vec![old_head.clone()];
-        let mut new_chain = vec![new_head.clone()];
-
-        // Walk back both chains to find common ancestor
-        while old_chain.last().unwrap().hash() != new_chain.last().unwrap().hash() {
-            let old_tip_height = old_chain.last().unwrap().height();
-            let new_tip_height = new_chain.last().unwrap().height();
-            let old_tip_parent = old_chain.last().unwrap().header.parent_hash;
-            let new_tip_parent = new_chain.last().unwrap().header.parent_hash;
-
-            if old_tip_height >= new_tip_height {
-                if let Some(parent) = block_store.get_by_hash(&old_tip_parent)? {
-                    old_chain.push(parent);
-                }
-            }
-
-            if new_tip_height >= old_tip_height {
-                if let Some(parent) = block_store.get_by_hash(&new_tip_parent)? {
-                    new_chain.push(parent);
-                }
-            }
-        }
-
-        let reorg_depth = old_chain.len() as u64 - 1;
-
-        warn!(
-            "Reorg detected: reverting {} blocks, applying {} blocks",
-            old_chain.len() - 1,
-            new_chain.len() - 1
-        );
-
-        // Revert old chain blocks (except common ancestor)
-        for block in old_chain.iter().rev().skip(1) {
-            // Atomically revert account + contract + dormant C1 compute-pool state
-            // together in a single write batch (issue #130), so an orphaned block
-            // cannot leave any one family behind while another rolls back. Under
-            // the production `None` gate no C1 journal exists, so the C1 revert is
-            // an inert no-op inside the same batch.
-            self.state
-                .revert_block_state_diffs(block.height(), &block.hash())?;
-
-            // Return transactions to mempool
-            for tx in &block.transactions {
+        // Only after the switch is durable.
+        for abandoned in &plan.old_branch {
+            for tx in &abandoned.transactions {
                 let _ = self.mempool.add(tx.clone());
             }
         }
+        *self.best_block.write() = Some(block.clone());
+        let tx_hashes: Vec<Hash> = plan
+            .new_branch
+            .iter()
+            .flat_map(|b| b.transactions.iter().map(|tx| tx.hash()))
+            .collect();
+        self.mempool.remove_batch(&tx_hashes);
 
-        // Note: new chain blocks are already applied during import
+        warn!(
+            depth = plan.depth(),
+            applied = outcome.applied,
+            verified = outcome.verified,
+            force_adopted = outcome.force_adopted,
+            ancestor = %plan.ancestor_hash,
+            old_head = %old_head.hash(),
+            new_head = %hash,
+            "chain reorganization"
+        );
+        if outcome.force_adopted > 0 {
+            // Said separately, and loudly. A block adopted under the historical
+            // compatibility window had its header root published despite the
+            // replay computing a different one, so the state this node now holds
+            // is NOT the state the branch commits to. That is a different claim
+            // from "the reorg succeeded", and collapsing the two would hide it.
+            warn!(
+                count = outcome.force_adopted,
+                cutoff = sumchain_storage::candidate::LEGACY_ROOT_COMPATIBILITY_HEIGHT,
+                "the reorg published {} block(s) whose replayed root did not match their \
+                 header, under the historical compatibility allowance; this branch's state \
+                 is NOT verified",
+                outcome.force_adopted
+            );
+        }
 
-        Ok(reorg_depth)
+        let _ = self.event_tx.send(ConsensusEvent::Reorg {
+            old_head: old_head.hash(),
+            new_head: hash,
+            depth: plan.depth(),
+        });
+        let _ = self.event_tx.send(ConsensusEvent::BlockImported(block));
+        info!("Reorged to block {} at height {}", hash, height);
+        Ok(())
     }
 
     /// Run the block production loop (for validators)

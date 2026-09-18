@@ -143,13 +143,32 @@ const LEDGER_CF_COUNT: usize = 0;
 /// hide a write: a new unreached mutator fails here rather than quietly
 /// dropping out of the manifest.
 ///
-/// Both of these are `pub` with no production caller anywhere in the workspace —
+/// All three are `pub` with no production caller anywhere in the workspace —
 /// verified by grep, not by this resolver — so excluding them is correct.
-const UNREACHED_MUTATORS: &[(&str, &str, &str)] = &[(
-    "crates/state/src/state.rs",
-    "StateManager::revert_state_diff",
-    "pub, no production caller: the reorg path uses revert_block_state_diffs",
-)];
+///
+/// The two `save_*_state_diff` entries became unreached when the reorg import
+/// path was replaced. The old path wrote both journals itself, out of band,
+/// after executing the arriving block; the publisher now writes all four inside
+/// the same atomic batch as the block, so there is nothing left for a caller to
+/// do. They survive as `pub` because the executor's own tests seed journals
+/// through them, and deleting them would take that fixture with them.
+const UNREACHED_MUTATORS: &[(&str, &str, &str)] = &[
+    (
+        "crates/state/src/state.rs",
+        "StateManager::revert_state_diff",
+        "pub, no production caller: the reorg path uses revert_block_state_diffs",
+    ),
+    (
+        "crates/state/src/state.rs",
+        "StateManager::save_state_diff",
+        "pub, no production caller: the publisher writes the account journal",
+    ),
+    (
+        "crates/state/src/state.rs",
+        "StateManager::save_contract_state_diff",
+        "pub, no production caller: the publisher writes the contract journal",
+    ),
+];
 
 /// Column families declared in `sumchain_storage::cf` that nothing reads or
 /// writes anywhere in the workspace.
@@ -1846,7 +1865,11 @@ fn non_execution_paths_are_classified() {
              The two classes are complementary, and this zero says so — it is \
              not an absence of coverage.",
         ),
-        (Class::ChainStorage, 18, "blocks, transactions, receipts, their indexes, validator sets, pruning — not application state"),
+        // 18 before the reorg import path was replaced. The old path wrote the
+        // block, every transaction, every receipt and both address indexes
+        // itself, out of band; the publisher now writes all of them inside the
+        // block's own atomic batch, so seven sites went with it.
+        (Class::ChainStorage, 11, "blocks, transactions, receipts, their indexes, validator sets, pruning — not application state"),
         (Class::Snapshot, 1, "fast-sync restore, outside consensus"),
         (Class::OperatorTooling, 7, "see operator_tooling_writes_are_declared_deployment_blockers"),
     ];
