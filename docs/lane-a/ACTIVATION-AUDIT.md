@@ -22,6 +22,87 @@ Four verdicts, and the decision rule that uses them:
     softer GATED OFF; a false GATED OFF is how a release ships a reachable
     defect.
 
+## Remediation status, and why it does not move the count
+
+This document has been worked since it was written. Twenty-four rows now have a
+remedy implemented and tested in the tree, and two more are half-remedied. **None of it changes a single
+verdict, and the blocking count is exactly what it was.** That is not a
+formality; it is the finding of the remediation pass.
+
+Every one of the twenty-four is a CONSENSUS CHANGE — it changes which
+transactions succeed, which blocks exist, or what an account balance is, and
+receipts are folded into the state root — so none of them may simply be applied.
+Each is implemented behind an activation height, exactly as the eighteen
+`*_enabled_from_height` gates in `ChainParams` are. **But `crates/genesis` is
+another track's, and none of the eight fields these gates read exists yet.** So
+every gate reads `None`, every gate is closed, and a release-configured node
+behaves precisely as it did before — which is what the pinning tests, all of
+which still pass unchanged, prove.
+
+**A gate that cannot be opened is not a gate.** This document's own decision rule
+says so: "A gate that cannot be pointed at is not a gate and is not this
+verdict," and a GATED OFF row must name "the gate, where it is set". These name
+the gate. None of them is set, and none can be set from the track that wrote
+them. So the verdict stays REACHABLE, and the blocking count stays 121.
+
+A third status is therefore recorded alongside the verdict, orthogonal to it:
+
+  * **REMEDIED, PENDING FIELD** — the corrected behaviour exists, is reachable
+    through a named seam, and is covered by tests that drive an ungated node and
+    a gated node over the same transaction and assert that they disagree. It
+    becomes live the moment the named `ChainParams` field lands and an operator
+    sets it. Twenty-four rows fully; AU-3 and AU-34 in part, and the tables say
+    which part.
+  * **BLOCKED, STRUCTURAL** — the defect cannot be closed by a guard at all,
+    because the subsystem records no address, no registry or no signature to
+    authorize against. A wire change or a new registry is needed. Stated rather
+    than papered over, because a rule that pretends to check something it cannot
+    see is worse than one that says it cannot. Six rows.
+  * unmarked — untouched by this pass.
+
+### The `ChainParams` fields the remediation needs
+
+Ten. None could be added from the track that implemented the behaviour behind
+them; each is specified in full — name, type, semantics and the one-line
+function body that replaces the seam — in the doc comment of its activation
+function. All follow the existing `#[serde(default)] Option<u64>` idiom, so an
+absent field resolves to `None` and the gate is closed, which is what makes the
+dormant state safe.
+
+| field | rows it governs | seam |
+|---|---|---|
+| `nft_receipt_failure_enabled_from_height` | BD-1, BD-2, BD-3, BD-4, BD-5 | `NftExecutor::receipt_failure_activation`, `crates/state/src/nft_executor.rs` |
+| `docclass_stake_escrow_enabled_from_height` | OV-26, and the stake half of AU-34 | `DocClassExecutor::stake_escrow_activation` |
+| `docclass_subject_index_split_enabled_from_height` | BD-6 | `DocClassExecutor::subject_index_split_activation` |
+| `docclass_revocation_standing_enabled_from_height` | AU-36 | `DocClassExecutor::revocation_standing_activation` |
+| `healthcare_authorization_enabled_from_height` | AU-1, AU-2, AU-4, AU-5, the revocation half of AU-3, OV-18 | `HealthcareExecutor::authorization_activation` |
+| `legal_authorization_enabled_from_height` | AU-13, AU-14, AU-15, AU-16 | `LegalExecutor::authorization_activation` |
+| `finance_authorization_enabled_from_height` | AU-22, AU-23, AU-25 | `FinanceExecutor::authorization_activation` |
+| `employment_authorization_enabled_from_height` | AU-27 | `EmploymentExecutor::authorization_activation` |
+| `property_authorization_enabled_from_height` | AU-30, AU-31 | `PropertyExecutor::authorization_activation` |
+| `tax_authorization_enabled_from_height` | AU-19 | `TaxExecutor::authorization_activation` |
+
+Ten fields: seven per-subsystem authorization heights and three per-defect. They are separate rather than one because activating
+them is separate: an operator coordinating a validator upgrade for the NFT
+block-denial rule should not be forced to activate the healthcare consent rules
+in the same block, and a subsystem whose remediation is later found wanting must
+be able to stay dormant without holding the others back.
+
+### What the mixed-version evidence actually shows
+
+Every remediated row is covered by a test that runs the SAME transaction under
+both gate values through one entry point — `execute_with_gate` on the NFT
+executor, `execute_with_gates` on the other seven — and asserts that the two
+nodes produce different results. The difference is always observable, and for
+the NFT rows it is stronger than a differing digest: an ungated node cannot
+execute the block AT ALL (`execute_block` returns `Err` before `receipts.push`),
+where a gated node executes it and records a `Failed` receipt. A node on the
+wrong side of that height halts against its peers rather than forking quietly
+behind them, which is the failure mode a consensus change should have. For the
+other rows the difference is a receipt's success bit and the rows it did or did
+not write, and receipts are folded into the root at
+`crates/state/src/executor.rs:3633-3637`.
+
 One methodological point governs every row. **A pinning test proves the
 behaviour; it does not prove the path is reachable in production.** A test
 constructs its own `ChainParams`, its own ceiling and its own height, and can
@@ -203,12 +284,12 @@ cannot build the block and no importer can validate it.
 
 | id | defect | source | verdict | gate | evidence | justification |
 |---|---|---|---|---|---|---|
-| BD-1 | NFT `Collection not found` aborts the block — mint, batch mint, transfer, burn, metadata update, collection-ownership transfer, config update | NFT §block-level denial | **REACHABLE** | none | `crates/state/src/nft_executor.rs:308, 417, 492, 588, 632, 673, 708`; propagated at `crates/state/src/executor.rs:504`; block-level at `:3140` | `NftExecutor::execute` returns `Result` (`nft_executor.rs:109`); the Nft arm at `executor.rs:494` has no gate check; any funded sender names an absent collection id for `min_fee` 1000 |
-| BD-2 | NFT `Token not found` aborts the block — transfer, approve, burn, metadata update, lock, unlock | NFT §block-level denial | **REACHABLE** | none | `crates/state/src/nft_executor.rs:502, 554, 598, 642, 748, 782` | same propagation path as BD-1; reachable inside one block by burning a token and then naming it |
-| BD-3 | NFT `Invalid config` (royalty above 2500bps in the payload) aborts the block | NFT §block-level denial | **REACHABLE** | none | `crates/state/src/nft_executor.rs:246`; validation `crates/nft/src/collection.rs:123-127` | a payload field the sender chooses freely |
-| BD-4 | NFT undecodable payloads abort the block — collection, mint, transfer, approve, batch, config data | NFT §block-level denial | **REACHABLE** | none | `crates/state/src/nft_executor.rs:240, 325, 429, 522, 564, 685, 720` | any byte string bincode cannot decode; the cheapest of the four |
-| BD-5 | NFT `deduct_fee` insufficient balance is an `Err`, not a failed receipt | found while auditing BD-1..4; not separately listed in the blocker document | **REACHABLE** | none | `crates/state/src/nft_executor.rs:208` returns `Err(StateError::InsufficientBalance{..})` | same propagation; noted because it widens BD-1..4 rather than adding a new class |
-| BD-6 | DocClass subject-index shape collision makes the next identity operation a block-level error | DocClass §one column family, two incompatible value shapes | **REACHABLE** | none | collision write `crates/state/src/docclass_view.rs:217-243` vs `:152-182`; pinned by `an_identity_and_a_credential_sharing_a_subject_commitment_break_the_block`, `crates/state/tests/docclass_routing.rs:3252-3319`, whose final assertion is `outcome.expect_err(…)` at `:3300` | the subject commitment is an arbitrary 32-byte payload value (`create_identity_root` stores the struct verbatim, `crates/state/src/docclass_executor.rs:278-293`), so an attacker picks the colliding key; two cheap transactions arm it and a third detonates it |
+| BD-1 | NFT `Collection not found` aborts the block — mint, batch mint, transfer, burn, metadata update, collection-ownership transfer, config update | NFT §block-level denial | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `nft_receipt_failure_enabled_from_height`, implemented and dormant | `crates/state/src/nft_executor.rs:308, 417, 492, 588, 632, 673, 708`; propagated at `crates/state/src/executor.rs:504`; block-level at `:3140` | `NftExecutor::execute` returns `Result` (`nft_executor.rs:109`); the Nft arm at `executor.rs:494` has no gate check; any funded sender names an absent collection id for `min_fee` 1000 |
+| BD-2 | NFT `Token not found` aborts the block — transfer, approve, burn, metadata update, lock, unlock | NFT §block-level denial | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `nft_receipt_failure_enabled_from_height`, implemented and dormant | `crates/state/src/nft_executor.rs:502, 554, 598, 642, 748, 782` | same propagation path as BD-1; reachable inside one block by burning a token and then naming it |
+| BD-3 | NFT `Invalid config` (royalty above 2500bps in the payload) aborts the block | NFT §block-level denial | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `nft_receipt_failure_enabled_from_height`, implemented and dormant | `crates/state/src/nft_executor.rs:246`; validation `crates/nft/src/collection.rs:123-127` | a payload field the sender chooses freely |
+| BD-4 | NFT undecodable payloads abort the block — collection, mint, transfer, approve, batch, config data | NFT §block-level denial | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `nft_receipt_failure_enabled_from_height`, implemented and dormant | `crates/state/src/nft_executor.rs:240, 325, 429, 522, 564, 685, 720` | any byte string bincode cannot decode; the cheapest of the four |
+| BD-5 | NFT `deduct_fee` insufficient balance is an `Err`, not a failed receipt | found while auditing BD-1..4; not separately listed in the blocker document | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `nft_receipt_failure_enabled_from_height`, implemented and dormant | `crates/state/src/nft_executor.rs:208` returns `Err(StateError::InsufficientBalance{..})` | same propagation; noted because it widens BD-1..4 rather than adding a new class |
+| BD-6 | DocClass subject-index shape collision makes the next identity operation a block-level error | DocClass §one column family, two incompatible value shapes | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `docclass_subject_index_split_enabled_from_height`, implemented and dormant | collision write `crates/state/src/docclass_view.rs:217-243` vs `:152-182`; pinned by `an_identity_and_a_credential_sharing_a_subject_commitment_break_the_block`, `crates/state/tests/docclass_routing.rs:3252-3319`, whose final assertion is `outcome.expect_err(…)` at `:3300` | the subject commitment is an arbitrary 32-byte payload value (`create_identity_root` stores the struct verbatim, `crates/state/src/docclass_executor.rs:278-293`), so an attacker picks the colliding key; two cheap transactions arm it and a third detonates it |
 
 **BD-6 is a second block-denial vector the blocker document files under a
 different heading.** It is filed there as a data-shape defect, and it is one,
@@ -281,11 +362,11 @@ and for every row below it is.
 
 | id | defect | source | verdict | gate | evidence | justification |
 |---|---|---|---|---|---|---|
-| AU-1 | `SupersedeConsent` checks **nothing** about the sender: any account marks any consent `Superseded` and stores a replacement whose subject, recipient, disclosure scope and issuer all come from its own payload | Healthcare §missing authorization | **REACHABLE** | none | arm `crates/state/src/healthcare_executor.rs:673`; sole guard is old-consent existence at `:682`; nothing in `:673-703` compares `sender`; pinned by `any_sender_can_supersede_any_consent_with_one_of_their_own` | complete bypass of the consent lifecycle by one ordinary transaction |
-| AU-2 | `FillPrescription` and `PartialFillPrescription` check no sender at all — not patient, prescriber, pharmacy or issuer | Healthcare §missing authorization | **REACHABLE** | none | arms `crates/state/src/healthcare_executor.rs:772` and `:802`; guards are only validity `:786`/`:816` and refills `:790`; pinned by `any_sender_can_fill_any_prescription` | a stranger fills anyone's prescription, controlled substances included |
-| AU-3 | A consent's subject is never consulted in either direction: `GrantConsent` compares only issuer to sender, `RevokeConsent` requires the issuer, so the subject can neither grant nor withdraw | Healthcare §missing authorization | **REACHABLE** | none | `crates/state/src/healthcare_executor.rs:596` guard `:600`; `:643` guard `:656`; `subject_address`/`subject_ref` declared at `crates/sumchain-wire/src/healthcare.rs:631,637` and read by no guard; pinned by `the_subject_of_a_consent_can_neither_grant_nor_revoke_it` | disclosure authorizations about a person are recorded without their participation |
-| AU-4 | `AddNetworkAffiliation` / `RemoveNetworkAffiliation` have no issuer check | Healthcare §missing authorization | **REACHABLE** | none | arms `crates/state/src/healthcare_executor.rs:298` and `:322`; only guard is provider existence `:307`/`:331`; pinned by `any_sender_can_change_a_providers_network_affiliations` | a stranger moves any provider between plan networks |
-| AU-5 | `IssuePrescription` never relates the sender to the named prescriber or to the patient | Healthcare §missing authorization | **REACHABLE** | none | arm `crates/state/src/healthcare_executor.rs:708`; guards `:712` (issuer == sender), `:717` (prescriber exists), `:721` (duplicate id) | anyone who can register a provider issues prescriptions naming any other registered provider |
+| AU-1 | `SupersedeConsent` checks **nothing** about the sender: any account marks any consent `Superseded` and stores a replacement whose subject, recipient, disclosure scope and issuer all come from its own payload | Healthcare §missing authorization | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `healthcare_authorization_enabled_from_height`, implemented and dormant | arm `crates/state/src/healthcare_executor.rs:673`; sole guard is old-consent existence at `:682`; nothing in `:673-703` compares `sender`; pinned by `any_sender_can_supersede_any_consent_with_one_of_their_own` | complete bypass of the consent lifecycle by one ordinary transaction |
+| AU-2 | `FillPrescription` and `PartialFillPrescription` check no sender at all — not patient, prescriber, pharmacy or issuer | Healthcare §missing authorization | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `healthcare_authorization_enabled_from_height`, implemented and dormant | arms `crates/state/src/healthcare_executor.rs:772` and `:802`; guards are only validity `:786`/`:816` and refills `:790`; pinned by `any_sender_can_fill_any_prescription` | a stranger fills anyone's prescription, controlled substances included |
+| AU-3 | A consent's subject is never consulted in either direction: `GrantConsent` compares only issuer to sender, `RevokeConsent` requires the issuer, so the subject can neither grant nor withdraw | Healthcare §missing authorization | **REACHABLE** | none today. **PARTLY REMEDIED, PENDING FIELD:** `healthcare_authorization_enabled_from_height (REVOCATION half only; the GRANT half is BLOCKED, STRUCTURAL -- a subject cannot participate in granting without a signature `ConsentEnvelope` does not carry)` | `crates/state/src/healthcare_executor.rs:596` guard `:600`; `:643` guard `:656`; `subject_address`/`subject_ref` declared at `crates/sumchain-wire/src/healthcare.rs:631,637` and read by no guard; pinned by `the_subject_of_a_consent_can_neither_grant_nor_revoke_it` | disclosure authorizations about a person are recorded without their participation |
+| AU-4 | `AddNetworkAffiliation` / `RemoveNetworkAffiliation` have no issuer check | Healthcare §missing authorization | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `healthcare_authorization_enabled_from_height`, implemented and dormant | arms `crates/state/src/healthcare_executor.rs:298` and `:322`; only guard is provider existence `:307`/`:331`; pinned by `any_sender_can_change_a_providers_network_affiliations` | a stranger moves any provider between plan networks |
+| AU-5 | `IssuePrescription` never relates the sender to the named prescriber or to the patient | Healthcare §missing authorization | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `healthcare_authorization_enabled_from_height`, implemented and dormant | arm `crates/state/src/healthcare_executor.rs:708`; guards `:712` (issuer == sender), `:717` (prescriber exists), `:721` (duplicate id) | anyone who can register a provider issues prescriptions naming any other registered provider |
 | AU-6 | Healthcare `VerifyProof` verifies nothing | Healthcare §missing authorization | **REACHABLE** | none | arm `crates/state/src/healthcare_executor.rs:955`; body `:957-961` is deduct/credit/increment, no proof read; pinned by `verify_proof_succeeds_for_a_proof_that_does_not_exist` | see Class 5 |
 | AU-7 | Issuer identity is self-asserted: where a check exists it is `issuer_address == sender`, and `issuer_address` comes from the payload on every creation path; no issuer registry is consulted | Healthcare / Property §missing authorization | **REACHABLE** | none | Healthcare creation guards e.g. `crates/state/src/healthcare_executor.rs:600, 712`; Property `crates/state/src/property_executor.rs:176` with no `v_get_issuer` call anywhere in `property_executor.rs` or `property_view.rs` | the check binds a row to whoever created it and to nothing else |
 | AU-8 | `policy_id` carried on providers, memberships, consents, prescriptions (and on Property assets, title events, encumbrances, coverage, claims; and on Agreement commitments, attestations, IP actions, executor links) — stored, consulted by no guard | Healthcare / Property / Agreement | **REACHABLE** | none | in the state crate `policy_id` appears only at `crates/state/src/agreement_executor.rs:684`, inside the `#[cfg(all(test, feature = "legacy_tests"))]` module opening at `:634` | the field exists, is written, and gates nothing |
@@ -294,9 +375,9 @@ and for every row below it is.
 
 | id | defect | source | verdict | gate | evidence | justification |
 |---|---|---|---|---|---|---|
-| AU-9 | A signature's party reference comes from the payload and is never compared to the sender, so any sender signs on behalf of any party and carries a two-party agreement to `Executed` alone | Agreement §missing authorization | **REACHABLE** | none | arm `crates/state/src/agreement_executor.rs:275`; `party_ref` deserialized at `:294`, used at `:297`; guards are agreement existence `:280` and duplicate signature `:284` only; pinned by `any_sender_can_sign_on_behalf_of_any_party` | consent itself is forgeable in one transaction |
-| AU-10 | The `signature` bytes are stored and never verified against `signer_key` or anything else | Agreement §missing authorization | **REACHABLE** | none | field `crates/sumchain-wire/src/agreement.rs:289`, stored via `v_put_signature` `crates/state/src/agreement_executor.rs:296`; no `verify`/`ed25519` call exists in `agreement_executor.rs` or `agreement_view.rs` | nothing in the executor checks a signature |
-| AU-11 | Any sender may terminate, void or supersede any agreement, revoke any IP action, and activate, pause, resume, terminate or complete any executor link | Agreement §missing authorization | **REACHABLE** | none | arms and their sole existence/state guards: `crates/state/src/agreement_executor.rs:212`/`:220`, `:242`/`:251`, `:424`/`:432`, `:472`/`:480`, `:502`/`:510`, `:526`/`:534`, `:555`/`:563`, `:579`/`:587`; pinned by `any_sender_can_terminate_void_and_revoke_anything` | none of the eight compares the sender |
+| AU-9 | A signature's party reference comes from the payload and is never compared to the sender, so any sender signs on behalf of any party and carries a two-party agreement to `Executed` alone | Agreement §missing authorization | **REACHABLE** | none. **BLOCKED, STRUCTURAL -- `AgreementCommitment` carries no address at all and `PartyRef` is a commitment or a 32-byte subject id, so there is nothing to compare a sender to. Needs an `Address` on the commitment or an address-bearing `PartyRef` variant, in `crates/sumchain-wire/src/agreement.rs`** | arm `crates/state/src/agreement_executor.rs:275`; `party_ref` deserialized at `:294`, used at `:297`; guards are agreement existence `:280` and duplicate signature `:284` only; pinned by `any_sender_can_sign_on_behalf_of_any_party` | consent itself is forgeable in one transaction |
+| AU-10 | The `signature` bytes are stored and never verified against `signer_key` or anything else | Agreement §missing authorization | **REACHABLE** | none. **BLOCKED, STRUCTURAL -- verifying the stored `signature` against `signer_key` needs a canonical signing input this subsystem does not define. A wire change, not a guard** | field `crates/sumchain-wire/src/agreement.rs:289`, stored via `v_put_signature` `crates/state/src/agreement_executor.rs:296`; no `verify`/`ed25519` call exists in `agreement_executor.rs` or `agreement_view.rs` | nothing in the executor checks a signature |
+| AU-11 | Any sender may terminate, void or supersede any agreement, revoke any IP action, and activate, pause, resume, terminate or complete any executor link | Agreement §missing authorization | **REACHABLE** | none. **BLOCKED, STRUCTURAL -- same missing address as AU-9; none of the eight arms has anything to authorize against** | arms and their sole existence/state guards: `crates/state/src/agreement_executor.rs:212`/`:220`, `:242`/`:251`, `:424`/`:432`, `:472`/`:480`, `:502`/`:510`, `:526`/`:534`, `:555`/`:563`, `:579`/`:587`; pinned by `any_sender_can_terminate_void_and_revoke_anything` | none of the eight compares the sender |
 | AU-12 | Agreement `VerifyProof` verifies nothing | Agreement §missing authorization | **REACHABLE** | none | arm `crates/state/src/agreement_executor.rs:621`, body `:623-627`; pinned by `verify_proof_succeeds_for_a_proof_that_does_not_exist` | see Class 5 |
 
 The attestation exception is real and worth recording because it shows the gap
@@ -308,55 +389,55 @@ guards at `:336`, `:353` at `:366`, `:381` at `:395` — pinned by
 
 | id | defect | source | verdict | gate | evidence | justification |
 |---|---|---|---|---|---|---|
-| AU-13 | `ConsolidateCase` has no authority check: any funded account attaches one stranger's case to another's and moves the second to `Consolidated` | Legal 1 | **REACHABLE** | none | arm `crates/state/src/legal_executor.rs:273`; guards only case existence `:281` and related-case existence `:284`; pinned by `consolidate_case_has_no_authority_check` | contrast `CloseCase`, which does check |
-| AU-14 | `TransferCase` has no authority check | Legal 2 | **REACHABLE** | none | arm `crates/state/src/legal_executor.rs:302`; only guard is case existence `:310`; pinned by `transfer_case_has_no_authority_check` | as above |
-| AU-15 | `SupersedeOrder` has no authority check **and** no duplicate guard, so a stranger supersedes an order and overwrites a different existing order by reusing its id in the same transaction | Legal 3 | **REACHABLE** | none | arm `crates/state/src/legal_executor.rs:550`; only guard is old-order existence `:559`; `v_put_order(&d.new_order)` at `:577` with no existence check; pinned by `supersede_order_overwrites_an_existing_order_without_a_guard` | both halves reachable from one transaction |
-| AU-16 | `SupersedeEvent` does not verify the new event's case exists, creating a dangling case→event index entry | Legal 4 | **REACHABLE** | none | arm `crates/state/src/legal_executor.rs:378`; guard `:387` only; stored at `:404` with no `v_get_case` (contrast `RecordEvent` at `:336`); pinned by `supersede_event_indexes_under_a_case_that_need_not_exist` | attacker chooses the unanchored case id |
+| AU-13 | `ConsolidateCase` has no authority check: any funded account attaches one stranger's case to another's and moves the second to `Consolidated` | Legal 1 | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `legal_authorization_enabled_from_height`, implemented and dormant | arm `crates/state/src/legal_executor.rs:273`; guards only case existence `:281` and related-case existence `:284`; pinned by `consolidate_case_has_no_authority_check` | contrast `CloseCase`, which does check |
+| AU-14 | `TransferCase` has no authority check | Legal 2 | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `legal_authorization_enabled_from_height`, implemented and dormant | arm `crates/state/src/legal_executor.rs:302`; only guard is case existence `:310`; pinned by `transfer_case_has_no_authority_check` | as above |
+| AU-15 | `SupersedeOrder` has no authority check **and** no duplicate guard, so a stranger supersedes an order and overwrites a different existing order by reusing its id in the same transaction | Legal 3 | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `legal_authorization_enabled_from_height`, implemented and dormant | arm `crates/state/src/legal_executor.rs:550`; only guard is old-order existence `:559`; `v_put_order(&d.new_order)` at `:577` with no existence check; pinned by `supersede_order_overwrites_an_existing_order_without_a_guard` | both halves reachable from one transaction |
+| AU-16 | `SupersedeEvent` does not verify the new event's case exists, creating a dangling case→event index entry | Legal 4 | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `legal_authorization_enabled_from_height`, implemented and dormant | arm `crates/state/src/legal_executor.rs:378`; guard `:387` only; stored at `:404` with no `v_get_case` (contrast `RecordEvent` at `:336`); pinned by `supersede_event_indexes_under_a_case_that_need_not_exist` | attacker chooses the unanchored case id |
 | AU-17 | Legal `VerifyProof` verifies nothing, for a payload that is not even a proof id | Legal 5 | **REACHABLE** | none | arm `crates/state/src/legal_executor.rs:768`, body `:770-774`; pinned by `verify_proof_verifies_nothing_and_still_charges_the_fee` | see Class 5 |
 
 ### Tax
 
 | id | defect | source | verdict | gate | evidence | justification |
 |---|---|---|---|---|---|---|
-| AU-18 | Anyone self-registers an ACTIVE issuer with an arbitrary class, `TaxAuthority` included, and then issues claims | Tax 1 | **REACHABLE** | none | arm `crates/state/src/tax_executor.rs:117`; guards are `issuer.address != *sender` `:121` and "already registered" `:125`; `tax_class` and `status` come from the payload (`crates/sumchain-wire/src/tax.rs:413, 425`), and `TaxIssuerClass::TaxAuthority` is a plain variant at `crates/sumchain-wire/src/tax.rs:314` | the registry authorizes nothing it does not take from the applicant |
-| AU-19 | Claim-type registration, update and deprecation have no authority check | Tax 2 | **REACHABLE** | none | arms `crates/state/src/tax_executor.rs:67`, `:83`, `:98`; all three guard only on row presence or absence | no sender comparison and no issuer row consulted |
+| AU-18 | Anyone self-registers an ACTIVE issuer with an arbitrary class, `TaxAuthority` included, and then issues claims | Tax 1 | **REACHABLE** | none. **BLOCKED, STRUCTURAL -- the registry authorizes nothing it does not take from the applicant, and no `ChainParams` field names a tax registrar. Needs a registrar the chain does not have** | arm `crates/state/src/tax_executor.rs:117`; guards are `issuer.address != *sender` `:121` and "already registered" `:125`; `tax_class` and `status` come from the payload (`crates/sumchain-wire/src/tax.rs:413, 425`), and `TaxIssuerClass::TaxAuthority` is a plain variant at `crates/sumchain-wire/src/tax.rs:314` | the registry authorizes nothing it does not take from the applicant |
+| AU-19 | Claim-type registration, update and deprecation have no authority check | Tax 2 | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `tax_authorization_enabled_from_height`, implemented and dormant | arms `crates/state/src/tax_executor.rs:67`, `:83`, `:98`; all three guard only on row presence or absence | no sender comparison and no issuer row consulted |
 | AU-20 | Tax `VerifyProof` performs no verification: it charges the fee and reports success | Tax 6 | **REACHABLE** | none | arm `crates/state/src/tax_executor.rs:275`, body `:277-281` | see Class 5 |
 
 ### Finance
 
 | id | defect | source | verdict | gate | evidence | justification |
 |---|---|---|---|---|---|---|
-| AU-21 | Any sender self-registers as any finance issuer class, `CentralBank` included, and attests KYC in the same block | Finance 1 | **REACHABLE** | none | arm `crates/state/src/finance_executor.rs:148`; guards `:152` (profile names sender) and `:156` (duplicate); `issuer_class` deserialized from the payload at `:149` | source-only in the blocker document; established here from source |
-| AU-22 | `UpdateIssuer` accepts any status the sender asks for, `Active` from `Revoked` included — the guard `ReactivateIssuer` exists to enforce, walked around | Finance 2 | **REACHABLE** | none | arm `crates/state/src/finance_executor.rs:169`; status taken from payload `:171-175`, applied `:190` with no current-status check; contrast `ReactivateIssuer`'s Suspended-only guard at `:234` | as above |
-| AU-23 | Update and revoke paths never recheck the issuer, so a REVOKED issuer keeps full control of everything it ever issued | Finance 3 | **REACHABLE** | none | arms `crates/state/src/finance_executor.rs:294`, `:357`, `:383`, `:451`, `:477` with guards `:304`, `:370`, `:396`, `:464`, `:490` — none calls `v_get_issuer`; creation paths do, at `:259`, `:330`, `:423` | the asymmetry is exact and specific |
-| AU-24 | `UpdateIssuer`'s `issuer.issuer_address != *sender` check is a no-op | Finance 4 | **REACHABLE** | none | row fetched by sender key at `crates/state/src/finance_executor.rs:177`, compared at `:182`; rows keyed by `issuer_address` at `crates/state/src/finance_view.rs:98`; registration forces equality at `:152` | the comparison is structurally unable to fire |
-| AU-25 | `SubmitProof` has no authority check at all — no issuer, no credential reference validation, no signature | Finance 6 | **REACHABLE** | none | arm `crates/state/src/finance_executor.rs:511`; only guard is duplicate proof id `:515` | anyone who pays writes any proof envelope |
+| AU-21 | Any sender self-registers as any finance issuer class, `CentralBank` included, and attests KYC in the same block | Finance 1 | **REACHABLE** | none. **BLOCKED, STRUCTURAL -- same shape as AU-18, for finance issuer classes** | arm `crates/state/src/finance_executor.rs:148`; guards `:152` (profile names sender) and `:156` (duplicate); `issuer_class` deserialized from the payload at `:149` | source-only in the blocker document; established here from source |
+| AU-22 | `UpdateIssuer` accepts any status the sender asks for, `Active` from `Revoked` included — the guard `ReactivateIssuer` exists to enforce, walked around | Finance 2 | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `finance_authorization_enabled_from_height`, implemented and dormant | arm `crates/state/src/finance_executor.rs:169`; status taken from payload `:171-175`, applied `:190` with no current-status check; contrast `ReactivateIssuer`'s Suspended-only guard at `:234` | as above |
+| AU-23 | Update and revoke paths never recheck the issuer, so a REVOKED issuer keeps full control of everything it ever issued | Finance 3 | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `finance_authorization_enabled_from_height`, implemented and dormant | arms `crates/state/src/finance_executor.rs:294`, `:357`, `:383`, `:451`, `:477` with guards `:304`, `:370`, `:396`, `:464`, `:490` — none calls `v_get_issuer`; creation paths do, at `:259`, `:330`, `:423` | the asymmetry is exact and specific |
+| AU-24 | `UpdateIssuer`'s `issuer.issuer_address != *sender` check is a no-op | Finance 4 | **REACHABLE** | none. **NOTED -- a dead check, not a hole: the row is fetched BY the sender key and registration forces the equality the comparison later tests, so the comparison cannot fire and removing it would close nothing** | row fetched by sender key at `crates/state/src/finance_executor.rs:177`, compared at `:182`; rows keyed by `issuer_address` at `crates/state/src/finance_view.rs:98`; registration forces equality at `:152` | the comparison is structurally unable to fire |
+| AU-25 | `SubmitProof` has no authority check at all — no issuer, no credential reference validation, no signature | Finance 6 | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `finance_authorization_enabled_from_height`, implemented and dormant | arm `crates/state/src/finance_executor.rs:511`; only guard is duplicate proof id `:515` | anyone who pays writes any proof envelope |
 | AU-26 | Finance `VerifyProof` succeeds for a proof id that does not exist | Finance 7 | **REACHABLE** | none | arm `crates/state/src/finance_executor.rs:528`, body `:530-534` | see Class 5 |
 
 ### Employment
 
 | id | defect | source | verdict | gate | evidence | justification |
 |---|---|---|---|---|---|---|
-| AU-27 | Only `CreateEmployment` and `CreateIncomeAttestation` require an active issuer; every mutation checks only the recorded issuer, so a suspended or revoked issuer keeps full control of everything it ever issued | Employment 4 | **REACHABLE** | none | active-issuer checks at `crates/state/src/employment_executor.rs:249-256` and `:422-429` only; mutation guards at `:311`, `:342`, `:372`, `:402`, `:472`; pinned by `a_suspended_issuer_can_still_revoke_but_not_create` | the pinning test's name states the asymmetry exactly |
-| AU-28 | `UpdateIssuer`'s `issuer.issuer_address != *sender` cannot fire | Employment 5 | **REACHABLE** | none | row fetched by sender at `crates/state/src/employment_executor.rs:177`, compared `:182`; equality forced at registration `:141` | the one item of the eleven the source message states without a test; confirmed here from source |
+| AU-27 | Only `CreateEmployment` and `CreateIncomeAttestation` require an active issuer; every mutation checks only the recorded issuer, so a suspended or revoked issuer keeps full control of everything it ever issued | Employment 4 | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `employment_authorization_enabled_from_height`, implemented and dormant | active-issuer checks at `crates/state/src/employment_executor.rs:249-256` and `:422-429` only; mutation guards at `:311`, `:342`, `:372`, `:402`, `:472`; pinned by `a_suspended_issuer_can_still_revoke_but_not_create` | the pinning test's name states the asymmetry exactly |
+| AU-28 | `UpdateIssuer`'s `issuer.issuer_address != *sender` cannot fire | Employment 5 | **REACHABLE** | none. **NOTED -- identical to AU-24, in Employment** | row fetched by sender at `crates/state/src/employment_executor.rs:177`, compared `:182`; equality forced at registration `:141` | the one item of the eleven the source message states without a test; confirmed here from source |
 | AU-29 | Employment `VerifyProof` charges the fee, advances the nonce and verifies nothing — not even that the proof exists | Employment 6 | **REACHABLE** | none | arm `crates/state/src/employment_executor.rs:506`, body `:508-512`; pinned by `verify_proof_charges_a_fee_and_verifies_nothing` | see Class 5 |
 
 ### Property
 
 | id | defect | source | verdict | gate | evidence | justification |
 |---|---|---|---|---|---|---|
-| AU-30 | `MergeAssets` checks nothing about the sender: any account merges two assets it did not issue, marking the secondary `Merged` | Property §missing authorization | **REACHABLE** | none | arm `crates/state/src/property_executor.rs:252`; guards `:261`, `:264` are both existence only; pinned by `three_operations_check_no_authority_at_all` | — |
-| AU-31 | `SupersedeTitleEvent` checks nothing about the sender: any account supersedes any title event and records a replacement naming itself | Property §missing authorization | **REACHABLE** | none | arm `crates/state/src/property_executor.rs:393`; guard `:402` only; same pinning test | — |
-| AU-32 | Property `SubmitProof` checks nothing about the sender and verifies nothing about the proof; the only guard is duplicate id | Property §missing authorization | **REACHABLE** | none | arm `crates/state/src/property_executor.rs:1019`; guard `:1023`; same pinning test | see Class 5 |
+| AU-30 | `MergeAssets` checks nothing about the sender: any account merges two assets it did not issue, marking the secondary `Merged` | Property §missing authorization | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `property_authorization_enabled_from_height`, implemented and dormant | arm `crates/state/src/property_executor.rs:252`; guards `:261`, `:264` are both existence only; pinned by `three_operations_check_no_authority_at_all` | — |
+| AU-31 | `SupersedeTitleEvent` checks nothing about the sender: any account supersedes any title event and records a replacement naming itself | Property §missing authorization | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `property_authorization_enabled_from_height`, implemented and dormant | arm `crates/state/src/property_executor.rs:393`; guard `:402` only; same pinning test | — |
+| AU-32 | Property `SubmitProof` checks nothing about the sender and verifies nothing about the proof; the only guard is duplicate id | Property §missing authorization | **REACHABLE** | none. **BLOCKED, STRUCTURAL -- `PropertyProofEnvelope` carries no issuer address and Property has no issuer registry at all (no `v_get_issuer` in `property_executor.rs` or `property_view.rs`)** | arm `crates/state/src/property_executor.rs:1019`; guard `:1023`; same pinning test | see Class 5 |
 
 ### DocClass — the identity and credential subsystem
 
 | id | defect | source | verdict | gate | evidence | justification |
 |---|---|---|---|---|---|---|
 | AU-33 | No signature is ever verified anywhere in DocClass; the revocation record the executor builds sets `signature: [0u8; 64]` on every path | DocClass §missing authorization | **REACHABLE** | none | `crates/state/src/docclass_executor.rs:906, 974, 1046, 1113`; no `verify`/`ed25519` call in the file; `issuer_signature` appears only in test literals at `:1636, 1738, 1864` | every signature field in the subsystem is decorative |
-| AU-34 | A registered issuer rewrites its own registry row wholesale — subcodes, jurisdictions, status and declared stake all from the payload — so it grants itself any subcode, declares any stake for free, and a SUSPENDED issuer restores itself to `Active` with one `UpdateIssuer` | DocClass §missing authorization | **REACHABLE** | none | arm `crates/state/src/docclass_executor.rs:232` → `:1211`; guards `:1223`, `:1227` only; wholesale write `:1236`; `min_issuer_stake` checked only at registration `:1184-1188`; `can_issue()` at `crates/state/src/docclass_view.rs:517`; pinned by `an_issuer_can_grant_itself_any_subcode_and_any_stake_by_updating_itself` and `a_suspended_issuer_can_still_revoke_and_update_itself` | suspension is self-reversible |
+| AU-34 | A registered issuer rewrites its own registry row wholesale — subcodes, jurisdictions, status and declared stake all from the payload — so it grants itself any subcode, declares any stake for free, and a SUSPENDED issuer restores itself to `Active` with one `UpdateIssuer` | DocClass §missing authorization | **REACHABLE** | none today. **PARTLY REMEDIED, PENDING FIELD:** `docclass_stake_escrow_enabled_from_height (the STAKE half only: `UpdateIssuer` can no longer restate the recorded amount. The subcode, jurisdiction and self-reactivation halves are untouched)` | arm `crates/state/src/docclass_executor.rs:232` → `:1211`; guards `:1223`, `:1227` only; wholesale write `:1236`; `min_issuer_stake` checked only at registration `:1184-1188`; `can_issue()` at `crates/state/src/docclass_view.rs:517`; pinned by `an_issuer_can_grant_itself_any_subcode_and_any_stake_by_updating_itself` and `a_suspended_issuer_can_still_revoke_and_update_itself` | suspension is self-reversible |
 | AU-35 | Nothing binds a `subject_commitment` to anybody: any funded account anchors an identity root claiming any subject, with any status, timestamps and schema hash, all from the payload | DocClass §missing authorization | **REACHABLE** | none | `crates/state/src/docclass_executor.rs:278-293` stores the deserialized struct verbatim after one check (`controller == sender`, `:281`); `subject_commitment` only copied into events at `:771, 819`; pinned by `an_identity_root_is_stored_exactly_as_the_sender_supplied_it` | this is also what arms BD-6 |
-| AU-36 | The revocation family never consults the issuer registry, so a suspended or revoked issuer can still revoke, suspend, reactivate and supersede its credentials | DocClass §missing authorization | **REACHABLE** | none | arms `crates/state/src/docclass_executor.rs:870, 938, 1006, 1077` all authorize through `check_revoke_auth` at `:1144-1156`, which reads only the row's `issuer` field; no `v_get_docclass_issuer` / `v_can_issue_subcode` in that family | — |
+| AU-36 | The revocation family never consults the issuer registry, so a suspended or revoked issuer can still revoke, suspend, reactivate and supersede its credentials | DocClass §missing authorization | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `docclass_revocation_standing_enabled_from_height`, implemented and dormant | arms `crates/state/src/docclass_executor.rs:870, 938, 1006, 1077` all authorize through `check_revoke_auth` at `:1144-1156`, which reads only the row's `issuer` field; no `v_get_docclass_issuer` / `v_can_issue_subcode` in that family | — |
 | AU-37 | `DocClassParams.require_issuer_stake`, `initial_issuers` and `max_credential_validity` are declared, defaulted and read by no execution path, while the RPC reports `require_issuer_stake: true` and a ten-year `max_credential_validity` as hardcoded literals | DocClass §missing authorization | **REACHABLE** | none | declarations `crates/genesis/src/lib.rs:763, 766, 769, 785-787`; RPC literals `crates/rpc/src/server.rs:4015-4016`; the only params field execution reads is `min_issuer_stake` at `crates/state/src/docclass_executor.rs:1184` | an operator querying the node is told about rules the chain does not apply |
 
 The two DocClass checks that do bite are recorded so the gap is not overstated:
@@ -505,7 +586,7 @@ live executor arm.
 | OV-15 | NFT removal is asymmetric: emptying an owner's list DELETES the row, emptying a collection's list WRITES an empty list | NFT §index shape | **REACHABLE** | none | `crates/state/src/nft_view.rs:205-207` vs `:253, 262-268`; pinned by `removal_is_asymmetric_between_the_two_indexes` and `burning_the_last_token_deletes_one_index_row_and_writes_the_other_empty` | — |
 | OV-16 | NFT `next_token_id` never goes back: a burn decrements `total_supply` with `saturating_sub` and leaves `next_token_id`, so a collection with `max_supply` can be permanently exhausted by minting and burning | NFT §index shape | **REACHABLE** | none | increments `crates/state/src/nft_executor.rs:392` (`+= 1`) and `:467` (`+= count`); burn touches only `total_supply` at `crates/state/src/nft_view.rs:317`; pinned by `a_burn_after_a_mint_in_one_block_moves_every_mirror_row_together` | note on the plain `+=`: `Cargo.toml:138-141` sets no `overflow-checks` for `[profile.release]`, so a release binary wraps rather than panics — with `panic = "abort"` at `:141`, a debug build would take the node down instead |
 | OV-17 | Healthcare `RenewMembership` sets status `Active` unconditionally, so a membership terminated a transaction earlier is active again by the end of the block | Healthcare §invalid transition | **REACHABLE** | none | arm `crates/state/src/healthcare_executor.rs:411`, issuer guard `:425`, then `v_renew_membership` writes `status = Active` at `crates/state/src/healthcare_view.rs:356` with no prior-status check; pinned by `renewing_a_terminated_membership_makes_it_active_again` | — |
-| OV-18 | Healthcare fill guard is `refills_remaining == 0 && status != Active`, so a prescription authorizing ZERO refills whose status is `Active` passes and is filled once more | Healthcare §invalid transition | **REACHABLE** | none | `crates/state/src/healthcare_executor.rs:790` — the conjunction is the defect; pinned by `a_prescription_with_no_refills_but_active_status_can_be_filled_once_more` | compounds AU-2 (anyone may fill) and TS-8 (validity evaluated at time zero) |
+| OV-18 | Healthcare fill guard is `refills_remaining == 0 && status != Active`, so a prescription authorizing ZERO refills whose status is `Active` passes and is filled once more | Healthcare §invalid transition | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `healthcare_authorization_enabled_from_height`, implemented and dormant | `crates/state/src/healthcare_executor.rs:790` — the conjunction is the defect; pinned by `a_prescription_with_no_refills_but_active_status_can_be_filled_once_more` | compounds AU-2 (anyone may fill) and TS-8 (validity evaluated at time zero) |
 | OV-19 | Healthcare `is_controlled` is read in exactly one place, covering exactly one status value: `UpdatePrescription` refuses `TransferRequested`; the same prescription can be filled, held, released and cancelled like any other | Healthcare §invalid transition | **REACHABLE** | none | sole production read `crates/state/src/healthcare_executor.rs:753`; the only other repo occurrence is a test fixture at `crates/storage/src/healthcare_store.rs:1151`; pinned by `the_controlled_substance_guard_covers_only_the_transfer_status` | with AU-2, the controlled-substance handling is a single status check |
 | OV-20 | Healthcare `RemoveNetworkAffiliation` writes the index unconditionally, so removing an affiliation the provider never had creates an empty list row where there was none and rewrites the provider row with a bumped `updated_at`; `RemoveDependent` is likewise unconditional | Healthcare §invalid transition | **REACHABLE** | none | `crates/state/src/healthcare_view.rs:224-241` (contrast the `contains`-gated add at `:200-219`) and `:400-420`; pinned by `removing_an_affiliation_that_was_never_there_still_writes_an_empty_index` and `..._still_stages_an_empty_index` | with AU-4 (no issuer check) this is an attacker-driven row-creation primitive |
 | OV-21 | Property: only `ReinstateCoverage`, `PayClaim` and `ReopenClaim` guard on the state they read; every other transition applies from any prior status | Property §invalid transition | **REACHABLE** | none | arms in `crates/state/src/property_executor.rs`; guarded exceptions only | a `Deregistered` asset returns to `Active`; a `Paid` claim moves anywhere |
@@ -513,7 +594,7 @@ live executor arm.
 | OV-23 | DocClass revocation is reversible: revoke, then suspend, then reactivate returns a revoked credential to `Active`, and the mirrored `revocation_status` follows | DocClass §revocation lifecycle | **REACHABLE** | none | `suspend_credential` at `crates/state/src/docclass_executor.rs:938` has no current-status guard (only auth at `:957`); `reactivate_credential`'s `status != Suspended` check at `:1027` then passes and writes `Active` at `:1040`; pinned by `a_revoked_credential_can_be_suspended_and_then_reactivated` | three ordinary transactions by the recorded issuer, which AU-34 shows can be a self-restored suspended issuer |
 | OV-24 | DocClass revocation records are keyed by `credential_id ‖ revoked_at_height`, so two records for one credential at one height are one row and the later write silently replaces the earlier | DocClass §revocation lifecycle | **REACHABLE** | none | `v_put_revocation_record` keys via `revocation_key` at `crates/state/src/docclass_view.rs:415`, defined `credential_id ‖ height_be` at `crates/storage/src/docclass_store.rs:92-97`; pinned by `two_revocations_at_one_height_are_one_row` | a revoke and a reactivation in the same block leave one record |
 | OV-25 | DocClass `UpdateCredential` charges the fee, advances the nonce and writes nothing at all — not the credential, not an event | DocClass §revocation lifecycle | **REACHABLE** | none | arm `crates/state/src/docclass_executor.rs:175` → `:830`; after the auth check at `:845-856` it deducts, credits and increments at `:858-860` and returns at `:862` with no `v_put_*`; pinned by `update_credential_charges_a_fee_and_writes_nothing` | — |
-| OV-26 | The DocClass registration stake is deducted from the sender and paid to nobody: `RegisterIssuer` deducts `fee + stake_amount` and credits only `fee`; `DeactivateIssuer` refunds nothing and `UpdateIssuer` can raise the recorded stake without moving balance | DocClass §the registration stake | **REACHABLE** | none | `crates/state/src/docclass_executor.rs:1190` computes `fee.saturating_add(issuer.stake_amount)`, `:1191` deducts it, `:1192` credits the proposer only `fee`; no escrow row written; pinned by `the_registration_stake_is_deducted_from_the_sender_and_paid_to_nobody` | tokens are destroyed, which is a supply effect and not only a user-facing loss |
+| OV-26 | The DocClass registration stake is deducted from the sender and paid to nobody: `RegisterIssuer` deducts `fee + stake_amount` and credits only `fee`; `DeactivateIssuer` refunds nothing and `UpdateIssuer` can raise the recorded stake without moving balance | DocClass §the registration stake | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `docclass_stake_escrow_enabled_from_height`, implemented and dormant | `crates/state/src/docclass_executor.rs:1190` computes `fee.saturating_add(issuer.stake_amount)`, `:1191` deducts it, `:1192` credits the proposer only `fee`; no escrow row written; pinned by `the_registration_stake_is_deducted_from_the_sender_and_paid_to_nobody` | tokens are destroyed, which is a supply effect and not only a user-facing loss |
 | OV-27 | DocClass `IssueCredential` selects its family by trial decode: `AcademicCredential` first, `EligibilityAttestation` on failure, first error discarded; the tx envelope's `DocSubcode` is not consulted | DocClass §family selection | **REACHABLE** | none | `crates/state/src/docclass_executor.rs:683-716`; pinned by `issue_credential_picks_its_family_by_trying_to_decode_and_falling_through` | "the two schemas do not currently cross-decode, and nothing enforces that they never will" — the risk is a future schema change, which is a release-process hazard rather than a today-exploitable one |
 | OV-28 | Agreement: a signature naming a party not bound to the agreement is stored anyway and rewrites the agreement row while flipping no flag | Agreement §overwrite | **REACHABLE** | none | arm `crates/state/src/agreement_executor.rs:275`; pinned by `a_signature_for_a_party_outside_the_agreement_is_still_recorded` | — |
 | OV-29 | Agreement `RevokeSignature` deletes the signature row and leaves the party's `signed` flag set, so an `Executed` agreement stays executed with a signature gone; no path recomputes the status | Agreement §overwrite | **REACHABLE** | none | arm `crates/state/src/agreement_executor.rs:303` → `v_delete_signature` deletes only the `AGREEMENT_SIGNATURES` row (`crates/state/src/agreement_view.rs:242-248`); `signed`/`signed_at` set at `:182-183` is never cleared and the `Executed` promotion at `:191` is never reversed; pinned by `revoking_a_signature_leaves_the_party_marked_signed` | — |
@@ -553,7 +634,8 @@ root; the rows the receipts were computed from are not.
 
 ### The four designated blockers, answered directly
 
-  1. **NFT permissionless block-level denial** — **REACHABLE.** Rows BD-1 to
+  1. **NFT permissionless block-level denial** — **REACHABLE**, and
+     **REMEDIED, PENDING FIELD.** Rows BD-1 to
      BD-5. Twenty-one `StateError::BlockValidation` sites in
      `crates/state/src/nft_executor.rs`, propagated by `?` at
      `crates/state/src/executor.rs:504` and again at `:3140` inside
@@ -565,7 +647,8 @@ root; the rows the receipts were computed from are not.
      byte string bincode cannot decode, at `min_fee: 1000`. **A
      release-configured node dispatches these paths at height 0 and at every
      height, under both readings of the configuration.**
-  2. **DocClass registration destroying stake** — **REACHABLE.** Row OV-26.
+  2. **DocClass registration destroying stake** — **REACHABLE**, and
+     **REMEDIED, PENDING FIELD.** Row OV-26.
      `crates/state/src/docclass_executor.rs:1190-1192`: `fee + stake_amount`
      deducted from the sender, `fee` alone credited to the proposer, no escrow
      row written, no refund path. `RegisterIssuer` is a live arm of an ungated
@@ -584,6 +667,48 @@ root; the rows the receipts were computed from are not.
      reproduces the previous halt's shape. OC-3, the remainder of the designated
      inventory, is **UNDETERMINED**: I could not find thirteen sites in this
      worktree and will not report a count I cannot cite.
+
+### OC-2: the change required, in files this track does not own
+
+OC-2 is the one designated blocker with the previous halt's exact shape, and it
+cannot be remedied from the subsystem executors. The writing path is
+`crates/node/src/main.rs`, which belongs to another track. The required change
+is stated here precisely rather than attempted:
+
+  * **The symptom.** `ImportRegisteredKeys` (`crates/node/src/main.rs:257-270`,
+    write loop `:1073-1084`) calls `MessagingStore::set_public_key`
+    (`crates/storage/src/messaging_store.rs:908`), which writes
+    `cf::MESSAGING_PUBLIC_KEYS` through `Database::put` — outside any candidate
+    and outside block execution. That family **is** read by consensus:
+    `crates/state/src/messaging_executor.rs:321` (a `SendMessage` requires a
+    registered key), `:750` (the `RegisterPublicKey` duplicate guard), and
+    `crates/state/src/executor.rs:2030` (the sponsored-registration duplicate
+    guard). Two nodes given different imports therefore produce different
+    receipts for identical blocks, and receipts are folded into the state root
+    at `crates/state/src/executor.rs:3633-3637`. That is a fork, produced by an
+    operator command, with no consensus event to explain it.
+  * **Why the OC-1 argument does not apply.** The startup backfill writes
+    `MESSAGING_SENDER_EVENTS` and `MESSAGING_PAYMENTS_BY_RECIPIENT`, which no
+    executor reads. `MESSAGING_PUBLIC_KEYS` is read by three execution sites.
+    The distinction is the whole verdict.
+  * **What the node track must do.** Either (a) delete the subcommand, or
+    (b) make the import refuse unless the node is at genesis height with an
+    empty `MESSAGING_PUBLIC_KEYS` family — a restore path rather than a
+    mutation path — and have it record a marker the node reports at startup and
+    on every RPC health response, so an operator can see that this node's
+    messaging state did not come from its own execution. Option (b) is only
+    safe with the refusal: an import into a node that has already executed
+    blocks is unrecoverable by any means short of resync, because there is no
+    record of which keys were imported and which were registered.
+  * **What this track can offer from `crates/storage`.** Nothing that helps
+    without (a) or (b). `MessagingStore::set_public_key` cannot tell an operator
+    import from the execution path, because the execution path does not go
+    through it — `crates/state/src/messaging_view.rs` writes the family through
+    the candidate. So the guard has to live at the caller, in
+    `crates/node/src/main.rs`. Narrowing the store method's visibility would
+    move the problem rather than solve it.
+  * **Until one of those lands, OC-2 stays REACHABLE and consensus-divergent**,
+    and is counted as blocking.
 
 ## Class 10 — The rows where a gate actually decides the answer
 
@@ -639,6 +764,42 @@ both readings of the release configuration:
 
 **Blocking = REACHABLE + UNDETERMINED = 121 of 137, under both readings.**
 
+### The count after the remediation pass, derived rather than asserted
+
+| | at the audit | after remediation |
+|---|---|---|
+| REACHABLE | 118 | **118** |
+| GATED OFF | 3 | **3** |
+| UNREACHABLE | 13 | **13** |
+| UNDETERMINED | 3 | **3** |
+| **blocking (REACHABLE + UNDETERMINED)** | **121** | **121** |
+
+**Unchanged, and the reason is the whole point.** Twenty-four rows now carry a
+remedy that is implemented, reachable through a named seam and covered by tests
+that show an ungated node and a gated node disagreeing, and two more carry half
+of one. Every one of those
+remedies sits behind an activation height whose `ChainParams` field does not
+exist, because `crates/genesis` belongs to another track. An absent
+`#[serde(default)] Option<u64>` resolves to `None`; `None` closes the gate;
+a closed gate means a release-configured node executes exactly the code it
+executed before. Nothing became unreachable, so nothing stops blocking.
+
+The arithmetic that WOULD move, stated so the next pass can check it: when the
+ten fields in the table above are added to `ChainParams` and set to a height in
+the deployed runtime `genesis.json`, twenty-four rows move from REACHABLE to
+GATED OFF — the remediated behaviour becomes the behaviour — and the blocking
+count falls from 121 to 97. AU-3 and AU-34 do NOT move, because only part of
+each is remedied and the rest is still reachable; a row is GATED OFF only when
+the whole of it is. Until the fields land and an operator sets them the count is
+121, and reporting 97 before then would be the exact failure this document was
+written to prevent.
+
+Six further rows are **BLOCKED, STRUCTURAL** (AU-9, AU-10, AU-11, AU-18, AU-21,
+AU-32): no guard can close them, because the subsystem records no address, no
+registry and no signature to authorize against. They need wire or registry
+changes in `crates/sumchain-wire` and `ChainParams`, and they are REACHABLE and
+blocking with or without the ten fields.
+
 Only three rows in the entire inventory are decided by a gate, and only two of
 those are gated under both readings. The eleven subsystems the blocker document
 covers have no activation gate of any kind: there is no `nft_enabled_from_height`,
@@ -650,6 +811,11 @@ of their dispatch arms (`crates/state/src/executor.rs:494, 692, 755, 795, 868,
 
 **That is the finding.** This release does not gate these subsystems off. It
 ships them.
+
+The remediation pass changes what is available, not what is shipped: ten
+activation gates now exist in the executors, dormant, waiting for ten
+`ChainParams` fields. Until those fields exist and an operator sets them, the
+sentence above is still true word for word.
 
 ## Prioritised blocking list
 
@@ -829,3 +995,33 @@ consensus is the receipt, not the row.** That is what makes JR-1 benign and OC-1
 survivable; it is also why OC-2 is dangerous, since a divergent row changes a
 receipt. It is not in the audited classes and is not counted, but a reader of
 this table should know it.
+
+## Appendix — where each remediation lives, and the test that governs it
+
+Every row below is REACHABLE in the release configuration and stays blocking.
+This table says only what exists in the tree to close it once its field lands.
+
+| row(s) | change | test |
+|---|---|---|
+| BD-1..BD-5 | `NftExecutor::execute_with_gate` converts `BlockValidation` and `InsufficientBalance` into a `Failed` receipt at the entry boundary; every error site in `nft_executor.rs` fires strictly before its own function's first write, checked site by site, so nothing is half-applied. Storage and encoding errors are deliberately not converted | `an_absent_collection_aborts_the_block_below_the_gate_and_is_a_receipt_above_it`, `every_block_denial_shape_becomes_a_receipt_at_the_gate_and_only_at_the_gate`, `an_in_block_insufficient_balance_aborts_below_the_gate_and_advances_the_nonce_above_it`, `an_ungated_node_cannot_execute_the_block_a_gated_node_roots` |
+| BD-6 | the identity subject index moves to a tagged 33-byte key no 32-byte legacy key can equal (`subject_identity_index_key`, `crates/storage/src/docclass_store.rs`); reads try the tagged key and fall back to the legacy one, so pre-activation rows are still found | `a_colliding_subject_commitment_ends_the_block_below_the_gate_and_is_harmless_above_it`, `an_identity_indexed_before_the_split_is_still_found_after_it` |
+| OV-26 | the stake is credited to `docclass_stake_escrow_address()`, a keyless account derived the way `gov_escrow_address` is; `DeactivateIssuer` returns it exactly once; `UpdateIssuer` may no longer restate the recorded amount | `a_registration_stake_is_destroyed_below_the_gate_and_escrowed_above_it`, `deactivation_refunds_the_escrowed_stake_once_and_only_at_the_gate`, `an_update_cannot_inflate_the_recorded_stake_at_the_gate` |
+| AU-1, AU-3 (revoke), AU-2, AU-4, AU-5, OV-18 | the Healthcare authorization rules, in `HealthcareGates` | `any_sender_can_supersede_any_consent_below_the_gate_and_none_can_above_it`, `the_issuer_may_still_supersede_but_cannot_move_the_subject_at_the_gate`, `the_subject_can_revoke_its_own_consent_only_at_the_gate`, `a_stranger_can_fill_any_prescription_below_the_gate_and_none_above_it`, `a_stranger_can_change_network_affiliations_only_below_the_gate`, `a_prescription_naming_another_issuers_prescriber_is_refused_only_at_the_gate`, `a_prescription_with_no_refills_is_filled_once_more_below_the_gate_only` |
+| AU-13..AU-16 | the Legal authority checks, in `LegalGates`; supersession also requires the sender to issue the replacement and the replacement's id to be free | `consolidate_and_transfer_lose_their_authority_gap_at_the_gate`, `a_supersession_cannot_overwrite_another_live_order_at_the_gate`, `a_superseded_event_must_name_a_case_that_exists_at_the_gate` |
+| AU-22, AU-23, AU-25 | the Finance issuer-standing rules, in `FinanceGates` | `a_suspended_finance_issuer_keeps_control_below_the_gate_and_loses_it_above`, `update_issuer_cannot_walk_around_reactivate_at_the_gate`, `submit_proof_requires_a_registered_active_issuer_at_the_gate` |
+| AU-27 | the Employment issuer-standing rule, in `EmploymentGates` | `a_suspended_employment_issuer_loses_its_mutations_only_at_the_gate`, `an_active_employment_issuer_is_unaffected_by_the_standing_rule` |
+| AU-30, AU-31 | the Property authority checks, in `PropertyGates` | `a_stranger_can_merge_assets_it_did_not_issue_only_below_the_gate`, `a_stranger_cannot_rewrite_a_title_history_at_the_gate` |
+| AU-19 | the Tax claim-type authority check, in `TaxGates` | `the_claim_type_registry_is_writable_by_anyone_only_below_the_gate` |
+| AU-36 | `check_revoke_auth` consults the issuer registry — the status question only, so an issuer whose authorization was narrowed can still withdraw what it validly issued | `a_suspended_issuer_keeps_the_revocation_family_only_below_the_gate` |
+
+### Rows this pass looked at and did not close
+
+| row(s) | why |
+|---|---|
+| AU-9, AU-10, AU-11 | `AgreementCommitment` carries no address at all, and `PartyRef` is a 32-byte commitment or a 32-byte subject id. There is nothing in the subsystem to compare a sender to, so no guard can be written. Needs an `Address` on the commitment (or an address-bearing `PartyRef` variant) in `crates/sumchain-wire/src/agreement.rs`; AU-10 additionally needs a canonical signing input the subsystem does not define |
+| AU-3 (grant half) | a consent's subject cannot participate in GRANTING without a signature `ConsentEnvelope` does not carry. The revocation half is remediated; the grant half is a wire change |
+| AU-18, AU-21 | the tax and finance registries authorize nothing they do not take from the applicant, and no `ChainParams` field names a registrar for either. Inventing one inside an executor would be a rule nobody set |
+| AU-32 | `PropertyProofEnvelope` carries no issuer address and Property has no issuer registry at all |
+| AU-24, AU-28 | dead checks, not holes: the row is fetched BY the sender key and registration forces the equality the comparison later tests, so neither can fire. Removing them would be tidier and would close nothing |
+| TS-1..TS-11 | the timestamp half is one change in `crates/state/src/executor.rs`'s dispatch arms; the `tx_index` half (TS-10, which silently destroys data rather than only mis-stamping it) additionally needs a `tx_index` parameter threaded through `execute_tx_with_validators`, whose signature is shared plumbing rather than subsystem code. Not attempted, so that a signature change on the shared dispatch is a deliberate decision by whoever owns it |
+| Class 4, Class 5, Class 6, Class 7, and the rest of Class 8 | untouched by this pass. They are ordered below Class 3 in severity and the pass ran out of runway before them, which is recorded here rather than left to be inferred from silence |
