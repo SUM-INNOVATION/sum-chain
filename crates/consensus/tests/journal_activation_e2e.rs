@@ -437,3 +437,115 @@ async fn the_pinned_height_decides_whether_a_reorg_halts_or_falls_back() {
         );
     }
 }
+
+/// The activation checkpoint fires through `PoAEngine::import_block` itself, on
+/// a two-deep switch whose abandoned branch reaches below a pinned boundary.
+///
+/// The refusal is proven at `execute_reorg` elsewhere
+/// (`reorg/a_reorg_crossing_the_checkpoint_is_refused_by_the_real_reorg_driver`),
+/// and the engine is proven to derive its journal and policy from `ChainParams`
+/// by the test above. This closes the composition of the two: a block arrives
+/// over the network, fork choice picks it, and the switch is refused with the
+/// node still on the branch it was on.
+///
+/// The fork is built by importing B's height-1 sibling first — it loses fork
+/// choice against A's height-2 head, so it is archived without publishing —
+/// and then B's height-2 block, which wins and makes the abandoned branch two
+/// blocks deep: heights 1 and 2, straddling a boundary pinned at 2.
+#[tokio::test]
+async fn a_crossing_reorg_is_refused_through_import_block() {
+    let mut settled = false;
+    for attempt in 0..MAX_ATTEMPTS {
+        let fee_b = 20u128 + attempt as u128;
+
+        let validator = KeyPair::generate();
+        let alice = KeyPair::generate();
+        let bob = KeyPair::generate();
+        let carol = KeyPair::generate();
+        let dave = KeyPair::generate();
+        let alloc = [
+            (&validator, 100_000_000u128),
+            (&alice, 10_000_000),
+            (&bob, 10_000_000),
+        ];
+        // Boundary pinned at 2: height 1 is pre-activation, height 2 is
+        // required, and a branch spanning both CROSSES.
+        let genesis = genesis_json_with_pinned_gate(&validator, &alloc, Some(2), None);
+        let vk = *validator.private_key().as_bytes();
+        let node_a = E2ENode::new(&genesis, vk);
+        let node_b = E2ENode::new(&genesis, vk);
+
+        let mut a_blocks = Vec::new();
+        let mut b_blocks = Vec::new();
+        for n in 0..2u64 {
+            node_a.submit(transfer(&alice, carol.address(), 1_000, 10, n));
+            a_blocks.push(node_a.produce().await);
+            node_b.submit(transfer(&bob, dave.address(), 2_000, fee_b, n));
+            b_blocks.push(node_b.produce().await);
+        }
+        assert_eq!(node_a.head_height(), 2);
+        if b_blocks[1].hash() >= a_blocks[1].hash() {
+            continue; // fork choice would not switch at height 2; retry
+        }
+        settled = true;
+
+        // B's height-1 sibling loses fork choice against A's height-2 head and
+        // is archived, which is what puts it in `BLOCKS` for the ancestor walk.
+        node_a
+            .consensus
+            .import_block(b_blocks[0].clone())
+            .await
+            .expect("a losing side block is archived, not rejected");
+        assert_eq!(
+            node_a.head_height(),
+            2,
+            "archiving a side block must not move the head"
+        );
+        assert_eq!(
+            node_a.consensus.get_block_by_height(2).map(|b| b.hash()),
+            Some(a_blocks[1].hash()),
+            "and must not touch the canonical height index"
+        );
+
+        // B's height-2 block wins fork choice and is not an extension, so the
+        // engine takes the reorg arm — and the abandoned branch is heights
+        // 1..=2, which crosses the boundary pinned at 2.
+        let err = node_a
+            .consensus
+            .import_block(b_blocks[1].clone())
+            .await
+            .expect_err("a switch whose abandoned branch crosses the checkpoint must refuse");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("crosses this chain's application-journal activation boundary")
+                && rendered.contains("irreversible checkpoint"),
+            "the refusal must name the boundary and the policy: {rendered}"
+        );
+        assert_eq!(
+            node_a.head_height(),
+            2,
+            "a refused switch leaves the node where it was"
+        );
+        assert_eq!(
+            node_a.consensus.best_block_hash(),
+            a_blocks[1].hash(),
+            "and on the branch it was on"
+        );
+        // The canonical height index must still name A's block, not the
+        // candidate the refused switch retained for the ancestor walk. It did
+        // not before `import_reorg` stopped retaining through
+        // `BlockStore::put`, which writes `BLOCK_HEIGHT` beside the
+        // content-addressed `BLOCKS` row.
+        assert_eq!(
+            node_a.consensus.get_block_by_height(2).map(|b| b.hash()),
+            Some(a_blocks[1].hash()),
+            "a refused switch must not leave the canonical height index pointing at the \
+             block it declined to adopt"
+        );
+        break;
+    }
+    assert!(
+        settled,
+        "could not arrange hash(B2) < hash(A2) in {MAX_ATTEMPTS} attempts"
+    );
+}

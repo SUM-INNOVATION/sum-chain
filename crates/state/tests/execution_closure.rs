@@ -1869,7 +1869,17 @@ fn non_execution_paths_are_classified() {
         // block, every transaction, every receipt and both address indexes
         // itself, out of band; the publisher now writes all of them inside the
         // block's own atomic batch, so seven sites went with it.
-        (Class::ChainStorage, 11, "blocks, transactions, receipts, their indexes, validator sets, pruning — not application state"),
+        //
+        // 11 -> 10 when `import_reorg` stopped retaining the arriving block
+        // through `BlockStore::put`. CHANGED DELIBERATELY: `put` writes
+        // `BLOCK_HEIGHT[height] = hash` beside the content-addressed `BLOCKS`
+        // row, so retaining a candidate that way pointed the CANONICAL height
+        // index at a block that had not been adopted — and left it pointing
+        // there when the switch was refused. The retention now goes through
+        // `archive_noncanonical`, which writes only the branch-safe rows. One
+        // out-of-band chain-storage write site disappearing is that fix showing
+        // up in the ledger, which is what this ledger is for.
+        (Class::ChainStorage, 10, "blocks, transactions, receipts, their indexes, validator sets, pruning — not application state"),
         (Class::Snapshot, 1, "fast-sync restore, outside consensus"),
         (Class::OperatorTooling, 7, "see operator_tooling_writes_are_declared_deployment_blockers"),
     ];

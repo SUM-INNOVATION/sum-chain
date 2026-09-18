@@ -800,9 +800,24 @@ impl PoAEngine {
         let height = block.height();
 
         // The ancestor walk reads `BLOCKS`, so the arriving block has to be
-        // there. Keyed by its own hash, so it cannot shadow anything; `publish`
-        // writes the same row again when the branch is adopted.
-        block_store.put(&block)?;
+        // there before `plan_reorg` runs. `publish` writes the same row again
+        // when the branch is adopted.
+        //
+        // Through `archive_noncanonical`, NOT `BlockStore::put`. `put` also
+        // writes `BLOCK_HEIGHT[height] = hash`, which is keyed by height alone
+        // and carries no branch identity — so retaining the arriving block that
+        // way pointed the CANONICAL height index at a block that had not been
+        // adopted, and left it pointing there if the switch was then refused.
+        // The comment this replaces claimed the row "cannot shadow anything"
+        // because it is keyed by the block's own hash; that was true of the
+        // `BLOCKS` row and false of the height index written beside it.
+        //
+        // `archive_noncanonical` writes exactly the branch-safe,
+        // content-addressed rows — `BLOCKS` and `TRANSACTIONS` — and
+        // deliberately not the height index, which is what this needs. It also
+        // preflights both against any bytes already stored under those hashes,
+        // so a collision is refused before anything is written.
+        self.archive_noncanonical(&block)?;
 
         let old_head = self
             .best_block

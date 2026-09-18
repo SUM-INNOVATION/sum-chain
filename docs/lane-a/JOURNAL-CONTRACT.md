@@ -680,7 +680,13 @@ called first in `stage_branch_unwind` so no unwind can reach around it. Tests:
 written and the head does not move, and that the same switch succeeds once the
 boundary sits at the foot of the branch),
 `reorg/a_reorg_wholly_below_the_boundary_is_not_a_crossing`,
-`reorg/the_checkpoint_stops_binding_once_the_head_outruns_the_engine_walk_limit`.]
+`reorg/the_checkpoint_stops_binding_once_the_head_outruns_the_engine_walk_limit`,
+and through the engine itself —
+`crates/consensus/tests/journal_activation_e2e.rs`'s
+`a_crossing_reorg_is_refused_through_import_block`, where the branch arrives
+over `PoAEngine::import_block`, fork choice picks it, and the switch is refused
+with the node still on the branch it was on and the canonical height index still
+naming its own block.]
 
 ### 7.4 Pruning
 
