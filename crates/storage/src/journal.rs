@@ -590,6 +590,74 @@ impl JournalActivation {
         }
     }
 
+    /// How many blocks below `head_height` this node holds GENERIC undo history
+    /// for — the depth over which it can restore every column family a block
+    /// wrote, rather than only the families the four legacy per-subsystem
+    /// journals happen to cover.
+    ///
+    /// `head_height - boundary + 1`, or `0` when the boundary is unestablished
+    /// or above the head.
+    ///
+    /// # Why a node can have canonical state and no undo history
+    ///
+    /// The journal is NODE-LOCAL. It is never hashed into a block, never folded
+    /// into a state root, and never sent over the wire, which is what makes it
+    /// free to change format without a consensus event. The same property means
+    /// a node that arrives by SNAPSHOT RESTORE or FAST SYNC receives canonical
+    /// state and NO journals: it holds height H and can revert nothing at all.
+    /// Its `ObservedFromChain` boundary is then the first height it publishes
+    /// itself, and this function counts upward from there.
+    ///
+    /// So `UNDO_RETENTION_FLOOR = 4_096` — the pruner's promise not to delete
+    /// undo data inside the reorg horizon — says nothing about a node that has
+    /// only produced 200 blocks since a restore. That node's honest depth is
+    /// 200, not 4,096, and the floor cannot raise it: retention is a promise not
+    /// to DISCARD history, never a claim to HAVE it.
+    pub fn restorable_depth(&self, head_height: BlockHeight) -> u64 {
+        match self.boundary {
+            Some(b) if head_height >= b => head_height - b + 1,
+            _ => 0,
+        }
+    }
+
+    /// The deepest reorg this node may honestly advertise and perform:
+    /// [`Self::restorable_depth`] capped at the engine's own walk limit.
+    ///
+    /// `engine_max` is a parameter because `sumchain-storage` sits below
+    /// `sumchain-consensus` and cannot name `poa::MAX_REORG_WALK`; the consensus
+    /// side passes it and pins the two together in its own test.
+    ///
+    /// # This is not an advertisement to be maintained separately
+    ///
+    /// It is a READING of the rule the unwind already enforces.
+    /// `sumchain_state::reorg_undo::crosses_activation_checkpoint` refuses any
+    /// branch reaching below the boundary while holding blocks at or above it,
+    /// so a reorg deeper than this number does not quietly do the wrong thing —
+    /// it is refused. This function exists so a node can SAY the number (to an
+    /// operator, to a peer, to a metric) before it is asked to prove it, rather
+    /// than discovering it at the refusal.
+    ///
+    /// # What a snapshot / fast-sync implementation owes
+    ///
+    /// `crates/state/src/snapshot.rs` is not this module's to change, and this
+    /// is the requirement it must meet, stated so it can be checked:
+    ///
+    /// 1. A restored node MUST NOT report, advertise or configure a reorg depth
+    ///    greater than this value. Immediately after a restore it is `0`.
+    /// 2. There is no way to import undo history with a snapshot, because
+    ///    journals are not transmitted and a pre-image cannot be derived from a
+    ///    post-state. The only way a restored node accumulates undo history is
+    ///    by PUBLISHING blocks itself, one journal per block.
+    /// 3. A restored node therefore reaches the engine's full horizon exactly
+    ///    `engine_max` blocks after the restore point, and not before. Until
+    ///    then its usable depth is the number of blocks it has published.
+    /// 4. The restore point itself is a hard floor: nothing below it is
+    ///    revertible by any record this node holds, which is the same statement
+    ///    the activation checkpoint makes about the activation height.
+    pub fn advertisable_reorg_depth(&self, head_height: BlockHeight, engine_max: u64) -> u64 {
+        self.restorable_depth(head_height).min(engine_max)
+    }
+
     /// The journal for a block about to be reverted, or a defined answer for its
     /// absence.
     ///

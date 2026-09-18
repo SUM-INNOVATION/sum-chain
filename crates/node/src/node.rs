@@ -166,6 +166,55 @@ impl Node {
             journal_format.observed_boundary,
         );
 
+        // ── the chain's activation gates, checked against each other ────────
+        //
+        // Before state, consensus or execution exist. `ChainParams::validate`
+        // holds the ordering
+        //
+        //     application_journal_enabled_from_height <= account_root_enabled_from_height
+        //
+        // among others. `Genesis::from_file` already validates, but `Node::new`
+        // also accepts a `Genesis` built in code, and a node that boots happily
+        // on an inconsistent pair and diverges at the boundary tens of thousands
+        // of blocks later is exactly the failure this check exists to eliminate.
+        // Cheap, pure, and it fails startup.
+        genesis
+            .params
+            .validate()
+            .map_err(|e| anyhow::anyhow!("genesis chain params are inconsistent: {}", e))?;
+
+        // What this node can honestly revert, said at boot rather than
+        // discovered at a refusal.
+        //
+        // The journal is node-local: it is never committed, never in a root,
+        // never transmitted. A node that arrived by snapshot restore or fast
+        // sync therefore holds canonical state and NO undo history, and its
+        // usable reorg depth is the number of blocks it has published SINCE the
+        // restore — not `UNDO_RETENTION_FLOOR`, which is a promise not to
+        // discard history and never a claim to have it.
+        {
+            let head = BlockStore::new(&db).get_latest_height()?.unwrap_or(0);
+            let activation = sumchain_storage::journal::JournalActivation::resolve(
+                &db,
+                sumchain_storage::journal::ActivationSource::from_configured_height(
+                    genesis.params.application_journal_enabled_from_height,
+                ),
+            )
+            .map_err(|e| {
+                anyhow::anyhow!("cannot resolve the journal activation boundary: {}", e)
+            })?;
+            let depth =
+                activation.advertisable_reorg_depth(head, sumchain_consensus::poa::MAX_REORG_WALK);
+            info!(
+                "Usable reorg depth: {} block(s) (engine limit {}, head {}, journal boundary \\
+                 {:?}). A reorg deeper than this is REFUSED, not silently mis-applied.",
+                depth,
+                sumchain_consensus::poa::MAX_REORG_WALK,
+                head,
+                activation.boundary(),
+            );
+        }
+
         // One-time, idempotent backfill of the messaging sender/payment
         // indexes from primary records. Must complete before RPC/consensus
         // start so messaging_getSentMessages / messaging_getPendingPayments

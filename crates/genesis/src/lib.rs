@@ -53,6 +53,40 @@ pub enum GenesisError {
     #[error("invalid beacon_params: {reason}")]
     InvalidBeaconParams { reason: &'static str },
 
+    /// `account_root_enabled_from_height` is `Some(_)` while
+    /// `application_journal_enabled_from_height` is `None`.
+    ///
+    /// `None` on the journal gate is not "off" — it means OBSERVED FROM CHAIN,
+    /// and what each node observes is its own first journalled height. That is a
+    /// node-local answer, which is harmless while the journal is node-local undo
+    /// metadata and fatal once the account commitment depends on it: two
+    /// validators would hold different boundaries, and discover the difference
+    /// at a reorg rather than at boot.
+    #[error(
+        "account_root_enabled_from_height is Some({account_root}) while \
+         application_journal_enabled_from_height is None. The account commitment folds \
+         account state into the block state root, so a reorg reaching a height where the \
+         root covers account rows must be able to restore those rows from a generic \
+         journal. `None` on the journal gate does not mean 'always required' — it means \
+         each node OBSERVES its own boundary from its own journal history, which is a \
+         node-local value two validators can disagree about. Pin \
+         application_journal_enabled_from_height to a height at or below {account_root}"
+    )]
+    AccountRootWithoutJournalGate { account_root: u64 },
+
+    /// The journal gate activates LATER than the account-root gate, leaving a
+    /// band of heights whose state root covers account rows that no generic
+    /// journal can restore.
+    #[error(
+        "application_journal_enabled_from_height is Some({journal}), later than \
+         account_root_enabled_from_height Some({account_root}). Heights \
+         {account_root}..{journal} would commit account state to the block state root \
+         while their undo record is only the four legacy per-subsystem journals, which do \
+         not cover every family a block writes. A reorg into that band could neither \
+         revert nor agree. The journal gate must be at or below the account-root gate"
+    )]
+    JournalGateAfterAccountRoot { journal: u64, account_root: u64 },
+
     /// A `beacon_schedule` config (issue #127) is internally inconsistent and is
     /// rejected at genesis load (not an activation height — declared dormant).
     #[error("invalid beacon_schedule: {reason}")]
@@ -347,6 +381,17 @@ pub struct ChainParams {
     /// Mirrors the V2/OmniNode/Education/Contracts activation pattern.
     ///
     /// Dev: set to `Some(0)` to commit to account state from genesis.
+    ///
+    /// # Ordered against the journal gate, and validated
+    ///
+    /// [`ChainParams::validate`] enforces
+    /// `application_journal_enabled_from_height <= account_root_enabled_from_height`,
+    /// and rejects `Some(_)` here while the journal gate is `None`. Once the
+    /// root covers account state, a reorg into that range must be able to
+    /// RESTORE account rows, and only the generic application journal restores
+    /// every family a block wrote. `None` on the journal gate means "each node
+    /// observes its own boundary", which is a node-local value and therefore not
+    /// something a consensus commitment may rest on.
     #[serde(default)]
     pub account_root_enabled_from_height: Option<u64>,
 
@@ -601,6 +646,17 @@ pub struct ChainParams {
     /// value cannot fork on the difference — one of them simply refuses a reorg
     /// the other would perform. That is why `Genesis::validate` admits `Some(_)`
     /// here, unlike the two dormant subsystem gates beside it.
+    ///
+    /// # Except once the account commitment depends on it
+    ///
+    /// [`Self::account_root_enabled_from_height`] folds account state into the
+    /// authoritative block state root. From that height on, a node that cannot
+    /// restore account rows during a reorg cannot agree about the root either.
+    /// [`ChainParams::validate`] therefore enforces
+    /// `application_journal_enabled_from_height <= account_root_enabled_from_height`
+    /// and rejects `None` here whenever the account gate is open — a
+    /// node-local, observed boundary is not a foundation a consensus commitment
+    /// may stand on. Both `None` remains legal and is the production default.
     #[serde(default)]
     pub application_journal_enabled_from_height: Option<u64>,
 
@@ -1032,6 +1088,48 @@ impl ChainParams {
                 gate: "beacon_enabled_from_height",
             });
         }
+        // ── the undo-before-commitment ordering, enforced at load ───────────
+        //
+        //     application_journal_enabled_from_height <= account_root_enabled_from_height
+        //
+        // The account-root gate folds account state into the authoritative block
+        // state root. Above it, a node that cannot RESTORE account rows during a
+        // reorg cannot agree about the root either — it is stuck with a state it
+        // can neither revert nor justify. The generic application journal is the
+        // only record that restores every family a block wrote, so it must be
+        // authoritative from at or before the height the commitment starts.
+        //
+        // `None` on the journal gate is rejected here rather than treated as
+        // "always on". `None` means OBSERVED FROM CHAIN — each node's boundary
+        // is its own first journalled height — which is fine for node-local undo
+        // metadata and not fine once consensus output depends on it: two
+        // validators would hold different boundaries and find out at a reorg.
+        // Opening the account commitment therefore forces the journal boundary
+        // to be CHAIN-DEFINED, written in the same genesis document, covered by
+        // the same genesis identity, and read the same way by every validator.
+        //
+        // Both `None` is legal and is the production default: no commitment, no
+        // requirement.
+        //
+        // This is a LOAD-time check, so an inconsistent pair is refused before a
+        // block executes rather than at the boundary 100,000 blocks later.
+        match (
+            self.application_journal_enabled_from_height,
+            self.account_root_enabled_from_height,
+        ) {
+            (_, None) => {}
+            (None, Some(account_root)) => {
+                return Err(GenesisError::AccountRootWithoutJournalGate { account_root })
+            }
+            (Some(journal), Some(account_root)) if journal > account_root => {
+                return Err(GenesisError::JournalGateAfterAccountRoot {
+                    journal,
+                    account_root,
+                })
+            }
+            (Some(_), Some(_)) => {}
+        }
+
         // The beacon PARAMETER surface (#127) MAY be declared while the gate stays
         // dormant — but only if internally consistent (draft §7.4). This validates
         // the config at load; it does NOT open the gate (still rejected above).
@@ -1999,5 +2097,160 @@ mod tests {
         let g = Genesis::from_json(LOCAL_GENESIS_JSON).unwrap();
         assert_eq!(g.params.compute_pool_enabled_from_height, None);
         assert_eq!(g.params.beacon_enabled_from_height, None);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // The undo-before-commitment ordering:
+    //     application_journal_enabled_from_height <= account_root_enabled_from_height
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Opening the account commitment while the journal gate is `None` is
+    /// REFUSED at load.
+    ///
+    /// `None` is not "off" and it is not "always required": it means each node
+    /// observes its own boundary from its own journal history. That is a
+    /// node-local number. The account commitment is consensus output. Resting
+    /// the second on the first is how two honest validators end up holding
+    /// different boundaries and finding out at a reorg, which is precisely the
+    /// failure this rejection exists to make unreachable.
+    #[test]
+    fn the_account_commitment_cannot_open_over_an_observed_journal_boundary() {
+        let mut p = ChainParams::default();
+        p.account_root_enabled_from_height = Some(1_000);
+        p.application_journal_enabled_from_height = None;
+        let err = p.validate().expect_err("None journal gate must be refused");
+        assert!(
+            matches!(
+                err,
+                GenesisError::AccountRootWithoutJournalGate {
+                    account_root: 1_000
+                }
+            ),
+            "{err}"
+        );
+        // And through the authoritative loader, not only the method.
+        let mut g = Genesis::from_json(LOCAL_GENESIS_JSON).unwrap();
+        g.params.account_root_enabled_from_height = Some(1_000);
+        g.params.application_journal_enabled_from_height = None;
+        assert!(
+            g.validate().is_err(),
+            "Genesis::validate must refuse it too"
+        );
+    }
+
+    /// A journal gate LATER than the account gate is refused, naming the band.
+    ///
+    /// Heights in `[account_root, journal)` would commit account state to the
+    /// block state root while their only undo record is the four legacy
+    /// per-subsystem journals, which do not cover every family a block writes. A
+    /// reorg into that band could neither revert nor agree.
+    #[test]
+    fn a_journal_gate_later_than_the_account_gate_is_refused() {
+        let mut p = ChainParams::default();
+        p.account_root_enabled_from_height = Some(1_000);
+        p.application_journal_enabled_from_height = Some(1_001);
+        let err = p
+            .validate()
+            .expect_err("later journal gate must be refused");
+        assert!(
+            matches!(
+                err,
+                GenesisError::JournalGateAfterAccountRoot {
+                    journal: 1_001,
+                    account_root: 1_000
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    /// The legal orderings, including both `None` — which is the production
+    /// default and must stay loadable.
+    #[test]
+    fn the_legal_gate_orderings_are_admitted() {
+        for (journal, account_root) in [
+            (None, None),               // production default: no commitment, no pin
+            (Some(0), None),            // journal pinned, commitment still closed
+            (Some(1_000), None),        // ditto, at a height
+            (Some(1_000), Some(1_000)), // same height: the journal is authoritative
+            // from the first block the root covers
+            (Some(500), Some(1_000)), // journal strictly earlier
+            (Some(0), Some(0)),       // both from genesis
+        ] {
+            let mut p = ChainParams::default();
+            p.application_journal_enabled_from_height = journal;
+            p.account_root_enabled_from_height = account_root;
+            p.validate()
+                .unwrap_or_else(|e| panic!("({journal:?}, {account_root:?}) must be legal: {e}"));
+        }
+    }
+
+    /// Every committed genesis fixture satisfies the ordering.
+    ///
+    /// Not a restatement of the rule: it is the check that no shipped chain
+    /// document is already inconsistent, which is the only way the rule could be
+    /// true in code and false in production.
+    #[test]
+    fn every_committed_genesis_satisfies_the_gate_ordering() {
+        for rel in [
+            "/../../genesis/local_genesis.json",
+            "/../../genesis/testnet_genesis.json",
+            "/../../genesis/mainnet_genesis.json",
+            "/../../genesis.json",
+        ] {
+            let path = format!("{}{}", env!("CARGO_MANIFEST_DIR"), rel);
+            let contents = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let g: Genesis =
+                serde_json::from_str(&contents).unwrap_or_else(|e| panic!("{path}: {e:?}"));
+            // `params.validate()` and not `Genesis::validate()`: the shipped
+            // testnet fixture carries placeholder validator keys, which is a
+            // separate, deliberate fact about that file and not this rule.
+            g.params
+                .validate()
+                .unwrap_or_else(|e| panic!("{path}: committed chain params must validate: {e}"));
+            match (
+                g.params.application_journal_enabled_from_height,
+                g.params.account_root_enabled_from_height,
+            ) {
+                (_, None) => {}
+                (Some(j), Some(a)) => assert!(j <= a, "{path}: journal gate {j} > account {a}"),
+                (None, Some(a)) => panic!("{path}: account gate {a} over an observed journal"),
+            }
+        }
+    }
+
+    /// Both gates are CHAIN-DEFINED: they serialize into the genesis document,
+    /// round-trip, and are therefore covered by whatever identity that document
+    /// has. An operator cannot set one in genesis and the other somewhere else,
+    /// because there is nowhere else to set either.
+    #[test]
+    fn both_gates_live_in_the_genesis_document_and_round_trip() {
+        let mut g = Genesis::from_json(LOCAL_GENESIS_JSON).unwrap();
+        g.params.application_journal_enabled_from_height = Some(500);
+        g.params.account_root_enabled_from_height = Some(1_000);
+        let json = g.to_json().unwrap();
+        assert!(json.contains("application_journal_enabled_from_height"));
+        assert!(json.contains("account_root_enabled_from_height"));
+        let back = Genesis::from_json(&json).expect("a consistent pair round-trips and validates");
+        assert_eq!(
+            back.params.application_journal_enabled_from_height,
+            Some(500)
+        );
+        assert_eq!(back.params.account_root_enabled_from_height, Some(1_000));
+
+        // The loader is the enforcement point: an inconsistent document does not
+        // parse into a usable Genesis at all.
+        let bad = json.replace(
+            "\"application_journal_enabled_from_height\": 500",
+            "\"application_journal_enabled_from_height\": null",
+        );
+        assert_ne!(bad, json, "the substitution must actually apply");
+        assert!(
+            Genesis::from_json(&bad).is_err(),
+            "an inconsistent genesis must be refused by the loader, not only by validate()"
+        );
     }
 }
