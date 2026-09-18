@@ -10949,10 +10949,11 @@ mod contract_rpc_tests {
     use super::*;
     use std::collections::HashMap;
     use sumchain_consensus::PoAEngine;
-    use sumchain_crypto::KeyPair;
+    use sumchain_crypto::{sign, KeyPair};
     use sumchain_genesis::{ChainParams, Genesis};
     use sumchain_primitives::transaction::ContractDeployData;
-    use sumchain_primitives::Address;
+    use sumchain_primitives::{Address, TransactionV2};
+    use sumchain_state::executor::BlockExecutor;
     use sumchain_state::{ContractExecutorState, MempoolConfig};
     use tempfile::TempDir;
 
@@ -10978,6 +10979,44 @@ mod contract_rpc_tests {
       (func (export "boom") (param i32 i32) (result i32) (unreachable)))
     "#;
 
+    /// Publish one block carrying `txs`, the way a proposer does: execute, bind
+    /// the root that execution produced into the header, accept, commit.
+    ///
+    /// Execution stages into the block's candidate and nothing it stages
+    /// reaches canonical storage until the candidate is published. Every read
+    /// these tests make is a committed one, so the block has to be published.
+    fn publish_block(
+        state: &Arc<StateManager>,
+        ex: &BlockExecutor,
+        height: u64,
+        timestamp: u64,
+        proposer: &KeyPair,
+        txs: Vec<SignedTransaction>,
+    ) -> Vec<sumchain_primitives::Receipt> {
+        use sumchain_primitives::BlockHeader;
+
+        let header = BlockHeader::new(
+            Hash::ZERO,
+            height,
+            timestamp,
+            Hash::ZERO,
+            Hash::ZERO,
+            *proposer.public_key().as_bytes(),
+        );
+        let mut block = Block::new(header, txs);
+        let exec = ex
+            .execute_block(&block, state.state_root(), &[])
+            .expect("execute_block");
+        block.header.state_root = exec.computed_root();
+        let (executed, _state_diff, _contract_diff) = exec.into_parts();
+        let receipts = executed.receipts().to_vec();
+        let accepted = executed.accept_produced(&block).expect("accept_produced");
+        let accumulator = accepted.accumulator();
+        accepted.publish().expect("publish");
+        state.set_state_root(accumulator);
+        receipts
+    }
+
     // Returns (server, deployed contract address).
     fn server_with_contract() -> (RpcServer, Address, TempDir) {
         let dir = TempDir::new().unwrap();
@@ -11001,25 +11040,51 @@ mod contract_rpc_tests {
             value: 0,
             gas_limit: 5_000_000,
         };
-        // The contract executor debits the deployer's account, which is staged
-        // now, so this fixture opens a candidate. It is never published: the
-        // test asserts on the deploy RESULT.
-        let mut candidate =
-            sumchain_storage::candidate::CandidateExecution::new(&db, 1 << 30);
-        let res = cexec
-            .deploy(
-                &mut candidate.view(),
-                &deployer.address(),
-                &deploy_data,
-                &state,
-                &proposer.address(),
-                1_000,
-                1,
-                1000,
-            )
-            .unwrap();
-        assert!(res.success, "deploy failed: {:?}", res.error);
-        let addr = res.contract_address;
+        // Both tests below read COMMITTED contract state -- `contract_exists`
+        // and `get_metadata` are explicitly canonical reads, and
+        // `contract_get_storage_at` looks the row up in the `CONTRACT_STORAGE`
+        // CF directly. Execution STAGES contract code, metadata and storage
+        // into the block's candidate, so a deploy that is never published
+        // leaves canonical state empty and every one of those reads answers
+        // "no such contract". The deploy therefore runs as a real transaction
+        // in a block that is then published, which is also how a contract
+        // actually reaches the chain.
+        let bex = BlockExecutor::new(state.clone(), db.clone(), params.clone());
+        let tx = TransactionV2 {
+            chain_id: 1,
+            from: deployer.address(),
+            fee: 1_000,
+            nonce: 0,
+            payload: TxPayload::ContractDeploy(deploy_data),
+        };
+        let sig = sign(tx.signing_hash().as_bytes(), deployer.private_key());
+        let signed =
+            SignedTransaction::new_v2(tx, *sig.as_bytes(), *deployer.public_key().as_bytes());
+        let receipts = publish_block(&state, &bex, 1, 1000, &proposer, vec![signed]);
+        assert_eq!(receipts.len(), 1, "one transaction in, one receipt out");
+        assert!(
+            matches!(receipts[0].status, sumchain_primitives::TxStatus::Success),
+            "deploy failed: {:?}",
+            receipts[0].status
+        );
+
+        // The deployed address, read back from the canonical metadata CF. The
+        // deploy result used to carry it; a transaction receipt does not, and
+        // recomputing the address rule here would let the fixture and the
+        // runtime drift apart silently. Exactly one contract exists, so the
+        // single metadata key IS the address -- and that it is there at all is
+        // itself evidence the block published.
+        let deployed: Vec<Address> = db
+            .iter(sumchain_storage::cf::CONTRACT_METADATA)
+            .unwrap()
+            .map(|(k, _)| {
+                let mut bytes = [0u8; 20];
+                bytes.copy_from_slice(&k);
+                Address::new(bytes)
+            })
+            .collect();
+        assert_eq!(deployed.len(), 1, "fixture deploys exactly one contract");
+        let addr = deployed[0];
 
         let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
         let validator = KeyPair::generate();
