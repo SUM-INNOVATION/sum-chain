@@ -75,7 +75,7 @@
 //! order fails the block with [`StateError::AccountScanOutOfOrder`] rather than
 //! producing a plausible-looking root over a differently-ordered fold.
 //!
-//! # Cost, measured — on the production account count and with a cold cache
+//! # Cost, measured — with a cold cache, against a count that is not yet known
 //!
 //! O(n) in the number of accounts, PER BLOCK, with O(1) memory: no map is
 //! built, no 44·n buffer is materialised, the hasher is fed 44 bytes at a time.
@@ -96,14 +96,43 @@
 //! every block, so that interval, not the slot, is what this scan has to fit
 //! inside. The budget is TIGHTER than the earlier note assumed.
 //!
-//! ## The production account count is 18
+//! ## The production STORED-ROW count is not established
 //!
-//! Not an estimate. Enumerated by walking the transaction graph out from the
-//! two genesis allocations through `sum_getTransactionsByAddress` to closure —
-//! 88 transactions, 18 addresses — and cross-checked against the chain's own
-//! accounting: those 18 balances sum to 999,998,997,000,000,000, which is
-//! `chain_getSupplyInfo.accounted_account_supply` to the base unit. There is no
-//! nineteenth account holding value.
+//! The cost is linear in the number of account ROWS RocksDB holds, and that
+//! number has not been measured, because no production database is available in
+//! the environment this work was done in. What was measured over RPC is a
+//! different quantity, and conflating the two would be the whole error:
+//!
+//! **18 accounts hold value on mainnet.** Enumerated by walking the transaction
+//! graph out from the two genesis allocations through
+//! `sum_getTransactionsByAddress` to closure — 88 transactions, 18 addresses —
+//! and cross-checked against the chain's own accounting: those 18 balances sum
+//! to 999,998,997,000,000,000, which is
+//! `chain_getSupplyInfo.accounted_account_supply` to the base unit.
+//!
+//! That is a **lower bound** on stored rows and nothing more. Each of the 18
+//! holds a nonzero balance, so each is certainly a stored row; 18 ≤ rows. It is
+//! **not an upper bound**, for two reasons that are not hypothetical:
+//!
+//! * A row whose balance and nonce are both zero is invisible to every RPC.
+//!   `get_account` flattens absence into `{balance: 0, nonce: 0}`, so
+//!   `sum_getBalance` cannot distinguish a stored zero row from no row — and the
+//!   two cost exactly the same to fold.
+//! * A row can exist at an address that never appears in the transaction index.
+//!   `ContractExecutorState` credits the CONTRACT address on a deployment
+//!   carrying value (`contract_executor.rs`, `v_credit(view,
+//!   &result.contract_address, …)`), and a contract address is not a
+//!   transaction's `to` field, so no recipient-index walk reaches it. The
+//!   contracts gate has been open on mainnet since height 8,900,000.
+//!
+//! So the number this cost model needs is **unmeasured**, and the instrument for
+//! measuring it ships here rather than the measurement: [`account_row_count`]
+//! runs the same scan as [`account_state_digest`], through the same prefix bound
+//! and the same stop condition, so it reports exactly the count the fold will
+//! pay for. It is exposed at node startup and as
+//! `chain_getSyncCapability.account_rows`, and the activation runbook makes
+//! taking that reading on a production node a prerequisite rather than a
+//! suggestion.
 //!
 //! ## Cold cache costs about 12%, not an order of magnitude
 //!
@@ -130,33 +159,44 @@
 //!
 //! ## The verdict
 //!
-//! **At the production account count this costs 4.6 microseconds per block —
-//! three millionths of the interval between blocks.** The scheme is not
-//! marginal here; it is free, by nine orders of magnitude.
+//! **At any row count near the value-holding count, this is free.** 18 rows
+//! costs 4.6 microseconds per block, three millionths of the interval. There is
+//! no performance argument against shipping the commitment at a count in that
+//! region, and nine orders of magnitude of headroom before one appears.
 //!
 //! **The ceiling is real and it is closer than the old note said.** At ten
-//! million accounts the coldest scan is 1.62 s against a 1,506 ms interval: it
-//! does not fit inside one block at all. Interpolating at 0.16 µs/account, the
-//! scan reaches 10% of the interval at about 940,000 accounts and 50% at about
-//! 4.7 million. So the practical ceiling is a few million, and the replacement
-//! at that point is the persistent authenticated trie rejected above, whose
-//! per-block work is O(touched · log n) rather than O(n), activated at its own
-//! later height under its own domain separator.
+//! million rows the coldest scan is 1.62 s against a 1,506 ms interval: it does
+//! not fit inside one block at all. Interpolating at 0.16 µs/row, the scan
+//! reaches 10% of the interval at about 940,000 rows and 50% at about 4.7
+//! million. The practical ceiling is a few million, and the replacement at that
+//! point is the persistent authenticated trie rejected above, whose per-block
+//! work is O(touched · log n) rather than O(n), activated at its own later
+//! height under its own domain separator.
 //!
-//! **The distance to that ceiling is the whole argument.** 18 accounts in
-//! 12.9 million blocks is roughly 0.04 new accounts per day. Reaching one
-//! million at that rate takes about 68,000 years; at a thousand times the
-//! historical rate it takes 68 years; at a million times, 25 days. Only the last
-//! of those is a deployment risk, and it is a risk with a warning signal
-//! attached, because the account count is observable and the cost is linear in
-//! it.
+//! **The distance to that ceiling is not known and must not be extrapolated.**
+//! An earlier version of this note computed a growth rate from 18 accounts over
+//! 12.9 million blocks and concluded that a million accounts was tens of
+//! thousands of years away. That figure is withdrawn. It divided an unmeasured
+//! quantity by the chain's whole lifetime and presented the quotient as a safety
+//! margin; historical usage of a chain with 88 transactions bounds nothing about
+//! its adoption, and a single integration can add more rows in a day than this
+//! chain has produced in its life. The honest statement is narrower and more
+//! useful: **the cost is linear and the input is observable**, so the ceiling is
+//! approached visibly rather than suddenly — provided somebody is looking.
 //!
-//! So the trie is not revisited as work to do now. It is revisited as a
-//! TRIGGER: the operational threshold is 500,000 accounts, at which this scan
-//! costs ~80 ms — 5% of the interval, still comfortable, and roughly a year of
-//! warning at any growth rate that reaches it. The gate below and the versioned
-//! domain are what make that replacement a coordinated upgrade rather than a
-//! rewrite.
+//! That is what the operational threshold is for, and it is a threshold on a
+//! MEASURED count rather than a projected one:
+//!
+//! | rows | scan | share of 1,506 ms | action |
+//! |-----:|-----:|------------------:|--------|
+//! |  250,000 |  40 ms | 2.7 % | warn; begin tracking the trend per week |
+//! |  500,000 |  80 ms | 5.3 % | design the trie replacement and its activation |
+//! | 2,000,000 | 320 ms | 21 % | the replacement must be scheduled, with a height |
+//! | 4,000,000 | 640 ms | 43 % | the replacement must be ACTIVE |
+//!
+//! See `docs/operations/ACCOUNT-ROOT-ACTIVATION.md` for how the count is read
+//! and at what cadence — it is an O(n) scan, the same one the commitment pays
+//! for, so it is not a value to poll at scrape frequency.
 //!
 //! Two limits remain on the numbers. The eviction is approximate — there is no
 //! portable way to drop the OS page cache, so the harness applies 24 GiB of
@@ -385,6 +425,29 @@ pub fn v_account_state_digest(view: &ExecutionView<'_, '_>) -> Result<Hash> {
     }
     Ok(digest.finish())
 }
+
+/// The stored-row count at which the fold's cost starts being worth watching.
+///
+/// 250,000 rows is ~40 ms per block, 2.7% of the 1,506 ms interval between
+/// blocks. Nothing is wrong at this count; what is wrong is nobody knowing the
+/// count is moving. Crossing it means start tracking the trend.
+///
+/// A constant rather than a line in a runbook, so the number a node warns at and
+/// the number the runbook names cannot drift apart.
+pub const ACCOUNT_ROW_WARN_THRESHOLD: u64 = 250_000;
+
+/// The stored-row count at which the replacement has to be designed.
+///
+/// 500,000 rows is ~80 ms per block, 5.3% of the interval — still comfortable,
+/// and the last count at which "comfortable" and "we have time to build the
+/// replacement" are both true. The replacement is the persistent authenticated
+/// trie, whose per-block work is O(touched · log n) rather than O(n).
+///
+/// Deliberately far below the point where the fold stops fitting in a block
+/// (~10M rows, 1.62 s against 1,506 ms): a trie is a storage-layout change with
+/// its own reorg, snapshot and activation story, and starting it at the ceiling
+/// would be starting it too late.
+pub const ACCOUNT_ROW_ACT_THRESHOLD: u64 = 500_000;
 
 /// How many account rows this database STORES.
 ///

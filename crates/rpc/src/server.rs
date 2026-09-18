@@ -1488,10 +1488,8 @@ impl SumChainApiServer for RpcServer {
 
     async fn chain_get_activation_status(
         &self,
-    ) -> std::result::Result<
-        crate::types::ActivationStatusInfo,
-        jsonrpsee::types::ErrorObjectOwned,
-    > {
+    ) -> std::result::Result<crate::types::ActivationStatusInfo, jsonrpsee::types::ErrorObjectOwned>
+    {
         let current_height = self.consensus.current_height();
         // Built from the SAME `activation_heights` list the digest folds, in the
         // same order, so what an operator reads here and what they compare are

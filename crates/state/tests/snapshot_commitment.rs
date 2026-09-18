@@ -893,7 +893,7 @@ fn a_corrupt_import_record_is_an_error_not_an_absence() {
     let n = committed_node();
     n.db.put(
         sumchain_storage::cf::META,
-        sumchain_state::snapshot::SNAPSHOT_RESTORE_META_KEY,
+        sumchain_state::snapshot::SNAPSHOT_IMPORT_META_KEY,
         &[0u8; 3],
     )
     .unwrap();

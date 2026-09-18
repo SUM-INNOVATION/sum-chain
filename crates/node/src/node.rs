@@ -478,15 +478,55 @@ impl Node {
                 sumchain_storage::pruner::UNDO_RETENTION_FLOOR,
                 h
             ),
-            None => info!(
-                "Sync: this node executed its own history; no snapshot import recorded"
-            ),
+            None => info!("Sync: this node executed its own history; no snapshot import recorded"),
         }
         if !cap.fast_sync_available {
             info!(
                 "Fast sync is DISABLED in this binary: the snapshot format does not \
                  carry {:?}",
                 cap.missing_families
+            );
+        }
+
+        // The account-row count, and the thresholds it is measured against.
+        //
+        // The account-state commitment folds one record per stored row, once per
+        // block, so its cost is linear in this number — and this number is the
+        // stored-row count, not the count of accounts holding value. The two are
+        // different: a row whose balance and nonce are both zero is invisible to
+        // every balance query and costs exactly as much to fold as any other.
+        //
+        // Reported once at startup rather than exposed as a scrape-frequency
+        // gauge, because producing it IS the O(n) scan the commitment pays for:
+        // polling it every fifteen seconds would add a second full account scan
+        // to every node, which is a meaningful fraction of the budget this
+        // warning exists to protect. `chain_getSyncCapability` serves it on
+        // demand for a slow-cadence monitor.
+        let rows = sumchain_state::account_root::account_row_count(db)
+            .map_err(|e| anyhow::anyhow!("counting account rows: {}", e))?;
+        if rows >= sumchain_state::account_root::ACCOUNT_ROW_ACT_THRESHOLD {
+            warn!(
+                "Account rows: {} — at or above the action threshold {}. The \
+                 account-state commitment's per-block scan is now a material \
+                 share of the block interval; the O(touched · log n) replacement \
+                 must be designed and given an activation height. See \
+                 docs/operations/ACCOUNT-ROOT-ACTIVATION.md.",
+                rows,
+                sumchain_state::account_root::ACCOUNT_ROW_ACT_THRESHOLD
+            );
+        } else if rows >= sumchain_state::account_root::ACCOUNT_ROW_WARN_THRESHOLD {
+            warn!(
+                "Account rows: {} — at or above the warning threshold {}. Nothing \
+                 is wrong at this count; start tracking the trend weekly.",
+                rows,
+                sumchain_state::account_root::ACCOUNT_ROW_WARN_THRESHOLD
+            );
+        } else {
+            info!(
+                "Account rows: {} (warn at {}, act at {})",
+                rows,
+                sumchain_state::account_root::ACCOUNT_ROW_WARN_THRESHOLD,
+                sumchain_state::account_root::ACCOUNT_ROW_ACT_THRESHOLD
             );
         }
         Ok(())

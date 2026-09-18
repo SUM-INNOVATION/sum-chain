@@ -1316,7 +1316,12 @@ enum Class {
     /// The node's own storage surface: blocks, transactions, receipts, their
     /// indexes, validator sets, pruning. Not application state.
     ChainStorage,
-    /// Fast-sync restore, outside consensus.
+    /// Snapshot import, outside consensus.
+    ///
+    /// Not a fast sync: `SnapshotManager::restore_snapshot` refuses while the
+    /// format carries only the account family. What this class covers is
+    /// `import_account_family` — the checked account-row import — and the `META`
+    /// row recording the height it happened at.
     Snapshot,
     /// RPC and mempool: diagnostics and admission, which answer about the
     /// PUBLISHED chain. A committed read here is correct, and a committed write
@@ -1882,7 +1887,20 @@ fn non_execution_paths_are_classified() {
         // out-of-band chain-storage write site disappearing is that fix showing
         // up in the ledger, which is what this ledger is for.
         (Class::ChainStorage, 10, "blocks, transactions, receipts, their indexes, validator sets, pruning — not application state"),
-        (Class::Snapshot, 1, "fast-sync restore, outside consensus"),
+
+        // 1 before the snapshot import recorded what it had done. The two sites
+        // are the account-row import itself and the `META` row saying at which
+        // height it happened — and the second is not bookkeeping about the
+        // first, it is what stops a restart forgetting that this node holds no
+        // undo records at or below that height.
+        (
+            Class::Snapshot,
+            2,
+            "account-family import, outside consensus: no block exists to \
+             abandon, so there is no candidate to write through. Note that this \
+             class is NOT a fast sync — `restore_snapshot` refuses, because the \
+             format does not carry the state families a sync needs.",
+        ),
         // 7 -> 1 when `sum-node rollback` stopped unwinding state with its own
         // loop. CHANGED DELIBERATELY: six of these seven were that command
         // reverting account rows out of `cf::STATE_DIFFS`, deleting receipts,

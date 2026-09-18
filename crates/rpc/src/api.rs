@@ -27,8 +27,7 @@ use crate::types::{
     TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo, ExecutorLinkInfo, AssetInfo, FinanceIssuerInfo,
     CaseInfo, HealthcareProviderInfo,
     EquityControllerConfigInfo, EquityEntityInfo, EquityShareClassInfo,
-    AccountInfo, ActivationGateInfo, ActivationStatusInfo, BlockHeightInfo, BlockInfo,
-    ContractCallResult, ContractInfo, SyncCapabilityInfo,
+    AccountInfo, BlockHeightInfo, BlockInfo, ContractCallResult, ContractInfo,
     CreateEmploymentCredentialRequest,
     CreateEmploymentCredentialResponse, DelegationRpcInfo, DelegatorSummary, DocClassConfigInfo,
     DocClassCredentialInfo, DocClassIdentityInfo, DocClassIssuerInfo, DocClassSummary,
@@ -581,7 +580,7 @@ pub trait SumChainApi {
     #[method(name = "chain_getActivationStatus")]
     async fn chain_get_activation_status(
         &self,
-    ) -> Result<ActivationStatusInfo, jsonrpsee::types::ErrorObjectOwned>;
+    ) -> Result<crate::types::ActivationStatusInfo, jsonrpsee::types::ErrorObjectOwned>;
 
     /// What this node may claim about its own history.
     ///
@@ -593,7 +592,7 @@ pub trait SumChainApi {
     #[method(name = "chain_getSyncCapability")]
     async fn chain_get_sync_capability(
         &self,
-    ) -> Result<SyncCapabilityInfo, jsonrpsee::types::ErrorObjectOwned>;
+    ) -> Result<crate::types::SyncCapabilityInfo, jsonrpsee::types::ErrorObjectOwned>;
 
     #[method(name = "chain_getBlockHeight")]
     async fn chain_get_block_height(

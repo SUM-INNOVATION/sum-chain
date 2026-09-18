@@ -37,7 +37,28 @@
 //!   write that silently dropped or mangled a row fails here rather than at the
 //!   next block.
 //!
-//! # What a snapshot still cannot prove, and where the proof comes from
+//! # Fast sync is DISABLED, and why that is the resolution
+//!
+//! None of the above makes a snapshot a SYNC. A snapshot carries the account
+//! family and nothing else, and `compute_block_state_root` folds the supply
+//! digest today, with no activation gate — so a node restored from one cannot
+//! reproduce the root of the next block it imports at any height, however
+//! perfectly its account rows landed. Contract state, tokens, NFTs, storage
+//! metadata and the validator set are missing too, and the compute-pool and
+//! beacon digests join the root the moment their gates open.
+//!
+//! So [`SnapshotManager::restore_snapshot`] refuses. Structurally, not by a
+//! flag: the file declares what it carries ([`SnapshotHeader::families`]), a
+//! constant declares what a sync requires
+//! ([`REQUIRED_FAST_SYNC_FAMILIES`]), and the difference is the refusal. When
+//! the format grows a family, [`SNAPSHOT_CARRIES`] grows with it and the refusal
+//! lifts itself — nobody has to remember a second place.
+//!
+//! [`SnapshotManager::import_account_family`] is what remains available: the
+//! same fully-checked import of the account family, which does not claim to be a
+//! sync and does not leave the node believing it is one.
+//!
+//! # What an account-family import still cannot prove, and where the proof comes from
 //!
 //! The digest in the header is a claim by whoever produced the file. Nothing in
 //! the file ties it to the chain. What ties it to the chain is the commitment
@@ -70,9 +91,21 @@
 //! and [`RestoreResult::journal_history_begins_at`] is where a node's own
 //! records start.
 //!
-//! The clamp itself belongs to the reorg planner, which this file does not own;
-//! see the crate-level report for what is required there and what is not yet
-//! wired.
+//! Both facts are RECORDED rather than returned and forgotten. The import height
+//! goes into `cf::META`, and [`sync_capability`] reads it back — so the startup
+//! log, the RPC surface and any future clamp all answer from one place and
+//! cannot drift into three different answers about the same node. A node that
+//! learned its undo history began at H+1 and then restarted would otherwise go
+//! straight back to advertising the full horizon.
+//!
+//! [`can_serve_history_at`] is the same idea for reads: a query path asks it
+//! before answering a historical state question, because a walk that runs off
+//! the bottom of this node's history and returns whatever it finds there is
+//! worse than an error — the caller cannot tell.
+//!
+//! Applying the depth as a bound on the reorg WALK belongs to the reorg planner,
+//! which this file does not own. This side reports the number; that side is
+//! where it becomes a limit.
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -149,13 +182,13 @@ pub const REQUIRED_FAST_SYNC_FAMILIES: &[&str] = &[
     "validators",
 ];
 
-/// `META` key holding what a snapshot restore did to this database.
+/// `META` key holding what a snapshot import did to this database.
 ///
-/// Namespaced like `journal::FORMAT_HIGH_WATER_META_KEY`, and persisted for the
-/// same reason: the consequences of a restore outlive the process that
-/// performed it. A node that learned its undo history began at H and then
-/// restarted would otherwise go back to believing it can unwind anything.
-pub const SNAPSHOT_RESTORE_META_KEY: &[u8] = b"snapshot/restored_at";
+/// Re-exported rather than redeclared: the key, its encoding and its decode
+/// failure live together in `sumchain_storage::snapshot_meta`, so there is one
+/// answer to "what is in that row" and one answer to "what if it is
+/// unreadable".
+pub use sumchain_storage::snapshot_meta::SNAPSHOT_IMPORT_META_KEY;
 
 /// The families [`REQUIRED_FAST_SYNC_FAMILIES`] demands and
 /// [`SNAPSHOT_CARRIES`] does not supply.
@@ -466,15 +499,10 @@ impl SnapshotManager {
         // Record it, so a restart does not forget. Written AFTER the commitment
         // check, so a database that failed the check is not marked as having
         // been imported into.
-        self.db
-            .put(
-                sumchain_storage::cf::META,
-                SNAPSHOT_RESTORE_META_KEY,
-                &snapshot.header.height.to_be_bytes(),
-            )
+        sumchain_storage::snapshot_meta::record_snapshot_import(&self.db, snapshot.header.height)
             .map_err(|e| {
-                StateError::Genesis(format!("recording the snapshot import height failed: {e}"))
-            })?;
+            StateError::Genesis(format!("recording the snapshot import height failed: {e}"))
+        })?;
 
         info!(
             "Account family imported: {} accounts at height {}, commitment {} \
@@ -770,21 +798,8 @@ pub fn sync_capability(db: &Database, current_height: BlockHeight) -> Result<Syn
 
 /// The height a snapshot was imported at, or `None`.
 pub fn imported_at(db: &Database) -> Result<Option<BlockHeight>> {
-    let raw = db
-        .get(sumchain_storage::cf::META, SNAPSHOT_RESTORE_META_KEY)
-        .map_err(|e| StateError::Genesis(format!("reading the snapshot import height: {e}")))?;
-    let Some(raw) = raw else { return Ok(None) };
-    let bytes: [u8; 8] = raw.as_slice().try_into().map_err(|_| {
-        // Corrupt rather than absent. Absent means "never imported", which is a
-        // permissive answer, and guessing it from an unreadable value would let
-        // a node claim history it does not have.
-        StateError::Genesis(format!(
-            "the recorded snapshot import height is {} bytes, not 8; this node \
-             cannot establish what history it holds and must not serve any",
-            raw.len()
-        ))
-    })?;
-    Ok(Some(u64::from_be_bytes(bytes)))
+    sumchain_storage::snapshot_meta::snapshot_import_height(db)
+        .map_err(|e| StateError::Genesis(e.to_string()))
 }
 
 /// May this node answer a historical STATE question at `height`?
@@ -918,6 +933,7 @@ mod tests {
             state_root: Hash::default(),
             account_digest: Hash::default(),
             account_root_activation: None,
+            families: SNAPSHOT_CARRIES.iter().map(|s| s.to_string()).collect(),
             account_count: 10,
             created_at: 12345678,
         };
@@ -945,6 +961,7 @@ mod tests {
                 state_root: Hash::default(),
                 account_digest: Hash::default(),
                 account_root_activation: None,
+                families: SNAPSHOT_CARRIES.iter().map(|s| s.to_string()).collect(),
                 account_count: 2,
                 created_at: 12345,
             },
@@ -986,6 +1003,7 @@ mod tests {
                 state_root: Hash::default(),
                 account_digest: Hash::default(),
                 account_root_activation: None,
+                families: SNAPSHOT_CARRIES.iter().map(|s| s.to_string()).collect(),
                 account_count: 5, // Says 5 accounts
                 created_at: 12345,
             },
@@ -1025,6 +1043,7 @@ mod tests {
                 state_root: Hash::default(),
                 account_digest: Hash::default(),
                 account_root_activation: None,
+                families: SNAPSHOT_CARRIES.iter().map(|s| s.to_string()).collect(),
                 account_count: 0,
                 created_at: 12345,
             },

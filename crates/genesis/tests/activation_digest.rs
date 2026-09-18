@@ -392,7 +392,9 @@ fn a_gate_missing_from_the_record_reads_as_dormant() {
 
     // And left dormant it is not a change at all.
     let dormant = ChainParams::with_v2_enabled();
-    assert!(dormant.activation_changes(&old_record, 12_920_593).is_empty());
+    assert!(dormant
+        .activation_changes(&old_record, 12_920_593)
+        .is_empty());
 }
 
 /// On a FIRST start there is no record, and the comparison is not performed —
