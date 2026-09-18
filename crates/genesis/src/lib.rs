@@ -1302,6 +1302,162 @@ impl ChainParams {
     }
 }
 
+/// What changed between the activation parameters a database was last started
+/// under and the ones it is being started under now.
+///
+/// Three outcomes, and the distinction between them is the whole value: a
+/// coordinated activation IS a change to `genesis.json`, so a startup check that
+/// refused every change would refuse the thing it exists to protect. What must
+/// be refused is a change to a gate the chain has ALREADY PASSED.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivationChange {
+    /// A gate whose height is still in the future under both the old value and
+    /// the new one. This is a coordinated activation being scheduled, rescheduled
+    /// or cancelled, and it is legitimate — noisy, and legitimate.
+    Retuned {
+        gate: String,
+        from: Option<u64>,
+        to: Option<u64>,
+    },
+    /// A gate that had ALREADY FIRED under the recorded height and now carries a
+    /// different one, or none.
+    ///
+    /// Blocks were produced under the old rule. Changing the height now does not
+    /// change them; it changes what this binary believes about them, which is
+    /// how a node computes a different root for a block it already accepted and
+    /// discovers it during a reorg.
+    AlreadyActive {
+        gate: String,
+        from: Option<u64>,
+        to: Option<u64>,
+    },
+    /// A gate that was dormant (or scheduled ahead) and is now set to a height
+    /// the chain has already passed.
+    ///
+    /// Every block between that height and the head was produced WITHOUT the
+    /// rule. A node starting under this configuration would reject its own
+    /// history, or worse, accept it and diverge from the moment it next
+    /// recomputed a root.
+    RetroactivelyOpened { gate: String, to: u64 },
+}
+
+impl ActivationChange {
+    /// May a node start under this change?
+    ///
+    /// Only [`Self::Retuned`]. The other two describe a rule being changed
+    /// underneath blocks that already exist, which is not a configuration
+    /// change — it is a different chain wearing this one's database.
+    pub fn is_permitted(&self) -> bool {
+        matches!(self, ActivationChange::Retuned { .. })
+    }
+
+    pub fn gate(&self) -> &str {
+        match self {
+            ActivationChange::Retuned { gate, .. }
+            | ActivationChange::AlreadyActive { gate, .. }
+            | ActivationChange::RetroactivelyOpened { gate, .. } => gate,
+        }
+    }
+}
+
+impl std::fmt::Display for ActivationChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn h(v: &Option<u64>) -> String {
+            match v {
+                Some(n) => n.to_string(),
+                None => "dormant".to_string(),
+            }
+        }
+        match self {
+            ActivationChange::Retuned { gate, from, to } => write!(
+                f,
+                "{gate}: {} -> {} (both still ahead of the chain; permitted)",
+                h(from),
+                h(to)
+            ),
+            ActivationChange::AlreadyActive { gate, from, to } => write!(
+                f,
+                "{gate}: {} -> {} — the chain has ALREADY PASSED {}; blocks exist \
+                 under the old rule and this changes what they mean",
+                h(from),
+                h(to),
+                h(from)
+            ),
+            ActivationChange::RetroactivelyOpened { gate, to } => write!(
+                f,
+                "{gate}: set to {to}, which the chain has already passed; every \
+                 block above {to} was produced without this rule"
+            ),
+        }
+    }
+}
+
+impl ChainParams {
+    /// Compare these activation heights against the ones this database was last
+    /// started under.
+    ///
+    /// `recorded` is `(gate name, height)` as persisted. A gate present here and
+    /// absent from `recorded` is treated as having been dormant, which is what a
+    /// binary that did not know the gate would have believed — so adding a gate
+    /// to `ChainParams` and starting an old database is a [`Self::Retuned`] if
+    /// the new height is ahead and a refusal if it is not.
+    ///
+    /// Unchanged gates produce nothing. The result is the change set, and an
+    /// empty result means the configuration is identical.
+    pub fn activation_changes(
+        &self,
+        recorded: &[(String, Option<u64>)],
+        current_height: u64,
+    ) -> Vec<ActivationChange> {
+        let mut out = Vec::new();
+        for (gate, now) in self.activation_heights() {
+            let before = recorded
+                .iter()
+                .find(|(name, _)| name == gate)
+                .map(|(_, h)| *h)
+                .unwrap_or(None);
+            if before == now {
+                continue;
+            }
+            // Had the old height already fired? If so, nothing about this gate
+            // may move: blocks exist that were produced under it.
+            if matches!(before, Some(h) if h <= current_height) {
+                out.push(ActivationChange::AlreadyActive {
+                    gate: gate.to_string(),
+                    from: before,
+                    to: now,
+                });
+                continue;
+            }
+            // The old height had not fired. The new one must not have either.
+            if let Some(h) = now {
+                if h <= current_height {
+                    out.push(ActivationChange::RetroactivelyOpened {
+                        gate: gate.to_string(),
+                        to: h,
+                    });
+                    continue;
+                }
+            }
+            out.push(ActivationChange::Retuned {
+                gate: gate.to_string(),
+                from: before,
+                to: now,
+            });
+        }
+        out
+    }
+
+    /// The activation heights as `(name, height)` pairs that own their strings,
+    /// for persisting.
+    pub fn recorded_activation_heights(&self) -> Vec<(String, Option<u64>)> {
+        self.activation_heights()
+            .into_iter()
+            .map(|(name, h)| (name.to_string(), h))
+            .collect()
+    }
+}
+
 /// Genesis configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Genesis {

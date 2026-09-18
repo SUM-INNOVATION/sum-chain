@@ -169,6 +169,13 @@ impl RpcTimeoutConfig {
 }
 
 /// RPC server
+/// The chain identity an RPC server serves, for `chain_getActivationStatus`.
+#[derive(Debug, Clone, Copy)]
+struct GenesisIdentity {
+    digest: sumchain_primitives::Hash,
+    chain_id: u64,
+}
+
 pub struct RpcServer {
     db: Arc<Database>,
     state: Arc<StateManager>,
@@ -194,6 +201,12 @@ pub struct RpcServer {
     /// production callers MUST set via `with_chain_params` to match the chain
     /// they're serving.
     chain_params: sumchain_genesis::ChainParams,
+    /// The chain identity this server is serving, for `chain_getActivationStatus`.
+    ///
+    /// `None` when the server was built without a genesis — the digest cannot
+    /// then be produced, and the RPC says so rather than returning a digest over
+    /// defaults, which would compare EQUAL between two nodes that share nothing.
+    genesis_identity: Option<GenesisIdentity>,
     /// Contract executor for smart contract RPCs
     contract_executor: Option<Arc<sumchain_state::ContractExecutorState>>,
 }
@@ -324,6 +337,7 @@ impl RpcServer {
             timeout_config: RpcTimeoutConfig::default(),
             contract_executor: None,
             chain_params: sumchain_genesis::ChainParams::default(),
+            genesis_identity: None,
         }
     }
 
@@ -335,6 +349,23 @@ impl RpcServer {
     /// archive will disagree with `AcceptAssignmentV2` validity.
     pub fn with_chain_params(mut self, params: sumchain_genesis::ChainParams) -> Self {
         self.chain_params = params;
+        self
+    }
+
+    /// Supply the genesis this node is serving, for `chain_getActivationStatus`.
+    ///
+    /// Takes the genesis rather than the digest so the server cannot be handed a
+    /// digest that does not correspond to its own parameters. A failure to
+    /// compute it is carried as `None` — the RPC reports the digest unavailable,
+    /// which is a true statement, where a fabricated one would not be.
+    pub fn with_genesis(mut self, genesis: &sumchain_genesis::Genesis) -> Self {
+        self.genesis_identity = genesis
+            .activation_digest()
+            .ok()
+            .map(|digest| GenesisIdentity {
+                digest,
+                chain_id: genesis.chain_id,
+            });
         self
     }
 
@@ -361,6 +392,16 @@ impl RpcServer {
     /// the node crate's production-wiring tripwire test.
     pub fn has_contract_executor(&self) -> bool {
         self.contract_executor.is_some()
+    }
+
+    /// Whether this server can produce the activation digest.
+    ///
+    /// Exists for the wiring tripwire in the node crate: a server built without
+    /// a genesis answers `chain_getActivationStatus` with "unavailable", which
+    /// is honest and useless, and the failure is invisible until an operator
+    /// tries to compare two nodes during an activation.
+    pub fn has_genesis_identity(&self) -> bool {
+        self.genesis_identity.is_some()
     }
 
     pub fn with_contract_executor(mut self, executor: Arc<sumchain_state::ContractExecutorState>) -> Self {
@@ -1442,6 +1483,72 @@ impl SumChainApiServer for RpcServer {
                 proposal_bond: g.proposal_bond.to_string(),
                 treasury_configured: g.treasury.is_some(),
             }),
+        })
+    }
+
+    async fn chain_get_activation_status(
+        &self,
+    ) -> std::result::Result<
+        crate::types::ActivationStatusInfo,
+        jsonrpsee::types::ErrorObjectOwned,
+    > {
+        let current_height = self.consensus.current_height();
+        // Built from the SAME `activation_heights` list the digest folds, in the
+        // same order, so what an operator reads here and what they compare are
+        // the same set. A second hand-maintained list here would be a place for
+        // the two to disagree.
+        let gates = self
+            .chain_params
+            .activation_heights()
+            .into_iter()
+            .map(|(gate, height)| crate::types::ActivationGateInfo {
+                gate: gate.to_string(),
+                height,
+                active: matches!(height, Some(h) if current_height >= h),
+            })
+            .collect();
+
+        // The digest covers chain identity as well as the heights, so it is
+        // computed from the genesis this node holds rather than from
+        // `chain_params` alone.
+        let (digest, chain_id) = match &self.genesis_identity {
+            Some(id) => (id.digest.to_string(), id.chain_id),
+            // An RPC server constructed without a genesis cannot produce the
+            // comparable value. Saying so is better than returning a digest over
+            // defaults, which would compare equal between two nodes that share
+            // nothing — the exact false agreement this value exists to prevent.
+            None => (
+                "unavailable: this RPC server was not given a genesis".to_string(),
+                0,
+            ),
+        };
+
+        Ok(crate::types::ActivationStatusInfo {
+            digest,
+            chain_id,
+            current_height,
+            gates,
+        })
+    }
+
+    async fn chain_get_sync_capability(
+        &self,
+    ) -> std::result::Result<crate::types::SyncCapabilityInfo, jsonrpsee::types::ErrorObjectOwned>
+    {
+        let current_height = self.consensus.current_height();
+        let cap = sumchain_state::sync_capability(&self.db, current_height)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        let account_rows = sumchain_state::account_root::account_row_count(&self.db)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(crate::types::SyncCapabilityInfo {
+            imported_at: cap.imported_at,
+            fast_sync_available: cap.fast_sync_available,
+            missing_families: cap.missing_families.iter().map(|s| s.to_string()).collect(),
+            state_history_floor: cap.state_history_floor,
+            journal_history_begins_at: cap.journal_history_begins_at,
+            usable_reorg_depth: cap.usable_reorg_depth,
+            current_height,
+            account_rows,
         })
     }
 
@@ -7947,6 +8054,28 @@ impl SumChainApiServer for RpcServer {
         &self,
         height: u64,
     ) -> std::result::Result<Vec<NodeRecordInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        // Historical state, on a node that may not have any at this height.
+        //
+        // `get_active_archive_nodes_at_height` walks BACKWARDS to the nearest
+        // snapshot. On a node seeded from a state snapshot that walk runs off
+        // the bottom of the history this machine holds and returns whatever it
+        // finds there — an answer the caller cannot distinguish from a correct
+        // one. Refusing is the only honest response, and the predicate is shared
+        // so every historical path applies the same rule.
+        if !sumchain_state::snapshot::can_serve_history_at(&self.db, height)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+        {
+            let floor = sumchain_state::snapshot::imported_at(&self.db)
+                .map_err(|e| RpcError::Internal(e.to_string()))?
+                .unwrap_or(0);
+            return Err(RpcError::InvalidParams(format!(
+                "height {height} is below this node's state-history floor {floor}: it \
+                 was seeded from a snapshot at {floor} and holds no state below that \
+                 height. Query a node that replayed this range."
+            ))
+            .into());
+        }
+
         let executor = sumchain_state::NodeRegistryExecutor::new(self.db.clone());
         let records = executor
             .get_active_archive_nodes_at_height(height)

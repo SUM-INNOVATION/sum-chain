@@ -222,3 +222,215 @@ fn allocation_order_does_not_reach_the_digest() {
         backward.activation_digest().unwrap()
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Changing an activation height under a running chain
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The digest above makes disagreement between two nodes visible. This makes
+// disagreement between a node and its OWN PAST visible, which is the failure an
+// operator produces by hand: editing `genesis.json` on a node that has already
+// been running.
+
+/// Rescheduling a gate that is still ahead of the chain is permitted.
+///
+/// This has to be permitted, and saying why matters: a coordinated activation
+/// IS a change to `genesis.json`. A check that refused every change would refuse
+/// the mechanism it exists to protect. What it may refuse is a change to a gate
+/// the chain has already passed.
+#[test]
+fn a_gate_still_ahead_of_the_chain_may_be_retuned() {
+    let before = ChainParams::with_v2_enabled();
+    let mut after = before.clone();
+    after.account_root_enabled_from_height = Some(14_700_000);
+
+    let changes = after.activation_changes(&before.recorded_activation_heights(), 12_920_593);
+    assert_eq!(changes.len(), 1, "one gate moved: {changes:?}");
+    assert!(changes[0].is_permitted());
+    assert_eq!(changes[0].gate(), "account_root_enabled_from_height");
+
+    // Moved again, still ahead: still permitted.
+    let mut later = after.clone();
+    later.account_root_enabled_from_height = Some(15_000_000);
+    let changes = later.activation_changes(&after.recorded_activation_heights(), 12_920_593);
+    assert!(changes[0].is_permitted(), "{changes:?}");
+
+    // Cancelled while still ahead: also permitted. Standing down a scheduled
+    // activation is the same class of act as scheduling it.
+    let mut cancelled = after.clone();
+    cancelled.account_root_enabled_from_height = None;
+    let changes = cancelled.activation_changes(&after.recorded_activation_heights(), 12_920_593);
+    assert!(changes[0].is_permitted(), "{changes:?}");
+}
+
+/// Changing a gate the chain has ALREADY PASSED is refused.
+///
+/// Blocks exist that were produced under the old height. Changing it now does
+/// not change them; it changes what this binary believes about them, and the
+/// node computes a different root for a block it already accepted. Three ways
+/// to do it, all refused: move the height, move it backwards, remove it.
+#[test]
+fn a_gate_the_chain_has_passed_may_not_be_changed() {
+    let mut before = ChainParams::with_v2_enabled();
+    before.account_root_enabled_from_height = Some(9_000_000);
+    let head = 12_920_593;
+
+    for (label, to) in [
+        ("moved forward", Some(13_000_000u64)),
+        ("moved backward", Some(8_000_000)),
+        ("removed", None),
+    ] {
+        let mut after = before.clone();
+        after.account_root_enabled_from_height = to;
+        let changes = after.activation_changes(&before.recorded_activation_heights(), head);
+        assert_eq!(changes.len(), 1, "{label}: {changes:?}");
+        assert!(
+            !changes[0].is_permitted(),
+            "{label} must be refused: {changes:?}"
+        );
+        let text = changes[0].to_string();
+        assert!(
+            text.contains("ALREADY PASSED") && text.contains("9000000"),
+            "{label}: the refusal must name the height that already fired: {text}"
+        );
+    }
+
+    // The boundary: a gate at exactly the head height HAS fired.
+    let mut at_head = ChainParams::with_v2_enabled();
+    at_head.account_root_enabled_from_height = Some(head);
+    let mut moved = at_head.clone();
+    moved.account_root_enabled_from_height = Some(head + 1);
+    assert!(
+        !moved.activation_changes(&at_head.recorded_activation_heights(), head)[0].is_permitted(),
+        "a gate whose height equals the head has fired for that block"
+    );
+
+    // One block above the head has not fired, and may still move.
+    let mut ahead = ChainParams::with_v2_enabled();
+    ahead.account_root_enabled_from_height = Some(head + 1);
+    let mut moved = ahead.clone();
+    moved.account_root_enabled_from_height = Some(head + 2);
+    assert!(moved.activation_changes(&ahead.recorded_activation_heights(), head)[0].is_permitted());
+}
+
+/// Opening a dormant gate at a height the chain has already passed is refused.
+///
+/// The one an operator reaches for by accident: copying a peer's genesis, or
+/// setting a gate to a height that was in the future when the plan was written
+/// and is in the past by the time it is applied. Every block above that height
+/// was produced without the rule.
+#[test]
+fn a_dormant_gate_may_not_be_opened_retroactively() {
+    let before = ChainParams::with_v2_enabled();
+    assert_eq!(before.account_root_enabled_from_height, None);
+
+    let mut after = before.clone();
+    after.account_root_enabled_from_height = Some(9_000_000);
+    let changes = after.activation_changes(&before.recorded_activation_heights(), 12_920_593);
+    assert_eq!(changes.len(), 1);
+    assert!(!changes[0].is_permitted());
+    assert!(
+        changes[0].to_string().contains("already passed"),
+        "{:?}",
+        changes[0]
+    );
+
+    // And a gate scheduled ahead that is then re-pointed into the past is the
+    // same refusal, not a permitted retune.
+    let mut scheduled = ChainParams::with_v2_enabled();
+    scheduled.account_root_enabled_from_height = Some(14_700_000);
+    let mut backdated = scheduled.clone();
+    backdated.account_root_enabled_from_height = Some(1_000);
+    assert!(
+        !backdated.activation_changes(&scheduled.recorded_activation_heights(), 12_920_593)[0]
+            .is_permitted()
+    );
+}
+
+/// An identical configuration produces no changes at all.
+///
+/// The normal restart. If this were noisy, the warnings that matter would be
+/// ignored.
+#[test]
+fn an_unchanged_configuration_reports_nothing() {
+    let params = ChainParams::with_v2_enabled();
+    assert!(params
+        .activation_changes(&params.recorded_activation_heights(), 12_920_593)
+        .is_empty());
+
+    let mut with_gates = params.clone();
+    with_gates.account_root_enabled_from_height = Some(14_700_000);
+    with_gates.application_journal_enabled_from_height = Some(14_200_000);
+    assert!(with_gates
+        .activation_changes(&with_gates.recorded_activation_heights(), 12_920_593)
+        .is_empty());
+}
+
+/// A gate this binary knows and the record does not is treated as having been
+/// dormant.
+///
+/// That is what a binary which did not know the gate believed, so it is the
+/// honest reading of a record written by one. The consequence is the right one:
+/// a new gate pointed ahead of the chain is a permitted retune, and a new gate
+/// pointed behind it is a retroactive opening and refused — which is exactly how
+/// an upgrade that ships a new activation should behave.
+#[test]
+fn a_gate_missing_from_the_record_reads_as_dormant() {
+    let old_record: Vec<(String, Option<u64>)> = ChainParams::with_v2_enabled()
+        .recorded_activation_heights()
+        .into_iter()
+        .filter(|(name, _)| name != "account_root_enabled_from_height")
+        .collect();
+
+    let mut ahead = ChainParams::with_v2_enabled();
+    ahead.account_root_enabled_from_height = Some(14_700_000);
+    assert!(ahead.activation_changes(&old_record, 12_920_593)[0].is_permitted());
+
+    let mut behind = ChainParams::with_v2_enabled();
+    behind.account_root_enabled_from_height = Some(9_000_000);
+    assert!(!behind.activation_changes(&old_record, 12_920_593)[0].is_permitted());
+
+    // And left dormant it is not a change at all.
+    let dormant = ChainParams::with_v2_enabled();
+    assert!(dormant.activation_changes(&old_record, 12_920_593).is_empty());
+}
+
+/// On a FIRST start there is no record, and the comparison is not performed —
+/// which is load-bearing, not an omission.
+///
+/// The function itself has no way to distinguish "height 0 because the chain is
+/// empty" from "height 0 because the genesis block exists", and a gate at
+/// `Some(0)` means opposite things in those two cases. So the caller makes the
+/// distinction: `Node::check_activation_parameters` compares only when a record
+/// exists, and a database with no record has no blocks for a gate to have fired
+/// over.
+///
+/// This test pins the consequence of getting that wrong, so the caller's
+/// structure is not free to drift: fed an empty record at height 0, the
+/// comparison reports a gate set to `Some(0)` as a retroactive opening. Correct
+/// for a chain that has produced blocks, wrong for one that has not, and the
+/// reason the first start is recorded rather than compared.
+#[test]
+fn a_first_start_is_recorded_rather_than_compared() {
+    let mut params = ChainParams::with_v2_enabled();
+    params.account_root_enabled_from_height = Some(14_700_000);
+
+    let changes = params.activation_changes(&[], 0);
+    assert_eq!(changes.len(), 2, "both set gates are reported: {changes:?}");
+
+    let by_gate = |g: &str| {
+        changes
+            .iter()
+            .find(|c| c.gate() == g)
+            .unwrap_or_else(|| panic!("{g} missing from {changes:?}"))
+    };
+    assert!(
+        by_gate("account_root_enabled_from_height").is_permitted(),
+        "a future height is a permitted retune even from an empty record"
+    );
+    assert!(
+        !by_gate("v2_enabled_from_height").is_permitted(),
+        "`Some(0)` against height 0 reads as retroactive — which is why a first \
+         start does not run this comparison at all"
+    );
+}

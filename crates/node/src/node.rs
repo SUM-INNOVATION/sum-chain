@@ -241,6 +241,31 @@ impl Node {
             .unwrap_or(0);
         let chain_height = Arc::new(AtomicU64::new(initial_height));
 
+        // ── the activation-parameter gate, before consensus exists ──────────
+        //
+        // Activation heights are how this chain coordinates a consensus change,
+        // and they coordinate nothing unless every validator holds the same
+        // ones. They are distributed as a runtime `genesis.json` per validator
+        // and, until now, compared by eye — a mistyped digit was invisible until
+        // blocks started being refused at the height it named.
+        //
+        // Two things happen here. The digest is logged, so the comparison
+        // between operators is an equality on one value rather than a field-by-
+        // field read of two files. And the heights are compared against the ones
+        // this database was last started under, with a REFUSAL — not a warning —
+        // for any gate the chain has already passed.
+        //
+        // The distinction matters, because a coordinated activation IS a change
+        // to `genesis.json`. Rescheduling a gate that is still ahead of the
+        // chain is the mechanism working; changing one the chain has already
+        // crossed is a rule being rewritten underneath blocks that exist, and
+        // a node that starts under it will compute a different root for a block
+        // it already accepted and find out during a reorg.
+        Self::check_activation_parameters(&db, &genesis, initial_height)?;
+
+        // What this node may claim about its own history, said at start.
+        Self::report_sync_capability(&db, initial_height)?;
+
         // Build the InferenceAttestation admission context. Carries the
         // narrowest set of handles needed for the three admission checks:
         // the storage executor that owns the canonical CF, the chain's
@@ -334,6 +359,139 @@ impl Node {
     }
 
     /// Run the node
+    /// `META` key holding the activation heights this database was last started
+    /// under.
+    ///
+    /// Namespaced like `journal::FORMAT_HIGH_WATER_META_KEY` and
+    /// `snapshot::SNAPSHOT_RESTORE_META_KEY`, and persisted for the same reason:
+    /// the question "did the rules change under me" cannot be answered from the
+    /// configuration alone, because the configuration is what changed.
+    const ACTIVATION_META_KEY: &'static [u8] = b"activation/heights";
+
+    /// Compare this genesis's activation heights against the ones this database
+    /// was last started under, and refuse the changes that rewrite history.
+    ///
+    /// Called before consensus, RPC or the network exist, so a refusal means the
+    /// node never joins rather than joins and diverges.
+    ///
+    /// On a first start there is nothing to compare against and the heights are
+    /// simply recorded. That is not a hole: a fresh database has no blocks, so
+    /// no gate can have fired, so every height in it is ahead of the chain by
+    /// definition.
+    fn check_activation_parameters(
+        db: &Arc<Database>,
+        genesis: &Genesis,
+        current_height: u64,
+    ) -> Result<()> {
+        let digest = genesis
+            .activation_digest()
+            .map_err(|e| anyhow::anyhow!("computing the genesis activation digest: {}", e))?;
+
+        let recorded: Option<Vec<(String, Option<u64>)>> = db
+            .get(sumchain_storage::cf::META, Self::ACTIVATION_META_KEY)
+            .map_err(|e| anyhow::anyhow!("reading the recorded activation heights: {}", e))?
+            .map(|raw| {
+                bincode::deserialize(&raw).map_err(|e| {
+                    // Unreadable, not absent. Treating a corrupt record as "first
+                    // start" would skip the only check that can catch a rule
+                    // changed underneath existing blocks.
+                    anyhow::anyhow!(
+                        "the recorded activation heights are unreadable ({}); this node \
+                         cannot establish whether its activation parameters changed and \
+                         must not join consensus",
+                        e
+                    )
+                })
+            })
+            .transpose()?;
+
+        let now = genesis.params.recorded_activation_heights();
+
+        if let Some(recorded) = &recorded {
+            let changes = genesis.params.activation_changes(recorded, current_height);
+            let (permitted, refused): (Vec<_>, Vec<_>) =
+                changes.into_iter().partition(|c| c.is_permitted());
+
+            for change in &permitted {
+                // Loud, because a legitimate reschedule is still an operator
+                // changing consensus-relevant configuration on a running node.
+                warn!("Activation parameter changed (permitted): {}", change);
+            }
+            if !refused.is_empty() {
+                let detail = refused
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(anyhow::anyhow!(
+                    "refusing to start: activation parameters changed for gates this \
+                     chain has already passed at height {current_height} — {detail}. \
+                     Restore the previous genesis.json, or re-sync from genesis under \
+                     the new one. Activation digest now {digest}."
+                ));
+            }
+        }
+
+        let encoded = bincode::serialize(&now)
+            .map_err(|e| anyhow::anyhow!("encoding the activation heights: {}", e))?;
+        db.put(
+            sumchain_storage::cf::META,
+            Self::ACTIVATION_META_KEY,
+            &encoded,
+        )
+        .map_err(|e| anyhow::anyhow!("recording the activation heights: {}", e))?;
+
+        let open: Vec<String> = now
+            .iter()
+            .filter_map(|(gate, h)| h.map(|h| format!("{gate}={h}")))
+            .collect();
+        info!(
+            "Genesis activation digest {} (chain {}, height {}, {} gates set: {})",
+            digest,
+            genesis.chain_id,
+            current_height,
+            open.len(),
+            open.join(", ")
+        );
+        if recorded.is_none() {
+            info!("Activation heights recorded for the first time on this database");
+        }
+        Ok(())
+    }
+
+    /// Log what this node may claim about its own history.
+    ///
+    /// A node that imported a snapshot holds canonical state and no undo
+    /// records, and cannot reconstruct state below the height it imported at.
+    /// Both facts bound what it may advertise and what it may serve, and both
+    /// are invisible unless said out loud at start.
+    fn report_sync_capability(db: &Arc<Database>, current_height: u64) -> Result<()> {
+        let cap = sumchain_state::sync_capability(db, current_height)
+            .map_err(|e| anyhow::anyhow!("reading this node's sync capability: {}", e))?;
+        match cap.imported_at {
+            Some(h) => warn!(
+                "This node was seeded from a snapshot at height {}. It holds NO undo \
+                 records at or below that height: usable reorg depth is {} of {}, \
+                 and historical state below {} is unavailable and must not be served.",
+                h,
+                cap.usable_reorg_depth,
+                sumchain_storage::pruner::UNDO_RETENTION_FLOOR,
+                h
+            ),
+            None => info!(
+                "Sync: this node executed its own history; no snapshot import recorded"
+            ),
+        }
+        if !cap.fast_sync_available {
+            info!(
+                "Fast sync is DISABLED in this binary: the snapshot format does not \
+                 carry {:?}",
+                cap.missing_families
+            );
+        }
+        Ok(())
+    }
+
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting node");
 
@@ -712,7 +870,7 @@ impl Node {
             self.rpc_auth_config.clone(),
             self.rpc_rate_limit_config.clone(),
             self.metrics.clone(),
-            self.genesis.params.clone(),
+            &self.genesis,
         );
 
         let handle = rpc.start(self.rpc_addr).await?;
@@ -881,8 +1039,9 @@ fn build_rpc_server(
     rpc_auth_config: RpcAuthConfig,
     rpc_rate_limit_config: RateLimitConfig,
     metrics: Arc<Metrics>,
-    params: sumchain_genesis::ChainParams,
+    genesis: &Genesis,
 ) -> RpcServer {
+    let params = genesis.params.clone();
     let contract_executor = Arc::new(sumchain_state::ContractExecutorState::new(
         db.clone(),
         params.clone(),
@@ -901,6 +1060,11 @@ fn build_rpc_server(
         metrics,
     )
     .with_chain_params(params)
+    // The whole genesis, not the digest: an RPC server cannot then be handed a
+    // digest that does not correspond to the parameters it is serving. This is
+    // what makes `chain_getActivationStatus` an operator-visible answer rather
+    // than a hash of whatever the server was configured with.
+    .with_genesis(genesis)
     .with_contract_executor(contract_executor)
 }
 
@@ -1111,12 +1275,18 @@ mod rpc_wiring_tests {
             RpcAuthConfig::disabled(),
             RateLimitConfig::disabled(),
             Arc::new(Metrics::new()),
-            genesis.params.clone(),
+            &genesis,
         );
 
         assert!(
             server.has_contract_executor(),
             "production RPC must wire the contract executor"
+        );
+        assert!(
+            server.has_genesis_identity(),
+            "production RPC must wire the genesis, or chain_getActivationStatus \
+             reports the digest unavailable on every node and the comparison \
+             operators are told to perform cannot be performed"
         );
     }
 }

@@ -725,6 +725,79 @@ pub struct BlockHeightInfo {
     pub finality: String,
 }
 
+/// `chain_getActivationStatus` — the activation parameters this node is running
+/// under, as one comparable value plus the heights behind it.
+///
+/// An activation height coordinates a consensus change only if every validator
+/// holds the same one. They are distributed as a runtime `genesis.json` per
+/// validator; before this, comparing them meant reading two files field by
+/// field, and a mistyped digit stayed invisible until blocks were refused at
+/// the height it named.
+///
+/// The `digest` is the comparison. Two operators read one hex string to each
+/// other, or a monitor scrapes it from both nodes; identical means identical
+/// configuration. It is deliberately not a consensus value — nothing rejects a
+/// peer over it — because the chain already rejects the blocks a disagreement
+/// produces. This is the earlier signal, available before the height arrives.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivationStatusInfo {
+    /// Domain-separated digest over the chain identity and every activation
+    /// height. The value to compare between nodes.
+    pub digest: String,
+    pub chain_id: u64,
+    /// Chain height this status was read at, so a scrape carries its own
+    /// context.
+    pub current_height: BlockHeight,
+    /// Every gate this binary knows, in the digest's fixed order. `height` is
+    /// `null` for a gate that is dormant — distinct from `0`, which is "active
+    /// from genesis".
+    pub gates: Vec<ActivationGateInfo>,
+}
+
+/// One activation gate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivationGateInfo {
+    pub gate: String,
+    pub height: Option<u64>,
+    /// Whether the chain has reached it. `false` for a dormant gate.
+    pub active: bool,
+}
+
+/// `chain_getSyncCapability` — what this node may claim about its own history.
+///
+/// A node seeded from a snapshot holds canonical state and NO undo records, and
+/// cannot reconstruct state below the height it was seeded at. Both bound what
+/// it may advertise and what it may serve, and neither is visible from outside
+/// unless the node says so.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncCapabilityInfo {
+    /// Height a snapshot was imported at, or `null` for a node that executed
+    /// its own history.
+    pub imported_at: Option<BlockHeight>,
+    /// Whether this binary's snapshot format can perform a fast sync at all.
+    /// `false` while the format does not carry every state family a sync needs.
+    pub fast_sync_available: bool,
+    /// Families a sync requires and this format does not carry.
+    pub missing_families: Vec<String>,
+    /// Lowest height this node can answer a historical STATE question for.
+    /// `null` means no restriction.
+    pub state_history_floor: Option<BlockHeight>,
+    /// First height this node holds an undo record for. `null` means no
+    /// restriction.
+    pub journal_history_begins_at: Option<BlockHeight>,
+    /// Deepest reorg this node may ADVERTISE at `current_height`.
+    pub usable_reorg_depth: u64,
+    pub current_height: BlockHeight,
+    /// Account rows stored in `cf::STATE`.
+    ///
+    /// The number the account-state commitment folds once per block, and the
+    /// number its per-block cost is linear in. Not the count of accounts holding
+    /// value: a row whose balance and nonce are both zero costs exactly as much
+    /// to fold as one that holds the whole supply. Exposed so the operational
+    /// threshold on it can be monitored rather than estimated.
+    pub account_rows: u64,
+}
+
 /// Transaction status V2 for `chain_getTransactionStatus` (Phase 0b, SNIP V2 Ask 11).
 ///
 /// Distinguishes mempool / included-but-unfinalized / finalized states so

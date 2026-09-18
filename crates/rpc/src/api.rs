@@ -27,7 +27,8 @@ use crate::types::{
     TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo, ExecutorLinkInfo, AssetInfo, FinanceIssuerInfo,
     CaseInfo, HealthcareProviderInfo,
     EquityControllerConfigInfo, EquityEntityInfo, EquityShareClassInfo,
-    AccountInfo, BlockHeightInfo, BlockInfo, ContractCallResult, ContractInfo,
+    AccountInfo, ActivationGateInfo, ActivationStatusInfo, BlockHeightInfo, BlockInfo,
+    ContractCallResult, ContractInfo, SyncCapabilityInfo,
     CreateEmploymentCredentialRequest,
     CreateEmploymentCredentialResponse, DelegationRpcInfo, DelegatorSummary, DocClassConfigInfo,
     DocClassCredentialInfo, DocClassIdentityInfo, DocClassIssuerInfo, DocClassSummary,
@@ -568,6 +569,32 @@ pub trait SumChainApi {
     /// (safe for expiry calculations under PoA reorgs); `None` or
     /// `Some("latest")` returns the head height. The return value's
     /// `finality` field echoes which view was returned.
+    /// The activation parameters this node is running under.
+    ///
+    /// Returns one digest over the chain identity and every activation height,
+    /// plus the heights themselves. The digest is what two operators compare:
+    /// identical means identical configuration, and a mistyped digit changes it.
+    ///
+    /// Not a consensus value — nothing rejects a peer over it. The chain already
+    /// rejects the blocks a disagreement produces; this is the earlier signal,
+    /// available before the activation height arrives rather than after.
+    #[method(name = "chain_getActivationStatus")]
+    async fn chain_get_activation_status(
+        &self,
+    ) -> Result<ActivationStatusInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// What this node may claim about its own history.
+    ///
+    /// A node seeded from a snapshot holds canonical state and no undo records.
+    /// Reports where its undo history begins, the lowest height it can answer a
+    /// historical state question for, the reorg depth it may advertise, whether
+    /// this binary can fast sync at all, and the stored account-row count the
+    /// account commitment's per-block cost is linear in.
+    #[method(name = "chain_getSyncCapability")]
+    async fn chain_get_sync_capability(
+        &self,
+    ) -> Result<SyncCapabilityInfo, jsonrpsee::types::ErrorObjectOwned>;
+
     #[method(name = "chain_getBlockHeight")]
     async fn chain_get_block_height(
         &self,
