@@ -33,7 +33,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use sumchain_consensus::reorg::{
-    accumulator_of, apply_branch, execute_reorg, plan_reorg, recorded_head, resume, ReorgPlan,
+    accumulator_of, apply_branch, execute_reorg, plan_reorg, recorded_head, resume, ReorgOutcome,
+    ReorgPlan,
 };
 use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::ChainParams;
@@ -6009,4 +6010,272 @@ fn an_interrupted_rollback_leaves_the_old_tip_untouched() {
     )
     .expect("a clean retry");
     assert_eq!(report.blocks, 2);
+}
+
+// 14. The activated account commitment, through a reorg
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The height these fixtures fork above.
+///
+/// Above `LEGACY_ROOT_COMPATIBILITY_HEIGHT`, and that is the whole point of
+/// paying for it. Below that cutoff a replayed block whose root disagrees with
+/// its header is FORCE-ADOPTED — `ReorgOutcome::force_adopted` counts it and the
+/// reorg still "succeeds". A convergence test run down there proves only that
+/// nobody noticed. Above it, a single wrong account row halts the reorg, so
+/// "the reorg completed" is itself part of the claim.
+const ACTIVATED: u64 = sumchain_storage::candidate::LEGACY_ROOT_COMPATIBILITY_HEIGHT + 1;
+
+/// Params with the account commitment ACTIVE from the fork height, paired with
+/// a journal boundary a full reorg horizon below it — the pair
+/// `sumchain_state::account_root::validate_account_root_activation` accepts.
+fn activated_params() -> ChainParams {
+    let mut params = ChainParams::with_v2_enabled();
+    params.account_root_enabled_from_height = Some(ACTIVATED);
+    params.application_journal_enabled_from_height =
+        Some(ACTIVATED - sumchain_storage::pruner::UNDO_RETENTION_FLOOR);
+    params
+}
+
+/// A fork point at `ACTIVATED - 1`, retained on every node that will build on
+/// it.
+///
+/// The fixtures elsewhere in this file start at height 0, which is inside the
+/// legacy window. This one cannot, so the chain begins at a block that is put
+/// into the store rather than produced: `plan_reorg` walks parents out of
+/// `BLOCKS` and needs the common ancestor to be there, and nothing else about
+/// the ancestor is read.
+fn forked_root(proposer: &KeyPair) -> Block {
+    let header = BlockHeader::new(
+        Hash::ZERO,
+        ACTIVATED - 1,
+        GENESIS_TS + ACTIVATED - 1,
+        Hash::ZERO,
+        Hash::ZERO,
+        *proposer.public_key().as_bytes(),
+    );
+    Block::new(header, Vec::new())
+}
+
+/// The account family, by itself.
+fn account_rows(node: &Node) -> BTreeMap<Vec<u8>, Vec<u8>> {
+    family(node, cf::STATE)
+        .into_iter()
+        .filter(|(k, _)| k.starts_with(sumchain_storage::schema::ACCOUNT_KEY_PREFIX))
+        .collect()
+}
+
+/// Build the two branches on a pair of nodes under `params` and reorg `a` onto
+/// `b`'s. Returns the two nodes, the outcome, and `a`'s head root.
+///
+/// Extracted so the test below can run the SAME fixture twice — once with the
+/// commitment active and once dormant — and compare the roots. Without that
+/// control, "the root converged" would be a statement about three families and
+/// the previous root, and would hold identically whether or not the account
+/// digest was in the formula at all.
+fn build_and_reorg(params: ChainParams) -> (Node, Node, ReorgOutcome, Hash) {
+    let alice = key(1);
+    let bob = key(2);
+    let carol = key(3);
+    let proposer = key(9);
+
+    let a = Node::new(params.clone());
+    let b = Node::new(params);
+    for n in [&a, &b] {
+        n.seed(&alice, 10_000_000);
+        n.seed(&bob, 10_000_000);
+        // An account no transaction on either branch ever touches. It is folded
+        // by the commitment and by nothing else, which is what makes the
+        // commitment's participation observable at all.
+        n.seed(&key(7), 4_242);
+    }
+    let root = forked_root(&proposer);
+    for n in [&a, &b] {
+        n.retain(&root);
+    }
+
+    // The abandoned branch: three blocks, alice paying carol.
+    let mut branch_a = Vec::new();
+    let mut parent = root.clone();
+    for n in 0..3u64 {
+        let blk = a.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+        parent = blk.clone();
+        branch_a.push(blk);
+    }
+
+    // The adopted branch: two blocks, bob paying carol. Different sender,
+    // different amounts, different length — so every one of the four things
+    // below really does have to move.
+    let mut branch_b = Vec::new();
+    let mut parent = root.clone();
+    for n in 0..2u64 {
+        let blk = b.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&bob, &carol.address(), 4_000, 700, n)],
+        );
+        parent = blk.clone();
+        branch_b.push(blk);
+    }
+
+    for blk in &branch_b {
+        a.retain(blk);
+    }
+    for blk in &branch_a {
+        assert_oracle_agrees(&a, blk);
+    }
+
+    let store = BlockStore::new(&a.db);
+    let plan = plan_reorg(
+        &store,
+        branch_a.last().unwrap(),
+        branch_b.last().unwrap(),
+        NO_FINALITY,
+        DEEP,
+    )
+    .expect("plan");
+    let outcome = execute_reorg(
+        &a.db,
+        &a.state,
+        &a.executor,
+        &plan,
+        NO_VALIDATORS,
+        &a.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect("the reorg must succeed through the real journal");
+
+    let head_root = a.state.state_root();
+    (a, b, outcome, head_root)
+}
+
+/// After a reorg, account rows, supply rows, journal consumption and the
+/// ACTIVATED state root converge together.
+///
+/// One fixture, four claims, and the point is that they are one claim. Each of
+/// the four has been established separately elsewhere in this file and in
+/// `crates/state/tests/account_state_root.rs`, on separate fixtures, with the
+/// commitment dormant. A clean cherry-pick of two branches proves they compile
+/// together; it proves nothing about whether the unwind restores exactly what
+/// the commitment now reads. This is the first test where a failure of the
+/// journal to restore one untouched account row is a failure of the STATE ROOT,
+/// and therefore a chain that can neither revert nor agree.
+///
+/// Run above `LEGACY_ROOT_COMPATIBILITY_HEIGHT`, so `force_adopted` cannot
+/// absorb a disagreement — see [`ACTIVATED`].
+///
+/// # The control
+///
+/// The same fixture is built twice, with the commitment active and dormant, and
+/// the two head roots must DIFFER. Without that, "the root converged" is a
+/// statement about the supply digest, the receipts and the previous root, true
+/// whether or not account state was ever folded — the reorg equivalent of
+/// `the_finding_account_rows_are_absent_from_todays_commitment`.
+#[test]
+fn a_reorg_converges_account_rows_supply_rows_journals_and_the_activated_root() {
+    let (a, b, outcome, activated_root) = build_and_reorg(activated_params());
+
+    assert_eq!(outcome.unwound.blocks, 3);
+    assert_eq!(outcome.unwound.tolerated_absences, 0);
+    assert_eq!(outcome.applied, 2);
+    assert_eq!(
+        outcome.force_adopted, 0,
+        "above the compatibility cutoff a mismatch halts, so this must be zero \
+         by construction; asserting it makes the reliance explicit"
+    );
+    assert_eq!(outcome.verified, 2, "every adopted block was CHECKED");
+
+    // ── 1. account rows ──────────────────────────────────────────────────────
+    assert_eq!(
+        account_rows(&a),
+        account_rows(&b),
+        "every account row must equal the node that built the adopted branch"
+    );
+    assert_eq!(
+        sumchain_state::account_root::account_state_digest(&a.db).unwrap(),
+        sumchain_state::account_root::account_state_digest(&b.db).unwrap(),
+        "and so must the commitment over them — the row comparison above is the \
+         same claim expressed as bytes, and this is it expressed as the value \
+         consensus actually folds"
+    );
+    // Named balances, so a failure says which direction the state went rather
+    // than only that two maps differ.
+    assert_eq!(
+        a.balance(&key(3).address()),
+        8_000,
+        "carol must hold the ADOPTED branch's two payments, not the abandoned \
+         branch's three"
+    );
+    assert_eq!(a.balance(&key(1).address()), 10_000_000, "alice untouched");
+    assert_eq!(
+        a.balance(&key(7).address()),
+        4_242,
+        "the bystander no transaction touched must be exactly where it started; \
+         it reaches the root through the commitment and through nothing else"
+    );
+
+    // ── 2. supply rows ───────────────────────────────────────────────────────
+    assert_eq!(
+        family(&a, cf::SUPPLY),
+        family(&b, cf::SUPPLY),
+        "the supply family is covered by no per-subsystem journal and folded \
+         into the root by `SupplyStore::v_state_digest`"
+    );
+
+    // ── 3. journal consumption ───────────────────────────────────────────────
+    //
+    // A reorg CONSUMES the records it replays: `BranchJournal::rows` deletes
+    // each block's row in the same batch that applies its restores. So the
+    // abandoned branch's records must be gone — a record left behind for a block
+    // on no chain would be replayed again by the next reorg that walked through
+    // it — and the adopted branch's must be present, because those blocks are
+    // now canonical and must remain revertible.
+    let journals = family(&a, cf::APPLICATION_JOURNAL);
+    assert_eq!(
+        journals.len(),
+        2,
+        "exactly the adopted branch's two records remain: three consumed, two \
+         written by the apply"
+    );
+    assert_eq!(
+        journals,
+        family(&b, cf::APPLICATION_JOURNAL),
+        "and they are byte-identical to the records the node that built that \
+         branch wrote"
+    );
+
+    // ── 4. the activated state root ──────────────────────────────────────────
+    assert_eq!(
+        activated_root,
+        b.state.state_root(),
+        "the accumulator a reorged node holds must be the accumulator the node \
+         that built the branch holds"
+    );
+    assert_eq!(
+        a.head().map(|h| h.header.state_root),
+        b.head().map(|h| h.header.state_root),
+        "and the head block they name must be the same block"
+    );
+
+    // ── the control: the root really does depend on the account rows here ────
+    let (_, _, dormant_outcome, dormant_root) = build_and_reorg(ChainParams::with_v2_enabled());
+    assert_eq!(
+        dormant_outcome.applied, 2,
+        "the control must be the same fixture, not a different one"
+    );
+    assert_ne!(
+        activated_root, dormant_root,
+        "with the gate closed the same blocks produce a different accumulator. \
+         If these were equal, every assertion above about `the root` would be a \
+         statement about the supply digest and the receipts, and account state \
+         would be converging beside the commitment rather than inside it."
+    );
+
+    // The strong form last, so a failure above names the family and this one
+    // catches anything the four did not think to look at.
+    let (left, right) = (a.snapshot(), b.snapshot());
+    assert_eq!(left, right, "{}", describe_divergence(&left, &right));
 }
