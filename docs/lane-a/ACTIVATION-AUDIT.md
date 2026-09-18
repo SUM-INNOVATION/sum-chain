@@ -26,8 +26,9 @@ Four verdicts, and the decision rule that uses them:
 
 This document has been worked since it was written. Thirty-five rows now have a
 remedy implemented and tested in the tree, and two more are half-remedied. **None of it changes a single
-verdict, and the blocking count is exactly what it was.** That is not a
-formality; it is the finding of the remediation pass.
+verdict, and the blocking count is what it was less the one row the integration
+pass CLOSED outright.** That is not a formality; it is the finding of the
+remediation pass.
 
 Every one of the thirty-five is a CONSENSUS CHANGE — it changes which
 transactions succeed, which blocks exist, or what an account balance is, and
@@ -57,7 +58,8 @@ what `state/every_remediation_gate_is_dormant_by_default` asserts directly.
 that a GATED OFF row must name "the gate, where it is set". These rows can now
 name the gate, which they could not before; they still cannot name where it is
 set, because nowhere is. The defective behaviour is what a release node runs.
-So the verdict stays REACHABLE, and the blocking count stays 121.
+So the verdict stays REACHABLE, and the blocking count stays 120 — 121 at the
+audit, less OC-2, which the integration pass closed outright rather than gated.
 
 What changed is the SHAPE of the remaining precondition, and that is worth
 stating plainly rather than burying in an unchanged number. Before, thirty-five
@@ -856,19 +858,33 @@ both readings of the release configuration:
 | **UNDETERMINED** | **3** | **3** |
 | total | 137 | 137 |
 
-**Blocking = REACHABLE + UNDETERMINED = 121 of 137, under both readings.**
+**Blocking = REACHABLE + UNDETERMINED = 121 of 137, under both readings.** That
+is the figure AT THE AUDIT; see the correction below, which takes it to 120.
 
 ### The count after the remediation pass, derived rather than asserted
 
-| | at the audit | after remediation |
-|---|---|---|
-| REACHABLE | 118 | **118** |
-| GATED OFF | 3 | **3** |
-| UNREACHABLE | 13 | **13** |
-| UNDETERMINED | 3 | **3** |
-| **blocking (REACHABLE + UNDETERMINED)** | **121** | **121** |
+| | at the audit | after remediation | after the integration pass |
+|---|---|---|---|
+| REACHABLE | 118 | **118** | **117** |
+| GATED OFF | 3 | **3** | **3** |
+| UNREACHABLE | 13 | **13** | **13** |
+| CLOSED | 0 | **0** | **1** |
+| UNDETERMINED | 3 | **3** | **3** |
+| **blocking (REACHABLE + UNDETERMINED)** | **121** | **121** | **120** |
 
-**Unchanged, and the reason is the whole point.** Thirty-five rows now carry a
+The last column is the correction the integration pass owes this table. OC-2 was
+CLOSED — `ImportRegisteredKeys` no longer has a reachable mutating shape — and
+its row was marked closed without the count being moved. One row leaving
+REACHABLE is one row leaving the blocking set, so the current number is 120 and
+not 121.
+
+Both figures were re-derived from the table rather than carried: excluding the
+eleven cross-references named above leaves exactly 137 rows, of which 117 carry
+a plain REACHABLE verdict today, one of the two reading-dependent rows is
+REACHABLE under either reading, and three are UNDETERMINED. 117 + 1 + 3 = 121 at
+the audit, when OC-2 was still among the 117; 120 now that it is not.
+
+**Otherwise unchanged, and the reason is the whole point.** Thirty-five rows now carry a
 remedy that is implemented, reachable through a named seam and covered by tests
 that show an ungated node and a gated node disagreeing, and two more carry
 half of one. Every one of those
@@ -882,16 +898,17 @@ The arithmetic that WOULD move, stated so the next pass can check it: the twelve
 fields now exist, so the remaining half of the precondition is that they are SET
 to a height in the deployed runtime `genesis.json`. When they are, thirty-five
 rows move from REACHABLE to GATED OFF — the remediated behaviour becomes the
-behaviour — and the blocking count falls from 121 to 86.
+behaviour — and the blocking count falls from 120 to 85.
 
 The thirty-five were re-derived from this table rather than carried forward:
 the rows that are both fully REMEDIED, PENDING ACTIVATION and currently blocking are
-BD-1..BD-6, TS-1..TS-9, TS-10, TS-11, AU-1, AU-2, AU-4, AU-5, AU-13..AU-16, AU-19, AU-22,
+BD-1..BD-6, TS-1..TS-11, AU-1, AU-2, AU-4, AU-5, AU-13..AU-16, AU-19, AU-22,
 AU-23, AU-25, AU-27, AU-30, AU-31, AU-36, OV-18 and OV-26. That is thirty-five
-rows, and neither of them is one of the two partial ones. AU-3 and AU-34 do NOT move, because only part of
+rows, none of them among the two partial ones and none of them OC-2, which is
+closed rather than pending. AU-3 and AU-34 do NOT move, because only part of
 each is remedied and the rest is still reachable; a row is GATED OFF only when
 the whole of it is. Until the fields land and an operator sets them the count is
-121, and reporting 86 before then would be the exact failure this document was
+120, and reporting 85 before then would be the exact failure this document was
 written to prevent.
 
 Six further rows are **BLOCKED, STRUCTURAL** (AU-9, AU-10, AU-11, AU-18, AU-21,
