@@ -141,6 +141,31 @@ impl Node {
         // Open database
         let db = Arc::new(Database::open_default(&data_dir)?);
 
+        // ── the application-journal downgrade gate, before anything else ─────
+        //
+        // First thing after the open, and before state, consensus, RPC or the
+        // messaging backfill exist. Once a node has published a block under a
+        // record format, running a binary that implements an OLDER one is
+        // prohibited: that binary cannot unwind the blocks those records
+        // describe, and it discovers that during a reorg, with the chain already
+        // committed to unwinding and no way back but a resync.
+        //
+        // The check takes the higher of two watermarks — the versions present in
+        // the records, and the version stamped in `META` by every publish, which
+        // survives pruning — so a node whose newer records have aged out still
+        // refuses. Failing here fails startup, which is the whole point: the
+        // alternative is failing later, silently, with state on the line.
+        let journal_format = sumchain_storage::journal::validate_startup(&db)
+            .map_err(|e| anyhow::anyhow!("application journal format check failed: {}", e))?;
+        info!(
+            "Application journal format: binary v{}, stamped {:?}, records {:?}, revert \
+             boundary {:?}",
+            journal_format.binary_version,
+            journal_format.persisted,
+            journal_format.scanned,
+            journal_format.observed_boundary,
+        );
+
         // One-time, idempotent backfill of the messaging sender/payment
         // indexes from primary records. Must complete before RPC/consensus
         // start so messaging_getSentMessages / messaging_getPendingPayments
