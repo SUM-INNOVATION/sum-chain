@@ -1463,7 +1463,7 @@ fn the_v2_dispatch_surface_also_stages_finance() {
     {
         let mut view = ExecutionView::new(&mut overlay);
         let r = executor
-            .execute_tx_v2(&mut view, &tx, &sig, &key, &proposer, 1, 1000)
+            .execute_tx_v2(&mut view, &tx, &sig, &key, &proposer, 1, 1000, 0)
             .unwrap();
         assert!(
             matches!(r.status, TxStatus::Success),
@@ -1517,7 +1517,7 @@ fn the_v2_dispatch_surface_refuses_a_duplicate_with_the_finance_status() {
     let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
     let mut view = ExecutionView::new(&mut overlay);
     let r = executor
-        .execute_tx_v2(&mut view, &tx, &sig, &key, &proposer, 1, 1000)
+        .execute_tx_v2(&mut view, &tx, &sig, &key, &proposer, 1, 1000, 0)
         .unwrap();
     assert_eq!(r.status, FINANCE_FAILED);
     assert_eq!(

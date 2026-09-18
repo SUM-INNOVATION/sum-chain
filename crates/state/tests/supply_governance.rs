@@ -319,7 +319,7 @@ fn release_exceeding_pool_fails_385_and_moves_nothing() {
         token_id: QTOKEN, min_balance: 50, effective_height: 0,
         approvals: vec![qualify_approval(&validator, 50, 0)],
     }).unwrap();
-    exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 101, 1000, &vset).unwrap();
+    exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 101, 1000, 0, &vset).unwrap();
     let creq = create_req(GovProposalClass::ReserveReleaseEcosystem, GovAssetKind::NativeEligibility, recipient, POOL_ECOSYSTEM + 1);
     exec.execute_tx(&mut candidate.view(), &signed(&voter, 0, gov(GovernanceOperation::CreateProposal, creq)), &Address::new([9; 20]), 105, 1000).unwrap();
     let pid = generate_proposal_id(&voter.address(), &GovAssetKind::NativeEligibility, &[0xAB; 32], 105, 0);

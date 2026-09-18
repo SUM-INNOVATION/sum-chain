@@ -906,7 +906,9 @@ fn the_v2_dispatch_surface_also_stages_messaging_and_sponsored_registration() {
         // A plain send, through the v2 surface.
         let (send, send_sig, send_key) = messaging_v2(&sender, 0, direct(rh));
         let r = executor
-            .execute_tx_v2(&mut view, &send, &send_sig, &send_key, &proposer, 1, 1000)
+            .execute_tx_v2(
+                &mut view, &send, &send_sig, &send_key, &proposer, 1, 1000, 0,
+            )
             .unwrap();
         assert!(
             matches!(r.status, TxStatus::Success),
@@ -924,7 +926,7 @@ fn the_v2_dispatch_surface_also_stages_messaging_and_sponsored_registration() {
         // And the sponsored registration it intercepts.
         let (reg, reg_sig, reg_key) = sponsored_register_v2(&sponsor, &registrant, 0);
         let rr = executor
-            .execute_tx_v2(&mut view, &reg, &reg_sig, &reg_key, &proposer, 1, 1000)
+            .execute_tx_v2(&mut view, &reg, &reg_sig, &reg_key, &proposer, 1, 1000, 0)
             .unwrap();
         assert!(
             matches!(rr.status, TxStatus::Success),
@@ -942,5 +944,150 @@ fn the_v2_dispatch_surface_also_stages_messaging_and_sponsored_registration() {
         canonical(&db),
         before,
         "neither may commit while the block is being built"
+    );
+}
+
+// ── TS-10's tx_index half, and TS-11, on the messaging arm ──────────────────
+//
+// Messaging keys its event rows `recipient_hash(32) || height(8) || tx_index(4)`
+// and its sender index `sender(20) || height(8) || tx_index(4)`. With `tx_index`
+// a literal zero, two messages sent to one recipient in one block are one row,
+// and the earlier one is gone — the same data-destroying collision TS-10 names
+// on DocClass, on a family that is a user's inbox.
+//
+// The timestamp is the separate defect TS-11 records, behind the separate gate
+// `subsystem_block_timestamp_enabled_from_height`: below it `MessageEvent`
+// carries `timestamp: 0`, the daily-quota bucket is day zero for the life of the
+// chain, and a pending payment's expiry is compared against the epoch.
+
+/// `params()`, with the transaction-index gate open from genesis.
+fn params_tx_index_enabled() -> ChainParams {
+    let mut p = params();
+    p.subsystem_tx_index_enabled_from_height = Some(0);
+    p
+}
+
+/// `params()`, with the block-timestamp gate open from genesis.
+fn params_block_timestamp_enabled() -> ChainParams {
+    let mut p = params();
+    p.subsystem_block_timestamp_enabled_from_height = Some(0);
+    p
+}
+
+/// Two direct messages from one sender to one recipient, in one block at
+/// `height`, each given its own transaction index. Returns the event rows the
+/// candidate holds under that recipient, in key order.
+fn two_messages_to_one_recipient(
+    p: ChainParams,
+    height: u64,
+    block_timestamp: u64,
+) -> Vec<(Vec<u8>, sumchain_primitives::MessageEvent)> {
+    let (_state, db, _dir, executor) = setup_with_params(p);
+    let sender = KeyPair::generate();
+    fund(&db, &sender, 10_000_000);
+    let proposer = Address::new([9; 20]);
+    let rh = [3u8; 32];
+
+    let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+    let mut view = ExecutionView::new(&mut overlay);
+    for nonce in 0..2u64 {
+        let r = executor
+            .execute_tx_with_validators(
+                &mut view,
+                &signed(&sender, nonce, direct(rh)),
+                &proposer,
+                height,
+                block_timestamp,
+                nonce as u32,
+                &[],
+            )
+            .unwrap();
+        assert!(matches!(r.status, TxStatus::Success), "{:?}", r.status);
+    }
+
+    view.prefix_iter(cf::MESSAGING_EVENTS, &rh)
+        .unwrap()
+        .map(|r| {
+            let (k, v) = r.unwrap();
+            (
+                k.to_vec(),
+                sumchain_storage::messaging_store::decode_message_event(&v).unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// The key `recipient_hash || height || tx_index`, as the store builds it.
+fn messaging_event_key(rh: &[u8; 32], height: u64, tx_index: u32) -> Vec<u8> {
+    let mut k = rh.to_vec();
+    k.extend_from_slice(&height.to_be_bytes());
+    k.extend_from_slice(&tx_index.to_be_bytes());
+    k
+}
+
+/// At the gate, two messages to one recipient in one block are two rows.
+#[test]
+fn two_messages_to_one_recipient_in_a_block_land_at_two_keys_at_the_gate() {
+    let rows = two_messages_to_one_recipient(params_tx_index_enabled(), 5, 1000);
+    let rh = [3u8; 32];
+    assert_eq!(rows.len(), 2, "two messages, two rows");
+    assert_eq!(
+        rows.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+        vec![
+            messaging_event_key(&rh, 5, 0),
+            messaging_event_key(&rh, 5, 1),
+        ],
+        "keyed by the transaction's own index within the block"
+    );
+    assert_ne!(
+        rows[0].1.message_id, rows[1].1.message_id,
+        "and they are two DIFFERENT messages, not one written twice"
+    );
+}
+
+/// Below the gate the same two messages, given their REAL indices, are one row.
+///
+/// The discriminator: real indices go in, one row comes out, so what decides is
+/// `subsystem_tx_index_enabled_from_height` and not the caller.
+#[test]
+fn the_same_two_messages_still_collide_below_the_gate() {
+    assert_eq!(
+        params().subsystem_tx_index_enabled_from_height,
+        None,
+        "the fixture must be the dormant one"
+    );
+    let rows = two_messages_to_one_recipient(params(), 5, 1000);
+    assert_eq!(rows.len(), 1, "two messages, one row -- unchanged");
+    assert_eq!(rows[0].0, messaging_event_key(&[3u8; 32], 5, 0));
+}
+
+/// TS-11: a messaging event is stamped at time zero until the timestamp gate.
+///
+/// The messaging arm was handed `0, // block_timestamp placeholder` by both
+/// dispatch arms, so this was not a mis-stamp alone: `current_day` buckets the
+/// daily quota by this value, and at the epoch every message a chain ever sends
+/// counts against day zero.
+///
+/// Two directions from one fixture, and the discriminator is the GATE — the same
+/// real block timestamp is passed in both cases.
+#[test]
+fn a_messaging_event_stamps_a_real_time_only_at_the_gate() {
+    const TS: u64 = 1_700_000_000;
+    assert_eq!(
+        params().subsystem_block_timestamp_enabled_from_height,
+        None,
+        "the dormant fixture must be dormant"
+    );
+
+    let closed = two_messages_to_one_recipient(params(), 5, TS);
+    assert_eq!(
+        closed[0].1.timestamp, 0,
+        "below the gate the executor writes the epoch, whatever the block says"
+    );
+
+    let open = two_messages_to_one_recipient(params_block_timestamp_enabled(), 5, TS);
+    assert_eq!(
+        open[0].1.timestamp, TS,
+        "at the gate it writes the block's own timestamp"
     );
 }

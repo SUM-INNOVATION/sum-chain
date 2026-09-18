@@ -114,6 +114,53 @@ pub fn effective_block_timestamp(block_timestamp: u64, gate_open: bool) -> u64 {
     }
 }
 
+/// The activation height for the executor-written transaction index.
+///
+/// Reads `params.subsystem_tx_index_enabled_from_height`.
+///
+/// Its own field, NOT `subsystem_block_timestamp_enabled_from_height`. Both
+/// defects are a literal `0` handed to the same executors by the same dispatch,
+/// which is the whole reason to check: they are not one rule. The timestamp gate
+/// changes what a row SAYS, in eight subsystems, and moves every time-dependent
+/// validity rule with it — a prescription that was fillable forever stops being
+/// so. This gate changes what KEY a row lands at, in the two families keyed by
+/// the transaction index, and therefore how many rows a block writes at all.
+/// Opening it grows the candidate write set, which has a ceiling that refuses a
+/// block rather than truncating it, so this is consensus-visible even though
+/// nothing reads these rows back. Two different blast radii; an operator must be
+/// able to take one without the other.
+#[inline]
+fn subsystem_tx_index_activation(params: &sumchain_genesis::ChainParams) -> Option<u64> {
+    params.subsystem_tx_index_enabled_from_height
+}
+
+/// Whether subsystem event rows are keyed by their real transaction index at
+/// `block_height`.
+#[inline]
+pub fn subsystem_tx_index_gate_open(
+    params: &sumchain_genesis::ChainParams,
+    block_height: u64,
+) -> bool {
+    matches!(subsystem_tx_index_activation(params), Some(h) if block_height >= h)
+}
+
+/// The transaction index a subsystem executor keys its event rows by.
+///
+/// Below the gate it is the literal `0` both dispatch arms used to pass, so
+/// every event in a block collides at one key and the family keeps the last one
+/// — reproduced exactly, because a dormant gate must be indistinguishable from
+/// the unremediated binary. At and above it, the transaction's own index within
+/// its block. Written once, here, so the two dispatch arms cannot drift apart on
+/// the question the way they already did on the timestamp.
+#[inline]
+pub fn effective_tx_index(tx_index: u32, gate_open: bool) -> u32 {
+    if gate_open {
+        tx_index
+    } else {
+        0
+    }
+}
+
 pub use agreement_executor::{AgreementExecutionResult, AgreementExecutor, AgreementGates};
 pub use cache::{CacheStats, CachedAccount, StateCache};
 pub use contract_executor::{ContractCallResult, ContractDeployResult, ContractExecutorState, ContractEvent, ContractMetadata};

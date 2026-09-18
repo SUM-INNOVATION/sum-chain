@@ -587,6 +587,7 @@ fn register_equity_class(
         &Address::new([9; 20]),
         1,
         1000,
+        0,
         vset,
     )
     .unwrap()

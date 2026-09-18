@@ -26,11 +26,11 @@ use common::{fund, setup_with_params, CHAIN_ID};
 use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
-    AcademicCredential, Address, CredentialAttribute, CredentialMetadata, DocClassEvent,
-    DocClassIssuer, DocClassIssuerStatus, DocClassIssuerType, DocClassOperation, DocClassTxData,
-    DocSubcode, EligibilityAttestation, EligibilityType, IdentityKey, IdentityRoot, IdentityStatus,
-    IssuerKey, KeyPurpose, KeyType, RevocationReason, RevocationStatus, ServiceEndpoint,
-    SignedTransaction, TransactionV2, TxPayload, TxStatus,
+    AcademicCredential, Address, Block, BlockHeader, CredentialAttribute, CredentialMetadata,
+    DocClassEvent, DocClassIssuer, DocClassIssuerStatus, DocClassIssuerType, DocClassOperation,
+    DocClassTxData, DocSubcode, EligibilityAttestation, EligibilityType, Hash, IdentityKey,
+    IdentityRoot, IdentityStatus, IssuerKey, KeyPurpose, KeyType, RevocationReason,
+    RevocationStatus, ServiceEndpoint, SignedTransaction, TransactionV2, TxPayload, TxStatus,
 };
 use sumchain_state::{DocClassExecutor, StateManager};
 use sumchain_storage::exec_view::ExecutionView;
@@ -2171,7 +2171,7 @@ fn the_v2_dispatch_surface_also_stages_docclass_rows() {
         );
         let sig = *sign(t.signing_hash().as_bytes(), gov.private_key()).as_bytes();
         let r = executor
-            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000)
+            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000, 0)
             .unwrap();
         assert!(
             matches!(r.status, TxStatus::Success),
@@ -2191,7 +2191,7 @@ fn the_v2_dispatch_surface_also_stages_docclass_rows() {
         );
         let sig = *sign(t.signing_hash().as_bytes(), gov.private_key()).as_bytes();
         let r = executor
-            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000)
+            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000, 0)
             .unwrap();
         assert!(
             matches!(r.status, TxStatus::Success),
@@ -2212,7 +2212,7 @@ fn the_v2_dispatch_surface_also_stages_docclass_rows() {
         );
         let sig = *sign(t.signing_hash().as_bytes(), gov.private_key()).as_bytes();
         let r = executor
-            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1_700_000_000)
+            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1_700_000_000, 0)
             .unwrap();
         assert!(matches!(r.status, TxStatus::Success), "{:?}", r.status);
         let issuer = DocClassExecutor::v_get_docclass_issuer(&view, &gov.address())
@@ -2238,7 +2238,7 @@ fn the_v2_dispatch_surface_also_stages_docclass_rows() {
         );
         let sig = *sign(t.signing_hash().as_bytes(), gov.private_key()).as_bytes();
         let _ = executor
-            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000)
+            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000, 0)
             .unwrap();
 
         let t = v2(
@@ -2248,7 +2248,7 @@ fn the_v2_dispatch_surface_also_stages_docclass_rows() {
         );
         let sig = *sign(t.signing_hash().as_bytes(), gov.private_key()).as_bytes();
         let r = executor
-            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000)
+            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000, 0)
             .unwrap();
         assert_eq!(
             r.status, DOCCLASS_FAILED,
@@ -2729,6 +2729,229 @@ fn every_docclass_event_in_a_block_lands_at_one_key() {
         .unwrap(),
         "and it is the LAST event, not the first"
     );
+}
+
+// ── TS-10, the tx_index half ────────────────────────────────────────────────
+//
+// The test above is the DORMANT side and must keep passing unchanged: with
+// `subsystem_tx_index_enabled_from_height` closed, two events in a block are one
+// row. What follows is the other side of the same gate, and the discriminator
+// between them.
+//
+// Note what the pinning test does NOT discriminate: it drives `execute_tx`,
+// which passes index `0` at the call site, so it would go on reporting one row
+// even if the gate were wrongly open. The closed-gate test below passes REAL,
+// distinct indices and still requires one row, which is what pins the GATE
+// rather than the call site.
+
+/// `params()`, with the transaction-index gate open from genesis.
+fn params_tx_index_enabled() -> ChainParams {
+    let mut p = params();
+    p.subsystem_tx_index_enabled_from_height = Some(0);
+    p
+}
+
+/// The two events one block produces, `(key, decoded event)`, in key order.
+fn event_rows(view: &ExecutionView<'_, '_>) -> Vec<(Vec<u8>, DocClassEvent)> {
+    view.prefix_iter(cf::DOCCLASS_EVENTS, &[])
+        .unwrap()
+        .map(|r| {
+            let (k, v) = r.unwrap();
+            (k.to_vec(), bincode::deserialize(&v).unwrap())
+        })
+        .collect()
+}
+
+fn event_key(height: u64, tx_index: u32, event_index: u16) -> Vec<u8> {
+    let mut k = height.to_be_bytes().to_vec();
+    k.extend_from_slice(&tx_index.to_be_bytes());
+    k.extend_from_slice(&event_index.to_be_bytes());
+    k
+}
+
+/// The two transactions the collision tests drive, in order.
+fn two_event_producing_txs(gov: &KeyPair) -> [SignedTransaction; 2] {
+    [
+        tx(
+            gov,
+            0,
+            DocClassOperation::RegisterIssuer,
+            DocSubcode::IssuerRegistry,
+            &government_issuer(gov.address()),
+        ),
+        tx(
+            gov,
+            1,
+            DocClassOperation::CreateIdentityRoot,
+            DocSubcode::IdentityRoot,
+            &identity(0x85, gov.address()),
+        ),
+    ]
+}
+
+/// At the gate, two events in a block land at two keys and BOTH are readable.
+///
+/// The positive half of TS-10's data-destroying arm. The first transaction's
+/// `IssuerRegistered` is the event the defect throws away, so the assertion that
+/// matters is not "two rows" but "the FIRST event is still there" — a fix that
+/// wrote two rows and lost the earlier one would satisfy a count.
+#[test]
+fn two_docclass_events_in_a_block_land_at_two_keys_at_the_gate() {
+    let (_state, db, _dir, executor) = setup_with_params(params_tx_index_enabled());
+    let gov = KeyPair::generate();
+    fund(&db, &gov, 100_000_000);
+    let proposer = Address::new([9; 20]);
+
+    let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+    let mut view = ExecutionView::new(&mut overlay);
+    for (idx, t) in two_event_producing_txs(&gov).into_iter().enumerate() {
+        let r = executor
+            .execute_tx_with_validators(&mut view, &t, &proposer, 11, 1000, idx as u32, &[])
+            .unwrap();
+        assert!(matches!(r.status, TxStatus::Success), "{:?}", r.status);
+    }
+
+    let rows = event_rows(&view);
+    assert_eq!(rows.len(), 2, "two events, two rows");
+    assert_eq!(
+        rows.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+        vec![event_key(11, 0, 0), event_key(11, 1, 0)],
+        "keyed by the transaction's own index within the block"
+    );
+    let issuer = government_issuer(gov.address());
+    assert_eq!(
+        rows[0].1,
+        DocClassEvent::IssuerRegistered {
+            issuer: issuer.address,
+            issuer_type: issuer.issuer_type,
+            jurisdictions: issuer.jurisdictions.clone(),
+            subcodes: issuer.authorized_subcodes.clone(),
+        },
+        "the FIRST event survives -- it is the one the defect destroyed"
+    );
+    assert_eq!(
+        rows[1].1,
+        DocClassEvent::IdentityRootCreated {
+            identity_id: [0x85; 32],
+            controller: gov.address(),
+            subject_commitment: [0x85u8.wrapping_add(0x40); 32],
+        },
+        "and the second is still the second"
+    );
+}
+
+/// Below the gate the same two transactions, given their REAL indices, still
+/// collide at one key.
+///
+/// The discriminator. `execute_tx_with_validators` is handed `0` and `1` here,
+/// exactly as `execute_block` hands them, and the row count must still be one:
+/// what decides is `subsystem_tx_index_enabled_from_height`, not what the caller
+/// passes. Without this a fix that ignored the gate and always used the real
+/// index would pass every other test in this file — and would change what every
+/// deployed node writes.
+#[test]
+fn the_same_two_events_still_collide_below_the_gate() {
+    let (_state, db, _dir, executor) = setup_with_params(params());
+    assert_eq!(
+        params().subsystem_tx_index_enabled_from_height,
+        None,
+        "the fixture must be the dormant one"
+    );
+    let gov = KeyPair::generate();
+    fund(&db, &gov, 100_000_000);
+    let proposer = Address::new([9; 20]);
+
+    let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+    let mut view = ExecutionView::new(&mut overlay);
+    for (idx, t) in two_event_producing_txs(&gov).into_iter().enumerate() {
+        let r = executor
+            .execute_tx_with_validators(&mut view, &t, &proposer, 11, 1000, idx as u32, &[])
+            .unwrap();
+        assert!(matches!(r.status, TxStatus::Success), "{:?}", r.status);
+    }
+
+    let rows = event_rows(&view);
+    assert_eq!(rows.len(), 1, "two events, one row -- unchanged");
+    assert_eq!(rows[0].0, event_key(11, 0, 0), "at tx_index zero");
+    assert_eq!(
+        rows[0].1,
+        DocClassEvent::IdentityRootCreated {
+            identity_id: [0x85; 32],
+            controller: gov.address(),
+            subject_commitment: [0x85u8.wrapping_add(0x40); 32],
+        },
+        "and it is the LAST event, not the first"
+    );
+}
+
+/// `execute_block` keys each event by the transaction's position in the block.
+///
+/// The two tests above call the dispatch directly and choose the index
+/// themselves, which proves the gate and proves nothing about who fills the
+/// parameter. This drives a real `Block` through `execute_block` and publishes
+/// it, so the indices come from block execution's own enumeration — the same
+/// `idx` its receipts are built from — and the rows are read back from the
+/// DATABASE, not from a candidate a test staged.
+///
+/// Both directions, in one fixture, because the claim is about the gate.
+#[test]
+fn execute_block_keys_each_docclass_event_by_its_own_transaction_index() {
+    fn rows_after_a_two_tx_block(p: ChainParams) -> Vec<(Vec<u8>, DocClassEvent)> {
+        let (_state, db, _dir, executor) = setup_with_params(p);
+        let gov = KeyPair::generate();
+        let proposer = KeyPair::generate();
+        fund(&db, &gov, 100_000_000);
+
+        let header = BlockHeader::new(
+            Hash::ZERO,
+            11,
+            1000,
+            Hash::ZERO,
+            Hash::ZERO,
+            *proposer.public_key().as_bytes(),
+        );
+        let mut blk = Block::new(header, two_event_producing_txs(&gov).to_vec());
+        let exec = executor.execute_block(&blk, Hash::ZERO, &[]).unwrap();
+        blk.header.state_root = exec.computed_root();
+        let (executed, _sd, _cd) = exec.into_parts();
+        for r in executed.receipts() {
+            assert!(
+                matches!(r.status, TxStatus::Success),
+                "both transactions must execute: {:?}",
+                r.status
+            );
+        }
+        executed
+            .accept_produced(&blk)
+            .expect("accept_produced")
+            .publish()
+            .expect("publish");
+
+        db.prefix_iter(cf::DOCCLASS_EVENTS, &[])
+            .unwrap()
+            .map(|(k, v)| (k.to_vec(), bincode::deserialize(&v).unwrap()))
+            .collect()
+    }
+
+    let open = rows_after_a_two_tx_block(params_tx_index_enabled());
+    assert_eq!(
+        open.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+        vec![event_key(11, 0, 0), event_key(11, 1, 0)],
+        "block execution must hand each transaction its own index"
+    );
+    assert!(
+        matches!(open[0].1, DocClassEvent::IssuerRegistered { .. }),
+        "and the first transaction's event is the one at index 0: {:?}",
+        open[0].1
+    );
+
+    let closed = rows_after_a_two_tx_block(params());
+    assert_eq!(
+        closed.len(),
+        1,
+        "one row per block while the gate is closed"
+    );
+    assert_eq!(closed[0].0, event_key(11, 0, 0));
 }
 
 /// Revocation is reversible: Revoke -> Suspend -> Reactivate returns a revoked

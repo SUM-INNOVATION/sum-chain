@@ -159,7 +159,7 @@ fn native_eligibility_snapshot_is_allowlisted_holders_intersect_koppa() {
     let req = bincode::serialize(&RegisterQualifyingAssetRequest {
         token_id: QTOKEN, min_balance: 50, effective_height: 0, approvals: vec![qualify_approval(&v, &QTOKEN, 50, 0)],
     }).unwrap();
-    let r = exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 1, 1000, &vset).unwrap();
+    let r = exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 1, 1000, 0, &vset).unwrap();
     assert!(matches!(r.status, TxStatus::Success), "register qualifying: {:?}", r.status);
 
     // Create a native proposal.
@@ -242,7 +242,7 @@ fn native_no_qualifying_holders_fails_315() {
     fund(&db, &submitter, 100_000);
     seed_qualifying_token(&db, &[]); // token exists, no balances
     let req = bincode::serialize(&RegisterQualifyingAssetRequest { token_id: QTOKEN, min_balance: 1, effective_height: 0, approvals: vec![qualify_approval(&v, &QTOKEN, 1, 0)] }).unwrap();
-    assert!(matches!(exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 1, 1000, &vset).unwrap().status, TxStatus::Success));
+    assert!(matches!(exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 1, 1000, 0, &vset).unwrap().status, TxStatus::Success));
 
     let proposer = KeyPair::generate();
     fund(&db, &proposer, 100_000);
@@ -270,7 +270,7 @@ fn native_all_holders_below_koppa_floor_fails_314() {
     seed_qualifying_token(&db, &[(a, 100)]);
     common::credit_committed(&db, &a, 500); // < 1_000_000 floor
     let req = bincode::serialize(&RegisterQualifyingAssetRequest { token_id: QTOKEN, min_balance: 1, effective_height: 0, approvals: vec![qualify_approval(&v, &QTOKEN, 1, 0)] }).unwrap();
-    assert!(matches!(exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 1, 1000, &vset).unwrap().status, TxStatus::Success));
+    assert!(matches!(exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 1, 1000, 0, &vset).unwrap().status, TxStatus::Success));
 
     let proposer = KeyPair::generate();
     fund(&db, &proposer, 100_000);
@@ -302,7 +302,7 @@ fn native_one_address_one_vote_and_6667_pass() {
     for k in &voters { fund(&db, k, 100_000); }
 
     let req = bincode::serialize(&RegisterQualifyingAssetRequest { token_id: QTOKEN, min_balance: 1, effective_height: 0, approvals: vec![qualify_approval(&v, &QTOKEN, 1, 0)] }).unwrap();
-    assert!(matches!(exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 1, 1000, &vset).unwrap().status, TxStatus::Success));
+    assert!(matches!(exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 1, 1000, 0, &vset).unwrap().status, TxStatus::Success));
 
     let proposer = &voters[0];
     let creq = bincode::serialize(&CreateProposalRequest {
@@ -346,7 +346,7 @@ fn native_snapshot_bound_305() {
     common::credit_committed(&db, &a, 1);
     common::credit_committed(&db, &b, 1);
     let req = bincode::serialize(&RegisterQualifyingAssetRequest { token_id: QTOKEN, min_balance: 1, effective_height: 0, approvals: vec![qualify_approval(&v, &QTOKEN, 1, 0)] }).unwrap();
-    assert!(matches!(exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 1, 1000, &vset).unwrap().status, TxStatus::Success));
+    assert!(matches!(exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 1, 1000, 0, &vset).unwrap().status, TxStatus::Success));
 
     let proposer = KeyPair::generate();
     fund(&db, &proposer, 100_000);
@@ -369,7 +369,7 @@ fn register_equity(view: &mut ExecutionView<'_, '_>, exec: &sumchain_state::exec
         class_id: CLASS, create_threshold: threshold, effective_height: 0,
         approvals: vec![equity_class_approval(v, &CLASS, threshold, 0)],
     }).unwrap();
-    exec.execute_tx_with_validators(view, &signed(submitter, nonce, gov(GovernanceOperation::RegisterEquityClass, req)), &Address::new([9; 20]), 1, 1000, vset).unwrap().status
+    exec.execute_tx_with_validators(view, &signed(submitter, nonce, gov(GovernanceOperation::RegisterEquityClass, req)), &Address::new([9; 20]), 1, 1000, 0, vset).unwrap().status
 }
 
 fn create_equity_proposal(view: &mut ExecutionView<'_, '_>, exec: &sumchain_state::executor::BlockExecutor, proposer: &KeyPair, nonce: u64, height: u64) -> [u8; 32] {

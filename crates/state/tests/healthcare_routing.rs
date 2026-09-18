@@ -2228,7 +2228,7 @@ fn the_v2_dispatch_surface_also_stages_healthcare() {
             bincode::serialize(&provider(0x90, addr, vec![PLAN_A])).unwrap(),
         );
         let r = executor
-            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000)
+            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000, 0)
             .unwrap();
         assert!(
             matches!(r.status, TxStatus::Success),
@@ -2251,7 +2251,7 @@ fn the_v2_dispatch_surface_also_stages_healthcare() {
             .unwrap(),
         );
         let r = executor
-            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1_700_000_000)
+            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1_700_000_000, 0)
             .unwrap();
         assert!(
             matches!(r.status, TxStatus::Success),
@@ -2275,7 +2275,7 @@ fn the_v2_dispatch_surface_also_stages_healthcare() {
             bincode::serialize(&prescription(0x91, 0x90, addr, 2)).unwrap(),
         );
         let r = executor
-            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000)
+            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000, 0)
             .unwrap();
         assert!(matches!(r.status, TxStatus::Success), "{:?}", r.status);
         assert_eq!(
@@ -2295,7 +2295,7 @@ fn the_v2_dispatch_surface_also_stages_healthcare() {
             .unwrap(),
         );
         let r = executor
-            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000)
+            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000, 0)
             .unwrap();
         assert_eq!(
             r.status, HEALTHCARE_FAILED,

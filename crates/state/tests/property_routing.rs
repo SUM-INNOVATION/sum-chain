@@ -1583,7 +1583,7 @@ fn the_v2_dispatch_surface_also_stages_property_rows() {
         );
         let sig = *sign(t.signing_hash().as_bytes(), actor.private_key()).as_bytes();
         let r = executor
-            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000)
+            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000, 0)
             .unwrap();
         assert!(
             matches!(r.status, TxStatus::Success),
@@ -1608,7 +1608,7 @@ fn the_v2_dispatch_surface_also_stages_property_rows() {
         );
         let sig = *sign(t.signing_hash().as_bytes(), actor.private_key()).as_bytes();
         let r = executor
-            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1_700_000_000)
+            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1_700_000_000, 0)
             .unwrap();
         assert!(
             matches!(r.status, TxStatus::Success),
@@ -1638,7 +1638,7 @@ fn the_v2_dispatch_surface_also_stages_property_rows() {
         );
         let sig = *sign(t.signing_hash().as_bytes(), actor.private_key()).as_bytes();
         let r = executor
-            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000)
+            .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, 1000, 0)
             .unwrap();
         assert_eq!(
             r.status,

@@ -1524,7 +1524,7 @@ fn the_v2_dispatch_surface_also_stages_nfts() {
             };
             let sig = *sign(t.signing_hash().as_bytes(), creator.private_key()).as_bytes();
             executor
-                .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, TS)
+                .execute_tx_v2(&mut view, &t, &sig, &key, &proposer, 1, TS, 0)
                 .unwrap()
         };
 

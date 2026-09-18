@@ -101,6 +101,7 @@ fn execute_tx_v2_path_also_gated() {
             &proposer.address(),
             1,
             1000,
+            0,
         )
         .unwrap();
     assert!(matches!(res.status, TxStatus::Failed(60)), "got {:?}", res.status);
