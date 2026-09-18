@@ -332,3 +332,136 @@ fn the_legacy_revert_path_refuses_a_post_activation_block() {
         .unwrap()
         .is_none());
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Release blocker 5: is `StateManager::revert_block_state_diffs` reached from
+// production, or is it dead?
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `StateManager::revert_block_state_diffs` has NO production caller anywhere in
+/// the workspace, and this checks it rather than asserting it.
+///
+/// # Why this is a test and not a note
+///
+/// The function carries a post-activation REFUSAL: at or above the journal
+/// activation boundary it returns `Err` without reading anything, because the
+/// four legacy per-subsystem journals cover fewer families than a block writes
+/// and reverting from them there would report success over rows nothing
+/// restored. A refusal is only as good as the path it guards, and the honest
+/// finding is that today it guards no live path: the production reorg path is
+/// `sumchain_state::reorg_undo::ActivatedJournal`, driven from
+/// `PoAEngine::import_reorg` through `execute_reorg`.
+///
+/// So the status is DEAD IN PRODUCTION, deliberately, and the guard is a
+/// contract on a public API rather than protection for a live caller. That is a
+/// decision, and a decision that is only written down drifts. This makes it
+/// fail if the situation changes in either direction — a new production caller
+/// appears, or the function is removed and this test stops finding it.
+///
+/// # What this does NOT say
+///
+/// It does not say nothing unwinds application state outside consensus.
+/// `sum-node rollback` (`crates/node/src/main.rs`) does, and it does so with its
+/// own open-coded loop that reads `cf::STATE_DIFFS` directly: it reverts account
+/// rows only, consults neither the contract diff nor the generic application
+/// journal, and never asks where the activation boundary is. Post-activation it
+/// therefore under-reverts in exactly the way this function's guard exists to
+/// prevent. That is a finding about an operator tool, recorded in §11.1 of
+/// `docs/lane-a/JOURNAL-CONTRACT.md`; it is NOT fixed here, and this test pins
+/// its shape so the claim can be rechecked.
+#[test]
+fn the_legacy_revert_path_has_no_production_caller_and_the_rollback_cli_has_its_own() {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .to_path_buf();
+    let crates = workspace.join("crates");
+    assert!(crates.is_dir(), "expected {}", crates.display());
+
+    /// Every `.rs` under `<crate>/src`, recursively.
+    fn sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                sources(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    for e in std::fs::read_dir(&crates).expect("read crates/").flatten() {
+        let src = e.path().join("src");
+        if src.is_dir() {
+            sources(&src, &mut files);
+        }
+    }
+    assert!(
+        files.len() > 50,
+        "the scan must actually have found the workspace sources: {}",
+        files.len()
+    );
+
+    let mut production_callers = Vec::new();
+    let mut saw_definition = false;
+    for path in &files {
+        let text = std::fs::read_to_string(path).expect("read source");
+        if text.contains("pub fn revert_block_state_diffs(") {
+            saw_definition = true;
+        }
+        // Everything from the first column-zero `#[cfg(test)]` onward is a test
+        // module, not production. Nothing above it in any of these files is.
+        let production = match text.find("\n#[cfg(test)]") {
+            Some(at) => &text[..at],
+            None => &text[..],
+        };
+        // A CALL, not the definition and not a doc-comment mention: the method
+        // is only reachable as `.revert_block_state_diffs(`.
+        for (n, line) in production.lines().enumerate() {
+            if line.contains(".revert_block_state_diffs(") {
+                production_callers.push(format!(
+                    "{}:{}",
+                    path.strip_prefix(&workspace).unwrap_or(path).display(),
+                    n + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        saw_definition,
+        "the scan did not find the definition, so a clean result would mean nothing"
+    );
+    assert!(
+        production_callers.is_empty(),
+        "`StateManager::revert_block_state_diffs` now HAS a production caller. That is \
+         not a failure — it is the situation this test exists to notice. Its \
+         post-activation refusal is no longer a contract on an unused API but a guard on \
+         a live path, and the caller must be checked for whether it classifies the \
+         height before calling. Callers found: {production_callers:?}"
+    );
+
+    // And the operator tool that DOES unwind application state outside consensus
+    // still has its own loop, which is the other half of the finding.
+    let main_rs = crates.join("node/src/main.rs");
+    let main = std::fs::read_to_string(&main_rs).expect("read the node CLI");
+    assert!(
+        main.contains("Commands::Rollback"),
+        "the rollback subcommand must still exist for this claim to be about anything"
+    );
+    assert!(
+        !main.contains(".revert_block_state_diffs("),
+        "the rollback CLI now routes through the guarded function; update §11.1 of \
+         docs/lane-a/JOURNAL-CONTRACT.md, which records that it does not"
+    );
+    assert!(
+        main.contains("get_state_diff"),
+        "the rollback CLI still reads the legacy account diff directly, which is what \
+         makes it a third unwind implementation"
+    );
+}

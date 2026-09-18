@@ -1026,3 +1026,184 @@ fn a_database_with_no_journal_history_starts_and_requires_nothing() {
         Some(sumchain_storage::journal::FORMAT_VERSION_V1)
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Release blocker 6: the downgrade PROCEDURE, not just the refusal.
+//
+// §8 already refused a downgrade and tested the refusal. What was missing was
+// the operational evidence around it: that an older binary cannot read the
+// watermark, where the supported rollback window opens and closes, and what an
+// operator is left holding on each side of it. These walk both directions on
+// real databases so the procedure in §8.1 is checked rather than described.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The watermark is a raw two-byte row under a key an older binary has no name
+/// for, in a family it may not even open — so the gate protects the node, and
+/// the older binary cannot protect itself.
+///
+/// This matters because it decides WHOSE job the refusal is. The stamp is not a
+/// negotiated handshake: it is a row this binary writes and this binary reads. A
+/// binary that predates it does not know `FORMAT_HIGH_WATER_META_KEY`, does not
+/// know `cf::APPLICATION_JOURNAL`, and will not look for either. Nothing in the
+/// format announces itself to a reader that is not already looking.
+///
+/// So the refusal only ever fires on a binary NEW enough to contain this gate
+/// and OLD enough not to implement the record format it finds. A downgrade that
+/// skips back past the introduction of the journal entirely is outside what any
+/// check here can see, and §8.1 says so rather than implying coverage.
+#[test]
+fn the_format_watermark_is_opaque_to_a_binary_that_does_not_look_for_it() {
+    let (d, _g) = db();
+    let block = block_at(7, 1);
+    publish_with(&d, &block, TEST_LIMIT, |view| {
+        view.put(cf::STATE, b"k", b"v")
+    })
+    .expect("publish");
+
+    // The whole watermark is two bytes, big-endian, under one META key. There is
+    // no envelope, no magic, and nothing self-describing: a reader that does not
+    // know the key finds nothing, and a reader that does not know the family
+    // does not reach the records either.
+    let raw = d
+        .get(
+            cf::META,
+            sumchain_storage::journal::FORMAT_HIGH_WATER_META_KEY,
+        )
+        .unwrap()
+        .expect("publish stamps the watermark");
+    assert_eq!(raw.len(), 2, "the stamp is two bytes and nothing else");
+    assert_eq!(
+        u16::from_be_bytes([raw[0], raw[1]]),
+        sumchain_storage::journal::FORMAT_VERSION_V1
+    );
+
+    // A row of any other width is not tolerated as "some other encoding": it
+    // means something other than this binary wrote it, and guessing is exactly
+    // what this gate exists to stop.
+    d.put(
+        cf::META,
+        sumchain_storage::journal::FORMAT_HIGH_WATER_META_KEY,
+        &[1u8, 2, 3],
+    )
+    .unwrap();
+    let err = sumchain_storage::journal::persisted_format_high_water(&d)
+        .expect_err("a mis-width watermark row must be an error, not a guess");
+    assert!(err.to_string().contains("2-byte big-endian"), "{err}");
+}
+
+/// The supported UPGRADE, and the two rollback positions either side of the
+/// first publish.
+///
+/// Walked on one database, in order, because the procedure is a sequence and
+/// checking the steps separately would not show where the window closes.
+///
+/// 1. **Upgrade onto pre-journal history.** A database with no generic journal
+///    at all starts, requires nothing, and establishes no boundary. This is what
+///    an operator upgrading a live node is handed, and it is why the boundary is
+///    OBSERVED rather than hardcoded.
+/// 2. **Rollback before the first publish is SUPPORTED.** Nothing has been
+///    written: no record, no stamp. The database an older binary gets back is
+///    the one it handed over, and this asserts that rather than assuming it.
+/// 3. **Rollback after the first publish is PROHIBITED.** From here the database
+///    carries records and a stamp in a format the older binary does not
+///    implement. The gate refuses, naming both watermarks and this binary's own.
+/// 4. **And it stays prohibited after pruning**, because the stamp is not
+///    pruned. That is the case that would otherwise silently re-open.
+#[test]
+fn the_supported_upgrade_and_rollback_procedure_walked_in_order() {
+    let (d, _g) = db();
+
+    // ── 1. upgrade onto pre-journal history ─────────────────────────────────
+    let before = sumchain_storage::journal::validate_startup(&d)
+        .expect("a binary with this gate must start against pre-journal history");
+    assert_eq!(before.persisted, None);
+    assert_eq!(before.scanned, None);
+    assert_eq!(
+        before.observed_boundary, None,
+        "no journal history means no boundary, and nothing required"
+    );
+
+    // ── 2. rollback BEFORE the first publish is supported ───────────────────
+    assert_eq!(
+        d.iter(cf::APPLICATION_JOURNAL).unwrap().count(),
+        0,
+        "the upgrade alone must not write a record"
+    );
+    assert_eq!(
+        d.get(
+            cf::META,
+            sumchain_storage::journal::FORMAT_HIGH_WATER_META_KEY
+        )
+        .unwrap(),
+        None,
+        "the upgrade alone must not stamp a watermark; the window is open until \
+         the first block is published, and this is what makes it open"
+    );
+
+    // ── 3. the first publish closes it ──────────────────────────────────────
+    let block = block_at(100, 1);
+    publish_with(&d, &block, TEST_LIMIT, |view| {
+        view.put(cf::STATE, b"k", b"v")
+    })
+    .expect("publish");
+    let after = sumchain_storage::journal::validate_startup(&d).expect("this binary reads its own");
+    assert_eq!(
+        after.persisted,
+        Some(sumchain_storage::journal::FORMAT_VERSION_V1)
+    );
+    assert_eq!(after.observed_boundary, Some(100));
+
+    // An OLDER binary is one whose `FORMAT_VERSION_V1` is below what it finds.
+    // That is not expressible by changing a constant in one test process, so it
+    // is expressed the only honest way: raise what is on disk, which is the same
+    // inequality from the gate's point of view.
+    for (label, raise) in [("the stamp alone", true), ("the records alone", false)] {
+        let (e, _g2) = db();
+        let b2 = block_at(100, 1);
+        publish_with(&e, &b2, TEST_LIMIT, |view| view.put(cf::STATE, b"k", b"v")).expect("publish");
+        if raise {
+            e.put(
+                cf::META,
+                sumchain_storage::journal::FORMAT_HIGH_WATER_META_KEY,
+                &(sumchain_storage::journal::FORMAT_VERSION_V1 + 1).to_be_bytes(),
+            )
+            .unwrap();
+        } else {
+            let key = journal_key(100, &b2.hash());
+            let mut bytes = e.get(cf::APPLICATION_JOURNAL, &key).unwrap().unwrap();
+            bytes[5..7]
+                .copy_from_slice(&(sumchain_storage::journal::FORMAT_VERSION_V1 + 1).to_be_bytes());
+            e.put(cf::APPLICATION_JOURNAL, &key, &bytes).unwrap();
+        }
+        let err = sumchain_storage::journal::validate_startup(&e)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("refuses to start"),
+            "{label}: the gate must refuse: {err}"
+        );
+        assert!(
+            err.contains("Downgrading a node"),
+            "{label}: the refusal must state the operational rule: {err}"
+        );
+        assert!(
+            err.contains("resync"),
+            "{label}: the refusal must name the only supported recovery: {err}"
+        );
+
+        // ── 4. and pruning every record does not re-open it ─────────────────
+        if raise {
+            e.delete(cf::APPLICATION_JOURNAL, &journal_key(100, &b2.hash()))
+                .unwrap();
+            assert_eq!(
+                sumchain_storage::journal::highest_stored_format_version(&e).unwrap(),
+                None,
+                "the fixture must really have pruned every record"
+            );
+            assert!(
+                sumchain_storage::journal::validate_startup(&e).is_err(),
+                "the stamp is not pruned, so the prohibition survives pruning"
+            );
+        }
+    }
+}

@@ -177,6 +177,48 @@ value cannot fork on the difference — one of them refuses a reorg the other
 performs.
 [CONSUMER, DONE: `reorg/the_journal_activation_gate_is_its_own_and_leaves_the_dormant_gates_closed`.]
 
+### 1.5 The ordering invariant, once the account commitment is open
+
+    application_journal_enabled_from_height <= account_root_enabled_from_height
+
+`ChainParams::account_root_enabled_from_height` folds account balances and
+nonces into the authoritative block state root. From that height on, a node that
+cannot RESTORE account rows during a reorg cannot agree about the root either:
+it holds a state it can neither revert nor justify. The generic journal is the
+only record that restores every family a block wrote, so it MUST be authoritative
+from at or before the height the commitment starts.
+
+Two rules, both enforced by `ChainParams::validate`:
+
+* `account_root_enabled_from_height = Some(_)` with
+  `application_journal_enabled_from_height = None` is **REFUSED**. `None` is not
+  "always required" — §1.4 — it means OBSERVED FROM CHAIN, and what each node
+  observes is its own first journalled height. That is a node-local number.
+  Resting consensus output on it is how two honest validators come to hold
+  different boundaries and find out at a reorg. Opening the commitment therefore
+  forces the boundary to be CHAIN-DEFINED: written in the same genesis document,
+  covered by the same genesis identity, read the same way by everyone, with
+  nothing for an operator to interpret.
+* A journal gate LATER than the account gate is **REFUSED**, naming the band.
+  Heights in `[account_root, journal)` would commit account state to the root
+  while their only undo record is the four legacy diffs.
+
+Both `None` remains legal and is the production default: no commitment, no
+requirement.
+
+Checked at LOAD, not at the boundary. `Genesis::validate` calls
+`ChainParams::validate`, so every genesis admitted through the authoritative
+loader is consistent; `sumchain_node::node::Node::new` calls it too, because it
+also accepts a `Genesis` built in code, and a node that boots happily on an
+inconsistent pair and diverges tens of thousands of blocks later is the failure
+this exists to eliminate.
+[PRODUCER, TESTED: `genesis/the_account_commitment_cannot_open_over_an_observed_journal_boundary`,
+`genesis/a_journal_gate_later_than_the_account_gate_is_refused`,
+`genesis/the_legal_gate_orderings_are_admitted`,
+`genesis/every_committed_genesis_satisfies_the_gate_ordering`,
+`genesis/both_gates_live_in_the_genesis_document_and_round_trip`. Tests named
+`genesis/<name>` live in the `#[cfg(test)]` module of `crates/genesis/src/lib.rs`.]
+
 ---
 
 ## 2. Deterministic record ordering
@@ -562,19 +604,83 @@ identity-mismatched records all HALT.
 deletion of undo data, not application of it: a post-activation block has legacy
 rows too, the publisher still writes them, and leaving them behind would leave
 undo records for blocks on no chain. Deleting a row that does not exist is a
-no-op. Tests: `reorg/a_reorg_across_the_journal_activation_boundary_decides_per_block`,
-`reorg/supply_state_converges_through_the_real_journal`.]
+no-op. Tests: `reorg/a_reorg_crossing_the_journal_activation_boundary_is_refused_whole`
+(which keeps the per-block classification assertions the test made under its
+former name, `a_reorg_across_the_journal_activation_boundary_decides_per_block`,
+because those are still true — see §7.3 for what stopped being true),
+`reorg/supply_state_converges_through_the_real_journal`,
+`reorg/a_real_reorg_at_the_full_production_depth_survives_the_real_retention_floor`.]
 
-### 7.3 Across it
+### 7.3 Across it — the boundary is an IRREVERSIBLE CHECKPOINT
 
-A reorg whose range spans the boundary is handled **per block**, not per reorg.
-`load_for_revert` is asked once per block with that block's own height, so the
-classification is per-block and needs no special case: blocks below fall back,
-blocks at or above are required. The unwind order — head first, downward — walks
-from the required region into the fallback region, never the reverse.
-[PRODUCER, BY CONSTRUCTION: `requirement_at` takes a single height and is called
-per block.]
-[CONSUMER: not batching the classification across a range.]
+**A reorg may not cross the activation boundary.** A branch that reaches below
+it while also holding blocks at or above it is refused whole, before a single
+row is read or staged, as
+`sumchain_state::reorg_undo::UndoRefusal::CrossesActivationCheckpoint`.
+
+This reverses what this document said in an earlier revision, and the reversal
+is the point, so it is stated rather than edited away.
+
+The earlier rule was that a crossing range is classified per block — below falls
+back, at-or-above is required — and that this needed no special case. The
+classification is still exactly that, and `requirement_at` is still asked once
+per block with that block's own height. What was wrong was the conclusion drawn
+from it. Selecting the record answers *which record governs this block*. It
+cannot answer *what restores the families no record covers*, and below the
+boundary the only records are the four legacy per-subsystem journals, which
+§11.1 records as knowingly incomplete: `cf::SUPPLY` is restorable from none of
+them.
+
+So the earlier behaviour unwound the upper blocks completely and the lower
+blocks partially, committed both in one batch, moved the head, and returned
+success. The rows the lower blocks wrote into uncovered families stayed applied
+under a chain that no longer contained the blocks that wrote them — silently.
+
+#### Why a checkpoint and not a backfill
+
+The alternative was to backfill complete generic journals across the supported
+pre-activation reorg window. That is not implementable here, and not merely
+expensive.
+
+A generic journal is the set of PRE-IMAGES of the keys a block wrote, captured
+by the overlay while that block executed (§0, §10). For a block published before
+the upgrade they were never captured. Reconstructing one means re-executing that
+block from the state that preceded it — which is the state the node would have
+to rewind to in order to obtain it, using the undo data the backfill is trying
+to manufacture. The only non-circular route is replaying the chain from genesis
+into a fresh database, which is a RESYNC; and a resynced node's journal history
+starts at the bottom of its chain, so it has no boundary left to cross.
+Backfill therefore collapses into either "impossible" or "resync", and shipping
+half of it would be shipping the appearance of a guarantee.
+
+#### What the checkpoint costs, and for how long
+
+`plan_reorg` bounds the abandoned branch at `MAX_REORG_WALK = 4_096` blocks. So
+once the head is 4,096 blocks past the boundary, no plan the engine will ever
+build can name a block below it, and the checkpoint cannot refuse anything. It
+is **self-extinguishing**. Finality shortens the window further, because
+`plan_reorg` already refuses to walk at or below the finalized height.
+
+Inside that window the cost is real: a deep reorg across the upgrade height is
+refused, the node stops following the canonical chain, and the operator's
+recovery is a resync. That is a bounded availability cost, and it is the price
+of making the unbounded correctness cost unreachable. An operator who does not
+want to pay it upgrades from a resynced database, whose boundary is genesis.
+
+A reorg **wholly below** the boundary is NOT a crossing and is untouched (§7.1).
+That is the shape an operator gets by pinning a boundary above the current head:
+the chain has not activated over that range at all, and refusing there would
+refuse every reorg on such a chain — a far larger claim than this one.
+
+[CONSUMER, DONE: `sumchain_state::reorg_undo::crosses_activation_checkpoint`,
+called first in `stage_branch_unwind` so no unwind can reach around it. Tests:
+`reorg/a_reorg_crossing_the_journal_activation_boundary_is_refused_whole`,
+`reorg/a_reorg_crossing_the_checkpoint_is_refused_by_the_real_reorg_driver`
+(through `execute_reorg` over a real `plan_reorg` plan, asserting nothing is
+written and the head does not move, and that the same switch succeeds once the
+boundary sits at the foot of the branch),
+`reorg/a_reorg_wholly_below_the_boundary_is_not_a_crossing`,
+`reorg/the_checkpoint_stops_binding_once_the_head_outruns_the_engine_walk_limit`.]
 
 ### 7.4 Pruning
 
@@ -587,7 +693,10 @@ observation about a database with no journal history rather than a gate left
 off.
 [PRODUCER, BY CONSTRUCTION]
 
-**Pruning is now implemented, with a retention FLOOR.**
+**Pruning is implemented, with a retention FLOOR — and it ships DISABLED.**
+Read §12.1 before this paragraph: what follows is a correct retention policy
+that nothing in the node currently runs, and §12 carries the disk figures an
+operator needs in order to run without it.
 `crates/storage/src/pruner.rs` prunes `application_journal` and `state_diffs`
 below the SAME height, and that height is never closer to the head than
 `UNDO_RETENTION_FLOOR = 4_096`, a copy of `sumchain_consensus::poa::MAX_REORG_WALK`.
@@ -649,10 +758,11 @@ A database with records but no stamp is not treated as a fault — that is the
 legitimate shape of one published before stamping existed, and the scan covers
 it.
 
-### 8.1 The operational rule
+### 8.1 The operational rule, and the procedure
 
 **Once a node has published a block under a record format, it must not be run
-against a binary that implements an older one.**
+against a binary that implements an older one. Downgrade after activation is
+PROHIBITED.**
 
 This is an operational prohibition, not advice, because the failure it prevents
 is silent and late. An old binary meeting a new record cannot unwind the blocks
@@ -663,6 +773,47 @@ Operators: a downgrade that trips this gate reports the stamped version, the
 version found in records, and the binary's own, and refuses to start. The
 supported responses are to run the newer binary, or to resync the node from an
 empty database. There is no supported way to clear the watermark and proceed.
+
+#### The watermark is opaque to the binary it protects against
+
+The stamp is a two-byte big-endian row under one `META` key. There is no
+envelope, no magic, and nothing self-describing. A binary that predates the
+journal does not know `FORMAT_HIGH_WATER_META_KEY`, does not know
+`cf::APPLICATION_JOURNAL`, and will not look for either: **nothing in this format
+announces itself to a reader that is not already looking.**
+
+So the refusal only ever fires on a binary new enough to contain this gate and
+old enough not to implement the record format it finds. A downgrade that skips
+back past the introduction of the journal entirely is outside what any check
+here can see. This document says so rather than implying coverage it does not
+have. (A partial column-family open may or may not be refused by the RocksDB
+binding in use — that is version-dependent and is NOT relied on as a barrier.)
+[PRODUCER, TESTED: `producer/the_format_watermark_is_opaque_to_a_binary_that_does_not_look_for_it`]
+
+#### The supported upgrade, and where the rollback window closes
+
+1. **Upgrade onto pre-journal history.** A database with no generic journal at
+   all starts, requires nothing, and establishes no boundary. This is what an
+   operator upgrading a live node is handed, and it is why the boundary is
+   observed rather than hardcoded.
+2. **Rollback BEFORE the first publish is SUPPORTED.** The upgrade alone writes
+   neither a record nor a stamp. The database an older binary gets back is the
+   one it handed over.
+3. **The first publish CLOSES the window, permanently.** From that commit the
+   database carries a record and a stamp. Rollback is prohibited from here.
+4. **Pruning does not re-open it.** The stamp is not pruned, so a database whose
+   records have all aged out still refuses.
+
+[PRODUCER, TESTED: `producer/the_supported_upgrade_and_rollback_procedure_walked_in_order`
+walks all four on real databases, in order, and requires the refusal to name the
+operational rule and the resync.]
+
+#### What an operator is left holding
+
+A node that trips this gate does not start. It has not corrupted anything —
+that is the point — but it is down until it is given a binary at or above the
+stamped version, or resynced from empty. On a validator, budget for the resync:
+there is no in-place repair, and there is deliberately no flag to override.
 
 ---
 
@@ -743,6 +894,26 @@ implementation and its test rather than declared done.
    cannot erase it. The operational rule is stated in §8.1.
 5. **Pruning this family** (§7.4). CLOSED, with a retention floor equal to the
    deepest reorg the engine will plan.
+7. **A reorg CROSSING the activation boundary** (§7.3). CLOSED, by reversing the
+   earlier answer: the boundary is an irreversible checkpoint and a crossing
+   reorg is refused whole. Per-block selection was never wrong about
+   classification; it was wrong as a safety argument, because it cannot restore
+   families no record covers. Backfilling generic journals across the
+   pre-activation window was the alternative and is circular — it needs the undo
+   data it is trying to manufacture — so it collapses into "resync".
+8. **The ordering between the journal gate and the account-root gate** (§1.5).
+   CLOSED: `application_journal_enabled_from_height <=
+   account_root_enabled_from_height`, enforced at genesis load and at node
+   startup, with `None` on the journal gate refused once the commitment is open.
+9. **What reorg depth a node may claim** (§13). CLOSED as a stated requirement
+   plus the API to answer it. A snapshot-restored node holds canonical state and
+   no undo history and must advertise `0` until it has published blocks itself.
+   The snapshot implementation is not this document's to change; §13.2 states
+   what it owes.
+10. **Pruning in production** (§12.1). CLOSED as a DECISION, not as an
+   implementation: pruning ships disabled, and §12 carries the disk figures,
+   the retained-set figures it would replace them with, and the monitoring.
+
 6. **Turning on `compute_pool_enabled_from_height` and
    `beacon_enabled_from_height`.** STILL NOT DONE, and still out of scope by
    design. Those are consensus gates for dormant subsystems; opening either
@@ -759,26 +930,35 @@ Stated because a clearly named gap is worth more than a silence.
   boundary they are still the only undo record a block has. `cf::SUPPLY` is not
   restorable there by any means this branch adds.
   `reorg/the_subsystem_journals_do_not_cover_every_family_a_block_writes`
-  measures exactly that, and is kept for that reason.
-* **Nothing exercises a reorg at production depth.** The retention floor is
-  pinned to `MAX_REORG_WALK` by equality assertions on both sides, and pruning is
-  tested against a 4,096-block horizon with seeded rows, but no test publishes
-  4,096 real blocks and reorgs across them.
-* **The `Pinned` boundary is not exercised end to end through `PoAEngine`.** The
-  per-block classification, the halt and the fallback are tested directly against
-  `ActivatedJournal` with a pinned boundary; the live path is tested with the
-  observed one.
-* **`Pruner` has no production caller.** Nothing in `crates/node` constructs one,
-  and `PrunerConfig::enabled` is `false` by default. §7.4 therefore describes a
-  correct retention POLICY that nothing currently runs. That is a pre-existing
-  fact about the node, not a consequence of this work, and it cuts in the safe
-  direction — a pruner that never runs cannot delete a journal early. Wiring a
-  pruning loop into the node is a separate change with its own risk.
-* **`StateManager::revert_block_state_diffs` has no production caller either.**
-  Its post-activation refusal is a guard on a function reached today only from
-  tests and from the `execution_closure` write ledger, where it is a classified
-  root. The guard is real and tested; it is not currently protecting a live path,
-  because the live path is `ActivatedJournal`.
+  measures exactly that, and is kept for that reason. What changed is the
+  BLAST RADIUS: a reorg can no longer carry that incompleteness across the
+  boundary (§7.3). A chain running wholly below the boundary still has it, and
+  nothing here fixes that.
+* **`Pruner` still has no production caller.** Nothing in `crates/node`
+  constructs one and `PrunerConfig::enabled` is `false`. This is now a stated
+  decision with numbers behind it (§12.1) rather than an omission, but the
+  decision is "ship with pruning off", not "pruning is wired". An operator who
+  turns it on gets the floor — `Pruner` is constructed and exercised at the real
+  constant by `reorg/a_real_reorg_at_the_full_production_depth_survives_the_real_retention_floor`
+  — but no loop in the node calls it, and the crash-safety of such a loop is
+  neither written nor tested here.
+* **`StateManager::revert_block_state_diffs` is DEAD in production**, and that
+  is now the stated resolution rather than an open question. The production
+  reorg path is `ActivatedJournal` via `execute_reorg`; nothing else calls it.
+  Its post-activation refusal is therefore a contract on a public API, not
+  protection for a live caller, and
+  `state/the_legacy_revert_path_has_no_production_caller_and_the_rollback_cli_has_its_own`
+  scans the workspace and fails if that changes in either direction.
+* **`sum-node rollback` is a THIRD unwind implementation, and it is not
+  boundary-aware.** `crates/node/src/main.rs` reverts account rows from
+  `cf::STATE_DIFFS` with its own open-coded loop: it consults neither the
+  contract diff nor the generic application journal, and never asks where the
+  activation boundary is. Post-activation it under-reverts in exactly the way
+  the guard above exists to prevent. This is a REAL defect, it is recorded here
+  rather than fixed, and the test named above pins its shape so the claim can be
+  rechecked. Fixing it means routing the CLI through `ActivatedJournal` +
+  `stage_branch_unwind`, which is a change in a crate none of this work's tests
+  cover.
 * **`UndoRefusal::DuplicateJournalKey` and `UndoRefusal::JournalIdentityMismatch`
   are unreachable through the real producer.** `decode_for` refuses a repeated
   `(cf, key)` as non-canonical order, and a transplanted record as another
@@ -786,3 +966,217 @@ Stated because a clearly named gap is worth more than a silence.
   `BranchJournal` is a trait and a producer that does not validate on the way in
   would reach them; but the tests that exercise those conditions against the real
   journal assert the DECODER's refusal, which is what actually fires.
+* **The checkpoint's availability cost is argued, not observed.** §7.3 shows the
+  arithmetic that bounds it to the first `MAX_REORG_WALK` blocks after
+  activation, and a test pins that arithmetic, but no test stands up a node that
+  is actually refused a crossing reorg and measures what an operator has to do
+  next. The recovery is a resync, and that claim rests on the same reasoning as
+  §8.1's.
+* **Nothing measures the journal against a contract-heavy or NFT-heavy write
+  set.** §12's figures come from transfer blocks. A block whose write set is
+  dominated by large contract values would journal more per transaction —
+  bounded by the same pre-image bytes it already charges, but the multiplier in
+  §12.2 is a transfer multiplier and should not be read as a universal one.
+* **A clean cherry-pick is not semantic compatibility.** This branch merges the
+  journal, reorg and account-root work without conflict. That is a syntactic
+  fact. Nothing here establishes that the journal and account-root seams agree
+  about anything; §1.5 is the one place they are made to, and it is a load-time
+  check on two numbers, not a proof about the state root.
+
+---
+
+## 12. Resource sizing, and the decision not to prune
+
+Every figure here is MEASURED against real published blocks, by
+`reorg/journal_bytes_per_block_are_measured_against_real_published_blocks` and
+`reorg/a_real_reorg_at_the_full_production_depth_survives_the_real_retention_floor`,
+and reproduced by running those tests with `--nocapture`. Nothing below is
+derived from the record layout.
+
+### 12.1 The decision: pruning ships DISABLED
+
+`PrunerConfig::enabled` is `false` by default and nothing in `crates/node`
+constructs a `Pruner`. That is not an oversight left unstated; it is the shipped
+configuration, and it is chosen:
+
+* A pruner that never runs cannot delete a journal a reorg still needs. The
+  failure it could cause is a self-inflicted outage at the worst moment — during
+  a switch, with the chain already committed to unwinding. The failure it
+  prevents is running out of disk, which is visible in advance, has a metric,
+  and is recoverable.
+* Wiring a crash-safe pruning loop into the node — after canonical commitment,
+  with its own interruption story — is a change with its own risk, in a crate
+  none of this work's tests cover. Shipping it untested beside a correctness
+  change would be worse than shipping neither.
+* §7.4's retention policy is therefore a correct policy that nothing currently
+  runs. It is not dead: `Pruner` is constructed and exercised at the real
+  constant by the depth test, so an operator who enables it gets the floor.
+
+The obligation this decision creates is the rest of this section: the numbers an
+operator needs in order to run with pruning off, and the metrics that say when
+that stops being viable.
+
+### 12.2 Journal bytes per block, measured
+
+At `ChainParams::default()` — `block_time_ms: 2000`, `max_txs_per_block: 1000`:
+
+| block | journal record | entries |
+|---|---|---|
+| 0 transactions | **55 bytes** (the header; zero entries) | 0 |
+| 1 transaction | **347 bytes** | 5 |
+| 8 transactions | **956 bytes** | 12 |
+| 32 transactions | **3,044 bytes** | 36 |
+| 1,000 transactions (full block, extrapolated) | **~87,260 bytes** | ~3,000 |
+
+The marginal cost is **~87 bytes per transaction**, taken across the 1→32 span
+so the fixed cost cancels. A transfer journals five rows at one transaction
+(sender, recipient, fee credit, and the rows those share) and about three per
+transaction thereafter.
+
+Against the **1 GiB `CANDIDATE_LIMIT_SCAFFOLD`**: a full 1,000-transaction
+block's journal is 87 KB, which is **0.008%** of the ceiling — a headroom factor
+of roughly 12,000×. §9 notes that journal bytes tighten the effective ceiling;
+at these magnitudes no block reachable today is affected, and that is now a
+measurement rather than an expectation.
+
+### 12.3 Disk growth with pruning disabled
+
+43,200 blocks/day at a 2-second target; 15.77M blocks/year.
+
+| sustained load | per day | per year |
+|---|---|---|
+| idle (0 tx/block) | 2.3 MiB | **0.81 GiB** |
+| 1 tx/block | 14.3 MiB | **5.1 GiB** |
+| 8 tx/block | 39.4 MiB | **14.0 GiB** |
+| 32 tx/block | 125.4 MiB | **44.7 GiB** |
+| saturated (1,000 tx/block) | 3.51 GiB | **1.25 TiB** |
+
+This is the generic journal family ALONE. It is additive to blocks,
+transactions, receipts, indexes and the four legacy diffs, none of which this
+work changes.
+
+**Planning rule.** Budget the row for the transaction rate the deployment
+actually expects, and treat it as monotonic: with pruning off the family never
+shrinks. At 32 tx/block — a busy chain by this tree's standards — the journal
+costs about 45 GiB/year, which is a disk line item and not a design problem. At
+saturation it is 1.25 TiB/year, and a deployment planning to run there should
+enable pruning rather than buy the disk.
+
+### 12.4 What enabling pruning would cost instead
+
+The retained set is bounded by the floor, so it is a CONSTANT, not a rate:
+
+| sustained load | retained undo set at `UNDO_RETENTION_FLOOR = 4_096` |
+|---|---|
+| idle | 220 KiB |
+| 1 tx/block | **1.23 MiB** (measured, not extrapolated) |
+| 8 tx/block | 3.7 MiB |
+| 32 tx/block | 11.9 MiB |
+| saturated | 341 MiB |
+
+The 1.23 MiB figure is read off a real 4,095-record retained set in the
+production-depth test. So the whole question an operator is being asked is
+"unbounded growth at the table in §12.3, or a fixed ceiling of a few hundred
+megabytes at most" — and the reason the answer is not simply "prune" is §12.1:
+the loop that would run it is not written or tested here.
+
+### 12.5 Memory: a pre-image is charged twice
+
+§9 states it; this measures it.
+`reorg/a_preimage_is_charged_twice_and_the_factor_is_measured` publishes two
+blocks whose write sets differ only in size and compares the pre-image bytes the
+overlay captured against the journal's copy of them.
+
+A one-transaction block captures 24 pre-image bytes and journals 347; a
+sixteen-transaction block captures 384 and journals 1,652. The total a candidate
+must have headroom for is **the overlay's capture plus the journal's copy**, and
+growing the write set raised the charge by **4.6× the growth in pre-image bytes**
+— 2× for the second copy, and the rest per-entry framing (family name, key,
+length prefixes, tags), because that write set grew by ENTRIES.
+
+§9's exact "2N" is a statement about growing ONE value by N bytes, where no
+framing is added. Both are true and they are not the same measurement; this
+document now says which is which rather than letting the smaller number stand
+for both.
+
+### 12.6 What to monitor
+
+With pruning disabled, three signals, in the order they matter:
+
+1. **`application_journal` bytes on disk**, against §12.3 for the deployment's
+   load. It only ever grows. Alert on the trajectory reaching the volume's
+   capacity, not on a fixed size — the rate is the number that predicts.
+2. **Usable reorg depth** — `JournalActivation::advertisable_reorg_depth(head,
+   MAX_REORG_WALK)`, which the node logs at startup. It should equal
+   `MAX_REORG_WALK` on a node that has been running since its own activation, and
+   less on one restored from a snapshot (§13). A node below the engine limit is a
+   node that will REFUSE deep reorgs; that is safe, and it is also an outage
+   waiting for the right fork.
+3. **Record count against head height.** Above the boundary these move together:
+   `publish` writes one record per block, unconditionally. A gap means records
+   were deleted by something, and with pruning disabled nothing should be
+   deleting them.
+
+---
+
+## 13. Reorg depth a node may honestly claim
+
+The journal is node-local (§0): never hashed into a block, never folded into a
+state root, never sent over the wire. That is what makes the format free to
+change without a consensus event. It has a consequence that is easy to miss.
+
+**A node that arrives by snapshot restore or fast sync has canonical state and
+NO undo history.** Journals are not transmitted, and a pre-image cannot be
+derived from a post-state, so there is no way to ship them alongside a snapshot.
+On arrival such a node can revert nothing at all.
+
+**`UNDO_RETENTION_FLOOR = 4_096` says nothing about it.** Retention is a promise
+not to DISCARD undo history. It is never a claim to HAVE it. A node 200 blocks
+past a restore holds 200 blocks of undo history, and the floor cannot raise that
+number.
+
+### 13.1 The rule
+
+**A node MUST NOT advertise, report or configure a reorg depth greater than
+`JournalActivation::advertisable_reorg_depth(head, MAX_REORG_WALK)`**, which is
+`head - boundary + 1` capped at the engine's walk limit, and `0` on a database
+with no journal history.
+
+This is not a second claim to keep in step with the first. It is a READING of
+the rule the unwind already enforces: `crosses_activation_checkpoint` (§7.3)
+refuses any branch reaching below the boundary, so a reorg deeper than this
+number is refused rather than mis-applied. The function exists so a node can SAY
+the number before it is asked to prove it.
+[CONSUMER, DONE: `JournalActivation::restorable_depth` /
+`advertisable_reorg_depth`, logged by `Node::new` at startup. Tests:
+`reorg/the_advertised_reorg_depth_is_the_depth_the_checkpoint_actually_allows`,
+`reorg/a_node_with_no_journal_history_advertises_zero_until_it_publishes`.]
+
+### 13.2 What a snapshot / fast-sync implementation owes
+
+`crates/state/src/snapshot.rs` is not this document's to change. This is the
+requirement it must meet, stated so it can be checked:
+
+1. A restored node MUST NOT report a reorg depth greater than the value above.
+   Immediately after a restore it is **0**.
+2. There is no way to import undo history with a snapshot. The only way a
+   restored node accumulates it is by PUBLISHING blocks itself, one journal per
+   block.
+3. A restored node therefore reaches the engine's full horizon exactly
+   `MAX_REORG_WALK` blocks after the restore point, and not before. Until then
+   its usable depth is the number of blocks it has published.
+4. The restore point is a hard floor: nothing below it is revertible by any
+   record the node holds — the same statement §7.3 makes about the activation
+   height, for the same reason.
+
+### 13.3 The interaction with the ordering invariant
+
+`application_journal_enabled_from_height <= account_root_enabled_from_height`
+(§1.4) is what keeps 13.1 from being merely advisory once the account
+commitment is open. Above the account gate the block state root covers account
+rows; a node that cannot restore those rows cannot agree about the root either.
+The ordering makes "the root covers account state here" imply "a generic journal
+is authoritative here", and the checkpoint makes the region below it
+unreachable by a reorg.
+
+---
