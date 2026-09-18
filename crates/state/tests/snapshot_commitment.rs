@@ -29,7 +29,10 @@ use sumchain_primitives::{
 };
 use sumchain_state::account_root::account_state_digest;
 use sumchain_state::executor::BlockExecutor;
-use sumchain_state::snapshot::{usable_reorg_depth, SnapshotAccount, SnapshotManager};
+use sumchain_state::snapshot::{
+    can_serve_history_at, imported_at, missing_for_fast_sync, sync_capability, usable_reorg_depth,
+    SnapshotAccount, SnapshotManager, REQUIRED_FAST_SYNC_FAMILIES, SNAPSHOT_CARRIES,
+};
 use sumchain_state::state::StateManager;
 use sumchain_storage::candidate::LEGACY_ROOT_COMPATIBILITY_HEIGHT;
 use sumchain_storage::pruner::UNDO_RETENTION_FLOOR;
@@ -339,7 +342,7 @@ fn a_restore_reproduces_the_commitment_from_committed_state() {
     let target = committed_node();
     let result = target
         .snapshots()
-        .restore_snapshot(&snapshot)
+        .import_account_family(&snapshot)
         .expect("a sound snapshot must restore");
 
     assert_eq!(result.account_digest, snapshot.header.account_digest);
@@ -375,7 +378,7 @@ fn a_restore_into_a_dirty_directory_is_refused() {
 
     let err = target
         .snapshots()
-        .restore_snapshot(&snapshot)
+        .import_account_family(&snapshot)
         .expect_err("a restore that does not reproduce the commitment must fail")
         .to_string();
     assert!(
@@ -395,7 +398,7 @@ fn a_failed_verification_writes_nothing() {
     let empty = account_state_digest(&target.db).unwrap();
     target
         .snapshots()
-        .restore_snapshot(&snapshot)
+        .import_account_family(&snapshot)
         .expect_err("a snapshot whose rows do not fold to its digest must be refused");
     assert_eq!(
         account_state_digest(&target.db).unwrap(),
@@ -404,26 +407,29 @@ fn a_failed_verification_writes_nothing() {
     );
 }
 
-/// A v1 snapshot is refused by name.
+/// A snapshot in an older format is refused by name.
 ///
-/// v1 carries no account commitment, so there is nothing in it this binary can
-/// check. Saying that is strictly better than a bincode error, which names a
-/// field offset and leaves the operator to guess.
+/// v1 carried no account commitment and v2 carried no family list, so neither
+/// holds a value this binary can check anything against. Saying which format
+/// and what to do is strictly better than a bincode error, which names a field
+/// offset and leaves the operator to guess.
 #[test]
-fn a_v1_snapshot_is_refused_by_name() {
+fn an_older_snapshot_format_is_refused_by_name() {
     let source = committed_node();
-    let mut snapshot = chain_with_snapshot(&source, BOUNDARY);
-    snapshot.header.version = 1;
+    for version in [1u32, 2] {
+        let mut snapshot = chain_with_snapshot(&source, BOUNDARY);
+        snapshot.header.version = version;
 
-    let err = committed_node()
-        .snapshots()
-        .restore_snapshot(&snapshot)
-        .expect_err("a pre-commitment snapshot format must be refused")
-        .to_string();
-    assert!(
-        err.contains("no account-state commitment") && err.contains("re-export"),
-        "the refusal must name the format and the remedy: {err}"
-    );
+        let err = committed_node()
+            .snapshots()
+            .import_account_family(&snapshot)
+            .expect_err("a pre-v3 snapshot format must be refused")
+            .to_string();
+        assert!(
+            err.contains(&format!("v{version}")) && err.contains("re-export"),
+            "the refusal must name the format and the remedy: {err}"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -453,7 +459,7 @@ fn a_snapshot_carries_only_the_account_family_so_a_restore_cannot_reproduce_a_ro
     let target = committed_node();
     target
         .snapshots()
-        .restore_snapshot(&snapshot)
+        .import_account_family(&snapshot)
         .expect("the account family restores perfectly");
     assert_eq!(
         account_state_digest(&target.db).unwrap(),
@@ -521,12 +527,12 @@ fn above_the_gate_the_chain_verifies_a_fast_synced_node_at_its_first_block() {
     // from the future and prove nothing about the block.
     let honest = committed_node();
     clone_everything_but_accounts(&source, &honest);
-    honest.snapshots().restore_snapshot(&snapshot).unwrap();
+    honest.snapshots().import_account_family(&snapshot).unwrap();
     honest.state.set_state_root(snapshot.header.state_root);
 
     let tampered = committed_node();
     clone_everything_but_accounts(&source, &tampered);
-    tampered.snapshots().restore_snapshot(&snapshot).unwrap();
+    tampered.snapshots().import_account_family(&snapshot).unwrap();
     tampered.state.set_state_root(snapshot.header.state_root);
 
     let next = source.publish(BOUNDARY + 1, vec![transfer(&alice, &addr(4), 2_000, 500, 1)]);
@@ -568,7 +574,7 @@ fn below_the_gate_a_fast_sync_cannot_be_verified_at_all() {
 
     let tampered = dormant_node();
     clone_everything_but_accounts(&source, &tampered);
-    let result = tampered.snapshots().restore_snapshot(&snapshot).unwrap();
+    let result = tampered.snapshots().import_account_family(&snapshot).unwrap();
 
     let next = source.publish(BOUNDARY + 1, vec![transfer(&alice, &addr(4), 2_000, 500, 1)]);
     assert_eq!(
@@ -675,7 +681,7 @@ fn a_restored_node_has_no_reorg_depth_until_it_has_earned_it() {
     let source = committed_node();
     let snapshot = chain_with_snapshot(&source, BOUNDARY);
     let target = committed_node();
-    let result = target.snapshots().restore_snapshot(&snapshot).unwrap();
+    let result = target.snapshots().import_account_family(&snapshot).unwrap();
     assert_eq!(
         result.journal_history_begins_at,
         result.height + 1,
@@ -683,4 +689,220 @@ fn a_restored_node_has_no_reorg_depth_until_it_has_earned_it() {
          it publishes or imports"
     );
     assert_eq!(usable_reorg_depth(result.height, result.height), 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. Fast sync is DISABLED, and the node knows what it is
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `restore_snapshot` — the fast-sync entry point — refuses, and names every
+/// family a sync needs and this format does not carry.
+///
+/// Section 4 established that a restored node cannot reproduce a root. This is
+/// the consequence: the entry point that would produce such a node does not
+/// exist as a working path. The refusal is structural — the file declares what
+/// it carries, the constant declares what a sync requires, and the comparison
+/// is what refuses — so extending the format lifts it without anyone
+/// remembering to.
+#[test]
+fn fast_sync_is_disabled_and_the_refusal_names_what_is_missing() {
+    let source = committed_node();
+    let snapshot = chain_with_snapshot(&source, BOUNDARY);
+
+    let target = committed_node();
+    let err = target
+        .snapshots()
+        .restore_snapshot(&snapshot)
+        .expect_err("fast sync must be refused while the format is incomplete")
+        .to_string();
+
+    assert!(
+        err.contains("fast sync is DISABLED"),
+        "the refusal must say so in those words: {err}"
+    );
+    // The family that reaches the root TODAY, with no gate, is the one that
+    // makes this a correctness refusal rather than a completeness preference.
+    assert!(
+        err.contains("supply"),
+        "the refusal must name the supply family: {err}"
+    );
+    for family in ["contracts", "tokens", "nft", "compute_pool", "beacon"] {
+        assert!(
+            err.contains(family),
+            "the refusal must name every missing family, and omits {family}: {err}"
+        );
+    }
+
+    // Nothing was written: the refusal precedes the import.
+    assert_eq!(
+        account_state_digest(&target.db).unwrap(),
+        account_state_digest(
+            &Database::open_default(tempfile::TempDir::new().unwrap().path()).unwrap()
+        )
+        .unwrap(),
+        "a refused sync must leave the target untouched"
+    );
+}
+
+/// The refusal is derived, not written down twice.
+///
+/// `missing_for_fast_sync` over what this format carries must be non-empty, and
+/// must become empty exactly when the carried set covers the required one. The
+/// test that the disable lifts itself.
+#[test]
+fn the_disable_is_derived_from_the_two_family_lists() {
+    let carried: Vec<String> = SNAPSHOT_CARRIES.iter().map(|s| s.to_string()).collect();
+    let missing = missing_for_fast_sync(&carried);
+    assert!(
+        !missing.is_empty(),
+        "this format does not carry a full sync; if this is ever empty, the \
+         refusal above has lifted and the format must have been extended"
+    );
+    assert!(
+        carried.contains(&"state:accounts".to_string()),
+        "the one family it does carry"
+    );
+
+    // Hand it the full required set and the refusal disappears — so the gate is
+    // a comparison and not a constant `false`.
+    let complete: Vec<String> = REQUIRED_FAST_SYNC_FAMILIES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert!(
+        missing_for_fast_sync(&complete).is_empty(),
+        "a snapshot carrying everything a sync requires must not be refused"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. What an imported node may claim about itself
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The import height is PERSISTED, so a restart does not forget it.
+///
+/// The failure this prevents is quiet and total: a node imports at H, learns it
+/// can unwind nothing, restarts, and — with the fact held only in the
+/// `RestoreResult` the previous process returned — goes back to advertising the
+/// full reorg horizon over blocks it has no records for.
+#[test]
+fn the_import_height_survives_a_restart() {
+    let source = committed_node();
+    let snapshot = chain_with_snapshot(&source, BOUNDARY);
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().to_path_buf();
+    {
+        let db = Arc::new(Database::open_default(&path).unwrap());
+        let mut params = ChainParams::with_v2_enabled();
+        params.account_root_enabled_from_height = Some(BOUNDARY);
+        params.application_journal_enabled_from_height = Some(0);
+        SnapshotManager::new(db, CHAIN_ID, params)
+            .import_account_family(&snapshot)
+            .expect("import");
+    }
+
+    // Every handle dropped, RocksDB reopened from disk. This is the restart.
+    let db = Database::open_default(&path).unwrap();
+    assert_eq!(
+        imported_at(&db).unwrap(),
+        Some(BOUNDARY),
+        "the import height must be read back from the database, not from the \
+         process that performed it"
+    );
+
+    let cap = sync_capability(&db, BOUNDARY).unwrap();
+    assert_eq!(cap.imported_at, Some(BOUNDARY));
+    assert_eq!(cap.state_history_floor, Some(BOUNDARY));
+    assert_eq!(cap.journal_history_begins_at, Some(BOUNDARY + 1));
+    assert_eq!(
+        cap.usable_reorg_depth, 0,
+        "at the import height this node may advertise nothing"
+    );
+    assert!(
+        !cap.fast_sync_available,
+        "and it must not claim a capability this format does not have"
+    );
+    assert!(cap.missing_families.contains(&"supply"));
+
+    // It earns depth one block at a time, and the value comes from the database.
+    assert_eq!(
+        sync_capability(&db, BOUNDARY + 700).unwrap().usable_reorg_depth,
+        700
+    );
+    assert_eq!(
+        sync_capability(&db, BOUNDARY + UNDO_RETENTION_FLOOR * 3)
+            .unwrap()
+            .usable_reorg_depth,
+        UNDO_RETENTION_FLOOR
+    );
+}
+
+/// A node that executed its whole chain claims no restriction.
+///
+/// The permissive answer has to be reachable, or the clamp would quietly
+/// hobble every normally-synced node on the network.
+#[test]
+fn a_node_that_never_imported_is_unrestricted() {
+    let n = committed_node();
+    let cap = sync_capability(&n.db, 1_000).unwrap();
+    assert_eq!(cap.imported_at, None);
+    assert_eq!(cap.state_history_floor, None);
+    assert_eq!(cap.journal_history_begins_at, None);
+    assert_eq!(cap.usable_reorg_depth, UNDO_RETENTION_FLOOR);
+    assert!(
+        can_serve_history_at(&n.db, 0).unwrap(),
+        "a node that executed every block can answer for every height"
+    );
+}
+
+/// An imported node refuses historical state below its floor.
+///
+/// A walk that runs off the bottom of this node's history and returns whatever
+/// it found there is worse than an error, because the caller cannot tell. The
+/// predicate is a refusal, and it is one predicate so that every query path
+/// applies the same rule.
+#[test]
+fn an_imported_node_cannot_answer_for_history_it_does_not_have() {
+    let source = committed_node();
+    let snapshot = chain_with_snapshot(&source, BOUNDARY);
+    let target = committed_node();
+    target
+        .snapshots()
+        .import_account_family(&snapshot)
+        .expect("import");
+
+    assert!(!can_serve_history_at(&target.db, 0).unwrap());
+    assert!(!can_serve_history_at(&target.db, BOUNDARY - 1).unwrap());
+    assert!(
+        can_serve_history_at(&target.db, BOUNDARY).unwrap(),
+        "the import height itself IS on this node — it is the state that arrived"
+    );
+    assert!(can_serve_history_at(&target.db, BOUNDARY + 1).unwrap());
+}
+
+/// An unreadable import record refuses everything rather than defaulting to
+/// "never imported".
+///
+/// Absent means unrestricted. Guessing absent from a corrupt value would let a
+/// node that WAS imported serve history it does not have, which is the exact
+/// failure the record exists to prevent — so a value that cannot be read is an
+/// error, not an absence.
+#[test]
+fn a_corrupt_import_record_is_an_error_not_an_absence() {
+    let n = committed_node();
+    n.db.put(
+        sumchain_storage::cf::META,
+        sumchain_state::snapshot::SNAPSHOT_RESTORE_META_KEY,
+        &[0u8; 3],
+    )
+    .unwrap();
+
+    let err = imported_at(&n.db)
+        .expect_err("a 3-byte height must not be read as absent")
+        .to_string();
+    assert!(
+        err.contains("must not serve any"),
+        "the refusal must say what follows from it: {err}"
+    );
 }

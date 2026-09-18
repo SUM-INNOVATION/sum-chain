@@ -25,7 +25,7 @@ use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
     Address, Block, BlockHeader, Hash, Receipt, SignedTransaction, TransactionV2, TxPayload,
 };
-use sumchain_state::account_root::{account_state_digest, v_account_state_digest};
+use sumchain_state::account_root::{account_row_count, account_state_digest, v_account_state_digest};
 use sumchain_state::executor::BlockExecutor;
 use sumchain_state::state::StateManager;
 use sumchain_state::supply::SupplyStore;
@@ -1101,4 +1101,75 @@ fn evict_page_cache(bytes: u64) {
         }
     }
     eprintln!("page-cache eviction: wrote and read back {total} B of ballast");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. The count that cost depends on
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `account_row_count` counts STORED ROWS, which is not the same number as
+/// "accounts holding value".
+///
+/// The distinction is the whole reason this function exists rather than a
+/// balance query or a transaction-graph walk. The commitment folds one record
+/// per stored row and the per-block cost is linear in that count. A row whose
+/// balance and nonce are both zero is indistinguishable from an absent account
+/// by VALUE — `get_account` flattens absence into exactly those values — and
+/// entirely distinguishable from one by COST. A performance argument built on
+/// the value-holding count is an argument about a different number.
+///
+/// Four rows, of which only one holds value. The count is four.
+#[test]
+fn the_row_count_is_not_the_count_of_accounts_holding_value() {
+    let n = old_binary();
+    assert_eq!(account_row_count(&n.db).unwrap(), 0);
+
+    n.seed(&addr(1), 1_000, 0); // value and no history
+    n.seed(&addr(2), 0, 7); // history and no value — a spent account
+    n.seed(&addr(3), 0, 0); // neither: present, and zero in both fields
+    n.seed(&addr(4), 0, 0);
+
+    assert_eq!(
+        account_row_count(&n.db).unwrap(),
+        4,
+        "every stored row counts, including the three that hold nothing"
+    );
+
+    // A balance-based count would say one. That is the number a supply
+    // cross-check or a transaction-graph closure produces, and it is not the
+    // number the fold pays for.
+    let holding_value = [addr(1), addr(2), addr(3), addr(4)]
+        .iter()
+        .filter(|a| n.account(a).balance > 0)
+        .count();
+    assert_eq!(holding_value, 1);
+
+    // The count tracks the fold exactly: it is the same scan, so deleting a row
+    // moves both together.
+    let before = n.committed_digest();
+    n.delete_account(&addr(3));
+    assert_eq!(account_row_count(&n.db).unwrap(), 3);
+    assert_ne!(before, n.committed_digest());
+}
+
+/// The row count is the number of records the commitment folds — established by
+/// agreement with the fold rather than by reading the two implementations.
+#[test]
+fn the_row_count_agrees_with_the_fold_it_predicts() {
+    let n = old_binary();
+    for i in 0u8..37 {
+        n.seed(&addr(i.wrapping_mul(7).wrapping_add(3)), i as u128, i as u64);
+    }
+    // 37 distinct addresses under `wrapping_mul(7)` on a byte: 7 is coprime with
+    // 256, so the map is injective and no two collide.
+    let rows = account_row_count(&n.db).unwrap();
+    assert_eq!(rows, 37);
+
+    // The count term the digest folds is the same u64. Changing the set by one
+    // row must move both, which is what makes the count a cost predictor rather
+    // than a statistic computed nearby.
+    let digest = n.committed_digest();
+    n.seed(&addr(200), 1, 1);
+    assert_eq!(account_row_count(&n.db).unwrap(), rows + 1);
+    assert_ne!(digest, n.committed_digest());
 }

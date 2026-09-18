@@ -386,6 +386,37 @@ pub fn v_account_state_digest(view: &ExecutionView<'_, '_>) -> Result<Hash> {
     Ok(digest.finish())
 }
 
+/// How many account rows this database STORES.
+///
+/// Not how many hold value. The commitment folds one record per stored row, and
+/// the per-block cost is linear in that count, so the count that matters is the
+/// one RocksDB holds — including a row whose balance and nonce are both zero,
+/// which is indistinguishable from an absent account by value and entirely
+/// distinguishable from one by cost.
+///
+/// The same scan as [`account_state_digest`], through the same prefix bound and
+/// the same stop condition, so the number it reports is exactly the number of
+/// records the commitment will fold. A count derived any other way — from an
+/// index, from a balance query, from a transaction graph — is a count of
+/// something else.
+pub fn account_row_count(db: &Database) -> Result<u64> {
+    let mut rows = 0u64;
+    for entry in db.prefix_iter_checked(cf::STATE, ACCOUNT_KEY_PREFIX)? {
+        let (key, _) = entry?;
+        if !key.starts_with(ACCOUNT_KEY_PREFIX) {
+            break;
+        }
+        // Skip, not count, a prefixed key that is not an account key — matching
+        // `AccountDigest::fold`, so this stays the fold's row count and not an
+        // approximation of it.
+        if StateStore::address_in_account_key(&key).is_none() {
+            continue;
+        }
+        rows += 1;
+    }
+    Ok(rows)
+}
+
 /// The account-state digest over rows held IN MEMORY.
 ///
 /// The third caller of the one encoder, and the reason the encoder is factored

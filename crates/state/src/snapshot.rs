@@ -91,20 +91,83 @@ use crate::{Result, StateError};
 
 /// Snapshot format version.
 ///
-/// v2 adds the account-state commitment to the header. The bump is not
-/// cosmetic: a v1 header carries a `state_root` that was compared against a
-/// digest computed under a different rule, so a v1 file records no value this
-/// code can check anything against. Snapshots are node-local artefacts — never
+/// v2 added the account-state commitment to the header. v3 adds the list of
+/// state families the file CARRIES, which is what turns "fast sync is
+/// incomplete" from a fact somebody has to remember into a fact the file states
+/// and the restore path enforces. Snapshots are node-local artefacts — never
 /// hashed into a block, never sent as consensus data — so raising the floor
 /// costs nothing but a re-export.
-const SNAPSHOT_VERSION: u32 = 2;
+const SNAPSHOT_VERSION: u32 = 3;
 
 /// The oldest snapshot format this binary will restore.
 ///
-/// Equal to [`SNAPSHOT_VERSION`]: a v1 snapshot is refused by NAME rather than
-/// failing later inside bincode, because "unsupported version 1, re-export"
+/// Equal to [`SNAPSHOT_VERSION`]: an older snapshot is refused by NAME rather
+/// than failing later inside bincode, because "unsupported version 2, re-export"
 /// is an answer an operator can act on and a deserialization error is not.
-const MIN_SUPPORTED_SNAPSHOT_VERSION: u32 = 2;
+const MIN_SUPPORTED_SNAPSHOT_VERSION: u32 = 3;
+
+/// The state families this snapshot format actually carries.
+///
+/// One entry, and that is the whole problem. Written into every file this
+/// binary produces, so a snapshot says what it holds rather than leaving a
+/// consumer to assume it holds everything.
+pub const SNAPSHOT_CARRIES: &[&str] = &["state:accounts"];
+
+/// The state families a snapshot must carry before restoring from one is a SYNC
+/// rather than a partial state import.
+///
+/// Derived from what a node needs in order to execute the next block and
+/// reproduce its root, not from what is convenient to export:
+///
+/// * `state:accounts` — balances and nonces, folded by the account commitment.
+/// * `supply` — the supply ledger and protocol reserve. Folded into every block
+///   state root through `SupplyStore::v_state_digest`, TODAY, with no activation
+///   gate. A node missing it cannot reproduce a root at any height.
+/// * `contracts`, `contract_storage` — persistent contract state. The contracts
+///   gate is open on mainnet (height 8,900,000) and the contract digest is
+///   folded above it.
+/// * `tokens`, `nft` — SUM-721 and token balances, allowances and indexes.
+/// * `compute_pool`, `beacon` — dormant today, folded the moment their gates
+///   open, which is the point at which forgetting them becomes a chain split.
+/// * `storage_metadata`, `validators` — SNIP V2 file/chunk/assignment records
+///   and the validator/delegation set, both read during execution.
+///
+/// A family appearing here is a claim that a restored node needs it. A family
+/// missing from here is a claim that it does not. Neither is safe to leave
+/// implicit, which is why [`missing_for_fast_sync`] compares the two lists
+/// instead of a human comparing them.
+pub const REQUIRED_FAST_SYNC_FAMILIES: &[&str] = &[
+    "state:accounts",
+    "supply",
+    "contracts",
+    "contract_storage",
+    "tokens",
+    "nft",
+    "compute_pool",
+    "beacon",
+    "storage_metadata",
+    "validators",
+];
+
+/// `META` key holding what a snapshot restore did to this database.
+///
+/// Namespaced like `journal::FORMAT_HIGH_WATER_META_KEY`, and persisted for the
+/// same reason: the consequences of a restore outlive the process that
+/// performed it. A node that learned its undo history began at H and then
+/// restarted would otherwise go back to believing it can unwind anything.
+pub const SNAPSHOT_RESTORE_META_KEY: &[u8] = b"snapshot/restored_at";
+
+/// The families [`REQUIRED_FAST_SYNC_FAMILIES`] demands and
+/// [`SNAPSHOT_CARRIES`] does not supply.
+///
+/// Empty means a snapshot of this format is a complete sync. It is not empty.
+pub fn missing_for_fast_sync(carried: &[String]) -> Vec<&'static str> {
+    REQUIRED_FAST_SYNC_FAMILIES
+        .iter()
+        .copied()
+        .filter(|required| !carried.iter().any(|c| c == required))
+        .collect()
+}
 
 /// Magic bytes to identify snapshot files
 const SNAPSHOT_MAGIC: &[u8; 8] = b"SUMSNAP\0";
@@ -151,6 +214,13 @@ pub struct SnapshotHeader {
     /// to consensus at [`Self::height`] or is merely the producer's own claim.
     /// See [`RestoreResult::consensus_verified_from`].
     pub account_root_activation: Option<u64>,
+    /// The state families this file CARRIES.
+    ///
+    /// Written from [`SNAPSHOT_CARRIES`] by the producer and compared against
+    /// [`REQUIRED_FAST_SYNC_FAMILIES`] by the consumer. A self-describing file:
+    /// a consumer never has to assume what a producer included, and a producer
+    /// that starts including more does not need the consumer changed to notice.
+    pub families: Vec<String>,
     /// Number of accounts in snapshot
     pub account_count: u64,
     /// Timestamp when snapshot was created
@@ -234,6 +304,7 @@ impl SnapshotManager {
             state_root,
             account_digest,
             account_root_activation: self.params.account_root_enabled_from_height,
+            families: SNAPSHOT_CARRIES.iter().map(|s| s.to_string()).collect(),
             account_count: accounts.len() as u64,
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -265,7 +336,58 @@ impl SnapshotManager {
         }).collect())
     }
 
-    /// Restore state from a snapshot.
+    /// Fast sync from a snapshot. **Refused: this format cannot perform one.**
+    ///
+    /// A snapshot carries the account family and nothing else. Restoring from it
+    /// and then importing the next block does not work and cannot be made to
+    /// work by checking the account rows harder:
+    /// `compute_block_state_root` folds the supply digest today, with no
+    /// activation gate, and `cf::SUPPLY` is not in the file. Contract state,
+    /// tokens, NFTs, storage metadata and the validator set are not in it
+    /// either, and the compute-pool and beacon digests join the root the moment
+    /// their gates open.
+    ///
+    /// So this is not a gap to be documented. Until the format carries
+    /// [`REQUIRED_FAST_SYNC_FAMILIES`], fast sync is **disabled**, and it is
+    /// disabled here — at the entry point, by comparing what the file says it
+    /// carries against what a sync requires — rather than by a flag someone can
+    /// set. When the format grows a family, [`SNAPSHOT_CARRIES`] grows with it
+    /// and this refusal lifts itself.
+    ///
+    /// [`Self::import_account_family`] is what remains available: a checked
+    /// import of the account family that does not claim to be a sync and does
+    /// not leave the node believing it is synced.
+    pub fn restore_snapshot(&self, snapshot: &Snapshot) -> Result<RestoreResult> {
+        self.check_header(snapshot)?;
+
+        let missing = missing_for_fast_sync(&snapshot.header.families);
+        if !missing.is_empty() {
+            return Err(StateError::Genesis(format!(
+                "fast sync is DISABLED: a snapshot at height {} carries {:?} and a \
+                 sync requires {:?} — missing {:?}. A node restored from this file \
+                 could not reproduce the state root of the next block it imported, \
+                 because `compute_block_state_root` folds state this file does not \
+                 contain. Sync by replaying blocks, or extend the snapshot format \
+                 to carry every family above.",
+                snapshot.header.height,
+                snapshot.header.families,
+                REQUIRED_FAST_SYNC_FAMILIES,
+                missing
+            )));
+        }
+
+        // Unreachable while `SNAPSHOT_CARRIES` is one family. Left as the real
+        // body rather than an `unreachable!()` so that extending the format is
+        // an edit to one constant and not a rediscovery of what restore does.
+        self.import_account_family(snapshot)
+    }
+
+    /// Import the ACCOUNT FAMILY from a snapshot. **Not a sync.**
+    ///
+    /// Everything [`Self::restore_snapshot`] would do to the account rows, fully
+    /// checked, with no claim that the resulting node is synced. What it is for:
+    /// seeding a node whose other families arrive by some other route, and
+    /// testing the account commitment against a state the node did not compute.
     ///
     /// Three checks, in the order that makes each one mean something:
     ///
@@ -284,47 +406,29 @@ impl SnapshotManager {
     ///
     /// A failure at (2) leaves the rows written. That is deliberate and it is
     /// stated rather than hidden: the alternative is a partial rollback whose
-    /// own correctness is unproven, and a node whose restore failed must not
+    /// own correctness is unproven, and a node whose import failed must not
     /// continue from either outcome. The error names the height so the operator
     /// re-inits from a known-good directory.
-    pub fn restore_snapshot(&self, snapshot: &Snapshot) -> Result<RestoreResult> {
-        // Verify chain ID
-        if snapshot.header.chain_id != self.chain_id {
-            return Err(StateError::Genesis(format!(
-                "Chain ID mismatch: expected {}, got {}",
-                self.chain_id, snapshot.header.chain_id
-            )));
-        }
-
-        // Verify version compatibility, in both directions. A newer format
-        // carries fields this binary cannot check; an older one carries no
-        // account commitment at all, so nothing it holds is checkable.
-        if snapshot.header.version > SNAPSHOT_VERSION {
-            return Err(StateError::Genesis(format!(
-                "Unsupported snapshot version: {} (max supported: {})",
-                snapshot.header.version, SNAPSHOT_VERSION
-            )));
-        }
-        if snapshot.header.version < MIN_SUPPORTED_SNAPSHOT_VERSION {
-            return Err(StateError::Genesis(format!(
-                "snapshot format v{} carries no account-state commitment, so \
-                 nothing in it can be verified; re-export at v{}",
-                snapshot.header.version, SNAPSHOT_VERSION
-            )));
-        }
+    ///
+    /// On success the import RECORDS what it did, in `cf::META`, because the
+    /// consequences outlive the process: this node holds no undo record for any
+    /// block at or below the import height and can reconstruct no historical
+    /// state below it. See [`sync_capability`] and [`state_history_floor`].
+    pub fn import_account_family(&self, snapshot: &Snapshot) -> Result<RestoreResult> {
+        self.check_header(snapshot)?;
 
         // The whole fold, before a single row is written.
         self.verify_snapshot(snapshot)?;
 
         info!(
-            "Restoring snapshot from height {} ({} accounts, account commitment {})",
+            "Importing the account family from height {} ({} accounts, account \
+             commitment {}). This is NOT a sync.",
             snapshot.header.height, snapshot.header.account_count, snapshot.header.account_digest
         );
 
         let state_store = StateStore::new(&self.db);
         let mut restored_count = 0u64;
 
-        // Import all accounts
         for account in &snapshot.accounts {
             let address = Address::new(account.address);
             state_store.put_account(
@@ -337,32 +441,50 @@ impl SnapshotManager {
             restored_count += 1;
 
             if restored_count % 10000 == 0 {
-                debug!("Restored {} accounts...", restored_count);
+                debug!("Imported {} accounts...", restored_count);
             }
         }
 
         // What the DATABASE now holds, through the function consensus uses —
         // not what the file claimed. The two differ whenever the write did
         // something other than what was asked, and whenever this database
-        // already held account rows the snapshot does not mention: a restore
+        // already held account rows the snapshot does not mention: an import
         // into a non-empty directory leaves those rows in place, they are folded
         // by the commitment, and the node would carry an account set no other
         // node has.
         let committed = account_state_digest(&self.db)?;
         if committed != snapshot.header.account_digest {
             return Err(StateError::Genesis(format!(
-                "snapshot restore at height {} did not reproduce the commitment: \
+                "snapshot import at height {} did not reproduce the commitment: \
                  the file claims {} and this database now digests to {}. The rows \
                  are written; this directory must not be used. Re-initialise and \
-                 restore into an empty state.",
+                 import into an empty state.",
                 snapshot.header.height, snapshot.header.account_digest, committed
             )));
         }
 
+        // Record it, so a restart does not forget. Written AFTER the commitment
+        // check, so a database that failed the check is not marked as having
+        // been imported into.
+        self.db
+            .put(
+                sumchain_storage::cf::META,
+                SNAPSHOT_RESTORE_META_KEY,
+                &snapshot.header.height.to_be_bytes(),
+            )
+            .map_err(|e| {
+                StateError::Genesis(format!("recording the snapshot import height failed: {e}"))
+            })?;
+
         info!(
-            "Snapshot restored: {} accounts at height {}, commitment {} reproduced \
-             from committed state",
-            restored_count, snapshot.header.height, committed
+            "Account family imported: {} accounts at height {}, commitment {} \
+             reproduced from committed state. Undo history begins at {}; \
+             historical state below {} is unavailable on this node.",
+            restored_count,
+            snapshot.header.height,
+            committed,
+            snapshot.header.height + 1,
+            snapshot.header.height
         );
 
         Ok(RestoreResult {
@@ -377,6 +499,32 @@ impl SnapshotManager {
             journal_history_begins_at: snapshot.header.height + 1,
             accounts_restored: restored_count,
         })
+    }
+
+    /// Chain id and format version. Shared by both entry points, so neither can
+    /// acquire a laxer version rule than the other.
+    fn check_header(&self, snapshot: &Snapshot) -> Result<()> {
+        if snapshot.header.chain_id != self.chain_id {
+            return Err(StateError::Genesis(format!(
+                "Chain ID mismatch: expected {}, got {}",
+                self.chain_id, snapshot.header.chain_id
+            )));
+        }
+        if snapshot.header.version > SNAPSHOT_VERSION {
+            return Err(StateError::Genesis(format!(
+                "Unsupported snapshot version: {} (max supported: {})",
+                snapshot.header.version, SNAPSHOT_VERSION
+            )));
+        }
+        if snapshot.header.version < MIN_SUPPORTED_SNAPSHOT_VERSION {
+            return Err(StateError::Genesis(format!(
+                "snapshot format v{} predates the self-describing family list, so \
+                 nothing in it can be checked against what a sync requires; \
+                 re-export at v{}",
+                snapshot.header.version, SNAPSHOT_VERSION
+            )));
+        }
+        Ok(())
     }
 
     /// Save snapshot to a file
@@ -555,6 +703,104 @@ pub struct RestoreResult {
     /// [`usable_reorg_depth`].
     pub journal_history_begins_at: BlockHeight,
     pub accounts_restored: u64,
+}
+
+/// What a node that imported a snapshot may claim about itself.
+///
+/// One value, read from the database rather than from whatever the process that
+/// performed the import happened to return, because the import and the claim are
+/// usually in different processes: a node imports, restarts, and then has to
+/// answer questions about its own history.
+///
+/// A node that never imported one is `imported_at == None`, and every field
+/// below reads as "no restriction" — which is the correct answer for a node that
+/// built its state by executing every block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SyncCapability {
+    /// The height a snapshot was imported at, if one ever was.
+    pub imported_at: Option<BlockHeight>,
+    /// Whether this binary's snapshot format can perform a fast sync at all.
+    ///
+    /// `false` while [`SNAPSHOT_CARRIES`] is short of
+    /// [`REQUIRED_FAST_SYNC_FAMILIES`]. Reported rather than assumed, because
+    /// "this node was fast-synced" and "this node could be" are different
+    /// questions and an operator asks both.
+    pub fast_sync_available: bool,
+    /// The families a sync requires and this format does not carry.
+    pub missing_families: Vec<&'static str>,
+    /// The lowest height this node can answer a historical STATE question for.
+    ///
+    /// `None` for a node that executed its whole chain. `Some(h)` for an
+    /// imported node: state below `h` was never on this machine and cannot be
+    /// reconstructed from what is.
+    pub state_history_floor: Option<BlockHeight>,
+    /// The first height this node holds an undo record for.
+    pub journal_history_begins_at: Option<BlockHeight>,
+    /// The deepest reorg this node may ADVERTISE, at `current_height`.
+    pub usable_reorg_depth: u64,
+    /// The chain height this was computed against.
+    pub current_height: BlockHeight,
+}
+
+/// Read what a snapshot import did to this database, and what follows from it.
+///
+/// The single place the node's startup log, its RPC surface and any future
+/// reorg-depth clamp should all read from, so the three cannot drift into three
+/// different answers about the same node.
+pub fn sync_capability(db: &Database, current_height: BlockHeight) -> Result<SyncCapability> {
+    let imported_at = imported_at(db)?;
+    let carried: Vec<String> = SNAPSHOT_CARRIES.iter().map(|s| s.to_string()).collect();
+    let missing_families = missing_for_fast_sync(&carried);
+    Ok(SyncCapability {
+        imported_at,
+        fast_sync_available: missing_families.is_empty(),
+        missing_families,
+        state_history_floor: imported_at,
+        journal_history_begins_at: imported_at.map(|h| h + 1),
+        usable_reorg_depth: match imported_at {
+            Some(h) => usable_reorg_depth(h, current_height),
+            // Not imported: this node executed every block it holds, so the
+            // pruner's retention floor is the only bound, and it is not this
+            // module's to report.
+            None => UNDO_RETENTION_FLOOR,
+        },
+        current_height,
+    })
+}
+
+/// The height a snapshot was imported at, or `None`.
+pub fn imported_at(db: &Database) -> Result<Option<BlockHeight>> {
+    let raw = db
+        .get(sumchain_storage::cf::META, SNAPSHOT_RESTORE_META_KEY)
+        .map_err(|e| StateError::Genesis(format!("reading the snapshot import height: {e}")))?;
+    let Some(raw) = raw else { return Ok(None) };
+    let bytes: [u8; 8] = raw.as_slice().try_into().map_err(|_| {
+        // Corrupt rather than absent. Absent means "never imported", which is a
+        // permissive answer, and guessing it from an unreadable value would let
+        // a node claim history it does not have.
+        StateError::Genesis(format!(
+            "the recorded snapshot import height is {} bytes, not 8; this node \
+             cannot establish what history it holds and must not serve any",
+            raw.len()
+        ))
+    })?;
+    Ok(Some(u64::from_be_bytes(bytes)))
+}
+
+/// May this node answer a historical STATE question at `height`?
+///
+/// The rule a query path applies, factored out so every path applies the same
+/// one. A node that imported a snapshot at `h` holds no state for any height
+/// below `h` and cannot derive it: the blocks are not there, and if they were,
+/// replaying them is the sync the import avoided. The answer is a refusal, not
+/// a best effort — a walk that runs off the bottom of this node's history and
+/// returns whatever it found there is worse than an error, because the caller
+/// cannot tell.
+pub fn can_serve_history_at(db: &Database, height: BlockHeight) -> Result<bool> {
+    Ok(match imported_at(db)? {
+        Some(floor) => height >= floor,
+        None => true,
+    })
 }
 
 /// How deep a reorg a snapshot-restored node can actually perform.

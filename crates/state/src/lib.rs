@@ -77,7 +77,10 @@ pub use storage_metadata::{
 };
 pub use property_executor::{PropertyExecutionResult, PropertyExecutor};
 pub use schema_validator::{SchemaValidator, SchemaValidatorConfig, ValidationResult};
-pub use snapshot::{Snapshot, SnapshotHeader, SnapshotManager, SnapshotSyncConfig, RestoreResult};
+pub use snapshot::{
+    sync_capability, usable_reorg_depth, RestoreResult, Snapshot, SnapshotHeader, SnapshotManager,
+    SnapshotSyncConfig, SyncCapability,
+};
 pub use staking_executor::{StakingExecutionResult, StakingExecutor};
 pub use state::StateManager;
 pub use tax_executor::{TaxExecutionResult, TaxExecutor};
