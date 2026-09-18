@@ -21,10 +21,17 @@ one of three tags:
 A clause tagged CONSUMER is not a claim that it works. It is a claim that the
 producer has made it implementable and has not implemented it.
 
+A fourth tag appears where the CONSUMER side has since been implemented:
+
+* **[CONSUMER, DONE]** — the obligation is met, and the implementation and its
+  test are named. Where a clause was left open because the producer could not
+  settle it, the resolution is stated in place rather than in a footnote.
+
 Tests named `producer/<name>` live in
 `crates/storage/tests/application_journal.rs`; those named `state/<name>` in
 `crates/state/tests/application_journal.rs`; those named `unit/<name>` in the
-`#[cfg(test)]` module of `crates/storage/src/journal.rs`.
+`#[cfg(test)]` module of `crates/storage/src/journal.rs`; those named
+`reorg/<name>` in `crates/consensus/tests/reorg_execution.rs`.
 
 ---
 
@@ -54,6 +61,14 @@ It does **not** cover:
 * The four legacy per-subsystem journals (`state_diffs`,
   `contract_state_diffs`, `compute_pool_state_diffs`, `beacon_state_diffs`).
   They are untouched. This journal is written beside them, not instead of them.
+* **Its own column family**, `application_journal`. The record is derived at the
+  top of `publish`, before its own row is staged, so a journal never describes
+  itself. That row is node-local undo data in the same class as the four above —
+  not application state a reorg restores, but the record that says how to restore
+  application state, which a reorg CONSUMES: the unwind deletes each block's row
+  in the same batch that applies its restores. Any comparison of "families a
+  block writes" against "families a journal records" must classify it that way or
+  it is comparing undo data with state.
 
 ---
 
@@ -130,6 +145,38 @@ decision, not a producer-side one.** This document does not invent one. What the
 producer guarantees is that the decision is expressible without ambiguity: a
 reader dispatches on the record it is holding.
 
+### 1.4 The activation gate
+
+The journal has its OWN genesis parameter:
+
+    ChainParams::application_journal_enabled_from_height: Option<u64>
+
+It is deliberately not `compute_pool_enabled_from_height` or
+`beacon_enabled_from_height`. Those two gate dormant CONSENSUS subsystems,
+`Genesis::validate` rejects any `Some(_)` for them, and opening either changes
+which state a block commits. Tying node-local undo enforcement to one of them
+would have made a storage decision wait on a coordinated consensus activation.
+
+It does **not** gate writing. `publish` writes a record for every block, with no
+gate to leave unset (§7). It gates the height from and above which a REVERT must
+find one, and above which this journal — not the four legacy diffs — is the
+authoritative undo record.
+
+* `None` (the default and the production rule) → `ActivationSource::ObservedFromChain`.
+  The boundary is the lowest height for which this database holds a record. Not
+  an "off" position: the first block a node publishes establishes it.
+* `Some(h)` → `ActivationSource::Pinned(h)`. A uniform, operator-visible
+  boundary for a deployment that wants every node to answer with the same number.
+
+`ActivationSource::from_configured_height` is the single translation site; the
+storage crate does not depend on the genesis crate, so the field arrives as the
+`Option<BlockHeight>` it is.
+
+Not consensus: the records are node-local, so two nodes disagreeing about this
+value cannot fork on the difference — one of them refuses a reorg the other
+performs.
+[CONSUMER, DONE: `reorg/the_journal_activation_gate_is_its_own_and_leaves_the_dormant_gates_closed`.]
+
 ---
 
 ## 2. Deterministic record ordering
@@ -159,6 +206,49 @@ strictly increasing. Canonical form is therefore enforced in both directions:
 identical content produces identical bytes, and bytes that are not in canonical
 form are not a valid record of anything.
 [PRODUCER, TESTED: `unit/a_non_canonically_ordered_record_is_refused`]
+
+### 2.1 The uniqueness invariant, and what it settles
+
+**A journal holds one NET entry per `(cf, key)`**: the value at the START of the
+block, and the value the block finally left, however many times execution wrote
+that key in between.
+
+This is now VALIDATED rather than inherited from the producing type's shape.
+`ApplicationJournal::bind` refuses a duplicate `(cf, key)` on the way in — it
+will not merge two entries, because a merge would have to pick one of two
+pre-images and neither is knowably the one the block started from — and
+`decode_for`'s strictly-increasing check refuses one on the way back out.
+[PRODUCER, TESTED: `unit/a_duplicate_cf_key_pair_is_refused_rather_than_merged`,
+`unit/a_non_canonically_ordered_record_is_refused`,
+`reorg/multiple_writes_to_one_key_produce_one_correct_net_undo_entry`]
+
+It settles a real disagreement between the two sides. The producer proves a
+TOTAL SORT over `(cf, key)` and has no application order to offer; the consumer
+was written demanding "the order the block applied them", on the reasoning that
+two mutations of one key inside a block are distinguishable only by application
+order. Neither was wrong about its own producer — the four legacy journals are
+append logs and really can hold a key twice per block.
+
+The reconciliation is the invariant, not a choice between the two:
+
+> If a block's records hold at most one entry per `(cf, key)`, then no two
+> records of that block can interact, so every order over them replays to the
+> same state, and a deterministic `(cf, key)` order is sufficient.
+
+So `BranchJournal` producers DECLARE which case they are in, through
+`JournalHeader::ordering`:
+
+* `EntryOrdering::NetByKey` — the generic journal. `stage_branch_unwind`
+  VALIDATES the uniqueness before relying on it; a duplicate is
+  `UndoRefusal::DuplicateJournalKey`, not a merge. Replay order is then free.
+* `EntryOrdering::ApplicationOrder` — the four legacy journals. Replayed
+  last-first, because undoing two writes to one key in forward order leaves the
+  intermediate value.
+
+"Mutation application order" is therefore not required of this producer and is
+not described anywhere in this contract as a property of its records.
+[CONSUMER, DONE: `sumchain_state::reorg_undo::EntryOrdering` and the check in
+`stage_branch_unwind`.]
 
 ---
 
@@ -297,11 +387,17 @@ That third case is the only silence in this contract, and it is bounded by a
 height the database itself establishes.
 [PRODUCER, TESTED: `producer/a_missing_post_activation_journal_halts_and_a_pre_activation_one_does_not`,
 `state/the_boundary_a_real_chain_establishes_is_the_first_height_it_published`]
-[CONSUMER: routing every revert through it. `StateManager::revert_block_state_diffs`
-today returns `Ok(())` whenever all four legacy journals are absent, at any
-height, with no boundary in the decision. That is the silent-skip case this
-section forbids post-activation, and closing it is a change to
-`crates/state/src/state.rs` on the reorg branch, not here.]
+[CONSUMER, DONE: every revert routes through it.
+`sumchain_state::reorg_undo::ApplicationJournalReader` calls `load_for_revert`
+per block and surfaces its `Err` as `JournalLookup::Unreadable`, which is a HALT
+— never `Absent`, which a tolerant policy could swallow.
+`StateManager::revert_block_state_diffs` now takes a `JournalRequirement`: its
+`Ok(())` over four absent journals survives only under `PreActivation`, and
+`Required` is REFUSED before anything is read, naming
+`ActivatedJournal` as the path that governs those heights. Tests:
+`state/the_legacy_revert_path_refuses_a_post_activation_block`,
+`reorg/every_post_activation_record_fault_halts_the_reorg`,
+`reorg/the_activation_boundary_decides_whether_an_absence_halts`.]
 
 ### 5.3 Empty is not missing
 
@@ -372,7 +468,34 @@ These are satisfiable against §6.1 with no further producer support: the journa
 for every block in the unwind range are present and self-identifying before the
 unwind begins, and §4's check tells the consumer, per block, whether that block's
 restores have already been applied.
-[CONSUMER]
+
+**The consumer's answer: there is no marker, because the HEAD is the marker.**
+
+`execute_reorg` makes exactly two kinds of durable write, and every one of them
+carries the head pointer:
+
+1. ONE batch for the whole unwind — every block's restores, every consumed
+   journal's deletion, the de-indexing, and the head reset to the ancestor.
+2. One batch per adopted block, which is `publish`'s own single commit,
+   carrying that block's head pointer.
+
+A `WriteBatch` has no interior, so a reopened database names a head whose state
+is fully applied: the old tip, the ancestor, or some prefix of the new branch.
+`resume` reads that head, restores the accumulator from that block's own header —
+the only place a chained accumulator is recoverable from — and does whatever
+remains. Requirement 1 is met because the head is determined without inspecting
+application rows; 2 is met vacuously, since there is no window for a marker to
+describe; 3 is met because restores and the journal's own deletion are in the
+same batch; 4 is met because the three head values are exhaustive and each maps
+to one action.
+
+Proven at four points rather than argued:
+[CONSUMER, DONE: `reorg/a_crash_before_publication_leaves_neither_state_nor_journal`,
+`reorg/a_crash_after_the_journal_write_finds_the_block_and_its_journal_together`,
+`reorg/a_crash_during_reversal_leaves_every_journal_it_was_consuming`,
+`reorg/a_crash_before_the_new_head_is_committed_resumes_from_the_ancestor`,
+`reorg/an_unwind_interrupted_before_commit_reopens_on_the_old_branch_and_retries_cleanly`,
+`reorg/an_apply_interrupted_between_blocks_resumes_on_the_committed_prefix`.]
 
 ---
 
@@ -421,11 +544,26 @@ Every block in the range MUST have a journal. A missing one halts the reorg
 journals may still be present and consumed for whatever they cover, but they are
 no longer the only undo record and a family missing from all four is no longer
 silently unreverted.
-[CONSUMER: ordering the two, and deciding whether to apply both or only this one.
-This is a genuine open question that the producer cannot settle: applying both a
-legacy diff and the generic journal to the same key is idempotent only because
-both restore the same pre-image, and confirming that for every subsystem is the
-consumer's audit, not an assertion this document is entitled to make.]
+[CONSUMER, DONE: **only this one, and never both.**
+`sumchain_state::reorg_undo::ActivatedJournal` classifies each block by height
+and consults exactly one record for it — the generic journal at and above the
+boundary, the four legacy diffs below it. That needs no audit of what each
+legacy diff covers, which is what made the question open: applying both would be
+at best redundant, and "at best" is not a proof. Choosing per block needs no
+proof.
+
+The generic journal is AUTHORITATIVE and MANDATORY at and above the boundary. It
+covers every family the block wrote, including the ones the four legacy journals
+never did, so there is no family for which consulting a legacy diff could add
+information. Missing, corrupt, mis-keyed, duplicate-keyed and
+identity-mismatched records all HALT.
+
+`BranchJournal::rows` still returns BOTH families' rows at every height. That is
+deletion of undo data, not application of it: a post-activation block has legacy
+rows too, the publisher still writes them, and leaving them behind would leave
+undo records for blocks on no chain. Deleting a row that does not exist is a
+no-op. Tests: `reorg/a_reorg_across_the_journal_activation_boundary_decides_per_block`,
+`reorg/supply_state_converges_through_the_real_journal`.]
 
 ### 7.3 Across it
 
@@ -449,10 +587,26 @@ observation about a database with no journal history rather than a gate left
 off.
 [PRODUCER, BY CONSTRUCTION]
 
-The pruner does not yet prune this family. It prunes `state_diffs` only. Adding
-`application_journal` to it is deliberate future work and is NOT done on this
-branch: pruning is a retention-policy change, and this branch is the record
-format and its producer.
+**Pruning is now implemented, with a retention FLOOR.**
+`crates/storage/src/pruner.rs` prunes `application_journal` and `state_diffs`
+below the SAME height, and that height is never closer to the head than
+`UNDO_RETENTION_FLOOR = 4_096`, a copy of `sumchain_consensus::poa::MAX_REORG_WALK`.
+
+The floor exists because `plan_reorg` will name a block within 4,096 of the head
+on an abandoned branch, and post-activation that block's unwind HALTS without its
+record — correctly, and as a self-inflicted outage. `PrunerConfig` may ask to
+keep MORE undo data; it cannot ask to keep less, and a configuration below the
+floor is raised to it rather than obeyed.
+
+Both undo families are pruned to one depth on purpose: a reorg crossing the
+boundary consumes both, and pruning them to different depths would leave a band
+of heights revertible by one record and not the other.
+[PRODUCER, TESTED: `the_undo_retention_floor_covers_the_deepest_reorg_the_node_will_plan`,
+`a_configuration_below_the_floor_is_raised_to_it_rather_than_obeyed`,
+`pruning_keeps_every_journal_whose_block_is_still_revertible`,
+`an_unrecognisable_journal_key_is_not_deleted_on_a_guess` (all in
+`crates/storage/src/pruner.rs`), `reorg/the_pruning_floor_covers_every_reorg_this_engine_will_plan`,
+`reorg/a_branch_inside_the_reorg_horizon_still_unwinds_after_pruning`.]
 
 ---
 
@@ -468,19 +622,47 @@ Two layers:
   implemented. A downgraded binary meeting a newer record errors; it never skips
   it or reads it as empty.
   [PRODUCER, TESTED: `unit/an_unimplemented_format_version_is_refused_rather_than_guessed`]
-* **At startup.** `journal::refuse_downgrade(db)` reads the version field of
-  every stored record and returns `Err` if any exceeds this binary's
-  `FORMAT_VERSION_V1`. `journal::highest_stored_format_version(db)` exposes the
-  watermark directly.
+* **At startup.** `journal::validate_startup(db)` is the gate, and
+  `journal::refuse_downgrade(db)` is it under its old name. It returns `Err` if
+  the effective watermark exceeds this binary's `FORMAT_VERSION_V1`.
   [PRODUCER, TESTED: `producer/a_binary_refuses_to_start_against_a_newer_record_format`]
-  [CONSUMER / node boot: calling it. The producer supplies the check; nothing on
-  this branch wires it into `sum-node` startup, because that is the node binary's
-  boot sequence and not this package's.]
+  [CONSUMER, DONE: called from `sumchain_node::node::Node::new`, immediately
+  after `Database::open_default` and before the state manager, consensus, RPC or
+  the messaging backfill exist. Failing it fails startup.]
 
-The watermark needs no separate marker row. It is derived from the journal
-column family itself, so there is no state to write, to keep in sync, or to
-forge. The cost is one scan of that family at startup, reading seven bytes per
-record.
+**Two watermarks, and the gate takes the higher.**
+
+* the **scan** — `highest_stored_format_version(db)`, exact over the records
+  present, reading seven bytes per record;
+* the **stamp** — `persisted_format_high_water(db)`, a two-byte `META` row at
+  `FORMAT_HIGH_WATER_META_KEY` written by EVERY publish in the same batch as the
+  block.
+
+The stamp exists because of §7.4. Pruning removes records, and a pruned database
+can reach a state where the family is empty; the scan then says "nothing", and a
+downgrade the records would have refused becomes silently permitted. The stamp
+is not pruned, so it still refuses.
+[PRODUCER, TESTED: `producer/the_format_watermark_survives_pruning_away_every_record`,
+`producer/a_database_with_no_journal_history_starts_and_requires_nothing`]
+
+A database with records but no stamp is not treated as a fault — that is the
+legitimate shape of one published before stamping existed, and the scan covers
+it.
+
+### 8.1 The operational rule
+
+**Once a node has published a block under a record format, it must not be run
+against a binary that implements an older one.**
+
+This is an operational prohibition, not advice, because the failure it prevents
+is silent and late. An old binary meeting a new record cannot unwind the blocks
+that record describes, and it finds out during a reorg — with the chain already
+committed to unwinding, and no recovery but a resync.
+
+Operators: a downgrade that trips this gate reports the stamped version, the
+version found in records, and the binary's own, and refuses to start. The
+supported responses are to run the newer binary, or to resync the node from an
+empty database. There is no supported way to clear the watermark and proceed.
 
 ---
 
@@ -538,27 +720,69 @@ chain-storage rows needs no list: those rows do not exist yet.
 
 ---
 
-## 11. Open points the producer cannot settle
+## 11. Points that were open, and where they stand
 
-Stated rather than closed with an invented answer.
+The first five were stated here rather than closed with an invented answer. They
+are closed now, each by the side that owned it, and each is named with the
+implementation and its test rather than declared done.
 
 1. **Precedence between the generic journal and the four legacy journals during
-   an unwind** (§7.2). Both restore pre-images for overlapping families. Whether
-   the consumer applies both, or this one only, depends on an audit of what each
-   legacy diff covers — which belongs to the reorg side.
-2. **The unwind marker protocol** (§6.2). Specified as requirements, not as a
-   design, because the unwind is the consumer's.
-3. **The height at which a future record format begins to be written** (§1.3). A
-   deployment decision. The format field makes it unambiguous once made; it does
-   not make it.
-4. **Wiring `refuse_downgrade` into node startup** (§8). The check exists; the
-   boot sequence that calls it is the node binary's.
-5. **Pruning this family** (§7.4). A retention-policy change, deliberately not
-   made here.
+   an unwind** (§7.2). CLOSED: only one, never both, chosen per block by height.
+   `ActivatedJournal`. The audit the question waited on is not needed, because
+   the two records are never both applied.
+2. **The unwind marker protocol** (§6.2). CLOSED: there is no marker, because
+   every durable write in a switch carries the head pointer, so the head IS the
+   marker. Proven at four crash points.
+3. **The height at which a future record format begins to be written** (§1.3).
+   STILL A DEPLOYMENT DECISION, and correctly so — there is no `v2` yet. What
+   changed is that the DEPLOYMENT now has a place to say it:
+   `application_journal_enabled_from_height` (§1.4) pins the revert boundary,
+   and a future format's write height is the same kind of declaration.
+4. **Wiring `refuse_downgrade` into node startup** (§8). CLOSED: called from
+   `Node::new`, and the watermark is now persisted as well as scanned so pruning
+   cannot erase it. The operational rule is stated in §8.1.
+5. **Pruning this family** (§7.4). CLOSED, with a retention floor equal to the
+   deepest reorg the engine will plan.
 6. **Turning on `compute_pool_enabled_from_height` and
-   `beacon_enabled_from_height`.** NOT done, and out of scope by design. Those
-   are consensus gates for dormant subsystems; opening either changes which
-   state a block commits and needs its own coordinated activation. The generic
-   journal does not depend on them — it is written for every block regardless of
-   whether either subsystem is live — so "the journal is never written in
-   production" is answered without touching them.
+   `beacon_enabled_from_height`.** STILL NOT DONE, and still out of scope by
+   design. Those are consensus gates for dormant subsystems; opening either
+   changes which state a block commits and needs its own coordinated activation.
+   The generic journal does not depend on them — it is written for every block
+   regardless of whether either subsystem is live — and it now has its own gate
+   (§1.4), so neither of theirs was repurposed.
+
+### 11.1 What is still not proven
+
+Stated because a clearly named gap is worth more than a silence.
+
+* **The four legacy journals remain incomplete**, and below the activation
+  boundary they are still the only undo record a block has. `cf::SUPPLY` is not
+  restorable there by any means this branch adds.
+  `reorg/the_subsystem_journals_do_not_cover_every_family_a_block_writes`
+  measures exactly that, and is kept for that reason.
+* **Nothing exercises a reorg at production depth.** The retention floor is
+  pinned to `MAX_REORG_WALK` by equality assertions on both sides, and pruning is
+  tested against a 4,096-block horizon with seeded rows, but no test publishes
+  4,096 real blocks and reorgs across them.
+* **The `Pinned` boundary is not exercised end to end through `PoAEngine`.** The
+  per-block classification, the halt and the fallback are tested directly against
+  `ActivatedJournal` with a pinned boundary; the live path is tested with the
+  observed one.
+* **`Pruner` has no production caller.** Nothing in `crates/node` constructs one,
+  and `PrunerConfig::enabled` is `false` by default. §7.4 therefore describes a
+  correct retention POLICY that nothing currently runs. That is a pre-existing
+  fact about the node, not a consequence of this work, and it cuts in the safe
+  direction — a pruner that never runs cannot delete a journal early. Wiring a
+  pruning loop into the node is a separate change with its own risk.
+* **`StateManager::revert_block_state_diffs` has no production caller either.**
+  Its post-activation refusal is a guard on a function reached today only from
+  tests and from the `execution_closure` write ledger, where it is a classified
+  root. The guard is real and tested; it is not currently protecting a live path,
+  because the live path is `ActivatedJournal`.
+* **`UndoRefusal::DuplicateJournalKey` and `UndoRefusal::JournalIdentityMismatch`
+  are unreachable through the real producer.** `decode_for` refuses a repeated
+  `(cf, key)` as non-canonical order, and a transplanted record as another
+  block's, before the unwind sees either. Both variants stay, because
+  `BranchJournal` is a trait and a producer that does not validate on the way in
+  would reach them; but the tests that exercise those conditions against the real
+  journal assert the DECODER's refusal, which is what actually fires.
