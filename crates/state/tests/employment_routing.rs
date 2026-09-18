@@ -2096,6 +2096,7 @@ fn every_status_update_records_a_zero_timestamp_through_dispatch() {
     // the zero above comes from the arm, not from this migration.
     let direct = EmploymentExecutor::execute(
         &mut view,
+        &params(),
         &issuer.address(),
         &EmploymentTxData {
             operation: EmploymentOperation::ReactivateIssuer,
@@ -2541,5 +2542,179 @@ fn published_employment_bytes_match_independently_built_keys_and_values() {
             Some(&value[..]),
             "{family}: the row changed across a close and reopen"
         );
+    }
+}
+
+// ── Class 3: the Employment issuer-standing rule, and its activation ─────────
+//
+// `docs/lane-a/ACTIVATION-AUDIT.md` row AU-27. Only `CreateEmployment` and
+// `CreateIncomeAttestation` require an active issuer; every mutation checks
+// only the address recorded on the row. The pinning test
+// `a_suspended_issuer_can_still_revoke_but_not_create` states the asymmetry in
+// its own name and still passes unchanged.
+//
+// Gated on `employment_authorization_enabled_from_height`, a `ChainParams`
+// field this track cannot add.
+//
+// AU-28 -- the `UpdateIssuer` sender check is structurally unable to fire,
+// because the row is fetched BY the sender key and registration forces the
+// equality the comparison later tests -- is NOT addressed here and is not
+// claimed to be. It is a dead check, not a hole: removing it would be tidier
+// and would close nothing.
+
+use sumchain_state::EmploymentGates;
+
+/// Drive one Employment operation through the gate seam.
+fn employment_at(
+    view: &mut ExecutionView<'_, '_>,
+    sender: &Address,
+    op: EmploymentOperation,
+    data: &impl serde::Serialize,
+    gates: EmploymentGates,
+) -> sumchain_state::EmploymentExecutionResult {
+    let proposer = Address::new([9; 20]);
+    EmploymentExecutor::execute_with_gates(
+        view,
+        sender,
+        &EmploymentTxData {
+            operation: op,
+            data: bincode::serialize(data).unwrap(),
+            recipient: Address::ZERO,
+        },
+        &proposer,
+        100,
+        1,
+        1_000,
+        0,
+        sumchain_primitives::Hash::default(),
+        gates,
+    )
+    .unwrap()
+}
+
+/// AU-27: the asymmetry, and the gate that removes it.
+///
+/// The same five operations on both sides. Below the gate a suspended issuer
+/// keeps update, suspend, end and revoke and loses only creation; above it,
+/// every one of them asks the question creation always asked.
+#[test]
+fn a_suspended_employment_issuer_loses_its_mutations_only_at_the_gate() {
+    for gates in [EmploymentGates::CLOSED, EmploymentGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        EmploymentStore::new(&db)
+            .issuers()
+            .put(&issuer_of(&issuer))
+            .unwrap();
+        let employee = Address::new([7; 20]);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let cred = credential_of(&issuer, 1, employee, [0x55; 32], [0x66; 32]);
+        assert!(
+            employment_at(
+                &mut view,
+                &issuer.address(),
+                EmploymentOperation::CreateEmployment,
+                &cred,
+                gates
+            )
+            .success,
+            "created while active under either gate"
+        );
+        assert!(
+            employment_at(
+                &mut view,
+                &issuer.address(),
+                EmploymentOperation::SuspendIssuer,
+                &Empty {},
+                gates
+            )
+            .success
+        );
+
+        let updated = employment_at(
+            &mut view,
+            &issuer.address(),
+            EmploymentOperation::UpdateEmployment,
+            &UpdateEmploymentData {
+                employment_id: [1u8; 32],
+                status: EmploymentStatus::Suspended,
+            },
+            gates,
+        );
+        let revoked = employment_at(
+            &mut view,
+            &issuer.address(),
+            EmploymentOperation::RevokeEmployment,
+            &RevokeEmploymentData {
+                employment_id: [1u8; 32],
+                revocation_ref: [0xFB; 32],
+            },
+            gates,
+        );
+        assert_eq!(
+            (updated.success, revoked.success),
+            (!gates.authorization, !gates.authorization),
+            "a suspended issuer keeps everything it ever issued, until the gate"
+        );
+
+        // Creation is refused on BOTH sides. That is the asymmetry the gate
+        // closes: it does not change the creation rule, it extends it.
+        let cred2 = credential_of(&issuer, 2, employee, [0x55; 32], [0x66; 32]);
+        assert!(
+            !employment_at(
+                &mut view,
+                &issuer.address(),
+                EmploymentOperation::CreateEmployment,
+                &cred2,
+                gates
+            )
+            .success
+        );
+    }
+}
+
+/// And an issuer in good standing keeps every one of them at the gate.
+#[test]
+fn an_active_employment_issuer_is_unaffected_by_the_standing_rule() {
+    let (_state, db, _dir, _executor) = setup_with_params(params());
+    let issuer = KeyPair::generate();
+    fund(&db, &issuer, 100_000_000);
+    EmploymentStore::new(&db)
+        .issuers()
+        .put(&issuer_of(&issuer))
+        .unwrap();
+    let employee = Address::new([7; 20]);
+    let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+    let mut view = ExecutionView::new(&mut overlay);
+
+    let cred = credential_of(&issuer, 3, employee, [0x55; 32], [0x66; 32]);
+    for (op, ok) in [
+        (EmploymentOperation::CreateEmployment, true),
+        (EmploymentOperation::UpdateEmployment, false),
+    ] {
+        let r = if ok {
+            employment_at(
+                &mut view,
+                &issuer.address(),
+                op,
+                &cred,
+                EmploymentGates::OPEN,
+            )
+        } else {
+            employment_at(
+                &mut view,
+                &issuer.address(),
+                op,
+                &UpdateEmploymentData {
+                    employment_id: [3u8; 32],
+                    status: EmploymentStatus::Suspended,
+                },
+                EmploymentGates::OPEN,
+            )
+        };
+        assert!(r.success, "{:?}: {:?}", op, r.error);
     }
 }

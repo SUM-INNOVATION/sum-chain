@@ -1025,6 +1025,7 @@ impl BlockExecutor {
                         // Execute Employment operation (SRC-88X)
                         let result = EmploymentExecutor::execute(
                             view,
+                            &self.params,
                             &v2_tx.from,
                             &employment_data,
                             proposer,
@@ -1064,6 +1065,7 @@ impl BlockExecutor {
                         // Execute Finance operation (SRC-89X)
                         let result = FinanceExecutor::execute(
                             view,
+                            &self.params,
                             &v2_tx.from,
                             &finance_data,
                             proposer,
@@ -2835,6 +2837,7 @@ impl BlockExecutor {
                 // Execute Employment operation (SRC-88X)
                 let result = EmploymentExecutor::execute(
                     view,
+                    &self.params,
                     &tx.from,
                     employment_data,
                     proposer,
@@ -2884,6 +2887,7 @@ impl BlockExecutor {
                 // Execute Finance operation (SRC-89X)
                 let result = FinanceExecutor::execute(
                     view,
+                    &self.params,
                     &tx.from,
                     finance_data,
                     proposer,

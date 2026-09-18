@@ -62,10 +62,12 @@ pub use contract_executor::{ContractCallResult, ContractDeployResult, ContractEx
 pub use docclass_executor::{
     docclass_stake_escrow_address, DocClassExecutionResult, DocClassExecutor, DocClassGates,
 };
-pub use employment_executor::{EmploymentExecutionResult, EmploymentExecutor};
+pub use employment_executor::{
+    EmploymentExecutionResult, EmploymentExecutor, EmploymentGates,
+};
 pub use equity_executor::{EquityExecutionResult, EquityExecutor};
 pub use executor::{BlockExecutor, TxExecutionResult};
-pub use finance_executor::{FinanceExecutionResult, FinanceExecutor};
+pub use finance_executor::{FinanceExecutionResult, FinanceExecutor, FinanceGates};
 pub use healthcare_executor::{HealthcareExecutionResult, HealthcareExecutor, HealthcareGates};
 pub use legal_executor::{LegalExecutionResult, LegalExecutor, LegalGates};
 pub use mempool::{Mempool, MempoolConfig, MempoolStats};
