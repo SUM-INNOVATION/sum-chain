@@ -11,6 +11,7 @@ pub mod equity_store;
 pub mod finance_store;
 pub mod governance_store;
 pub mod healthcare_store;
+pub mod journal;
 pub mod legal_store;
 pub mod messaging_store;
 pub mod nft_store;
@@ -34,6 +35,7 @@ pub use equity_store::{
     EquityEventStore, EquityStore, EquityTokenStore, GovernanceActionStore, OwnershipProofStore,
     OwnershipSnapshotStore,
 };
+pub use journal::{AfterImage, ApplicationJournal, JournalEntry, Preimage};
 pub use messaging_store::{BackfillStats, MessagingStore, MESSAGING_LIST_DEFAULT, MESSAGING_LIST_MAX};
 pub use pruner::{DbStats, PruneStats, Pruner, PrunerConfig};
 pub use schema::{

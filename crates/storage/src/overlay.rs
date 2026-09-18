@@ -462,6 +462,52 @@ impl<'a> ApplicationOverlay<'a> {
         self.preimages.get(cf).into_iter().flat_map(BTreeMap::iter)
     }
 
+    /// The generic application journal's entries, DERIVED from the pre-images.
+    ///
+    /// This is the whole of the coverage argument. The pre-image map is
+    /// populated by `stage`, which every `put` and every `delete` goes through,
+    /// so it holds one entry for exactly the keys this overlay has written —
+    /// across every column family, with no list anywhere of which families those
+    /// are. A family added to the schema tomorrow is journalled the first time a
+    /// block writes to it, without this function changing.
+    ///
+    /// The after-image tag is taken from `writes`, which has the same key set as
+    /// `preimages`: `stage` inserts into `writes` on every call and into
+    /// `preimages` on the first call for a key, so a key is in one exactly when
+    /// it is in the other. A key present in `preimages` and missing from
+    /// `writes` would be that invariant broken, and is reported rather than
+    /// papered over with a default.
+    ///
+    /// Entries come back unsorted; [`crate::journal::ApplicationJournal::bind`]
+    /// establishes the canonical order.
+    pub(crate) fn journal_entries(&self) -> Result<Vec<crate::journal::JournalEntry>> {
+        use crate::journal::{AfterImage, JournalEntry, Preimage};
+
+        let mut out = Vec::new();
+        for (cf, keys) in &self.preimages {
+            for (key, before) in keys {
+                let Some(op) = self.writes.get(cf).and_then(|m| m.get(key)) else {
+                    return Err(StorageError::InvalidData(format!(
+                        "overlay invariant violated: a pre-image was captured for \
+                         {cf} key {} but the overlay buffers no write for it, so the \
+                         journal cannot say what the block left there",
+                        hex::encode(key)
+                    )));
+                };
+                let after = match op {
+                    Op::Put(v) => AfterImage::of(cf, key, Some(v)),
+                    Op::Delete => AfterImage::Absent,
+                };
+                let before = match before {
+                    None => Preimage::Absent,
+                    Some(v) => Preimage::Value(v.clone()),
+                };
+                out.push(JournalEntry::new(cf.clone(), key.clone(), before, after));
+            }
+        }
+        Ok(out)
+    }
+
     /// Merged forward iteration from the start of the column family.
     pub fn iter<'o>(&'o self, cf: &str) -> Result<MergedIter<'o>> {
         self.merged(cf, None)

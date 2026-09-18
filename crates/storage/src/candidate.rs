@@ -505,6 +505,29 @@ impl<'db, 'a> AcceptedCandidate<'db, 'a> {
         let block_hash = block.hash();
         let height = block.height();
 
+        // ── derive the generic application journal, BEFORE anything is staged ──
+        //
+        // Order is the load-bearing part. At this instant the overlay holds
+        // exactly what block execution wrote and nothing else: the only handle
+        // execution was ever given is `ExecutionView`, `finish_execution`
+        // consumed the candidate, and neither `ExecutedCandidate` nor this type
+        // exposes the overlay. So the pre-image map IS the block's application
+        // write set, and reading it here needs no allowlist to separate
+        // application families from the block, transaction, receipt and metadata
+        // rows staged below — those rows do not exist yet.
+        //
+        // Both halves of the key come from the one `&Block` this candidate was
+        // accepted against, and the record repeats them inside its own header.
+        // There is no parameter through which a caller could pair one block's
+        // undo data with another block's key, and no path that keys by height
+        // alone — issue #253's defect is not expressible here.
+        let application_journal = crate::journal::ApplicationJournal::bind(
+            height,
+            block_hash,
+            self.overlay.journal_entries()?,
+        );
+        let application_journal_bytes = application_journal.encode()?;
+
         // ── stage every canonical record through the overlay ────────────────
         self.overlay
             .put(cf::BLOCKS, block_hash.as_bytes(), &block.to_bytes())?;
@@ -558,6 +581,20 @@ impl<'db, 'a> AcceptedCandidate<'db, 'a> {
                 self.overlay.put(cf_name, &jkey, bytes)?;
             }
         }
+
+        // The generic journal is staged like everything else, so its bytes are
+        // charged against the SAME ceiling as execution's writes and the block's
+        // derived records. A block cannot buy unbounded undo data for free: if
+        // the journal does not fit, `stage` refuses here, `publish` returns the
+        // error, and `into_batch` below is never reached — so nothing canonical
+        // moves.
+        //
+        // Unconditional, including for a block that wrote nothing. An empty
+        // journal is the positive statement "this block touched no application
+        // row"; a MISSING row cannot be told apart from a block published by a
+        // binary that wrote no journal at all.
+        self.overlay
+            .put(cf::APPLICATION_JOURNAL, &jkey, &application_journal_bytes)?;
 
         self.overlay.put(
             cf::META,

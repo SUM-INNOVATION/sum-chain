@@ -565,6 +565,21 @@ pub mod cf {
     /// `height.to_be_bytes()`. Mirrors `compute_pool_state_diffs`: `(key, old, new)`
     /// mutations replayed in reverse into the unified atomic reorg batch.
     pub const BEACON_STATE_DIFFS: &str = "beacon_state_diffs";
+
+    /// The GENERIC per-block application undo journal
+    /// (`sumchain_storage::journal::ApplicationJournal`), keyed by
+    /// `schema::journal_key(height, block_hash)` — height big-endian then the
+    /// 32-byte block hash, so two competing blocks at one height cannot name the
+    /// same row.
+    ///
+    /// Unlike the four journals above, nothing assembles this one by hand: it is
+    /// derived from the pre-images the overlay captured for every key the block
+    /// wrote, whatever family that key lives in. There is no allowlist that can
+    /// fall behind the families it covers.
+    ///
+    /// Node-local undo data, exactly like the four above. Never hashed into a
+    /// block and never read by consensus, so its format is a storage concern.
+    pub const APPLICATION_JOURNAL: &str = "application_journal";
 }
 
 /// All column families used by the database
@@ -776,6 +791,8 @@ pub const ALL_CFS: &[&str] = &[
     // BR1 dormant beacon state (issue #127)
     cf::BEACON_STATE,
     cf::BEACON_STATE_DIFFS,
+    // The generic, preimage-derived per-block application undo journal
+    cf::APPLICATION_JOURNAL,
 ];
 
 /// Database configuration
