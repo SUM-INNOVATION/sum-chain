@@ -501,6 +501,7 @@ impl BlockExecutor {
                             proposer,
                             v2_tx.fee,
                             block_timestamp,
+                            block_height,
                         )?;
 
                         if result.success {
@@ -2185,6 +2186,7 @@ impl BlockExecutor {
                     proposer,
                     tx.fee,
                     block_timestamp,
+                    block_height,
                 )?;
 
                 if result.success {

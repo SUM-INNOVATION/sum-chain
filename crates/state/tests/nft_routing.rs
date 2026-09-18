@@ -2821,3 +2821,378 @@ fn royalties_are_recorded_and_never_paid() {
         "and the transfer paid the recipient nothing"
     );
 }
+
+// ── BD-1..BD-5: the block-denial rule, and the activation that governs it ────
+//
+// `docs/lane-a/ACTIVATION-AUDIT.md` rows BD-1 to BD-5. The four pinning tests
+// above record the inherited behaviour: a `StateError::BlockValidation` out of
+// `NftExecutor::execute`, propagated by `?` at `crates/state/src/executor.rs`
+// and again inside `execute_block`'s transaction loop, so one minimum-fee
+// transaction from anyone makes a whole block unexecutable.
+//
+// Changing that is a CONSENSUS CHANGE — a block that one node refuses to
+// execute at all is a block another node executes and roots — so it is gated
+// rather than fixed outright. The gate is
+// `NftExecutor::receipt_failure_gate_open`, whose activation height wants a
+// `nft_receipt_failure_enabled_from_height` field in `ChainParams` that this
+// track cannot add; until it lands the activation reads `None`, the gate is
+// closed, and the four tests above still pass unchanged. That is the point: the
+// production path did not move.
+//
+// What the tests below establish is the other half — that the gated side is
+// real, that it is reachable through one entry point, and that an ungated node
+// and a gated node disagree DETECTABLY. The disagreement is not two different
+// state roots over the same block. It is stronger: the ungated node produces NO
+// BLOCK AT ALL (`execute_block` returns `Err` before `receipts.push`) where the
+// gated node produces a block carrying a `Failed` receipt. A node that cannot
+// execute a block its peers executed halts against them rather than forking
+// silently behind them.
+
+/// The gate seam, driven both ways over the same transaction and the same view.
+///
+/// Below the gate: `Err(BlockValidation("Collection not found"))`, which is
+/// what `execute_block` propagates. At or above it: a `Failed` result and a
+/// block that still executes.
+#[test]
+fn an_absent_collection_aborts_the_block_below_the_gate_and_is_a_receipt_above_it() {
+    let (_state, db, _dir, _executor) = setup_with_params(params());
+    let actor = KeyPair::generate();
+    fund(&db, &actor, 100_000_000);
+    let proposer = Address::new([9; 20]);
+
+    let nft_data = NftTxData {
+        collection_id: [0x55u8; 32],
+        token_id: 0,
+        operation: NftOperation::Mint,
+        data: mint_payload(actor.address()),
+    };
+
+    // Ungated node: the error that ends the block.
+    let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+    let mut view = ExecutionView::new(&mut overlay);
+    let err = NftExecutor::execute_with_gate(
+        &mut view,
+        &params(),
+        &actor.address(),
+        &nft_data,
+        &proposer,
+        100,
+        TS,
+        false,
+    )
+    .expect_err("below the gate an absent collection is still an Err");
+    assert!(err.to_string().contains("Collection not found"), "{err}");
+
+    // Gated node: a refusal the block survives.
+    let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+    let mut view = ExecutionView::new(&mut overlay);
+    let result = NftExecutor::execute_with_gate(
+        &mut view,
+        &params(),
+        &actor.address(),
+        &nft_data,
+        &proposer,
+        100,
+        TS,
+        true,
+    )
+    .expect("at the gate the same transaction is a receipt, not a block abort");
+    assert!(!result.success, "it is still a refusal");
+    assert_eq!(
+        result.error.as_deref(),
+        Some("Collection not found"),
+        "and it carries the same reason the error carried"
+    );
+
+    // The refusal is paid for. `deduct_fee` runs before the dispatch match, so
+    // the sender is charged and the proposer credited exactly as for every
+    // other refused NFT operation — the gate changes the block's fate, not the
+    // fee rule.
+    assert_eq!(
+        StateManager::v_get_balance(&view, &actor.address()).unwrap(),
+        100_000_000 - 100
+    );
+    assert_eq!(
+        StateManager::v_get_balance(&view, &proposer).unwrap(),
+        100,
+        "the proposer keeps the fee for the work it did"
+    );
+    assert_eq!(
+        StateManager::v_get_account(&view, &actor.address())
+            .unwrap()
+            .nonce,
+        1,
+        "and the nonce advanced, so the refusal is not replayable"
+    );
+}
+
+/// All four block-denial shapes flip together, and only at the gate.
+///
+/// BD-1 absent collection, BD-2 absent token, BD-3 out-of-range royalty,
+/// BD-4 undecodable payload. One table, both gate values, so a fix that
+/// converts one shape and forgets another fails here.
+#[test]
+fn every_block_denial_shape_becomes_a_receipt_at_the_gate_and_only_at_the_gate() {
+    let (_state, db, _dir, _executor) = setup_with_params(params());
+    let actor = KeyPair::generate();
+    fund(&db, &actor, 100_000_000);
+    let proposer = Address::new([9; 20]);
+
+    // A collection that exists, so the absent-TOKEN case reaches its own guard
+    // rather than the absent-collection one.
+    let live = [0x77u8; 32];
+    seed_collection(&db, &actor.address(), &live, &transferable());
+
+    let greedy = CollectionConfig {
+        royalty_bps: 2501,
+        royalty_recipient: Address::new([0xAA; 20]),
+        ..transferable()
+    };
+
+    let cases: Vec<(&str, NftTxData, &str)> = vec![
+        (
+            "BD-1 absent collection",
+            NftTxData {
+                collection_id: [0x55u8; 32],
+                token_id: 0,
+                operation: NftOperation::Mint,
+                data: mint_payload(actor.address()),
+            },
+            "Collection not found",
+        ),
+        (
+            "BD-2 absent token",
+            NftTxData {
+                collection_id: live,
+                token_id: 4242,
+                operation: NftOperation::Transfer,
+                data: transfer_payload(Address::new([0xB1; 20])),
+            },
+            "Token not found",
+        ),
+        (
+            "BD-3 royalty above 2500bps",
+            NftTxData {
+                collection_id: [0u8; 32],
+                token_id: 0,
+                operation: NftOperation::CreateCollection,
+                data: create_payload("Greedy", greedy),
+            },
+            "Invalid config",
+        ),
+        (
+            "BD-4 undecodable payload",
+            NftTxData {
+                collection_id: [0u8; 32],
+                token_id: 0,
+                operation: NftOperation::CreateCollection,
+                data: vec![0xFF; 3],
+            },
+            "Invalid collection data",
+        ),
+    ];
+
+    for (label, nft_data, needle) in cases {
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+        let err = NftExecutor::execute_with_gate(
+            &mut view,
+            &params(),
+            &actor.address(),
+            &nft_data,
+            &proposer,
+            100,
+            TS,
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains(needle),
+            "{label}: below the gate this must still abort the block, got {err}"
+        );
+
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+        let result = NftExecutor::execute_with_gate(
+            &mut view,
+            &params(),
+            &actor.address(),
+            &nft_data,
+            &proposer,
+            100,
+            TS,
+            true,
+        )
+        .unwrap_or_else(|e| panic!("{label}: at the gate this must be a receipt, got {e}"));
+        assert!(!result.success, "{label}: still a refusal");
+        assert!(
+            result.error.as_deref().unwrap_or_default().contains(needle),
+            "{label}: the receipt must carry the reason, got {:?}",
+            result.error
+        );
+    }
+}
+
+/// BD-5: the fee deduction's own insufficient-balance error is the same shape.
+///
+/// It is reachable inside a block even though `validate_tx` checked the balance
+/// against the parent state — a sender that spends down inside the block meets
+/// it on a later transaction. Below the gate it ends the block; at the gate it
+/// is a receipt, and the nonce advances even though no fee could be charged, so
+/// the refused transaction is not replayable at the same nonce.
+#[test]
+fn an_in_block_insufficient_balance_aborts_below_the_gate_and_advances_the_nonce_above_it() {
+    let (_state, db, _dir, _executor) = setup_with_params(params());
+    let actor = KeyPair::generate();
+    fund(&db, &actor, 150);
+    let proposer = Address::new([9; 20]);
+    let live = [0x88u8; 32];
+    seed_collection(&db, &actor.address(), &live, &transferable());
+
+    let nft_data = NftTxData {
+        collection_id: live,
+        token_id: 0,
+        operation: NftOperation::Mint,
+        data: mint_payload(actor.address()),
+    };
+
+    for gate_open in [false, true] {
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        // First mint spends 100 of 150.
+        NftExecutor::execute_with_gate(
+            &mut view,
+            &params(),
+            &actor.address(),
+            &nft_data,
+            &proposer,
+            100,
+            TS,
+            gate_open,
+        )
+        .expect("the first mint is affordable under either gate");
+
+        // Second mint cannot afford its fee out of the 50 that remain.
+        let outcome = NftExecutor::execute_with_gate(
+            &mut view,
+            &params(),
+            &actor.address(),
+            &nft_data,
+            &proposer,
+            100,
+            TS,
+            gate_open,
+        );
+
+        if gate_open {
+            let result = outcome.expect("at the gate this is a receipt");
+            assert!(!result.success);
+            assert!(
+                result
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("Insufficient balance"),
+                "{:?}",
+                result.error
+            );
+            assert_eq!(
+                StateManager::v_get_balance(&view, &actor.address()).unwrap(),
+                50,
+                "nothing was charged, because nothing could be"
+            );
+            assert_eq!(
+                StateManager::v_get_account(&view, &actor.address())
+                    .unwrap()
+                    .nonce,
+                2,
+                "but the nonce advanced, so the refusal is consumed"
+            );
+        } else {
+            let err = outcome.expect_err("below the gate this ends the block");
+            assert!(
+                err.to_string().contains("Insufficient balance")
+                    || err.to_string().contains("insufficient"),
+                "{err}"
+            );
+        }
+    }
+}
+
+/// The mixed-version disagreement, stated as a block outcome rather than as a
+/// receipt field.
+///
+/// One block, one transaction, two nodes. The node below the activation height
+/// cannot execute the block at all; the node at or above it executes it and
+/// records a refusal. That is not a silent fork — the ungated node has no root
+/// to offer, so it stalls against a chain that moved on, which is the loud
+/// failure a consensus change is supposed to have.
+///
+/// The ungated half runs through the real `execute_block`. The gated half runs
+/// through the executor seam, because opening the gate from `ChainParams`
+/// requires `nft_receipt_failure_enabled_from_height`, which is in
+/// `crates/genesis` and not in this track's files. When that field lands, the
+/// gated half of this test becomes an `execute_block` call with the height set
+/// and the assertion below stays as it is.
+#[test]
+fn an_ungated_node_cannot_execute_the_block_a_gated_node_roots() {
+    let (state, db, _dir, executor) = setup_with_params(params());
+    let actor = KeyPair::generate();
+    fund(&db, &actor, 100_000_000);
+    let proposer = Address::new([9; 20]);
+
+    let nft_data = NftTxData {
+        collection_id: [0x55u8; 32],
+        token_id: 0,
+        operation: NftOperation::Mint,
+        data: mint_payload(actor.address()),
+    };
+    let t = nft_tx(
+        &actor,
+        0,
+        100,
+        nft_data.collection_id,
+        0,
+        NftOperation::Mint,
+        nft_data.data.clone(),
+    );
+
+    // Ungated node, real block path: no block.
+    let header = sumchain_primitives::BlockHeader::new(
+        sumchain_primitives::Hash::ZERO,
+        1,
+        TS,
+        sumchain_primitives::Hash::ZERO,
+        sumchain_primitives::Hash::ZERO,
+        [3u8; 32],
+    );
+    let block = sumchain_primitives::Block::new(header, vec![t]);
+    assert!(
+        executor
+            .execute_block(&block, state.state_root(), &[])
+            .is_err(),
+        "the ungated node produces no block, which is what the gate is for"
+    );
+
+    // Gated node, same transaction: a refusal the block carries.
+    let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+    let mut view = ExecutionView::new(&mut overlay);
+    let result = NftExecutor::execute_with_gate(
+        &mut view,
+        &params(),
+        &actor.address(),
+        &nft_data,
+        &proposer,
+        100,
+        TS,
+        true,
+    )
+    .expect("the gated node executes the transaction");
+    assert!(!result.success);
+
+    // The receipt the gated node produces is the one `compute_block_state_root`
+    // folds in (tx hash, success bit, `fee_paid`). The ungated node has no
+    // receipt to fold, and therefore no root: the divergence is a halt, not a
+    // quiet difference in a digest.
+}
