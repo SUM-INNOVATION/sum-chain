@@ -1314,3 +1314,185 @@ fn a_node_that_was_never_restored_is_unaffected_by_the_floor() {
         "the observed boundary is the lowest record, exactly as before"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Release blocker 8: what a node does as it approaches the disk it was given.
+//
+// This tree ships with pruning DISABLED, so the undo families grow for the life
+// of the database. That is a decision (§12.1), and the obligation it creates is
+// a defined behaviour before exhaustion rather than a `WriteBatch` discovering
+// the end of the disk.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The capacity thresholds are exact at every size, and unbudgeted is a no-op.
+#[test]
+fn the_disk_budget_thresholds_are_exact_and_default_to_unbounded() {
+    use sumchain_storage::pruner::{
+        CapacityGuard, CapacityVerdict, CAPACITY_STOP_PERCENT, CAPACITY_WARN_PERCENT,
+    };
+
+    // Unbudgeted is the shipped default and changes nothing, at any size.
+    let none = CapacityGuard::unbounded();
+    for used in [0u64, 1, 1 << 40, u64::MAX] {
+        assert_eq!(none.assess(used), CapacityVerdict::Healthy);
+        assert!(!none.assess(used).is_stop());
+    }
+
+    // Integer arithmetic, so the boundaries are exact rather than nearly.
+    let budget = 1_000u64;
+    let guard = CapacityGuard::new(budget);
+    assert_eq!(guard.budget_bytes(), budget);
+    let warn_at = budget * CAPACITY_WARN_PERCENT / 100;
+    let stop_at = budget * CAPACITY_STOP_PERCENT / 100;
+    assert_eq!(guard.assess(warn_at - 1), CapacityVerdict::Healthy);
+    assert_eq!(
+        guard.assess(warn_at),
+        CapacityVerdict::Warn {
+            used: warn_at,
+            budget
+        },
+        "the warn threshold is inclusive"
+    );
+    assert_eq!(
+        guard.assess(stop_at - 1),
+        CapacityVerdict::Warn {
+            used: stop_at - 1,
+            budget
+        }
+    );
+    assert_eq!(
+        guard.assess(stop_at),
+        CapacityVerdict::StopProducing {
+            used: stop_at,
+            budget
+        },
+        "the stop threshold is inclusive"
+    );
+    assert!(guard.assess(budget * 10).is_stop(), "and stays stopped");
+
+    // No overflow at the top of the range, where a naive percent calculation
+    // would wrap and read as healthy.
+    let huge = CapacityGuard::new(u64::MAX / 2);
+    assert!(huge.assess(u64::MAX).is_stop());
+}
+
+/// The budget round-trips through the database, and `0` clears it.
+#[test]
+fn a_recorded_disk_budget_round_trips_and_zero_clears_it() {
+    use sumchain_storage::pruner::{disk_budget, record_disk_budget, CapacityGuard};
+
+    let (d, _g) = db();
+    assert_eq!(disk_budget(&d).unwrap(), None, "unbudgeted by default");
+    assert_eq!(
+        CapacityGuard::from_db(&d).unwrap().budget_bytes(),
+        0,
+        "and an unbudgeted database yields an unbounded guard"
+    );
+
+    record_disk_budget(&d, 64 * 1024 * 1024 * 1024).unwrap();
+    assert_eq!(disk_budget(&d).unwrap(), Some(64 * 1024 * 1024 * 1024));
+    assert_eq!(
+        CapacityGuard::from_db(&d).unwrap().budget_bytes(),
+        64 * 1024 * 1024 * 1024
+    );
+
+    record_disk_budget(&d, 0).unwrap();
+    assert_eq!(
+        CapacityGuard::from_db(&d).unwrap().budget_bytes(),
+        0,
+        "zero clears the brake, which is how an operator turns it off"
+    );
+
+    // A row of the wrong width is a fault, not a guess — the same rule the
+    // format watermark follows, for the same reason.
+    d.put(
+        cf::META,
+        sumchain_storage::pruner::DISK_BUDGET_META_KEY,
+        &[9u8; 3],
+    )
+    .unwrap();
+    assert!(disk_budget(&d).is_err());
+}
+
+/// Pruning is DISABLED by default, and this pins it as a shipped decision
+/// rather than leaving it to be rediscovered.
+///
+/// It also pins the two numbers §12 of the contract quotes, so the capacity
+/// tables and the code cannot drift apart silently.
+#[test]
+fn pruning_ships_disabled_and_the_retention_floor_is_the_reorg_horizon() {
+    use sumchain_storage::pruner::{PrunerConfig, UNDO_RETENTION_FLOOR};
+
+    let default = PrunerConfig::default();
+    assert!(
+        !default.enabled,
+        "pruning ships disabled; §12.1 of docs/lane-a/JOURNAL-CONTRACT.md is the \
+         decision and the disk forecasts that go with it"
+    );
+    assert_eq!(UNDO_RETENTION_FLOOR, 4_096);
+
+    // And the floor cannot be configured away, which is what makes enabling
+    // pruning a safe operator action rather than a foot-gun.
+    let asking_for_less = PrunerConfig {
+        state_diffs_to_keep: 1,
+        enabled: true,
+        ..PrunerConfig::default()
+    };
+    let (d, _g) = db();
+    let pruner = sumchain_storage::pruner::Pruner::new(std::sync::Arc::new(d), asking_for_less);
+    assert_eq!(pruner.undo_retention(), UNDO_RETENTION_FLOOR);
+}
+
+/// `Database::approximate_size` counts EVERY column family, and used not to.
+///
+/// It asked for the default family's `estimate-live-data-size`. Nothing in this
+/// schema lives in the default family, so the answer was approximately zero for
+/// a database of any size — and `Pruner::needs_pruning`'s `max_db_size_bytes`
+/// check, `PruneStats::bytes_freed` and now the capacity brake were all reading
+/// a constant.
+#[test]
+fn the_database_size_estimate_counts_every_family_not_just_the_default() {
+    let (d, _g) = db();
+    // An "empty" database is not zero: `cur-size-all-mem-tables` counts the
+    // arena RocksDB has allocated per column family, and this schema opens many.
+    // That floor is a fixed cost in the hundreds of kilobytes, which is noise
+    // against any budget an operator would set and is stated rather than hidden.
+    let empty = d.approximate_size();
+    assert!(
+        empty < 8 * 1024 * 1024,
+        "the empty-database floor is the per-family memtable arena and should be \
+         hundreds of kilobytes, not megabytes: got {empty}"
+    );
+
+    // A megabyte, in a NAMED family — which is where every row in this schema
+    // lives, and where the old implementation could not see it.
+    for i in 0..4_000u32 {
+        d.put(cf::STATE, &i.to_be_bytes(), &[7u8; 256]).unwrap();
+    }
+    let unflushed = d.approximate_size();
+    assert!(
+        unflushed > empty,
+        "bytes written but not yet flushed must still count: for a capacity brake, \
+         undercounting is the direction that keeps a node producing onto a full disk \
+         ({unflushed} against an empty {empty})"
+    );
+
+    d.flush().unwrap();
+    d.compact().unwrap();
+    let flushed = d.approximate_size();
+    assert!(
+        flushed > empty,
+        "flushed rows in a NAMED family must be visible to the estimate; the old \
+         implementation read the default family, where nothing in this schema lives, \
+         and would have seen no change at all ({flushed} against an empty {empty})"
+    );
+    println!(
+        "size estimate: empty {empty}, one megabyte written {unflushed}, after \
+         flush+compact {flushed}"
+    );
+    // The flushed figure is SMALLER than the megabyte written, and that is
+    // correct rather than a shortfall: SSTs are compressed, and this fixture's
+    // rows are highly compressible. The estimate reports on-disk bytes, which is
+    // the number a disk budget is about.
+    assert!(flushed < unflushed + 1_000_000);
+}

@@ -249,6 +249,24 @@ enum Commands {
         yes: bool,
     },
 
+    /// Record the disk budget this node is provisioned for, so it stops
+    /// PRODUCING blocks before it runs out of space.
+    ///
+    /// Pruning ships disabled, so the undo families grow for the life of the
+    /// database. With a budget recorded, a node warns at 80% and refuses to
+    /// produce at 95%; unbudgeted (the default) nothing changes. Producing is
+    /// braked and importing is not, so this DELAYS exhaustion rather than
+    /// preventing it — the remedy is more disk, or a pruner.
+    SetDiskBudget {
+        /// Data directory
+        #[arg(short, long, default_value = "data")]
+        data_dir: PathBuf,
+
+        /// Budget in bytes. `0` clears it and restores unbudgeted behaviour.
+        #[arg(long)]
+        bytes: u64,
+    },
+
     /// Export every registered SRC-201 messaging public key to NDJSON.
     /// Used to migrate registrations from one validator to another after
     /// `messaging_registerSponsored` direct-write divergence (recovery tool).
@@ -944,6 +962,31 @@ async fn main() -> Result<()> {
             }
             println!();
             println!("Start the node to resume block production.");
+        }
+
+        Commands::SetDiskBudget { data_dir, bytes } => {
+            init_logging("info", false)?;
+            let db = Database::open_default(&data_dir)?;
+            sumchain_storage::pruner::record_disk_budget(&db, bytes)?;
+            let used = db.approximate_size();
+            let guard = sumchain_storage::pruner::CapacityGuard::new(bytes);
+            println!("Disk budget recorded.");
+            if bytes == 0 {
+                println!("  Budget:  unbounded (the brake is off)");
+            } else {
+                println!("  Budget:  {} bytes", bytes);
+                println!("  In use:  {} bytes ({}%)", used, used.saturating_mul(100) / bytes);
+                println!(
+                    "  Warns at {}%, stops producing at {}%",
+                    sumchain_storage::pruner::CAPACITY_WARN_PERCENT,
+                    sumchain_storage::pruner::CAPACITY_STOP_PERCENT,
+                );
+                println!("  Current verdict: {:?}", guard.assess(used));
+            }
+            println!();
+            println!("Pruning is disabled in this build, so the undo families grow for the");
+            println!("life of the database. This brake stops block PRODUCTION only; import");
+            println!("continues, so it delays exhaustion rather than preventing it.");
         }
 
         Commands::ExportRegisteredKeys { data_dir, output } => {

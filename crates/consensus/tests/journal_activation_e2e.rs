@@ -562,3 +562,131 @@ async fn a_crossing_reorg_is_refused_through_import_block() {
         "could not arrange hash(B2) < hash(A2) in {MAX_ATTEMPTS} attempts"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Release blocker 8: the disk brake, through real block production.
+//
+// Housed here because this file already has the harness it needs — a real
+// `PoAEngine` on a real database that can be asked to propose. The subject is
+// not journal activation: it is what a node does as it approaches the disk it
+// was provisioned with, given that pruning ships disabled and the undo families
+// therefore grow for the life of the database.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A node at or above its recorded disk budget REFUSES TO PRODUCE, and an
+/// unbudgeted node is unaffected.
+///
+/// The brake is read once at engine construction, so the fixture records the
+/// budget and then builds the engine — which is also the real sequence, since
+/// `sum-node set-disk-budget` is run against a stopped node.
+///
+/// What this does NOT claim: that the node cannot run out of disk. Producing is
+/// braked and importing is not, because following the chain is not optional and
+/// adding to it is. The brake delays exhaustion; more disk or a pruner is the
+/// remedy.
+#[tokio::test]
+async fn a_node_at_its_disk_budget_refuses_to_produce_and_says_why() {
+    use sumchain_storage::pruner::{record_disk_budget, CapacityGuard, CapacityVerdict};
+
+    let validator = KeyPair::generate();
+    let alice = KeyPair::generate();
+    let bob = KeyPair::generate();
+    let genesis = genesis_json_with_pinned_gate(
+        &validator,
+        &[(&validator, 100_000_000), (&alice, 10_000_000)],
+        None,
+        None,
+    );
+
+    // Unbudgeted — the shipped default — produces normally.
+    let open = E2ENode::new(&genesis, *validator.private_key().as_bytes());
+    open.submit(transfer(&alice, bob.address(), 1_000, 10, 0));
+    let produced = open.produce().await;
+    assert_eq!(produced.height(), 1);
+
+    // Now a node whose budget is already exceeded by its own database. The
+    // budget is recorded BEFORE the engine is built, because the engine reads it
+    // once at construction and `set-disk-budget` runs against a stopped node.
+    let dir = TempDir::new().expect("temp dir");
+    {
+        let db = Database::open_default(dir.path()).expect("open");
+        // `Database::approximate_size` reports RocksDB's LIVE DATA estimate,
+        // which is zero until something has been flushed — so a budget cannot be
+        // exceeded by an empty database however small the budget is. The fixture
+        // therefore puts real bytes on disk, compacts so the estimate is
+        // populated, and sets the budget to exactly what it measures.
+        for i in 0..4_000u32 {
+            db.put(cf::STATE, &i.to_be_bytes(), &[7u8; 256])
+                .expect("fill");
+        }
+        db.flush()
+            .expect("flush so the size estimate sees the writes");
+        db.compact().expect("compact");
+        let used = db.approximate_size();
+        assert!(
+            used > 0,
+            "the fixture must have produced a measurable database, or the brake is              being tested against an estimate that is structurally zero"
+        );
+        record_disk_budget(&db, used).expect("record");
+        assert!(
+            CapacityGuard::new(used).assess(used).is_stop(),
+            "a database exactly at its budget is over the stop threshold"
+        );
+        for i in 0..4_000u32 {
+            db.delete(cf::STATE, &i.to_be_bytes()).expect("tidy");
+        }
+    }
+    let squeezed = E2ENode::open(dir, &genesis, *validator.private_key().as_bytes());
+    squeezed
+        .consensus
+        .init_genesis(&genesis)
+        .expect("init genesis");
+    squeezed.submit(transfer(&alice, bob.address(), 1_000, 10, 0));
+
+    let txs = squeezed.mempool.select_for_block(100);
+    let err = squeezed
+        .consensus
+        .propose_block(txs)
+        .await
+        .expect_err("a node over its disk budget must refuse to produce");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("refusing to produce a block")
+            && rendered.contains("disk budget")
+            && rendered.contains("Pruning is disabled in this build")
+            && rendered.contains("set-disk-budget --bytes 0"),
+        "the refusal must name the cause, the reason the database grows, and the way \
+         back: {rendered}"
+    );
+    assert_eq!(
+        squeezed.head_height(),
+        0,
+        "and must not have produced anything"
+    );
+
+    // IMPORT is deliberately not braked: the node still follows the chain, which
+    // is the asymmetry the refusal message describes.
+    squeezed
+        .consensus
+        .import_block(produced.clone())
+        .await
+        .expect("a braked node must still follow the chain");
+    assert_eq!(
+        squeezed.head_height(),
+        1,
+        "importing is not braked, so the brake delays exhaustion rather than preventing it"
+    );
+
+    // Clearing the budget restores production on the next start.
+    record_disk_budget(&squeezed.db, 0).expect("clear");
+    let restarted = squeezed.restart();
+    restarted.submit(transfer(&alice, bob.address(), 1_000, 10, 1));
+    let after = restarted.produce().await;
+    assert_eq!(after.height(), 2, "clearing the budget turns the brake off");
+    assert_eq!(
+        CapacityGuard::from_db(&restarted.db)
+            .unwrap()
+            .assess(u64::MAX),
+        CapacityVerdict::Healthy
+    );
+}

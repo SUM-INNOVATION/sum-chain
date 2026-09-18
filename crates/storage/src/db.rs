@@ -1027,12 +1027,51 @@ impl Database {
         Ok(())
     }
 
-    /// Get approximate database size in bytes
+    /// Approximate size of this database in bytes, across EVERY column family.
+    ///
+    /// # This used to read one family, and that family is always empty
+    ///
+    /// It asked `property_value("rocksdb.estimate-live-data-size")`, which is the
+    /// property of the DEFAULT column family. Nothing in this schema lives
+    /// there — every row is in one of `ALL_CFS` — so the answer was
+    /// approximately zero for a database of any size. Anything built on it was
+    /// built on a constant: `Pruner::needs_pruning`'s `max_db_size_bytes` check
+    /// could never fire, and `PruneStats::bytes_freed` was always zero.
+    ///
+    /// It now sums the property across every family the database opens, so a
+    /// family added to the schema is counted on the day it is added.
+    ///
+    /// # What it counts, and why memtables are in it
+    ///
+    /// `estimate-live-data-size` counts live data in SST FILES, so bytes that
+    /// have been written but not yet flushed are invisible to it. For a capacity
+    /// brake, undercounting is the dangerous direction — the node would keep
+    /// producing on a disk that is fuller than it thinks — so this adds
+    /// `cur-size-all-mem-tables` as well.
+    ///
+    /// It remains an ESTIMATE. It is not the size of the directory: it excludes
+    /// the WAL, obsolete-but-unreclaimed SSTs and RocksDB's own bookkeeping, and
+    /// the SST figure is itself approximate. Treat it as a signal with the right
+    /// order of magnitude and the right direction, not as a measurement.
+    ///
+    /// There is also a FLOOR: `cur-size-all-mem-tables` counts the arena RocksDB
+    /// has allocated for each family whether or not anything is in it, and this
+    /// schema opens many families, so an empty database reads in the hundreds of
+    /// kilobytes. Noise against any budget an operator would set, and stated so
+    /// nobody reads a small non-zero answer as data.
     pub fn approximate_size(&self) -> u64 {
         let mut total = 0u64;
-        if let Ok(Some(size_str)) = self.db.property_value("rocksdb.estimate-live-data-size") {
-            if let Ok(size) = size_str.parse::<u64>() {
-                total = size;
+        for cf_name in ALL_CFS {
+            let Ok(handle) = self.cf(cf_name) else {
+                continue;
+            };
+            for property in [
+                "rocksdb.estimate-live-data-size",
+                "rocksdb.cur-size-all-mem-tables",
+            ] {
+                if let Ok(Some(value)) = self.db.property_value_cf(handle, property) {
+                    total = total.saturating_add(value.parse::<u64>().unwrap_or(0));
+                }
             }
         }
         total

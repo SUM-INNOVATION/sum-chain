@@ -85,6 +85,9 @@ pub struct PoAEngine {
     validator_key: Option<KeyPair>,
     /// Current best block
     best_block: RwLock<Option<Block>>,
+    /// The disk budget this node was provisioned for, read once at construction
+    /// from its own database. Unbudgeted by default, which is a no-op.
+    capacity: sumchain_storage::pruner::CapacityGuard,
     /// Fork choice rule
     fork_choice: LongestChainForkChoice,
     /// Event broadcaster
@@ -112,6 +115,10 @@ impl PoAEngine {
 
         let executor = Arc::new(BlockExecutor::new(state.clone(), db.clone(), genesis.params.clone()));
         let (event_tx, _) = broadcast::channel(100);
+        let capacity = sumchain_storage::pruner::CapacityGuard::from_db(&db).unwrap_or_else(|e| {
+            warn!("unreadable disk budget row ({e}); treating this node as unbudgeted");
+            sumchain_storage::pruner::CapacityGuard::unbounded()
+        });
 
         Ok(Self {
             db,
@@ -123,6 +130,7 @@ impl PoAEngine {
             active_validator_set: RwLock::new(None),
             validator_key,
             best_block: RwLock::new(None),
+            capacity,
             fork_choice: LongestChainForkChoice,
             event_tx,
             running: RwLock::new(false),
@@ -450,6 +458,48 @@ impl PoAEngine {
         // Check if we're the proposer
         if !self.is_proposer(height) {
             return Err(ConsensusError::NotProposer);
+        }
+
+        // ── the disk brake ──────────────────────────────────────────────────
+        //
+        // This tree ships with pruning DISABLED, so the undo families grow for
+        // the life of the database. An operator who records a budget
+        // (`sum-node set-disk-budget`) gets a defined behaviour as the database
+        // approaches it, instead of discovering the end of the disk inside a
+        // `WriteBatch`.
+        //
+        // Producing is braked; importing is not. Following the chain is not
+        // optional and adding to it is, so this is the half that can be given
+        // up without the node becoming dishonest. It DELAYS exhaustion rather
+        // than preventing it — a node that keeps importing keeps growing — and
+        // the operator's actual remedy is more disk or a pruner. Unbudgeted
+        // (the default) it is a no-op.
+        match self.capacity.assess_db(&self.db) {
+            sumchain_storage::pruner::CapacityVerdict::Healthy => {}
+            sumchain_storage::pruner::CapacityVerdict::Warn { used, budget } => {
+                warn!(
+                    used,
+                    budget,
+                    "database is at {}% of its recorded disk budget; add disk or enable \
+                     pruning before it reaches {}%, at which point this node stops \
+                     producing blocks",
+                    used.saturating_mul(100) / budget.max(1),
+                    sumchain_storage::pruner::CAPACITY_STOP_PERCENT,
+                );
+            }
+            sumchain_storage::pruner::CapacityVerdict::StopProducing { used, budget } => {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "refusing to produce a block at height {height}: this database uses \
+                     {used} byte(s) of a recorded {budget}-byte disk budget, at or above \
+                     the {}% stop threshold. Pruning is disabled in this build, so the \
+                     undo families grow for the life of the database. Producing is braked \
+                     and importing is not, so this delays exhaustion rather than \
+                     preventing it: add disk, or enable pruning, or resync. Clear the \
+                     budget with `sum-node set-disk-budget --bytes 0` to disable this \
+                     brake",
+                    sumchain_storage::pruner::CAPACITY_STOP_PERCENT
+                )));
+            }
         }
 
         // Compute tx root

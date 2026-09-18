@@ -702,10 +702,12 @@ observation about a database with no journal history rather than a gate left
 off.
 [PRODUCER, BY CONSTRUCTION]
 
-**Pruning is implemented, with a retention FLOOR — and it ships DISABLED.**
-Read §12.1 before this paragraph: what follows is a correct retention policy
-that nothing in the node currently runs, and §12 carries the disk figures an
-operator needs in order to run without it.
+**Pruning is NOT RUNNING in this build, and nothing calls a `Pruner`.** What
+follows describes the retention RULE that `crates/storage/src/pruner.rs`
+implements and that an operator who constructs a `Pruner` would get. It is not a
+description of behaviour this node performs. Read §12.1 first: the shipped
+decision is that pruning is off, and §12 carries the disk figures, the capacity
+requirement and the brake that go with that decision.
 `crates/storage/src/pruner.rs` prunes `application_journal` and `state_diffs`
 below the SAME height, and that height is never closer to the head than
 `UNDO_RETENTION_FLOOR = 4_096`, a copy of `sumchain_consensus::poa::MAX_REORG_WALK`.
@@ -943,14 +945,13 @@ Stated because a clearly named gap is worth more than a silence.
   BLAST RADIUS: a reorg can no longer carry that incompleteness across the
   boundary (§7.3). A chain running wholly below the boundary still has it, and
   nothing here fixes that.
-* **`Pruner` still has no production caller.** Nothing in `crates/node`
-  constructs one and `PrunerConfig::enabled` is `false`. This is now a stated
-  decision with numbers behind it (§12.1) rather than an omission, but the
-  decision is "ship with pruning off", not "pruning is wired". An operator who
-  turns it on gets the floor — `Pruner` is constructed and exercised at the real
-  constant by `reorg/a_real_reorg_at_the_full_production_depth_survives_the_real_retention_floor`
-  — but no loop in the node calls it, and the crash-safety of such a loop is
-  neither written nor tested here.
+* **No pruning runs in this build**, and that is the shipped decision rather
+  than an omission (§12.1), now carrying the disk forecast, the capacity
+  requirement, the alert thresholds and a defined pre-exhaustion behaviour with a
+  real caller (§12.3.1, §12.6, §12.7). What is still NOT done: no loop in
+  `crates/node` calls a `Pruner`, and the crash-safety of such a loop is neither
+  written nor tested here. The brake in §12.7 buys time; it does not prune.
+  A node that keeps importing still grows without bound.
 * **`StateManager::revert_pre_activation_block_state_diffs` is DEAD in
   production**, and its unsafe case is now STRUCTURALLY unreachable rather than
   refused at run time. It takes a `reorg_undo::PreActivationBlock`, whose only
@@ -1032,7 +1033,7 @@ Every figure here is MEASURED against real published blocks, by
 and reproduced by running those tests with `--nocapture`. Nothing below is
 derived from the record layout.
 
-### 12.1 The decision: pruning ships DISABLED
+### 12.1 The decision: NO PRUNING RUNS in this build
 
 `PrunerConfig::enabled` is `false` by default and nothing in `crates/node`
 constructs a `Pruner`. That is not an oversight left unstated; it is the shipped
@@ -1047,13 +1048,17 @@ configuration, and it is chosen:
   with its own interruption story — is a change with its own risk, in a crate
   none of this work's tests cover. Shipping it untested beside a correctness
   change would be worse than shipping neither.
-* §7.4's retention policy is therefore a correct policy that nothing currently
-  runs. It is not dead: `Pruner` is constructed and exercised at the real
-  constant by the depth test, so an operator who enables it gets the floor.
+* §7.4 describes a retention RULE, not running behaviour. The rule is real and
+  is exercised at the real constant by
+  `reorg/a_real_reorg_at_the_full_production_depth_survives_the_real_retention_floor`,
+  which constructs a `Pruner`, asks it to keep 8 blocks, and requires the floor
+  to override that — so an operator who turns it on gets the floor. Nothing in
+  `crates/node` turns it on.
 
-The obligation this decision creates is the rest of this section: the numbers an
-operator needs in order to run with pruning off, and the metrics that say when
-that stops being viable.
+The obligations this decision creates are the rest of this section: the disk
+forecast (§12.3), the capacity REQUIREMENT an operator must provision to
+(§12.3.1), the alert thresholds (§12.6), and a defined behaviour before
+exhaustion rather than a `WriteBatch` discovering the end of the disk (§12.7).
 
 ### 12.2 Journal bytes per block, measured
 
@@ -1101,6 +1106,28 @@ costs about 45 GiB/year, which is a disk line item and not a design problem. At
 saturation it is 1.25 TiB/year, and a deployment planning to run there should
 enable pruning rather than buy the disk.
 
+### 12.3.1 The capacity requirement
+
+**Provision for `(expected annual journal growth x planned years) + headroom`,
+and record that number as the node's disk budget** (§12.7). The journal is
+additive to blocks, transactions, receipts, indexes and the four legacy diffs,
+none of which this work changes and none of which shrink either, so the journal
+row is a lower bound on total growth rather than an estimate of it.
+
+Concretely, for a three-year deployment with 50% headroom on the journal alone:
+
+| sustained load | three-year journal | provision at least |
+|---|---|---|
+| idle | 2.4 GiB | **4 GiB** |
+| 1 tx/block | 15 GiB | **23 GiB** |
+| 8 tx/block | 42 GiB | **63 GiB** |
+| 32 tx/block | 134 GiB | **201 GiB** |
+| saturated | 3.75 TiB | **5.6 TiB** |
+
+A deployment that cannot provision the row for its expected load has chosen to
+enable pruning; there is no third option, and §12.7 is what happens if neither
+is done.
+
 ### 12.4 What enabling pruning would cost instead
 
 The retained set is bounded by the floor, so it is a CONSTANT, not a rate:
@@ -1138,7 +1165,7 @@ framing is added. Both are true and they are not the same measurement; this
 document now says which is which rather than letting the smaller number stand
 for both.
 
-### 12.6 What to monitor
+### 12.6 Alerts, and what to monitor
 
 With pruning disabled, three signals, in the order they matter:
 
@@ -1155,6 +1182,60 @@ With pruning disabled, three signals, in the order they matter:
    `publish` writes one record per block, unconditionally. A gap means records
    were deleted by something, and with pruning disabled nothing should be
    deleting them.
+
+**Alert thresholds**, matching what the node itself does:
+
+| signal | warn | act |
+|---|---|---|
+| database size against the recorded budget | **80%** (`CAPACITY_WARN_PERCENT`) | **95%** (`CAPACITY_STOP_PERCENT`) — the node stops producing |
+| usable reorg depth | below `MAX_REORG_WALK` on a node that has been up longer than 4,096 blocks | zero |
+| journal records against head height | any gap above the boundary | any gap, with pruning off |
+
+The first row is not advisory: the node acts on it (§12.7), so an operator alert
+at 80% is the last point at which adding disk is cheaper than an outage.
+
+### 12.7 Defined behaviour before exhaustion
+
+An operator records the budget the node was provisioned for:
+
+    sum-node set-disk-budget --data-dir <dir> --bytes <n>
+
+It is node-local operator configuration in a `META` row, not consensus and not
+chain state. **Absent (the default) means unbounded, and nothing changes** —
+which is the honest description of what this build does out of the box.
+
+With a budget recorded, `PoAEngine` reads it once at construction and consults
+it before producing each block:
+
+* below 80% — nothing;
+* at or above 80% — a `warn!` naming the percentage and the stop threshold;
+* at or above 95% — **the node refuses to produce**, with a message naming the
+  budget, the usage, the fact that pruning is disabled in this build, and the
+  way back (`--bytes 0`).
+
+**Producing is braked; importing is not**, and the asymmetry is the point:
+following the chain is not optional and adding to it is. This is also the limit
+of the guarantee, stated plainly — **it delays exhaustion, it does not prevent
+it.** A node that keeps importing keeps growing. The remedy is more disk, or a
+pruner, or a resync; the brake buys the time to choose one.
+
+The size signal is `Database::approximate_size`, which until this work summed a
+single column family — the DEFAULT one, where nothing in this schema lives — and
+therefore reported approximately zero for a database of any size. Anything built
+on it was built on a constant, including `Pruner::needs_pruning`'s
+`max_db_size_bytes` check and `PruneStats::bytes_freed`. It now sums live SST
+data and memtable size across every family the database opens. It is still an
+estimate: it excludes the WAL and unreclaimed SSTs, it reflects COMPRESSED
+on-disk bytes, and it has a floor of a few hundred kilobytes from per-family
+memtable arenas on an empty database.
+[PRODUCER, TESTED: `producer/the_disk_budget_thresholds_are_exact_and_default_to_unbounded`,
+`producer/a_recorded_disk_budget_round_trips_and_zero_clears_it`,
+`producer/pruning_ships_disabled_and_the_retention_floor_is_the_reorg_horizon`,
+`producer/the_database_size_estimate_counts_every_family_not_just_the_default`.]
+[CONSUMER, DONE: `crates/consensus/tests/journal_activation_e2e.rs`'s
+`a_node_at_its_disk_budget_refuses_to_produce_and_says_why` — a real engine over
+a real database refuses to propose, still imports, and produces again once the
+budget is cleared.]
 
 ---
 

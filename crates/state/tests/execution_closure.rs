@@ -1897,7 +1897,17 @@ fn non_execution_paths_are_classified() {
         // The one that remains is the messaging-key recovery import, which is a
         // deployment blocker in its own right and is pinned by
         // `operator_tooling_writes_are_declared_deployment_blockers`.
-        (Class::OperatorTooling, 1, "see operator_tooling_writes_are_declared_deployment_blockers"),
+        // 1 -> 2 with `sum-node set-disk-budget`, and the two are NOT the same
+        // kind of thing. The messaging-key recovery import writes APPLICATION
+        // state outside consensus, and a node that runs it diverges from one
+        // that did not — that is the deployment blocker this class is named for.
+        // The disk-budget row is node-local operator CONFIGURATION in `cf::META`:
+        // it records how much space this machine was given, it is read only by
+        // this node's own block-production brake, and two nodes holding
+        // different values cannot disagree about any block. It is counted here
+        // because it is a committed write from an operator command, which is
+        // what this class counts; it is not a divergence risk.
+        (Class::OperatorTooling, 2, "see operator_tooling_writes_are_declared_deployment_blockers"),
     ];
     let sites = analyse();
     let mut counted: BTreeMap<Class, usize> = BTreeMap::new();

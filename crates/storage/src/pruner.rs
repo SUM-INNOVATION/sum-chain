@@ -29,6 +29,125 @@ use crate::Result;
 /// its own constant.
 pub const UNDO_RETENTION_FLOOR: u64 = 4_096;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// DISK CAPACITY: what a node does as it approaches the space it was given
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Release blocker 8. This tree ships with pruning DISABLED — `PrunerConfig`
+// defaults `enabled` to `false` and nothing constructs a `Pruner` — so the undo
+// families grow monotonically for the life of the database. That is a decision,
+// not an oversight (see §12.1 of `docs/lane-a/JOURNAL-CONTRACT.md`), and the
+// obligation it creates is this: a node must have a defined behaviour as it
+// approaches the disk it was provisioned with, rather than discovering the end
+// of the disk inside a `WriteBatch`.
+
+/// `META` key holding the disk budget, in bytes, this node was provisioned for.
+///
+/// Node-local operator configuration, not consensus and not chain state. Absent
+/// means unbounded, which is the shipped default and today's behaviour exactly.
+pub const DISK_BUDGET_META_KEY: &[u8] = b"node/disk_budget_bytes";
+
+/// Fraction of the budget at which a node warns. Percent, to keep the whole
+/// calculation in integers.
+pub const CAPACITY_WARN_PERCENT: u64 = 80;
+
+/// Fraction of the budget at which a node STOPS PRODUCING BLOCKS.
+pub const CAPACITY_STOP_PERCENT: u64 = 95;
+
+/// What a node should do about the space it is using.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapacityVerdict {
+    /// Under [`CAPACITY_WARN_PERCENT`] of the budget, or no budget set.
+    Healthy,
+    /// At or above [`CAPACITY_WARN_PERCENT`]. Keep running, say so loudly: this
+    /// is the point at which an operator still has time to add disk or turn
+    /// pruning on.
+    Warn { used: u64, budget: u64 },
+    /// At or above [`CAPACITY_STOP_PERCENT`]. Stop PRODUCING blocks.
+    ///
+    /// Producing is the part of a node's behaviour that is optional and that
+    /// adds to the problem; following the chain is neither. So this brakes
+    /// production and leaves import alone, which is the honest shape of the
+    /// guarantee: **it delays exhaustion, it does not prevent it.** A node that
+    /// keeps importing keeps growing, and the operator's actual remedy is more
+    /// disk or a pruner.
+    StopProducing { used: u64, budget: u64 },
+}
+
+impl CapacityVerdict {
+    pub fn is_stop(&self) -> bool {
+        matches!(self, CapacityVerdict::StopProducing { .. })
+    }
+}
+
+/// The disk budget a node was provisioned for, and the verdicts it implies.
+#[derive(Debug, Clone, Copy)]
+pub struct CapacityGuard {
+    budget_bytes: u64,
+}
+
+impl CapacityGuard {
+    /// `0` means unbounded — the shipped default, and today's behaviour.
+    pub fn new(budget_bytes: u64) -> Self {
+        Self { budget_bytes }
+    }
+
+    pub fn unbounded() -> Self {
+        Self { budget_bytes: 0 }
+    }
+
+    /// The budget an operator recorded for this database, or unbounded.
+    pub fn from_db(db: &Database) -> Result<Self> {
+        Ok(Self::new(disk_budget(db)?.unwrap_or(0)))
+    }
+
+    pub fn budget_bytes(&self) -> u64 {
+        self.budget_bytes
+    }
+
+    /// Integer-only, so the thresholds are exact at every size and there is no
+    /// floating-point edge to argue about at 95%.
+    pub fn assess(&self, used: u64) -> CapacityVerdict {
+        if self.budget_bytes == 0 {
+            return CapacityVerdict::Healthy;
+        }
+        let budget = self.budget_bytes;
+        if used.saturating_mul(100) >= budget.saturating_mul(CAPACITY_STOP_PERCENT) {
+            CapacityVerdict::StopProducing { used, budget }
+        } else if used.saturating_mul(100) >= budget.saturating_mul(CAPACITY_WARN_PERCENT) {
+            CapacityVerdict::Warn { used, budget }
+        } else {
+            CapacityVerdict::Healthy
+        }
+    }
+
+    /// The verdict for a live database, using RocksDB's own live-data estimate.
+    pub fn assess_db(&self, db: &Database) -> CapacityVerdict {
+        self.assess(db.approximate_size())
+    }
+}
+
+/// Read the recorded disk budget. `None` = unbounded.
+pub fn disk_budget(db: &Database) -> Result<Option<u64>> {
+    match db.get(cf::META, DISK_BUDGET_META_KEY)? {
+        None => Ok(None),
+        Some(v) if v.len() == 8 => {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&v);
+            Ok(Some(u64::from_be_bytes(b)))
+        }
+        Some(v) => Err(crate::StorageError::InvalidData(format!(
+            "the disk budget row is {} byte(s); it is an 8-byte big-endian byte count",
+            v.len()
+        ))),
+    }
+}
+
+/// Record the disk budget this node is provisioned for. `0` clears it.
+pub fn record_disk_budget(db: &Database, bytes: u64) -> Result<()> {
+    db.put(cf::META, DISK_BUDGET_META_KEY, &bytes.to_be_bytes())
+}
+
 /// Pruning configuration
 #[derive(Debug, Clone)]
 pub struct PrunerConfig {
