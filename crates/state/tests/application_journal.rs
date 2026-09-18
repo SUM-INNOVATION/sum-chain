@@ -374,14 +374,15 @@ fn a_post_activation_block_cannot_be_named_to_the_legacy_revert_path() {
 /// # What this does NOT say
 ///
 /// It does not say nothing unwinds application state outside consensus.
-/// `sum-node rollback` (`crates/node/src/main.rs`) does, and it does so with its
-/// own open-coded loop that reads `cf::STATE_DIFFS` directly: it reverts account
-/// rows only, consults neither the contract diff nor the generic application
-/// journal, and never asks where the activation boundary is. Post-activation it
-/// therefore under-reverts in exactly the way this function's guard exists to
-/// prevent. That is a finding about an operator tool, recorded in §11.1 of
-/// `docs/lane-a/JOURNAL-CONTRACT.md`; it is NOT fixed here, and this test pins
-/// its shape so the claim can be rechecked.
+/// `sum-node rollback` (`crates/node/src/main.rs`) does — and it now does it
+/// through `sumchain_consensus::reorg::plan_rollback` + `execute_rollback`,
+/// which is the reorg path's own unwind: one atomic batch, the per-block journal
+/// classification, the missing-record halt and the activation checkpoint.
+///
+/// It used to walk the tip down with its own loop over `cf::STATE_DIFFS`,
+/// reverting account rows only. The assertions below pin that it no longer
+/// does, because that was a real under-revert past activation and a regression
+/// to it would be silent.
 #[test]
 fn the_legacy_revert_path_has_no_production_caller_and_the_rollback_cli_has_its_own() {
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -473,8 +474,13 @@ fn the_legacy_revert_path_has_no_production_caller_and_the_rollback_cli_has_its_
          docs/lane-a/JOURNAL-CONTRACT.md, which records that it does not"
     );
     assert!(
-        main.contains("get_state_diff"),
-        "the rollback CLI still reads the legacy account diff directly, which is what \
-         makes it a third unwind implementation"
+        main.contains("plan_rollback") && main.contains("execute_rollback"),
+        "the rollback CLI must go through the consensus unwind, not its own loop"
+    );
+    assert!(
+        !main.contains("get_state_diff"),
+        "the rollback CLI must not read the legacy account diff directly again: doing so \
+         is what made it a third unwind implementation that under-reverted past the \
+         journal activation boundary"
     );
 }

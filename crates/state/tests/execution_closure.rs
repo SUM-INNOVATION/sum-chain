@@ -1883,7 +1883,21 @@ fn non_execution_paths_are_classified() {
         // up in the ledger, which is what this ledger is for.
         (Class::ChainStorage, 10, "blocks, transactions, receipts, their indexes, validator sets, pruning — not application state"),
         (Class::Snapshot, 1, "fast-sync restore, outside consensus"),
-        (Class::OperatorTooling, 7, "see operator_tooling_writes_are_declared_deployment_blockers"),
+        // 7 -> 1 when `sum-node rollback` stopped unwinding state with its own
+        // loop. CHANGED DELIBERATELY: six of these seven were that command
+        // reverting account rows out of `cf::STATE_DIFFS`, deleting receipts,
+        // diffs, the height index and the block, and resetting the tip — out of
+        // band, one write at a time, consulting no journal and no activation
+        // boundary. It now runs `sumchain_consensus::reorg::execute_rollback`,
+        // which is the reorg path's own unwind in a single batch, so those
+        // writes are library writes under a consensus caller rather than
+        // operator writes here. Six out-of-band operator writes disappearing is
+        // that fix showing up in the ledger.
+        //
+        // The one that remains is the messaging-key recovery import, which is a
+        // deployment blocker in its own right and is pinned by
+        // `operator_tooling_writes_are_declared_deployment_blockers`.
+        (Class::OperatorTooling, 1, "see operator_tooling_writes_are_declared_deployment_blockers"),
     ];
     let sites = analyse();
     let mut counted: BTreeMap<Class, usize> = BTreeMap::new();

@@ -566,9 +566,23 @@ pub enum JournalRequirement {
 impl JournalActivation {
     /// Resolve the boundary against `db`.
     pub fn resolve(db: &Database, source: ActivationSource) -> Result<Self> {
-        let boundary = match source {
+        let configured = match source {
             ActivationSource::Pinned(h) => Some(h),
             ActivationSource::ObservedFromChain => lowest_journal_height(db)?,
+        };
+        // A snapshot restore or fast sync leaves canonical state and NO undo
+        // history below the height it restored at — journals are node-local and
+        // are not transmitted. The floor it stamps raises the boundary, because
+        // nothing below it is reversible by any record this database holds. See
+        // `UNDO_HISTORY_FLOOR_META_KEY`.
+        //
+        // `floor + 1` and not `floor`: the restored block itself is the last one
+        // the node did not journal, so the first reversible height is the one
+        // above it.
+        let boundary = match (configured, undo_history_floor(db)?) {
+            (c, None) => c,
+            (None, Some(f)) => Some(f.saturating_add(1)),
+            (Some(c), Some(f)) => Some(c.max(f.saturating_add(1))),
         };
         Ok(Self { source, boundary })
     }
@@ -777,6 +791,73 @@ pub fn refuse_downgrade(db: &Database) -> Result<()> {
 // ═══════════════════════════════════════════════════════════════════════════
 // PERSISTED FORMAT STATE, AND THE STARTUP GATE
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// `META` key holding the height a snapshot restore or fast sync left this
+/// database at — the floor below which it holds NO undo history of any kind.
+///
+/// # Why this row exists, and who writes it
+///
+/// The application journal is node-local: never hashed into a block, never
+/// folded into a state root, never sent over the wire. That is what makes the
+/// format free to change without a consensus event, and it has a consequence —
+/// **a snapshot cannot carry undo history.** A restored node receives canonical
+/// state at some height and no journals, generic or legacy, for anything below
+/// it. It can reverse nothing until it has published blocks of its own.
+///
+/// `ObservedFromChain` alone cannot see that. On a freshly restored database the
+/// journal family is empty, so the observed boundary is unestablished, which is
+/// indistinguishable from a genuine pre-journal chain — and a pre-journal chain
+/// legitimately unwinds from the four legacy per-subsystem journals, which a
+/// restored node does not have either.
+///
+/// This row removes the ambiguity, and it is the seam between the two halves of
+/// the work: **the restore path writes it** (see
+/// [`record_undo_history_floor`]), and everything that reads an activation
+/// honours it. [`JournalActivation::resolve`] raises the boundary to `floor + 1`,
+/// so the checkpoint (§7.3), the advertised depth (§13) and the planner's depth
+/// refusal all bind without any further plumbing.
+pub const UNDO_HISTORY_FLOOR_META_KEY: &[u8] = b"application_journal/undo_history_floor";
+
+/// The height a restore left this database at, if one did.
+pub fn undo_history_floor(db: &Database) -> Result<Option<BlockHeight>> {
+    match db.get(crate::db::cf::META, UNDO_HISTORY_FLOOR_META_KEY)? {
+        None => Ok(None),
+        Some(v) if v.len() == 8 => {
+            let mut h = [0u8; 8];
+            h.copy_from_slice(&v);
+            Ok(Some(u64::from_be_bytes(h)))
+        }
+        Some(v) => Err(invalid(format!(
+            "the undo-history floor row is {} byte(s); it is an 8-byte big-endian block \\
+             height, and a row of any other width means something other than this binary \\
+             wrote it",
+            v.len()
+        ))),
+    }
+}
+
+/// Record that this database was populated by a snapshot restore or fast sync
+/// that left it at `height`, with no undo history below that point.
+///
+/// **This is the function a restore path must call**, in the same batch that
+/// makes the restored state durable if it can, and before the node serves or
+/// imports anything if it cannot. Calling it is what stops the node claiming a
+/// reorg depth it cannot honour.
+///
+/// Monotone: a later restore may only raise the floor. Lowering it would claim
+/// undo history the node never acquired.
+pub fn record_undo_history_floor(db: &Database, height: BlockHeight) -> Result<()> {
+    if let Some(existing) = undo_history_floor(db)? {
+        if height <= existing {
+            return Ok(());
+        }
+    }
+    db.put(
+        crate::db::cf::META,
+        UNDO_HISTORY_FLOOR_META_KEY,
+        &height.to_be_bytes(),
+    )
+}
 
 /// `META` key holding the highest record format version this database has ever
 /// had written into it.

@@ -965,16 +965,21 @@ Stated because a clearly named gap is worth more than a silence.
   capability the storage layer does not have. What is closed is the case the API
   was actually exposed to: a caller that did not think about the boundary can no
   longer reach the function at all.
-* **`sum-node rollback` is a THIRD unwind implementation, and it is not
-  boundary-aware.** `crates/node/src/main.rs` reverts account rows from
-  `cf::STATE_DIFFS` with its own open-coded loop: it consults neither the
-  contract diff nor the generic application journal, and never asks where the
-  activation boundary is. Post-activation it under-reverts in exactly the way
-  the guard above exists to prevent. This is a REAL defect, it is recorded here
-  rather than fixed, and the test named above pins its shape so the claim can be
-  rechecked. Fixing it means routing the CLI through `ActivatedJournal` +
-  `stage_branch_unwind`, which is a change in a crate none of this work's tests
-  cover.
+* **`sum-node rollback` is FIXED**, and was the real defect of the two. It used
+  to revert account rows from `cf::STATE_DIFFS` with its own open-coded loop,
+  consulting neither the contract diff nor the generic application journal and
+  never asking where the activation boundary was — so past activation it
+  under-reverted, silently, while reporting success. It now runs
+  `sumchain_consensus::reorg::plan_rollback` + `execute_rollback`, which is the
+  reorg path's own unwind: one atomic batch, the per-block journal
+  classification, the missing-record halt, the activation checkpoint, and the
+  refusal to go deeper than this node's undo history reaches. Those live in the
+  consensus crate rather than in `main.rs` precisely so tests can reach them.
+  What remains unproven about it is the CLI GLUE: the tests drive
+  `plan_rollback`/`execute_rollback` directly, and nothing executes the
+  `sum-node rollback` subcommand end to end. The scan in
+  `state/the_legacy_revert_path_has_no_production_caller_and_the_rollback_cli_has_its_own`
+  pins that `main.rs` calls them and no longer reads `get_state_diff`.
 * **`UndoRefusal::DuplicateJournalKey` and `UndoRefusal::JournalIdentityMismatch`
   are unreachable through the real producer.** `decode_for` refuses a repeated
   `(cf, key)` as non-canonical order, and a transplanted record as another
@@ -1168,22 +1173,68 @@ the number before it is asked to prove it.
 `reorg/the_advertised_reorg_depth_is_the_depth_the_checkpoint_actually_allows`,
 `reorg/a_node_with_no_journal_history_advertises_zero_until_it_publishes`.]
 
-### 13.2 What a snapshot / fast-sync implementation owes
+### 13.2 The restore floor, and the one thing a snapshot must do
 
-`crates/state/src/snapshot.rs` is not this document's to change. This is the
-requirement it must meet, stated so it can be checked:
+A restored database and a genuine pre-journal chain look identical through the
+journal family: both are empty. They need OPPOSITE treatment — the pre-journal
+chain has the four legacy per-subsystem journals to fall back on, and the
+restored node has nothing at all. So the ambiguity is removed by a row rather
+than guessed at.
 
-1. A restored node MUST NOT report a reorg depth greater than the value above.
-   Immediately after a restore it is **0**.
+**`journal::record_undo_history_floor(db, height)` is the one call a restore
+path must make.** It stamps `META[application_journal/undo_history_floor]` with
+the height the snapshot left the database at. It is monotone: a later restore
+may raise the floor, never lower it.
+
+`JournalActivation::resolve` then raises the boundary to `floor + 1` — `+ 1`
+because the restored block is the last one this node did not journal — and takes
+the higher of that and whatever the source said, so a boundary pinned BELOW the
+floor cannot claim undo history the restore did not bring. Everything downstream
+follows without further plumbing:
+
+* §7.3's checkpoint refuses any branch reaching below it;
+* §13.1's advertised depth counts up from it;
+* `sumchain_consensus::reorg::plan_reorg_within_undo_history` refuses a switch
+  deeper than that at PLAN time, before the plan is acted on.
+
+`crates/state/src/snapshot.rs` belongs to another workstream and is not changed
+here. The requirement on it is exactly one line of code and these properties:
+
+1. A restored node MUST NOT report a reorg depth greater than
+   `advertisable_reorg_depth`. Immediately after a restore it is **0**.
 2. There is no way to import undo history with a snapshot. The only way a
    restored node accumulates it is by PUBLISHING blocks itself, one journal per
    block.
 3. A restored node therefore reaches the engine's full horizon exactly
-   `MAX_REORG_WALK` blocks after the restore point, and not before. Until then
-   its usable depth is the number of blocks it has published.
+   `MAX_REORG_WALK` blocks after the restore point, and not before.
 4. The restore point is a hard floor: nothing below it is revertible by any
    record the node holds — the same statement §7.3 makes about the activation
    height, for the same reason.
+
+**Until something calls `record_undo_history_floor`, a restored node is
+indistinguishable from a pre-journal chain and is treated as one.** That is
+stated rather than glossed: the enforcement is complete and tested on this side,
+and it binds on the day the row is written.
+[PRODUCER, TESTED: `producer/a_restore_floor_raises_the_activation_boundary`,
+`producer/a_node_that_was_never_restored_is_unaffected_by_the_floor`.]
+[CONSUMER, DONE: `reorg/a_snapshot_restored_node_refuses_a_switch_below_its_restore_point`,
+`reorg/a_switch_deeper_than_this_nodes_undo_history_is_refused_at_plan_time`,
+`reorg/a_long_catch_up_over_a_shallow_fork_is_not_refused`,
+`reorg/a_restored_nodes_usable_depth_rebuilds_one_block_at_a_time`.]
+
+### 13.2.1 Why the depth is checked against the ABANDONED branch only
+
+`plan_reorg`'s `max_depth` bounds both walks, so passing the usable depth as
+`max_depth` would also refuse a long CATCH-UP over a recent fork — a node coming
+back online adopts far more than it reverses, and that is not the restricted
+thing. `plan_reorg_within_undo_history` therefore keeps the walk budget at the
+engine's limit and checks `ReorgPlan::depth()`, which counts abandoned blocks
+alone.
+
+The check applies only where the generic journal GOVERNS the head. Below the
+boundary the chain has not activated over that range (§7.1) and the legacy
+journals are the record; refusing there would refuse every reorg on a chain
+whose boundary is pinned above its head.
 
 ### 13.3 The interaction with the ordering invariant
 

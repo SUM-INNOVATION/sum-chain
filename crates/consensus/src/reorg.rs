@@ -39,6 +39,7 @@ use sumchain_state::reorg_undo::{
 };
 use sumchain_state::state::StateManager;
 use sumchain_storage::candidate::{stage_deindex, Acceptance};
+use sumchain_storage::journal::{JournalActivation, JournalRequirement};
 use sumchain_storage::schema::BlockStore;
 use sumchain_storage::Database;
 
@@ -69,6 +70,100 @@ impl ReorgPlan {
     pub fn is_extension(&self) -> bool {
         self.old_branch.is_empty()
     }
+}
+
+/// Plan a switch, and refuse one deeper than the undo history this node
+/// actually holds.
+///
+/// This is the entry point the engine uses. [`plan_reorg`] stays as it was and
+/// answers "what would this switch be"; this answers "and may this node perform
+/// it", which is a different question with a different input.
+///
+/// # Why this is not just a smaller `max_depth`
+///
+/// `max_depth` bounds BOTH walks, and the constraint here is on one of them. A
+/// node that can unwind 200 blocks may still legitimately adopt a branch
+/// thousands long — catching up after being offline, where the fork point is
+/// recent and the adopted branch is not. Passing the usable depth as `max_depth`
+/// would refuse that, which is a different and much larger restriction than the
+/// one intended. So the walk budget stays at the engine's limit and the
+/// ABANDONED branch is checked against the undo history separately.
+///
+/// # What the undo history has to do with it
+///
+/// The application journal is node-local: never committed, never folded into a
+/// root, never transmitted. A node that arrived by snapshot restore or fast sync
+/// therefore holds canonical state and NO undo records, and journals cannot be
+/// shipped with a snapshot — a pre-image is not derivable from a post-state. Its
+/// usable reorg depth on arrival is ZERO, and it REBUILDS one block at a time as
+/// it publishes, because publishing is the only thing that writes a journal.
+///
+/// `UNDO_RETENTION_FLOOR = 4_096` says nothing about such a node: retention is a
+/// promise not to DISCARD undo history, never a claim to HAVE it.
+///
+/// So a node must never accept a reorg deeper than
+/// `JournalActivation::advertisable_reorg_depth`, which is the same number it
+/// reports about itself. Refusing here rather than at the unwind means the
+/// refusal happens before the plan is acted on, and names the depth rather than
+/// the first block whose record is missing.
+///
+/// `stage_branch_unwind`'s activation checkpoint still refuses the same branch
+/// if this is bypassed — the two agree by construction, because a branch deeper
+/// than `head - boundary + 1` is exactly a branch reaching below `boundary`.
+/// This is the earlier and more legible of the two, not a replacement for it.
+pub fn plan_reorg_within_undo_history(
+    block_store: &BlockStore,
+    old_head: &Block,
+    new_head: &Block,
+    finalized_height: BlockHeight,
+    max_depth: u64,
+    activation: &JournalActivation,
+) -> Result<ReorgPlan> {
+    let plan = plan_reorg(block_store, old_head, new_head, finalized_height, max_depth)?;
+    refuse_beyond_undo_history(&plan, activation, old_head.height(), max_depth)?;
+    Ok(plan)
+}
+
+/// The depth check on its own, so it can be applied to a plan built elsewhere
+/// and tested without a fork.
+pub fn refuse_beyond_undo_history(
+    plan: &ReorgPlan,
+    activation: &JournalActivation,
+    head_height: BlockHeight,
+    engine_max: u64,
+) -> Result<()> {
+    // Only where the generic journal GOVERNS the head. Below the boundary the
+    // chain has not activated over this range at all — the four legacy
+    // per-subsystem journals are the undo record, incomplete as they are, and
+    // §7.1 of the contract leaves that behaviour alone. Refusing there would
+    // refuse every reorg on a chain whose boundary is pinned above its head,
+    // which is a far larger claim than this one and not the one being made.
+    //
+    // This is the same predicate `crosses_activation_checkpoint` uses, stated
+    // the other way round: a branch deeper than `head - boundary + 1` under a
+    // head at or above `boundary` is exactly a branch reaching below it.
+    if activation.requirement_at(head_height) != JournalRequirement::Required {
+        return Ok(());
+    }
+    let usable = activation.advertisable_reorg_depth(head_height, engine_max);
+    if plan.depth() > usable {
+        return Err(ConsensusError::InvalidBlock(format!(
+            "refusing a {}-block switch: this node holds undo history for only {} block(s) \
+             below its head at {}. The application journal is node-local — it is never \
+             committed, never folded into a state root and never transmitted — so a node \
+             restored from a snapshot or fast sync arrives with canonical state and no \
+             undo records at all, and rebuilds them only by publishing blocks itself. \
+             This node's journal boundary is {:?}; the retention floor is a promise not to \
+             discard undo history, never a claim to hold it. Reverting these blocks \
+             without their records would leave the rows they wrote applied under a chain \
+             that no longer contains them",
+            plan.depth(),
+            usable,
+            head_height,
+            activation.boundary(),
+        )));
+    }
+    Ok(())
 }
 
 /// Walk both branches back to their common ancestor.
@@ -431,6 +526,166 @@ pub fn resume(
     // The head is still on the abandoned branch: nothing was committed.
     state.set_state_root(accumulator_of(&head));
     execute_reorg(db, state, executor, plan, validators, journal, missing)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Operator rollback
+//
+// `sum-node rollback` used to walk the tip down with its own loop, reverting
+// ACCOUNT rows out of `cf::STATE_DIFFS` and nothing else: it consulted neither
+// the contract diff, nor the compute-pool and beacon journals, nor the generic
+// application journal, and it never asked where the activation boundary was. On
+// a chain past activation that under-reverts — it reports success while leaving
+// every row outside `cf::STATE` applied under a chain that no longer contains
+// the blocks that wrote them — and it was a third, divergent implementation of
+// an unwind the tree already had two correct halves of.
+//
+// It is now the same unwind the reorg path uses, which means it gets the same
+// per-block journal classification, the same missing-record halt, the same
+// activation checkpoint and the same single-batch atomicity. It lives here, in
+// the planner, rather than in `main.rs`, because a correctness-critical unwind
+// that only a binary can reach is one no test can reach either.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A resolved, validated operator rollback. Producing one mutates nothing.
+#[derive(Debug, Clone)]
+pub struct RollbackPlan {
+    /// The block the chain will be left on.
+    pub target: Block,
+    /// Blocks to unwind, ANCESTOR-TO-HEAD order, exactly as `ReorgPlan` uses.
+    pub abandoned: Vec<Block>,
+}
+
+impl RollbackPlan {
+    pub fn depth(&self) -> u64 {
+        self.abandoned.len() as u64
+    }
+}
+
+/// Plan a rollback to `to_height`, refusing anything this node cannot reverse.
+///
+/// Refuses, before anything is written, when:
+///
+/// * `to_height` is not below the current tip — there is nothing to roll back;
+/// * any block in the range is missing from the store, which would make the
+///   unwind's own input incomplete;
+/// * the range is deeper than the undo history this node holds
+///   ([`refuse_beyond_undo_history`]) — the same rule the reorg path applies,
+///   for the same reason, and the reason an operator most needs to hear it:
+///   rolling back past the point where records exist would leave rows applied
+///   under a chain that no longer contains the blocks that wrote them.
+///
+/// `max_depth` is the operator's own limit, and is checked against the range so
+/// a mistyped height is refused rather than executed.
+pub fn plan_rollback(
+    block_store: &BlockStore,
+    to_height: BlockHeight,
+    max_depth: u64,
+    activation: &JournalActivation,
+) -> Result<RollbackPlan> {
+    let current = block_store.get_latest_height()?.ok_or_else(|| {
+        ConsensusError::InvalidBlock(
+            "cannot roll back a database with no recorded height".to_string(),
+        )
+    })?;
+    if to_height >= current {
+        return Err(ConsensusError::InvalidBlock(format!(
+            "target height {to_height} must be strictly below the current tip {current}"
+        )));
+    }
+    let depth = current - to_height;
+    if depth > max_depth {
+        return Err(ConsensusError::InvalidBlock(format!(
+            "refusing to roll back {depth} block(s): the limit for this invocation is \
+             {max_depth}"
+        )));
+    }
+
+    let target = block_store.get_by_height(to_height)?.ok_or_else(|| {
+        ConsensusError::InvalidBlock(format!("no block at target height {to_height}"))
+    })?;
+    let mut abandoned = Vec::with_capacity(depth as usize);
+    for height in to_height + 1..=current {
+        let block = block_store.get_by_height(height)?.ok_or_else(|| {
+            ConsensusError::InvalidBlock(format!(
+                "no block at height {height}; the rollback range has a gap, and unwinding \
+                 across one would leave the missing block's rows applied"
+            ))
+        })?;
+        abandoned.push(block);
+    }
+
+    let plan = RollbackPlan { target, abandoned };
+    // Same predicate, same message, same reason as a reorg: a rollback is a
+    // switch whose adopted branch is empty.
+    refuse_beyond_undo_history(
+        &ReorgPlan {
+            ancestor_hash: plan.target.hash(),
+            ancestor_height: plan.target.height(),
+            old_branch: plan.abandoned.clone(),
+            new_branch: Vec::new(),
+        },
+        activation,
+        current,
+        max_depth,
+    )?;
+    Ok(plan)
+}
+
+/// Execute a rollback in ONE batch, through the same unwind a reorg uses.
+///
+/// The batch carries the state restores, every consumed journal's deletion, the
+/// de-indexing, the removal of the rolled-back block rows, the head reset and
+/// any finality pull-back. A `WriteBatch` has no interior, so an interrupted
+/// rollback leaves either the old tip or the target — never a half-rolled-back
+/// chain — which is the same argument §6.2 of the journal contract makes about
+/// a reorg, and for the same reason: the head IS the marker.
+///
+/// The block ROWS are deleted, which is what the previous implementation did and
+/// what an operator asks for: a rollback is not a fork choice, and leaving the
+/// rolled-back blocks retrievable by hash would leave the tool's effect
+/// ambiguous. This differs from a reorg, which keeps them so the branch can be
+/// re-adopted.
+pub fn execute_rollback(
+    db: &Database,
+    state: &StateManager,
+    plan: &RollbackPlan,
+    journal: &dyn BranchJournal,
+    missing: MissingJournalPolicy,
+) -> Result<UnwindReport> {
+    let block_store = BlockStore::new(db);
+    let mut batch = db.batch();
+    let report = stage_branch_unwind(db, &mut batch, &plan.abandoned, journal, missing)
+        .map_err(|e| ConsensusError::InvalidBlock(format!("rollback unwind refused: {e}")))?;
+    for abandoned in &plan.abandoned {
+        stage_deindex(&mut batch, abandoned)?;
+        batch.delete(sumchain_storage::cf::BLOCKS, abandoned.hash().as_bytes())?;
+    }
+    stage_head_reset(&mut batch, &plan.target)?;
+
+    // Finality cannot outlive the tip. Staged into the SAME batch, not applied
+    // after it: a crash between the two would leave a node claiming finality for
+    // a block it no longer has.
+    if let Some(finalized) = block_store.get_finalized_height()? {
+        if finalized > plan.target.height() {
+            use sumchain_storage::schema::meta_keys;
+            batch.put(
+                sumchain_storage::cf::META,
+                meta_keys::FINALIZED_HEIGHT,
+                &plan.target.height().to_be_bytes(),
+            )?;
+            batch.put(
+                sumchain_storage::cf::META,
+                meta_keys::FINALIZED_HASH,
+                plan.target.hash().as_bytes(),
+            )?;
+        }
+    }
+
+    batch.commit()?;
+    // Only after the commit, for the same reason `execute_reorg` waits.
+    state.set_state_root(accumulator_of(&plan.target));
+    Ok(report)
 }
 
 #[cfg(test)]

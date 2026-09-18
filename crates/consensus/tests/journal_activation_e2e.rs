@@ -515,11 +515,24 @@ async fn a_crossing_reorg_is_refused_through_import_block() {
             .import_block(b_blocks[1].clone())
             .await
             .expect_err("a switch whose abandoned branch crosses the checkpoint must refuse");
+        // CHANGED DELIBERATELY. This asserted the CHECKPOINT's wording, from
+        // `stage_branch_unwind`. The engine now refuses one step earlier, at
+        // planning, because a branch deeper than the undo history this node
+        // holds and a branch reaching below the boundary are the SAME branch —
+        // `head - boundary + 1` is both numbers. The earlier refusal wins the
+        // race, so this asserts the earlier refusal.
+        //
+        // The checkpoint itself is still proven, on this very shape, by
+        // `reorg/a_reorg_crossing_the_checkpoint_is_refused_by_the_real_reorg_driver`
+        // and `reorg/a_switch_deeper_than_this_nodes_undo_history_is_refused_at_plan_time`,
+        // which drives the same branch into `stage_branch_unwind` and gets
+        // `CrossesActivationCheckpoint`. Neither guard is load-bearing alone.
         let rendered = err.to_string();
         assert!(
-            rendered.contains("crosses this chain's application-journal activation boundary")
-                && rendered.contains("irreversible checkpoint"),
-            "the refusal must name the boundary and the policy: {rendered}"
+            rendered.contains("refusing a 2-block switch")
+                && rendered.contains("only 1 block(s)")
+                && rendered.contains("node-local"),
+            "the refusal must name both depths and why the shortfall exists: {rendered}"
         );
         assert_eq!(
             node_a.head_height(),

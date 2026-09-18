@@ -5323,3 +5323,690 @@ fn the_height_index_survives_a_refusal_and_follows_an_adoption() {
         "and the reorged node's index must equal the index of the node it adopted from"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 18. Usable undo depth is enforced at PLAN time
+//
+// Release blocker 10. A node restored from a snapshot or fast sync holds
+// canonical state and no journals — they are node-local and are not
+// transmitted, and a pre-image is not derivable from a post-state. Its usable
+// reorg depth on arrival is ZERO; it REBUILDS one block per publish; and it must
+// never accept a switch deeper than it can reverse.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The plan-time check: a switch deeper than the undo history this node holds is
+/// refused before the plan is acted on, and one exactly at the limit is not.
+///
+/// Driven through `plan_reorg_within_undo_history`, the function
+/// `PoAEngine::import_reorg` now calls — not through the standalone predicate —
+/// so what is exercised is the entry point rather than a helper beside it.
+#[test]
+fn a_switch_deeper_than_this_nodes_undo_history_is_refused_at_plan_time() {
+    let alice = key(1);
+    let bob = key(2);
+    let carol = key(3);
+    let proposer = key(9);
+    let (a, b, genesis) = two_nodes(
+        ChainParams::with_v2_enabled(),
+        &[(&alice, 10_000_000), (&bob, 10_000_000)],
+    );
+
+    let mut branch_a = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..4u64 {
+        let blk = a.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(
+                &alice,
+                &carol.address(),
+                1_000 + n as u128,
+                500,
+                n,
+            )],
+        );
+        parent = blk.clone();
+        branch_a.push(blk);
+    }
+    let mut branch_b = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..5u64 {
+        let blk = b.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&bob, &carol.address(), 7_000 + n as u128, 500, n)],
+        );
+        parent = blk.clone();
+        branch_b.push(blk);
+    }
+    for blk in &branch_b {
+        a.retain(blk);
+    }
+    let store = BlockStore::new(&a.db);
+    let head = branch_a.last().unwrap();
+    let new_head = branch_b.last().unwrap();
+    assert_eq!(head.height(), 4);
+
+    // A node "restored at height 2": its journal history begins at 3, so it can
+    // reverse heights 3 and 4 and nothing below. The abandoned branch here is
+    // four blocks, which is deeper.
+    let restored = JournalActivation::pinned(3);
+    assert_eq!(restored.advertisable_reorg_depth(4, DEEP), 2);
+    let err = sumchain_consensus::reorg::plan_reorg_within_undo_history(
+        &store,
+        head,
+        new_head,
+        NO_FINALITY,
+        DEEP,
+        &restored,
+    )
+    .expect_err("a switch deeper than the undo history must be refused");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("refusing a 4-block switch")
+            && rendered.contains("only 2 block(s)")
+            && rendered.contains("node-local"),
+        "the refusal must name both depths and why the shortfall exists: {rendered}"
+    );
+
+    // Nothing was written by the refusal — planning never writes, and this
+    // refuses inside planning.
+    assert_eq!(
+        a.head().map(|h| h.hash()),
+        Some(head.hash()),
+        "a refused plan leaves the node where it was"
+    );
+
+    // Exactly at the limit is accepted: a boundary at 1 makes all four blocks
+    // reversible.
+    let full = JournalActivation::pinned(1);
+    assert_eq!(full.advertisable_reorg_depth(4, DEEP), 4);
+    let plan = sumchain_consensus::reorg::plan_reorg_within_undo_history(
+        &store,
+        head,
+        new_head,
+        NO_FINALITY,
+        DEEP,
+        &full,
+    )
+    .expect("a switch exactly at the usable depth is not deeper than it");
+    assert_eq!(plan.depth(), 4);
+
+    // And one block of undo history short of that is refused, so the acceptance
+    // above is a boundary and not a large allowance.
+    let one_short = JournalActivation::pinned(2);
+    assert_eq!(one_short.advertisable_reorg_depth(4, DEEP), 3);
+    assert!(sumchain_consensus::reorg::plan_reorg_within_undo_history(
+        &store,
+        head,
+        new_head,
+        NO_FINALITY,
+        DEEP,
+        &one_short,
+    )
+    .is_err());
+
+    // The plan-time refusal and the unwind-time checkpoint agree by
+    // construction: a branch deeper than `head - boundary + 1` is exactly a
+    // branch reaching below `boundary`. Shown rather than argued.
+    let journal = ActivatedJournal::new(&a.db, restored);
+    let plan = plan_reorg(&store, head, new_head, NO_FINALITY, DEEP).expect("plan");
+    let mut batch = a.db.batch();
+    let err = stage_branch_unwind(
+        &a.db,
+        &mut batch,
+        &plan.old_branch,
+        &journal,
+        journal.policy(),
+    )
+    .expect_err("the same branch must also be refused by the checkpoint");
+    drop(batch);
+    assert!(
+        matches!(err, UndoRefusal::CrossesActivationCheckpoint { .. }),
+        "{err}"
+    );
+}
+
+/// A node that adopts a branch whose ADOPTED side is long but whose abandoned
+/// side is short is NOT refused.
+///
+/// This is why the usable depth is checked against the abandoned branch rather
+/// than passed as `max_depth`: `max_depth` bounds both walks, and a node catching
+/// up after being offline legitimately adopts far more than it reverses.
+#[test]
+fn a_long_catch_up_over_a_shallow_fork_is_not_refused() {
+    let alice = key(1);
+    let bob = key(2);
+    let carol = key(3);
+    let proposer = key(9);
+    let (a, b, genesis) = two_nodes(
+        ChainParams::with_v2_enabled(),
+        &[(&alice, 10_000_000), (&bob, 10_000_000)],
+    );
+
+    // A's chain, and B's: they share the genesis only, but A abandons ONE block
+    // while B offers twelve.
+    let only = a.produce(
+        Some(&genesis),
+        &proposer,
+        vec![transfer(&alice, &carol.address(), 1_000, 500, 0)],
+    );
+    let mut branch_b = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..12u64 {
+        let blk = b.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&bob, &carol.address(), 7_000 + n as u128, 500, n)],
+        );
+        parent = blk.clone();
+        branch_b.push(blk);
+    }
+    for blk in &branch_b {
+        a.retain(blk);
+    }
+
+    // Undo history for exactly the one block it has to reverse, and no more.
+    let activation = JournalActivation::pinned(1);
+    assert_eq!(activation.advertisable_reorg_depth(1, DEEP), 1);
+    let plan = sumchain_consensus::reorg::plan_reorg_within_undo_history(
+        &BlockStore::new(&a.db),
+        &only,
+        branch_b.last().unwrap(),
+        NO_FINALITY,
+        DEEP,
+        &activation,
+    )
+    .expect("adopting twelve while abandoning one is within a one-block undo history");
+    assert_eq!(plan.depth(), 1);
+    assert_eq!(plan.new_branch.len(), 12);
+}
+
+/// The usable depth REBUILDS as the node publishes, measured on a real database
+/// rather than asserted about the formula.
+///
+/// A restored node cannot import undo history — journals are not transmitted —
+/// so the only thing that raises this number is publishing blocks. After
+/// `MAX_REORG_WALK` of them it has reached the engine's horizon and stops
+/// growing.
+#[test]
+fn a_restored_nodes_usable_depth_rebuilds_one_block_at_a_time() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let walk = sumchain_consensus::poa::MAX_REORG_WALK;
+
+    // The restore: canonical state present, no journal history at all. That is
+    // the state a snapshot leaves, and the observed boundary is unestablished.
+    let restored =
+        JournalActivation::resolve(&node.db, ActivationSource::ObservedFromChain).expect("resolve");
+    assert_eq!(restored.boundary(), None);
+    assert_eq!(
+        restored.advertisable_reorg_depth(5_000, walk),
+        0,
+        "a node that has published nothing can reverse nothing, whatever its head"
+    );
+
+    // Publishing is the only thing that rebuilds it.
+    let genesis = node.produce(None, &proposer, Vec::new());
+    let mut parent = genesis;
+    for n in 0..4u64 {
+        parent = node.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+        let observed = JournalActivation::resolve(&node.db, ActivationSource::ObservedFromChain)
+            .expect("resolve");
+        assert_eq!(
+            observed.advertisable_reorg_depth(parent.height(), walk),
+            parent.height() + 1,
+            "after publishing height {} the node can reverse every block it published",
+            parent.height()
+        );
+    }
+
+    // And a node restored at a height ABOVE genesis counts from its own first
+    // published block, not from the bottom of the chain it was handed.
+    const RESTORE: u64 = 900_000;
+    let after_restore = JournalActivation::pinned(RESTORE + 1);
+    for published in [0u64, 1, 200, walk, walk + 5_000] {
+        assert_eq!(
+            after_restore.advertisable_reorg_depth(RESTORE + published, walk),
+            published.min(walk),
+            "after {published} published block(s)"
+        );
+    }
+}
+
+/// A node that was RESTORED from a snapshot refuses a switch reaching below the
+/// restore point, on a real database, through the planner the engine uses.
+///
+/// The restore is expressed the way a restore expresses itself: canonical state
+/// present, blocks present, and `record_undo_history_floor` stamped at the
+/// height it arrived at. Nothing else distinguishes it — the journal family is
+/// empty either way, which is why the row exists.
+///
+/// `crates/state/src/snapshot.rs` belongs to another workstream and is not
+/// touched here. What this pins is the seam: whatever writes that row gets this
+/// behaviour, and until something does, a restored node is indistinguishable
+/// from a pre-journal chain and is treated as one.
+#[test]
+fn a_snapshot_restored_node_refuses_a_switch_below_its_restore_point() {
+    let alice = key(1);
+    let bob = key(2);
+    let carol = key(3);
+    let proposer = key(9);
+    let (a, b, genesis) = two_nodes(
+        ChainParams::with_v2_enabled(),
+        &[(&alice, 10_000_000), (&bob, 10_000_000)],
+    );
+
+    let mut branch_a = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..4u64 {
+        let blk = a.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(
+                &alice,
+                &carol.address(),
+                1_000 + n as u128,
+                500,
+                n,
+            )],
+        );
+        parent = blk.clone();
+        branch_a.push(blk);
+    }
+    let mut branch_b = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..5u64 {
+        let blk = b.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&bob, &carol.address(), 7_000 + n as u128, 500, n)],
+        );
+        parent = blk.clone();
+        branch_b.push(blk);
+    }
+    for blk in &branch_b {
+        a.retain(blk);
+    }
+    let store = BlockStore::new(&a.db);
+    let head = branch_a.last().unwrap();
+    let new_head = branch_b.last().unwrap();
+
+    // Before the restore is recorded, this chain's own journal history says the
+    // whole branch is reversible — which it is, because this node published it.
+    let native =
+        JournalActivation::resolve(&a.db, ActivationSource::ObservedFromChain).expect("resolve");
+    assert_eq!(native.boundary(), Some(0));
+    sumchain_consensus::reorg::plan_reorg_within_undo_history(
+        &store,
+        head,
+        new_head,
+        NO_FINALITY,
+        DEEP,
+        &native,
+    )
+    .expect("a node holding its own journals may reverse its own blocks");
+
+    // Now say it arrived at height 2 by snapshot. Everything at or below 2 is
+    // unreversible by any record this database holds, however many blocks are
+    // sitting in `BLOCKS`.
+    sumchain_storage::journal::record_undo_history_floor(&a.db, 2).expect("record the floor");
+    let restored =
+        JournalActivation::resolve(&a.db, ActivationSource::ObservedFromChain).expect("resolve");
+    assert_eq!(
+        restored.boundary(),
+        Some(3),
+        "the floor raises the boundary even though the journal family is full"
+    );
+    assert_eq!(restored.advertisable_reorg_depth(4, DEEP), 2);
+
+    let err = sumchain_consensus::reorg::plan_reorg_within_undo_history(
+        &store,
+        head,
+        new_head,
+        NO_FINALITY,
+        DEEP,
+        &restored,
+    )
+    .expect_err("a restored node must refuse a switch below its restore point");
+    assert!(
+        err.to_string().contains("refusing a 4-block switch")
+            && err.to_string().contains("only 2 block(s)"),
+        "{err}"
+    );
+
+    // And the unwind layer refuses the same branch independently, so the two
+    // guards agree on a restored node exactly as they do on an activating one.
+    let journal = ActivatedJournal::new(&a.db, restored);
+    let plan = plan_reorg(&store, head, new_head, NO_FINALITY, DEEP).expect("plan");
+    let mut batch = a.db.batch();
+    let refusal = stage_branch_unwind(
+        &a.db,
+        &mut batch,
+        &plan.old_branch,
+        &journal,
+        journal.policy(),
+    )
+    .expect_err("the checkpoint must refuse a branch below the restore point too");
+    drop(batch);
+    assert!(
+        matches!(
+            refusal,
+            UndoRefusal::CrossesActivationCheckpoint { boundary: 3, .. }
+        ),
+        "{refusal}"
+    );
+
+    // A shallower switch, wholly above the restore point, is still allowed —
+    // the restriction is a floor, not a freeze.
+    let shallow = plan_reorg(&store, head, &branch_b[3], NO_FINALITY, DEEP).expect("plan");
+    assert_eq!(shallow.depth(), 4);
+    let fork_at_3 = plan_reorg(&store, head, new_head, NO_FINALITY, DEEP).expect("plan");
+    assert_eq!(fork_at_3.depth(), 4);
+    let shallow_plan = ReorgPlanShim::two_block_suffix(&branch_a);
+    sumchain_consensus::reorg::refuse_beyond_undo_history(&shallow_plan, &restored, 4, DEEP)
+        .expect("a two-block switch is within a two-block undo history");
+}
+
+/// A `ReorgPlan` built by hand, so the depth predicate can be exercised at
+/// depths this fixture's forks do not happen to produce.
+struct ReorgPlanShim;
+
+impl ReorgPlanShim {
+    fn two_block_suffix(branch: &[Block]) -> sumchain_consensus::reorg::ReorgPlan {
+        let ancestor = &branch[branch.len() - 3];
+        sumchain_consensus::reorg::ReorgPlan {
+            ancestor_hash: ancestor.hash(),
+            ancestor_height: ancestor.height(),
+            old_branch: branch[branch.len() - 2..].to_vec(),
+            new_branch: Vec::new(),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 19. The operator rollback
+//
+// Release blocker 7. `sum-node rollback` reverted ACCOUNT rows out of
+// `cf::STATE_DIFFS` with its own loop and nothing else — no contract diff, no
+// compute-pool or beacon journal, no generic application journal, and no
+// question about the activation boundary. Past activation that under-reverts.
+// It is now `plan_rollback` + `execute_rollback`, which is the reorg path's own
+// unwind, and these drive those directly.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A rollback returns EVERY family to the target, byte for byte — including the
+/// families the four legacy per-subsystem journals never covered, which is the
+/// whole of what the old loop got wrong.
+#[test]
+fn a_rollback_restores_every_family_the_legacy_diffs_never_covered() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+
+    // Two blocks above the target, then the target snapshot, then two more.
+    let mut parent = genesis;
+    for n in 0..2u64 {
+        parent = node.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+    }
+    let target = parent.clone();
+    let at_target = node.snapshot();
+    for n in 2..4u64 {
+        parent = node.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+    }
+    assert_ne!(node.snapshot(), at_target, "the fixture must have moved on");
+
+    let store = BlockStore::new(&node.db);
+    let journals = node.real_journal();
+    let plan = sumchain_consensus::reorg::plan_rollback(
+        &store,
+        target.height(),
+        10,
+        &journals.activation(),
+    )
+    .expect("plan a two-block rollback");
+    assert_eq!(plan.depth(), 2);
+    assert_eq!(plan.target.hash(), target.hash());
+
+    let report = sumchain_consensus::reorg::execute_rollback(
+        &node.db,
+        &node.state,
+        &plan,
+        &journals,
+        journals.policy(),
+    )
+    .expect("execute");
+    drop(journals);
+
+    assert_eq!(report.blocks, 2);
+    assert_eq!(report.tolerated_absences, 0);
+    assert_eq!(report.checks, report.records);
+    assert!(report.records > 0);
+
+    // Every convergent family, not only `cf::STATE`. The old loop would have
+    // left everything outside `cf::STATE` exactly where the rolled-back blocks
+    // put it.
+    let after = node.snapshot();
+    let mut expected = at_target.clone();
+    // The rolled-back blocks' rows are gone from BLOCKS too — a rollback is not
+    // a fork choice, and the tool deletes them, as it always did.
+    expected.retain(|(family, _), _| family != cf::BLOCKS);
+    let mut after_cmp = after.clone();
+    after_cmp.retain(|(family, _), _| family != cf::BLOCKS);
+    assert_eq!(
+        after_cmp,
+        expected,
+        "a rollback must return every family to the target:\n{}",
+        describe_divergence(&after_cmp, &expected)
+    );
+    assert_eq!(node.head().map(|h| h.hash()), Some(target.hash()));
+    assert_eq!(node.state.state_root(), accumulator_of(&target));
+
+    // And the rolled-back blocks are gone from the store, which is what the
+    // operator asked for.
+    assert!(store.get_by_height(target.height() + 1).unwrap().is_none());
+}
+
+/// A rollback that would cross the activation checkpoint is REFUSED, at plan
+/// time, and writes nothing.
+///
+/// This is the case the old loop executed happily: below the boundary it would
+/// have reverted account rows from the legacy diffs and left every other family
+/// applied, on a chain that no longer contained the blocks that wrote them.
+#[test]
+fn a_rollback_across_the_activation_checkpoint_is_refused() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+    let mut parent = genesis.clone();
+    for n in 0..4u64 {
+        parent = node.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+    }
+    let before = node.snapshot();
+    let store = BlockStore::new(&node.db);
+
+    // The chain's boundary is at 3: heights 1 and 2 are pre-journal history.
+    let activation = JournalActivation::pinned(3);
+    let err = sumchain_consensus::reorg::plan_rollback(&store, 1, 10, &activation)
+        .expect_err("a rollback reaching below the boundary must be refused");
+    assert!(
+        err.to_string().contains("refusing a 3-block switch")
+            && err.to_string().contains("only 2 block(s)"),
+        "{err}"
+    );
+    assert_eq!(node.snapshot(), before, "planning writes nothing");
+
+    // Down to the boundary itself is allowed — the restriction is a floor.
+    let plan = sumchain_consensus::reorg::plan_rollback(&store, 2, 10, &activation)
+        .expect("a rollback to the boundary's own predecessor is within the undo history");
+    assert_eq!(plan.depth(), 2);
+
+    // And the unwind layer refuses the crossing branch independently, so the
+    // tool is not the only thing standing between an operator and it.
+    let journals = ActivatedJournal::new(&node.db, activation);
+    let crossing: Vec<Block> = (1..=4)
+        .map(|h| store.get_by_height(h).unwrap().unwrap())
+        .collect();
+    let mut batch = node.db.batch();
+    let refusal = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &crossing,
+        &journals,
+        journals.policy(),
+    )
+    .expect_err("the checkpoint must refuse it too");
+    drop(batch);
+    assert!(
+        matches!(
+            refusal,
+            UndoRefusal::CrossesActivationCheckpoint { boundary: 3, .. }
+        ),
+        "{refusal}"
+    );
+    assert_eq!(node.snapshot(), before);
+}
+
+/// The operator-facing refusals: a target at or above the tip, a range past the
+/// caller's own limit, and a gap in the range. All before anything is written.
+#[test]
+fn a_rollback_refuses_a_bad_target_a_deep_range_and_a_gap() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+    let mut parent = genesis;
+    for n in 0..4u64 {
+        parent = node.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+    }
+    let before = node.snapshot();
+    let store = BlockStore::new(&node.db);
+    let activation =
+        JournalActivation::resolve(&node.db, ActivationSource::ObservedFromChain).expect("resolve");
+
+    for (target, limit, expect) in [
+        (4u64, 10u64, "strictly below the current tip"),
+        (5, 10, "strictly below the current tip"),
+        (0, 2, "the limit for this invocation is 2"),
+    ] {
+        let err = sumchain_consensus::reorg::plan_rollback(&store, target, limit, &activation)
+            .expect_err("must refuse");
+        assert!(
+            err.to_string().contains(expect),
+            "target {target} limit {limit}: {err}"
+        );
+    }
+
+    // A gap: the height index no longer names a block in the range. Refused
+    // rather than unwound around, because unwinding around it would leave the
+    // missing block's rows applied.
+    assert_eq!(
+        node.snapshot(),
+        before,
+        "no refusal so far has written anything"
+    );
+    node.db
+        .delete(cf::BLOCK_HEIGHT, &3u64.to_be_bytes())
+        .expect("create a gap");
+    let with_gap = node.snapshot();
+    let err = sumchain_consensus::reorg::plan_rollback(&store, 1, 10, &activation)
+        .expect_err("a gap must refuse");
+    assert!(err.to_string().contains("has a gap"), "{err}");
+    assert_eq!(
+        node.snapshot(),
+        with_gap,
+        "the gap refusal writes nothing either"
+    );
+}
+
+/// A rollback is ONE batch, so an interruption leaves the old tip or the target
+/// and never a chain half-way between them.
+#[test]
+fn an_interrupted_rollback_leaves_the_old_tip_untouched() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+    let mut parent = genesis;
+    for n in 0..3u64 {
+        parent = node.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+    }
+    let head = parent.clone();
+    let before = node.snapshot();
+    let store = BlockStore::new(&node.db);
+    let journals = node.real_journal();
+    let plan =
+        sumchain_consensus::reorg::plan_rollback(&store, 1, 10, &journals.activation()).unwrap();
+
+    // The interruption: everything staged, nothing committed. `stage_branch_unwind`
+    // is what `execute_rollback` calls, and a dropped `WriteBatch` writes
+    // nothing — which is the whole of the crash argument, since the rollback has
+    // no second batch for a crash to land between.
+    let mut batch = node.db.batch();
+    stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &plan.abandoned,
+        &journals,
+        journals.policy(),
+    )
+    .expect("stage");
+    drop(batch);
+    drop(journals);
+
+    assert_eq!(
+        node.snapshot(),
+        before,
+        "an interrupted rollback leaves the database exactly as it was"
+    );
+    assert_eq!(node.head().map(|h| h.hash()), Some(head.hash()));
+
+    // And the retry succeeds, because nothing was consumed.
+    let journals = node.real_journal();
+    let report = sumchain_consensus::reorg::execute_rollback(
+        &node.db,
+        &node.state,
+        &plan,
+        &journals,
+        journals.policy(),
+    )
+    .expect("a clean retry");
+    assert_eq!(report.blocks, 2);
+}

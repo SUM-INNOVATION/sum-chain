@@ -30,7 +30,7 @@ use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::engine::{ConsensusEngine, ConsensusEvent, ForkChoice, LongestChainForkChoice};
-use crate::reorg::{execute_reorg, plan_reorg};
+use crate::reorg::{execute_reorg, plan_reorg_within_undo_history};
 use crate::{ConsensusError, Result};
 
 /// Proof of Authority consensus engine
@@ -52,7 +52,7 @@ enum Admission {
 
 /// Upper bound on how far the ancestor walk may travel.
 ///
-/// An allocation bound, not a consensus rule: `plan_reorg` walks both branches
+/// An allocation bound, not a consensus rule: `crate::reorg::plan_reorg` walks both branches
 /// into memory, and a malformed or hostile branch must not be able to make that
 /// unbounded. What actually limits how deep a switch may go is finality, which
 /// is checked separately and refuses a walk below the finalized height. This
@@ -775,7 +775,7 @@ impl PoAEngine {
     /// What happens instead, in order:
     ///
     /// 1. Retain the arriving block, so the ancestor walk can see it.
-    /// 2. [`plan_reorg`] resolves the fork BY HASH and refuses a gap, a switch
+    /// 2. [`crate::reorg::plan_reorg`] resolves the fork BY HASH and refuses a gap, a switch
     ///    below finality, or a walk past the allocation bound — before anything
     ///    is written.
     /// 3. [`execute_reorg`] unwinds the abandoned branch newest-first from its
@@ -828,7 +828,6 @@ impl PoAEngine {
             ))?;
 
         let finalized = block_store.get_finalized_height()?.unwrap_or(0);
-        let plan = plan_reorg(block_store, &old_head, &block, finalized, MAX_REORG_WALK)?;
 
         // The journal this node reverts from, resolved per block against its own
         // activation boundary: the generic application journal at and above it,
@@ -851,6 +850,20 @@ impl PoAEngine {
                 "cannot resolve the application-journal activation boundary: {e}"
             ))
         })?;
+
+        // Planned against the undo history this node actually HOLDS, not only
+        // against the engine's walk limit. A node restored from a snapshot has
+        // canonical state and no journals, so its usable depth starts at zero and
+        // rebuilds one block per publish; `MAX_REORG_WALK` is what the engine
+        // will walk, never a claim about what this database can reverse.
+        let plan = plan_reorg_within_undo_history(
+            block_store,
+            &old_head,
+            &block,
+            finalized,
+            MAX_REORG_WALK,
+            &journals.activation(),
+        )?;
         // Derived from the same `JournalActivation` the journal itself holds, so
         // the policy and the journal cannot disagree about where the boundary
         // is. A missing record at or above it HALTS the reorg; below it, absence

@@ -234,6 +234,16 @@ enum Commands {
         #[arg(long, default_value = "10")]
         max_blocks: u64,
 
+        /// Genesis file, so the chain's own application-journal activation
+        /// height is honoured exactly.
+        ///
+        /// Without it the boundary is OBSERVED from the journal history this
+        /// database holds, which is right for the production `None` gate and
+        /// may differ from a chain that pins one. Pass it on any chain that
+        /// sets `application_journal_enabled_from_height`.
+        #[arg(long)]
+        genesis: Option<PathBuf>,
+
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
@@ -799,55 +809,104 @@ async fn main() -> Result<()> {
             data_dir,
             to_height,
             max_blocks,
+            genesis,
             yes,
         } => {
-            use sumchain_storage::cf;
-            use sumchain_storage::schema::{BlockStore, StateStore};
+            // ── the operator rollback, through the reorg path's own unwind ───
+            //
+            // This command used to walk the tip down with its own loop,
+            // reverting ACCOUNT rows out of `cf::STATE_DIFFS` and nothing else:
+            // no contract diff, no compute-pool or beacon journal, no generic
+            // application journal, and no question about where the activation
+            // boundary is. Past activation that under-reverts — it reports
+            // success while leaving every row outside `cf::STATE` applied under
+            // a chain that no longer contains the blocks that wrote them.
+            //
+            // It is now `sumchain_consensus::reorg::plan_rollback` +
+            // `execute_rollback`, which is the same unwind a reorg performs: one
+            // atomic batch, the per-block journal classification, the
+            // missing-record halt, the activation checkpoint, and the refusal to
+            // go deeper than this node's undo history reaches. Those live in the
+            // consensus crate rather than here because a correctness-critical
+            // unwind only a binary can reach is one no test can reach either.
+            use sumchain_consensus::reorg::{execute_rollback, plan_rollback};
+            use sumchain_state::reorg_undo::ActivatedJournal;
+            use sumchain_state::StateManager;
+            use sumchain_storage::journal::ActivationSource;
+            use sumchain_storage::schema::BlockStore;
 
             init_logging("info", false)?;
 
             info!("Opening database at {:?}", data_dir);
-            let db = Database::open_default(&data_dir)?;
+            let db = std::sync::Arc::new(Database::open_default(&data_dir)?);
+
+            // The same gate the node runs at boot. An operator tool that
+            // REWRITES state must not run against journal history this binary
+            // cannot read: it would be deciding what to restore from records it
+            // does not understand.
+            let format = sumchain_storage::journal::validate_startup(&db)
+                .context("application journal format check failed")?;
+
+            // Where this chain's generic journal becomes authoritative. From the
+            // genesis document when one is supplied, so a pinned gate is honoured
+            // exactly; otherwise observed from the journal history on disk, which
+            // is the production `None` rule.
+            let source = match &genesis {
+                Some(path) => {
+                    let g = sumchain_genesis::Genesis::from_file(path)
+                        .with_context(|| format!("failed to load genesis from {:?}", path))?;
+                    ActivationSource::from_configured_height(
+                        g.params.application_journal_enabled_from_height,
+                    )
+                }
+                None => {
+                    println!(
+                        "NOTE: no --genesis given, so the journal activation boundary is \
+                         OBSERVED from this database ({:?}). On a chain that pins \
+                         application_journal_enabled_from_height, pass --genesis so this \
+                         tool uses the same boundary the node does.",
+                        format.observed_boundary
+                    );
+                    ActivationSource::ObservedFromChain
+                }
+            };
+            let journals = ActivatedJournal::resolve(&db, source)
+                .map_err(|e| anyhow::anyhow!("cannot resolve the journal boundary: {}", e))?;
 
             let block_store = BlockStore::new(&db);
-            let state_store = StateStore::new(&db);
-
             let current_height = block_store
                 .get_latest_height()?
                 .context("No latest block height found in DB (chain not initialized?)")?;
 
-            if to_height >= current_height {
-                anyhow::bail!(
-                    "Target height {} must be strictly less than current tip {}",
-                    to_height,
-                    current_height
-                );
-            }
+            // Planning writes nothing, and refuses everything it cannot justify:
+            // a target at or above the tip, a gap in the range, a range past the
+            // operator's own limit, and a range deeper than this node's undo
+            // history reaches.
+            let plan = plan_rollback(&block_store, to_height, max_blocks, &journals.activation())
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            let target_hash = plan.target.hash();
 
-            let to_rollback = current_height - to_height;
-            if to_rollback > max_blocks {
-                anyhow::bail!(
-                    "Refusing to roll back {} blocks (max allowed: {}). \
-                     Raise --max-blocks if you really mean to do this.",
-                    to_rollback,
-                    max_blocks
-                );
-            }
-
-            let target_block = block_store
-                .get_by_height(to_height)?
-                .with_context(|| format!("No block found at target height {}", to_height))?;
-            let target_hash = target_block.hash();
-
-            println!("WARNING: Rolling back {} block(s).", to_rollback);
+            println!("WARNING: Rolling back {} block(s).", plan.depth());
             println!("  Data directory: {:?}", data_dir);
             println!("  Current tip:    {}", current_height);
             println!("  Target tip:     {} (hash {})", to_height, target_hash);
+            println!(
+                "  Undo boundary:  {:?} (usable depth {})",
+                journals.activation().boundary(),
+                journals
+                    .activation()
+                    .advertisable_reorg_depth(current_height, sumchain_consensus::poa::MAX_REORG_WALK),
+            );
             println!();
-            println!("This will:");
-            println!("  - Revert account state using stored state diffs");
-            println!("  - Delete blocks, height->hash index, and state diffs above target");
-            println!("  - Reset LATEST_BLOCK_HASH / LATEST_BLOCK_HEIGHT to the target");
+            println!("This will, in ONE atomic write:");
+            println!("  - Restore every column family the rolled-back blocks wrote, from");
+            println!("    their own undo journals, validated against current state first");
+            println!("  - Delete those journals, the blocks, the height index, receipts");
+            println!("    and the transaction indexes");
+            println!("  - Reset the chain tip, and finality if it had advanced past target");
+            println!();
+            println!("An interruption leaves either the old tip or the target, never a");
+            println!("half-rolled-back chain.");
             println!();
             println!("The node must be stopped before running this command.");
             println!();
@@ -862,64 +921,27 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Walk from tip down to target+1, reverting each block.
-            for height in (to_height + 1..=current_height).rev() {
-                let block = block_store.get_by_height(height)?.with_context(|| {
-                    format!("Missing block at height {} during rollback", height)
-                })?;
-                let block_hash = block.hash();
-
-                // 1. Revert account state using the stored state diff.
-                if let Some(diff) = state_store.get_state_diff(height, &block_hash)? {
-                    for (address, old_state, _new_state) in diff.changes.iter().rev() {
-                        match old_state {
-                            Some(prev) => state_store.put_account(address, prev)?,
-                            None => {
-                                // Account did not exist before this block — delete it.
-                                let mut key = Vec::with_capacity(4 + 20);
-                                key.extend_from_slice(b"acct");
-                                key.extend_from_slice(address.as_bytes());
-                                db.delete(cf::STATE, &key)?;
-                            }
-                        }
-                    }
-                } else {
-                    info!("No state diff found for height {} (skipping revert)", height);
-                }
-
-                // 2. Delete receipts for this block.
-                for tx in block.transactions.iter() {
-                    db.delete(cf::RECEIPTS, tx.hash().as_bytes())?;
-                }
-
-                // 3. Delete the state diff.
-                state_store.delete_state_diff(height, &block_hash)?;
-
-                // 4. Delete the height -> hash index entry.
-                db.delete(cf::BLOCK_HEIGHT, &height.to_be_bytes())?;
-
-                // 5. Delete the block itself.
-                db.delete(cf::BLOCKS, block_hash.as_bytes())?;
-
-                info!("Reverted block {} ({})", height, block_hash);
-            }
-
-            // Reset chain tip.
-            block_store.set_latest_hash(&target_hash)?;
-            block_store.set_latest_height(to_height)?;
-
-            // Bring finalized height back down if it had advanced past target.
-            if let Some(fin_height) = block_store.get_finalized_height()? {
-                if fin_height > to_height {
-                    block_store.set_finalized_height(to_height)?;
-                    block_store.set_finalized_hash(&target_hash)?;
-                    info!("Finalized height pulled back to {}", to_height);
-                }
-            }
+            let state = StateManager::new(db.clone(), 0);
+            let report = execute_rollback(&db, &state, &plan, &journals, journals.policy())
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             println!();
             println!("Rollback complete.");
             println!("  New tip: {} ({})", to_height, target_hash);
+            println!(
+                "  Unwound {} block(s), replaying {} record(s) with {} current-value check(s)",
+                report.blocks, report.records, report.checks
+            );
+            if report.tolerated_absences > 0 {
+                println!();
+                println!(
+                    "  WARNING: {} block(s) had no undo journal and were skipped. Their \
+                     effects on state were NOT reverted and remain applied under a chain \
+                     that no longer contains them. This is only possible below the journal \
+                     activation boundary.",
+                    report.tolerated_absences
+                );
+            }
             println!();
             println!("Start the node to resume block production.");
         }

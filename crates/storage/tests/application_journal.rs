@@ -1207,3 +1207,110 @@ fn the_supported_upgrade_and_rollback_procedure_walked_in_order() {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Release blocker 10: the snapshot / fast-sync undo-history floor.
+//
+// A snapshot cannot carry undo history — the journal is node-local and is not
+// transmitted, and a pre-image is not derivable from a post-state. A restored
+// database is therefore indistinguishable, by the journal family alone, from a
+// genuine pre-journal chain: both have an empty family. The two need opposite
+// treatment (the pre-journal chain has legacy diffs to fall back on; the
+// restored node has nothing), so the restore stamps a floor and every
+// activation honours it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A recorded restore floor raises the activation boundary to `floor + 1`,
+/// under BOTH activation sources, so everything downstream binds without
+/// further plumbing.
+#[test]
+fn a_restore_floor_raises_the_activation_boundary() {
+    use sumchain_storage::journal::{record_undo_history_floor, undo_history_floor};
+
+    let (d, _g) = db();
+    assert_eq!(
+        undo_history_floor(&d).unwrap(),
+        None,
+        "no restore, no floor"
+    );
+
+    // Before the restore is recorded, an empty journal family reads as "no
+    // journal history at all" — which is also what a genuine pre-journal chain
+    // looks like. That ambiguity is the reason for the row.
+    let before = JournalActivation::resolve(&d, ActivationSource::ObservedFromChain).unwrap();
+    assert_eq!(before.boundary(), None);
+    assert_eq!(before.advertisable_reorg_depth(9_000, 4_096), 0);
+
+    record_undo_history_floor(&d, 9_000).unwrap();
+    assert_eq!(undo_history_floor(&d).unwrap(), Some(9_000));
+
+    // `floor + 1`, not `floor`: the restored block itself is the last one this
+    // node did not journal, so the first reversible height is the one above it.
+    let observed = JournalActivation::resolve(&d, ActivationSource::ObservedFromChain).unwrap();
+    assert_eq!(observed.boundary(), Some(9_001));
+    assert_eq!(
+        observed.requirement_at(9_000),
+        JournalRequirement::PreActivation
+    );
+    assert_eq!(observed.requirement_at(9_001), JournalRequirement::Required);
+
+    // The depth counts from the floor and REBUILDS with the head.
+    assert_eq!(observed.advertisable_reorg_depth(9_000, 4_096), 0);
+    assert_eq!(observed.advertisable_reorg_depth(9_001, 4_096), 1);
+    assert_eq!(observed.advertisable_reorg_depth(9_200, 4_096), 200);
+    assert_eq!(
+        observed.advertisable_reorg_depth(9_000 + 10_000, 4_096),
+        4_096,
+        "and stops at the engine's horizon"
+    );
+
+    // A PINNED boundary cannot lower it. Configuration says from when a record
+    // is required; the floor says from when one EXISTS, and the higher wins.
+    let pinned_below = JournalActivation::resolve(&d, ActivationSource::Pinned(5)).unwrap();
+    assert_eq!(
+        pinned_below.boundary(),
+        Some(9_001),
+        "a pinned boundary below the restore floor would claim undo history the \
+         restore did not bring"
+    );
+    let pinned_above = JournalActivation::resolve(&d, ActivationSource::Pinned(20_000)).unwrap();
+    assert_eq!(pinned_above.boundary(), Some(20_000));
+
+    // Monotone: a later restore may raise the floor, never lower it.
+    record_undo_history_floor(&d, 8_000).unwrap();
+    assert_eq!(undo_history_floor(&d).unwrap(), Some(9_000));
+    record_undo_history_floor(&d, 12_000).unwrap();
+    assert_eq!(undo_history_floor(&d).unwrap(), Some(12_000));
+
+    // And a row of the wrong width is a fault, not a guess.
+    d.put(
+        cf::META,
+        sumchain_storage::journal::UNDO_HISTORY_FLOOR_META_KEY,
+        &[1u8, 2, 3],
+    )
+    .unwrap();
+    assert!(undo_history_floor(&d).is_err());
+}
+
+/// A database with real journal history is unaffected by the floor machinery
+/// when no restore recorded one — the ordinary node path is unchanged.
+#[test]
+fn a_node_that_was_never_restored_is_unaffected_by_the_floor() {
+    let (d, _g) = db();
+    let block = block_at(40, 1);
+    publish_with(&d, &block, TEST_LIMIT, |view| {
+        view.put(cf::STATE, b"k", b"v")
+    })
+    .expect("publish");
+
+    assert_eq!(
+        sumchain_storage::journal::undo_history_floor(&d).unwrap(),
+        None
+    );
+    let act = JournalActivation::resolve(&d, ActivationSource::ObservedFromChain).unwrap();
+    assert_eq!(
+        act.boundary(),
+        Some(40),
+        "the observed boundary is the lowest record, exactly as before"
+    );
+}
