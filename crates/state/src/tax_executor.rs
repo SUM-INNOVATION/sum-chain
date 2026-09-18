@@ -57,23 +57,29 @@ pub struct TaxGates {
     /// The claim-type registry is writable only by a registered, active issuer.
     /// ACTIVATION-AUDIT row AU-19.
     pub authorization: bool,
+    /// Executor-written timestamps are the block's, not a literal zero.
+    /// ACTIVATION-AUDIT class 2.
+    pub real_block_timestamp: bool,
 }
 
 impl TaxGates {
     /// Every gate closed -- the release configuration today.
     pub const CLOSED: Self = Self {
         authorization: false,
+        real_block_timestamp: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
     pub const OPEN: Self = Self {
         authorization: true,
+        real_block_timestamp: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
     pub fn from_params(params: &ChainParams, block_height: BlockHeight) -> Self {
         Self {
             authorization: TaxExecutor::authorization_gate_open(params, block_height),
+            real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
         }
     }
 }
@@ -165,6 +171,8 @@ impl TaxExecutor {
         _tx_hash: Hash,
         gates: TaxGates,
     ) -> Result<TaxExecutionResult> {
+        let block_timestamp =
+            crate::effective_block_timestamp(block_timestamp, gates.real_block_timestamp);
         // AU-19: claim-type registration, update and deprecation have no
         // authority check at all below the gate -- all three guard only on row
         // presence or absence, so any funded account writes the chain's

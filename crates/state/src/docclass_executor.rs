@@ -54,6 +54,9 @@ pub struct DocClassGates {
     /// revoked issuer stops controlling what it issued. ACTIVATION-AUDIT row
     /// AU-36.
     pub revocation_standing: bool,
+    /// Executor-written timestamps are the block's, not a literal zero.
+    /// ACTIVATION-AUDIT class 2.
+    pub real_block_timestamp: bool,
 }
 
 impl DocClassGates {
@@ -63,6 +66,7 @@ impl DocClassGates {
         stake_escrow: false,
         subject_index_split: false,
         revocation_standing: false,
+        real_block_timestamp: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -70,6 +74,7 @@ impl DocClassGates {
         stake_escrow: true,
         subject_index_split: true,
         revocation_standing: true,
+        real_block_timestamp: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -84,6 +89,7 @@ impl DocClassGates {
                 params,
                 block_height,
             ),
+            real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
         }
     }
 }
@@ -287,6 +293,8 @@ impl DocClassExecutor {
         _tx_hash: Hash,
         gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
+        let block_timestamp =
+            crate::effective_block_timestamp(block_timestamp, gates.real_block_timestamp);
         match data.operation {
             // Identity operations (SRC-800)
             DocClassOperation::CreateIdentityRoot => Self::create_identity_root(

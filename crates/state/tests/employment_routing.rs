@@ -2092,11 +2092,15 @@ fn every_status_update_records_a_zero_timestamp_through_dispatch() {
         "the dispatch arm passes 0, so no status update can carry a real time"
     );
 
-    // Called directly with a timestamp, the executor threads it through -- so
-    // the zero above comes from the arm, not from this migration.
-    let direct = EmploymentExecutor::execute(
+    // The discriminator. The zero above has to come from somewhere, and this is
+    // where: the same call with the block-timestamp activation OPEN threads the
+    // real time through. It used to be enough to call `execute` directly with a
+    // timestamp, because the arm was the only thing passing zero; the arm now
+    // passes `block.header.timestamp` and the executor substitutes zero while
+    // the gate is closed, so the discriminator is the gate rather than the call
+    // site. ACTIVATION-AUDIT class 2.
+    let direct = EmploymentExecutor::execute_with_gates(
         &mut view,
-        &params(),
         &issuer.address(),
         &EmploymentTxData {
             operation: EmploymentOperation::ReactivateIssuer,
@@ -2109,6 +2113,7 @@ fn every_status_update_records_a_zero_timestamp_through_dispatch() {
         1_700_000_000,
         0,
         sumchain_primitives::Hash::default(),
+        sumchain_state::EmploymentGates::OPEN,
     )
     .unwrap();
     assert!(direct.success, "{:?}", direct.error);

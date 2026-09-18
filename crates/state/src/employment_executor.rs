@@ -120,23 +120,29 @@ pub struct EmploymentGates {
     /// The subsystem's issuer-standing rule is enforced. ACTIVATION-AUDIT row
     /// AU-27.
     pub authorization: bool,
+    /// Executor-written timestamps are the block's, not a literal zero.
+    /// ACTIVATION-AUDIT class 2.
+    pub real_block_timestamp: bool,
 }
 
 impl EmploymentGates {
     /// Every gate closed -- the release configuration today.
     pub const CLOSED: Self = Self {
         authorization: false,
+        real_block_timestamp: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
     pub const OPEN: Self = Self {
         authorization: true,
+        real_block_timestamp: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
     pub fn from_params(params: &ChainParams, block_height: BlockHeight) -> Self {
         Self {
             authorization: EmploymentExecutor::authorization_gate_open(params, block_height),
+            real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
         }
     }
 }
@@ -233,6 +239,8 @@ impl EmploymentExecutor {
         _tx_hash: Hash,
         gates: EmploymentGates,
     ) -> Result<EmploymentExecutionResult> {
+        let block_timestamp =
+            crate::effective_block_timestamp(block_timestamp, gates.real_block_timestamp);
         let schema_validator = SchemaValidator::new();
 
         match data.operation {

@@ -24,12 +24,12 @@ Four verdicts, and the decision rule that uses them:
 
 ## Remediation status, and why it does not move the count
 
-This document has been worked since it was written. Twenty-four rows now have a
-remedy implemented and tested in the tree, and two more are half-remedied. **None of it changes a single
+This document has been worked since it was written. Thirty-three rows now have a
+remedy implemented and tested in the tree, and three more are half-remedied. **None of it changes a single
 verdict, and the blocking count is exactly what it was.** That is not a
 formality; it is the finding of the remediation pass.
 
-Every one of the twenty-four is a CONSENSUS CHANGE — it changes which
+Every one of the thirty-three is a CONSENSUS CHANGE — it changes which
 transactions succeed, which blocks exist, or what an account balance is, and
 receipts are folded into the state root — so none of them may simply be applied.
 Each is implemented behind an activation height, exactly as the eighteen
@@ -51,8 +51,8 @@ A third status is therefore recorded alongside the verdict, orthogonal to it:
     through a named seam, and is covered by tests that drive an ungated node and
     a gated node over the same transaction and assert that they disagree. It
     becomes live the moment the named `ChainParams` field lands and an operator
-    sets it. Twenty-four rows fully; AU-3 and AU-34 in part, and the tables say
-    which part.
+    sets it. Thirty-three rows fully; AU-3, AU-34 and TS-10 in part, and the
+    tables say which part.
   * **BLOCKED, STRUCTURAL** — the defect cannot be closed by a guard at all,
     because the subsystem records no address, no registry or no signature to
     authorize against. A wire change or a new registry is needed. Stated rather
@@ -62,7 +62,7 @@ A third status is therefore recorded alongside the verdict, orthogonal to it:
 
 ### The `ChainParams` fields the remediation needs
 
-Ten. None could be added from the track that implemented the behaviour behind
+Eleven. None could be added from the track that implemented the behaviour behind
 them; each is specified in full — name, type, semantics and the one-line
 function body that replaces the seam — in the doc comment of its activation
 function. All follow the existing `#[serde(default)] Option<u64>` idiom, so an
@@ -81,8 +81,10 @@ dormant state safe.
 | `employment_authorization_enabled_from_height` | AU-27 | `EmploymentExecutor::authorization_activation` |
 | `property_authorization_enabled_from_height` | AU-30, AU-31 | `PropertyExecutor::authorization_activation` |
 | `tax_authorization_enabled_from_height` | AU-19 | `TaxExecutor::authorization_activation` |
+| `subsystem_block_timestamp_enabled_from_height` | TS-1 to TS-9, and the timestamp half of TS-10 | `subsystem_block_timestamp_activation`, `crates/state/src/lib.rs` — one field for eight subsystems, because it is one rule |
 
-Ten fields: seven per-subsystem authorization heights and three per-defect. They are separate rather than one because activating
+Eleven fields: seven per-subsystem authorization heights, three per-defect, and one
+shared rule. They are separate rather than one because activating
 them is separate: an operator coordinating a validator upgrade for the NFT
 block-denial rule should not be forced to activate the healthcare consent rules
 in the same block, and a subsystem whose remediation is later found wanting must
@@ -328,16 +330,16 @@ The zero placeholders on the production arm are at
 
 | id | defect | source | verdict | gate | evidence | justification |
 |---|---|---|---|---|---|---|
-| TS-1 | Employment: every `updated_at` a status update writes is zero | Employment 1 | **REACHABLE** | none | `crates/state/src/executor.rs:1030-1031`; pinned by `every_status_update_records_a_zero_timestamp_through_dispatch` | production arm; ungated subsystem |
-| TS-2 | Legal: every status transition stamps `updated_at = 0`, `tx_index = 0` | Legal 6 | **REACHABLE** | none | `crates/state/src/executor.rs:916-917`; pinned by `a_status_transition_stamps_a_zero_timestamp` | as above |
-| TS-3 | Finance: every routed update, suspension, revocation, reactivation stamps `updated_at = 0` | Finance 10 | **REACHABLE** | none | `crates/state/src/executor.rs:1069-1070` | as above; no test named by the source message |
-| TS-4 | Tax: both paths pass timestamp 0, so status changes persist an incorrect `updated_at` | Tax 8 | **REACHABLE** | none | `crates/state/src/executor.rs:803-804` | as above |
-| TS-5 | Agreement: timestamp 0 and tx index 0 on every executor-written timestamp | Agreement §untrusted payload metadata | **REACHABLE** | none | `crates/state/src/executor.rs:877-878`; pinned by `the_block_timestamp_reaching_agreement_operations_is_always_zero` | as above |
-| TS-6 | Property: timestamp 0 and tx index 0 | Property §untrusted payload metadata | **REACHABLE** | none | `crates/state/src/executor.rs:952-953`; pinned by `the_block_timestamp_reaching_property_operations_is_always_zero` | as above |
-| TS-7 | Property: `TitleEvent` has no `updated_at`, so a transition writes the (zero) timestamp into `created_at`, destroying the creation time | Property §untrusted payload metadata | **REACHABLE** | none | same arm as TS-6; same pinning test | compounding of TS-6, not independent of it |
-| TS-8 | Healthcare: timestamp 0 and tx index 0 — **and `Prescription::is_valid` is therefore evaluated at time zero**, so an expired prescription is fillable forever and one with a non-zero `effective_from` can never be filled | Healthcare §untrusted payload metadata | **REACHABLE** | none | `crates/state/src/executor.rs:991-992`; pinned by `the_block_timestamp_reaching_healthcare_operations_is_always_zero` | the only member of this class with a direct authorization consequence; ranked accordingly below |
-| TS-9 | DocClass: timestamp 0 on `IdentityRoot.updated_at`, `DocClassIssuer.updated_at`, `RevocationRecord.revoked_at` | DocClass §untrusted payload metadata | **REACHABLE** | none | `crates/state/src/executor.rs:765-766`; pinned by `the_block_timestamp_reaching_docclass_operations_is_always_zero` | as above |
-| TS-10 | DocClass: because `tx_index` is also 0, every event in a block lands at key `height ‖ 0 ‖ 0` and the family holds one row per block — the last event | DocClass §untrusted payload metadata | **REACHABLE** | none | `crates/state/src/executor.rs:766`; write at `crates/state/src/docclass_executor.rs:300`; pinned by `every_docclass_event_in_a_block_lands_at_one_key` | the one place where `tx_index = 0` silently destroys data rather than only mis-stamping it |
+| TS-1 | Employment: every `updated_at` a status update writes is zero | Employment 1 | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `subsystem_block_timestamp_enabled_from_height`, implemented and dormant | `crates/state/src/executor.rs:1030-1031`; pinned by `every_status_update_records_a_zero_timestamp_through_dispatch` | production arm; ungated subsystem |
+| TS-2 | Legal: every status transition stamps `updated_at = 0`, `tx_index = 0` | Legal 6 | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `subsystem_block_timestamp_enabled_from_height`, implemented and dormant | `crates/state/src/executor.rs:916-917`; pinned by `a_status_transition_stamps_a_zero_timestamp` | as above |
+| TS-3 | Finance: every routed update, suspension, revocation, reactivation stamps `updated_at = 0` | Finance 10 | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `subsystem_block_timestamp_enabled_from_height`, implemented and dormant | `crates/state/src/executor.rs:1069-1070` | as above; no test named by the source message |
+| TS-4 | Tax: both paths pass timestamp 0, so status changes persist an incorrect `updated_at` | Tax 8 | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `subsystem_block_timestamp_enabled_from_height`, implemented and dormant | `crates/state/src/executor.rs:803-804` | as above |
+| TS-5 | Agreement: timestamp 0 and tx index 0 on every executor-written timestamp | Agreement §untrusted payload metadata | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `subsystem_block_timestamp_enabled_from_height`, implemented and dormant | `crates/state/src/executor.rs:877-878`; pinned by `the_block_timestamp_reaching_agreement_operations_is_always_zero` | as above |
+| TS-6 | Property: timestamp 0 and tx index 0 | Property §untrusted payload metadata | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `subsystem_block_timestamp_enabled_from_height`, implemented and dormant | `crates/state/src/executor.rs:952-953`; pinned by `the_block_timestamp_reaching_property_operations_is_always_zero` | as above |
+| TS-7 | Property: `TitleEvent` has no `updated_at`, so a transition writes the (zero) timestamp into `created_at`, destroying the creation time | Property §untrusted payload metadata | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `subsystem_block_timestamp_enabled_from_height`, implemented and dormant | same arm as TS-6; same pinning test | compounding of TS-6, not independent of it |
+| TS-8 | Healthcare: timestamp 0 and tx index 0 — **and `Prescription::is_valid` is therefore evaluated at time zero**, so an expired prescription is fillable forever and one with a non-zero `effective_from` can never be filled | Healthcare §untrusted payload metadata | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `subsystem_block_timestamp_enabled_from_height`, implemented and dormant | `crates/state/src/executor.rs:991-992`; pinned by `the_block_timestamp_reaching_healthcare_operations_is_always_zero` | the only member of this class with a direct authorization consequence; ranked accordingly below |
+| TS-9 | DocClass: timestamp 0 on `IdentityRoot.updated_at`, `DocClassIssuer.updated_at`, `RevocationRecord.revoked_at` | DocClass §untrusted payload metadata | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `subsystem_block_timestamp_enabled_from_height`, implemented and dormant | `crates/state/src/executor.rs:765-766`; pinned by `the_block_timestamp_reaching_docclass_operations_is_always_zero` | as above |
+| TS-10 | DocClass: because `tx_index` is also 0, every event in a block lands at key `height ‖ 0 ‖ 0` and the family holds one row per block — the last event | DocClass §untrusted payload metadata | **REACHABLE** | none. **PARTLY REMEDIED, PENDING FIELD:** the TIMESTAMP half is gated on `subsystem_block_timestamp_enabled_from_height`. The `tx_index` half -- the one that silently destroys data -- is **BLOCKED**: it needs a `tx_index` parameter threaded through `execute_tx_with_validators`, shared dispatch plumbing with ~25 test call sites across other tracks' suites, so the signature change belongs to whoever owns it | `crates/state/src/executor.rs:766`; write at `crates/state/src/docclass_executor.rs:300`; pinned by `every_docclass_event_in_a_block_lands_at_one_key` | the one place where `tx_index = 0` silently destroys data rather than only mis-stamping it |
 | TS-11 | Messaging: timestamp/tx-index placeholders on the messaging arm | not listed as a defect in the blocker document (messaging carries no deferred-defect inventory) | **REACHABLE** | none | `crates/state/src/executor.rs:725-726` | recorded for completeness; the blocker document makes no claim here, so this row adds an observation rather than classifying an entry |
 | TS-12 | The same literal zeros on the second dispatch arm, for all of the above | the "both dispatch arms" half of Employment 1, Legal 6, Finance 10, Tax 8, Agreement, Property, Healthcare, DocClass | **UNREACHABLE** | — | `crates/state/src/executor.rs:2452-2789`; fn `execute_tx_v2` at `:2081` has no caller outside `crates/state/tests/` | dead public API; a fix must still change both, because `pub` means a future caller can appear, but nothing today reaches it |
 
@@ -774,10 +776,10 @@ both readings of the release configuration:
 | UNDETERMINED | 3 | **3** |
 | **blocking (REACHABLE + UNDETERMINED)** | **121** | **121** |
 
-**Unchanged, and the reason is the whole point.** Twenty-four rows now carry a
+**Unchanged, and the reason is the whole point.** Thirty-three rows now carry a
 remedy that is implemented, reachable through a named seam and covered by tests
-that show an ungated node and a gated node disagreeing, and two more carry half
-of one. Every one of those
+that show an ungated node and a gated node disagreeing, and three more carry
+half of one. Every one of those
 remedies sits behind an activation height whose `ChainParams` field does not
 exist, because `crates/genesis` belongs to another track. An absent
 `#[serde(default)] Option<u64>` resolves to `None`; `None` closes the gate;
@@ -785,13 +787,13 @@ a closed gate means a release-configured node executes exactly the code it
 executed before. Nothing became unreachable, so nothing stops blocking.
 
 The arithmetic that WOULD move, stated so the next pass can check it: when the
-ten fields in the table above are added to `ChainParams` and set to a height in
-the deployed runtime `genesis.json`, twenty-four rows move from REACHABLE to
+eleven fields in the table above are added to `ChainParams` and set to a height in
+the deployed runtime `genesis.json`, thirty-three rows move from REACHABLE to
 GATED OFF — the remediated behaviour becomes the behaviour — and the blocking
-count falls from 121 to 97. AU-3 and AU-34 do NOT move, because only part of
+count falls from 121 to 88. AU-3, AU-34 and TS-10 do NOT move, because only part of
 each is remedied and the rest is still reachable; a row is GATED OFF only when
 the whole of it is. Until the fields land and an operator sets them the count is
-121, and reporting 97 before then would be the exact failure this document was
+121, and reporting 88 before then would be the exact failure this document was
 written to prevent.
 
 Six further rows are **BLOCKED, STRUCTURAL** (AU-9, AU-10, AU-11, AU-18, AU-21,
@@ -812,8 +814,8 @@ of their dispatch arms (`crates/state/src/executor.rs:494, 692, 755, 795, 868,
 **That is the finding.** This release does not gate these subsystems off. It
 ships them.
 
-The remediation pass changes what is available, not what is shipped: ten
-activation gates now exist in the executors, dormant, waiting for ten
+The remediation pass changes what is available, not what is shipped: eleven
+activation gates now exist in the executors, dormant, waiting for eleven
 `ChainParams` fields. Until those fields exist and an operator sets them, the
 sentence above is still true word for word.
 
@@ -1012,6 +1014,7 @@ This table says only what exists in the tree to close it once its field lands.
 | AU-27 | the Employment issuer-standing rule, in `EmploymentGates` | `a_suspended_employment_issuer_loses_its_mutations_only_at_the_gate`, `an_active_employment_issuer_is_unaffected_by_the_standing_rule` |
 | AU-30, AU-31 | the Property authority checks, in `PropertyGates` | `a_stranger_can_merge_assets_it_did_not_issue_only_below_the_gate`, `a_stranger_cannot_rewrite_a_title_history_at_the_gate` |
 | AU-19 | the Tax claim-type authority check, in `TaxGates` | `the_claim_type_registry_is_writable_by_anyone_only_below_the_gate` |
+| TS-1..TS-9, TS-10 (timestamp half) | every dispatch arm for the eight subsystems now passes `block.header.timestamp`, and each executor substitutes `0` while the gate is closed, through one shared `effective_block_timestamp` so the eight cannot drift apart | `prescription_validity_is_evaluated_at_time_zero_until_the_gate` (TS-8, both directions: expired-forever and never-fillable), `a_consent_revocation_stamps_a_real_time_only_at_the_gate`, and `every_status_update_records_a_zero_timestamp_through_dispatch`, whose discriminator moved from the call site to the gate |
 | AU-36 | `check_revoke_auth` consults the issuer registry — the status question only, so an issuer whose authorization was narrowed can still withdraw what it validly issued | `a_suspended_issuer_keeps_the_revocation_family_only_below_the_gate` |
 
 ### Rows this pass looked at and did not close
@@ -1023,5 +1026,6 @@ This table says only what exists in the tree to close it once its field lands.
 | AU-18, AU-21 | the tax and finance registries authorize nothing they do not take from the applicant, and no `ChainParams` field names a registrar for either. Inventing one inside an executor would be a rule nobody set |
 | AU-32 | `PropertyProofEnvelope` carries no issuer address and Property has no issuer registry at all |
 | AU-24, AU-28 | dead checks, not holes: the row is fetched BY the sender key and registration forces the equality the comparison later tests, so neither can fire. Removing them would be tidier and would close nothing |
-| TS-1..TS-11 | the timestamp half is one change in `crates/state/src/executor.rs`'s dispatch arms; the `tx_index` half (TS-10, which silently destroys data rather than only mis-stamping it) additionally needs a `tx_index` parameter threaded through `execute_tx_with_validators`, whose signature is shared plumbing rather than subsystem code. Not attempted, so that a signature change on the shared dispatch is a deliberate decision by whoever owns it |
+| TS-10 (`tx_index` half) | the half that silently destroys data — every DocClass event in a block lands at key `height ‖ 0 ‖ 0`, so the family holds one row per block. It needs a `tx_index` parameter threaded through `execute_tx_with_validators`, which is shared dispatch plumbing with roughly twenty-five call sites across other tracks' test suites. Not attempted, so that a signature change on the shared dispatch is a deliberate decision by whoever owns it |
+| TS-11, TS-12 | TS-11 is the Messaging arm, and `messaging_executor.rs` is not this track's file; the same one-line change applies and is left for its owner. TS-12 is the dead `execute_tx_v2` arm, which was changed with the live one — a fix must change both, because `pub` means a future caller can appear |
 | Class 4, Class 5, Class 6, Class 7, and the rest of Class 8 | untouched by this pass. They are ordered below Class 3 in severity and the pass ran out of runway before them, which is recorded here rather than left to be inferred from silence |

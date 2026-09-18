@@ -763,7 +763,7 @@ impl BlockExecutor {
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
+                            block_timestamp,
                             0, // tx_index placeholder
                             tx_hash,
                         )?;
@@ -802,7 +802,7 @@ impl BlockExecutor {
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
+                            block_timestamp,
                             0, // tx_index placeholder
                             tx_hash,
                         )?;
@@ -871,12 +871,13 @@ impl BlockExecutor {
                         // Execute Agreement operation (SRC-84X)
                         let result = AgreementExecutor::execute(
                             view,
+                            &self.params,
                             &v2_tx.from,
                             &agreement_data,
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
+                            block_timestamp,
                             0, // tx_index placeholder
                             tx_hash,
                         )?;
@@ -916,7 +917,7 @@ impl BlockExecutor {
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
+                            block_timestamp,
                             0, // tx_index placeholder
                             tx_hash,
                         )?;
@@ -953,7 +954,7 @@ impl BlockExecutor {
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
+                            block_timestamp,
                             0, // tx_index placeholder
                             tx_hash,
                         )?;
@@ -993,7 +994,7 @@ impl BlockExecutor {
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
+                            block_timestamp,
                             0, // tx_index placeholder
                             tx_hash,
                         )?;
@@ -1033,7 +1034,7 @@ impl BlockExecutor {
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
+                            block_timestamp,
                             0, // tx_index placeholder
                             tx_hash,
                         )?;
@@ -1073,7 +1074,7 @@ impl BlockExecutor {
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
+                            block_timestamp,
                             0, // tx_index placeholder
                             tx_hash,
                         )?;
@@ -2507,7 +2508,7 @@ impl BlockExecutor {
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
+                    block_timestamp,
                     0, // tx_index placeholder
                     tx_hash,
                 )?;
@@ -2556,7 +2557,7 @@ impl BlockExecutor {
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
+                    block_timestamp,
                     0, // tx_index placeholder
                     tx_hash,
                 )?;
@@ -2645,12 +2646,13 @@ impl BlockExecutor {
                 // Execute Agreement operation (SRC-84X)
                 let result = AgreementExecutor::execute(
                     view,
+                    &self.params,
                     &tx.from,
                     agreement_data,
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
+                    block_timestamp,
                     0, // tx_index placeholder
                     tx_hash,
                 )?;
@@ -2700,7 +2702,7 @@ impl BlockExecutor {
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
+                    block_timestamp,
                     0, // tx_index placeholder
                     tx_hash,
                 )?;
@@ -2747,7 +2749,7 @@ impl BlockExecutor {
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
+                    block_timestamp,
                     0, // tx_index placeholder
                     tx_hash,
                 )?;
@@ -2797,7 +2799,7 @@ impl BlockExecutor {
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
+                    block_timestamp,
                     0, // tx_index placeholder
                     tx_hash,
                 )?;
@@ -2847,7 +2849,7 @@ impl BlockExecutor {
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
+                    block_timestamp,
                     0, // tx_index placeholder
                     tx_hash,
                 )?;
@@ -2897,7 +2899,7 @@ impl BlockExecutor {
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
+                    block_timestamp,
                     0, // tx_index placeholder
                     tx_hash,
                 )?;

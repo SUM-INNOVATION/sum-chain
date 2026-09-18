@@ -4334,3 +4334,161 @@ fn a_prescription_with_no_refills_is_filled_once_more_below_the_gate_only() {
         );
     }
 }
+
+// ── Class 2 (TS-8): the timestamp, and what evaluating validity at zero does ──
+//
+// `docs/lane-a/ACTIVATION-AUDIT.md` row TS-8, and it is the only member of that
+// class with a direct authorization consequence. Every dispatch arm for this
+// subsystem passed a literal `0` where the block timestamp belongs, so
+// `Prescription::is_valid` was evaluated at TIME ZERO. Two things follow, in
+// opposite directions and both wrong: a prescription that has expired is still
+// valid forever, because `current_time >= expiry` is `0 >= expiry`; and a
+// prescription with a non-zero `effective_from` can NEVER be filled, because
+// `current_time < effective_from` is `0 < effective_from`.
+//
+// The arms now pass `block.header.timestamp` and the executor substitutes zero
+// while the gate is closed, so `the_block_timestamp_reaching_healthcare_
+// operations_is_always_zero` still passes unchanged and the production bytes
+// are identical. Gated on `subsystem_block_timestamp_enabled_from_height`, one
+// field for all eight subsystems because it is one rule.
+
+/// TS-8, both directions, under both gate values.
+#[test]
+fn prescription_validity_is_evaluated_at_time_zero_until_the_gate() {
+    #[derive(serde::Serialize)]
+    struct Fill {
+        prescription_id: [u8; 32],
+        fill_commitment: [u8; 32],
+    }
+
+    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let prov = provider(0x68, issuer.address(), vec![]);
+        assert!(
+            healthcare_at(
+                &mut view,
+                &issuer.address(),
+                HealthcareOperation::RegisterProvider,
+                &prov,
+                gates
+            )
+            .success
+        );
+
+        // (a) Expired at the block's real time of 1000, valid at time zero.
+        let mut expired = prescription(0x69, 0x68, issuer.address(), 3);
+        expired.expiry = 500;
+        // (b) Not yet effective at time zero, effective at 1000.
+        let mut future = prescription(0x6A, 0x68, issuer.address(), 3);
+        future.effective_from = Some(500);
+
+        for rx in [&expired, &future] {
+            assert!(
+                healthcare_at(
+                    &mut view,
+                    &issuer.address(),
+                    HealthcareOperation::IssuePrescription,
+                    rx,
+                    gates
+                )
+                .success
+            );
+        }
+
+        let fill_expired = healthcare_at(
+            &mut view,
+            &issuer.address(),
+            HealthcareOperation::FillPrescription,
+            &Fill {
+                prescription_id: expired.prescription_id,
+                fill_commitment: [0xF3; 32],
+            },
+            gates,
+        );
+        let fill_future = healthcare_at(
+            &mut view,
+            &issuer.address(),
+            HealthcareOperation::FillPrescription,
+            &Fill {
+                prescription_id: future.prescription_id,
+                fill_commitment: [0xF4; 32],
+            },
+            gates,
+        );
+
+        if gates.real_block_timestamp {
+            assert!(
+                !fill_expired.success,
+                "at the gate an expired prescription is expired"
+            );
+            assert!(
+                fill_future.success,
+                "and one whose effective date has passed can finally be filled"
+            );
+        } else {
+            assert!(
+                fill_expired.success,
+                "below the gate an expired prescription is fillable forever"
+            );
+            assert!(
+                !fill_future.success,
+                "and one with a non-zero effective date can never be filled at all"
+            );
+        }
+    }
+}
+
+/// And the same activation makes an ordinary `updated_at` a real time.
+#[test]
+fn a_consent_revocation_stamps_a_real_time_only_at_the_gate() {
+    #[derive(serde::Serialize)]
+    struct Revoke {
+        consent_id: [u8; 32],
+    }
+
+    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let c = consent(0x6B, issuer.address());
+        assert!(
+            healthcare_at(
+                &mut view,
+                &issuer.address(),
+                HealthcareOperation::GrantConsent,
+                &c,
+                gates
+            )
+            .success
+        );
+        assert!(
+            healthcare_at(
+                &mut view,
+                &issuer.address(),
+                HealthcareOperation::RevokeConsent,
+                &Revoke {
+                    consent_id: c.consent_id
+                },
+                gates
+            )
+            .success
+        );
+
+        assert_eq!(
+            HealthcareExecutor::v_get_consent(&view, &c.consent_id)
+                .unwrap()
+                .unwrap()
+                .updated_at,
+            if gates.real_block_timestamp { 1_000 } else { 0 },
+            "the executor's own timestamp"
+        );
+    }
+}

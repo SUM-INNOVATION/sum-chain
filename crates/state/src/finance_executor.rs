@@ -135,23 +135,29 @@ pub struct FinanceGates {
     /// The subsystem's issuer-standing rules are enforced. ACTIVATION-AUDIT
     /// rows AU-22, AU-23 and AU-25.
     pub authorization: bool,
+    /// Executor-written timestamps are the block's, not a literal zero.
+    /// ACTIVATION-AUDIT class 2.
+    pub real_block_timestamp: bool,
 }
 
 impl FinanceGates {
     /// Every gate closed -- the release configuration today.
     pub const CLOSED: Self = Self {
         authorization: false,
+        real_block_timestamp: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
     pub const OPEN: Self = Self {
         authorization: true,
+        real_block_timestamp: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
     pub fn from_params(params: &ChainParams, block_height: BlockHeight) -> Self {
         Self {
             authorization: FinanceExecutor::authorization_gate_open(params, block_height),
+            real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
         }
     }
 }
@@ -250,6 +256,8 @@ impl FinanceExecutor {
         _tx_hash: Hash,
         gates: FinanceGates,
     ) -> Result<FinanceExecutionResult> {
+        let block_timestamp =
+            crate::effective_block_timestamp(block_timestamp, gates.real_block_timestamp);
         match data.operation {
             // =================================================================
             // SRC-891: Issuer Registry Operations
