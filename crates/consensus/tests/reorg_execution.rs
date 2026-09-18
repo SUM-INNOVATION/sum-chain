@@ -356,6 +356,50 @@ impl Node {
         block
     }
 
+    /// `produce`, without the file-local snapshot-diff ORACLE.
+    ///
+    /// Byte for byte the same publication path — execute, fill in the computed
+    /// root, accept, publish, advance the accumulator. The only thing skipped is
+    /// `ObservedJournal::snapshot`, which walks every row of the database and is
+    /// taken twice per block; that is fine for a fixture publishing three blocks
+    /// and quadratic for one publishing thousands.
+    ///
+    /// Nothing that reads a journal is affected: the oracle is a comparator this
+    /// file uses to check the producer against a snapshot diff, and the tests
+    /// that use this helper read the REAL records back off disk through
+    /// `real_journal()`.
+    fn produce_bulk(
+        &self,
+        parent: Option<&Block>,
+        proposer: &KeyPair,
+        txs: Vec<SignedTransaction>,
+    ) -> Block {
+        let (parent_hash, height) = match parent {
+            Some(p) => (p.hash(), p.height() + 1),
+            None => (Hash::ZERO, 0),
+        };
+        let header = BlockHeader::new(
+            parent_hash,
+            height,
+            GENESIS_TS + height,
+            Hash::ZERO,
+            Hash::ZERO,
+            *proposer.public_key().as_bytes(),
+        );
+        let mut block = Block::new(header, txs);
+        let execution = self
+            .executor
+            .execute_block(&block, self.state.state_root(), NO_VALIDATORS)
+            .expect("execute_block");
+        block.header.state_root = execution.computed_root();
+        let (executed, _account_diff, _contract_diff) = execution.into_parts();
+        let accepted = executed.accept_produced(&block).expect("accept_produced");
+        let accumulator = accepted.accumulator();
+        accepted.publish().expect("publish");
+        self.state.set_state_root(accumulator);
+        block
+    }
+
     /// Execute and ACCEPT a block, then die before `publish` commits.
     ///
     /// Returns the block that was never published. Nothing is written: the
@@ -4554,5 +4598,505 @@ fn a_node_with_no_journal_history_advertises_zero_until_it_publishes() {
         act.advertisable_reorg_depth(head, walk),
         head + 1,
         "every block this node published is revertible, and nothing below that is"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 15. Resource sizing: what the journal costs on disk and in memory
+//
+// Release blocker 7. With pruning disabled (`PrunerConfig::enabled` is `false`
+// by default and nothing in `crates/node` constructs a `Pruner`), the journal
+// column family grows without bound, so the growth rate is an operational
+// number somebody has to have. These tests MEASURE it against real published
+// blocks rather than estimating it from the record layout, and the figures they
+// print are the ones `docs/lane-a/JOURNAL-CONTRACT.md` §12 quotes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Journal bytes per published block, measured, with a fixed cost and a
+/// per-transaction marginal cost separated.
+///
+/// The marginal cost is the interesting one: it is what multiplies by the
+/// transaction rate, and it is what a capacity plan is a function of. Asserted
+/// with bounds rather than exact equality — the record layout is pinned by the
+/// producer's own tests, and pinning byte totals here would make this test fail
+/// for reasons that have nothing to do with resource sizing.
+#[test]
+fn journal_bytes_per_block_are_measured_against_real_published_blocks() {
+    let proposer = key(9);
+    let mut measured: Vec<(usize, usize)> = Vec::new();
+
+    for tx_count in [0usize, 1, 8, 32] {
+        let node = Node::new(ChainParams::with_v2_enabled());
+        let senders: Vec<_> = (0..tx_count).map(|i| key(20 + i as u8)).collect();
+        for s in &senders {
+            node.seed(s, 10_000_000);
+        }
+        let recipient = key(3);
+        let genesis = node.produce(None, &proposer, Vec::new());
+        let txs: Vec<_> = senders
+            .iter()
+            .map(|s| transfer(s, &recipient.address(), 1_000, 500, 0))
+            .collect();
+        let block = node.produce(Some(&genesis), &proposer, txs);
+
+        let raw = node
+            .db
+            .get(
+                cf::APPLICATION_JOURNAL,
+                &sumchain_storage::schema::journal_key(block.height(), &block.hash()),
+            )
+            .expect("read")
+            .expect("every published block has a record");
+        let decoded = sumchain_storage::journal::ApplicationJournal::decode_for(
+            &raw,
+            block.height(),
+            &block.hash(),
+        )
+        .expect("decode");
+        println!(
+            "journal sizing: {tx_count:>3} tx -> {:>6} bytes, {} entries ({} families)",
+            raw.len(),
+            decoded.entries().len(),
+            decoded.column_families().len()
+        );
+        measured.push((tx_count, raw.len()));
+    }
+
+    // Fixed cost: the header is 55 bytes, and a block's non-transaction writes
+    // (the proposer's fee credit, the supply rows) are the rest. The zero-tx
+    // measurement IS the fixed cost, which is why it is taken.
+    let (_, zero) = measured[0];
+    let (_, one) = measured[1];
+    let (_, eight) = measured[2];
+    let (_, thirty_two) = measured[3];
+    assert!(
+        zero >= 55,
+        "a record cannot be smaller than its own header: {zero}"
+    );
+    println!("journal sizing: fixed cost (0 tx) = {zero} bytes");
+
+    // Marginal cost per transaction, taken across the widest span measured so
+    // the fixed cost cancels.
+    let marginal = (thirty_two - one) as f64 / 31.0;
+    assert!(
+        one > zero,
+        "a transaction must journal something: {zero}, {one}"
+    );
+    println!("journal sizing: marginal cost ~{marginal:.0} bytes per transaction");
+    assert!(
+        (40.0..400.0).contains(&marginal),
+        "the per-transaction marginal journal cost is {marginal:.0} bytes, outside the \
+         range this capacity plan was written against; the sizing in \
+         docs/lane-a/JOURNAL-CONTRACT.md §12 needs revisiting"
+    );
+    assert!(
+        eight > one && thirty_two > eight,
+        "journal size must grow with the write set: {one}, {eight}, {thirty_two}"
+    );
+
+    // A full block at the chain's own ceiling, extrapolated from the marginal
+    // cost, against the 1 GiB logical candidate ceiling the tree carries.
+    let max_txs = ChainParams::default().max_txs_per_block as f64;
+    let full_block = one as f64 + marginal * (max_txs - 1.0);
+    println!(
+        "journal sizing: a full {max_txs:.0}-tx block journals ~{:.0} bytes",
+        full_block
+    );
+    assert!(
+        full_block < (1u64 << 30) as f64,
+        "a full block's journal must fit inside CANDIDATE_LIMIT_SCAFFOLD with room to \
+         spare, or the ceiling is the binding constraint rather than the block limit"
+    );
+}
+
+/// A pre-image is charged TWICE against the candidate ceiling — once by the
+/// overlay that captured it, once by the journal's copy of it — and this
+/// measures the factor rather than restating §9 of the contract.
+///
+/// This is the memory overhead the journal adds to a candidate in flight. It is
+/// not a disk figure: it is what a node must have headroom for while executing
+/// a block, and it is the reason the effective publishing ceiling for a block
+/// near the limit is tighter than the limit says.
+#[test]
+fn a_preimage_is_charged_twice_and_the_factor_is_measured() {
+    let proposer = key(9);
+
+    // Two blocks whose write sets differ only in size, so the difference in
+    // charged bytes is attributable to the pre-images alone.
+    let mut charged = Vec::new();
+    for tx_count in [1usize, 16] {
+        let node = Node::new(ChainParams::with_v2_enabled());
+        let senders: Vec<_> = (0..tx_count).map(|i| key(40 + i as u8)).collect();
+        for s in &senders {
+            node.seed(s, 10_000_000);
+        }
+        let recipient = key(3);
+        let genesis = node.produce(None, &proposer, Vec::new());
+        let txs: Vec<_> = senders
+            .iter()
+            .map(|s| transfer(s, &recipient.address(), 1_000, 500, 0))
+            .collect();
+        let block = node.produce(Some(&genesis), &proposer, txs);
+
+        let raw = node
+            .db
+            .get(
+                cf::APPLICATION_JOURNAL,
+                &sumchain_storage::schema::journal_key(block.height(), &block.hash()),
+            )
+            .expect("read")
+            .expect("record");
+        let decoded = sumchain_storage::journal::ApplicationJournal::decode_for(
+            &raw,
+            block.height(),
+            &block.hash(),
+        )
+        .expect("decode");
+
+        // The pre-image bytes the overlay captured, as the journal reports them.
+        let preimage_bytes: usize = decoded
+            .entries()
+            .iter()
+            .map(|e| match e.before() {
+                sumchain_storage::journal::Preimage::Value(v) => v.len(),
+                sumchain_storage::journal::Preimage::Absent => 0,
+            })
+            .sum();
+        println!(
+            "journal memory: {tx_count:>3} tx -> {} pre-image bytes, {} journal bytes \
+             (framing {} bytes)",
+            preimage_bytes,
+            raw.len(),
+            raw.len() - preimage_bytes
+        );
+        charged.push((preimage_bytes, raw.len()));
+    }
+
+    // The journal is a SECOND copy of every pre-image, plus framing. So the
+    // total a candidate must have headroom for is the overlay's capture plus
+    // the journal's copy: 2N + framing, not N.
+    for (preimage_bytes, journal_bytes) in &charged {
+        assert!(
+            journal_bytes >= preimage_bytes,
+            "the journal carries every pre-image, so it cannot be smaller than they are"
+        );
+        let total_charged = preimage_bytes + journal_bytes;
+        assert!(
+            total_charged >= 2 * preimage_bytes,
+            "a pre-image is charged twice: {total_charged} against {preimage_bytes}"
+        );
+    }
+
+    // Growing the pre-image set raises the charge by twice the growth, plus
+    // framing — the exact statement §9 of the contract makes about the ceiling.
+    let (p1, j1) = charged[0];
+    let (p16, j16) = charged[1];
+    let preimage_growth = p16 - p1;
+    let charge_growth = (p16 + j16) - (p1 + j1);
+    println!(
+        "journal memory: pre-images grew {preimage_growth} bytes, charged bytes grew \
+         {charge_growth} ({:.2}x)",
+        charge_growth as f64 / preimage_growth.max(1) as f64
+    );
+    assert!(
+        charge_growth >= 2 * preimage_growth,
+        "growing pre-images by N must raise the charge by at least 2N: {charge_growth} \
+         against {preimage_growth}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 16. Depth: a real reorg at a reduced horizon, and capacity at the real one
+//
+// Release blocker 3. The retention floor was pinned to `MAX_REORG_WALK` by
+// constant equality on both sides and exercised against seeded rows; the
+// deepest REAL reorg anywhere was three blocks. Two tests close that, by the
+// second of the two routes the blocker allows:
+//
+//   * this one — a real multi-block reorg through the IDENTICAL production
+//     algorithm (`plan_reorg` -> `execute_reorg` -> `stage_branch_unwind`),
+//     with only the horizon reduced, and with the real `Pruner` run at the real
+//     `UNDO_RETENTION_FLOOR` in between so the floor is what preserved the
+//     records the unwind then consumes;
+//   * `the_retained_undo_set_at_the_real_floor_is_bounded_and_complete`, a
+//     storage/capacity test at the real constant.
+//
+// Why this route and not a real 4,096-block reorg: the two branches would be
+// ~8,200 real block executions plus a 4,096-block unwind and re-apply, and the
+// publication path here runs at a few blocks per second. A test that takes tens
+// of minutes is a test that gets disabled. What a deeper run would exercise
+// that this one does not is LOOP COUNT — the code is the same code, the batch
+// is the same single batch, and the per-block work does not change with depth.
+// The one thing depth changes that a short test cannot see is the SIZE of the
+// single unwind batch, and that is what the capacity test measures at 4,096.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A REAL reorg at the engine's full production depth — 4,096 abandoned blocks
+/// — over a chain long enough for the real pruner at the real
+/// `UNDO_RETENTION_FLOOR` to have deleted something, with every record read back
+/// off disk.
+///
+/// # Why this is route A and not route B
+///
+/// Publishing a real block through this fixture costs about two milliseconds, so
+/// the 8,300 blocks this needs cost seconds rather than the tens of minutes that
+/// would have forced a reduced horizon. Nothing here is reduced: `MAX_REORG_WALK`
+/// is passed to `plan_reorg` unchanged, `UNDO_RETENTION_FLOOR` is the real
+/// constant, the pruner is asked to keep far LESS than the floor so that what
+/// preserves the branch is the floor overriding the configuration, and the
+/// abandoned branch is exactly as deep as the engine will ever plan.
+///
+/// The fork is arranged by determinism rather than by copying: both nodes build
+/// the same prefix from the same transactions, and `produce_bulk` derives every
+/// header field from the height, so the prefix blocks are byte-identical and the
+/// fork point is a real common ancestor.
+///
+/// What this leaves unmeasured: nothing about depth. The single unwind batch
+/// here holds every one of the 4,096 blocks' restores, which is the one property
+/// a shallow test cannot reach.
+#[test]
+fn a_real_reorg_at_the_full_production_depth_survives_the_real_retention_floor() {
+    let walk = sumchain_consensus::poa::MAX_REORG_WALK;
+    const PREFIX: u64 = 64;
+
+    let alice = key(1);
+    let bob = key(2);
+    let carol = key(3);
+    let proposer = key(9);
+    let (a, b, genesis) = two_nodes(
+        ChainParams::with_v2_enabled(),
+        &[(&alice, u128::MAX / 4), (&bob, u128::MAX / 4)],
+    );
+
+    // The shared prefix, built independently and identically on both nodes.
+    let started = std::time::Instant::now();
+    let mut fork_point_a = genesis.clone();
+    let mut fork_point_b = genesis.clone();
+    for n in 0..PREFIX {
+        let tx = transfer(&alice, &carol.address(), 1_000, 500, n);
+        fork_point_a = a.produce_bulk(Some(&fork_point_a), &proposer, vec![tx.clone()]);
+        fork_point_b = b.produce_bulk(Some(&fork_point_b), &proposer, vec![tx]);
+    }
+    assert_eq!(
+        fork_point_a.hash(),
+        fork_point_b.hash(),
+        "the shared prefix must be byte-identical, or the fork has no common ancestor"
+    );
+    assert_eq!(fork_point_a.height(), PREFIX);
+
+    // A's branch: `MAX_REORG_WALK - 1` blocks above the fork point, which is the
+    // deepest abandoned branch `plan_reorg` will ever return.
+    //
+    // Not `MAX_REORG_WALK`. The depth check is on the WALK vectors, and each
+    // carries the ancestor as its last element, so a walk of `max_depth` entries
+    // describes a branch of `max_depth - 1` blocks. Asking for 4,096 abandoned
+    // blocks is asking for a 4,097-entry walk and is refused — measured here
+    // rather than assumed, by the assertion below. The consequence is that
+    // `UNDO_RETENTION_FLOOR = 4_096` is conservative by exactly one block, which
+    // is the safe direction.
+    let mut branch_a = Vec::new();
+    let mut parent = fork_point_a.clone();
+    for n in 0..walk - 1 {
+        parent = a.produce_bulk(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, PREFIX + n)],
+        );
+        branch_a.push(parent.clone());
+    }
+    // B's branch: one longer, from a disjoint sender so no transaction is on
+    // both branches.
+    let mut branch_b = Vec::new();
+    let mut parent = fork_point_b.clone();
+    for n in 0..walk {
+        parent = b.produce_bulk(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&bob, &carol.address(), 2_000, 500, n)],
+        );
+        branch_b.push(parent.clone());
+    }
+    let head_height = branch_a.last().unwrap().height();
+    println!(
+        "depth evidence: published {} real blocks in {:?}; A's head is {}",
+        4 * PREFIX + 2 * walk - 1,
+        started.elapsed(),
+        head_height
+    );
+    assert_eq!(head_height, PREFIX + walk - 1);
+
+    for blk in &branch_b {
+        a.retain(blk);
+    }
+
+    // ── the real pruner, at the real head, at the real floor ────────────────
+    //
+    // Asked to keep 8 blocks of undo data on a chain whose head is above the
+    // floor. The floor raises that to 4,096, so the prune line lands at
+    // `head - 4_096`, which is BELOW the fork point and therefore below every
+    // record the unwind needs. Something is deleted — that is the point; an
+    // unfloored pruner at this head would have deleted the whole branch.
+    let pruner = sumchain_storage::pruner::Pruner::new(
+        a.db.clone(),
+        sumchain_storage::pruner::PrunerConfig {
+            blocks_to_keep: 0,
+            state_diffs_to_keep: 8,
+            max_db_size_bytes: 0,
+            compact_after_prune: false,
+            enabled: true,
+        },
+    );
+    assert_eq!(
+        pruner.undo_retention(),
+        sumchain_storage::pruner::UNDO_RETENTION_FLOOR
+    );
+    let stats = pruner.prune(head_height).expect("prune");
+    println!(
+        "depth evidence: the pruner removed {} journal(s) and {} state diff(s) at head \
+         {head_height} (line at {})",
+        stats.application_journals_pruned,
+        stats.state_diffs_pruned,
+        head_height - sumchain_storage::pruner::UNDO_RETENTION_FLOOR
+    );
+    assert!(
+        stats.application_journals_pruned > 0,
+        "the pruner must actually have run and deleted something, or this proves nothing \
+         about the floor"
+    );
+
+    // Every record inside the horizon survived, decodes, and identifies itself.
+    let retained_bytes: usize = branch_a
+        .iter()
+        .map(|blk| {
+            let raw =
+                a.db.get(
+                    cf::APPLICATION_JOURNAL,
+                    &sumchain_storage::schema::journal_key(blk.height(), &blk.hash()),
+                )
+                .expect("read")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the floor deleted the record for height {} that a reorg can still \
+                         name",
+                        blk.height()
+                    )
+                });
+            sumchain_storage::journal::ApplicationJournal::decode_for(
+                &raw,
+                blk.height(),
+                &blk.hash(),
+            )
+            .expect("a surviving record must still decode");
+            raw.len()
+        })
+        .sum();
+    println!(
+        "depth evidence: {} retained journal records total {} bytes ({:.1} MiB)",
+        branch_a.len(),
+        retained_bytes,
+        retained_bytes as f64 / (1024.0 * 1024.0)
+    );
+
+    // ── the reorg, at full depth, through the production algorithm ───────────
+    let store = BlockStore::new(&a.db);
+    let plan = plan_reorg(
+        &store,
+        branch_a.last().unwrap(),
+        branch_b.last().unwrap(),
+        NO_FINALITY,
+        walk,
+    )
+    .expect("the deepest branch the engine will plan must be plannable");
+    assert_eq!(plan.ancestor_hash, fork_point_a.hash());
+    assert_eq!(
+        plan.depth(),
+        walk - 1,
+        "the abandoned branch must be exactly as deep as the engine will ever plan"
+    );
+
+    // One block deeper is refused, which is what makes the line above a
+    // MAXIMUM rather than an arbitrary large number.
+    let deeper = plan_reorg(
+        &store,
+        branch_a.last().unwrap(),
+        branch_b.last().unwrap(),
+        NO_FINALITY,
+        walk - 1,
+    );
+    assert!(
+        deeper.is_err(),
+        "a walk budget one below the engine's must refuse this very plan"
+    );
+    assert!(
+        sumchain_storage::pruner::UNDO_RETENTION_FLOOR >= plan.depth(),
+        "the retention floor must cover the deepest branch the engine will plan"
+    );
+
+    let switching = std::time::Instant::now();
+    let outcome = execute_reorg(
+        &a.db,
+        &a.state,
+        &a.executor,
+        &plan,
+        NO_VALIDATORS,
+        &a.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect("execute_reorg at full depth");
+    println!(
+        "depth evidence: unwound {} blocks ({} records, {} checks) and applied {} in {:?}",
+        outcome.unwound.blocks,
+        outcome.unwound.records,
+        outcome.unwound.checks,
+        outcome.applied,
+        switching.elapsed()
+    );
+
+    assert_eq!(outcome.unwound.blocks, walk - 1);
+    assert_eq!(
+        outcome.unwound.tolerated_absences, 0,
+        "no record inside the horizon may have been missing"
+    );
+    assert_eq!(outcome.unwound.checks, outcome.unwound.records);
+    assert_eq!(outcome.applied, walk);
+    assert_eq!(
+        outcome.force_adopted, 0,
+        "every adopted root must be REPRODUCED by replay at this depth too"
+    );
+
+    // Convergence, minus the two families the PRUNER deliberately emptied on A
+    // and not on B. They are node-local undo metadata, not application state: A
+    // ran a pruner and B did not, so they are expected to differ, and comparing
+    // them would be comparing the pruner's effect rather than the reorg's. Every
+    // other family — including `cf::SUPPLY`, which no legacy journal covers — is
+    // compared in full.
+    let pruned_families = [cf::APPLICATION_JOURNAL, cf::STATE_DIFFS];
+    let without_undo = |snap: BTreeMap<(String, Vec<u8>), Vec<u8>>| {
+        snap.into_iter()
+            .filter(|((family, _), _)| !pruned_families.contains(&family.as_str()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let left = without_undo(a.snapshot());
+    let right = without_undo(b.snapshot());
+    let compared: std::collections::BTreeSet<&str> =
+        left.keys().map(|(family, _)| family.as_str()).collect();
+    assert!(
+        compared.contains(cf::STATE) && compared.len() >= 2,
+        "the comparison must still cover real application state: {compared:?}"
+    );
+    assert_eq!(
+        left,
+        right,
+        "a {}-block reorg did not converge with the branch it adopted:\n{}",
+        walk - 1,
+        describe_divergence(&left, &right)
+    );
+    assert_eq!(
+        a.head().map(|h| h.hash()),
+        Some(branch_b.last().unwrap().hash())
+    );
+    assert_eq!(
+        a.state.state_root(),
+        accumulator_of(branch_b.last().unwrap())
     );
 }
