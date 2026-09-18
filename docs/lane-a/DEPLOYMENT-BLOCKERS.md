@@ -1637,6 +1637,24 @@ so a later reader can re-establish it rather than trust it.
     `state/a_failed_import_leaves_the_floor_that_describes_what_it_wrote` and
     `storage/the_restore_floor_and_the_restored_state_commit_or_fail_together`.
 
+  * **`ImportRegisteredKeys` wrote application state outside consensus.**
+    Recorded as OC-2 in the activation audit. The write now goes through
+    `MessagingStore::seed_registry_at_genesis`, which refuses unless the
+    database has executed no block above genesis, holds no registration of its
+    own, and has not already been seeded — so the mutating shape is unreachable
+    from the command and from any caller written later. The one remaining shape
+    is an INITIAL CONDITION, and it commits a `cf::META` marker in the same
+    batch as the rows carrying a blake3 digest of the seeded set in address
+    order, read back by `sync_capability`, warned at every later startup and
+    served on `chain_getSyncCapability`.
+
+    The residual is real and is NOT closed: nothing refuses a node whose digest
+    differs from its peers'. Two validators can now establish that they were
+    seeded from different sets before the first messaging transaction, which is
+    strictly better than the silence this replaced — but the divergence is made
+    visible, not prevented. Preventing it means folding the digest into the
+    genesis artefact, a `crates/genesis` consensus surface this did not touch.
+
   * **The first start of an upgraded node validated no activation heights.**
     `ACTIVATION_META_KEY` does not exist in the deployed binary, so every
     upgrading node's first start has no record to compare against — and that
@@ -1680,12 +1698,6 @@ so a later reader can re-establish it rather than trust it.
     returned at `:634`) refuses, rather than unwinding half a branch
     from records that cannot restore it and reporting success. The refusal is
     the guarantee; the gap below the boundary remains a gap.
-
-  * **`ImportRegisteredKeys` writes application state outside consensus.**
-    Recorded as OC-2 in the activation audit and counted in the closure ledger's
-    `Class::OperatorTooling`, pinned by
-    `operator_tooling_writes_are_declared_deployment_blockers`. A node that ran
-    it diverges from one that did not, and nothing records that it happened.
 
   * **The `tx_index` half of TS-10 destroys data.** Every subsystem event in a
     block is written at a key whose transaction index is a literal `0`, so the
