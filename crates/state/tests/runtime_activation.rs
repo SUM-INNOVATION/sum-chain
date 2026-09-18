@@ -167,3 +167,54 @@ fn nothing_that_processes_a_block_is_built_before_activation_is_validated() {
         }
     }
 }
+
+/// A first start refuses a retroactive gate BEFORE it records anything.
+///
+/// The ordering is the whole value of the check. `check_activation_parameters`
+/// ends by writing the current heights into `ACTIVATION_META_KEY`, and from then
+/// on every start compares against that row. If the refusal came after the
+/// write, a first start under a retroactive configuration would persist that
+/// configuration as the baseline — and the NEXT start would compare the same
+/// wrong heights against themselves, find no change, and come up clean. The
+/// mistake would become invisible at exactly the moment it became permanent.
+///
+/// Source-level for the same reason as the test above: proving the refusal
+/// precedes the write by observing behaviour means performing the write.
+#[test]
+fn a_first_start_refuses_before_it_records_what_it_refused() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../node/src/node.rs"))
+        .expect("node.rs");
+    let body = {
+        let at = src
+            .find("fn check_activation_parameters(")
+            .expect("check_activation_parameters");
+        let end = src[at..]
+            .find("\n    /// Log what this node may claim about its own history.")
+            .expect("end of check_activation_parameters");
+        &src[at..at + end]
+    };
+
+    let refusal = body
+        .find("retroactive_gates_on_a_first_start")
+        .expect("a first start must check for retroactively opened gates");
+    let record = body
+        .find("Self::ACTIVATION_META_KEY,")
+        .expect("the heights must be recorded");
+    assert!(
+        refusal < record,
+        "the first-start refusal must precede the write that becomes every \
+         later start's baseline"
+    );
+
+    // And it must be guarded on the record's ABSENCE. Running it unconditionally
+    // would refuse an ordinary restart of a node that legitimately activated a
+    // gate and has been running under it since.
+    let guard = body
+        .find("if recorded.is_none() {")
+        .expect("the first-start check must be guarded on there being no record");
+    assert!(
+        guard < refusal,
+        "the check belongs inside the no-record branch: a node that recorded its \
+         heights and then passed one is compared against the record instead"
+    );
+}

@@ -415,6 +415,39 @@ impl Node {
 
         let now = genesis.params.recorded_activation_heights();
 
+        // No record: the first start of a node upgraded from a binary that did
+        // not keep one. `activation_changes` has nothing to compare against, so
+        // the comparison that CAN still be made is made instead — a gate this
+        // binary introduced, set at or below a height this database already
+        // holds, is claiming to have fired for blocks produced without it.
+        //
+        // This is the reachable case and not a hypothetical: the deployed binary
+        // has no ACTIVATION_META_KEY at all, so every upgrading node takes this
+        // branch exactly once, and it takes it on the start where thirteen newly
+        // introduced gates are least familiar to whoever wrote the genesis.
+        if recorded.is_none() {
+            let retroactive = genesis
+                .params
+                .retroactive_gates_on_a_first_start(current_height);
+            if !retroactive.is_empty() {
+                let detail = retroactive
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(anyhow::anyhow!(
+                    "refusing to start: this database holds blocks up to height \
+                     {current_height} and has never recorded its activation \
+                     heights, so nothing can confirm these gates were in force \
+                     when those blocks were produced — {detail}. These gates did \
+                     not exist in the binary that wrote this database, so no \
+                     block below the head was produced under them. Schedule each \
+                     ahead of the chain, or re-sync from genesis under this \
+                     configuration. Activation digest now {digest}."
+                ));
+            }
+        }
+
         if let Some(recorded) = &recorded {
             let changes = genesis.params.activation_changes(recorded, current_height);
             let (permitted, refused): (Vec<_>, Vec<_>) =

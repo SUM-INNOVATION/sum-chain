@@ -436,3 +436,176 @@ fn a_first_start_is_recorded_rather_than_compared() {
          start does not run this comparison at all"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The first start of an upgraded node: no record to compare against
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Every grandfathered name is still a gate.
+///
+/// The list is closed, so it can never legitimately grow — but a gate can be
+/// RENAMED, and a stale name in the list silently grandfathers nothing while
+/// looking like it grandfathers something. Worse, the renamed gate then falls
+/// through to the strict side and refuses a chain that was fine a commit ago.
+#[test]
+fn every_grandfathered_gate_still_exists() {
+    let gates: HashSet<&str> = ChainParams::default()
+        .activation_heights()
+        .into_iter()
+        .map(|(g, _)| g)
+        .collect();
+    let stale: Vec<&&str> = sumchain_genesis::GATES_PREDATING_ACTIVATION_RECORDING
+        .iter()
+        .filter(|g| !gates.contains(**g))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "these grandfathered names are no longer gates, so they grandfather \
+         nothing and the gates they used to name are now refused on a first \
+         start: {stale:?}"
+    );
+    assert_eq!(
+        sumchain_genesis::GATES_PREDATING_ACTIVATION_RECORDING.len(),
+        18,
+        "the list is closed: it names the gates that existed before this binary \
+         began recording activation heights, which is a historical fact. If this \
+         number moved, either a gate was renamed (fix the name) or someone added \
+         a new gate to it (do not: a new gate has no blocks behind it)"
+    );
+}
+
+/// A gate this binary introduced is not grandfathered, whatever else changes.
+///
+/// The load-bearing default. Thirteen gates arrived after activation recording
+/// did, and the point of deriving the strict set by EXCLUSION rather than by
+/// listing it is that a fourteenth is strict without anyone remembering to say
+/// so.
+#[test]
+fn a_gate_this_binary_introduced_is_not_grandfathered() {
+    for gate in [
+        "application_journal_enabled_from_height",
+        "account_root_enabled_from_height",
+        "nft_receipt_failure_enabled_from_height",
+        "subsystem_block_timestamp_enabled_from_height",
+        "healthcare_authorization_enabled_from_height",
+        "docclass_stake_escrow_enabled_from_height",
+    ] {
+        assert!(
+            !sumchain_genesis::GATES_PREDATING_ACTIVATION_RECORDING.contains(&gate),
+            "{gate} did not exist in the binary that wrote any production \
+             database, so no block was produced under it and it must not be \
+             grandfathered"
+        );
+    }
+}
+
+/// A gate the deployed binary already had may sit below the head.
+///
+/// `v2_enabled_from_height: Some(0)` on a chain at height 500,000 is the
+/// ORDINARY configuration, not a fault: v2 shipped in the binary that produced
+/// those blocks. A first-start check that refused this would refuse every real
+/// chain, which is the failure mode worth guarding against explicitly.
+#[test]
+fn a_gate_the_deployed_binary_already_had_may_sit_below_the_head() {
+    let mut p = ChainParams::default();
+    p.v2_enabled_from_height = Some(0);
+    p.education_enabled_from_height = Some(1);
+    p.contracts_enabled_from_height = Some(400_000);
+    assert!(
+        p.retroactive_gates_on_a_first_start(496_720).is_empty(),
+        "a chain running the gates it was produced under must start"
+    );
+}
+
+/// A gate this binary introduced may not.
+#[test]
+fn a_newly_introduced_gate_below_the_head_refuses_a_first_start() {
+    let head = 496_720;
+    let cases: &[(&str, &dyn Fn(&mut ChainParams, u64))] = &[
+        ("application_journal_enabled_from_height", &|p, h| {
+            p.application_journal_enabled_from_height = Some(h)
+        }),
+        ("account_root_enabled_from_height", &|p, h| {
+            p.application_journal_enabled_from_height = Some(h);
+            p.account_root_enabled_from_height = Some(h);
+        }),
+        ("nft_receipt_failure_enabled_from_height", &|p, h| {
+            p.nft_receipt_failure_enabled_from_height = Some(h)
+        }),
+        ("subsystem_block_timestamp_enabled_from_height", &|p, h| {
+            p.subsystem_block_timestamp_enabled_from_height = Some(h)
+        }),
+        ("tax_authorization_enabled_from_height", &|p, h| {
+            p.tax_authorization_enabled_from_height = Some(h)
+        }),
+    ];
+    for (name, set) in cases {
+        let name = *name;
+        let mut p = ChainParams::default();
+        set(&mut p, head - 1);
+        let refusals = p.retroactive_gates_on_a_first_start(head);
+        assert!(
+            refusals.iter().any(|c| c.gate() == name),
+            "{name} at {} on a chain at {head} must be refused; got {refusals:?}",
+            head - 1
+        );
+        assert!(
+            !refusals[0].is_permitted(),
+            "a retroactive gate is never a permitted change"
+        );
+
+        // The boundary: exactly at the head is still retroactive — the block at
+        // that height already exists — and one above it is not.
+        let mut at = ChainParams::default();
+        set(&mut at, head);
+        assert!(
+            at.retroactive_gates_on_a_first_start(head)
+                .iter()
+                .any(|c| c.gate() == name),
+            "{name} AT the head is still retroactive: that block already exists"
+        );
+        let mut ahead = ChainParams::default();
+        set(&mut ahead, head + 1);
+        assert!(
+            ahead
+                .retroactive_gates_on_a_first_start(head)
+                .iter()
+                .all(|c| c.gate() != name),
+            "{name} one block ahead of the head is a scheduled activation"
+        );
+    }
+}
+
+/// An empty chain has passed nothing, so nothing is retroactive on it.
+///
+/// Without this the check would refuse a fresh chain whose genesis opens a gate
+/// at 0 — which is how a new chain is configured, and the one case where a
+/// height at or below the head is unambiguously fine.
+#[test]
+fn a_chain_with_no_blocks_may_open_any_gate_at_zero() {
+    let mut p = ChainParams::default();
+    p.application_journal_enabled_from_height = Some(0);
+    p.account_root_enabled_from_height = Some(0);
+    p.nft_receipt_failure_enabled_from_height = Some(0);
+    assert!(
+        p.retroactive_gates_on_a_first_start(0).is_empty(),
+        "a chain at height 0 has produced nothing to be retroactive about"
+    );
+}
+
+/// The default configuration starts on any chain.
+///
+/// The check must not make an upgrade harder than it is. A node upgrading with
+/// every new gate dormant — which is what the shipped default is, and what an
+/// operator who changes nothing gets — starts at any height.
+#[test]
+fn the_default_configuration_starts_at_any_height() {
+    for head in [1u64, 496_720, 12_920_593] {
+        assert!(
+            ChainParams::default()
+                .retroactive_gates_on_a_first_start(head)
+                .is_empty(),
+            "the shipped default must start a node at height {head}"
+        );
+    }
+}

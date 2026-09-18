@@ -1660,6 +1660,58 @@ impl std::fmt::Display for ActivationChange {
     }
 }
 
+/// The gates that existed before this binary began recording activation heights.
+///
+/// # Why this list is closed
+///
+/// [`ChainParams::activation_changes`] can only compare against a record, and a
+/// database written by a binary that never recorded one has nothing to compare
+/// against. That is not a hypothetical: `ACTIVATION_META_KEY` does not exist in
+/// the deployed binary, so the FIRST start of every node that upgrades to this
+/// one has no record — and that start is exactly the one where thirteen gates
+/// the operator has never configured before are most likely to carry a wrong
+/// height.
+///
+/// On that start, a gate set at or below the current height means one of two
+/// things, and the database cannot tell them apart:
+///
+///   * the chain genuinely passed that height under a binary that implemented
+///     the rule — true for every gate on this list, because they shipped in the
+///     binary that produced those blocks; or
+///   * the rule is being applied retroactively to blocks produced without it,
+///     which is [`ActivationChange::RetroactivelyOpened`] with no record to
+///     detect it.
+///
+/// So this list is the grandfather clause, and it is CLOSED: it names the gates
+/// that were already live, which is a historical fact and cannot grow. A gate
+/// introduced after it — every one of the thirteen, and every future one —
+/// is not on it, and must therefore be dated ahead of the chain on a first
+/// start. That default is the safe direction: a new gate someone forgets to
+/// think about is REFUSED with a message rather than silently believed.
+///
+/// Pinned by `every_grandfathered_gate_still_exists` and
+/// `a_gate_this_binary_introduced_is_not_grandfathered`.
+pub const GATES_PREDATING_ACTIVATION_RECORDING: &[&str] = &[
+    "archive_reassignment_enabled_from_height",
+    "archive_unbonding_enabled_from_height",
+    "assignment_aware_por_scheduler_enabled_from_height",
+    "beacon_enabled_from_height",
+    "compute_pool_enabled_from_height",
+    "contracts_enabled_from_height",
+    "education_enabled_from_height",
+    "governance_enabled_from_height",
+    "inference_settlement_consistency_enabled_from_height",
+    "inference_settlement_enabled_from_height",
+    "inference_verifier_bonding_enabled_from_height",
+    "messaging_sponsored_registration_enabled_from_height",
+    "monetary_policy_enabled_from_height",
+    "omninode_enabled_from_height",
+    "omninode_sponsored_attestation_enabled_from_height",
+    "por_assignment_targeting_enabled_from_height",
+    "service_grants_enabled_from_height",
+    "v2_enabled_from_height",
+];
+
 impl ChainParams {
     /// Compare these activation heights against the ones this database was last
     /// started under.
@@ -1714,6 +1766,42 @@ impl ChainParams {
             });
         }
         out
+    }
+
+    /// Which gates a database with NO activation record must not be started
+    /// under.
+    ///
+    /// [`Self::activation_changes`] needs a record. This is the case where there
+    /// is none — the first start of an upgraded node — and it asks the only
+    /// question that can still be asked: is this gate claiming to have fired for
+    /// blocks this database already holds?
+    ///
+    /// A gate on [`GATES_PREDATING_ACTIVATION_RECORDING`] may be, and normally
+    /// is: it shipped in the binary that produced those blocks, so
+    /// `v2_enabled_from_height: Some(0)` on a chain at height 500,000 is the
+    /// ordinary configuration and not a fault. Every other gate is one this
+    /// binary introduced; no block below the head was produced under it, so a
+    /// height at or below the head is retroactive by construction.
+    ///
+    /// Returns the refusals, empty when the configuration is startable. At
+    /// `current_height` 0 the result is always empty: an empty chain has passed
+    /// nothing, so no height is retroactive and a genesis may open any gate it
+    /// likes at 0.
+    pub fn retroactive_gates_on_a_first_start(&self, current_height: u64) -> Vec<ActivationChange> {
+        if current_height == 0 {
+            return Vec::new();
+        }
+        self.activation_heights()
+            .into_iter()
+            .filter(|(gate, _)| !GATES_PREDATING_ACTIVATION_RECORDING.contains(gate))
+            .filter_map(|(gate, height)| match height {
+                Some(h) if h <= current_height => Some(ActivationChange::RetroactivelyOpened {
+                    gate: gate.to_string(),
+                    to: h,
+                }),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The activation heights as `(name, height)` pairs that own their strings,
