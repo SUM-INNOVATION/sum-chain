@@ -1200,6 +1200,51 @@ impl BeaconParamsConfig {
     }
 }
 
+/// Domain separator for the genesis activation digest.
+///
+/// Versioned in the string: a future digest that covers a different field set is
+/// a different value under a different domain, so the two can never be compared
+/// by accident.
+pub const GENESIS_ACTIVATION_DIGEST_DOMAIN: &[u8] = b"sumchain/genesis-activation/v1";
+
+impl ChainParams {
+    /// Every activation height this binary knows, in a FIXED declared order.
+    ///
+    /// The order is the digest's order and must never be permuted: reordering
+    /// changes the digest without changing a single height, which would read to
+    /// an operator as a genesis mismatch that is not one.
+    ///
+    /// The list is exhaustive by test, not by discipline —
+    /// `genesis_activation_digest.rs::every_activation_height_is_covered_by_the_digest`
+    /// reads the field declarations out of this file and fails if one is missing
+    /// here. A gate added to `ChainParams` and forgotten here would otherwise be
+    /// a height that two validators could silently disagree about.
+    pub fn activation_heights(&self) -> Vec<(&'static str, Option<u64>)> {
+        vec![
+            ("v2_enabled_from_height", self.v2_enabled_from_height),
+            ("omninode_enabled_from_height", self.omninode_enabled_from_height),
+            ("omninode_sponsored_attestation_enabled_from_height", self.omninode_sponsored_attestation_enabled_from_height),
+            ("education_enabled_from_height", self.education_enabled_from_height),
+            ("contracts_enabled_from_height", self.contracts_enabled_from_height),
+            ("account_root_enabled_from_height", self.account_root_enabled_from_height),
+            ("governance_enabled_from_height", self.governance_enabled_from_height),
+            ("archive_unbonding_enabled_from_height", self.archive_unbonding_enabled_from_height),
+            ("archive_reassignment_enabled_from_height", self.archive_reassignment_enabled_from_height),
+            ("por_assignment_targeting_enabled_from_height", self.por_assignment_targeting_enabled_from_height),
+            ("service_grants_enabled_from_height", self.service_grants_enabled_from_height),
+            ("monetary_policy_enabled_from_height", self.monetary_policy_enabled_from_height),
+            ("assignment_aware_por_scheduler_enabled_from_height", self.assignment_aware_por_scheduler_enabled_from_height),
+            ("inference_settlement_enabled_from_height", self.inference_settlement_enabled_from_height),
+            ("inference_settlement_consistency_enabled_from_height", self.inference_settlement_consistency_enabled_from_height),
+            ("inference_verifier_bonding_enabled_from_height", self.inference_verifier_bonding_enabled_from_height),
+            ("compute_pool_enabled_from_height", self.compute_pool_enabled_from_height),
+            ("application_journal_enabled_from_height", self.application_journal_enabled_from_height),
+            ("beacon_enabled_from_height", self.beacon_enabled_from_height),
+            ("messaging_sponsored_registration_enabled_from_height", self.messaging_sponsored_registration_enabled_from_height),
+        ]
+    }
+}
+
 /// Genesis configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Genesis {
@@ -1330,6 +1375,77 @@ impl Genesis {
         for (addr, balance) in sorted_alloc {
             data.extend_from_slice(addr.as_bytes());
             data.extend_from_slice(&balance.to_be_bytes());
+        }
+
+        Ok(Hash::hash(&data))
+    }
+
+    /// The genesis ACTIVATION DIGEST: one 32-byte value naming the chain and
+    /// every height at which its behaviour changes.
+    ///
+    /// # What this is for
+    ///
+    /// An activation height is only a coordination mechanism if every validator
+    /// holds the same one. Today the heights live in each validator's runtime
+    /// `genesis.json`, which is distributed out of band and compared by eye; a
+    /// single mistyped digit gives one node a different root formula at a
+    /// different height, and nothing reports it until blocks start being
+    /// refused. This digest turns that comparison into an equality: two
+    /// operators read one hex string to each other, or a monitor scrapes it, and
+    /// a difference is visible before the height arrives rather than after.
+    ///
+    /// It is deliberately NOT a consensus value. Nothing rejects a peer for
+    /// disagreeing about it — the chain already rejects the blocks that
+    /// disagreement produces, which is the detection the commitment provides.
+    /// This is the earlier, cheaper signal.
+    ///
+    /// # What it covers
+    ///
+    /// The chain's identity (`chain_id`, `genesis_time`), its validator set in
+    /// declared order, its allocations in ascending address order, and every
+    /// activation height in [`ChainParams::activation_heights`] — each as a
+    /// length-prefixed name, a presence byte and, when present, the height. The
+    /// name is folded so that renaming a field, or moving a height from one gate
+    /// to another, changes the digest.
+    ///
+    /// `None` and `Some(0)` are distinguished by the presence byte, which
+    /// matters: "dormant forever" and "active from genesis" are opposite
+    /// configurations.
+    pub fn activation_digest(&self) -> Result<Hash> {
+        let mut data = Vec::new();
+        data.extend_from_slice(GENESIS_ACTIVATION_DIGEST_DOMAIN);
+        data.extend_from_slice(&self.chain_id.to_be_bytes());
+        data.extend_from_slice(&self.genesis_time.to_be_bytes());
+
+        // Validators in DECLARED order: the order is the PoA proposer rotation,
+        // so two genesis files holding the same set in a different order are
+        // different chains and must digest differently.
+        data.extend_from_slice(&(self.validators.len() as u64).to_be_bytes());
+        for pubkey in self.validator_pubkeys()? {
+            data.extend_from_slice(&pubkey);
+        }
+
+        // Allocations in ascending address order: a `HashMap` has no order of
+        // its own, so without sorting this digest would depend on iteration
+        // order and two identical files would disagree.
+        let mut alloc: Vec<_> = self.parsed_alloc()?;
+        alloc.sort_by_key(|(addr, _)| *addr);
+        data.extend_from_slice(&(alloc.len() as u64).to_be_bytes());
+        for (addr, balance) in &alloc {
+            data.extend_from_slice(addr.as_bytes());
+            data.extend_from_slice(&balance.to_be_bytes());
+        }
+
+        for (name, height) in self.params.activation_heights() {
+            data.extend_from_slice(&(name.len() as u64).to_be_bytes());
+            data.extend_from_slice(name.as_bytes());
+            match height {
+                Some(h) => {
+                    data.push(1);
+                    data.extend_from_slice(&h.to_be_bytes());
+                }
+                None => data.push(0),
+            }
         }
 
         Ok(Hash::hash(&data))

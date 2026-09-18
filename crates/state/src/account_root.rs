@@ -112,9 +112,12 @@
 //! without changing the construction.
 
 use sumchain_genesis::ChainParams;
-use sumchain_primitives::Hash;
+use sumchain_primitives::{Address, Hash};
+use sumchain_storage::candidate::LEGACY_ROOT_COMPATIBILITY_HEIGHT;
 use sumchain_storage::exec_view::ExecutionView;
+use sumchain_storage::pruner::UNDO_RETENTION_FLOOR;
 use sumchain_storage::schema::decode_account;
+use sumchain_storage::schema::AccountState;
 use sumchain_storage::schema::ACCOUNT_KEY_PREFIX;
 use sumchain_storage::{cf, Database, StateStore};
 
@@ -141,6 +144,79 @@ pub const ACCOUNT_STATE_DIGEST_DOMAIN: &[u8] = b"sumchain/account-state/v1";
 #[inline]
 pub fn account_root_gate_open(params: &ChainParams, block_height: u64) -> bool {
     matches!(params.account_root_enabled_from_height, Some(h) if block_height >= h)
+}
+
+/// What an activation height must satisfy before any block is executed under it.
+///
+/// A pure function of [`ChainParams`]: no database, no block, no height. That is
+/// deliberate — the failures below are configuration failures, and a
+/// configuration failure has to be reachable at startup, where it stops a node
+/// from joining, rather than at the activation boundary, where it stops a node
+/// that has already been publishing.
+///
+/// # The two constraints, and why each one
+///
+/// **Above [`LEGACY_ROOT_COMPATIBILITY_HEIGHT`].** At or below that height
+/// `accept_imported` adopts a mismatching header root rather than refusing the
+/// block. An activation inside the window would therefore produce exactly the
+/// outcome the commitment exists to prevent: an upgraded and an un-upgraded node
+/// computing different roots, both publishing the proposer's, and neither able
+/// to tell. Pinned by
+/// `account_state_root.rs::a_boundary_inside_the_legacy_window_would_be_absorbed_not_detected`.
+///
+/// **A pinned journal height, at least a full reorg horizon below.** Once the
+/// root folds account rows, a reorg has to be able to put those rows back — a
+/// branch that unwinds without restoring them leaves a node whose recomputed
+/// root disagrees with the chain's, and the chain can then neither revert nor
+/// agree. Two parts:
+///
+/// * `application_journal_enabled_from_height` must be `Some(j)`. `None` means
+///   "observed from this node's own chain", which is a NODE-LOCAL boundary —
+///   correct for a node-local record, and not a thing a consensus commitment can
+///   rest on, because two nodes may legitimately hold different answers.
+/// * `j + UNDO_RETENTION_FLOOR <= h`. `UNDO_RETENTION_FLOOR` equals
+///   `sumchain_consensus::poa::MAX_REORG_WALK`, so a reorg at the activation
+///   height itself can walk that far back. If records begin later than that, the
+///   walk reaches blocks the root commits to and the journal cannot restore.
+///
+/// # Ownership
+///
+/// The invariant `application_journal_enabled_from_height <=
+/// account_root_enabled_from_height` is the journal workstream's, and its
+/// authoritative call site is `ChainParams::validate` — which runs on every
+/// genesis load, and therefore on every boot. This function is the
+/// account-commitment side of the same invariant, in the stricter form the
+/// reorg horizon requires, called from [`crate::state::StateManager::init_from_genesis`]
+/// so that a chain cannot be INITIALISED on a pair that does not satisfy it.
+pub fn validate_account_root_activation(params: &ChainParams) -> Result<()> {
+    let Some(account) = params.account_root_enabled_from_height else {
+        // Dormant: the root formula is byte-for-byte the one an un-upgraded node
+        // computes, and nothing below is required of the journal.
+        return Ok(());
+    };
+
+    if account <= LEGACY_ROOT_COMPATIBILITY_HEIGHT {
+        return Err(StateError::AccountRootActivationInsideLegacyWindow {
+            height: account,
+            cutoff: LEGACY_ROOT_COMPATIBILITY_HEIGHT,
+        });
+    }
+
+    let Some(journal) = params.application_journal_enabled_from_height else {
+        return Err(StateError::AccountRootActivationWithoutPinnedJournal { height: account });
+    };
+
+    // Saturating, so a journal height above the account height reports the same
+    // failure as one too close below it rather than underflowing into success.
+    if account.saturating_sub(journal) < UNDO_RETENTION_FLOOR {
+        return Err(StateError::AccountRootActivationOutrunsJournal {
+            account,
+            journal,
+            horizon: UNDO_RETENTION_FLOOR,
+        });
+    }
+
+    Ok(())
 }
 
 /// The one account-commitment encoder.
@@ -187,29 +263,46 @@ impl AccountDigest {
             return Ok(true);
         };
         let address = *address.as_bytes();
-        // The ascending-order assumption, checked rather than trusted. A fold
-        // over a differently-ordered scan is a different digest, and a
-        // different digest with no error is a silent chain split.
+        // The ascending-order assumption is checked rather than trusted, in
+        // `fold_decoded` below: a fold over a differently-ordered scan is a
+        // different digest, and a different digest with no error is a silent
+        // chain split.
+        //
+        // The DECODED balance and nonce, not the stored bytes. The commitment
+        // is over what the account IS, so it is immune to a change in the row
+        // encoding — and a row this node cannot decode fails the block instead
+        // of being folded as opaque bytes.
+        let account = decode_account(value)?;
+        self.fold_decoded(&address, &account)?;
+        Ok(true)
+    }
+
+    /// Fold one already-decoded account.
+    ///
+    /// THE record layout, and the only place it is written. Every caller — the
+    /// candidate scan, the committed scan and the snapshot verifier — arrives
+    /// here, so a snapshot cannot be checked against a digest computed under a
+    /// different encoding than the one consensus uses.
+    ///
+    /// The ascending-order check lives here rather than in [`Self::fold`]
+    /// because it is a property of the FOLD, not of the storage scan: a caller
+    /// holding rows in memory has to satisfy it too, and a duplicate address
+    /// fails it for the same reason an out-of-order one does.
+    fn fold_decoded(&mut self, address: &[u8; 20], account: &AccountState) -> Result<()> {
         if let Some(previous) = self.previous {
-            if address <= previous {
+            if *address <= previous {
                 return Err(StateError::AccountScanOutOfOrder {
                     previous: hex::encode(previous),
                     got: hex::encode(address),
                 });
             }
         }
-        self.previous = Some(address);
-
-        // The DECODED balance and nonce, not the stored bytes. The commitment
-        // is over what the account IS, so it is immune to a change in the row
-        // encoding — and a row this node cannot decode fails the block instead
-        // of being folded as opaque bytes.
-        let account = decode_account(value)?;
-        self.hasher.update(&address);
+        self.previous = Some(*address);
+        self.hasher.update(address);
         self.hasher.update(&account.balance.to_be_bytes());
         self.hasher.update(&account.nonce.to_be_bytes());
         self.count += 1;
-        Ok(true)
+        Ok(())
     }
 
     fn finish(mut self) -> Hash {
@@ -235,6 +328,28 @@ pub fn v_account_state_digest(view: &ExecutionView<'_, '_>) -> Result<Hash> {
         if !digest.fold(&key, &value)? {
             break;
         }
+    }
+    Ok(digest.finish())
+}
+
+/// The account-state digest over rows held IN MEMORY.
+///
+/// The third caller of the one encoder, and the reason the encoder is factored
+/// out at all: a snapshot arriving over the network is a list of accounts, not a
+/// database, and the only useful thing to check it against is the digest
+/// consensus computes. A second transcription of the record layout here would
+/// let a snapshot verify against a digest the chain never agreed to.
+///
+/// Rows must arrive in strictly ascending address order — the same rule the two
+/// scans satisfy by construction. A shuffled or duplicated list is an error, not
+/// a differently-ordered digest.
+pub fn account_state_digest_of<I>(rows: I) -> Result<Hash>
+where
+    I: IntoIterator<Item = (Address, AccountState)>,
+{
+    let mut digest = AccountDigest::new();
+    for (address, account) in rows {
+        digest.fold_decoded(address.as_bytes(), &account)?;
     }
     Ok(digest.finish())
 }

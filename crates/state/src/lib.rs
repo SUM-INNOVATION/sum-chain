@@ -210,6 +210,58 @@ pub enum StateError {
     /// assumption is worth checking rather than commenting.
     #[error("account-state commitment: scan out of order (previous {previous}, got {got})")]
     AccountScanOutOfOrder { previous: String, got: String },
+
+    /// The account commitment was activated at or below the historical
+    /// root-compatibility cutoff.
+    ///
+    /// At or below that height `accept_imported` ADOPTS a mismatching header
+    /// root instead of refusing the block, so an activation inside the window
+    /// makes a mixed-version disagreement invisible: both sides publish the
+    /// proposer's root over state they do not share. The commitment exists to
+    /// make that impossible, so the configuration is refused rather than run.
+    #[error(
+        "account_root_enabled_from_height = {height} is at or below the legacy \
+         root-compatibility cutoff {cutoff}; a mismatch there is force-adopted, \
+         not refused, so activating inside the window would split the network \
+         silently"
+    )]
+    AccountRootActivationInsideLegacyWindow { height: u64, cutoff: u64 },
+
+    /// The account commitment was activated without a PINNED application-journal
+    /// height.
+    ///
+    /// `application_journal_enabled_from_height == None` means "observed from
+    /// this node's own chain", which is a node-local answer: two nodes can hold
+    /// different boundaries and neither is wrong. The account digest is folded
+    /// into the state root, so the guarantee that a reverted block's account
+    /// rows can be restored has to be chain-defined, not per-node. Refused.
+    #[error(
+        "account_root_enabled_from_height = {height} requires a PINNED \
+         application_journal_enabled_from_height; `None` means \
+         observed-from-this-node's-chain, which is node-local, and a commitment \
+         folded into the state root cannot rest on a per-node boundary"
+    )]
+    AccountRootActivationWithoutPinnedJournal { height: u64 },
+
+    /// The account commitment activates before the journal can cover a full
+    /// reorg horizon below it.
+    ///
+    /// Covers both failures: a journal height ABOVE the account height (there is
+    /// a band where the root commits to account rows no journal can restore),
+    /// and a journal height close enough below it that a reorg from just above
+    /// the account activation can walk back past where records begin.
+    #[error(
+        "account_root_enabled_from_height = {account} requires \
+         application_journal_enabled_from_height <= {account} - {horizon}, but it \
+         is {journal}: a reorg at the activation height may walk {horizon} blocks \
+         back, and the root commits to account rows the journal cannot restore \
+         below {journal}"
+    )]
+    AccountRootActivationOutrunsJournal {
+        account: u64,
+        journal: u64,
+        horizon: u64,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, StateError>;

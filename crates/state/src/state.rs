@@ -38,6 +38,19 @@ impl StateManager {
     pub fn init_from_genesis(&self, genesis: &Genesis) -> Result<Hash> {
         info!("Initializing state from genesis");
 
+        // Before a single row is written. The account-state commitment is folded
+        // into the block state root once its gate opens, and two things must be
+        // true of the height that opens it: it is above the legacy
+        // root-compatibility window, where a mismatch is force-adopted rather
+        // than refused, and the application journal is pinned at least one full
+        // reorg horizon below it, so a reorg can actually restore the account
+        // rows the root now commits to. Both are configuration facts, so they
+        // are checked here — where a bad pair stops the chain being created —
+        // rather than at the activation boundary, where it would stop a chain
+        // that has already been publishing. See
+        // [`crate::account_root::validate_account_root_activation`].
+        crate::account_root::validate_account_root_activation(&genesis.params)?;
+
         let store = StateStore::new(&self.db);
         let alloc = genesis
             .parsed_alloc()
