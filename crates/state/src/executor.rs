@@ -3246,7 +3246,7 @@ impl BlockExecutor {
         // alongside the accumulator and receipts; the publisher writes it under
         // `(height, block_hash)` once the root is filled in and the hash is
         // final. On reorg these rows revert atomically with account + contract
-        // state via `StateManager::revert_block_state_diffs`.
+        // state via `StateManager::revert_pre_activation_block_state_diffs`.
         // GATE-CLOSED: under the production default
         // (`compute_pool_enabled_from_height == None`) the manager is never
         // constructed, nothing is applied, and the root fold below is skipped — the
@@ -4034,6 +4034,24 @@ impl BlockExecutor {
 
 #[cfg(test)]
 mod tests {
+
+    /// A pre-activation witness for a height, on a chain whose journal boundary
+    /// is pinned above everything — which is exactly what "this chain has not
+    /// activated the generic journal yet" is.
+    ///
+    /// `PreActivationBlock` has no other constructor: the classification has to
+    /// happen, and these fixtures are about the pre-activation path, so they
+    /// declare that rather than passing a flag.
+    fn pre_activation_witness(
+        height: sumchain_primitives::BlockHeight,
+        block_hash: Hash,
+    ) -> crate::reorg_undo::PreActivationBlock {
+        let activation = sumchain_storage::journal::JournalActivation::pinned(
+            sumchain_primitives::BlockHeight::MAX,
+        );
+        crate::reorg_undo::PreActivationBlock::classify(&activation, height, block_hash)
+            .expect("every height is below a boundary pinned at u64::MAX")
+    }
     use super::*;
 
     /// The receipts one block's execution produced.
@@ -7566,11 +7584,7 @@ mod tests {
         // The unified reorg-revert path is a clean no-op under the dormant gate
         // (no account/contract/C1 diff at this height).
         state
-            .revert_block_state_diffs(
-                1,
-                &Hash::ZERO,
-                sumchain_storage::journal::JournalRequirement::PreActivation,
-            )
+            .revert_pre_activation_block_state_diffs(&pre_activation_witness(1, Hash::ZERO))
             .unwrap();
         assert!(
             store.load_state_map().unwrap().is_empty(),
@@ -7752,7 +7766,8 @@ mod tests {
     /// `height`, before any candidate exists.
     ///
     /// SEEDING, not publishing. The reorg tests below are about
-    /// `revert_block_state_diffs` unwinding account and C1 state in one batch,
+    /// `revert_pre_activation_block_state_diffs` unwinding account and C1 state
+    /// in one batch,
     /// and they need a prior block's output to unwind — which, until #125
     /// supplies an operation source, no block can actually produce.
     fn seed_c1_job(db: &Database, height: u64, seed: u8) {
@@ -8256,11 +8271,7 @@ mod tests {
         // The journal is keyed by the PUBLISHED block, so the revert must name it.
         // `Hash::ZERO` was the pre-publication header root, not a block hash.
         state
-            .revert_block_state_diffs(
-                1,
-                &blk.hash(),
-                sumchain_storage::journal::JournalRequirement::PreActivation,
-            )
+            .revert_pre_activation_block_state_diffs(&pre_activation_witness(1, blk.hash()))
             .unwrap();
         assert!(
             store.load_state_map().unwrap().is_empty(),
@@ -8335,11 +8346,7 @@ mod tests {
         assert!(r1[0].is_success());
 
         state
-            .revert_block_state_diffs(
-                1,
-                &blk.hash(),
-                sumchain_storage::journal::JournalRequirement::PreActivation,
-            )
+            .revert_pre_activation_block_state_diffs(&pre_activation_witness(1, blk.hash()))
             .unwrap();
         // A fresh executor replays the identical block.
         let ex2 = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
@@ -8600,12 +8607,9 @@ mod tests {
             let store = crate::beacon_store::BeaconStore::new(&db);
             let snap = store.get_membership(0).unwrap();
             assert_eq!(snap, Some(pubs.clone()));
+            let witness = pre_activation_witness(1, boundary.hash());
             state
-                .revert_block_state_diffs(
-                    1,
-                    &boundary.hash(),
-                    sumchain_storage::journal::JournalRequirement::PreActivation,
-                )
+                .revert_pre_activation_block_state_diffs(&witness)
                 .unwrap();
             assert_eq!(
                 store.get_membership(0).unwrap(),
@@ -8656,7 +8660,8 @@ mod tests {
     }
 
     /// ATOMIC REORG REVERT: a reverted block rolls back account AND C1 state in a
-    /// SINGLE `revert_block_state_diffs` call (one write batch), so the two
+    /// SINGLE `revert_pre_activation_block_state_diffs` call (one write batch),
+    /// so the two
     /// families cannot end up partially reverted.
     #[test]
     fn compute_pool_reorg_reverts_account_and_c1_in_one_call() {
@@ -8707,11 +8712,7 @@ mod tests {
 
         // ONE call reverts BOTH families atomically.
         state
-            .revert_block_state_diffs(
-                height,
-                &Hash::ZERO,
-                sumchain_storage::journal::JournalRequirement::PreActivation,
-            )
+            .revert_pre_activation_block_state_diffs(&pre_activation_witness(height, Hash::ZERO))
             .unwrap();
 
         assert_eq!(
@@ -8734,7 +8735,8 @@ mod tests {
     }
 
     /// A forced C1 revert failure (a corrupt journal) must abort the UNIFIED
-    /// `revert_block_state_diffs` BEFORE commit, so account (and contract) state
+    /// `revert_pre_activation_block_state_diffs` BEFORE commit, so account (and
+    /// contract) state
     /// can never be reverted independently of C1 — all families revert or none.
     #[test]
     fn forced_c1_revert_failure_cannot_revert_account_independently() {
@@ -8794,11 +8796,10 @@ mod tests {
         // The unified revert MUST abort — nothing committed.
         assert!(
             state
-                .revert_block_state_diffs(
+                .revert_pre_activation_block_state_diffs(&pre_activation_witness(
                     height,
-                    &Hash::ZERO,
-                    sumchain_storage::journal::JournalRequirement::PreActivation,
-                )
+                    Hash::ZERO
+                ))
                 .is_err(),
             "corrupt C1 journal aborts the unified revert before commit"
         );

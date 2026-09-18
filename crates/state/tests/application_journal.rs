@@ -259,24 +259,29 @@ fn the_boundary_a_real_chain_establishes_is_the_first_height_it_published() {
     assert!(act.load_for_revert(&db, 3, &hash).unwrap().is_some());
 }
 
-/// The legacy revert path refuses a block at or above the activation boundary,
-/// and its `Ok(())` over an absent journal survives only below it.
+/// A post-activation block cannot be NAMED to the legacy revert path, and below
+/// the boundary that path is unchanged.
 ///
-/// `StateManager::revert_block_state_diffs` reverts from the four per-subsystem
-/// diffs. Those cover strictly fewer families than a block writes — `cf::SUPPLY`
-/// most visibly — so at and above the boundary reverting from them would report
-/// success while leaving rows the block wrote in place. That is the silent-skip
-/// the contract forbids post-activation, and it is closed by the signature: the
-/// caller must pass its classification, and `Required` is refused before
-/// anything is read.
+/// # This test was rewritten, and what it asserts is stronger
 ///
-/// Below the boundary the old behaviour is intact, including the `Ok(())` for a
-/// block with no diffs at all — which is correct there, because a block
-/// published by a binary that wrote no journal for a family it did not touch is
-/// indistinguishable from one whose record was lost, and there is no third thing
-/// to consult.
+/// It used to call `StateManager::revert_block_state_diffs(height, hash,
+/// JournalRequirement::Required)` and assert an `Err` whose message named the
+/// generic journal. That refusal no longer exists, because the case no longer
+/// exists: the function takes a
+/// `sumchain_state::reorg_undo::PreActivationBlock`, and
+/// `PreActivationBlock::classify` returns `None` for any height the activation
+/// calls `Required`. So the assertion moved from "the call is refused" to "the
+/// call cannot be constructed", which is the same guarantee held one layer
+/// earlier and without depending on a caller remembering to classify.
+///
+/// The rest is unchanged and still the point: below the boundary the legacy
+/// diffs are the only undo record, their joint absence is `Ok(())`, and a real
+/// revert from them consumes the record.
 #[test]
-fn the_legacy_revert_path_refuses_a_post_activation_block() {
+fn a_post_activation_block_cannot_be_named_to_the_legacy_revert_path() {
+    use sumchain_state::reorg_undo::PreActivationBlock;
+    use sumchain_storage::journal::JournalActivation;
+
     let (state, db, _dir, executor) = setup();
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -296,36 +301,44 @@ fn the_legacy_revert_path_refuses_a_post_activation_block() {
         .unwrap()
         .hash();
 
-    let err = state
-        .revert_block_state_diffs(1, &hash, JournalRequirement::Required)
-        .expect_err("the legacy path must refuse a post-activation block");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("generic journal is authoritative and mandatory"),
-        "the refusal must say which record governs and why: {msg}"
+    // This chain's own boundary, observed from the journal history it holds.
+    // Height 1 is at or above it, so the generic journal governs.
+    let activation =
+        JournalActivation::resolve(&db, ActivationSource::ObservedFromChain).expect("resolve");
+    assert_eq!(activation.boundary(), Some(1));
+    assert_eq!(
+        activation.requirement_at(1),
+        JournalRequirement::Required,
+        "the fixture must really be post-activation at height 1, or this proves nothing"
     );
     assert!(
-        msg.contains("ActivatedJournal"),
-        "and must name the path that does govern it: {msg}"
+        PreActivationBlock::classify(&activation, 1, hash).is_none(),
+        "a post-activation block must not be expressible as a PreActivationBlock, which \
+         is what makes the legacy path unreachable for it rather than merely refused"
     );
 
-    // The refusal read nothing and wrote nothing: the diffs are still there for
+    // Nothing was read and nothing was written: the diffs are still there for
     // the correct path to consume.
     assert!(db
         .get(cf::STATE_DIFFS, &journal_key(1, &hash))
         .unwrap()
         .is_some());
 
-    // Below the boundary the same call is the old behaviour, and an absence is
-    // the tolerated silence.
+    // Below the boundary the same block IS expressible, and the old behaviour is
+    // intact — including the tolerated silence over a block with no diffs, which
+    // is the only place that silence survives.
+    let pre = JournalActivation::pinned(u64::MAX);
     let absent = sumchain_primitives::Hash::hash(b"a block with no diffs at all");
     state
-        .revert_block_state_diffs(9, &absent, JournalRequirement::PreActivation)
+        .revert_pre_activation_block_state_diffs(
+            &PreActivationBlock::classify(&pre, 9, absent).expect("below the boundary"),
+        )
         .expect("pre-activation absence is Ok(()), which is the only place it is");
 
-    // And the real revert below the boundary still works.
     state
-        .revert_block_state_diffs(1, &hash, JournalRequirement::PreActivation)
+        .revert_pre_activation_block_state_diffs(
+            &PreActivationBlock::classify(&pre, 1, hash).expect("below the boundary"),
+        )
         .expect("pre-activation revert from the legacy diffs is unchanged");
     assert!(db
         .get(cf::STATE_DIFFS, &journal_key(1, &hash))
@@ -411,7 +424,7 @@ fn the_legacy_revert_path_has_no_production_caller_and_the_rollback_cli_has_its_
     let mut saw_definition = false;
     for path in &files {
         let text = std::fs::read_to_string(path).expect("read source");
-        if text.contains("pub fn revert_block_state_diffs(") {
+        if text.contains("pub fn revert_pre_activation_block_state_diffs(") {
             saw_definition = true;
         }
         // Everything from the first column-zero `#[cfg(test)]` onward is a test
@@ -423,7 +436,7 @@ fn the_legacy_revert_path_has_no_production_caller_and_the_rollback_cli_has_its_
         // A CALL, not the definition and not a doc-comment mention: the method
         // is only reachable as `.revert_block_state_diffs(`.
         for (n, line) in production.lines().enumerate() {
-            if line.contains(".revert_block_state_diffs(") {
+            if line.contains(".revert_pre_activation_block_state_diffs(") {
                 production_callers.push(format!(
                     "{}:{}",
                     path.strip_prefix(&workspace).unwrap_or(path).display(),
@@ -439,7 +452,7 @@ fn the_legacy_revert_path_has_no_production_caller_and_the_rollback_cli_has_its_
     );
     assert!(
         production_callers.is_empty(),
-        "`StateManager::revert_block_state_diffs` now HAS a production caller. That is \
+        "`StateManager::revert_pre_activation_block_state_diffs` now HAS a production caller. That is \
          not a failure — it is the situation this test exists to notice. Its \
          post-activation refusal is no longer a contract on an unused API but a guard on \
          a live path, and the caller must be checked for whether it classifies the \
@@ -455,7 +468,7 @@ fn the_legacy_revert_path_has_no_production_caller_and_the_rollback_cli_has_its_
         "the rollback subcommand must still exist for this claim to be about anything"
     );
     assert!(
-        !main.contains(".revert_block_state_diffs("),
+        !main.contains(".revert_pre_activation_block_state_diffs("),
         "the rollback CLI now routes through the guarded function; update §11.1 of \
          docs/lane-a/JOURNAL-CONTRACT.md, which records that it does not"
     );

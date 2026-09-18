@@ -15,7 +15,8 @@
 //!   folded into the block state root **only when the beacon gate is open**
 //!   (`crate::executor::compute_block_state_root`); [`BeaconStore::stage_block_revert`]
 //!   is composed into the SAME atomic batch as account + contract + C1 revert
-//!   (`crate::state::StateManager::revert_block_state_diffs`). Both are no-ops while
+//!   (`crate::state::StateManager::revert_pre_activation_block_state_diffs`).
+//!   Both are no-ops while
 //!   no journal exists (always, under the `None` gate), so dormant behavior is
 //!   unchanged.
 //! * **Wired (live producer):** [`BeaconStore::materialize`] serializes the runtime

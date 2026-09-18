@@ -35,7 +35,8 @@
 //! * **Revert** — a [`ComputePoolStateDiff`] journal of `(key, old, new)` records
 //!   replayed in reverse into a single [`sumchain_storage::Database::batch`],
 //!   deleting the journal in the same batch. This is the exact shape of
-//!   `ContractStateDiff` + `StateManager::revert_block_state_diffs`, but this
+//!   `ContractStateDiff` + `StateManager::revert_pre_activation_block_state_diffs`,
+//!   but this
 //!   adapter drives it in isolation; it is not connected to the live PoA reorg
 //!   path.
 //!
@@ -1067,7 +1068,8 @@ impl<'a> ComputePoolStore<'a> {
     ///
     /// This is the seam that lets the C1 revert compose into the SAME atomic
     /// write as the account + contract revert: the live reorg driver
-    /// ([`crate::state::StateManager::revert_block_state_diffs`]) stages account,
+    /// ([`crate::state::StateManager::revert_pre_activation_block_state_diffs`])
+    /// stages account,
     /// contract, AND C1 restores into one batch and commits once, so a crash can
     /// never leave a partially-reverted node (all families revert or none do).
     ///

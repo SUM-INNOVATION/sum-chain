@@ -68,7 +68,8 @@
 //!   twice. Replayed last-first, because undoing two writes to one key in
 //!   forward order leaves the intermediate value. This is what the four legacy
 //!   per-subsystem journals are (`ContractStateDiff` in
-//!   `revert_block_state_diffs` already replays in reverse for this reason).
+//!   `revert_pre_activation_block_state_diffs` already replays in reverse for
+//!   this reason).
 //!
 //! That distinction is the resolution of a real disagreement between the two
 //! halves of this design: the producer proves a total `(cf, key)` sort and has
@@ -339,6 +340,66 @@ impl MissingJournalPolicy {
             MissingJournalPolicy::RequiredFrom(from) => height < *from,
             MissingJournalPolicy::ToleratedEverywhere => true,
         }
+    }
+}
+
+/// Proof that a block is BELOW this chain's journal activation boundary.
+///
+/// # Why this is a type and not a parameter
+///
+/// `StateManager::revert_pre_activation_block_state_diffs` reverts a block from
+/// the four legacy per-subsystem journals. Those cover strictly fewer families
+/// than a block writes — `cf::SUPPLY` most visibly — so at and above the
+/// activation boundary reverting from them would report success while leaving
+/// rows the block wrote in place. That is the silent skip the contract forbids.
+///
+/// The function used to take a `JournalRequirement` and REFUSE `Required` at
+/// run time. A runtime refusal on a function nothing calls is a tripwire, not a
+/// guard: it is only as good as the discipline of the next caller, and the next
+/// caller is the one nobody has reviewed. This type removes the refusal by
+/// removing the case — there is no way to name a post-activation block to that
+/// function, because there is no way to build this value for one.
+///
+/// [`PreActivationBlock::classify`] is the only constructor, it takes a
+/// `JournalActivation` resolved against a real database, and it returns `None`
+/// for any height the activation calls [`JournalRequirement::Required`].
+///
+/// # What it does NOT prove
+///
+/// It proves the classification HAPPENED, against some activation. A caller
+/// holding a fabricated `JournalActivation` — `Pinned(u64::MAX)`, say — can
+/// still classify everything as pre-activation. Closing that would need a
+/// capability the storage layer does not have. What is closed is the case this
+/// was actually exposed to: a caller that simply did not think about the
+/// boundary, which can no longer reach the function at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreActivationBlock {
+    height: BlockHeight,
+    block_hash: Hash,
+}
+
+impl PreActivationBlock {
+    /// The only constructor. `None` when `activation` says a generic journal is
+    /// REQUIRED at this height — that block's undo record is the generic
+    /// journal, and `sumchain_state::reorg_undo::ActivatedJournal` is the path
+    /// that reads it.
+    pub fn classify(
+        activation: &JournalActivation,
+        height: BlockHeight,
+        block_hash: Hash,
+    ) -> Option<Self> {
+        match activation.requirement_at(height) {
+            JournalRequirement::PreActivation => Some(Self { height, block_hash }),
+            JournalRequirement::Required => None,
+        }
+    }
+
+    pub fn height(&self) -> BlockHeight {
+        self.height
+    }
+
+    pub fn block_hash(&self) -> &Hash {
+        &self.block_hash
     }
 }
 
@@ -1027,7 +1088,7 @@ impl BranchJournal for SubsystemJournals<'_> {
 ///
 /// Includes the pre-#253 height-only key alongside the hash-addressed one, so a
 /// journal written by an older binary cannot survive the unwind that consumed
-/// it. Mirrors `revert_block_state_diffs`.
+/// it. Mirrors `revert_pre_activation_block_state_diffs`.
 pub fn subsystem_journal_rows(height: BlockHeight, block_hash: &Hash) -> Vec<(String, Vec<u8>)> {
     let hashed = journal_row_key(height, block_hash);
     let legacy = height.to_be_bytes().to_vec();

@@ -94,7 +94,8 @@
 //! accumulator rehydrates ([`dkg::DkgEpoch::rehydrate`] / [`rounds::BeaconChain::
 //! rehydrate`]) from the store each block, so cross-block persistence + restart work.
 //! The persisted `state_digest` folds into `compute_block_state_root` and reverts via
-//! the unified `revert_block_state_diffs` batch — **only** when the gate is open.
+//! the unified `revert_pre_activation_block_state_diffs` batch — **only** when the
+//! gate is open.
 //!
 //! Because `beacon_enabled_from_height` is `None` by default (fail-closed in
 //! `ChainParams::validate`), the whole path is dormant in production: no accumulator is

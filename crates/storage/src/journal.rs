@@ -590,6 +590,24 @@ impl JournalActivation {
         }
     }
 
+    /// The activation a chain has when its boundary is PINNED by configuration.
+    ///
+    /// [`Self::resolve`] is the production entry point and needs a database for
+    /// the [`ActivationSource::ObservedFromChain`] case. A pinned boundary needs
+    /// no database — `resolve` ignores it for that variant — so this names that
+    /// case directly, for a caller that has a configured height and no handle.
+    ///
+    /// It is not a way around the classification: the value it produces answers
+    /// [`Self::requirement_at`] the same way any other does, and a boundary
+    /// pinned above the head is the ordinary "this chain has not activated the
+    /// generic journal yet" configuration rather than a bypass.
+    pub fn pinned(boundary: BlockHeight) -> Self {
+        Self {
+            source: ActivationSource::Pinned(boundary),
+            boundary: Some(boundary),
+        }
+    }
+
     /// How many blocks below `head_height` this node holds GENERIC undo history
     /// for — the depth over which it can restore every column family a block
     /// wrote, rather than only the families the four legacy per-subsystem

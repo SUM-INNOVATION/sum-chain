@@ -5165,7 +5165,13 @@ fn the_height_index_survives_a_refusal_and_follows_an_adoption() {
         let blk = a.produce(
             Some(&parent),
             &proposer,
-            vec![transfer(&alice, &carol.address(), 1_000 + n as u128, 500, n)],
+            vec![transfer(
+                &alice,
+                &carol.address(),
+                1_000 + n as u128,
+                500,
+                n,
+            )],
         );
         parent = blk.clone();
         branch_a.push(blk);
@@ -5284,14 +5290,8 @@ fn the_height_index_survives_a_refusal_and_follows_an_adoption() {
     );
 
     // Apply one block and check the index gained exactly that one height.
-    let applied = apply_branch(
-        &a.db,
-        &a.state,
-        &a.executor,
-        &branch_b[..1],
-        NO_VALIDATORS,
-    )
-    .expect("apply the first adopted block");
+    let applied = apply_branch(&a.db, &a.state, &a.executor, &branch_b[..1], NO_VALIDATORS)
+        .expect("apply the first adopted block");
     assert_eq!(applied.applied, 1);
     let after_one = height_index(&a);
     assert_eq!(

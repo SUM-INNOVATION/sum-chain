@@ -11,6 +11,23 @@ use sumchain_primitives::{Block, BlockHeader, Hash, SignedTransaction, Transacti
 use sumchain_storage::schema::AccountState;
 use sumchain_storage::{cf, contract_cf_kind, ContractMutation, ContractStateDiff, StateDiff};
 
+/// A pre-activation witness, on a chain whose journal boundary is pinned above
+/// everything — which is exactly what "this chain has not activated the generic
+/// journal yet" is, and what every fixture in this file is about.
+///
+/// `PreActivationBlock` has no other constructor. The classification has to
+/// happen; these tests declare which side of it they are on rather than passing
+/// a flag that a future caller could pass wrongly.
+fn pre_activation_witness(
+    height: u64,
+    block_hash: Hash,
+) -> sumchain_state::reorg_undo::PreActivationBlock {
+    let activation = sumchain_storage::journal::JournalActivation::pinned(u64::MAX);
+    sumchain_state::reorg_undo::PreActivationBlock::classify(&activation, height, block_hash)
+        .expect("every height is below a boundary pinned at u64::MAX")
+}
+
+
 /// `new` (init) writes storage key "k" -> "VAL", so a deploy yields a diff with
 /// STORAGE + CODE + METADATA records.
 const WAT_INIT_WRITES: &str = r#"
@@ -101,7 +118,7 @@ fn deploy_diff_captured_and_reverted() {
     // coordinated path.
     state.save_state_diff(1, &Hash::ZERO, state_diff).unwrap();
     state.save_contract_state_diff(1, &Hash::ZERO, contract_diff).unwrap();
-    state.revert_block_state_diffs(1, &Hash::ZERO, sumchain_storage::journal::JournalRequirement::PreActivation).unwrap();
+    state.revert_pre_activation_block_state_diffs(&pre_activation_witness(1, Hash::ZERO)).unwrap();
 
     // Deploy fully undone: code, storage, metadata all gone.
     assert!(db.get(cf::CONTRACT_CODE, &code_key).unwrap().is_none(), "code reverted");
@@ -109,7 +126,7 @@ fn deploy_diff_captured_and_reverted() {
     assert!(db.get(cf::CONTRACT_METADATA, &code_key).unwrap().is_none(), "metadata reverted");
     // Account state restored, and BOTH diff records deleted.
     assert_eq!(state.get_balance(&deployer.address()).unwrap(), 10_000_000, "account restored");
-    assert!(state.revert_block_state_diffs(1, &Hash::ZERO, sumchain_storage::journal::JournalRequirement::PreActivation).is_ok(), "diffs already consumed -> no-op");
+    assert!(state.revert_pre_activation_block_state_diffs(&pre_activation_witness(1, Hash::ZERO)).is_ok(), "diffs already consumed -> no-op");
 }
 
 #[test]
@@ -193,13 +210,13 @@ fn call_overwrite_and_delete_revert_at_state_level() {
     diff.sort();
 
     state.save_contract_state_diff(7, &Hash::ZERO, diff).unwrap();
-    state.revert_block_state_diffs(7, &Hash::ZERO, sumchain_storage::journal::JournalRequirement::PreActivation).unwrap();
+    state.revert_pre_activation_block_state_diffs(&pre_activation_witness(7, Hash::ZERO)).unwrap();
 
     // Overwrite reverted to "old"; delete reverted to restore "prior".
     assert_eq!(db.get(cf::CONTRACT_STORAGE, &over_key).unwrap().as_deref(), Some(b"old".as_ref()));
     assert_eq!(db.get(cf::CONTRACT_STORAGE, &del_key).unwrap().as_deref(), Some(b"prior".as_ref()));
     // Diff consumed.
-    assert!(state.revert_block_state_diffs(7, &Hash::ZERO, sumchain_storage::journal::JournalRequirement::PreActivation).is_ok());
+    assert!(state.revert_pre_activation_block_state_diffs(&pre_activation_witness(7, Hash::ZERO)).is_ok());
 }
 
 #[test]
@@ -225,11 +242,11 @@ fn unknown_cf_kind_aborts_revert_atomically() {
     state.save_contract_state_diff(9, &Hash::ZERO, cd).unwrap();
 
     // Revert must fail and apply NOTHING.
-    assert!(state.revert_block_state_diffs(9, &Hash::ZERO, sumchain_storage::journal::JournalRequirement::PreActivation).is_err());
+    assert!(state.revert_pre_activation_block_state_diffs(&pre_activation_witness(9, Hash::ZERO)).is_err());
     // Account NOT reverted (still post-block value).
     assert_eq!(state.get_balance(&addr).unwrap(), 50, "account must not be partially reverted");
     // Both diffs intact -> a retry still hits the same error (proves not deleted).
-    assert!(state.revert_block_state_diffs(9, &Hash::ZERO, sumchain_storage::journal::JournalRequirement::PreActivation).is_err(), "diffs must be preserved for retry");
+    assert!(state.revert_pre_activation_block_state_diffs(&pre_activation_witness(9, Hash::ZERO)).is_err(), "diffs must be preserved for retry");
 }
 
 // ── Abandonment ──────────────────────────────────────────────────────────────

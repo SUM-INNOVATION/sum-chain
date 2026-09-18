@@ -156,7 +156,8 @@ const UNREACHED_MUTATORS: &[(&str, &str, &str)] = &[
     (
         "crates/state/src/state.rs",
         "StateManager::revert_state_diff",
-        "pub, no production caller: the reorg path uses revert_block_state_diffs",
+        "pub, no production caller: the reorg path uses \
+         revert_pre_activation_block_state_diffs",
     ),
     (
         "crates/state/src/state.rs",
@@ -1308,7 +1309,8 @@ enum Class {
     /// Reachable only from `StateManager::init_from_genesis` — no block exists
     /// to abandon.
     Genesis,
-    /// Reachable only from `StateManager::revert_block_state_diffs` — the
+    /// Reachable only from `StateManager::revert_pre_activation_block_state_diffs`
+    /// — the
     /// committed write that unwinds an already-published block.
     ReorgUndo,
     /// The node's own storage surface: blocks, transactions, receipts, their
@@ -1347,7 +1349,7 @@ const ROOTS: &[(Class, &str, &str, &str)] = &[
         Class::ReorgUndo,
         "crates/state/src/state.rs",
         "StateManager",
-        "revert_block_state_diffs",
+        "revert_pre_activation_block_state_diffs",
     ),
     (
         Class::OperatorTooling,
@@ -2846,7 +2848,7 @@ impl StateManager {
     pub fn init_from_genesis(&self, db: &Database) -> Result<()> {
         StateStore::new(db).put_account(b"k", b"v")
     }
-    pub fn revert_block_state_diffs(&self, db: &Database) -> Result<()> {
+    pub fn revert_pre_activation_block_state_diffs(&self, db: &Database) -> Result<()> {
         StateStore::new(db).put_account(b"k", b"v")
     }
     pub fn put_account(db: &Database) -> Result<()> {

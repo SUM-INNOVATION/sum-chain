@@ -433,11 +433,14 @@ height the database itself establishes.
 `sumchain_state::reorg_undo::ApplicationJournalReader` calls `load_for_revert`
 per block and surfaces its `Err` as `JournalLookup::Unreadable`, which is a HALT
 — never `Absent`, which a tolerant policy could swallow.
-`StateManager::revert_block_state_diffs` now takes a `JournalRequirement`: its
-`Ok(())` over four absent journals survives only under `PreActivation`, and
-`Required` is REFUSED before anything is read, naming
-`ActivatedJournal` as the path that governs those heights. Tests:
-`state/the_legacy_revert_path_refuses_a_post_activation_block`,
+`StateManager::revert_pre_activation_block_state_diffs` takes a
+`reorg_undo::PreActivationBlock`, a witness constructible only by classifying a
+height against a resolved `JournalActivation` and only when that classification
+returns `PreActivation`. Its `Ok(())` over four absent journals therefore
+survives only below the boundary, and a post-activation block cannot be NAMED to
+it at all — there is no refusal because there is no case. `ActivatedJournal` is
+the path that governs those heights. Tests:
+`state/a_post_activation_block_cannot_be_named_to_the_legacy_revert_path`,
 `reorg/every_post_activation_record_fault_halts_the_reorg`,
 `reorg/the_activation_boundary_decides_whether_an_absence_halts`.]
 
@@ -948,13 +951,20 @@ Stated because a clearly named gap is worth more than a silence.
   constant by `reorg/a_real_reorg_at_the_full_production_depth_survives_the_real_retention_floor`
   — but no loop in the node calls it, and the crash-safety of such a loop is
   neither written nor tested here.
-* **`StateManager::revert_block_state_diffs` is DEAD in production**, and that
-  is now the stated resolution rather than an open question. The production
-  reorg path is `ActivatedJournal` via `execute_reorg`; nothing else calls it.
-  Its post-activation refusal is therefore a contract on a public API, not
-  protection for a live caller, and
-  `state/the_legacy_revert_path_has_no_production_caller_and_the_rollback_cli_has_its_own`
-  scans the workspace and fails if that changes in either direction.
+* **`StateManager::revert_pre_activation_block_state_diffs` is DEAD in
+  production**, and its unsafe case is now STRUCTURALLY unreachable rather than
+  refused at run time. It takes a `reorg_undo::PreActivationBlock`, whose only
+  constructor returns `None` for any height the activation calls `Required`, so
+  the post-activation case has no expression. The reachability scan
+  (`state/the_legacy_revert_path_has_no_production_caller_and_the_rollback_cli_has_its_own`)
+  stays as a secondary tripwire, not as the guard.
+
+  What that does NOT close: a caller holding a fabricated `JournalActivation` —
+  `JournalActivation::pinned(u64::MAX)`, which the tests themselves use — can
+  still classify everything as pre-activation. Closing that would need a
+  capability the storage layer does not have. What is closed is the case the API
+  was actually exposed to: a caller that did not think about the boundary can no
+  longer reach the function at all.
 * **`sum-node rollback` is a THIRD unwind implementation, and it is not
   boundary-aware.** `crates/node/src/main.rs` reverts account rows from
   `cf::STATE_DIFFS` with its own open-coded loop: it consults neither the
