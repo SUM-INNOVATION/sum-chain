@@ -1580,6 +1580,22 @@ What survives the correction is worse than a stray write:
     what transactions do. Two nodes given different imports produce different
     receipts for identical blocks, and receipts ARE folded into the state root --
     so this is a divergence vector, not merely an untracked write.
+
+    **CLOSED.** The write now goes through
+    `MessagingStore::seed_registry_at_genesis`, which refuses unless the
+    database has executed no block above genesis, holds no registration of its
+    own, and has not already been seeded -- so the mutation shape is
+    unreachable, from the command and from any caller written later. The one
+    remaining shape is an INITIAL CONDITION, and it commits a permanent
+    `cf::META` marker in the same batch as the rows, carrying a blake3 digest of
+    the seeded set in address order. That marker outlives the process: it is
+    read back by `sumchain_state::sync_capability`, warned at every later
+    startup, and served on `chain_getSyncCapability`, so two validators can
+    establish whether they were seeded from the same set before the first
+    messaging transaction. The residual is stated rather than claimed away --
+    nothing REFUSES a node whose digest differs from its peers'; the divergence
+    is made visible, not prevented. See `docs/lane-a/ACTIVATION-AUDIT.md`,
+    "OC-2: closed, by option (b) with a digest".
   * The startup backfill (`crates/node/src/node.rs:148-150`) runs on every boot
     but writes only indexes the executor does not read.
   * A third class of callers remains **UNDETERMINED**: the reproduced count and

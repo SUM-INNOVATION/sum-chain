@@ -9,8 +9,8 @@
 //! - Message event indexing
 
 use sumchain_primitives::{
-    Address, Balance, Hash, InboxFilter, MessageEvent, PendingPayment, RegisteredPublicKey,
-    DEFAULT_DAILY_QUOTA, DEFAULT_MAX_MESSAGE_SIZE, DEFAULT_MIN_TRUST_STAKE,
+    Address, Balance, BlockHeight, Hash, InboxFilter, MessageEvent, PendingPayment,
+    RegisteredPublicKey, DEFAULT_DAILY_QUOTA, DEFAULT_MAX_MESSAGE_SIZE, DEFAULT_MIN_TRUST_STAKE,
 };
 
 use crate::db::{cf, Database};
@@ -940,6 +940,214 @@ impl<'a> MessagingStore<'a> {
             out.push((address, registered));
         }
         Ok(out)
+    }
+
+    // ========================================================================
+    // Operator registry seed (OC-2)
+    // ========================================================================
+
+    /// Seed the SRC-201 public-key registry from an operator-supplied set, and
+    /// record that it happened.
+    ///
+    /// # Why this exists instead of a loop over [`Self::set_public_key`]
+    ///
+    /// `cf::MESSAGING_PUBLIC_KEYS` is read by consensus — `SendMessage` requires
+    /// the sender to hold a registered key, and both the plain and the sponsored
+    /// `RegisterPublicKey` paths refuse a duplicate. A node whose copy of that
+    /// family differs from its peers' therefore produces different RECEIPTS for
+    /// identical blocks, and receipts are folded into the state root. Writing
+    /// the family from an operator command, at any height a block has already
+    /// been executed at, is a fork with no consensus event to explain it.
+    ///
+    /// That is not a hazard a warning closes, because the damage is also
+    /// unobservable after the fact: nothing distinguishes an imported row from a
+    /// registered one, so an operator who ran the import mid-chain cannot be told
+    /// which rows to remove, and the only remedy is a resync.
+    ///
+    /// So the operation is narrowed to the one shape that is not a mutation of
+    /// executed state: an INITIAL CONDITION, applied to a database that has
+    /// executed no block above genesis and holds no registration of its own.
+    /// Every other shape is refused here, in the library, so that no caller can
+    /// reach the write without passing the same three questions.
+    ///
+    /// # Why a marker, and why it carries a digest
+    ///
+    /// Seeding at genesis is only sound if EVERY node seeds the same set — it is
+    /// a coordinated initial condition, exactly like a genesis edit, and a node
+    /// that seeded a different file is forked from block one rather than from
+    /// block N. Nothing in the chain data records that, because the rows look
+    /// identical either way.
+    ///
+    /// So the fact is recorded in `cf::META`, in the same batch as the rows, and
+    /// it carries [`RegistrySeed::digest`] — a blake3 over the seeded set in
+    /// address order, so two operators who seeded the same registrations from
+    /// differently-ordered files still get the same value and two who did not
+    /// cannot. The row outlives the process that wrote it, is read back by
+    /// `sumchain_state::sync_capability`, and is reported in the startup log and
+    /// on `chain_getSyncCapability`. "Did we all seed the same thing?" is then a
+    /// question a peer can answer before the first messaging transaction, rather
+    /// than an inference drawn from a diverged root afterwards.
+    ///
+    /// # Arguments
+    ///
+    /// `chain_height` is this database's own tip as
+    /// [`crate::schema::BlockStore::get_latest_height`] reports it: `None` for a
+    /// database that holds no block at all, `Some(0)` for one holding only
+    /// genesis. Anything above that is refused.
+    ///
+    /// # Errors
+    ///
+    /// Refuses, WITHOUT WRITING ANYTHING, when the database has executed a block
+    /// above genesis, when the registry already holds a row, when a seed has
+    /// already been recorded, or when `keys` is empty. The rows and the marker
+    /// go in one batch, so no crash can leave a seeded registry that does not
+    /// say it was seeded.
+    pub fn seed_registry_at_genesis(
+        &self,
+        chain_height: Option<BlockHeight>,
+        keys: &[(Address, RegisteredPublicKey)],
+    ) -> Result<RegistrySeed> {
+        if let Some(height) = chain_height {
+            if height > 0 {
+                return Err(StorageError::InvalidData(format!(
+                    "refusing to seed the SRC-201 public-key registry: this database is at \
+                     height {height}, and that family is read by consensus. A write here \
+                     changes the receipts this node produces for blocks it has already \
+                     executed, and nothing afterwards can tell a seeded row from a \
+                     registered one. Seeding is permitted only on a database that has \
+                     executed no block above genesis; to correct a diverged registry, \
+                     resync"
+                )));
+            }
+        }
+        if let Some(existing) = registry_seed(self.db)? {
+            return Err(StorageError::InvalidData(format!(
+                "refusing to seed the SRC-201 public-key registry: it was already seeded at \
+                 height {} with {} key(s), digest {}. A second seed would leave this node \
+                 unable to say what its registry contains",
+                existing.seeded_at_height, existing.key_count, existing.digest
+            )));
+        }
+        if self
+            .db
+            .full_iter(cf::MESSAGING_PUBLIC_KEYS)?
+            .next()
+            .is_some()
+        {
+            return Err(StorageError::InvalidData(
+                "refusing to seed the SRC-201 public-key registry: it already holds at least \
+                 one registration. A seed is an initial condition, not a merge — a partial \
+                 overwrite leaves a registry no operator can describe"
+                    .to_string(),
+            ));
+        }
+        if keys.is_empty() {
+            return Err(StorageError::InvalidData(
+                "refusing to seed the SRC-201 public-key registry from an empty set: there is \
+                 nothing to seed, and recording a marker for it would make this node claim a \
+                 provenance it does not have"
+                    .to_string(),
+            ));
+        }
+
+        // Address order, so the digest is a property of the SET and not of the
+        // order the operator's file happened to be in. Two validators seeding
+        // the same registrations must agree; two seeding different ones must
+        // not.
+        let mut ordered: Vec<(Address, Vec<u8>)> = Vec::with_capacity(keys.len());
+        for (address, key) in keys {
+            ordered.push((*address, encode_public_key(key)?));
+        }
+        ordered.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        if ordered.windows(2).any(|w| w[0].0 == w[1].0) {
+            return Err(StorageError::InvalidData(
+                "refusing to seed the SRC-201 public-key registry: the set names the same \
+                 address twice, so which registration this node would end up holding depends \
+                 on input order"
+                    .to_string(),
+            ));
+        }
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(REGISTRY_SEED_DIGEST_CONTEXT);
+        hasher.update(&(ordered.len() as u64).to_be_bytes());
+        for (address, encoded) in &ordered {
+            hasher.update(address.as_bytes());
+            hasher.update(&(encoded.len() as u64).to_be_bytes());
+            hasher.update(encoded);
+        }
+        let seed = RegistrySeed {
+            seeded_at_height: chain_height.unwrap_or(0),
+            key_count: ordered.len() as u64,
+            digest: hasher.finalize().to_hex().to_string(),
+        };
+
+        // One batch: the rows and the fact that an operator put them there. The
+        // caller does not get to choose the ordering, because the only ordering
+        // that closes the crash window is this one.
+        let mut batch = self.db.batch();
+        for (address, encoded) in &ordered {
+            batch.put(cf::MESSAGING_PUBLIC_KEYS, public_key_key(address), encoded)?;
+        }
+        batch.put(
+            cf::META,
+            REGISTRY_SEED_META_KEY,
+            &encode_registry_seed(&seed)?,
+        )?;
+        batch.commit()?;
+        Ok(seed)
+    }
+}
+
+/// `META` key holding what an operator seed did to this database's SRC-201
+/// public-key registry.
+pub const REGISTRY_SEED_META_KEY: &[u8] = b"messaging/registry_seed_v1";
+
+/// Domain separation for [`RegistrySeed::digest`], so the value cannot collide
+/// with a hash this repo computes over the same bytes for another purpose.
+const REGISTRY_SEED_DIGEST_CONTEXT: &[u8] = b"sumchain/messaging/registry_seed_v1";
+
+/// What an operator seed did to this node's SRC-201 public-key registry.
+///
+/// Present only on a node whose registry did NOT come from its own execution.
+/// A node that built the family by executing blocks has no such row, and that
+/// absence is the normal, correct state.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RegistrySeed {
+    /// The height the database was at when the seed was applied. Zero by
+    /// construction — [`MessagingStore::seed_registry_at_genesis`] refuses above
+    /// it — and recorded anyway, so the row states its own precondition rather
+    /// than leaving a reader to trust that the refusal was in place.
+    pub seeded_at_height: BlockHeight,
+    /// How many registrations were written.
+    pub key_count: u64,
+    /// blake3, in hex, over the seeded set in address order.
+    ///
+    /// The value two validators compare. Equal digests mean equal registries;
+    /// different digests mean they will disagree about the first `SendMessage`
+    /// whose sender is in one set and not the other.
+    pub digest: String,
+}
+
+fn encode_registry_seed(seed: &RegistrySeed) -> Result<Vec<u8>> {
+    serde_json::to_vec(seed).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+/// What an operator seed did to this database, or `None` if none was applied.
+///
+/// A malformed row is an ERROR rather than a `None`. `None` is a positive claim
+/// — "this node's registry came from its own execution" — and a node that cannot
+/// read the row is in no position to make it.
+pub fn registry_seed(db: &Database) -> Result<Option<RegistrySeed>> {
+    match db.get(cf::META, REGISTRY_SEED_META_KEY)? {
+        None => Ok(None),
+        Some(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| {
+            StorageError::InvalidData(format!(
+                "the messaging registry-seed row is unreadable ({e}). This node cannot \
+                 establish whether its SRC-201 registry came from its own execution and \
+                 must not claim that it did"
+            ))
+        }),
     }
 }
 

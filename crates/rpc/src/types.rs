@@ -796,6 +796,34 @@ pub struct SyncCapabilityInfo {
     /// to fold as one that holds the whole supply. Exposed so the operational
     /// threshold on it can be monitored rather than estimated.
     pub account_rows: u64,
+    /// What an operator seed did to this node's SRC-201 public-key registry, or
+    /// `null` on a node whose registry came from its own execution.
+    ///
+    /// The family is read by consensus, so two nodes holding different
+    /// registries produce different receipts for identical blocks. Served here
+    /// because this is where a peer already asks what a node may claim about its
+    /// own history, and because comparing digests answers "were we seeded from
+    /// the same set?" before the first messaging transaction rather than after a
+    /// diverged state root.
+    pub messaging_registry_seed: Option<MessagingRegistrySeedInfo>,
+}
+
+/// Operator-applied provenance for this node's SRC-201 public-key registry.
+///
+/// Present only on a node where `sumchain import-registered-keys` ran. That
+/// command refuses above genesis height and into a non-empty registry, so the
+/// presence of this object means an INITIAL CONDITION was applied, not that
+/// executed state was rewritten.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessagingRegistrySeedInfo {
+    /// Height the database was at when the seed was applied. Zero by
+    /// construction.
+    pub seeded_at_height: BlockHeight,
+    /// How many registrations were written.
+    pub key_count: u64,
+    /// blake3, in hex, over the seeded set in address order. The value two
+    /// validators compare: equal digests mean equal registries.
+    pub digest: String,
 }
 
 /// Transaction status V2 for `chain_getTransactionStatus` (Phase 0b, SNIP V2 Ask 11).

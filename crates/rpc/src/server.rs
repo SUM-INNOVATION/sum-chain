@@ -1616,6 +1616,13 @@ impl SumChainApiServer for RpcServer {
             usable_reorg_depth: cap.usable_reorg_depth,
             current_height,
             account_rows,
+            messaging_registry_seed: cap.messaging_registry_seed.as_ref().map(|seed| {
+                crate::types::MessagingRegistrySeedInfo {
+                    seeded_at_height: seed.seeded_at_height,
+                    key_count: seed.key_count,
+                    digest: seed.digest.clone(),
+                }
+            }),
         })
     }
 

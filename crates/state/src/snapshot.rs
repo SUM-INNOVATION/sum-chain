@@ -115,6 +115,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::{Address, Balance, BlockHeight, Hash, Nonce};
+use sumchain_storage::messaging_store::RegistrySeed;
 use sumchain_storage::pruner::UNDO_RETENTION_FLOOR;
 use sumchain_storage::{schema::AccountState, BlockStore, Database, StateStore};
 use tracing::{debug, info, warn};
@@ -775,6 +776,18 @@ pub struct SyncCapability {
     pub usable_reorg_depth: u64,
     /// The chain height this was computed against.
     pub current_height: BlockHeight,
+    /// What an operator seed did to this node's SRC-201 public-key registry.
+    ///
+    /// `None` on every node that built the family by executing blocks, which is
+    /// the normal state. `Some(_)` says this node's messaging registry did NOT
+    /// come from its own execution — it was written by `sumchain
+    /// import-registered-keys` before the first block above genesis — and
+    /// carries the digest a peer compares against its own to find out whether
+    /// the two were seeded from the same set. The family is read by consensus,
+    /// so two nodes seeded differently disagree about receipts; this is the
+    /// value that makes that answerable before the first messaging transaction
+    /// rather than after a diverged root.
+    pub messaging_registry_seed: Option<RegistrySeed>,
 }
 
 /// Read what a snapshot import did to this database, and what follows from it.
@@ -782,6 +795,11 @@ pub struct SyncCapability {
 /// The single place the node's startup log, its RPC surface and any future
 /// reorg-depth clamp should all read from, so the three cannot drift into three
 /// different answers about the same node.
+///
+/// It also reports the one OPERATOR-applied provenance a node can carry:
+/// [`SyncCapability::messaging_registry_seed`]. A snapshot import and a registry
+/// seed are the same kind of fact — state on this machine that this machine did
+/// not produce — and they are answered from one place for the same reason.
 pub fn sync_capability(db: &Database, current_height: BlockHeight) -> Result<SyncCapability> {
     let imported_at = imported_at(db)?;
     let carried: Vec<String> = SNAPSHOT_CARRIES.iter().map(|s| s.to_string()).collect();
@@ -800,6 +818,11 @@ pub fn sync_capability(db: &Database, current_height: BlockHeight) -> Result<Syn
             None => UNDO_RETENTION_FLOOR,
         },
         current_height,
+        // Read here rather than at each reporting site for the reason this
+        // whole function exists: the startup log and the RPC surface must not
+        // be able to give two different answers about the same node.
+        messaging_registry_seed: sumchain_storage::messaging_store::registry_seed(db)
+            .map_err(|e| StateError::Genesis(e.to_string()))?,
     })
 }
 

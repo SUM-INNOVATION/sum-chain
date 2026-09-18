@@ -1957,6 +1957,30 @@ fn non_execution_paths_are_classified() {
         // different values cannot disagree about any block. It is counted here
         // because it is a committed write from an operator command, which is
         // what this class counts; it is not a divergence risk.
+        //
+        // 2 -> 2 when OC-2 was closed, and the count staying put is the honest
+        // report. The messaging-key write did NOT go away: it moved from a loop
+        // over `MessagingStore::set_public_key`, callable at any height and with
+        // a `--skip-existing` merge flag, to a single call into
+        // `MessagingStore::seed_registry_at_genesis`, which refuses unless the
+        // database has executed no block above genesis, holds no registration of
+        // its own, and has not already been seeded — and which writes the rows
+        // and a permanent `cf::META` marker recording the seed, with a digest of
+        // the set, in one batch.
+        //
+        // This class counts committed writes from operator commands, and that is
+        // still what this is. What changed is the class of DAMAGE it can do: it
+        // can no longer rewrite executed state, only establish an initial
+        // condition, and a node that establishes one says so in its startup log
+        // and on `chain_getSyncCapability` for the rest of its life. It stays
+        // counted here because a coordinated initial condition is still
+        // something every validator must agree on, and this ledger is where that
+        // obligation is recorded. Pinned by
+        // `operator_tooling_writes_are_declared_deployment_blockers` below,
+        // `sumchain-storage/tests/messaging_registry_seed.rs`,
+        // `sumchain-node/tests/import_registered_keys_guard.rs` (the real
+        // binary) and
+        // `sumchain-rpc/.../a_seeded_messaging_registry_is_visible_to_a_peer_and_two_seeds_are_comparable`.
         (Class::OperatorTooling, 2, "see operator_tooling_writes_are_declared_deployment_blockers"),
     ];
     let sites = analyse();
@@ -2354,6 +2378,39 @@ fn operator_tooling_writes_are_declared_deployment_blockers() {
             s.file, s.caller
         );
     }
+
+    // OC-2. The messaging write must go through the GUARDED entry point, and
+    // only through it.
+    //
+    // `MessagingStore::set_public_key` writes `cf::MESSAGING_PUBLIC_KEYS` at any
+    // height, into any registry, with no record that it ran — which is what the
+    // import used to do, one key at a time, and is the shape that forked
+    // validators. `seed_registry_at_genesis` refuses unless the database has
+    // executed no block above genesis and holds no registration of its own, and
+    // commits a `cf::META` marker with the rows.
+    //
+    // Checked here rather than only in the node crate because this is the ledger
+    // that knows which operator callers reach a mutator at all: an operator
+    // write into that family through any other door would be a new row here, and
+    // this turns it into a named failure instead of a count nobody reads.
+    let messaging_callees: BTreeSet<&str> = operator
+        .iter()
+        .filter(|s| {
+            s.cfs
+                .iter()
+                .any(|c| matches!(c, Cf::Named(n) if n.starts_with("MESSAGING_")))
+        })
+        .map(|s| s.callee.as_str())
+        .collect();
+    assert_eq!(
+        messaging_callees,
+        BTreeSet::from(["MessagingStore::seed_registry_at_genesis"]),
+        "the operator path into a MESSAGING_* family must be the guarded \
+         genesis-only seed and nothing else. `set_public_key` reappearing here \
+         is OC-2 reopening: it writes a consensus-read family at any height, \
+         leaves no record that it ran, and a node that ran it produces receipts \
+         its peers do not."
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
