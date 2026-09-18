@@ -674,26 +674,89 @@ fn a_boundary_inside_the_legacy_window_would_be_absorbed_not_detected() {
 // 6. Cost
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The per-block cost of the commitment at a realistic account count, as a
-/// number.
+/// The count of accounts holding value on mainnet, enumerated by
+/// transaction-graph closure and cross-checked against
+/// `chain_getSupplyInfo.accounted_account_supply` to the base unit.
+///
+/// It is a LOWER BOUND on the stored-row count the fold pays for and nothing
+/// more — a row whose balance and nonce are both zero is invisible to every RPC,
+/// and a contract address credited on a deployment carrying value appears in no
+/// transaction index. The production stored-row count is unmeasured; see
+/// `docs/operations/ACCOUNT-ROOT-ACTIVATION.md`. It is benchmarked here anyway,
+/// because it is the one count on this chain that was actually measured, and a
+/// cost model that only reports synthetic counts has not been anchored to
+/// anything.
+const MAINNET_ACCOUNTS_HOLDING_VALUE: usize = 18;
+
+/// The per-block cost of the commitment, measured at the count that was taken
+/// from the chain AND at a count large enough to see the slope.
 ///
 /// The fold is O(accounts) per block with O(1) memory, and that cost is the
 /// design decision rather than a footnote: it is paid on EVERY block by every
 /// node, so it is measured rather than assumed.
 ///
-/// `ACCOUNT_ROOT_COST_ACCOUNTS` overrides the count (default 100_000, which
-/// keeps the unoptimised test build quick). The measured numbers are recorded
-/// in the accompanying report. The assertion here is deliberately loose: it is
-/// a tripwire on the ORDER of the cost — that the fold is still a linear
-/// streaming scan and has not acquired a per-account allocation, map build or
-/// re-seek — not a benchmark gate, because a test machine's absolute timings
-/// are not a consensus parameter.
+/// # Why two counts and not one
+///
+/// One count gives a number; two give a shape, and the shape is what the
+/// operational threshold in `account_root.rs` is interpolated from. The small
+/// one is dominated by fixed iterator and open cost and says what the commitment
+/// costs on this chain TODAY; the large one is in the linear regime and says
+/// what it will cost as the family grows. Reporting only the large one would
+/// overstate today's cost per account; reporting only the small one would hide
+/// the slope entirely. Neither is an extrapolation to a production count, which
+/// remains unmeasured.
+///
+/// `ACCOUNT_ROOT_COST_ACCOUNTS` overrides the large count (default 100_000,
+/// which keeps the unoptimised test build quick). The assertion is deliberately
+/// loose: it is a tripwire on the ORDER of the cost — that the fold is still a
+/// linear streaming scan and has not acquired a per-account allocation, map
+/// build or re-seek — not a benchmark gate, because a test machine's absolute
+/// timings are not a consensus parameter.
 #[test]
 fn the_cost_of_the_account_commitment_at_a_realistic_account_count() {
     let accounts: usize = std::env::var("ACCOUNT_ROOT_COST_ACCOUNTS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(100_000);
+    assert!(
+        accounts > MAINNET_ACCOUNTS_HOLDING_VALUE,
+        "the large count must actually be larger, or this measures one point twice"
+    );
+
+    // ── The count taken from the chain. Measured first and on its own database,
+    //    so it is not reading pages the large run warmed.
+    {
+        let small = old_binary();
+        for i in 0..MAINNET_ACCOUNTS_HOLDING_VALUE {
+            small.seed(&addr(i as u8 + 1), (i as u128) * 1_000 + 1, i as u64);
+        }
+        assert_eq!(
+            account_row_count(&small.db).unwrap(),
+            MAINNET_ACCOUNTS_HOLDING_VALUE as u64,
+            "the instrument and the fixture must agree about how many rows exist"
+        );
+        let _ = small.committed_digest();
+        let started = Instant::now();
+        let digest = small.committed_digest();
+        let elapsed = started.elapsed();
+        eprintln!(
+            "ACCOUNT-ROOT COST: {MAINNET_ACCOUNTS_HOLDING_VALUE} accounts (the \
+             mainnet value-holding count, a LOWER BOUND on stored rows) | \
+             committed scan {elapsed:?} ({:.3} us/account) | {:.6} % of a 1,506 \
+             ms block interval | digest {digest}",
+            elapsed.as_secs_f64() * 1e6 / MAINNET_ACCOUNTS_HOLDING_VALUE as f64,
+            elapsed.as_secs_f64() * 100.0 / 1.506,
+        );
+        // At this count the scan must be far inside a block interval by any
+        // margin a test machine could plausibly produce. This is the one
+        // assertion in the cost tests that is about the CHAIN rather than about
+        // the shape of the function.
+        assert!(
+            elapsed.as_secs_f64() < 0.1,
+            "a fold over {MAINNET_ACCOUNTS_HOLDING_VALUE} rows took {elapsed:?}, \
+             which is not a fold over 18 rows"
+        );
+    }
 
     let n = old_binary();
     let mut batch = n.db.batch();

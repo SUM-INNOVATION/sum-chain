@@ -1090,3 +1090,113 @@ fn the_snapshot_policy_admits_only_what_the_commitment_can_check() {
          one side and by execution on the other"
     );
 }
+
+/// A restored node cannot ACCEPT a branch it has no records to unwind — and the
+/// number that stops it is the same number this module advertises.
+///
+/// Advertising and serving are covered above. Accepting is the third, and it is
+/// the one this module does not implement: the clamp on the reorg WALK lives in
+/// `crates/consensus/src/reorg.rs`, which reads
+/// `sumchain_storage::journal::JournalActivation::advertisable_reorg_depth`
+/// rather than anything here.
+///
+/// So there are two independently-derived numbers for one fact, and the failure
+/// worth testing for is that they disagree — a node that advertises zero and
+/// walks four thousand, or the reverse. They are derived from different
+/// evidence, which is what makes the agreement meaningful rather than circular:
+///
+/// * this module's, from the RECORDED import height — a fact about what arrived;
+/// * the planner's, from the journals the database actually HOLDS — a fact about
+///   what can be undone. A restored node holds none, so its observed boundary is
+///   unestablished and its usable depth is zero without anyone having to tell it.
+///
+/// Both then grow one block per block the node publishes itself, because that is
+/// the only way undo history is ever acquired: journals are node-local, never
+/// transmitted, and a pre-image cannot be derived from a post-state.
+#[test]
+fn a_restored_node_cannot_accept_a_branch_it_cannot_unwind() {
+    use sumchain_storage::journal::{ActivationSource, JournalActivation};
+
+    let alice = key(1);
+    let engine_max = UNDO_RETENTION_FLOOR;
+
+    let source = committed_node();
+    let snapshot = chain_with_snapshot(&source, BOUNDARY);
+
+    // No `clone_everything_but_accounts` here, deliberately. That fixture exists
+    // to isolate the account rows for the root-reproduction tests, and it copies
+    // the source's APPLICATION_JOURNAL family along with everything else — which
+    // is not what an import produces. Journals are node-local and are not
+    // transmitted; a target holding the source's would be a node claiming undo
+    // history for blocks it never executed, which is the precise thing this test
+    // is about. (A fast-sync format that DID copy journals is what
+    // `journal::record_undo_history_floor` exists for, and it is the journal
+    // workstream's to stamp.)
+    let target = committed_node();
+    target
+        .snapshots()
+        .import_account_family(&snapshot)
+        .expect("import");
+    target.state.set_state_root(snapshot.header.state_root);
+
+    // ── At the restore height: zero, from both sides.
+    let planner_depth = |head: u64| {
+        JournalActivation::resolve(&target.db, ActivationSource::ObservedFromChain)
+            .expect("resolve the journal boundary")
+            .advertisable_reorg_depth(head, engine_max)
+    };
+    assert_eq!(
+        sync_capability(&target.db, BOUNDARY)
+            .unwrap()
+            .usable_reorg_depth,
+        0,
+        "this module says the node can unwind nothing"
+    );
+    assert_eq!(
+        planner_depth(BOUNDARY),
+        0,
+        "and the planner, reading the journals this database holds rather than \
+         the import record, reaches the same zero"
+    );
+
+    // ── It earns depth by publishing, one block at a time, and the two numbers
+    //    stay equal the whole way up.
+    for (i, height) in (BOUNDARY + 1..=BOUNDARY + 4).enumerate() {
+        target.publish(
+            height,
+            vec![transfer(
+                &alice,
+                &addr(0x70 + i as u8),
+                1_000,
+                500,
+                1 + i as u64,
+            )],
+        );
+        let advertised = sync_capability(&target.db, height)
+            .unwrap()
+            .usable_reorg_depth;
+        assert_eq!(
+            advertised,
+            (i as u64) + 1,
+            "height {height}: one block published is one block of undo history"
+        );
+        assert_eq!(
+            planner_depth(height),
+            advertised,
+            "height {height}: the depth this node ADVERTISES and the depth the \
+             reorg planner will WALK must be one number. Two numbers here is a \
+             node that either refuses reorgs it could perform or attempts ones \
+             it cannot finish, leaving a branch half-applied."
+        );
+    }
+
+    // ── And neither ever reaches below the restore point, which is the hard
+    //    floor: no record this database holds can revert a block it never had.
+    assert!(
+        sync_capability(&target.db, BOUNDARY + 4)
+            .unwrap()
+            .usable_reorg_depth
+            < engine_max,
+        "a node four blocks past a restore must not claim the full horizon"
+    );
+}
