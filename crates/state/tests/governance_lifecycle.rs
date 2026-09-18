@@ -157,18 +157,18 @@ fn register_requires_validator_quorum_and_non_mintable() {
 
     // No approvals → 303, even with a validator set supplied (fail closed).
     let req_no = bincode::serialize(&RegisterAssetRequest { token_id: TOKEN, create_threshold: 1, effective_height: 0, approvals: vec![] }).unwrap();
-    let r = exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterAsset, req_no)), &Address::new([9; 20]), 1, 1000, &vset).unwrap();
+    let r = exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterAsset, req_no)), &Address::new([9; 20]), 1, 1000, 0, &vset).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(303)), "no approvals: {:?}", r.status);
 
     // Approval NOT from an active validator → does not count → 303.
     let outsider = KeyPair::generate();
     let req_out = bincode::serialize(&RegisterAssetRequest { token_id: TOKEN, create_threshold: 1, effective_height: 0, approvals: vec![register_approval(&outsider, &TOKEN, 1, 0)] }).unwrap();
-    let r = exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 1, gov(GovernanceOperation::RegisterAsset, req_out)), &Address::new([9; 20]), 1, 1000, &vset).unwrap();
+    let r = exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 1, gov(GovernanceOperation::RegisterAsset, req_out)), &Address::new([9; 20]), 1, 1000, 0, &vset).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(303)), "non-validator approval: {:?}", r.status);
 
     // Valid validator quorum → success.
     let req_ok = bincode::serialize(&RegisterAssetRequest { token_id: TOKEN, create_threshold: 1, effective_height: 0, approvals: vec![register_approval(&v, &TOKEN, 1, 0)] }).unwrap();
-    let r = exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 2, gov(GovernanceOperation::RegisterAsset, req_ok)), &Address::new([9; 20]), 1, 1000, &vset).unwrap();
+    let r = exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 2, gov(GovernanceOperation::RegisterAsset, req_ok)), &Address::new([9; 20]), 1, 1000, 0, &vset).unwrap();
     assert!(matches!(r.status, TxStatus::Success), "valid quorum: {:?}", r.status);
 }
 
@@ -184,7 +184,7 @@ fn register_rejects_mintable_and_missing_token() {
     fund(&db, &submitter, 10_000);
     // No token seeded → missing token → 303 despite valid authority.
     let req = bincode::serialize(&RegisterAssetRequest { token_id: TOKEN, create_threshold: 1, effective_height: 0, approvals: vec![register_approval(&v, &TOKEN, 1, 0)] }).unwrap();
-    let r = exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterAsset, req)), &Address::new([9; 20]), 1, 1000, &vset).unwrap();
+    let r = exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterAsset, req)), &Address::new([9; 20]), 1, 1000, 0, &vset).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(303)), "missing token: {:?}", r.status);
 }
 
@@ -533,14 +533,14 @@ fn validator_quorum_cancel_burns_bond() {
 
     // Non-proposer cancel WITHOUT approvals → 306 (authority).
     let creq_no = bincode::serialize(&CancelProposalRequest { proposal_id: pid, approvals: vec![] }).unwrap();
-    let r = exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::CancelProposal, creq_no)), &Address::new(BLOCK_PROPOSER), 10, 1000, &vset).unwrap();
+    let r = exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::CancelProposal, creq_no)), &Address::new(BLOCK_PROPOSER), 10, 1000, 0, &vset).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(306)), "no-approval validator cancel: {:?}", r.status);
 
     // Non-proposer cancel WITH a valid validator quorum → success, bond burned.
     let msg = sumchain_primitives::validator_authority::cancel_proposal_signing_bytes(CHAIN_ID, &pid);
     let approval = sumchain_primitives::ValidatorApproval { pubkey: *v.public_key().as_bytes(), signature: sign(&msg, v.private_key()).to_bytes() };
     let creq = bincode::serialize(&CancelProposalRequest { proposal_id: pid, approvals: vec![approval] }).unwrap();
-    let r = exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 1, gov(GovernanceOperation::CancelProposal, creq)), &Address::new(BLOCK_PROPOSER), 10, 1000, &vset).unwrap();
+    let r = exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 1, gov(GovernanceOperation::CancelProposal, creq)), &Address::new(BLOCK_PROPOSER), 10, 1000, 0, &vset).unwrap();
     assert!(matches!(r.status, TxStatus::Success), "validator cancel: {:?}", r.status);
 
     let stored = gv::v_get_proposal(&candidate.view(), &pid).unwrap().unwrap();

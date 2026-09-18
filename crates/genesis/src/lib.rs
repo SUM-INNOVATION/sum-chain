@@ -913,6 +913,35 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub subsystem_block_timestamp_enabled_from_height: Option<u64>,
+
+    /// Subsystem event rows are keyed by the transaction that produced them.
+    ///
+    /// Below the gate every dispatch arm hands the subsystem executors a literal
+    /// `0` where the transaction's index within its block belongs. DocClass
+    /// events are keyed `height || tx_index || event_index` and messaging events
+    /// `recipient || height || tx_index`, so every event a block produces lands
+    /// at one key and only the LAST survives: the family holds one row per block
+    /// and every earlier event is silently overwritten. At and above the gate
+    /// each arm passes the transaction's real index and the rows stop colliding.
+    ///
+    /// Distinct from `subsystem_block_timestamp_enabled_from_height` on purpose.
+    /// That gate changes the CONTENTS of rows across eight subsystems and moves
+    /// time-dependent validity with it; this one changes the KEYS and the COUNT
+    /// of rows in two families, and therefore the size of a block's write set,
+    /// which the candidate ceiling can refuse. They are different defects with
+    /// different blast radii, and an operator must be able to sequence them.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub subsystem_tx_index_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -1248,6 +1277,7 @@ impl Default for ChainParams {
             tax_authorization_enabled_from_height: None,
             // Production-safe default: eight subsystems see the block's timestamp instead of a literal zero — dormant.
             subsystem_block_timestamp_enabled_from_height: None,
+            subsystem_tx_index_enabled_from_height: None,
         }
     }
 }
@@ -1565,6 +1595,10 @@ impl ChainParams {
             (
                 "subsystem_block_timestamp_enabled_from_height",
                 self.subsystem_block_timestamp_enabled_from_height,
+            ),
+            (
+                "subsystem_tx_index_enabled_from_height",
+                self.subsystem_tx_index_enabled_from_height,
             ),
         ]
     }

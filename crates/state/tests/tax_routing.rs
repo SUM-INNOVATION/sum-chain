@@ -807,7 +807,7 @@ fn the_v2_dispatch_surface_also_stages_tax() {
     {
         let mut view = ExecutionView::new(&mut overlay);
         let r = executor
-            .execute_tx_v2(&mut view, &tx, &sig, &key, &proposer, 1, 1000)
+            .execute_tx_v2(&mut view, &tx, &sig, &key, &proposer, 1, 1000, 0)
             .unwrap();
         assert!(
             matches!(r.status, TxStatus::Success),

@@ -587,10 +587,13 @@ impl DocClassExecutor {
 
     /// Keyed by `height || tx_index || event_index`, all big-endian.
     ///
-    /// Both dispatch arms pass a literal `0` for `tx_index`, so every DocClass
-    /// event in a block lands at the SAME key and only the last one survives.
-    /// That is inherited and is pinned as a deployment blocker, not repaired
-    /// here.
+    /// `tx_index` reaches here already reduced by
+    /// [`crate::effective_tx_index`]. While
+    /// `subsystem_tx_index_enabled_from_height` is closed it is the literal `0`
+    /// both dispatch arms used to pass, so every DocClass event in a block lands
+    /// at the SAME key and only the last survives — the inherited defect,
+    /// reproduced exactly. At and above that height each arm passes the
+    /// transaction's own index and the events in a block stop colliding.
     pub fn v_put_docclass_event(
         view: &mut ExecutionView<'_, '_>,
         block_height: BlockHeight,

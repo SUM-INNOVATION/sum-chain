@@ -542,7 +542,7 @@ fn dispute_deny_blocks_claim_and_allows_refund() {
     let vset = [*resolver.public_key().as_bytes()];
     let ap = resolve_approval(&resolver, "s", &verifier.address(), false);
     let rd = executor
-        .execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), allow_claim: false, approvals: vec![ap] })), &proposer.address(), 9, 1000, &vset)
+        .execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), allow_claim: false, approvals: vec![ap] })), &proposer.address(), 9, 1000, 0, &vset)
         .unwrap();
     assert!(rd.status.is_success(), "resolve: {:?}", rd.status);
 
@@ -578,7 +578,7 @@ fn dispute_allow_lets_claim_proceed() {
     // validator quorum allows.
     let vset = [*resolver.public_key().as_bytes()];
     let ap = resolve_approval(&resolver, "s", &verifier.address(), true);
-    executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), allow_claim: true, approvals: vec![ap] })), &proposer.address(), 9, 1000, &vset).unwrap();
+    executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), allow_claim: true, approvals: vec![ap] })), &proposer.address(), 9, 1000, 0, &vset).unwrap();
     // claim proceeds after maturity.
     let vbal = StateManager::v_get_balance(&candidate.view(), &verifier.address()).unwrap();
     let claim = executor
@@ -609,14 +609,14 @@ fn resolve_requires_validator_quorum_353() {
     // (stranger) is irrelevant; the approval is from a non-validator.
     let bad = resolve_approval(&stranger, "s", &verifier.address(), true);
     let r = executor
-        .execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&stranger, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), allow_claim: true, approvals: vec![bad] })), &proposer.address(), 9, 1000, &vset)
+        .execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&stranger, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), allow_claim: true, approvals: vec![bad] })), &proposer.address(), 9, 1000, 0, &vset)
         .unwrap();
     assert!(matches!(r.status, TxStatus::Failed(353)), "non-validator approval: {:?}", r.status);
 
     // A valid validator quorum (submitted by a non-validator) → success.
     let ap = resolve_approval(&validator, "s", &verifier.address(), true);
     let r = executor
-        .execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&stranger, 1, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), allow_claim: true, approvals: vec![ap] })), &proposer.address(), 9, 1000, &vset)
+        .execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&stranger, 1, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), allow_claim: true, approvals: vec![ap] })), &proposer.address(), 9, 1000, 0, &vset)
         .unwrap();
     assert!(r.status.is_success(), "valid quorum by non-validator submitter: {:?}", r.status);
 }
@@ -1114,7 +1114,7 @@ fn denied_dispute_denies_reward_and_slashes_bond() {
     // Funder disputes (height 8), quorum DENIES (height 9).
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 1, open_dispute_op("s", &v.address())), &p, 8, 1000).unwrap();
     let ap = resolve_approval(&resolver, "s", &v.address(), false);
-    let rd = executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: false, approvals: vec![ap] })), &p, 9, 1000, &vset).unwrap();
+    let rd = executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: false, approvals: vec![ap] })), &p, 9, 1000, 0, &vset).unwrap();
     assert!(rd.status.is_success(), "resolve deny: {:?}", rd.status);
 
     // Bond slashed by 25%; slashed amount burned to ZERO.
@@ -1143,7 +1143,7 @@ fn allowed_dispute_does_not_slash() {
     attest_digest(&mut candidate.view(), &executor, &p, &v, "s", 5, 1, (1, 2, 3, 4));
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 1, open_dispute_op("s", &v.address())), &p, 8, 1000).unwrap();
     let ap = resolve_approval(&resolver, "s", &v.address(), true);
-    executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: true, approvals: vec![ap] })), &p, 9, 1000, &vset).unwrap();
+    executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: true, approvals: vec![ap] })), &p, 9, 1000, 0, &vset).unwrap();
     assert_eq!(InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap().bond, BOND, "allow → no slash");
     assert_eq!(StateManager::v_get_balance(&candidate.view(), &Address::ZERO).unwrap(), 0, "nothing burned");
 }
@@ -1164,7 +1164,7 @@ fn denied_dispute_with_no_or_zero_bond_slashes_zero_no_underflow() {
     attest_digest(&mut candidate.view(), &executor, &p, &v, "s", 5, 0, (1, 2, 3, 4)); // v nonce 0, no registration
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 1, open_dispute_op("s", &v.address())), &p, 8, 1000).unwrap();
     let ap = resolve_approval(&resolver, "s", &v.address(), false);
-    let rd = executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: false, approvals: vec![ap] })), &p, 9, 1000, &vset).unwrap();
+    let rd = executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: false, approvals: vec![ap] })), &p, 9, 1000, 0, &vset).unwrap();
     assert!(rd.status.is_success(), "resolve succeeds even with no bond: {:?}", rd.status);
     assert!(InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().is_none(), "no verifier record created");
     assert_eq!(StateManager::v_get_balance(&candidate.view(), &Address::ZERO).unwrap(), 0, "no burn, no mint, no underflow");
@@ -1189,7 +1189,7 @@ fn slash_during_unbonding_reduces_withdrawal() {
     // Funder disputes + quorum denies (slashes 40% of remaining bond even while Unbonding).
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 1, open_dispute_op("s", &v.address())), &p, 7, 1000).unwrap();
     let ap = resolve_approval(&resolver, "s", &v.address(), false);
-    executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: false, approvals: vec![ap] })), &p, 8, 1000, &vset).unwrap();
+    executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: false, approvals: vec![ap] })), &p, 8, 1000, 0, &vset).unwrap();
     let slash = BOND * 4000 / 10_000;
     assert_eq!(InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap().bond, BOND - slash);
 
@@ -1337,7 +1337,7 @@ fn supply_conserved_across_register_open_slash_withdraw() {
     attest_digest(&mut candidate.view(), &executor, &p, &v, "s", 5, 1, (1, 2, 3, 4));
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 1, open_dispute_op("s", &v.address())), &p, 8, 1000).unwrap();
     let ap = resolve_approval(&resolver, "s", &v.address(), false);
-    executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: false, approvals: vec![ap] })), &p, 9, 1000, &vset).unwrap();
+    executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: false, approvals: vec![ap] })), &p, 9, 1000, 0, &vset).unwrap();
     assert_eq!(reconcile(&state, &mut candidate), funded, "after slash (burn to ZERO conserves supply)");
     // Unbond + withdraw the reduced bond.
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&v, 2, InferenceSettlementOperation::BeginVerifierUnbond), &p, 60, 1000).unwrap();

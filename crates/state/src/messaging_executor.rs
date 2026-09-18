@@ -65,6 +65,20 @@ impl MessagingExecutor {
     }
 
     /// Execute a messaging transaction
+    ///
+    /// `block_timestamp` arrives real from both dispatch arms and is reduced to
+    /// the literal `0` they used to pass while
+    /// `subsystem_block_timestamp_enabled_from_height` is closed — the same
+    /// substitution, through the same function, that the other eight subsystems
+    /// make (TS-11). It is not cosmetic here: `current_day` buckets the daily
+    /// send quota by timestamp, so at time zero every message a chain ever sends
+    /// counts against day zero and the quota is exhausted permanently; and
+    /// `claim_payment` compares a pending payment's expiry against it. Both
+    /// decide whether a transaction succeeds, so the substitution is gated.
+    ///
+    /// `tx_index` is already reduced by the dispatch arm — see
+    /// [`crate::effective_tx_index`] — because it is the arm that knows the
+    /// index. It reaches the event-row keys unchanged from here.
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
         view: &mut ExecutionView<'_, '_>,
@@ -78,6 +92,10 @@ impl MessagingExecutor {
         tx_index: u32,
         tx_hash: Hash,
     ) -> Result<MessagingExecutionResult> {
+        let block_timestamp = crate::effective_block_timestamp(
+            block_timestamp,
+            crate::subsystem_block_timestamp_gate_open(params, block_height),
+        );
         match data.operation {
             MessagingOperation::SendMessage => Self::send_message_sponsored(
                 view,

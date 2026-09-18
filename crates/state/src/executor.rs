@@ -406,6 +406,12 @@ impl BlockExecutor {
     /// an empty active validator set, so any validator-quorum action fails closed.
     /// Block execution uses [`Self::execute_tx_with_validators`] with the real
     /// active PoA set for the height.
+    ///
+    /// Passes transaction index `0`, which is what a lone transaction's index
+    /// is. A caller placing SEVERAL transactions in one block must use
+    /// [`Self::execute_tx_with_validators`] and pass each one's own index, or
+    /// the subsystem event rows they write will collide — see
+    /// [`crate::effective_tx_index`].
     pub fn execute_tx(
         &self,
         view: &mut ExecutionView<'_, '_>,
@@ -414,13 +420,19 @@ impl BlockExecutor {
         block_height: u64,
         block_timestamp: u64,
     ) -> Result<TxExecutionResult> {
-        self.execute_tx_with_validators(view, tx, proposer, block_height, block_timestamp, &[])
+        self.execute_tx_with_validators(view, tx, proposer, block_height, block_timestamp, 0, &[])
     }
 
     /// Execute a single transaction, authorizing validator-quorum actions against
     /// the supplied active PoA validator set (threaded from the consensus layer
     /// for the block being executed). Never consults `StakingStore`/
     /// `ValidatorSetStore` for authority.
+    ///
+    /// `tx_index` is the transaction's position within its block. It is what the
+    /// subsystem event families key their rows by; see
+    /// [`crate::effective_tx_index`] for why passing it is gated rather than
+    /// unconditional.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_tx_with_validators(
         &self,
         view: &mut ExecutionView<'_, '_>,
@@ -428,9 +440,17 @@ impl BlockExecutor {
         proposer: &Address,
         block_height: u64,
         block_timestamp: u64,
+        tx_index: u32,
         active_validator_pubkeys: &[[u8; 32]],
     ) -> Result<TxExecutionResult> {
         let tx_hash = tx.hash();
+        // Resolved ONCE, at the top of the arm, so every subsystem below sees
+        // the same answer. Below the gate this is the literal `0` the arm used
+        // to write inline at each call.
+        let tx_index = crate::effective_tx_index(
+            tx_index,
+            crate::subsystem_tx_index_gate_open(&self.params, block_height),
+        );
 
         // Validate first
         if let Err(e) = self.validate_tx(view, tx) {
@@ -723,8 +743,8 @@ impl BlockExecutor {
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
-                            0, // tx_index placeholder
+                            block_timestamp,
+                            tx_index,
                             tx_hash,
                         )?;
 
@@ -764,7 +784,7 @@ impl BlockExecutor {
                             v2_tx.fee,
                             block_height,
                             block_timestamp,
-                            0, // tx_index placeholder
+                            tx_index,
                             tx_hash,
                         )?;
 
@@ -803,7 +823,7 @@ impl BlockExecutor {
                             v2_tx.fee,
                             block_height,
                             block_timestamp,
-                            0, // tx_index placeholder
+                            tx_index,
                             tx_hash,
                         )?;
 
@@ -838,7 +858,7 @@ impl BlockExecutor {
                             v2_tx.fee,
                             block_height,
                             0, // block_timestamp placeholder
-                            0, // tx_index placeholder
+                            tx_index,
                             tx_hash,
                         )?;
 
@@ -878,7 +898,7 @@ impl BlockExecutor {
                             v2_tx.fee,
                             block_height,
                             block_timestamp,
-                            0, // tx_index placeholder
+                            tx_index,
                             tx_hash,
                         )?;
 
@@ -918,7 +938,7 @@ impl BlockExecutor {
                             v2_tx.fee,
                             block_height,
                             block_timestamp,
-                            0, // tx_index placeholder
+                            tx_index,
                             tx_hash,
                         )?;
 
@@ -955,7 +975,7 @@ impl BlockExecutor {
                             v2_tx.fee,
                             block_height,
                             block_timestamp,
-                            0, // tx_index placeholder
+                            tx_index,
                             tx_hash,
                         )?;
 
@@ -995,7 +1015,7 @@ impl BlockExecutor {
                             v2_tx.fee,
                             block_height,
                             block_timestamp,
-                            0, // tx_index placeholder
+                            tx_index,
                             tx_hash,
                         )?;
 
@@ -1035,7 +1055,7 @@ impl BlockExecutor {
                             v2_tx.fee,
                             block_height,
                             block_timestamp,
-                            0, // tx_index placeholder
+                            tx_index,
                             tx_hash,
                         )?;
 
@@ -1075,7 +1095,7 @@ impl BlockExecutor {
                             v2_tx.fee,
                             block_height,
                             block_timestamp,
-                            0, // tx_index placeholder
+                            tx_index,
                             tx_hash,
                         )?;
 
@@ -2095,8 +2115,16 @@ impl BlockExecutor {
         proposer: &Address,
         block_height: u64,
         block_timestamp: u64,
+        tx_index: u32,
     ) -> Result<TxExecutionResult> {
         let tx_hash = tx.signing_hash();
+        // The same resolution as the live arm, through the same function. This
+        // arm has no caller outside the test suites, and it is changed with the
+        // live one precisely because `pub` means one can appear.
+        let tx_index = crate::effective_tx_index(
+            tx_index,
+            crate::subsystem_tx_index_gate_open(&self.params, block_height),
+        );
 
         // 1. Verify chain ID
         if tx.chain_id != self.state.chain_id() {
@@ -2458,8 +2486,8 @@ impl BlockExecutor {
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
-                    0, // tx_index placeholder
+                    block_timestamp,
+                    tx_index,
                     tx_hash,
                 )?;
 
@@ -2509,7 +2537,7 @@ impl BlockExecutor {
                     tx.fee,
                     block_height,
                     block_timestamp,
-                    0, // tx_index placeholder
+                    tx_index,
                     tx_hash,
                 )?;
 
@@ -2558,7 +2586,7 @@ impl BlockExecutor {
                     tx.fee,
                     block_height,
                     block_timestamp,
-                    0, // tx_index placeholder
+                    tx_index,
                     tx_hash,
                 )?;
 
@@ -2603,7 +2631,7 @@ impl BlockExecutor {
                     tx.fee,
                     block_height,
                     0, // block_timestamp placeholder
-                    0, // tx_index placeholder
+                    tx_index,
                     tx_hash,
                 )?;
 
@@ -2653,7 +2681,7 @@ impl BlockExecutor {
                     tx.fee,
                     block_height,
                     block_timestamp,
-                    0, // tx_index placeholder
+                    tx_index,
                     tx_hash,
                 )?;
 
@@ -2703,7 +2731,7 @@ impl BlockExecutor {
                     tx.fee,
                     block_height,
                     block_timestamp,
-                    0, // tx_index placeholder
+                    tx_index,
                     tx_hash,
                 )?;
 
@@ -2750,7 +2778,7 @@ impl BlockExecutor {
                     tx.fee,
                     block_height,
                     block_timestamp,
-                    0, // tx_index placeholder
+                    tx_index,
                     tx_hash,
                 )?;
 
@@ -2800,7 +2828,7 @@ impl BlockExecutor {
                     tx.fee,
                     block_height,
                     block_timestamp,
-                    0, // tx_index placeholder
+                    tx_index,
                     tx_hash,
                 )?;
 
@@ -2850,7 +2878,7 @@ impl BlockExecutor {
                     tx.fee,
                     block_height,
                     block_timestamp,
-                    0, // tx_index placeholder
+                    tx_index,
                     tx_hash,
                 )?;
 
@@ -2900,7 +2928,7 @@ impl BlockExecutor {
                     tx.fee,
                     block_height,
                     block_timestamp,
-                    0, // tx_index placeholder
+                    tx_index,
                     tx_hash,
                 )?;
 
@@ -3152,6 +3180,10 @@ impl BlockExecutor {
                     &proposer,
                     block.height(),
                     block.header.timestamp,
+                    // The same `idx` the receipt below is built from: the
+                    // transaction's position in this block, which is what its
+                    // event rows must be keyed by.
+                    idx as u32,
                     active_validator_pubkeys,
                 )?
             };

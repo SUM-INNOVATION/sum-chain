@@ -2669,7 +2669,7 @@ fn the_v2_dispatch_surface_also_stages_legal() {
     {
         let mut view = ExecutionView::new(&mut overlay);
         let r = executor
-            .execute_tx_v2(&mut view, &tx, &sig, &key, &proposer, 1, 1000)
+            .execute_tx_v2(&mut view, &tx, &sig, &key, &proposer, 1, 1000, 0)
             .unwrap();
         assert!(
             matches!(r.status, TxStatus::Success),
@@ -2727,7 +2727,7 @@ fn the_v2_dispatch_surface_refuses_with_the_legal_code() {
     let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
     let mut view = ExecutionView::new(&mut overlay);
     let r = executor
-        .execute_tx_v2(&mut view, &tx, &sig, &key, &proposer, 1, 1000)
+        .execute_tx_v2(&mut view, &tx, &sig, &key, &proposer, 1, 1000, 0)
         .unwrap();
     assert_eq!(r.status, LEGAL_FAILED);
     assert!(families_changed(&db, &view).is_empty());

@@ -487,6 +487,7 @@ fn a_gate_this_binary_introduced_is_not_grandfathered() {
         "account_root_enabled_from_height",
         "nft_receipt_failure_enabled_from_height",
         "subsystem_block_timestamp_enabled_from_height",
+        "subsystem_tx_index_enabled_from_height",
         "healthcare_authorization_enabled_from_height",
         "docclass_stake_escrow_enabled_from_height",
     ] {
@@ -534,6 +535,9 @@ fn a_newly_introduced_gate_below_the_head_refuses_a_first_start() {
         }),
         ("subsystem_block_timestamp_enabled_from_height", &|p, h| {
             p.subsystem_block_timestamp_enabled_from_height = Some(h)
+        }),
+        ("subsystem_tx_index_enabled_from_height", &|p, h| {
+            p.subsystem_tx_index_enabled_from_height = Some(h)
         }),
         ("tax_authorization_enabled_from_height", &|p, h| {
             p.tax_authorization_enabled_from_height = Some(h)

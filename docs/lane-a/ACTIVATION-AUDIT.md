@@ -24,24 +24,28 @@ Four verdicts, and the decision rule that uses them:
 
 ## Remediation status, and why it does not move the count
 
-This document has been worked since it was written. Thirty-three rows now have a
-remedy implemented and tested in the tree, and three more are half-remedied. **None of it changes a single
+This document has been worked since it was written. Thirty-five rows now have a
+remedy implemented and tested in the tree, and two more are half-remedied. **None of it changes a single
 verdict, and the blocking count is exactly what it was.** That is not a
 formality; it is the finding of the remediation pass.
 
-Every one of the thirty-three is a CONSENSUS CHANGE — it changes which
+Every one of the thirty-five is a CONSENSUS CHANGE — it changes which
 transactions succeed, which blocks exist, or what an account balance is, and
 receipts are folded into the state root — so none of them may simply be applied.
 Each is implemented behind an activation height, exactly as the other
-`*_enabled_from_height` gates in `ChainParams` are. **All eleven fields now
-exist** — they were added to `ChainParams` in the integration commit that
-records this paragraph, are covered by `activation_heights` (and therefore by
+`*_enabled_from_height` gates in `ChainParams` are. **All twelve fields now
+exist** — eleven were added to `ChainParams` in the integration commit that
+records this paragraph and a twelfth,
+`subsystem_tx_index_enabled_from_height`, with the `tx_index` remedy; all are
+covered by `activation_heights` (and therefore by
 the genesis activation digest and by the startup change detection), and are
-read by the eleven accessors that previously ignored their parameter. The
+read by the twelve accessors that previously ignored their parameter. The
 pairing between accessor and field is pinned by
-`state/every_remediation_gate_reads_the_field_it_names`, because eleven
+`state/every_remediation_gate_reads_the_field_it_names`, because twelve
 near-identical three-line functions fail by reading each other's field rather
-than by being absent.
+than by being absent — and the twelfth's neighbour,
+`subsystem_block_timestamp_enabled_from_height`, is exactly the field a
+copy-paste would have left it reading.
 
 **Every one of them defaults to `None`, and none is set anywhere in this
 branch.** Adding a field is not opening a gate. A dormant gate means a
@@ -56,9 +60,9 @@ set, because nowhere is. The defective behaviour is what a release node runs.
 So the verdict stays REACHABLE, and the blocking count stays 121.
 
 What changed is the SHAPE of the remaining precondition, and that is worth
-stating plainly rather than burying in an unchanged number. Before, thirty-three
+stating plainly rather than burying in an unchanged number. Before, thirty-five
 rows were blocked on code in a crate nobody had written. Now they are blocked on
-a deployment decision: setting eleven heights in the runtime `genesis.json` of
+a deployment decision: setting twelve heights in the runtime `genesis.json` of
 every validator, as one coordinated consensus-breaking activation. That decision
 is the owner's and is deliberately not taken here — the field documentation says
 "never `Some(_)` in a committed genesis in this branch", and a committed default
@@ -70,7 +74,7 @@ A third status is therefore recorded alongside the verdict, orthogonal to it:
     through a named seam, and is covered by tests that drive an ungated node and
     a gated node over the same transaction and assert that they disagree. It
     becomes live the moment the named `ChainParams` field lands and an operator
-    sets it. Thirty-three rows fully; AU-3, AU-34 and TS-10 in part, and the
+    sets it. Thirty-five rows fully; AU-3 and AU-34 in part, and the
     tables say which part.
   * **BLOCKED, STRUCTURAL** — the defect cannot be closed by a guard at all,
     because the subsystem records no address, no registry or no signature to
@@ -81,8 +85,8 @@ A third status is therefore recorded alongside the verdict, orthogonal to it:
 
 ### The `ChainParams` fields the remediation needs
 
-Eleven. None could be added from the track that implemented the behaviour behind
-them; each is specified in full — name, type, semantics and the one-line
+Twelve. Eleven could not be added from the track that implemented the behaviour
+behind them; each is specified in full — name, type, semantics and the one-line
 function body that replaces the seam — in the doc comment of its activation
 function. All follow the existing `#[serde(default)] Option<u64>` idiom, so an
 absent field resolves to `None` and the gate is closed, which is what makes the
@@ -101,9 +105,10 @@ dormant state safe.
 | `property_authorization_enabled_from_height` | AU-30, AU-31 | `PropertyExecutor::authorization_activation` |
 | `tax_authorization_enabled_from_height` | AU-19 | `TaxExecutor::authorization_activation` |
 | `subsystem_block_timestamp_enabled_from_height` | TS-1 to TS-9, and the timestamp half of TS-10 | `subsystem_block_timestamp_activation`, `crates/state/src/lib.rs` — one field for eight subsystems, because it is one rule |
+| `subsystem_tx_index_enabled_from_height` | the `tx_index` half of TS-10, and the same collision on the Messaging arm of TS-11 | `subsystem_tx_index_activation`, `crates/state/src/lib.rs` — its own field, because it is its own rule: the timestamp gate changes what a row SAYS, this one changes what KEY it lands at and therefore how many rows a block writes |
 
-Eleven fields: seven per-subsystem authorization heights, three per-defect, and one
-shared rule. They are separate rather than one because activating
+Twelve fields: seven per-subsystem authorization heights, three per-defect, and two
+shared rules. They are separate rather than one because activating
 them is separate: an operator coordinating a validator upgrade for the NFT
 block-denial rule should not be forced to activate the healthcare consent rules
 in the same block, and a subsystem whose remediation is later found wanting must
@@ -358,8 +363,8 @@ The zero placeholders on the production arm are at
 | TS-7 | Property: `TitleEvent` has no `updated_at`, so a transition writes the (zero) timestamp into `created_at`, destroying the creation time | Property §untrusted payload metadata | **REACHABLE** | none today. **REMEDIED, PENDING ACTIVATION:** `subsystem_block_timestamp_enabled_from_height`, implemented and dormant | same arm as TS-6; same pinning test | compounding of TS-6, not independent of it |
 | TS-8 | Healthcare: timestamp 0 and tx index 0 — **and `Prescription::is_valid` is therefore evaluated at time zero**, so an expired prescription is fillable forever and one with a non-zero `effective_from` can never be filled | Healthcare §untrusted payload metadata | **REACHABLE** | none today. **REMEDIED, PENDING ACTIVATION:** `subsystem_block_timestamp_enabled_from_height`, implemented and dormant | `crates/state/src/executor.rs:991-992`; pinned by `the_block_timestamp_reaching_healthcare_operations_is_always_zero` | the only member of this class with a direct authorization consequence; ranked accordingly below |
 | TS-9 | DocClass: timestamp 0 on `IdentityRoot.updated_at`, `DocClassIssuer.updated_at`, `RevocationRecord.revoked_at` | DocClass §untrusted payload metadata | **REACHABLE** | none today. **REMEDIED, PENDING ACTIVATION:** `subsystem_block_timestamp_enabled_from_height`, implemented and dormant | `crates/state/src/executor.rs:765-766`; pinned by `the_block_timestamp_reaching_docclass_operations_is_always_zero` | as above |
-| TS-10 | DocClass: because `tx_index` is also 0, every event in a block lands at key `height ‖ 0 ‖ 0` and the family holds one row per block — the last event | DocClass §untrusted payload metadata | **REACHABLE** | none. **PARTLY REMEDIED, PENDING ACTIVATION:** the TIMESTAMP half is gated on `subsystem_block_timestamp_enabled_from_height`. The `tx_index` half -- the one that silently destroys data -- is **BLOCKED**: it needs a `tx_index` parameter threaded through `execute_tx_with_validators`, shared dispatch plumbing with ~25 test call sites across other tracks' suites, so the signature change belongs to whoever owns it | `crates/state/src/executor.rs:766`; write at `crates/state/src/docclass_executor.rs:300`; pinned by `every_docclass_event_in_a_block_lands_at_one_key` | the one place where `tx_index = 0` silently destroys data rather than only mis-stamping it |
-| TS-11 | Messaging: timestamp/tx-index placeholders on the messaging arm | not listed as a defect in the blocker document (messaging carries no deferred-defect inventory) | **REACHABLE** | none | `crates/state/src/executor.rs:725-726` | recorded for completeness; the blocker document makes no claim here, so this row adds an observation rather than classifying an entry |
+| TS-10 | DocClass: because `tx_index` is also 0, every event in a block lands at key `height ‖ 0 ‖ 0` and the family holds one row per block — the last event | DocClass §untrusted payload metadata | **REACHABLE** | none. **REMEDIED, PENDING ACTIVATION:** the TIMESTAMP half on `subsystem_block_timestamp_enabled_from_height`; the `tx_index` half — the one that silently destroys data — on its own `subsystem_tx_index_enabled_from_height`. `execute_tx_with_validators` and `execute_tx_v2` now take the transaction's index, `execute_block` passes the same `idx` its receipts are built from, and both arms reduce it through one `effective_tx_index` that yields the literal `0` while the gate is closed | `crates/state/src/executor.rs`; write at `crates/state/src/docclass_view.rs::v_put_docclass_event`; pinned by `every_docclass_event_in_a_block_lands_at_one_key`, `the_same_two_events_still_collide_below_the_gate`, `two_docclass_events_in_a_block_land_at_two_keys_at_the_gate` and `execute_block_keys_each_docclass_event_by_its_own_transaction_index` | the one place where `tx_index = 0` silently destroys data rather than only mis-stamping it |
+| TS-11 | Messaging: timestamp/tx-index placeholders on the messaging arm | not listed as a defect in the blocker document (messaging carries no deferred-defect inventory) | **REACHABLE** | none. **REMEDIED, PENDING ACTIVATION:** both arms now pass the block's timestamp and the transaction's index; `MessagingExecutor::execute` reduces the timestamp through `effective_block_timestamp` on `subsystem_block_timestamp_enabled_from_height`, and the index is reduced by the dispatch on `subsystem_tx_index_enabled_from_height` | `crates/state/src/executor.rs`, `crates/state/src/messaging_executor.rs` | not cosmetic: `current_day` buckets the daily send quota by this timestamp, so at the epoch every message a chain ever sends counts against day zero; and two messages to one recipient in a block were one row |
 | TS-12 | The same literal zeros on the second dispatch arm, for all of the above | the "both dispatch arms" half of Employment 1, Legal 6, Finance 10, Tax 8, Agreement, Property, Healthcare, DocClass | **UNREACHABLE** | — | `crates/state/src/executor.rs:2452-2789`; fn `execute_tx_v2` at `:2081` has no caller outside `crates/state/tests/` | dead public API; a fix must still change both, because `pub` means a future caller can appear, but nothing today reaches it |
 
 NFT is **not** in this class. The NFT arm passes the real block timestamp —
@@ -863,9 +868,9 @@ both readings of the release configuration:
 | UNDETERMINED | 3 | **3** |
 | **blocking (REACHABLE + UNDETERMINED)** | **121** | **121** |
 
-**Unchanged, and the reason is the whole point.** Thirty-three rows now carry a
+**Unchanged, and the reason is the whole point.** Thirty-five rows now carry a
 remedy that is implemented, reachable through a named seam and covered by tests
-that show an ungated node and a gated node disagreeing, and three more carry
+that show an ungated node and a gated node disagreeing, and two more carry
 half of one. Every one of those
 remedies sits behind an activation height whose `ChainParams` field does not
 exist, because `crates/genesis` belongs to another track. An absent
@@ -873,20 +878,20 @@ exist, because `crates/genesis` belongs to another track. An absent
 a closed gate means a release-configured node executes exactly the code it
 executed before. Nothing became unreachable, so nothing stops blocking.
 
-The arithmetic that WOULD move, stated so the next pass can check it: the eleven
+The arithmetic that WOULD move, stated so the next pass can check it: the twelve
 fields now exist, so the remaining half of the precondition is that they are SET
-to a height in the deployed runtime `genesis.json`. When they are, thirty-three
+to a height in the deployed runtime `genesis.json`. When they are, thirty-five
 rows move from REACHABLE to GATED OFF — the remediated behaviour becomes the
-behaviour — and the blocking count falls from 121 to 88.
+behaviour — and the blocking count falls from 121 to 86.
 
-The thirty-three were re-derived from this table rather than carried forward:
+The thirty-five were re-derived from this table rather than carried forward:
 the rows that are both fully REMEDIED, PENDING ACTIVATION and currently blocking are
-BD-1..BD-6, TS-1..TS-9, AU-1, AU-2, AU-4, AU-5, AU-13..AU-16, AU-19, AU-22,
-AU-23, AU-25, AU-27, AU-30, AU-31, AU-36, OV-18 and OV-26. That is thirty-three
-rows, and none of them is one of the three partial ones. AU-3, AU-34 and TS-10 do NOT move, because only part of
+BD-1..BD-6, TS-1..TS-9, TS-10, TS-11, AU-1, AU-2, AU-4, AU-5, AU-13..AU-16, AU-19, AU-22,
+AU-23, AU-25, AU-27, AU-30, AU-31, AU-36, OV-18 and OV-26. That is thirty-five
+rows, and neither of them is one of the two partial ones. AU-3 and AU-34 do NOT move, because only part of
 each is remedied and the rest is still reachable; a row is GATED OFF only when
 the whole of it is. Until the fields land and an operator sets them the count is
-121, and reporting 88 before then would be the exact failure this document was
+121, and reporting 86 before then would be the exact failure this document was
 written to prevent.
 
 Six further rows are **BLOCKED, STRUCTURAL** (AU-9, AU-10, AU-11, AU-18, AU-21,
@@ -907,9 +912,9 @@ of their dispatch arms (`crates/state/src/executor.rs:494, 692, 755, 795, 868,
 **That is the finding.** This release does not gate these subsystems off. It
 ships them.
 
-The remediation pass changes what is available, not what is shipped: eleven
-activation gates now exist in the executors, dormant, waiting for eleven
-`ChainParams` fields. Until those fields exist and an operator sets them, the
+The remediation pass changes what is available, not what is shipped: twelve
+activation gates now exist in the executors, dormant, each reading the
+`ChainParams` field it names. Until an operator sets them, the
 sentence above is still true word for word.
 
 ## Prioritised blocking list
@@ -994,8 +999,9 @@ what one ordinary transaction costs the network, then by what it costs a person.
 
 ### Tier 5 — correctness, data loss, and reachable-but-narrow
 
- 22. **TS-1 to TS-11**, every executor-written timestamp is zero, and **TS-10**,
-     where `tx_index = 0` reduces the DocClass event family to one row per block.
+ 22. **TS-1 to TS-11**, every executor-written timestamp is zero, and **TS-10**
+     and **TS-11**, where `tx_index = 0` reduces the DocClass event family, and a
+     recipient's messaging inbox, to one row per block.
  23. **OV-23 + OV-24 + OV-25**, revocation is reversible, two revocations at one
      height are one row, and `UpdateCredential` writes nothing.
  24. **OV-1 to OV-8, OV-11 to OV-17, OV-20 to OV-22, OV-27 to OV-30, CI-1,
@@ -1112,6 +1118,7 @@ This table says only what exists in the tree to close it once its field lands.
 | AU-19 | the Tax claim-type authority check, in `TaxGates` | `the_claim_type_registry_is_writable_by_anyone_only_below_the_gate` |
 | TS-1..TS-9, TS-10 (timestamp half) | every dispatch arm for the eight subsystems now passes `block.header.timestamp`, and each executor substitutes `0` while the gate is closed, through one shared `effective_block_timestamp` so the eight cannot drift apart | `prescription_validity_is_evaluated_at_time_zero_until_the_gate` (TS-8, both directions: expired-forever and never-fillable), `a_consent_revocation_stamps_a_real_time_only_at_the_gate`, and `every_status_update_records_a_zero_timestamp_through_dispatch`, whose discriminator moved from the call site to the gate |
 | AU-36 | `check_revoke_auth` consults the issuer registry — the status question only, so an issuer whose authorization was narrowed can still withdraw what it validly issued | `a_suspended_issuer_keeps_the_revocation_family_only_below_the_gate` |
+| TS-10 (`tx_index` half), TS-11 | `execute_tx_with_validators` and `execute_tx_v2` take the transaction's index; `execute_block` passes the same `idx` its receipts are built from; both arms reduce it once through `effective_tx_index`, which yields the literal `0` while `subsystem_tx_index_enabled_from_height` is closed. The Messaging arm additionally stopped passing `0` for the block timestamp and now reduces it through `effective_block_timestamp` like the other eight | `two_docclass_events_in_a_block_land_at_two_keys_at_the_gate` and `the_same_two_events_still_collide_below_the_gate` (the discriminator: REAL indices go in below the gate and one row still comes out), `execute_block_keys_each_docclass_event_by_its_own_transaction_index` (both directions, through a published block), `two_messages_to_one_recipient_in_a_block_land_at_two_keys_at_the_gate`, `the_same_two_messages_still_collide_below_the_gate`, `a_messaging_event_stamps_a_real_time_only_at_the_gate` |
 
 ### Rows this pass looked at and did not close
 
@@ -1122,7 +1129,6 @@ This table says only what exists in the tree to close it once its field lands.
 | AU-18, AU-21 | the tax and finance registries authorize nothing they do not take from the applicant, and no `ChainParams` field names a registrar for either. Inventing one inside an executor would be a rule nobody set |
 | AU-32 | `PropertyProofEnvelope` carries no issuer address and Property has no issuer registry at all |
 | AU-24, AU-28 | dead checks, not holes: the row is fetched BY the sender key and registration forces the equality the comparison later tests, so neither can fire. Removing them would be tidier and would close nothing |
-| TS-10 (`tx_index` half) | the half that silently destroys data — every DocClass event in a block lands at key `height ‖ 0 ‖ 0`, so the family holds one row per block. It needs a `tx_index` parameter threaded through `execute_tx_with_validators`, which is shared dispatch plumbing with roughly twenty-five call sites across other tracks' test suites. Not attempted, so that a signature change on the shared dispatch is a deliberate decision by whoever owns it |
-| TS-11, TS-12 | TS-11 is the Messaging arm, and `messaging_executor.rs` is not this track's file; the same one-line change applies and is left for its owner. TS-12 is the dead `execute_tx_v2` arm, which was changed with the live one — a fix must change both, because `pub` means a future caller can appear |
+| TS-12 | the dead `execute_tx_v2` arm, which was changed with the live one — a fix must change both, because `pub` means a future caller can appear. It took the `tx_index` parameter and the same `effective_tx_index` reduction as the live arm |
 | Class 5 (PR-1..PR-8, = AU-6, AU-12, AU-17, AU-20, AU-26, AU-29, AU-32) | **BLOCKED, and looked at rather than skipped.** All seven `VerifyProof` arms are character-for-character the same three statements: deduct, credit, increment, return success. None reads a payload, because there is no wire type for a verification REQUEST — `data` is free bytes and no struct in `crates/sumchain-wire` describes what a `VerifyProof` payload contains. More to the point, **no proof verifier exists anywhere in this tree**: nothing consumes `proof_data` against `public_inputs`, in any subsystem. A presence check ("the named proof exists") could be added and would stop these succeeding for proofs that do not exist, but it would not verify anything, and shipping it under the name `VerifyProof` would invite exactly the misreading this class is about. It is left alone deliberately: the finding is "verifies nothing", and a presence check does not change that sentence. What it needs is a request payload type and a verifier |
 | Class 4 (AL-1..AL-13), Class 6 (RY-1..RY-3), Class 7 (SC-1..SC-8), and the rest of Class 8 | untouched by this pass. They are ordered below Class 3 in severity and the pass ran out of runway before them, which is recorded here rather than left to be inferred from silence. AL-13 and SC-8 are the two UNDETERMINED rows in these classes and remain so: neither was investigated, so neither moved |
