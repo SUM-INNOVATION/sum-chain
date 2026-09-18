@@ -1389,3 +1389,21 @@ mod rpc_wiring_tests {
         );
     }
 }
+
+/// Multi-node, restart and downgrade evidence for the startup gates this file
+/// owns.
+///
+/// A unit-test module because `sumchain-node` has no library target, so
+/// `Node::with_rpc_config` and `Self::ACTIVATION_META_KEY` are unreachable from
+/// an ordinary integration test in `tests/`. Its SOURCE lives outside `src/`
+/// deliberately: `activation_construction_guard.rs` defines production code as
+/// `crates/*/src/**/*.rs` and enumerates every site that resolves a
+/// `JournalActivation`, and this file resolves one. It is test-only — it is
+/// compiled solely by this `#[cfg(test)]` declaration and can never reach a
+/// production build — so counting it as a production site would be wrong, and
+/// relaxing the guard to exclude it would weaken a guard to accommodate a test.
+/// `tests/unit/` is not auto-discovered by Cargo (only `tests/*.rs` and
+/// `tests/*/main.rs` are), so it produces no separate test target.
+#[cfg(test)]
+#[path = "../tests/unit/node_activation_boot_tests.rs"]
+mod activation_boot_tests;
