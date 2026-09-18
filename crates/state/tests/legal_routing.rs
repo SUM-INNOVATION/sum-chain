@@ -3492,3 +3492,236 @@ fn published_legal_bytes_match_independently_built_keys_and_values() {
         );
     }
 }
+
+// ── Class 3: the Legal authority checks, and their activation ────────────────
+//
+// `docs/lane-a/ACTIVATION-AUDIT.md` rows AU-13, AU-14, AU-15 and AU-16.
+// `ConsolidateCase` and `TransferCase` have no authority check at all;
+// `SupersedeOrder` has neither an authority check nor a duplicate guard, so a
+// stranger supersedes an order and overwrites a DIFFERENT existing order by
+// reusing its id in the same transaction; and `SupersedeEvent` never verifies
+// that the replacement's case exists, so it creates a case-to-event index entry
+// under a case id the attacker chose. The pinning tests above record all four
+// and still pass unchanged.
+//
+// Enforcing them changes which transactions succeed, so this is a consensus
+// change and is gated on `legal_authorization_enabled_from_height`, a
+// `ChainParams` field this track cannot add.
+
+use sumchain_state::LegalGates;
+
+/// Drive one Legal operation through the gate seam.
+fn legal_at(
+    view: &mut ExecutionView<'_, '_>,
+    sender: &Address,
+    op: LegalOperation,
+    payload: &impl serde::Serialize,
+    gates: LegalGates,
+) -> sumchain_state::LegalExecutionResult {
+    let proposer = Address::new([9; 20]);
+    LegalExecutor::execute_with_gates(
+        view,
+        sender,
+        &LegalTxData {
+            operation: op,
+            data: bincode::serialize(payload).unwrap(),
+            recipient: Address::ZERO,
+        },
+        &proposer,
+        100,
+        1,
+        1_000,
+        0,
+        sumchain_primitives::Hash::ZERO,
+        gates,
+    )
+    .unwrap()
+}
+
+/// AU-13 and AU-14: a stranger consolidates and transfers other people's cases.
+#[test]
+fn consolidate_and_transfer_lose_their_authority_gap_at_the_gate() {
+    #[derive(serde::Serialize)]
+    struct Consolidate {
+        case_id: [u8; 32],
+        related_case_id: [u8; 32],
+    }
+    #[derive(serde::Serialize)]
+    struct CaseId {
+        case_id: [u8; 32],
+    }
+
+    for gates in [LegalGates::CLOSED, LegalGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let owner = KeyPair::generate();
+        let other = KeyPair::generate();
+        let stranger = KeyPair::generate();
+        for kp in [&owner, &other, &stranger] {
+            fund(&db, kp, 100_000_000);
+        }
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let a = case_of(&owner, 0x41, "US-NY");
+        let b = case_of(&other, 0x42, "US-NY");
+        assert!(legal_at(&mut view, &owner.address(), LegalOperation::AnchorCase, &a, gates).success);
+        assert!(legal_at(&mut view, &other.address(), LegalOperation::AnchorCase, &b, gates).success);
+
+        let consolidated = legal_at(
+            &mut view,
+            &stranger.address(),
+            LegalOperation::ConsolidateCase,
+            &Consolidate {
+                case_id: a.case_id,
+                related_case_id: b.case_id,
+            },
+            gates,
+        );
+        assert_eq!(
+            consolidated.success,
+            !gates.authorization,
+            "any funded account attaches one stranger's case to another's, until the gate"
+        );
+
+        let transferred = legal_at(
+            &mut view,
+            &stranger.address(),
+            LegalOperation::TransferCase,
+            &CaseId { case_id: a.case_id },
+            gates,
+        );
+        assert_eq!(transferred.success, !gates.authorization);
+
+        // The case's own issuer keeps the operation on both sides.
+        assert!(
+            legal_at(
+                &mut view,
+                &owner.address(),
+                LegalOperation::TransferCase,
+                &CaseId { case_id: a.case_id },
+                gates
+            )
+            .success,
+            "the gate narrows the set of senders, it does not empty it"
+        );
+    }
+}
+
+/// AU-15: supersession as a way to overwrite somebody else's order.
+///
+/// The attack is one transaction: supersede an order you do not own, and give
+/// the replacement the id of a DIFFERENT live order, which `v_put_order` then
+/// overwrites with no existence check at all.
+#[test]
+fn a_supersession_cannot_overwrite_another_live_order_at_the_gate() {
+    #[derive(serde::Serialize)]
+    struct Supersede {
+        old_order_id: [u8; 32],
+        new_order: CourtOrder,
+    }
+
+    for gates in [LegalGates::CLOSED, LegalGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let court = KeyPair::generate();
+        let stranger = KeyPair::generate();
+        for kp in [&court, &stranger] {
+            fund(&db, kp, 100_000_000);
+        }
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let case = case_of(&court, 0x43, "US-NY");
+        assert!(legal_at(&mut view, &court.address(), LegalOperation::AnchorCase, &case, gates).success);
+        let target = order_of(&court, 0x44, 0x43);
+        let victim = order_of(&court, 0x45, 0x43);
+        for o in [&target, &victim] {
+            assert!(
+                legal_at(&mut view, &court.address(), LegalOperation::IssueOrder, o, gates).success
+            );
+        }
+
+        // The replacement takes the VICTIM's id.
+        let mut replacement = order_of(&stranger, 0x45, 0x43);
+        replacement.order_commitment = [0xEE; 32];
+
+        let r = legal_at(
+            &mut view,
+            &stranger.address(),
+            LegalOperation::SupersedeOrder,
+            &Supersede {
+                old_order_id: target.order_id,
+                new_order: replacement,
+            },
+            gates,
+        );
+
+        if gates.authorization {
+            assert!(!r.success, "at the gate neither half of the defect is reachable");
+            assert_eq!(
+                LegalExecutor::v_get_order(&view, &victim.order_id)
+                    .unwrap()
+                    .unwrap()
+                    .order_commitment,
+                [0x01; 32],
+                "and the order that was never named is untouched"
+            );
+        } else {
+            assert!(r.success, "below the gate the stranger's supersession lands");
+            assert_eq!(
+                LegalExecutor::v_get_order(&view, &victim.order_id)
+                    .unwrap()
+                    .unwrap()
+                    .order_commitment,
+                [0xEE; 32],
+                "and it silently overwrote a different live order"
+            );
+        }
+    }
+}
+
+/// AU-16: a superseded event indexed under a case that was never anchored.
+#[test]
+fn a_superseded_event_must_name_a_case_that_exists_at_the_gate() {
+    #[derive(serde::Serialize)]
+    struct Supersede {
+        old_event_id: [u8; 32],
+        new_event: ProcessEvent,
+    }
+
+    for gates in [LegalGates::CLOSED, LegalGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let firm = KeyPair::generate();
+        fund(&db, &firm, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let case = case_of(&firm, 0x46, "US-NY");
+        assert!(legal_at(&mut view, &firm.address(), LegalOperation::AnchorCase, &case, gates).success);
+        let ev = event_of(&firm, 0x47, 0x46);
+        assert!(legal_at(&mut view, &firm.address(), LegalOperation::RecordEvent, &ev, gates).success);
+
+        // The replacement names a case id that was never anchored.
+        let dangling = event_of(&firm, 0x48, 0xDD);
+        let r = legal_at(
+            &mut view,
+            &firm.address(),
+            LegalOperation::SupersedeEvent,
+            &Supersede {
+                old_event_id: ev.event_id,
+                new_event: dangling.clone(),
+            },
+            gates,
+        );
+        assert_eq!(
+            r.success,
+            !gates.authorization,
+            "the attacker chooses the unanchored case id, until the gate"
+        );
+        assert_eq!(
+            LegalExecutor::v_get_process_event(&view, &dangling.event_id)
+                .unwrap()
+                .is_some(),
+            !gates.authorization
+        );
+    }
+}

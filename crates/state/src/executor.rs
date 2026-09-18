@@ -909,6 +909,7 @@ impl BlockExecutor {
                         // Execute Legal operation (SRC-85X)
                         let result = LegalExecutor::execute(
                             view,
+                            &self.params,
                             &v2_tx.from,
                             &legal_data,
                             proposer,
@@ -2688,6 +2689,7 @@ impl BlockExecutor {
                 // Execute Legal operation (SRC-85X)
                 let result = LegalExecutor::execute(
                     view,
+                    &self.params,
                     &tx.from,
                     legal_data,
                     proposer,
