@@ -14,6 +14,37 @@ owners or dates — it is the standing answer to "why can this not ship yet".
 Each entry names the test that pins it. A future fix must change that test on
 purpose.
 
+## Ceilings, and what the measurements below mean
+
+Every allocation measurement in this document was taken with the candidate's
+byte ceiling set to **4,096 or 8,192 bytes**. Those are TEST ceilings, chosen
+small so that a refusal happens early and the allocation that precedes it can be
+observed. They are not production values.
+
+**Production uses a 1 GiB candidate ceiling**: `CANDIDATE_LIMIT_SCAFFOLD =
+1 << 30` (`crates/state/src/executor.rs:269`, used at `:3074`).
+
+So the ratios quoted per subsystem -- "3.2 MB allocated against a 4,096 B
+ceiling" and similar -- demonstrate ONE thing and must not be read as
+demonstrating another. What they demonstrate is **allocation before
+accounting**: the whole value is built before `view.put` charges a single byte,
+so the ceiling bounds what a block may COMMIT and not what one refused
+transaction may ALLOCATE. That property is real at any ceiling.
+
+What they do NOT demonstrate is a production memory ratio. Against 1 GiB the
+same transaction is admitted rather than refused, and the risk changes shape:
+it is unbounded attacker-controlled decoding and accumulation, not a small
+ceiling being overshot by three orders of magnitude. An earlier summary of this
+work quoted the test ratio as though it were production behaviour. That was
+wrong, and the claim is withdrawn here rather than quietly restated.
+
+Two further configuration values are part of this picture and are not
+`ChainParams` fields: the DocClass schema validator activates at height 385,000
+(`crates/state/src/schema_validator.rs:56-63`), and the contract gate at
+8,900,000 has been open since roughly 2026-07-12 -- a "gated off" answer that
+was correct in July is wrong today, and time-dependent gates must be evaluated
+at the intended release height rather than at the height the note was written.
+
 ## Status by subsystem
 
 | subsystem | commit | inventory |
@@ -78,6 +109,9 @@ corroborates it.
 
 ## PolicyAccount
 
+**Entries: 3** — one per bulleted defect below. This line is the normative count;
+the prose beneath it repeats it.
+
 Source: `855ec009`, "state: move policy accounts onto the execution view". The
 byte-identical message is also carried by `cece16c`; `855ec009` itself sits on
 no branch in this tree, and both resolve.
@@ -130,6 +164,9 @@ nonce reads that guarded it, which moved to the candidate in the same commit.
 
 ## Messaging + sponsored registration
 
+**Entries: 2** — one per bulleted defect below. This line is the normative count;
+the prose beneath it repeats it.
+
 Source: `e293b03a`, "state: move messaging onto the execution view".
 
 Like PolicyAccount, this message carries NO deferred-defect inventory: no
@@ -165,9 +202,12 @@ check and the second would overwrite the first".
 
 ## Tax
 
+**Entries: 9** — one per numbered defect below. This line is the normative count;
+the prose beneath it repeats it.
+
 Source: `1c5494c`, "state: move tax onto the execution view". The message's own
 heading is "Inherited risk, none of it fixed by this commit"; it closes that
-section with "Deployment remains blocked on all of it." Eleven items: nine
+section with "Deployment remains blocked on all of it." Nine items: nine
 numbered, then two the message calls resource items. The numbering below is the
 message's own. None of the nine numbered items names a test.
 
@@ -248,6 +288,9 @@ these two from the message, so both stay source-only.
     [`1c5494c` | source-only]
 
 ## Employment (SRC-88X)
+
+**Entries: 11** — one per numbered defect below. This line is the normative count;
+the prose beneath it repeats it.
 
 Source: `04eb5bc`, "state: move employment onto the execution view". The same
 message, differing only in that its section headings were dropped, is at
@@ -350,6 +393,9 @@ different instrument from the routing tests the other items name.
      [`04eb5bc` | source-only]
 
 ## Legal (SRC-85X)
+
+**Entries: 10** — one per numbered defect below. This line is the normative count;
+the prose beneath it repeats it.
 
 Source: `026447f`, "state: move legal onto the execution view". The message at
 `ddc4985` on this branch is byte-identical to it; both resolve. Ten deferred
@@ -454,6 +500,9 @@ name, which no other message in this group manages.
      here.
 
 ## Finance (SRC-89X)
+
+**Entries: 14** — one per numbered defect below. This line is the normative count;
+the prose beneath it repeats it.
 
 Source: `0706862`, "state: move finance onto the execution view". The same
 message, differing only in that its section headings were dropped, is at
@@ -565,7 +614,10 @@ not let anyone find them.
 
 ## Agreement (SRC-84X)
 
-Eleven items, grouped as the reviewer framed them.
+**Entries: 15** — one per bulleted defect below. This line is the normative count;
+the prose beneath it repeats it.
+
+Fifteen items, grouped as the reviewer framed them.
 
 ### Unrestricted allocation from untrusted input
 
@@ -663,7 +715,10 @@ and only the recorded issuer may revoke or update one.
 
 ## Property (SRC-86X)
 
-Thirteen items, grouped as the reviewer framed them.
+**Entries: 18** — one per bulleted defect below. This line is the normative count;
+the prose beneath it repeats it.
+
+Eighteen items, grouped as the reviewer framed them.
 
 ### Unrestricted allocation from untrusted input
 
@@ -708,9 +763,83 @@ number of distinct keys in the family.
   * `SubmitProof` checks nothing about the sender and verifies nothing about the
     proof: the only guard is a duplicate-id check.
     -- three_operations_check_no_authority_at_all
+  * `VerifyProof` verifies nothing: it charges the fee, advances the nonce and
+    returns success for a proof id that was never submitted, without
+    deserializing its payload.
+    -- verify_proof_succeeds_for_a_proof_that_does_not_exist
+  * Where an authorization check does exist it is `issuer_address == sender`,
+    and on every creation path `issuer_address` comes from the PAYLOAD. So the
+    check binds a row to whoever created it and to nothing else: any account may
+    anchor an asset in any jurisdiction, declaring any `PropertyIssuerClass`,
+    and then holds sole authority over it. No issuer registry is consulted.
+  * `policy_id` is carried on assets, title events, encumbrances, coverage and
+    claims, stored, and never consulted by any guard.
+
+### Overwrite and invalid-transition paths
+
+  * Only three transitions guard on the state they read — `ReinstateCoverage`
+    (`Suspended`), `PayClaim` (`Approved` or `PartiallyApproved`) and
+    `ReopenClaim` (`Closed` or `Denied`). Every other transition applies from
+    any prior status, so a `Deregistered` asset can be set back to `Active`, a
+    `Paid` claim moved to any status by `UpdateClaim`, and a `Cancelled`
+    coverage reactivated by `UpdateCoverage`.
+  * `MergeAssets` records no relationship: `related_assets` stays empty on both
+    rows and the primary asset is never written at all. `SubdivideAsset`
+    creates no child assets. `TransferAsset` moves no ownership — an asset row
+    has no owner field, and `PropertyTxData.recipient` is ignored.
+    -- merge_subdivide_and_transfer_record_a_status_and_nothing_else
+  * `AssetStore::add_related_asset` is the one writer that could record a merge
+    or a subdivision, and no execution path reaches it.
+
+### Untrusted payload metadata
+
+  * `created_at`, `updated_at`, `recorded_at_height`, `anchored_at_height`,
+    `effective_from`, `expiry`, `date_of_loss` and `date_filed` are taken from
+    the payload as supplied. Nothing reconciles them with the block.
+  * Both dispatch arms pass a literal `0` where the block timestamp belongs, and
+    a literal `0` for the transaction index, so every timestamp the executor
+    itself writes is 0 regardless of the block.
+    -- the_block_timestamp_reaching_property_operations_is_always_zero
+  * `TitleEvent` has no `updated_at` field, so `update_status` writes the
+    transition's timestamp into `created_at` — with the zero above, voiding or
+    superseding an event destroys its recorded creation time.
+    -- the_block_timestamp_reaching_property_operations_is_always_zero
+  * `PropertyTxData.recipient`, `_tx_index` and `_tx_hash` are accepted and
+    ignored.
+
+### Unbounded reads and indexes
+
+  * All five indexes are unbounded accumulating `Vec<[u8; 32]>` values with a
+    linear `contains` on every append.
+  * The committed readers are unpaginated whole-family scans: `list_active`
+    walks every row in its column family and returns one `Vec`, and the four
+    `get_by_*` readers resolve an index list and then point-read every id in
+    it, with no limit, offset or cursor.
+    -- the_committed_property_readers_return_two_thousand_rows_whole
+
+### Missing history and corruption handling
+
+  * `PropertyEventStore` exists for `cf::PROPERTY_SYSTEM_EVENTS` and no executor
+    operation ever calls it, so the property journal is empty on every chain.
+    That is the twelfth column family; the eleven this commit moves are the ones
+    anything writes. There is no undo history and no audit trail: a deregistered
+    asset retains no record of who deregistered it or what it held before.
+    -- the_property_event_journal_is_never_written
+  * The duplicate guards use `contains`, never `get`, so a CORRUPT row reads as
+    present and refuses rather than erroring. This is the safe direction and is
+    preserved for that reason: upgrading it would turn today's refusals into
+    block-level errors.
+    -- a_corrupt_proof_row_is_read_as_presence_not_as_corruption
+  * `PropertyProofStore::is_valid` compares `expires_at` to a caller-supplied
+    time and nothing else. No proof in SRC-86X is ever cryptographically
+    checked.
+
 ## Healthcare (SRC-87X)
 
-Twenty-two items. Healthcare is the subsystem where an authorization defect is
+**Entries: 21** — one per bulleted defect below. This line is the normative count;
+the prose beneath it repeats it.
+
+Twenty-one items. Healthcare is the subsystem where an authorization defect is
 least tolerable, and it has the weakest authorization in the lane so far: the
 consent lifecycle can be taken over by any sender, and a prescription can be
 filled by anyone at all.
@@ -720,9 +849,162 @@ filled by anyone at all.
 SEVEN accumulating structures, not two. Five are index families whose values are
 `Vec` lists; two accumulate INSIDE a primary row, so the buffer that gets built
 is the entire record. Every one serializes its whole contents before `view.put`
+accounts for a single byte, so the candidate's byte ceiling bounds what a block
+may COMMIT and not what one refused transaction may ALLOCATE. Measured at 20,000
+entries with the ceiling set to 4,096 B:
+
+```
+provider network index            allocated 3,204,738 B, largest single 1,280,000 B, accounted 448 B
+member index                      allocated 3,205,282 B, largest single 1,280,000 B, accounted 545 B
+subject consent index             allocated 3,205,195 B, largest single 1,280,000 B, accounted 572 B
+patient prescription index        allocated 3,205,682 B, largest single 1,280,000 B, accounted 644 B
+prescriber prescription index     allocated 3,207,096 B, largest single 1,280,000 B, accounted 748 B
+membership.dependents   (in row)  allocated 4,483,696 B, largest single 1,280,000 B, accounted 168 B
+prescription.fill_history (in row) allocated 4,483,993 B, largest single 1,280,000 B, accounted 168 B
+```
+
+The 1,280,000-byte single allocation is the `Vec` doubling capacity from 20,000
+to 40,000 elements before the encode runs. The two in-row cases allocate about
+40% more than the index cases because the whole record is rebuilt, and
+`PartialFillPrescription` rebuilds it TWICE in one transaction -- once to append
+the fill and once to stamp the status onto the row it just wrote.
+
+This is one measured size, not a bound for arbitrary input. Healthcare cannot be
+described as memory bounded or OOM safe. A deterministic activated bound, or a
+bounded storage structure, is required before deployment.
+
+  -- every_healthcare_accumulator_allocates_its_whole_value_before_the_ceiling_refuses
+
+Every healthcare payload is `bincode::deserialize`d from transaction data with
+no size or shape limit ahead of it, so the same unrestricted-allocation exposure
+applies at the decode boundary and not only at the index append.
+
+### Missing authorization
+
+  * `SupersedeConsent` checks NOTHING about the sender. Every other consent
+    operation requires the sender to be the recorded issuer; this one only
+    checks that the old consent exists, then marks it `Superseded` and stores a
+    replacement whose entire contents come from the payload -- a different
+    subject, a different recipient, a wider disclosure scope, a different
+    issuer. It is a complete bypass of the consent lifecycle's authorization and
+    is the most serious item in this inventory.
+    -- any_sender_can_supersede_any_consent_with_one_of_their_own
+  * A consent's SUBJECT is never consulted in either direction. `GrantConsent`
+    compares the packet's issuer to the sender and compares nothing to
+    `subject_address` or `subject_ref`, so the issuer records a disclosure
+    authorization about someone else without their participation; and
+    `RevokeConsent` requires the issuer, so the subject cannot withdraw it.
+    -- the_subject_of_a_consent_can_neither_grant_nor_revoke_it
+  * `FillPrescription` and `PartialFillPrescription` check no sender at all --
+    not the patient, not the prescriber, not the pharmacy, not the issuer. Every
+    other prescription operation checks the issuer. A stranger can fill anyone's
+    prescription, including a controlled substance.
+    -- any_sender_can_fill_any_prescription
+  * `AddNetworkAffiliation` and `RemoveNetworkAffiliation` are the only provider
+    operations with no issuer check: they verify the provider exists and write.
+    A stranger can move any provider between plan networks.
+    -- any_sender_can_change_a_providers_network_affiliations
+  * `IssuePrescription` requires the packet's issuer to be the sender and the
+    named prescriber provider to EXIST, and never relates the sender to that
+    provider or to the patient. Anyone who can register a provider can issue
+    prescriptions naming any other registered provider as prescriber.
+  * `VerifyProof` verifies nothing: it charges the fee, advances the nonce and
+    returns success for a proof id that was never submitted, without
+    deserializing its payload.
+    -- verify_proof_succeeds_for_a_proof_that_does_not_exist
+  * `proof_data` is stored and never checked against anything, and `policy_id`
+    is carried on providers, memberships, consents and prescriptions, stored,
+    and never consulted by any guard.
+
+The issuer checks that DO exist -- register/update/suspend/revoke/reactivate a
+provider, every membership operation, grant/update/revoke a consent, and
+update/cancel/hold/release a prescription -- are pinned by the contrast
+assertions inside the two `any_sender_*` tests above.
+
+### Invalid-transition and overwrite paths
+
+  * `RenewMembership` sets the status to `Active` unconditionally, with no
+    transition check, so a membership terminated a transaction earlier is active
+    again by the end of the block.
+    -- renewing_a_terminated_membership_makes_it_active_again
+  * The fill guard is `refills_remaining == 0 && status != Active`, so a
+    prescription authorizing ZERO refills whose status is `Active` passes it and
+    is filled once more.
+    -- a_prescription_with_no_refills_but_active_status_can_be_filled_once_more
+  * `is_controlled` is read in exactly one place, and that guard covers exactly
+    one status value: `UpdatePrescription` refuses `TransferRequested`. The same
+    prescription can be filled, held, released and cancelled like any other, and
+    any other status may be set on it directly.
+    -- the_controlled_substance_guard_covers_only_the_transfer_status
+  * `RemoveNetworkAffiliation` writes the network index unconditionally, so
+    removing an affiliation the provider never had CREATES an empty list row
+    where there was none, and rewrites the provider row with a bumped
+    `updated_at`.
+    -- removing_an_affiliation_that_was_never_there_still_writes_an_empty_index
+    -- removing_an_affiliation_that_was_never_there_still_stages_an_empty_index
+  * `RemoveDependent` is likewise unconditional: it rewrites the membership row
+    and bumps `updated_at` even when the dependent was not in the list.
+
+### Untrusted payload metadata, and a block timestamp that is always zero
+
+  * Both dispatch arms pass a literal `0` where the block timestamp belongs, and
+    a literal `0` for the transaction index. Every timestamp the executor itself
+    writes is therefore 0 regardless of the block -- and, worse than cosmetic,
+    `Prescription::is_valid` is evaluated at time zero. An EXPIRED prescription
+    is fillable forever, because `0 >= expiry` is false for every positive
+    expiry; a prescription with a non-zero `effective_from` can never be filled
+    at all.
+    -- the_block_timestamp_reaching_healthcare_operations_is_always_zero
+  * `created_at`, `updated_at`, `effective_from`, `expiry`, `date_written` and
+    `recorded_at_height` are taken from the payload as supplied. Nothing
+    reconciles them with the block.
+  * `HealthcareTxData.recipient`, `_tx_index` and `_tx_hash` are accepted and
+    ignored.
+
+### Unbounded reads and indexes
+
+  * All five index families are unbounded accumulating `Vec<[u8; 32]>` values
+    with a linear `contains` on every append, and two more such lists accumulate
+    inside primary rows.
+  * The committed readers are unpaginated whole-family scans: `list_active`
+    walks every row in its column family and `get_by_network`, `get_by_member`,
+    `get_by_subject`, `get_by_patient` and `get_by_prescriber` resolve a whole
+    index list row by row, each returning one `Vec` with no limit, offset or
+    cursor.
+    -- the_committed_healthcare_readers_return_two_thousand_rows_whole
+
+### Missing history and corruption handling
+
+  * `HealthcareEventStore` exists for `cf::HEALTHCARE_SYSTEM_EVENTS` and no
+    executor operation ever calls it, so the healthcare journal is empty on
+    every chain. There is no undo history and no audit trail: a revoked consent
+    retains no record of who revoked it, and a filled prescription none of who
+    filled it -- which, given that anyone may fill one, is the pair of defects
+    compounding.
+    -- the_healthcare_event_journal_is_never_written
+  * Three declared column families -- `HEALTHCARE_MEMBER_ADDRESS_INDEX`,
+    `HEALTHCARE_SUBJECT_ADDRESS_INDEX` and `HEALTHCARE_PATIENT_ADDRESS_INDEX` --
+    are never written by anything, even though every row carries the address
+    they would be keyed by. `execution_closure` classifies them dead; the same
+    test drives that claim through a real published block.
+    -- the_healthcare_event_journal_is_never_written
+  * The duplicate guards use `contains`, never `get`, so a CORRUPT row reads as
+    present and refuses rather than erroring. This is the safe direction and is
+    preserved for that reason: upgrading it would turn today's refusals into
+    block-level errors.
+    -- a_corrupt_proof_row_is_read_as_presence_not_as_corruption
+  * `PrescriptionStore::record_fill` carries its own `InvalidData("No refills
+    remaining")` guard, which is unreachable through dispatch because the
+    executor reads the same row a moment earlier and refuses first. It is
+    reproduced verbatim on the candidate surface anyway -- the store is public,
+    and the candidate side must not be the laxer of the two.
+
 ## NFT (SUM-721)
 
-Sixteen items. Every one is inherited, reproduced deliberately, and pinned by
+**Entries: 51** — one per bulleted defect below. This line is the normative count;
+the prose beneath it repeats it.
+
+Fifty-one items. Every one is inherited, reproduced deliberately, and pinned by
 the named test.
 
 ### Block-level denial of service: absence is an error, not a failed receipt
@@ -1058,7 +1340,10 @@ a duplicate. The id is not unique per creation; it is unique per
 
 ## DocClass (SRC-80X/81X)
 
-Twenty items, grouped as the reviewer framed them. DocClass is the identity and
+**Entries: 17** — one per bulleted defect below. This line is the normative count;
+the prose beneath it repeats it.
+
+Seventeen items, grouped as the reviewer framed them. DocClass is the identity and
 credential subsystem — identity roots, eligibility attestations, academic and
 professional credentials, revocations and the issuer registry — so the
 authorization and lifecycle entries below are the ones that matter most.
@@ -1244,6 +1529,62 @@ cursor.
   * `DocClassStore::verify_credential` checks expiry, validity window,
     revocation status and whether the issuer may still issue. It checks no
     signature and no proof, and no execution path calls it.
+
+## Out-of-consensus writes, and the journal re-key
+
+Two findings that sit outside normal execution and are therefore outside the
+zero-closure claim entirely. Both are corrections to earlier statements of mine,
+recorded here rather than left to stand.
+
+### The journal re-key is a downgrade hazard, not a state-root consensus change
+
+An earlier note called the compute-pool/beacon journal re-keying
+"consensus-relevant" and said it required coordinated activation. That was taken
+from the re-keying commit's own message rather than checked.
+
+Checked: `compute_block_state_root` (`crates/state/src/executor.rs:3610-3687`)
+folds **no application column family**, so a journal key shape cannot change the
+state root. Reads fall back to the legacy key (`crates/storage/src/schema.rs:377,421`)
+and deletes remove both spellings (`:394,442`).
+
+The residual risk is real but different: a node that reads new-shaped journals
+and is then DOWNGRADED to a binary that only understands the legacy key cannot
+interpret them. That is a compatibility and downgrade hazard, not an activation
+one, and it is what the existing re-key needs handled.
+
+**The future generic journal is a separate matter and DOES require explicit
+activation.** It changes what is written during execution, on every block, and
+must be gated so that nodes on either side of the boundary agree.
+
+Both existing journal gates are meanwhile fail-closed at the loader:
+`ChainParams::validate` (`crates/genesis/src/lib.rs:941-969`) rejects
+`Some(_)` for `compute_pool_enabled_from_height` and `beacon_enabled_from_height`
+outright, so no genesis edit can open them and re-exposure requires a code
+change. Neither journal is written in production today; every test that
+exercises them seeds rows directly.
+
+### Out-of-consensus messaging writes: two reproduced callers, not thirteen
+
+An earlier summary of mine claimed roughly thirteen non-test write sites into
+the `MESSAGING_*` families (7 operator, 2 genesis, 1 snapshot, 3 raw reorg).
+**That count could not be reproduced.** Two non-test write callers were found;
+`state.rs`, `snapshot.rs` and `crates/consensus/` contain no `MESSAGING`
+reference at all. The larger figure is withdrawn.
+
+What survives the correction is worse than a stray write:
+
+  * **`ImportRegisteredKeys` mutates consensus-read messaging state.**
+    `crates/node/src/main.rs:1073-1084` writes `MESSAGING_PUBLIC_KEYS`, and the
+    executor READS that family at `crates/state/src/messaging_executor.rs:321,750`
+    and `crates/state/src/executor.rs:2030`. An operator command therefore changes
+    what transactions do. Two nodes given different imports produce different
+    receipts for identical blocks, and receipts ARE folded into the state root --
+    so this is a divergence vector, not merely an untracked write.
+  * The startup backfill (`crates/node/src/node.rs:148-150`) runs on every boot
+    but writes only indexes the executor does not read.
+  * A third class of callers remains **UNDETERMINED**: the reproduced count and
+    the earlier claim disagree, and the discrepancy is recorded rather than
+    resolved by picking the more convenient number.
 
 ## What this file now is
 
