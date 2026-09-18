@@ -468,8 +468,115 @@ pub enum UndoRefusal {
         key: String,
     },
 
+    /// The abandoned branch reaches BELOW this chain's journal activation
+    /// boundary while also holding blocks at or above it.
+    ///
+    /// The activation boundary is an irreversible checkpoint. See
+    /// [`crosses_activation_checkpoint`] for why a crossing unwind cannot be
+    /// made correct with the records that exist below the boundary, and why it
+    /// is refused whole rather than run per block.
+    #[error(
+        "refusing to unwind a branch that crosses this chain's application-journal \
+         activation boundary {boundary}: the branch spans heights {lowest}..={highest}, so \
+         part of it would be unwound from the four legacy per-subsystem journals, which do \
+         not cover every column family a block writes (`cf::SUPPLY` is restorable from none \
+         of them). Unwinding it would leave abandoned application state applied under a \
+         chain that no longer contains the blocks that wrote it, and would do so silently. \
+         The activation boundary is an irreversible checkpoint: a reorg may not cross it"
+    )]
+    CrossesActivationCheckpoint {
+        boundary: BlockHeight,
+        lowest: BlockHeight,
+        highest: BlockHeight,
+    },
+
     #[error("storage error during unwind: {0}")]
     Storage(#[from] StorageError),
+}
+
+/// Whether unwinding `branch` would cross this chain's activation boundary, and
+/// the refusal if it would.
+///
+/// # The policy, and the argument for it
+///
+/// Below the boundary the only undo records a block has are the four legacy
+/// per-subsystem journals, and those are KNOWINGLY incomplete: they cover
+/// account and contract rows (plus the two dormant subsystems) and nothing else,
+/// so a family like `cf::SUPPLY` is restorable from none of them. That is a
+/// pre-existing fact about pre-journal history, and §7.1 of the contract leaves
+/// it alone for a reorg that stays wholly below the boundary — such a chain is
+/// running entirely under the old rules and this work changes nothing about it.
+///
+/// A CROSSING unwind is different, and choosing the record per block does not
+/// fix it. The per-block classification (`ActivatedJournal`) answers "which
+/// record governs this block"; it cannot answer "what restores the families no
+/// record covers". So a branch that starts above the boundary and continues
+/// below it unwinds its upper blocks completely and its lower blocks partially,
+/// commits both in one batch, and reports success. The rows the lower blocks
+/// wrote into uncovered families stay applied under a chain that no longer
+/// contains those blocks — silently, and with the head already moved.
+///
+/// The two available policies were:
+///
+/// 1. **Backfill** complete generic journals across the supported pre-activation
+///    reorg window, or
+/// 2. **Checkpoint**: the activation block is irreversible and a reorg may not
+///    cross it.
+///
+/// Backfill is not implementable here, and not merely expensive. A generic
+/// journal is the set of PRE-IMAGES of the keys a block wrote, captured by the
+/// overlay while that block executed. For a block published before the upgrade
+/// those pre-images were never captured, and reconstructing them means
+/// re-executing the block from the state that preceded it — which is the state
+/// the node would have to rewind to in order to get it, using the undo data the
+/// backfill is trying to manufacture. The only non-circular way to obtain it is
+/// to replay the chain from genesis into a fresh database, which is a RESYNC;
+/// and a resynced node's journal history starts at genesis, so its boundary is
+/// the bottom of its chain and there is nothing left to cross. Backfill
+/// therefore collapses into either "impossible" or "resync", and shipping a
+/// half-built version of it would be shipping the appearance of a guarantee.
+///
+/// The checkpoint is implementable as a refusal that happens before a single
+/// row is staged, it is loud, and it is SELF-EXTINGUISHING: `plan_reorg` bounds
+/// the ancestor walk at `sumchain_consensus::poa::MAX_REORG_WALK` (4,096), so
+/// once a node is 4,096 blocks past its boundary no plan it will ever build can
+/// reach below it, and the restriction stops binding without anybody doing
+/// anything. Finality shortens that window further, since `plan_reorg` already
+/// refuses to walk below the finalized height. What it costs is a bounded
+/// availability window immediately after an upgrade, in which a deep reorg
+/// across the upgrade height is refused and the operator resyncs. What it buys
+/// is that the alternative — silently retaining abandoned application state —
+/// is unreachable.
+///
+/// # What counts as crossing
+///
+/// The branch must hold a block at or above the boundary AND a block below it.
+/// A branch wholly at or above is §7.2 and is fully covered by generic records.
+/// A branch wholly below is §7.1: the chain has not activated over that range at
+/// all — the shape an operator gets by pinning a boundary above the current head
+/// — and the legacy behaviour is left exactly as it was.
+///
+/// Under [`MissingJournalPolicy::ToleratedEverywhere`] there is no boundary to
+/// cross: the database holds no generic journal history at all, every block in
+/// it is pre-journal, and nothing here applies.
+pub fn crosses_activation_checkpoint(
+    branch: &[Block],
+    missing: MissingJournalPolicy,
+) -> Option<UndoRefusal> {
+    let boundary = match missing {
+        MissingJournalPolicy::RequiredFrom(b) => b,
+        MissingJournalPolicy::ToleratedEverywhere => return None,
+    };
+    let lowest = branch.iter().map(|b| b.height()).min()?;
+    let highest = branch.iter().map(|b| b.height()).max()?;
+    if lowest < boundary && highest >= boundary {
+        return Some(UndoRefusal::CrossesActivationCheckpoint {
+            boundary,
+            lowest,
+            highest,
+        });
+    }
+    None
 }
 
 /// What an unwind staged, for logging and for tests that assert it did work.
@@ -566,6 +673,12 @@ fn describe(v: &Option<Vec<u8>>) -> String {
 /// Every block on the branch must have a journal. A block with none cannot be
 /// reversed, and continuing past it would leave its effects applied under a
 /// chain that no longer contains it.
+///
+/// A branch that CROSSES this chain's journal activation boundary is refused
+/// outright, before anything is read or staged — the boundary is an
+/// irreversible checkpoint. See [`crosses_activation_checkpoint`] for the
+/// argument, and for why choosing the record per block does not make a crossing
+/// unwind correct.
 pub fn stage_branch_unwind(
     db: &Database,
     batch: &mut WriteBatch<'_>,
@@ -573,6 +686,14 @@ pub fn stage_branch_unwind(
     journal: &dyn BranchJournal,
     missing: MissingJournalPolicy,
 ) -> Result<UnwindReport, UndoRefusal> {
+    // The activation boundary is an irreversible checkpoint. Checked FIRST, over
+    // the whole branch, before a single record is read: a crossing unwind cannot
+    // be made correct block by block, so it is refused whole rather than started
+    // and abandoned partway. See `crosses_activation_checkpoint`.
+    if let Some(refusal) = crosses_activation_checkpoint(branch, missing) {
+        return Err(refusal);
+    }
+
     let mut view = StagedView::new(db);
     let mut report = UnwindReport::default();
 

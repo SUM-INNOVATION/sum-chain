@@ -2480,26 +2480,41 @@ fn a_missing_journal_halts_at_or_above_the_height_it_is_required_from() {
     );
     assert_eq!(node.snapshot(), before, "a halt writes nothing");
 
-    // Required only from height 2: the absence at 1 is below the line, so it is
-    // tolerated — and counted.
+    // Required only from height 2: the branch (heights 1..=3) now reaches BELOW
+    // the boundary while holding blocks above it, so the unwind is refused as a
+    // CHECKPOINT CROSSING before the absence at height 1 is ever reached.
+    //
+    // CHANGED DELIBERATELY. This block used to assert that the absence at
+    // height 1 was tolerated and counted, and that two of the three blocks
+    // unwound. That was the per-block fallback rule, and it is no longer the
+    // policy: the four legacy journals do not cover every family a block wrote,
+    // so unwinding the lower part of a crossing branch from them leaves rows
+    // applied under a chain that no longer contains the blocks that wrote them,
+    // and reports success. The activation height is an irreversible checkpoint
+    // instead. The old assertion encoded an assumption that is now false; it is
+    // replaced rather than deleted, so the change is visible.
     let mut batch = node.db.batch();
-    let report = stage_branch_unwind(
+    let err = stage_branch_unwind(
         &node.db,
         &mut batch,
         &branch,
         &journal,
         MissingJournalPolicy::RequiredFrom(2),
     )
-    .expect("below the required height, absence is tolerated");
+    .expect_err("a branch reaching below the boundary must be refused whole");
     drop(batch);
-    assert_eq!(
-        report.tolerated_absences, 1,
-        "a tolerated absence must be REPORTED: the block's effects were not reverted"
+    assert!(
+        matches!(
+            err,
+            UndoRefusal::CrossesActivationCheckpoint {
+                boundary: 2,
+                lowest: 1,
+                highest: 3
+            }
+        ),
+        "{err}"
     );
-    assert_eq!(
-        report.blocks, 2,
-        "only two of the three blocks were unwound"
-    );
+    assert_eq!(node.snapshot(), before, "a refused unwind writes nothing");
 
     // And the tolerant-everywhere policy tolerates the same absence.
     let mut batch = node.db.batch();
@@ -3517,20 +3532,33 @@ fn the_journal_activation_gate_is_its_own_and_leaves_the_dormant_gates_closed() 
     );
 }
 
-/// A reorg whose range spans the activation boundary decides PER BLOCK: the
-/// generic journal at and above it, the legacy journals below it, never both.
+/// A reorg whose range CROSSES the activation boundary is refused whole, and
+/// the same branch unwinds cleanly once it stops crossing.
 ///
-/// The boundary is pinned partway up the abandoned branch. Below it the generic
-/// records are DELETED from disk, so any block that still consulted them would
-/// halt; above it the legacy rows are deleted, so any block that fell back would
-/// find nothing. Passing therefore means each block was classified correctly and
-/// only one record was consulted for it.
+/// # This test was rewritten, and the claim it makes is the opposite of the one
+/// it used to make
 ///
-/// The unwind runs head-first, so it walks from the required region into the
-/// fallback region — never the reverse, which is the direction that would need a
-/// re-classification mid-range.
+/// It was `a_reorg_across_the_journal_activation_boundary_decides_per_block`,
+/// and it asserted that a branch spanning the boundary unwound completely, each
+/// block from its own record. Choosing the record per block is still exactly
+/// what `ActivatedJournal` does, and the classification assertions below are
+/// kept unchanged because they are still true. What was false is the conclusion
+/// drawn from them: that per-block selection made a crossing unwind CORRECT.
+///
+/// It does not. Selecting the record answers "which record governs this block".
+/// It cannot answer "what restores the families no record covers". Below the
+/// boundary the only records are the four legacy per-subsystem journals, and
+/// `the_subsystem_journals_do_not_cover_every_family_a_block_writes` measures
+/// precisely how incomplete they are — `cf::SUPPLY` is restorable from none of
+/// them. So the old behaviour reverted the upper blocks completely and the lower
+/// blocks partially, committed both in one batch, moved the head, and returned
+/// `Ok`. The abandoned rows stayed applied, silently.
+///
+/// The policy is now that the activation height is an IRREVERSIBLE CHECKPOINT.
+/// A branch reaching below it while holding blocks at or above it is refused
+/// before a single row is staged.
 #[test]
-fn a_reorg_across_the_journal_activation_boundary_decides_per_block() {
+fn a_reorg_crossing_the_journal_activation_boundary_is_refused_whole() {
     let alice = key(1);
     let carol = key(3);
     let proposer = key(9);
@@ -3561,7 +3589,9 @@ fn a_reorg_across_the_journal_activation_boundary_decides_per_block() {
         "the policy must be derived from the same activation the journal holds"
     );
 
-    // Remove the record each side is NOT supposed to consult.
+    // Remove the record each side is NOT supposed to consult. Unchanged from the
+    // original test: it is what makes the per-block classification observable
+    // rather than asserted.
     for blk in &branch {
         if blk.height() < BOUNDARY {
             node.db
@@ -3579,36 +3609,20 @@ fn a_reorg_across_the_journal_activation_boundary_decides_per_block() {
         }
     }
 
-    let mut batch = node.db.batch();
-    let report = stage_branch_unwind(&node.db, &mut batch, &branch, &journal, journal.policy())
-        .expect("a branch spanning the boundary must unwind, each block from its own record");
+    // The classification is still per block, and still correct. Every block
+    // finds a record through the journal it is supposed to consult — which is
+    // exactly why the old test passed, and exactly why passing was not evidence
+    // of safety.
     for blk in &branch {
-        sumchain_storage::candidate::stage_deindex(&mut batch, blk).expect("deindex");
+        assert!(
+            matches!(
+                journal.lookup(blk.height(), &blk.hash()),
+                sumchain_state::reorg_undo::JournalLookup::Present { .. }
+            ),
+            "height {} must resolve through its own record",
+            blk.height()
+        );
     }
-    sumchain_state::reorg_undo::stage_head_reset(&mut batch, &genesis).expect("head");
-    batch.commit().expect("commit");
-
-    assert_eq!(
-        report.blocks, 4,
-        "every block on the branch was accounted for"
-    );
-    assert_eq!(
-        report.tolerated_absences, 0,
-        "no block's record was missing: below the boundary the legacy rows are \
-         there, at and above it the generic ones are"
-    );
-
-    // Account state returns to the fork point. The families the legacy journals
-    // never covered are only restored for the blocks at and above the boundary —
-    // which is exactly the shortfall the pre-activation region is stuck with,
-    // and why the boundary exists rather than being a formality.
-    assert_eq!(
-        node.head().map(|h| h.hash()),
-        Some(genesis.hash()),
-        "the head moved back to the fork point"
-    );
-
-    // Classification is per height and nothing else.
     assert_eq!(journal.governing(0), JournalRequirement::PreActivation);
     assert_eq!(
         journal.governing(BOUNDARY - 1),
@@ -3618,6 +3632,63 @@ fn a_reorg_across_the_journal_activation_boundary_decides_per_block() {
     assert_eq!(
         journal.governing(BOUNDARY + 100),
         JournalRequirement::Required
+    );
+
+    // And the crossing unwind is refused anyway, naming the span and the
+    // boundary, with nothing staged.
+    let before = node.snapshot();
+    let head_before = node.head().map(|h| h.hash());
+    let mut batch = node.db.batch();
+    let err = stage_branch_unwind(&node.db, &mut batch, &branch, &journal, journal.policy())
+        .expect_err("a branch crossing the checkpoint must be refused");
+    drop(batch);
+    assert!(
+        matches!(
+            err,
+            UndoRefusal::CrossesActivationCheckpoint {
+                boundary: BOUNDARY,
+                lowest: 1,
+                highest: 4
+            }
+        ),
+        "{err}"
+    );
+    assert_eq!(node.snapshot(), before, "a refusal writes nothing");
+    assert_eq!(
+        node.head().map(|h| h.hash()),
+        head_before,
+        "and does not move the head"
+    );
+
+    // The same branch, truncated to the blocks at and above the boundary, is not
+    // a crossing and unwinds completely from generic records alone — the legacy
+    // rows for these heights were deleted above, so nothing else could have done
+    // it. This is the region the checkpoint keeps reversible.
+    let above: Vec<_> = branch
+        .iter()
+        .filter(|b| b.height() >= BOUNDARY)
+        .cloned()
+        .collect();
+    assert_eq!(above.len(), 2);
+    let fork_point = branch[BOUNDARY as usize - 2].clone();
+    assert_eq!(fork_point.height(), BOUNDARY - 1);
+    let mut batch = node.db.batch();
+    let report = stage_branch_unwind(&node.db, &mut batch, &above, &journal, journal.policy())
+        .expect("a branch wholly at or above the boundary unwinds from generic records");
+    for blk in &above {
+        sumchain_storage::candidate::stage_deindex(&mut batch, blk).expect("deindex");
+    }
+    sumchain_state::reorg_undo::stage_head_reset(&mut batch, &fork_point).expect("head");
+    batch.commit().expect("commit");
+    assert_eq!(report.blocks, 2);
+    assert_eq!(
+        report.tolerated_absences, 0,
+        "no absence is tolerated at or above the boundary"
+    );
+    assert_eq!(
+        node.head().map(|h| h.hash()),
+        Some(fork_point.hash()),
+        "the head moved back to the last block the checkpoint allows reverting to"
     );
 }
 
@@ -4149,4 +4220,339 @@ fn a_crash_before_the_new_head_is_committed_resumes_from_the_ancestor() {
 
     let (left, right) = (a.snapshot(), b.snapshot());
     assert_eq!(left, right, "{}", describe_divergence(&left, &right));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 13. The activation boundary is an irreversible checkpoint
+//
+// Release blocker 1. Below the boundary the only undo records are the four
+// legacy per-subsystem journals, and
+// `the_subsystem_journals_do_not_cover_every_family_a_block_writes` measures how
+// incomplete they are. Selecting the record per block answers "which record
+// governs this block"; it cannot answer "what restores the families no record
+// covers". So a reorg that crosses the boundary is refused whole.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The REAL reorg driver refuses a crossing switch, writes nothing, and leaves
+/// the head where it was.
+///
+/// Not `stage_branch_unwind` in isolation: `execute_reorg` is the function
+/// `PoAEngine::import_reorg` calls, over a plan `plan_reorg` built, with the
+/// `ActivatedJournal` a pinned `ChainParams` gate produces. The refusal has to
+/// hold there or it holds nowhere.
+#[test]
+fn a_reorg_crossing_the_checkpoint_is_refused_by_the_real_reorg_driver() {
+    let alice = key(1);
+    let bob = key(2);
+    let carol = key(3);
+    let proposer = key(9);
+    let (a, b, genesis) = two_nodes(
+        ChainParams::with_v2_enabled(),
+        &[(&alice, 10_000_000), (&bob, 10_000_000)],
+    );
+
+    let mut branch_a = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..3u64 {
+        let blk = a.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(
+                &alice,
+                &carol.address(),
+                1_000 + n as u128,
+                500,
+                n,
+            )],
+        );
+        parent = blk.clone();
+        branch_a.push(blk);
+    }
+    let mut branch_b = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..2u64 {
+        let blk = b.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&bob, &carol.address(), 7_000 + n as u128, 500, n)],
+        );
+        parent = blk.clone();
+        branch_b.push(blk);
+    }
+    for blk in &branch_b {
+        a.retain(blk);
+    }
+
+    let store = BlockStore::new(&a.db);
+    let plan = plan_reorg(
+        &store,
+        branch_a.last().unwrap(),
+        branch_b.last().unwrap(),
+        NO_FINALITY,
+        DEEP,
+    )
+    .expect("plan");
+    assert_eq!(plan.depth(), 3, "the abandoned branch spans heights 1..=3");
+
+    // The boundary sits INSIDE the abandoned branch: heights 1 and 2 are
+    // pre-activation, height 3 is required. This is the configuration the
+    // per-block rule used to accept.
+    const BOUNDARY: u64 = 3;
+    let journal = ActivatedJournal::new(
+        &a.db,
+        JournalActivation::resolve(&a.db, ActivationSource::Pinned(BOUNDARY)).expect("resolve"),
+    );
+    assert_eq!(
+        journal.policy(),
+        MissingJournalPolicy::RequiredFrom(BOUNDARY)
+    );
+
+    let before = a.snapshot();
+    let head_before = a.head().map(|h| h.hash());
+    let err = execute_reorg(
+        &a.db,
+        &a.state,
+        &a.executor,
+        &plan,
+        NO_VALIDATORS,
+        &journal,
+        journal.policy(),
+    )
+    .expect_err("a switch whose abandoned branch crosses the checkpoint must be refused");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("crosses this chain's application-journal activation boundary")
+            && rendered.contains("irreversible checkpoint"),
+        "the refusal must name the boundary and the policy: {rendered}"
+    );
+    assert_eq!(
+        a.snapshot(),
+        before,
+        "a refused switch writes nothing at all"
+    );
+    assert_eq!(
+        a.head().map(|h| h.hash()),
+        head_before,
+        "and leaves the node on the branch it was already on"
+    );
+
+    // The same switch, with the boundary at the FOOT of the abandoned branch,
+    // is not a crossing and succeeds — so what was refused above is the
+    // crossing and not the switch.
+    let journal = ActivatedJournal::new(
+        &a.db,
+        JournalActivation::resolve(&a.db, ActivationSource::Pinned(1)).expect("resolve"),
+    );
+    let outcome = execute_reorg(
+        &a.db,
+        &a.state,
+        &a.executor,
+        &plan,
+        NO_VALIDATORS,
+        &journal,
+        journal.policy(),
+    )
+    .expect("a switch wholly at or above the boundary is unaffected");
+    assert_eq!(outcome.unwound.blocks, 3);
+    assert_eq!(outcome.applied, 2);
+    assert_eq!(outcome.force_adopted, 0);
+    let (left, right) = (a.snapshot(), b.snapshot());
+    assert_eq!(
+        left,
+        right,
+        "the reorged node did not converge:\n{}",
+        describe_divergence(&left, &right)
+    );
+}
+
+/// A reorg wholly BELOW the boundary is NOT a crossing and is left alone.
+///
+/// This is the shape an operator gets by pinning a boundary above the current
+/// head: the chain has not activated over that range at all, every block in it
+/// is pre-journal history, and §7.1 says the legacy behaviour is unchanged.
+/// Refusing here would refuse every reorg on such a chain, which is a different
+/// and much larger claim than the one the checkpoint makes.
+#[test]
+fn a_reorg_wholly_below_the_boundary_is_not_a_crossing() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+
+    let mut branch = Vec::new();
+    let mut parent = genesis;
+    for n in 0..3u64 {
+        let blk = node.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+        parent = blk.clone();
+        branch.push(blk);
+    }
+
+    // Boundary far above the branch. Every block is pre-activation, and the
+    // legacy journals — incomplete as they are — are what unwinds it, exactly as
+    // before this work.
+    let journal = ActivatedJournal::new(
+        &node.db,
+        JournalActivation::resolve(&node.db, ActivationSource::Pinned(100)).expect("resolve"),
+    );
+    assert!(
+        sumchain_state::reorg_undo::crosses_activation_checkpoint(&branch, journal.policy())
+            .is_none(),
+        "a branch wholly below the boundary does not cross it"
+    );
+    let mut batch = node.db.batch();
+    stage_branch_unwind(&node.db, &mut batch, &branch, &journal, journal.policy())
+        .expect("a wholly pre-activation branch still unwinds from the legacy journals");
+    drop(batch);
+}
+
+/// The checkpoint is SELF-EXTINGUISHING, and this is the arithmetic that says
+/// when it stops binding.
+///
+/// `plan_reorg` never walks further than `MAX_REORG_WALK` blocks back from the
+/// head, so once the head is `MAX_REORG_WALK` blocks above the boundary, no plan
+/// the engine will ever build can name a block below it — and the checkpoint
+/// cannot refuse anything. The availability cost of blocker 1's policy is
+/// therefore bounded to the first `MAX_REORG_WALK` blocks after activation, and
+/// this pins that rather than leaving it as a claim in a doc comment.
+#[test]
+fn the_checkpoint_stops_binding_once_the_head_outruns_the_engine_walk_limit() {
+    const BOUNDARY: u64 = 10_000;
+    let walk = sumchain_consensus::poa::MAX_REORG_WALK;
+
+    // `plan_reorg` refuses once either walk exceeds `max_depth`, and the walk
+    // vector carries the ancestor as its last element, so the deepest abandoned
+    // branch it will ever return is exactly `walk` blocks long — pinned by
+    // `reorg::tests::an_excessively_deep_reorg_is_refused`. The lowest height
+    // such a branch can contain is therefore `head - walk + 1`.
+    let lowest_reachable = |head: u64| head.saturating_sub(walk) + 1;
+
+    // The last head at which a crossing is still expressible.
+    let head = BOUNDARY + walk - 2;
+    assert!(
+        lowest_reachable(head) < BOUNDARY,
+        "at head {head} the engine can still name a block below {BOUNDARY}"
+    );
+
+    // From `BOUNDARY + walk - 1` onward it cannot, ever again.
+    for head in [BOUNDARY + walk - 1, BOUNDARY + walk, BOUNDARY + 1_000_000] {
+        assert!(
+            lowest_reachable(head) >= BOUNDARY,
+            "at head {head} no plan can reach below {BOUNDARY}, so the checkpoint is inert"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 14. What a node may honestly claim it can revert
+//
+// The journal is node-local: never committed, never in a root, never
+// transmitted. A node that arrives by snapshot restore or fast sync holds
+// canonical state and NO undo history, so `UNDO_RETENTION_FLOOR` — a promise not
+// to DISCARD undo data — says nothing about how much it HAS.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The depth a node advertises is exactly the depth the checkpoint lets it
+/// unwind. One number, two readings, and they are pinned to each other.
+///
+/// A node restored from a snapshot at height 5,000 holds canonical state and no
+/// journals at all — journals are node-local and are not transmitted, and a
+/// pre-image cannot be derived from a post-state. Its first published block is
+/// 5,001, which becomes its observed boundary. `UNDO_RETENTION_FLOOR = 4_096` is
+/// irrelevant to it: retention is a promise not to DISCARD undo history, never a
+/// claim to HAVE it.
+#[test]
+fn the_advertised_reorg_depth_is_the_depth_the_checkpoint_actually_allows() {
+    let node = Node::new(ChainParams::with_v2_enabled());
+    let walk = sumchain_consensus::poa::MAX_REORG_WALK;
+
+    const RESTORE: u64 = 5_000;
+    const BOUNDARY: u64 = RESTORE + 1;
+    let activation =
+        JournalActivation::resolve(&node.db, ActivationSource::Pinned(BOUNDARY)).expect("resolve");
+
+    for published in [0u64, 1, 200, walk - 1, walk, walk + 1, 100_000] {
+        let head = RESTORE + published;
+        assert_eq!(
+            activation.advertisable_reorg_depth(head, walk),
+            published.min(walk),
+            "after {published} published block(s) the node may claim {} and no more",
+            published.min(walk)
+        );
+        assert_eq!(activation.restorable_depth(head), published);
+    }
+
+    // The claim is not separately maintained. A branch of exactly the advertised
+    // depth stays at or above the boundary and does not cross the checkpoint; one
+    // block deeper reaches below it and does.
+    let policy = MissingJournalPolicy::RequiredFrom(BOUNDARY);
+    let head = RESTORE + 200;
+    let depth = activation.advertisable_reorg_depth(head, walk);
+    assert_eq!(depth, 200);
+    let fake = |lowest: u64, highest: u64| (lowest..=highest).collect::<Vec<_>>();
+    // Expressed over heights rather than blocks, because what the checkpoint
+    // reads off a branch is exactly its lowest and highest height.
+    for (lowest, crossing) in [
+        (head + 1 - depth, false), // the advertised depth, to the block
+        (head - depth, true),      // one block deeper
+    ] {
+        let span = fake(lowest, head);
+        let crosses = *span.iter().min().unwrap() < BOUNDARY;
+        assert_eq!(
+            crosses, crossing,
+            "a branch spanning {lowest}..={head} against boundary {BOUNDARY}"
+        );
+    }
+    let _ = policy;
+
+    // Immediately after the restore, before the node has published anything, the
+    // honest depth is ZERO — not 4_096, and not the engine limit.
+    assert_eq!(activation.advertisable_reorg_depth(RESTORE, walk), 0);
+    assert_eq!(activation.restorable_depth(RESTORE), 0);
+}
+
+/// The observed boundary a restored node establishes is the first height it
+/// publishes, measured on a real database rather than asserted.
+#[test]
+fn a_node_with_no_journal_history_advertises_zero_until_it_publishes() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let walk = sumchain_consensus::poa::MAX_REORG_WALK;
+
+    // Before any block: no journal history, nothing revertible.
+    let empty =
+        JournalActivation::resolve(&node.db, ActivationSource::ObservedFromChain).expect("resolve");
+    assert_eq!(empty.boundary(), None);
+    assert_eq!(empty.advertisable_reorg_depth(0, walk), 0);
+
+    let genesis = node.produce(None, &proposer, Vec::new());
+    let mut parent = genesis;
+    for n in 0..3u64 {
+        parent = node.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+    }
+    let head = parent.height();
+    let act =
+        JournalActivation::resolve(&node.db, ActivationSource::ObservedFromChain).expect("resolve");
+    assert_eq!(
+        act.boundary(),
+        Some(0),
+        "this fixture publishes genesis through `publish` too, so its history starts at 0"
+    );
+    assert_eq!(
+        act.advertisable_reorg_depth(head, walk),
+        head + 1,
+        "every block this node published is revertible, and nothing below that is"
+    );
 }
