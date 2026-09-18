@@ -3842,3 +3842,653 @@ fn a_640_kb_fill_history_is_refused_by_the_ceiling_without_canonical_change() {
         [0xD8u8; 32],
     );
 }
+
+// ── Class 3: the Healthcare authorization rules, and their activation ────────
+//
+// `docs/lane-a/ACTIVATION-AUDIT.md` rows AU-1, AU-2, AU-4, AU-5, the revocation
+// half of AU-3, and OV-18. The audit calls Healthcare "the subsystem where this
+// class is least tolerable", and the pinning tests above record why: a stranger
+// supersedes any consent and stores a replacement whose subject, recipient,
+// scope and issuer all come from its own payload; a stranger fills anyone's
+// prescription, controlled substances included; a stranger moves any provider
+// between plan networks; and the fill guard is a conjunction, so a prescription
+// authorizing zero refills is fillable once more.
+//
+// Enforcing any of that changes which transactions succeed, and receipts are
+// folded into the state root, so it is a CONSENSUS CHANGE and is gated. The
+// activation wants a `healthcare_authorization_enabled_from_height` field in
+// `ChainParams` this track cannot add; until it lands
+// `HealthcareGates::from_params` reads it as closed and every pinning test
+// above passes unchanged.
+//
+// `HealthcareGates` is the seam. Each test below runs one transaction under
+// both values and asserts the two nodes disagree: one writes a row and reports
+// `Success`, the other writes nothing and reports `Failed`. That difference
+// reaches the state root through the receipt's success bit, so a node on the
+// wrong side of the height forks visibly rather than accepting quietly.
+
+use sumchain_state::HealthcareGates;
+
+/// Drive one Healthcare operation through the gate seam.
+fn healthcare_at(
+    view: &mut ExecutionView<'_, '_>,
+    sender: &Address,
+    op: HealthcareOperation,
+    payload: &impl serde::Serialize,
+    gates: HealthcareGates,
+) -> sumchain_state::HealthcareExecutionResult {
+    let proposer = Address::new([9; 20]);
+    HealthcareExecutor::execute_with_gates(
+        view,
+        sender,
+        &HealthcareTxData {
+            operation: op,
+            data: bincode::serialize(payload).unwrap(),
+            recipient: Address::ZERO,
+        },
+        &proposer,
+        100,
+        1,
+        1_000,
+        0,
+        sumchain_primitives::Hash::ZERO,
+        gates,
+    )
+    .unwrap()
+}
+
+/// AU-1: a stranger's supersession succeeds below the gate and is refused above.
+#[test]
+fn any_sender_can_supersede_any_consent_below_the_gate_and_none_can_above_it() {
+    #[derive(serde::Serialize)]
+    struct Supersede {
+        old_consent_id: [u8; 32],
+        new_consent: ConsentEnvelope,
+    }
+
+    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        let stranger = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        fund(&db, &stranger, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let original = consent(0x70, issuer.address());
+        assert!(
+            healthcare_at(
+                &mut view,
+                &issuer.address(),
+                HealthcareOperation::GrantConsent,
+                &original,
+                gates
+            )
+            .success
+        );
+
+        // The stranger's replacement names ITSELF as issuer and a different
+        // subject, which is the whole point of the defect.
+        let mut replacement = consent(0x71, stranger.address());
+        replacement.subject_address = Address::new([0xFE; 20]);
+
+        let r = healthcare_at(
+            &mut view,
+            &stranger.address(),
+            HealthcareOperation::SupersedeConsent,
+            &Supersede {
+                old_consent_id: original.consent_id,
+                new_consent: replacement.clone(),
+            },
+            gates,
+        );
+
+        if gates.authorization {
+            assert!(!r.success, "at the gate a stranger cannot supersede");
+            assert_eq!(
+                HealthcareExecutor::v_get_consent(&view, &original.consent_id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                ConsentStatus::Granted,
+                "and the original is untouched"
+            );
+            assert!(
+                HealthcareExecutor::v_get_consent(&view, &replacement.consent_id)
+                    .unwrap()
+                    .is_none(),
+                "and no replacement was stored"
+            );
+        } else {
+            assert!(r.success, "below the gate anyone may supersede anything");
+            assert_eq!(
+                HealthcareExecutor::v_get_consent(&view, &original.consent_id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                ConsentStatus::Superseded
+            );
+            assert_eq!(
+                HealthcareExecutor::v_get_consent(&view, &replacement.consent_id)
+                    .unwrap()
+                    .unwrap()
+                    .subject_address,
+                Address::new([0xFE; 20]),
+                "and the replacement is about whoever the stranger said"
+            );
+        }
+    }
+}
+
+/// AU-1, the narrow half: the consent's own issuer may still supersede, and may
+/// not re-point the subject while doing it.
+#[test]
+fn the_issuer_may_still_supersede_but_cannot_move_the_subject_at_the_gate() {
+    #[derive(serde::Serialize)]
+    struct Supersede {
+        old_consent_id: [u8; 32],
+        new_consent: ConsentEnvelope,
+    }
+
+    let (_state, db, _dir, _executor) = setup_with_params(params());
+    let issuer = KeyPair::generate();
+    fund(&db, &issuer, 100_000_000);
+    let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+    let mut view = ExecutionView::new(&mut overlay);
+
+    let original = consent(0x72, issuer.address());
+    assert!(
+        healthcare_at(
+            &mut view,
+            &issuer.address(),
+            HealthcareOperation::GrantConsent,
+            &original,
+            HealthcareGates::OPEN
+        )
+        .success
+    );
+
+    // Same issuer, different subject: refused.
+    let mut moved = consent(0x73, issuer.address());
+    moved.subject_address = Address::new([0xFE; 20]);
+    assert!(
+        !healthcare_at(
+            &mut view,
+            &issuer.address(),
+            HealthcareOperation::SupersedeConsent,
+            &Supersede {
+                old_consent_id: original.consent_id,
+                new_consent: moved,
+            },
+            HealthcareGates::OPEN
+        )
+        .success,
+        "a supersession is not a way to re-point a consent at somebody else"
+    );
+
+    // Same issuer, same subject: allowed.
+    let replacement = consent(0x74, issuer.address());
+    assert!(
+        healthcare_at(
+            &mut view,
+            &issuer.address(),
+            HealthcareOperation::SupersedeConsent,
+            &Supersede {
+                old_consent_id: original.consent_id,
+                new_consent: replacement,
+            },
+            HealthcareGates::OPEN
+        )
+        .success,
+        "the legitimate supersession still works"
+    );
+}
+
+/// AU-3, the revocation half: the subject can withdraw a consent at the gate.
+///
+/// The GRANT half is not closed here and is not claimed to be. A subject cannot
+/// participate in granting without a signature the `ConsentEnvelope` does not
+/// carry; that is a wire change, not a guard, and it is recorded as still
+/// blocking rather than quietly counted as fixed.
+#[test]
+fn the_subject_can_revoke_its_own_consent_only_at_the_gate() {
+    #[derive(serde::Serialize)]
+    struct Revoke {
+        consent_id: [u8; 32],
+    }
+
+    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let c = consent(0x75, issuer.address());
+        let subject = c.subject_address;
+        common::seed_balance(&db, &subject, 100_000_000);
+        assert!(
+            healthcare_at(
+                &mut view,
+                &issuer.address(),
+                HealthcareOperation::GrantConsent,
+                &c,
+                gates
+            )
+            .success
+        );
+
+        let r = healthcare_at(
+            &mut view,
+            &subject,
+            HealthcareOperation::RevokeConsent,
+            &Revoke {
+                consent_id: c.consent_id,
+            },
+            gates,
+        );
+        assert_eq!(
+            r.success,
+            gates.authorization,
+            "the subject of a consent can withdraw it only once the gate is open"
+        );
+    }
+}
+
+/// AU-2 and OV-18: who may fill, and what "no refills" means.
+#[test]
+fn a_stranger_can_fill_any_prescription_below_the_gate_and_none_above_it() {
+    #[derive(serde::Serialize)]
+    struct Fill {
+        prescription_id: [u8; 32],
+        fill_commitment: [u8; 32],
+    }
+
+    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        let stranger = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        fund(&db, &stranger, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let prov = provider(0x60, issuer.address(), vec![]);
+        assert!(
+            healthcare_at(
+                &mut view,
+                &issuer.address(),
+                HealthcareOperation::RegisterProvider,
+                &prov,
+                gates
+            )
+            .success
+        );
+        let rx = prescription(0x61, 0x60, issuer.address(), 2);
+        assert!(
+            healthcare_at(
+                &mut view,
+                &issuer.address(),
+                HealthcareOperation::IssuePrescription,
+                &rx,
+                gates
+            )
+            .success
+        );
+
+        let fill = Fill {
+            prescription_id: rx.prescription_id,
+            fill_commitment: [0xF1; 32],
+        };
+
+        let by_stranger = healthcare_at(
+            &mut view,
+            &stranger.address(),
+            HealthcareOperation::FillPrescription,
+            &fill,
+            gates,
+        );
+        assert_eq!(
+            by_stranger.success,
+            !gates.authorization,
+            "below the gate a stranger fills anyone's prescription; above it, nobody unrelated does"
+        );
+
+        // The patient the prescription names is authorized on both sides of the
+        // rule, so the gate narrows the set rather than emptying it.
+        common::seed_balance(&db, &rx.patient_address, 100_000_000);
+        let by_patient = healthcare_at(
+            &mut view,
+            &rx.patient_address,
+            HealthcareOperation::FillPrescription,
+            &fill,
+            gates,
+        );
+        assert!(
+            by_patient.success,
+            "the patient can always fill, under either gate"
+        );
+    }
+}
+
+/// AU-4: a stranger moves a provider between plan networks, until the gate.
+#[test]
+fn a_stranger_can_change_network_affiliations_only_below_the_gate() {
+    #[derive(serde::Serialize)]
+    struct Affiliation {
+        provider_id: [u8; 32],
+        plan_id: [u8; 32],
+    }
+
+    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        let stranger = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        fund(&db, &stranger, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let prov = provider(0x62, issuer.address(), vec![]);
+        assert!(
+            healthcare_at(
+                &mut view,
+                &issuer.address(),
+                HealthcareOperation::RegisterProvider,
+                &prov,
+                gates
+            )
+            .success
+        );
+
+        let d = Affiliation {
+            provider_id: prov.provider_id,
+            plan_id: [0xA1; 32],
+        };
+        let r = healthcare_at(
+            &mut view,
+            &stranger.address(),
+            HealthcareOperation::AddNetworkAffiliation,
+            &d,
+            gates,
+        );
+        assert_eq!(r.success, !gates.authorization);
+
+        // And the provider's own issuer is unaffected by the rule.
+        let own = healthcare_at(
+            &mut view,
+            &issuer.address(),
+            HealthcareOperation::AddNetworkAffiliation,
+            &d,
+            gates,
+        );
+        assert!(own.success, "the issuer keeps the operation under either gate");
+    }
+}
+
+/// AU-5: a prescription naming somebody else's provider as prescriber.
+#[test]
+fn a_prescription_naming_another_issuers_prescriber_is_refused_only_at_the_gate() {
+    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let real = KeyPair::generate();
+        let impostor = KeyPair::generate();
+        fund(&db, &real, 100_000_000);
+        fund(&db, &impostor, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let prov = provider(0x63, real.address(), vec![]);
+        assert!(
+            healthcare_at(
+                &mut view,
+                &real.address(),
+                HealthcareOperation::RegisterProvider,
+                &prov,
+                gates
+            )
+            .success
+        );
+
+        // The impostor names itself as issuer -- which is all the inherited
+        // guard checks -- and the real issuer's provider as prescriber.
+        let rx = prescription(0x64, 0x63, impostor.address(), 1);
+        let r = healthcare_at(
+            &mut view,
+            &impostor.address(),
+            HealthcareOperation::IssuePrescription,
+            &rx,
+            gates,
+        );
+        assert_eq!(
+            r.success,
+            !gates.authorization,
+            "anyone who can register a provider issues prescriptions naming any \
+             other registered provider, until the gate"
+        );
+    }
+}
+
+/// OV-18: the fill guard is a conjunction, so zero refills plus `Active` passes.
+///
+/// `refills_remaining == 0 && status != Active`. A prescription that authorizes
+/// no refills at all and is still `Active` satisfies neither half of the
+/// conjunction and is filled once more. At the gate either half refuses on its
+/// own.
+#[test]
+fn a_prescription_with_no_refills_is_filled_once_more_below_the_gate_only() {
+    #[derive(serde::Serialize)]
+    struct Fill {
+        prescription_id: [u8; 32],
+        fill_commitment: [u8; 32],
+    }
+
+    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let prov = provider(0x65, issuer.address(), vec![]);
+        assert!(
+            healthcare_at(
+                &mut view,
+                &issuer.address(),
+                HealthcareOperation::RegisterProvider,
+                &prov,
+                gates
+            )
+            .success
+        );
+        // Zero refills authorized, status Active: neither half of the
+        // conjunction is true.
+        let rx = prescription(0x66, 0x65, issuer.address(), 0);
+        assert_eq!(rx.refills_remaining, 0);
+        assert_eq!(rx.status, PrescriptionStatus::Active);
+        assert!(
+            healthcare_at(
+                &mut view,
+                &issuer.address(),
+                HealthcareOperation::IssuePrescription,
+                &rx,
+                gates
+            )
+            .success
+        );
+
+        let r = healthcare_at(
+            &mut view,
+            &issuer.address(),
+            HealthcareOperation::FillPrescription,
+            &Fill {
+                prescription_id: rx.prescription_id,
+                fill_commitment: [0xF2; 32],
+            },
+            gates,
+        );
+        assert_eq!(
+            r.success,
+            !gates.authorization,
+            "a prescription authorizing zero refills is fillable once more, until the gate"
+        );
+    }
+}
+
+// ── Class 2 (TS-8): the timestamp, and what evaluating validity at zero does ──
+//
+// `docs/lane-a/ACTIVATION-AUDIT.md` row TS-8, and it is the only member of that
+// class with a direct authorization consequence. Every dispatch arm for this
+// subsystem passed a literal `0` where the block timestamp belongs, so
+// `Prescription::is_valid` was evaluated at TIME ZERO. Two things follow, in
+// opposite directions and both wrong: a prescription that has expired is still
+// valid forever, because `current_time >= expiry` is `0 >= expiry`; and a
+// prescription with a non-zero `effective_from` can NEVER be filled, because
+// `current_time < effective_from` is `0 < effective_from`.
+//
+// The arms now pass `block.header.timestamp` and the executor substitutes zero
+// while the gate is closed, so `the_block_timestamp_reaching_healthcare_
+// operations_is_always_zero` still passes unchanged and the production bytes
+// are identical. Gated on `subsystem_block_timestamp_enabled_from_height`, one
+// field for all eight subsystems because it is one rule.
+
+/// TS-8, both directions, under both gate values.
+#[test]
+fn prescription_validity_is_evaluated_at_time_zero_until_the_gate() {
+    #[derive(serde::Serialize)]
+    struct Fill {
+        prescription_id: [u8; 32],
+        fill_commitment: [u8; 32],
+    }
+
+    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let prov = provider(0x68, issuer.address(), vec![]);
+        assert!(
+            healthcare_at(
+                &mut view,
+                &issuer.address(),
+                HealthcareOperation::RegisterProvider,
+                &prov,
+                gates
+            )
+            .success
+        );
+
+        // (a) Expired at the block's real time of 1000, valid at time zero.
+        let mut expired = prescription(0x69, 0x68, issuer.address(), 3);
+        expired.expiry = 500;
+        // (b) Not yet effective at time zero, effective at 1000.
+        let mut future = prescription(0x6A, 0x68, issuer.address(), 3);
+        future.effective_from = Some(500);
+
+        for rx in [&expired, &future] {
+            assert!(
+                healthcare_at(
+                    &mut view,
+                    &issuer.address(),
+                    HealthcareOperation::IssuePrescription,
+                    rx,
+                    gates
+                )
+                .success
+            );
+        }
+
+        let fill_expired = healthcare_at(
+            &mut view,
+            &issuer.address(),
+            HealthcareOperation::FillPrescription,
+            &Fill {
+                prescription_id: expired.prescription_id,
+                fill_commitment: [0xF3; 32],
+            },
+            gates,
+        );
+        let fill_future = healthcare_at(
+            &mut view,
+            &issuer.address(),
+            HealthcareOperation::FillPrescription,
+            &Fill {
+                prescription_id: future.prescription_id,
+                fill_commitment: [0xF4; 32],
+            },
+            gates,
+        );
+
+        if gates.real_block_timestamp {
+            assert!(
+                !fill_expired.success,
+                "at the gate an expired prescription is expired"
+            );
+            assert!(
+                fill_future.success,
+                "and one whose effective date has passed can finally be filled"
+            );
+        } else {
+            assert!(
+                fill_expired.success,
+                "below the gate an expired prescription is fillable forever"
+            );
+            assert!(
+                !fill_future.success,
+                "and one with a non-zero effective date can never be filled at all"
+            );
+        }
+    }
+}
+
+/// And the same activation makes an ordinary `updated_at` a real time.
+#[test]
+fn a_consent_revocation_stamps_a_real_time_only_at_the_gate() {
+    #[derive(serde::Serialize)]
+    struct Revoke {
+        consent_id: [u8; 32],
+    }
+
+    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let c = consent(0x6B, issuer.address());
+        assert!(
+            healthcare_at(
+                &mut view,
+                &issuer.address(),
+                HealthcareOperation::GrantConsent,
+                &c,
+                gates
+            )
+            .success
+        );
+        assert!(
+            healthcare_at(
+                &mut view,
+                &issuer.address(),
+                HealthcareOperation::RevokeConsent,
+                &Revoke {
+                    consent_id: c.consent_id
+                },
+                gates
+            )
+            .success
+        );
+
+        assert_eq!(
+            HealthcareExecutor::v_get_consent(&view, &c.consent_id)
+                .unwrap()
+                .unwrap()
+                .updated_at,
+            if gates.real_block_timestamp { 1_000 } else { 0 },
+            "the executor's own timestamp"
+        );
+    }
+}

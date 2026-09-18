@@ -17,6 +17,8 @@ use sumchain_primitives::{
 };
 use tracing::debug;
 
+use sumchain_genesis::ChainParams;
+
 use crate::{Result, SchemaValidator, StateError, StateManager};
 
 /// Result of Employment operation execution
@@ -112,10 +114,120 @@ impl EmploymentExecutionResult {
 /// identically.
 pub struct EmploymentExecutor;
 
+/// The activation decisions an Employment transaction executes under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EmploymentGates {
+    /// The subsystem's issuer-standing rule is enforced. ACTIVATION-AUDIT row
+    /// AU-27.
+    pub authorization: bool,
+    /// Executor-written timestamps are the block's, not a literal zero.
+    /// ACTIVATION-AUDIT class 2.
+    pub real_block_timestamp: bool,
+}
+
+impl EmploymentGates {
+    /// Every gate closed -- the release configuration today.
+    pub const CLOSED: Self = Self {
+        authorization: false,
+        real_block_timestamp: false,
+    };
+
+    /// Every gate open. For the gated half of a mixed-version test.
+    pub const OPEN: Self = Self {
+        authorization: true,
+        real_block_timestamp: true,
+    };
+
+    /// Derive the decisions from the chain's parameters at `block_height`.
+    pub fn from_params(params: &ChainParams, block_height: BlockHeight) -> Self {
+        Self {
+            authorization: EmploymentExecutor::authorization_gate_open(params, block_height),
+            real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
+        }
+    }
+}
+
 impl EmploymentExecutor {
-    /// Execute an Employment transaction
+    /// The activation height for the Employment issuer-standing rule.
+    ///
+    /// **This is a seam for a `ChainParams` field that does not exist yet.**
+    /// `crates/genesis/**` belongs to another track, so the field cannot be
+    /// added from here. The field this function must read, once that track adds
+    /// it, is:
+    ///
+    /// ```text
+    /// /// SRC-88X Employment issuer-standing rule. Dormant by default (`None`
+    /// /// -> never open). Below the gate only `CreateEmployment` and
+    /// /// `CreateIncomeAttestation` require an active issuer; every mutation
+    /// /// checks only the address recorded on the row, so a suspended or
+    /// /// revoked issuer keeps full control of everything it ever issued. At
+    /// /// and above the gate every mutation asks the same question the creation
+    /// /// paths ask. Activation is a consensus change and needs a coordinated
+    /// /// validator upgrade.
+    /// #[serde(default)]
+    /// pub employment_authorization_enabled_from_height: Option<u64>,
+    /// ```
+    ///
+    /// Until it exists this returns `None`, which is exactly what an absent
+    /// `#[serde(default)] Option<u64>` resolves to, so production behaviour is
+    /// unchanged and `a_suspended_issuer_can_still_revoke_but_not_create` still
+    /// passes with the asymmetry its name describes.
+    #[inline]
+    fn authorization_activation(params: &ChainParams) -> Option<u64> {
+        // Replace with `params.employment_authorization_enabled_from_height`.
+        let _ = params;
+        None
+    }
+
+    /// Whether the Employment issuer-standing rule is active at `block_height`.
+    #[inline]
+    pub fn authorization_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::authorization_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// Is `sender` a registered issuer whose standing is still active?
+    ///
+    /// The exact question `CreateEmployment` and `CreateIncomeAttestation` ask
+    /// inline, asked of the same row from the mutation paths.
+    fn issuer_in_good_standing(view: &ExecutionView<'_, '_>, sender: &Address) -> Result<bool> {
+        Ok(match Self::v_get_issuer(view, sender)? {
+            Some(issuer) => issuer.status.is_active(),
+            None => false,
+        })
+    }
+
+    /// Execute an Employment transaction.
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
+        sender: &Address,
+        data: &EmploymentTxData,
+        proposer: &Address,
+        fee: Balance,
+        block_height: BlockHeight,
+        block_timestamp: Timestamp,
+        tx_index: u32,
+        tx_hash: Hash,
+    ) -> Result<EmploymentExecutionResult> {
+        Self::execute_with_gates(
+            view,
+            sender,
+            data,
+            proposer,
+            fee,
+            block_height,
+            block_timestamp,
+            tx_index,
+            tx_hash,
+            EmploymentGates::from_params(params, block_height),
+        )
+    }
+
+    /// Execute an Employment transaction with the activation decisions supplied
+    /// directly. The seam the mixed-version tests use.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_gates(
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &EmploymentTxData,
@@ -125,7 +237,10 @@ impl EmploymentExecutor {
         block_timestamp: Timestamp,
         _tx_index: u32,
         _tx_hash: Hash,
+        gates: EmploymentGates,
     ) -> Result<EmploymentExecutionResult> {
+        let block_timestamp =
+            crate::effective_block_timestamp(block_timestamp, gates.real_block_timestamp);
         let schema_validator = SchemaValidator::new();
 
         match data.operation {
@@ -309,6 +424,16 @@ impl EmploymentExecutor {
                     return Ok(EmploymentExecutionResult::failure("Only issuer can update"));
                 }
 
+                // AU-27: below the gate this path checks only the address on
+                // the row, so a suspended or revoked issuer keeps full control
+                // of everything it ever issued. The two creation paths ask this
+                // same question inline; the asymmetry is the defect.
+                if gates.authorization && !Self::issuer_in_good_standing(view, sender)? {
+                    return Ok(EmploymentExecutionResult::failure(
+                        "Issuer is not registered and active",
+                    ));
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -337,6 +462,16 @@ impl EmploymentExecutor {
 
                 if credential.issuer_address != *sender {
                     return Ok(EmploymentExecutionResult::failure("Only issuer can suspend"));
+                }
+
+                // AU-27: below the gate this path checks only the address on
+                // the row, so a suspended or revoked issuer keeps full control
+                // of everything it ever issued. The two creation paths ask this
+                // same question inline; the asymmetry is the defect.
+                if gates.authorization && !Self::issuer_in_good_standing(view, sender)? {
+                    return Ok(EmploymentExecutionResult::failure(
+                        "Issuer is not registered and active",
+                    ));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -369,6 +504,16 @@ impl EmploymentExecutor {
                     return Ok(EmploymentExecutionResult::failure("Only issuer can end"));
                 }
 
+                // AU-27: below the gate this path checks only the address on
+                // the row, so a suspended or revoked issuer keeps full control
+                // of everything it ever issued. The two creation paths ask this
+                // same question inline; the asymmetry is the defect.
+                if gates.authorization && !Self::issuer_in_good_standing(view, sender)? {
+                    return Ok(EmploymentExecutionResult::failure(
+                        "Issuer is not registered and active",
+                    ));
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -398,6 +543,16 @@ impl EmploymentExecutor {
 
                 if credential.issuer_address != *sender {
                     return Ok(EmploymentExecutionResult::failure("Only issuer can revoke"));
+                }
+
+                // AU-27: below the gate this path checks only the address on
+                // the row, so a suspended or revoked issuer keeps full control
+                // of everything it ever issued. The two creation paths ask this
+                // same question inline; the asymmetry is the defect.
+                if gates.authorization && !Self::issuer_in_good_standing(view, sender)? {
+                    return Ok(EmploymentExecutionResult::failure(
+                        "Issuer is not registered and active",
+                    ));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -468,6 +623,16 @@ impl EmploymentExecutor {
 
                 if attestation.issuer_address != *sender {
                     return Ok(EmploymentExecutionResult::failure("Only issuer can revoke"));
+                }
+
+                // AU-27: below the gate this path checks only the address on
+                // the row, so a suspended or revoked issuer keeps full control
+                // of everything it ever issued. The two creation paths ask this
+                // same question inline; the asymmetry is the defect.
+                if gates.authorization && !Self::issuer_in_good_standing(view, sender)? {
+                    return Ok(EmploymentExecutionResult::failure(
+                        "Issuer is not registered and active",
+                    ));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;

@@ -18,6 +18,8 @@ use sumchain_primitives::{
 };
 use tracing::debug;
 
+use sumchain_genesis::ChainParams;
+
 use crate::{Result, StateError, StateManager};
 
 /// Result of Legal operation execution
@@ -130,10 +132,113 @@ impl LegalExecutionResult {
 /// parameter no operation consults.
 pub struct LegalExecutor;
 
+/// The activation decisions a Legal transaction executes under.
+///
+/// [`LegalExecutor::execute`] derives it from `ChainParams`;
+/// [`LegalExecutor::execute_with_gates`] takes it directly, which is how a test
+/// drives an ungated node and a gated node over the same transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LegalGates {
+    /// The subsystem's authority checks are enforced. ACTIVATION-AUDIT rows
+    /// AU-13, AU-14, AU-15 and AU-16.
+    pub authorization: bool,
+    /// Executor-written timestamps are the block's, not a literal zero.
+    /// ACTIVATION-AUDIT class 2.
+    pub real_block_timestamp: bool,
+}
+
+impl LegalGates {
+    /// Every gate closed -- the release configuration today.
+    pub const CLOSED: Self = Self {
+        authorization: false,
+        real_block_timestamp: false,
+    };
+
+    /// Every gate open. For the gated half of a mixed-version test.
+    pub const OPEN: Self = Self {
+        authorization: true,
+        real_block_timestamp: true,
+    };
+
+    /// Derive the decisions from the chain's parameters at `block_height`.
+    pub fn from_params(params: &ChainParams, block_height: BlockHeight) -> Self {
+        Self {
+            authorization: LegalExecutor::authorization_gate_open(params, block_height),
+            real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
+        }
+    }
+}
+
 impl LegalExecutor {
-    /// Execute a Legal transaction
+    /// The activation height for the Legal authority checks.
+    ///
+    /// **This is a seam for a `ChainParams` field that does not exist yet.**
+    /// `crates/genesis/**` belongs to another track, so the field cannot be
+    /// added from here. The field this function must read, once that track adds
+    /// it, is:
+    ///
+    /// ```text
+    /// /// SRC-85X Legal authority checks. Dormant by default (`None` -> never
+    /// /// open). Below the gate `ConsolidateCase` and `TransferCase` have no
+    /// /// authority check at all, `SupersedeOrder` has neither an authority
+    /// /// check nor a duplicate guard -- so a stranger overwrites a different
+    /// /// existing order by reusing its id -- and `SupersedeEvent` does not
+    /// /// verify that the replacement's case exists, leaving a dangling
+    /// /// case-to-event index entry the attacker chose. At and above the gate
+    /// /// each of those is enforced. Activation is a consensus change and needs
+    /// /// a coordinated validator upgrade.
+    /// #[serde(default)]
+    /// pub legal_authorization_enabled_from_height: Option<u64>,
+    /// ```
+    ///
+    /// Until it exists this returns `None`, which is exactly what an absent
+    /// `#[serde(default)] Option<u64>` resolves to, so production behaviour is
+    /// unchanged and every pinning test that records the gap still passes.
+    #[inline]
+    fn authorization_activation(params: &ChainParams) -> Option<u64> {
+        // Replace with `params.legal_authorization_enabled_from_height`.
+        let _ = params;
+        None
+    }
+
+    /// Whether the Legal authority checks are active at `block_height`.
+    #[inline]
+    pub fn authorization_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::authorization_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// Execute a Legal transaction.
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
+        sender: &Address,
+        data: &LegalTxData,
+        proposer: &Address,
+        fee: Balance,
+        block_height: BlockHeight,
+        block_timestamp: Timestamp,
+        tx_index: u32,
+        tx_hash: Hash,
+    ) -> Result<LegalExecutionResult> {
+        Self::execute_with_gates(
+            view,
+            sender,
+            data,
+            proposer,
+            fee,
+            block_height,
+            block_timestamp,
+            tx_index,
+            tx_hash,
+            LegalGates::from_params(params, block_height),
+        )
+    }
+
+    /// Execute a Legal transaction with the activation decisions supplied
+    /// directly. The seam the mixed-version tests use.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_gates(
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &LegalTxData,
@@ -143,7 +248,10 @@ impl LegalExecutor {
         block_timestamp: Timestamp,
         _tx_index: u32,
         _tx_hash: Hash,
+        gates: LegalGates,
     ) -> Result<LegalExecutionResult> {
+        let block_timestamp =
+            crate::effective_block_timestamp(block_timestamp, gates.real_block_timestamp);
         match data.operation {
             // SRC-851: Case Anchor Operations
             LegalOperation::AnchorCase => {
@@ -279,11 +387,26 @@ impl LegalExecutor {
                 let d: ConsolidateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if Self::v_get_case(view, &d.case_id)?.is_none() {
-                    return Ok(LegalExecutionResult::failure("Case not found"));
-                }
-                if Self::v_get_case(view, &d.related_case_id)?.is_none() {
-                    return Ok(LegalExecutionResult::failure("Related case not found"));
+                let case = match Self::v_get_case(view, &d.case_id)? {
+                    Some(c) => c,
+                    None => return Ok(LegalExecutionResult::failure("Case not found")),
+                };
+                let related = match Self::v_get_case(view, &d.related_case_id)? {
+                    Some(c) => c,
+                    None => return Ok(LegalExecutionResult::failure("Related case not found")),
+                };
+
+                // AU-13: below the gate the only guards are existence, so any
+                // funded account attaches one stranger's case to another's and
+                // moves the second to `Consolidated`. Both issuers are required
+                // at the gate, because the operation changes both rows.
+                // Contrast `CloseCase`, which has always checked.
+                if gates.authorization
+                    && (case.issuer_address != *sender || related.issuer_address != *sender)
+                {
+                    return Ok(LegalExecutionResult::failure(
+                        "Only the issuer of both cases can consolidate them",
+                    ));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -307,8 +430,14 @@ impl LegalExecutor {
                 let d: TransferData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if Self::v_get_case(view, &d.case_id)?.is_none() {
-                    return Ok(LegalExecutionResult::failure("Case not found"));
+                let case = match Self::v_get_case(view, &d.case_id)? {
+                    Some(c) => c,
+                    None => return Ok(LegalExecutionResult::failure("Case not found")),
+                };
+
+                // AU-14: existence was the only guard.
+                if gates.authorization && case.issuer_address != *sender {
+                    return Ok(LegalExecutionResult::failure("Only issuer can transfer"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -384,8 +513,24 @@ impl LegalExecutor {
                 let d: SupersedeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if Self::v_get_process_event(view, &d.old_event_id)?.is_none() {
-                    return Ok(LegalExecutionResult::failure("Old event not found"));
+                let old_event = match Self::v_get_process_event(view, &d.old_event_id)? {
+                    Some(e) => e,
+                    None => return Ok(LegalExecutionResult::failure("Old event not found")),
+                };
+
+                // AU-16: below the gate the replacement's case is never
+                // checked, so a stranger's supersession creates a case-to-event
+                // index entry under a case id it chose and that need not exist.
+                // Contrast `RecordEvent`, which does read the case.
+                if gates.authorization {
+                    if old_event.issuer_address != *sender {
+                        return Ok(LegalExecutionResult::failure("Only issuer can supersede"));
+                    }
+                    if Self::v_get_case(view, &d.new_event.case_id)?.is_none() {
+                        return Ok(LegalExecutionResult::failure(
+                            "The replacement event names a case that does not exist",
+                        ));
+                    }
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -556,8 +701,32 @@ impl LegalExecutor {
                 let d: SupersedeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if Self::v_get_order(view, &d.old_order_id)?.is_none() {
-                    return Ok(LegalExecutionResult::failure("Old order not found"));
+                let old_order = match Self::v_get_order(view, &d.old_order_id)? {
+                    Some(o) => o,
+                    None => return Ok(LegalExecutionResult::failure("Old order not found")),
+                };
+
+                // AU-15, both halves. Below the gate this arm has no authority
+                // check AND no duplicate guard, so a stranger supersedes an
+                // order and, by reusing an existing order's id for the
+                // replacement, overwrites a different order in the same
+                // transaction.
+                if gates.authorization {
+                    if old_order.issuer_address != *sender {
+                        return Ok(LegalExecutionResult::failure("Only issuer can supersede"));
+                    }
+                    if d.new_order.issuer_address != *sender {
+                        return Ok(LegalExecutionResult::failure(
+                            "The replacement order must be issued by the sender",
+                        ));
+                    }
+                    if d.new_order.order_id != d.old_order_id
+                        && Self::v_get_order(view, &d.new_order.order_id)?.is_some()
+                    {
+                        return Ok(LegalExecutionResult::failure(
+                            "The replacement order id is already in use",
+                        ));
+                    }
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;

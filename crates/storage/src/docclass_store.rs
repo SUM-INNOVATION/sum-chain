@@ -76,8 +76,37 @@ pub fn docclass_issuer_key(address: &Address) -> &[u8] {
 
 /// The subject index is keyed by the 32-byte subject commitment. Its VALUE is
 /// one of two incompatible shapes; see the module note above.
+///
+/// This is the LEGACY key, and after the subject-index split activation
+/// (ACTIVATION-AUDIT row BD-6) it belongs to the credential-id-list shape
+/// alone. The identity-pair shape moves to [`subject_identity_index_key`].
 pub fn subject_index_key(subject_commitment: &SubjectCommitment) -> &[u8] {
     subject_commitment
+}
+
+/// The one-byte tag that separates the identity-pair key space from the
+/// credential-id-list key space.
+///
+/// A commitment is 32 bytes, so a tagged key is 33 and cannot equal any legacy
+/// key. The tag leads rather than trails so the two spaces do not interleave
+/// under a prefix scan.
+pub const SUBJECT_IDENTITY_INDEX_TAG: u8 = 0x01;
+
+/// The subject index key the IDENTITY shape uses after the split activation.
+///
+/// `DOCCLASS_SUBJECT_INDEX` held two incompatible value shapes at one key: a
+/// `Vec<(CredentialId, DocSubcode)>` written by the identity path and a bare
+/// `Vec<CredentialId>` written by the eligibility and credential paths. Because
+/// the subject commitment is an arbitrary 32-byte payload value, an attacker
+/// picks the colliding key: two cheap transactions arm it, the second silently
+/// destroys the first's index, and the next identity operation on that subject
+/// fails to decode and ends the block. Separating the key spaces removes both
+/// halves -- the silent corruption and the block denial -- by construction.
+pub fn subject_identity_index_key(subject_commitment: &SubjectCommitment) -> Vec<u8> {
+    let mut key = Vec::with_capacity(33);
+    key.push(SUBJECT_IDENTITY_INDEX_TAG);
+    key.extend_from_slice(subject_commitment);
+    key
 }
 
 /// The issuer index is keyed by the raw 20 address bytes of the ISSUER, and its
@@ -272,10 +301,24 @@ impl<'a> IdentityRootStore<'a> {
     }
 
     /// Get all credential IDs for a subject commitment
+    /// Read the identity subject index, post-split key first.
+    ///
+    /// Reads fall back to the legacy bare-commitment key exactly as the undo
+    /// journal's re-key does, so a node reading rows written before the
+    /// subject-index split activation still finds them. A value at the LEGACY
+    /// key that does not decode as identity pairs is still an error, because
+    /// before the split that is precisely the collision this reader has always
+    /// surfaced.
     pub fn get_by_subject(
         &self,
         subject_commitment: &[u8; 32],
     ) -> Result<Vec<(CredentialId, DocSubcode)>> {
+        if let Some(bytes) = self.db.get(
+            cf::DOCCLASS_SUBJECT_INDEX,
+            &subject_identity_index_key(subject_commitment),
+        )? {
+            return decode_subject_identity_index(&bytes);
+        }
         match self.db.get(
             cf::DOCCLASS_SUBJECT_INDEX,
             subject_index_key(subject_commitment),

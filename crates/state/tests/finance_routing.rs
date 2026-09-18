@@ -3292,3 +3292,256 @@ fn published_finance_bytes_match_independently_built_keys_and_values() {
         );
     }
 }
+
+// ── Class 3: the Finance issuer-standing rules, and their activation ─────────
+//
+// `docs/lane-a/ACTIVATION-AUDIT.md` rows AU-22, AU-23 and AU-25. Every update
+// and revoke path checks only the address recorded on the row and never rereads
+// the issuer registry, so an issuer that has been suspended or revoked keeps
+// full control of everything it ever issued -- and the creation paths DO read
+// the registry, so the asymmetry is exact rather than an oversight of shape.
+// `UpdateIssuer` applies whatever status the sender asks for, `Active` from
+// `Revoked` included, walking around the Suspended-only guard `ReactivateIssuer`
+// exists to enforce. `SubmitProof` has no authority check at all.
+//
+// Gated on `finance_authorization_enabled_from_height`, a `ChainParams` field
+// this track cannot add.
+//
+// AU-21 (anyone self-registers as any issuer class, `CentralBank` included) and
+// AU-24 (the `UpdateIssuer` sender check is structurally unable to fire,
+// because the row is fetched BY the sender key) are NOT addressed here and are
+// not claimed to be. AU-21 needs an authority the subsystem does not have: no
+// `ChainParams` field names a finance registrar, and inventing one from inside
+// the executor would be a rule nobody set. AU-24 is a dead check rather than a
+// hole -- registration forces the equality the comparison later tests -- so
+// deleting it would be tidier and would close nothing.
+
+use sumchain_state::FinanceGates;
+
+/// Drive one Finance operation through the gate seam.
+fn finance_at(
+    view: &mut ExecutionView<'_, '_>,
+    sender: &Address,
+    op: FinanceOperation,
+    payload: &impl serde::Serialize,
+    gates: FinanceGates,
+) -> sumchain_state::FinanceExecutionResult {
+    let proposer = Address::new([9; 20]);
+    FinanceExecutor::execute_with_gates(
+        view,
+        sender,
+        &tx_data(op, payload),
+        &proposer,
+        100,
+        1,
+        1_000,
+        0,
+        sumchain_primitives::Hash::ZERO,
+        gates,
+    )
+    .unwrap()
+}
+
+/// AU-23: a suspended issuer keeps control of everything it ever issued.
+///
+/// Create while Active, suspend, then update and revoke. Below the gate both
+/// still land; above it neither does, and creation is refused too -- which is
+/// the point: the creation path always checked, so at the gate the two halves
+/// finally agree.
+#[test]
+fn a_suspended_finance_issuer_keeps_control_below_the_gate_and_loses_it_above() {
+    #[derive(serde::Serialize)]
+    struct UpdateIssuer {
+        status: FinanceIssuerStatus,
+    }
+    #[derive(serde::Serialize)]
+    struct UpdateKyc {
+        attestation_id: [u8; 32],
+        status: KycStatus,
+    }
+    #[derive(serde::Serialize)]
+    struct RevokeKyc {
+        attestation_id: [u8; 32],
+        revocation_ref: [u8; 32],
+    }
+
+    for gates in [FinanceGates::CLOSED, FinanceGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        assert!(
+            finance_at(
+                &mut view,
+                &issuer.address(),
+                FinanceOperation::RegisterIssuer,
+                &bank(&issuer),
+                gates
+            )
+            .success
+        );
+        let att = kyc(&issuer, 0x51, [0x52; 32]);
+        assert!(
+            finance_at(
+                &mut view,
+                &issuer.address(),
+                FinanceOperation::CreateKycAttestation,
+                &att,
+                gates
+            )
+            .success,
+            "created while Active under either gate"
+        );
+
+        // Suspend, through the arm that is allowed to.
+        assert!(
+            finance_at(
+                &mut view,
+                &issuer.address(),
+                FinanceOperation::UpdateIssuer,
+                &UpdateIssuer {
+                    status: FinanceIssuerStatus::Suspended
+                },
+                gates
+            )
+            .success
+        );
+
+        let updated = finance_at(
+            &mut view,
+            &issuer.address(),
+            FinanceOperation::UpdateKycAttestation,
+            &UpdateKyc {
+                attestation_id: att.attestation_id,
+                status: KycStatus::Expired,
+            },
+            gates,
+        );
+        let revoked = finance_at(
+            &mut view,
+            &issuer.address(),
+            FinanceOperation::RevokeKycAttestation,
+            &RevokeKyc {
+                attestation_id: att.attestation_id,
+                revocation_ref: [0x53; 32],
+            },
+            gates,
+        );
+        assert_eq!(
+            (updated.success, revoked.success),
+            (!gates.authorization, !gates.authorization),
+            "a suspended issuer keeps update and revoke, until the gate"
+        );
+
+        // The creation path refuses on BOTH sides, which is the asymmetry the
+        // gate closes.
+        let second = kyc(&issuer, 0x54, [0x55; 32]);
+        assert!(
+            !finance_at(
+                &mut view,
+                &issuer.address(),
+                FinanceOperation::CreateKycAttestation,
+                &second,
+                gates
+            )
+            .success,
+            "creation has always been refused to a suspended issuer"
+        );
+    }
+}
+
+/// AU-22: `UpdateIssuer` restores `Active` from `Revoked`, until the gate.
+#[test]
+fn update_issuer_cannot_walk_around_reactivate_at_the_gate() {
+    #[derive(serde::Serialize)]
+    struct UpdateIssuer {
+        status: FinanceIssuerStatus,
+    }
+
+    for gates in [FinanceGates::CLOSED, FinanceGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        assert!(
+            finance_at(
+                &mut view,
+                &issuer.address(),
+                FinanceOperation::RegisterIssuer,
+                &bank(&issuer),
+                gates
+            )
+            .success
+        );
+        assert!(
+            finance_at(
+                &mut view,
+                &issuer.address(),
+                FinanceOperation::UpdateIssuer,
+                &UpdateIssuer {
+                    status: FinanceIssuerStatus::Revoked
+                },
+                gates
+            )
+            .success,
+            "revoking itself is allowed on both sides"
+        );
+
+        let restored = finance_at(
+            &mut view,
+            &issuer.address(),
+            FinanceOperation::UpdateIssuer,
+            &UpdateIssuer {
+                status: FinanceIssuerStatus::Active,
+            },
+            gates,
+        );
+        assert_eq!(
+            restored.success,
+            !gates.authorization,
+            "Active from Revoked, in one transaction, until the gate"
+        );
+        assert_eq!(
+            FinanceExecutor::v_get_issuer(&view, &issuer.address())
+                .unwrap()
+                .unwrap()
+                .status,
+            if gates.authorization {
+                FinanceIssuerStatus::Revoked
+            } else {
+                FinanceIssuerStatus::Active
+            }
+        );
+    }
+}
+
+/// AU-25: anyone who pays writes any proof envelope, until the gate.
+#[test]
+fn submit_proof_requires_a_registered_active_issuer_at_the_gate() {
+    for gates in [FinanceGates::CLOSED, FinanceGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let stranger = KeyPair::generate();
+        fund(&db, &stranger, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let env = proof_envelope(0x56);
+        let r = finance_at(
+            &mut view,
+            &stranger.address(),
+            FinanceOperation::SubmitProof,
+            &env,
+            gates,
+        );
+        assert_eq!(r.success, !gates.authorization);
+        assert_eq!(
+            FinanceExecutor::v_proof_exists(&view, &env.proof_id).unwrap(),
+            !gates.authorization,
+            "and nothing reached the proof family at the gate"
+        );
+    }
+}

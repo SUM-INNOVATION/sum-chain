@@ -96,9 +96,160 @@ impl NftExecutor {
         block_timestamp
     }
 
-    /// Execute an NFT operation from transaction data
+    /// The activation height for the NFT receipt-failure rule.
+    ///
+    /// **This is a seam for a `ChainParams` field that does not exist yet.**
+    /// `crates/genesis/**` belongs to another track, so the field cannot be
+    /// added from here. The field this function must read, once that track adds
+    /// it, is:
+    ///
+    /// ```text
+    /// /// SRC-721 receipt-failure rule. Dormant by default (`None` -> never
+    /// /// open). Below the gate, an NFT operation naming an absent collection
+    /// /// or token, carrying an undecodable payload, carrying an out-of-range
+    /// /// royalty, or draining the sender's balance inside the block, returns
+    /// /// `Err(StateError::BlockValidation)` and makes the whole block
+    /// /// unexecutable. At and above the gate the same conditions produce a
+    /// /// `Failed` receipt that charges the sender and leaves the block valid.
+    /// /// Activation is a consensus change and needs a coordinated validator
+    /// /// upgrade: two nodes that disagree about this height disagree about
+    /// /// whether a block exists at all.
+    /// #[serde(default)]
+    /// pub nft_receipt_failure_enabled_from_height: Option<u64>,
+    /// ```
+    ///
+    /// Until it exists this returns `None`, which is exactly what an absent
+    /// `#[serde(default)] Option<u64>` resolves to, so the production behaviour
+    /// is bit-identical to the behaviour before this change: the gate is closed
+    /// and the `Err` still propagates. The gated side is not dead, though — it
+    /// is reachable through [`NftExecutor::execute_with_gate`], which is what
+    /// the mixed-version tests drive.
+    #[inline]
+    fn receipt_failure_activation(params: &ChainParams) -> Option<u64> {
+        // Replace this body with `params.nft_receipt_failure_enabled_from_height`.
+        let _ = params;
+        None
+    }
+
+    /// Whether the NFT receipt-failure rule is active at `block_height`.
+    #[inline]
+    fn receipt_failure_gate_open(params: &ChainParams, block_height: u64) -> bool {
+        matches!(Self::receipt_failure_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The errors the receipt-failure rule converts into a `Failed` receipt.
+    ///
+    /// Deliberately narrow. Storage and encoding errors are node-local faults
+    /// and must still abort the block; only the conditions an ordinary sender
+    /// chooses from its own payload are converted.
+    fn as_receipt_failure(err: &StateError) -> Option<String> {
+        match err {
+            StateError::BlockValidation(msg) => Some(msg.clone()),
+            StateError::InsufficientBalance {
+                required,
+                available,
+            } => Some(format!(
+                "Insufficient balance: required {}, available {}",
+                required, available
+            )),
+            _ => None,
+        }
+    }
+
+    /// Execute an NFT operation from transaction data.
+    ///
+    /// Reads the receipt-failure activation height out of `params` and
+    /// dispatches through [`Self::execute_with_gate`].
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
+        sender: &Address,
+        nft_data: &NftTxData,
+        proposer: &Address,
+        fee: Balance,
+        block_timestamp: u64,
+        block_height: u64,
+    ) -> Result<NftExecutionResult> {
+        Self::execute_with_gate(
+            view,
+            params,
+            sender,
+            nft_data,
+            proposer,
+            fee,
+            block_timestamp,
+            Self::receipt_failure_gate_open(params, block_height),
+        )
+    }
+
+    /// Execute an NFT operation with the receipt-failure gate supplied directly.
+    ///
+    /// The seam the mixed-version tests use. `receipt_failure_gate_open` is the
+    /// only thing that differs between a node below the activation height and a
+    /// node at or above it, so driving both values through one entry point is
+    /// what makes the divergence observable rather than asserted.
+    ///
+    /// Every error site inside the operation bodies fires strictly before that
+    /// body's first write — verified site by site — so converting the error at
+    /// this boundary cannot leave a half-applied operation in the overlay. The
+    /// fee is the one exception, and it is deducted deliberately: it is
+    /// deducted at `:execute_ungated` before the match, which is the same
+    /// position the pre-existing `failure()` guards already charge from.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_gate(
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
+        sender: &Address,
+        nft_data: &NftTxData,
+        proposer: &Address,
+        fee: Balance,
+        block_timestamp: u64,
+        receipt_failure_gate_open: bool,
+    ) -> Result<NftExecutionResult> {
+        let outcome = Self::execute_ungated(
+            view,
+            params,
+            sender,
+            nft_data,
+            proposer,
+            fee,
+            block_timestamp,
+        );
+
+        let err = match outcome {
+            Ok(result) => return Ok(result),
+            Err(err) => err,
+        };
+
+        if !receipt_failure_gate_open {
+            return Err(err);
+        }
+
+        let Some(message) = Self::as_receipt_failure(&err) else {
+            return Err(err);
+        };
+
+        // An insufficient-balance refusal never reached `deduct_fee`'s writes,
+        // so nothing advanced the sender's nonce. Advance it here, or the
+        // refused transaction stays replayable at the same nonce while still
+        // occupying a receipt slot in the block.
+        if matches!(err, StateError::InsufficientBalance { .. }) {
+            let mut sender_account = StateManager::v_get_account(view, sender)?;
+            sender_account.nonce += 1;
+            StateManager::v_put_account(view, sender, &sender_account)?;
+        }
+
+        warn!(
+            "NFT {:?} refused with a receipt rather than aborting the block: {}",
+            nft_data.operation, message
+        );
+        Ok(NftExecutionResult::failure(message))
+    }
+
+    /// The operation bodies, with no gate applied.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_ungated(
         view: &mut ExecutionView<'_, '_>,
         params: &ChainParams,
         sender: &Address,

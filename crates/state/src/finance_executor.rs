@@ -19,6 +19,8 @@ use sumchain_primitives::{
 };
 use tracing::debug;
 
+use sumchain_genesis::ChainParams;
+
 use crate::{Result, StateError, StateManager};
 
 /// Result of Finance operation execution
@@ -127,10 +129,122 @@ impl FinanceExecutionResult {
 /// RPC server.
 pub struct FinanceExecutor;
 
+/// The activation decisions a Finance transaction executes under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FinanceGates {
+    /// The subsystem's issuer-standing rules are enforced. ACTIVATION-AUDIT
+    /// rows AU-22, AU-23 and AU-25.
+    pub authorization: bool,
+    /// Executor-written timestamps are the block's, not a literal zero.
+    /// ACTIVATION-AUDIT class 2.
+    pub real_block_timestamp: bool,
+}
+
+impl FinanceGates {
+    /// Every gate closed -- the release configuration today.
+    pub const CLOSED: Self = Self {
+        authorization: false,
+        real_block_timestamp: false,
+    };
+
+    /// Every gate open. For the gated half of a mixed-version test.
+    pub const OPEN: Self = Self {
+        authorization: true,
+        real_block_timestamp: true,
+    };
+
+    /// Derive the decisions from the chain's parameters at `block_height`.
+    pub fn from_params(params: &ChainParams, block_height: BlockHeight) -> Self {
+        Self {
+            authorization: FinanceExecutor::authorization_gate_open(params, block_height),
+            real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
+        }
+    }
+}
+
 impl FinanceExecutor {
-    /// Execute a Finance transaction
+    /// The activation height for the Finance issuer-standing rules.
+    ///
+    /// **This is a seam for a `ChainParams` field that does not exist yet.**
+    /// `crates/genesis/**` belongs to another track, so the field cannot be
+    /// added from here. The field this function must read, once that track adds
+    /// it, is:
+    ///
+    /// ```text
+    /// /// SRC-89X Finance issuer-standing rules. Dormant by default (`None` ->
+    /// /// never open). Below the gate every update and revoke path checks only
+    /// /// the address recorded ON THE ROW and never rereads the issuer
+    /// /// registry, so an issuer that has been suspended or revoked keeps full
+    /// /// control of everything it ever issued -- the creation paths DO check,
+    /// /// so the asymmetry is exact. `UpdateIssuer` also accepts whatever
+    /// /// status the sender asks for, `Active` from `Revoked` included, walking
+    /// /// around the Suspended-only guard `ReactivateIssuer` exists to enforce.
+    /// /// And `SubmitProof` has no authority check at all. At and above the
+    /// /// gate each of those is enforced. Activation is a consensus change and
+    /// /// needs a coordinated validator upgrade.
+    /// #[serde(default)]
+    /// pub finance_authorization_enabled_from_height: Option<u64>,
+    /// ```
+    ///
+    /// Until it exists this returns `None`, which is exactly what an absent
+    /// `#[serde(default)] Option<u64>` resolves to, so production behaviour is
+    /// unchanged and every pinning test that records the gap still passes.
+    #[inline]
+    fn authorization_activation(params: &ChainParams) -> Option<u64> {
+        // Replace with `params.finance_authorization_enabled_from_height`.
+        let _ = params;
+        None
+    }
+
+    /// Whether the Finance issuer-standing rules are active at `block_height`.
+    #[inline]
+    pub fn authorization_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::authorization_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// Is `sender` a registered issuer whose standing is still `Active`?
+    ///
+    /// The check the mutation paths never made. The creation paths make it
+    /// inline; this is the same question asked of the same row.
+    fn issuer_in_good_standing(view: &ExecutionView<'_, '_>, sender: &Address) -> Result<bool> {
+        Ok(match Self::v_get_issuer(view, sender)? {
+            Some(issuer) => issuer.status.is_active(),
+            None => false,
+        })
+    }
+
+    /// Execute a Finance transaction.
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
+        sender: &Address,
+        data: &FinanceTxData,
+        proposer: &Address,
+        fee: Balance,
+        block_height: BlockHeight,
+        block_timestamp: Timestamp,
+        tx_index: u32,
+        tx_hash: Hash,
+    ) -> Result<FinanceExecutionResult> {
+        Self::execute_with_gates(
+            view,
+            sender,
+            data,
+            proposer,
+            fee,
+            block_height,
+            block_timestamp,
+            tx_index,
+            tx_hash,
+            FinanceGates::from_params(params, block_height),
+        )
+    }
+
+    /// Execute a Finance transaction with the activation decisions supplied
+    /// directly. The seam the mixed-version tests use.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_gates(
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &FinanceTxData,
@@ -140,7 +254,10 @@ impl FinanceExecutor {
         block_timestamp: Timestamp,
         _tx_index: u32,
         _tx_hash: Hash,
+        gates: FinanceGates,
     ) -> Result<FinanceExecutionResult> {
+        let block_timestamp =
+            crate::effective_block_timestamp(block_timestamp, gates.real_block_timestamp);
         match data.operation {
             // =================================================================
             // SRC-891: Issuer Registry Operations
@@ -181,6 +298,28 @@ impl FinanceExecutor {
 
                 if issuer.issuer_address != *sender {
                     return Ok(FinanceExecutionResult::failure("Only issuer can update"));
+                }
+
+                // AU-22: below the gate this arm applies whatever status the
+                // sender asks for, with no reference to the status the row
+                // already holds -- `Active` from `Revoked` included. That walks
+                // around the Suspended-only guard `ReactivateIssuer` exists to
+                // enforce. At the gate `UpdateIssuer` may not restore `Active`
+                // at all (that is `ReactivateIssuer`'s job, with its own guard)
+                // and `Revoked` is terminal.
+                if gates.authorization {
+                    if issuer.status == FinanceIssuerStatus::Revoked {
+                        return Ok(FinanceExecutionResult::failure(
+                            "A revoked issuer's status is terminal",
+                        ));
+                    }
+                    if update.status == FinanceIssuerStatus::Active
+                        && issuer.status != FinanceIssuerStatus::Active
+                    {
+                        return Ok(FinanceExecutionResult::failure(
+                            "Use ReactivateIssuer to restore an issuer to Active",
+                        ));
+                    }
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -309,6 +448,17 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Only issuer can revoke"));
                 }
 
+                // AU-23: below the gate this path checks only the address on
+                // the row and never rereads the issuer registry, so a SUSPENDED
+                // or REVOKED issuer keeps full control of everything it ever
+                // issued. The creation paths do check; the asymmetry is the
+                // defect.
+                if gates.authorization && !Self::issuer_in_good_standing(view, sender)? {
+                    return Ok(FinanceExecutionResult::failure(
+                        "Issuer is not registered and active",
+                    ));
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -372,6 +522,17 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Only issuer can update"));
                 }
 
+                // AU-23: below the gate this path checks only the address on
+                // the row and never rereads the issuer registry, so a SUSPENDED
+                // or REVOKED issuer keeps full control of everything it ever
+                // issued. The creation paths do check; the asymmetry is the
+                // defect.
+                if gates.authorization && !Self::issuer_in_good_standing(view, sender)? {
+                    return Ok(FinanceExecutionResult::failure(
+                        "Issuer is not registered and active",
+                    ));
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -396,6 +557,17 @@ impl FinanceExecutor {
 
                 if credential.issuer_address != *sender {
                     return Ok(FinanceExecutionResult::failure("Only issuer can revoke"));
+                }
+
+                // AU-23: below the gate this path checks only the address on
+                // the row and never rereads the issuer registry, so a SUSPENDED
+                // or REVOKED issuer keeps full control of everything it ever
+                // issued. The creation paths do check; the asymmetry is the
+                // defect.
+                if gates.authorization && !Self::issuer_in_good_standing(view, sender)? {
+                    return Ok(FinanceExecutionResult::failure(
+                        "Issuer is not registered and active",
+                    ));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -466,6 +638,17 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Only issuer can update"));
                 }
 
+                // AU-23: below the gate this path checks only the address on
+                // the row and never rereads the issuer registry, so a SUSPENDED
+                // or REVOKED issuer keeps full control of everything it ever
+                // issued. The creation paths do check; the asymmetry is the
+                // defect.
+                if gates.authorization && !Self::issuer_in_good_standing(view, sender)? {
+                    return Ok(FinanceExecutionResult::failure(
+                        "Issuer is not registered and active",
+                    ));
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -492,6 +675,17 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Only issuer can revoke"));
                 }
 
+                // AU-23: below the gate this path checks only the address on
+                // the row and never rereads the issuer registry, so a SUSPENDED
+                // or REVOKED issuer keeps full control of everything it ever
+                // issued. The creation paths do check; the asymmetry is the
+                // defect.
+                if gates.authorization && !Self::issuer_in_good_standing(view, sender)? {
+                    return Ok(FinanceExecutionResult::failure(
+                        "Issuer is not registered and active",
+                    ));
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -514,6 +708,16 @@ impl FinanceExecutor {
 
                 if Self::v_proof_exists(view, &proof.proof_id)? {
                     return Ok(FinanceExecutionResult::failure("Proof already exists"));
+                }
+
+                // AU-25: below the gate the duplicate-id check is the ONLY
+                // guard -- no issuer, no credential reference validation, no
+                // signature -- so anyone who pays writes any proof envelope
+                // into the family.
+                if gates.authorization && !Self::issuer_in_good_standing(view, sender)? {
+                    return Ok(FinanceExecutionResult::failure(
+                        "Only a registered, active issuer can submit a proof",
+                    ));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;

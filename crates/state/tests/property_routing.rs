@@ -2989,3 +2989,186 @@ fn published_property_bytes_match_independently_built_keys_and_values() {
         );
     }
 }
+
+// ── Class 3: the Property authority checks, and their activation ─────────────
+//
+// `docs/lane-a/ACTIVATION-AUDIT.md` rows AU-30 and AU-31, two of the three the
+// pinning test `three_operations_check_no_authority_at_all` records.
+// `MergeAssets` checks nothing about the sender, so any account merges two
+// assets it did not issue and marks the secondary `Merged`. `SupersedeTitleEvent`
+// checks nothing either, so any account supersedes any title event and records
+// a replacement naming ITSELF -- a stranger rewriting a title history in one
+// transaction.
+//
+// Gated on `property_authorization_enabled_from_height`, a `ChainParams` field
+// this track cannot add.
+//
+// The third operation that test names -- `SubmitProof` (AU-32) -- is NOT
+// addressed here and is not claimed to be. `PropertyProofEnvelope` carries no
+// issuer address and Property has no issuer registry to consult (there is no
+// `v_get_issuer` anywhere in `property_executor.rs` or `property_view.rs`), so
+// there is nothing on the row or in the subsystem to authorize against. That is
+// a wire and registry change, not a guard, and it stays blocking.
+
+use sumchain_state::PropertyGates;
+
+/// Drive one Property operation through the gate seam.
+fn property_at(
+    view: &mut ExecutionView<'_, '_>,
+    sender: &Address,
+    op: PropertyOperation,
+    payload: &impl serde::Serialize,
+    gates: PropertyGates,
+) -> sumchain_state::PropertyExecutionResult {
+    let proposer = Address::new([9; 20]);
+    PropertyExecutor::execute_with_gates(
+        view,
+        sender,
+        &PropertyTxData {
+            operation: op,
+            data: bincode::serialize(payload).unwrap(),
+            recipient: Address::ZERO,
+        },
+        &proposer,
+        100,
+        1,
+        1_000,
+        0,
+        sumchain_primitives::Hash::ZERO,
+        gates,
+    )
+    .unwrap()
+}
+
+/// AU-30: a stranger merges two assets it did not issue.
+#[test]
+fn a_stranger_can_merge_assets_it_did_not_issue_only_below_the_gate() {
+    #[derive(serde::Serialize)]
+    struct Merge {
+        primary_asset_id: [u8; 32],
+        secondary_asset_id: [u8; 32],
+    }
+
+    for gates in [PropertyGates::CLOSED, PropertyGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let owner = KeyPair::generate();
+        let stranger = KeyPair::generate();
+        fund(&db, &owner, 100_000_000);
+        fund(&db, &stranger, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        for id in [110u8, 111] {
+            assert!(
+                property_at(
+                    &mut view,
+                    &owner.address(),
+                    PropertyOperation::AnchorAsset,
+                    &asset(id, owner.address()),
+                    gates
+                )
+                .success
+            );
+        }
+
+        let r = property_at(
+            &mut view,
+            &stranger.address(),
+            PropertyOperation::MergeAssets,
+            &Merge {
+                primary_asset_id: [110u8; 32],
+                secondary_asset_id: [111u8; 32],
+            },
+            gates,
+        );
+        assert_eq!(r.success, !gates.authorization);
+        assert_eq!(
+            PropertyExecutor::v_get_asset(&view, &[111u8; 32])
+                .unwrap()
+                .unwrap()
+                .status
+                == AssetStatus::Merged,
+            !gates.authorization,
+            "the secondary asset is marked Merged by a stranger, until the gate"
+        );
+
+        // And the issuer of both keeps the operation.
+        assert!(
+            property_at(
+                &mut view,
+                &owner.address(),
+                PropertyOperation::MergeAssets,
+                &Merge {
+                    primary_asset_id: [110u8; 32],
+                    secondary_asset_id: [111u8; 32],
+                },
+                gates
+            )
+            .success
+        );
+    }
+}
+
+/// AU-31: a stranger supersedes a title event and names itself in the
+/// replacement.
+#[test]
+fn a_stranger_cannot_rewrite_a_title_history_at_the_gate() {
+    #[derive(serde::Serialize)]
+    struct Supersede {
+        old_event_id: [u8; 32],
+        new_event: TitleEvent,
+    }
+
+    for gates in [PropertyGates::CLOSED, PropertyGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let owner = KeyPair::generate();
+        let stranger = KeyPair::generate();
+        fund(&db, &owner, 100_000_000);
+        fund(&db, &stranger, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        assert!(
+            property_at(
+                &mut view,
+                &owner.address(),
+                PropertyOperation::AnchorAsset,
+                &asset(112, owner.address()),
+                gates
+            )
+            .success
+        );
+        let original = title_event(0xB0, 112, owner.address());
+        assert!(
+            property_at(
+                &mut view,
+                &owner.address(),
+                PropertyOperation::RecordTitleEvent,
+                &original,
+                gates
+            )
+            .success
+        );
+
+        // The replacement names the STRANGER as issuer.
+        let replacement = title_event(0xB1, 112, stranger.address());
+        let r = property_at(
+            &mut view,
+            &stranger.address(),
+            PropertyOperation::SupersedeTitleEvent,
+            &Supersede {
+                old_event_id: original.event_id,
+                new_event: replacement.clone(),
+            },
+            gates,
+        );
+        assert_eq!(r.success, !gates.authorization);
+        assert_eq!(
+            PropertyExecutor::v_get_title_event(&view, &replacement.event_id)
+                .unwrap()
+                .is_some(),
+            !gates.authorization,
+            "a stranger's replacement enters the title history, until the gate"
+        );
+    }
+}

@@ -20,6 +20,8 @@ use sumchain_primitives::{
 };
 use tracing::debug;
 
+use sumchain_genesis::ChainParams;
+
 use crate::{Result, StateError, StateManager};
 
 /// Result of Agreement operation execution
@@ -150,11 +152,66 @@ impl AgreementExecutionResult {
 /// `sumchain_storage::agreement_store` for the RPC server.
 pub struct AgreementExecutor;
 
-impl AgreementExecutor {
+/// The activation decisions an Agreement transaction executes under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AgreementGates {
+    /// Executor-written timestamps are the block's, not a literal zero.
+    /// ACTIVATION-AUDIT row TS-5.
+    pub real_block_timestamp: bool,
+}
 
-    /// Execute an Agreement transaction
+impl AgreementGates {
+    /// Every gate closed -- the release configuration today.
+    pub const CLOSED: Self = Self {
+        real_block_timestamp: false,
+    };
+
+    /// Every gate open. For the gated half of a mixed-version test.
+    pub const OPEN: Self = Self {
+        real_block_timestamp: true,
+    };
+
+    /// Derive the decisions from the chain's parameters at `block_height`.
+    pub fn from_params(params: &ChainParams, block_height: BlockHeight) -> Self {
+        Self {
+            real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
+        }
+    }
+}
+
+impl AgreementExecutor {
+    /// Execute an Agreement transaction.
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
+        sender: &Address,
+        data: &AgreementTxData,
+        proposer: &Address,
+        fee: Balance,
+        block_height: BlockHeight,
+        block_timestamp: Timestamp,
+        tx_index: u32,
+        tx_hash: Hash,
+    ) -> Result<AgreementExecutionResult> {
+        Self::execute_with_gates(
+            view,
+            sender,
+            data,
+            proposer,
+            fee,
+            block_height,
+            block_timestamp,
+            tx_index,
+            tx_hash,
+            AgreementGates::from_params(params, block_height),
+        )
+    }
+
+    /// Execute an Agreement transaction with the activation decisions supplied
+    /// directly. The seam the mixed-version tests use.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_gates(
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &AgreementTxData,
@@ -164,7 +221,10 @@ impl AgreementExecutor {
         block_timestamp: Timestamp,
         _tx_index: u32,
         _tx_hash: Hash,
+        gates: AgreementGates,
     ) -> Result<AgreementExecutionResult> {
+        let block_timestamp =
+            crate::effective_block_timestamp(block_timestamp, gates.real_block_timestamp);
         match data.operation {
             // SRC-841: Agreement Commitment Operations
             AgreementOperation::CommitAgreement => {

@@ -1201,3 +1201,127 @@ fn a_640_kib_subject_index_is_refused_by_the_ceiling_without_canonical_change() 
     }
     assert_eq!(canonical(&db), before, "still nothing committed");
 }
+
+// ── Class 3: the Tax claim-type authority check, and its activation ──────────
+//
+// `docs/lane-a/ACTIVATION-AUDIT.md` row AU-19. Claim-type registration, update
+// and deprecation have no authority check at all: all three guard only on row
+// presence or absence, and no sender comparison or issuer row is consulted. Any
+// funded account writes the chain's claim-type registry, including deprecating
+// a type everybody else depends on.
+//
+// Gated on `tax_authorization_enabled_from_height`, a `ChainParams` field this
+// track cannot add.
+//
+// AU-18 -- anyone self-registers an ACTIVE issuer with an arbitrary class,
+// `TaxAuthority` included, and then issues claims -- is NOT addressed here and
+// is not claimed to be. The registry authorizes nothing it does not take from
+// the applicant, and there is no authority in the subsystem or in `ChainParams`
+// to check the applicant against. Closing it needs a registrar the chain does
+// not have, so it stays blocking; the check below narrows claim-type writes to
+// registered issuers without pretending that being registered means anything
+// more than having asked.
+
+use sumchain_state::TaxGates;
+
+/// Drive one Tax operation through the gate seam.
+fn tax_at(
+    view: &mut ExecutionView<'_, '_>,
+    sender: &Address,
+    op: TaxOperation,
+    payload: &impl serde::Serialize,
+    gates: TaxGates,
+) -> sumchain_state::TaxExecutionResult {
+    let proposer = Address::new([9; 20]);
+    TaxExecutor::execute_with_gates(
+        view,
+        sender,
+        &TaxTxData {
+            operation: op,
+            data: bincode::serialize(payload).unwrap(),
+            recipient: Address::ZERO,
+        },
+        &proposer,
+        100,
+        1,
+        1_000,
+        0,
+        sumchain_primitives::Hash::ZERO,
+        gates,
+    )
+    .unwrap()
+}
+
+/// AU-19: an unregistered account writes and deprecates claim types.
+#[test]
+fn the_claim_type_registry_is_writable_by_anyone_only_below_the_gate() {
+    #[derive(serde::Serialize)]
+    struct Deprecate {
+        claim_type: String,
+    }
+
+    for gates in [TaxGates::CLOSED, TaxGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let authority = KeyPair::generate();
+        let stranger = KeyPair::generate();
+        fund(&db, &authority, 100_000_000);
+        fund(&db, &stranger, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        // A registered, active issuer, so the gated side has somebody who CAN.
+        assert!(
+            tax_at(
+                &mut view,
+                &authority.address(),
+                TaxOperation::RegisterIssuer,
+                &issuer_of(&authority),
+                gates
+            )
+            .success
+        );
+        let entry = claim_type("residency.v1");
+        assert!(
+            tax_at(
+                &mut view,
+                &authority.address(),
+                TaxOperation::RegisterClaimType,
+                &entry,
+                gates
+            )
+            .success,
+            "a registered issuer writes the registry under either gate"
+        );
+
+        // The stranger registers a type of its own, and deprecates the
+        // authority's.
+        let theirs = claim_type("stranger.v1");
+        let registered = tax_at(
+            &mut view,
+            &stranger.address(),
+            TaxOperation::RegisterClaimType,
+            &theirs,
+            gates,
+        );
+        let deprecated = tax_at(
+            &mut view,
+            &stranger.address(),
+            TaxOperation::DeprecateClaimType,
+            &Deprecate {
+                claim_type: entry.claim_type.clone(),
+            },
+            gates,
+        );
+        assert_eq!(
+            (registered.success, deprecated.success),
+            (!gates.authorization, !gates.authorization),
+            "any funded account writes and deprecates claim types, until the gate"
+        );
+        assert_eq!(
+            TaxExecutor::v_get_claim_type(&view, "stranger.v1")
+                .unwrap()
+                .is_some(),
+            !gates.authorization
+        );
+    }
+}

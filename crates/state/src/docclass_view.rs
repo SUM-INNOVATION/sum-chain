@@ -64,7 +64,7 @@ use sumchain_storage::docclass_store::{
     encode_docclass_issuer, encode_eligibility, encode_identity_root,
     encode_issuer_credential_index, encode_revocation_record, encode_subject_credential_index,
     encode_subject_identity_index, identity_root_key, issuer_index_key, revocation_key,
-    subject_index_key, SubjectCommitment,
+    subject_identity_index_key, subject_index_key, SubjectCommitment,
 };
 use sumchain_storage::exec_view::ExecutionView;
 
@@ -121,6 +121,7 @@ impl DocClassExecutor {
     pub fn v_put_identity_root(
         view: &mut ExecutionView<'_, '_>,
         identity: &IdentityRoot,
+        split_subject_index: bool,
     ) -> Result<()> {
         let bytes = encode_identity_root(identity).map_err(StateError::Storage)?;
         view.put(
@@ -134,6 +135,7 @@ impl DocClassExecutor {
             &identity.subject_commitment,
             &identity.identity_id,
             DocSubcode::IdentityRoot,
+            split_subject_index,
         )
     }
 
@@ -143,10 +145,27 @@ impl DocClassExecutor {
     /// eligibility or credential store, which this decode does not accept. That
     /// is the inherited collision, and it surfaces here as a decode error rather
     /// than as silence.
+    /// Reads the split key first, then falls back to the legacy bare key.
+    ///
+    /// No gate parameter, deliberately: the reader has to answer correctly on
+    /// both sides of the activation and for rows written on either side, and
+    /// reading the tagged key first does that without being told which side it
+    /// is on. The legacy branch keeps its hard decode error, because below the
+    /// activation a value of the wrong shape at that key IS the collision, and
+    /// hiding it would change what a pre-activation node does.
     pub fn v_get_subject_identity_entries(
         view: &ExecutionView<'_, '_>,
         subject_commitment: &SubjectCommitment,
     ) -> Result<Vec<(CredentialId, DocSubcode)>> {
+        if let Some(bytes) = view
+            .get(
+                cf::DOCCLASS_SUBJECT_INDEX,
+                &subject_identity_index_key(subject_commitment),
+            )
+            .map_err(StateError::Storage)?
+        {
+            return decode_subject_identity_index(&bytes).map_err(StateError::Storage);
+        }
         match view
             .get(
                 cf::DOCCLASS_SUBJECT_INDEX,
@@ -164,6 +183,7 @@ impl DocClassExecutor {
         subject_commitment: &SubjectCommitment,
         credential_id: &CredentialId,
         subcode: DocSubcode,
+        split_subject_index: bool,
     ) -> Result<()> {
         let mut index = Self::v_get_subject_identity_entries(view, subject_commitment)?;
         let entry = (*credential_id, subcode);
@@ -174,12 +194,21 @@ impl DocClassExecutor {
         }
         index.push(entry);
         let bytes = encode_subject_identity_index(&index).map_err(StateError::Storage)?;
-        view.put(
-            cf::DOCCLASS_SUBJECT_INDEX,
-            subject_index_key(subject_commitment),
-            &bytes,
-        )
-        .map_err(StateError::Storage)
+        if split_subject_index {
+            view.put(
+                cf::DOCCLASS_SUBJECT_INDEX,
+                &subject_identity_index_key(subject_commitment),
+                &bytes,
+            )
+            .map_err(StateError::Storage)
+        } else {
+            view.put(
+                cf::DOCCLASS_SUBJECT_INDEX,
+                subject_index_key(subject_commitment),
+                &bytes,
+            )
+            .map_err(StateError::Storage)
+        }
     }
 
     /// Read, set status and `updated_at`, write through `v_put_identity_root` --
@@ -190,12 +219,13 @@ impl DocClassExecutor {
         identity_id: &CredentialId,
         status: IdentityStatus,
         timestamp: Timestamp,
+        split_subject_index: bool,
     ) -> Result<()> {
         match Self::v_get_identity_root(view, identity_id)? {
             Some(mut identity) => {
                 identity.status = status;
                 identity.updated_at = timestamp;
-                Self::v_put_identity_root(view, &identity)
+                Self::v_put_identity_root(view, &identity, split_subject_index)
             }
             None => Err(not_found_id("Identity", identity_id)),
         }

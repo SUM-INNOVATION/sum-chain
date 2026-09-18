@@ -20,6 +20,8 @@ use sumchain_primitives::{
 };
 use tracing::debug;
 
+use sumchain_genesis::ChainParams;
+
 use crate::{Result, StateError, StateManager};
 
 /// Result of Property operation execution
@@ -151,10 +153,108 @@ impl PropertyExecutionResult {
 /// operator paths.
 pub struct PropertyExecutor;
 
+/// The activation decisions a Property transaction executes under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PropertyGates {
+    /// The subsystem's authority checks are enforced. ACTIVATION-AUDIT rows
+    /// AU-30 and AU-31.
+    pub authorization: bool,
+    /// Executor-written timestamps are the block's, not a literal zero.
+    /// ACTIVATION-AUDIT class 2.
+    pub real_block_timestamp: bool,
+}
+
+impl PropertyGates {
+    /// Every gate closed -- the release configuration today.
+    pub const CLOSED: Self = Self {
+        authorization: false,
+        real_block_timestamp: false,
+    };
+
+    /// Every gate open. For the gated half of a mixed-version test.
+    pub const OPEN: Self = Self {
+        authorization: true,
+        real_block_timestamp: true,
+    };
+
+    /// Derive the decisions from the chain's parameters at `block_height`.
+    pub fn from_params(params: &ChainParams, block_height: BlockHeight) -> Self {
+        Self {
+            authorization: PropertyExecutor::authorization_gate_open(params, block_height),
+            real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
+        }
+    }
+}
+
 impl PropertyExecutor {
-    /// Execute a Property transaction
+    /// The activation height for the Property authority checks.
+    ///
+    /// **This is a seam for a `ChainParams` field that does not exist yet.**
+    /// `crates/genesis/**` belongs to another track, so the field cannot be
+    /// added from here. The field this function must read, once that track adds
+    /// it, is:
+    ///
+    /// ```text
+    /// /// SRC-86X Property authority checks. Dormant by default (`None` ->
+    /// /// never open). Below the gate `MergeAssets` checks nothing about the
+    /// /// sender, so any account merges two assets it did not issue and marks
+    /// /// the secondary `Merged`; and `SupersedeTitleEvent` checks nothing
+    /// /// either, so any account supersedes any title event and records a
+    /// /// replacement naming itself. At and above the gate each is bound to the
+    /// /// issuer recorded on the row it changes. Activation is a consensus
+    /// /// change and needs a coordinated validator upgrade.
+    /// #[serde(default)]
+    /// pub property_authorization_enabled_from_height: Option<u64>,
+    /// ```
+    ///
+    /// Until it exists this returns `None`, which is exactly what an absent
+    /// `#[serde(default)] Option<u64>` resolves to, so production behaviour is
+    /// unchanged and `three_operations_check_no_authority_at_all` still passes.
+    #[inline]
+    fn authorization_activation(params: &ChainParams) -> Option<u64> {
+        // Replace with `params.property_authorization_enabled_from_height`.
+        let _ = params;
+        None
+    }
+
+    /// Whether the Property authority checks are active at `block_height`.
+    #[inline]
+    pub fn authorization_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::authorization_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// Execute a Property transaction.
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
+        sender: &Address,
+        data: &PropertyTxData,
+        proposer: &Address,
+        fee: Balance,
+        block_height: BlockHeight,
+        block_timestamp: Timestamp,
+        tx_index: u32,
+        tx_hash: Hash,
+    ) -> Result<PropertyExecutionResult> {
+        Self::execute_with_gates(
+            view,
+            sender,
+            data,
+            proposer,
+            fee,
+            block_height,
+            block_timestamp,
+            tx_index,
+            tx_hash,
+            PropertyGates::from_params(params, block_height),
+        )
+    }
+
+    /// Execute a Property transaction with the activation decisions supplied
+    /// directly. The seam the mixed-version tests use.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_gates(
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &PropertyTxData,
@@ -164,7 +264,10 @@ impl PropertyExecutor {
         block_timestamp: Timestamp,
         _tx_index: u32,
         _tx_hash: Hash,
+        gates: PropertyGates,
     ) -> Result<PropertyExecutionResult> {
+        let block_timestamp =
+            crate::effective_block_timestamp(block_timestamp, gates.real_block_timestamp);
         match data.operation {
             // =================================================================
             // SRC-861: Asset Anchor Operations
@@ -258,11 +361,29 @@ impl PropertyExecutor {
                 let d: MergeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if Self::v_get_asset(view, &d.primary_asset_id)?.is_none() {
-                    return Ok(PropertyExecutionResult::failure("Primary asset not found"));
-                }
-                if Self::v_get_asset(view, &d.secondary_asset_id)?.is_none() {
-                    return Ok(PropertyExecutionResult::failure("Secondary asset not found"));
+                let primary = match Self::v_get_asset(view, &d.primary_asset_id)? {
+                    Some(a) => a,
+                    None => return Ok(PropertyExecutionResult::failure("Primary asset not found")),
+                };
+                let secondary = match Self::v_get_asset(view, &d.secondary_asset_id)? {
+                    Some(a) => a,
+                    None => {
+                        return Ok(PropertyExecutionResult::failure(
+                            "Secondary asset not found",
+                        ))
+                    }
+                };
+
+                // AU-30: below the gate both guards are existence only, so any
+                // account merges two assets it did not issue and marks the
+                // secondary `Merged`. Both issuers are required at the gate,
+                // because a merge is a statement about both rows.
+                if gates.authorization
+                    && (primary.issuer_address != *sender || secondary.issuer_address != *sender)
+                {
+                    return Ok(PropertyExecutionResult::failure(
+                        "Only the issuer of both assets can merge them",
+                    ));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -399,8 +520,26 @@ impl PropertyExecutor {
                 let d: SupersedeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if Self::v_get_title_event(view, &d.old_event_id)?.is_none() {
-                    return Ok(PropertyExecutionResult::failure("Old event not found"));
+                let old_event = match Self::v_get_title_event(view, &d.old_event_id)? {
+                    Some(e) => e,
+                    None => return Ok(PropertyExecutionResult::failure("Old event not found")),
+                };
+
+                // AU-31: below the gate existence is the only guard, so any
+                // account supersedes any title event and records a replacement
+                // naming ITSELF as issuer -- which is how a title history is
+                // rewritten by a stranger in one transaction.
+                if gates.authorization {
+                    if old_event.issuer_address != *sender {
+                        return Ok(PropertyExecutionResult::failure(
+                            "Only issuer can supersede",
+                        ));
+                    }
+                    if d.new_event.issuer_address != *sender {
+                        return Ok(PropertyExecutionResult::failure(
+                            "The replacement event must be issued by the sender",
+                        ));
+                    }
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;

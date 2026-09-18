@@ -501,6 +501,7 @@ impl BlockExecutor {
                             proposer,
                             v2_tx.fee,
                             block_timestamp,
+                            block_height,
                         )?;
 
                         if result.success {
@@ -762,7 +763,7 @@ impl BlockExecutor {
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
+                            block_timestamp,
                             0, // tx_index placeholder
                             tx_hash,
                         )?;
@@ -795,12 +796,13 @@ impl BlockExecutor {
                     TxPayload::Tax(tax_data) => {
                         // Execute Tax operation (SRC-82X)
                         let result = TaxExecutor::execute(view,
+                            &self.params,
                             &v2_tx.from,
                             &tax_data,
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
+                            block_timestamp,
                             0, // tx_index placeholder
                             tx_hash,
                         )?;
@@ -869,12 +871,13 @@ impl BlockExecutor {
                         // Execute Agreement operation (SRC-84X)
                         let result = AgreementExecutor::execute(
                             view,
+                            &self.params,
                             &v2_tx.from,
                             &agreement_data,
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
+                            block_timestamp,
                             0, // tx_index placeholder
                             tx_hash,
                         )?;
@@ -908,12 +911,13 @@ impl BlockExecutor {
                         // Execute Legal operation (SRC-85X)
                         let result = LegalExecutor::execute(
                             view,
+                            &self.params,
                             &v2_tx.from,
                             &legal_data,
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
+                            block_timestamp,
                             0, // tx_index placeholder
                             tx_hash,
                         )?;
@@ -944,12 +948,13 @@ impl BlockExecutor {
                         // Execute Property operation (SRC-86X)
                         let result = PropertyExecutor::execute(
                             view,
+                            &self.params,
                             &v2_tx.from,
                             &property_data,
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
+                            block_timestamp,
                             0, // tx_index placeholder
                             tx_hash,
                         )?;
@@ -983,12 +988,13 @@ impl BlockExecutor {
                         // Execute Healthcare operation (SRC-87X)
                         let result = HealthcareExecutor::execute(
                             view,
+                            &self.params,
                             &v2_tx.from,
                             &healthcare_data,
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
+                            block_timestamp,
                             0, // tx_index placeholder
                             tx_hash,
                         )?;
@@ -1022,12 +1028,13 @@ impl BlockExecutor {
                         // Execute Employment operation (SRC-88X)
                         let result = EmploymentExecutor::execute(
                             view,
+                            &self.params,
                             &v2_tx.from,
                             &employment_data,
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
+                            block_timestamp,
                             0, // tx_index placeholder
                             tx_hash,
                         )?;
@@ -1061,12 +1068,13 @@ impl BlockExecutor {
                         // Execute Finance operation (SRC-89X)
                         let result = FinanceExecutor::execute(
                             view,
+                            &self.params,
                             &v2_tx.from,
                             &finance_data,
                             proposer,
                             v2_tx.fee,
                             block_height,
-                            0, // block_timestamp placeholder
+                            block_timestamp,
                             0, // tx_index placeholder
                             tx_hash,
                         )?;
@@ -2185,6 +2193,7 @@ impl BlockExecutor {
                     proposer,
                     tx.fee,
                     block_timestamp,
+                    block_height,
                 )?;
 
                 if result.success {
@@ -2499,7 +2508,7 @@ impl BlockExecutor {
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
+                    block_timestamp,
                     0, // tx_index placeholder
                     tx_hash,
                 )?;
@@ -2542,12 +2551,13 @@ impl BlockExecutor {
 
                 // Execute Tax operation (SRC-82X)
                 let result = TaxExecutor::execute(view,
+                    &self.params,
                     &tx.from,
                     tax_data,
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
+                    block_timestamp,
                     0, // tx_index placeholder
                     tx_hash,
                 )?;
@@ -2636,12 +2646,13 @@ impl BlockExecutor {
                 // Execute Agreement operation (SRC-84X)
                 let result = AgreementExecutor::execute(
                     view,
+                    &self.params,
                     &tx.from,
                     agreement_data,
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
+                    block_timestamp,
                     0, // tx_index placeholder
                     tx_hash,
                 )?;
@@ -2685,12 +2696,13 @@ impl BlockExecutor {
                 // Execute Legal operation (SRC-85X)
                 let result = LegalExecutor::execute(
                     view,
+                    &self.params,
                     &tx.from,
                     legal_data,
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
+                    block_timestamp,
                     0, // tx_index placeholder
                     tx_hash,
                 )?;
@@ -2731,12 +2743,13 @@ impl BlockExecutor {
                 // Execute Property operation (SRC-86X)
                 let result = PropertyExecutor::execute(
                     view,
+                    &self.params,
                     &tx.from,
                     property_data,
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
+                    block_timestamp,
                     0, // tx_index placeholder
                     tx_hash,
                 )?;
@@ -2780,12 +2793,13 @@ impl BlockExecutor {
                 // Execute Healthcare operation (SRC-87X)
                 let result = HealthcareExecutor::execute(
                     view,
+                    &self.params,
                     &tx.from,
                     healthcare_data,
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
+                    block_timestamp,
                     0, // tx_index placeholder
                     tx_hash,
                 )?;
@@ -2829,12 +2843,13 @@ impl BlockExecutor {
                 // Execute Employment operation (SRC-88X)
                 let result = EmploymentExecutor::execute(
                     view,
+                    &self.params,
                     &tx.from,
                     employment_data,
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
+                    block_timestamp,
                     0, // tx_index placeholder
                     tx_hash,
                 )?;
@@ -2878,12 +2893,13 @@ impl BlockExecutor {
                 // Execute Finance operation (SRC-89X)
                 let result = FinanceExecutor::execute(
                     view,
+                    &self.params,
                     &tx.from,
                     finance_data,
                     proposer,
                     tx.fee,
                     block_height,
-                    0, // block_timestamp placeholder
+                    block_timestamp,
                     0, // tx_index placeholder
                     tx_hash,
                 )?;

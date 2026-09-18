@@ -56,16 +56,80 @@ pub mod token_executor;
 pub mod token_view;
 pub mod validator_quorum;
 
-pub use agreement_executor::{AgreementExecutionResult, AgreementExecutor};
+/// The activation height for the executor-written block timestamp.
+///
+/// **This is a seam for a `ChainParams` field that does not exist yet.**
+/// `crates/genesis/**` belongs to another track, so the field cannot be added
+/// from here. The field this function must read, once that track adds it, is:
+///
+/// ```text
+/// /// Executor-written block timestamps. Dormant by default (`None` -> never
+/// /// open). Below the gate every dispatch arm for DocClass, Tax, Agreement,
+/// /// Legal, Property, Healthcare, Employment and Finance passes a literal `0`
+/// /// where the block timestamp belongs, so every `created_at`, `updated_at`
+/// /// and `revoked_at` those subsystems write is zero -- and Healthcare's
+/// /// `Prescription::is_valid` is therefore evaluated at time zero, so an
+/// /// expired prescription is fillable forever and one with a non-zero
+/// /// `effective_from` can never be filled at all. At and above the gate each
+/// /// arm passes `block.header.timestamp`. Activation is a consensus change --
+/// /// it changes the bytes of every row those subsystems write -- and needs a
+/// /// coordinated validator upgrade.
+/// #[serde(default)]
+/// pub subsystem_block_timestamp_enabled_from_height: Option<u64>,
+/// ```
+///
+/// One field for eight subsystems, because it is one rule: the timestamp the
+/// executor writes is the block's. Splitting it per subsystem would let a chain
+/// hold half its rows at zero and half at a real time, which is worse than
+/// either end.
+///
+/// Until it exists this returns `None`, which is exactly what an absent
+/// `#[serde(default)] Option<u64>` resolves to, so production behaviour is
+/// unchanged and every `..._is_always_zero` pinning test still passes.
+#[inline]
+fn subsystem_block_timestamp_activation(params: &sumchain_genesis::ChainParams) -> Option<u64> {
+    // Replace with `params.subsystem_block_timestamp_enabled_from_height`.
+    let _ = params;
+    None
+}
+
+/// Whether executor-written block timestamps are real at `block_height`.
+#[inline]
+pub fn subsystem_block_timestamp_gate_open(
+    params: &sumchain_genesis::ChainParams,
+    block_height: u64,
+) -> bool {
+    matches!(subsystem_block_timestamp_activation(params), Some(h) if block_height >= h)
+}
+
+/// The timestamp a subsystem executor writes, given the gate.
+///
+/// Below the gate it is the literal `0` the dispatch arms used to pass; at and
+/// above it, the block's own timestamp. Written once, here, so that the eight
+/// subsystems cannot drift apart on the question.
+#[inline]
+pub fn effective_block_timestamp(block_timestamp: u64, gate_open: bool) -> u64 {
+    if gate_open {
+        block_timestamp
+    } else {
+        0
+    }
+}
+
+pub use agreement_executor::{AgreementExecutionResult, AgreementExecutor, AgreementGates};
 pub use cache::{CacheStats, CachedAccount, StateCache};
 pub use contract_executor::{ContractCallResult, ContractDeployResult, ContractExecutorState, ContractEvent, ContractMetadata};
-pub use docclass_executor::{DocClassExecutionResult, DocClassExecutor};
-pub use employment_executor::{EmploymentExecutionResult, EmploymentExecutor};
+pub use docclass_executor::{
+    docclass_stake_escrow_address, DocClassExecutionResult, DocClassExecutor, DocClassGates,
+};
+pub use employment_executor::{
+    EmploymentExecutionResult, EmploymentExecutor, EmploymentGates,
+};
 pub use equity_executor::{EquityExecutionResult, EquityExecutor};
 pub use executor::{BlockExecutor, TxExecutionResult};
-pub use finance_executor::{FinanceExecutionResult, FinanceExecutor};
-pub use healthcare_executor::{HealthcareExecutionResult, HealthcareExecutor};
-pub use legal_executor::{LegalExecutionResult, LegalExecutor};
+pub use finance_executor::{FinanceExecutionResult, FinanceExecutor, FinanceGates};
+pub use healthcare_executor::{HealthcareExecutionResult, HealthcareExecutor, HealthcareGates};
+pub use legal_executor::{LegalExecutionResult, LegalExecutor, LegalGates};
 pub use mempool::{Mempool, MempoolConfig, MempoolStats};
 pub use messaging_executor::{MessagingExecutionResult, MessagingExecutor};
 pub use nft_executor::{NftExecutionResult, NftExecutor};
@@ -75,7 +139,7 @@ pub use storage_metadata::{
     ArchivePerEntry, CoverageSummaryV2, StorageMetadataExecutionResult, StorageMetadataExecutor,
     StorageMetadataV2ExecutionResult, MAX_ASSIGNED_COUNT_CHUNK_COUNT,
 };
-pub use property_executor::{PropertyExecutionResult, PropertyExecutor};
+pub use property_executor::{PropertyExecutionResult, PropertyExecutor, PropertyGates};
 pub use schema_validator::{SchemaValidator, SchemaValidatorConfig, ValidationResult};
 pub use snapshot::{
     sync_capability, usable_reorg_depth, RestoreResult, Snapshot, SnapshotHeader, SnapshotManager,
@@ -83,7 +147,7 @@ pub use snapshot::{
 };
 pub use staking_executor::{StakingExecutionResult, StakingExecutor};
 pub use state::StateManager;
-pub use tax_executor::{TaxExecutionResult, TaxExecutor};
+pub use tax_executor::{TaxExecutionResult, TaxExecutor, TaxGates};
 pub use token_executor::{TokenExecutionResult, TokenExecutor};
 
 // Type alias for convenience (used by executors)

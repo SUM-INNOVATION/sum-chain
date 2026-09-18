@@ -12,6 +12,8 @@ use sumchain_primitives::{
 };
 use tracing::debug;
 
+use sumchain_genesis::ChainParams;
+
 use crate::{Result, StateError, StateManager};
 
 /// Result of Tax operation execution
@@ -49,10 +51,115 @@ impl TaxExecutionResult {
 /// server.
 pub struct TaxExecutor;
 
+/// The activation decisions a Tax transaction executes under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TaxGates {
+    /// The claim-type registry is writable only by a registered, active issuer.
+    /// ACTIVATION-AUDIT row AU-19.
+    pub authorization: bool,
+    /// Executor-written timestamps are the block's, not a literal zero.
+    /// ACTIVATION-AUDIT class 2.
+    pub real_block_timestamp: bool,
+}
+
+impl TaxGates {
+    /// Every gate closed -- the release configuration today.
+    pub const CLOSED: Self = Self {
+        authorization: false,
+        real_block_timestamp: false,
+    };
+
+    /// Every gate open. For the gated half of a mixed-version test.
+    pub const OPEN: Self = Self {
+        authorization: true,
+        real_block_timestamp: true,
+    };
+
+    /// Derive the decisions from the chain's parameters at `block_height`.
+    pub fn from_params(params: &ChainParams, block_height: BlockHeight) -> Self {
+        Self {
+            authorization: TaxExecutor::authorization_gate_open(params, block_height),
+            real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
+        }
+    }
+}
+
 impl TaxExecutor {
-    /// Execute a Tax transaction
+    /// The activation height for the Tax claim-type authority check.
+    ///
+    /// **This is a seam for a `ChainParams` field that does not exist yet.**
+    /// `crates/genesis/**` belongs to another track, so the field cannot be
+    /// added from here. The field this function must read, once that track adds
+    /// it, is:
+    ///
+    /// ```text
+    /// /// SRC-84X Tax claim-type authority. Dormant by default (`None` ->
+    /// /// never open). Below the gate claim-type registration, update and
+    /// /// deprecation have no authority check at all: all three guard only on
+    /// /// row presence or absence, so any funded account writes the chain's
+    /// /// claim-type registry. At and above the gate the sender must be a
+    /// /// registered tax issuer whose status is still Active. Activation is a
+    /// /// consensus change and needs a coordinated validator upgrade.
+    /// #[serde(default)]
+    /// pub tax_authorization_enabled_from_height: Option<u64>,
+    /// ```
+    ///
+    /// Until it exists this returns `None`, which is exactly what an absent
+    /// `#[serde(default)] Option<u64>` resolves to, so production behaviour is
+    /// unchanged and every pinning test that records the gap still passes.
+    #[inline]
+    fn authorization_activation(params: &ChainParams) -> Option<u64> {
+        // Replace with `params.tax_authorization_enabled_from_height`.
+        let _ = params;
+        None
+    }
+
+    /// Whether the Tax claim-type authority check is active at `block_height`.
+    #[inline]
+    pub fn authorization_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::authorization_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// Is `sender` a registered tax issuer whose standing is still `Active`?
+    fn issuer_in_good_standing(view: &ExecutionView<'_, '_>, sender: &Address) -> Result<bool> {
+        Ok(match Self::v_get_issuer(view, sender)? {
+            Some(issuer) => issuer.status == TaxIssuerStatus::Active,
+            None => false,
+        })
+    }
+
+    /// Execute a Tax transaction.
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
+        sender: &Address,
+        data: &TaxTxData,
+        proposer: &Address,
+        fee: Balance,
+        block_height: BlockHeight,
+        block_timestamp: Timestamp,
+        tx_index: u32,
+        tx_hash: Hash,
+    ) -> Result<TaxExecutionResult> {
+        Self::execute_with_gates(
+            view,
+            sender,
+            data,
+            proposer,
+            fee,
+            block_height,
+            block_timestamp,
+            tx_index,
+            tx_hash,
+            TaxGates::from_params(params, block_height),
+        )
+    }
+
+    /// Execute a Tax transaction with the activation decisions supplied
+    /// directly. The seam the mixed-version tests use.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_gates(
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &TaxTxData,
@@ -62,7 +169,29 @@ impl TaxExecutor {
         block_timestamp: Timestamp,
         _tx_index: u32,
         _tx_hash: Hash,
+        gates: TaxGates,
     ) -> Result<TaxExecutionResult> {
+        let block_timestamp =
+            crate::effective_block_timestamp(block_timestamp, gates.real_block_timestamp);
+        // AU-19: claim-type registration, update and deprecation have no
+        // authority check at all below the gate -- all three guard only on row
+        // presence or absence, so any funded account writes the chain's
+        // claim-type registry. One check covers all three because they are the
+        // same registry and the same question.
+        if gates.authorization
+            && matches!(
+                data.operation,
+                TaxOperation::RegisterClaimType
+                    | TaxOperation::UpdateClaimType
+                    | TaxOperation::DeprecateClaimType
+            )
+            && !Self::issuer_in_good_standing(view, sender)?
+        {
+            return Ok(TaxExecutionResult::failure(
+                "Only a registered, active tax issuer can write the claim-type registry",
+            ));
+        }
+
         match data.operation {
             TaxOperation::RegisterClaimType => {
                 let entry: TaxClaimTypeEntry = bincode::deserialize(&data.data)
