@@ -54,17 +54,27 @@ this wave, and their rows above carry the SHA they now have on this branch, not
 the SHA of the parallel branch they were authored on. Three gaps in that earlier
 review are closed by test-only additions on this branch: employment had no
 close/reopen restart-parity test, and none of the three had a publication
-byte-contract test of the kind property carries. One gap is NOT closed and is
-recorded here rather than implied away: neither employment nor legal committed a
-per-mutation battery document. Their commit messages report 52/52 and 56/56
-killed, but that record is not auditable in the tree, and this branch does not
-make it so. Finance's battery is at `docs/lane-a/FINANCE-MUTATION-BATTERY.md`.
+byte-contract test of the kind property carries.
 
-That paragraph predates `c91f370` on this branch, which added
-`docs/lane-a/EMPLOYMENT-MUTATION-BATTERY.md` and
-`docs/lane-a/LEGAL-MUTATION-BATTERY.md`. Its historical claim stands -- neither
-original commit shipped a battery document -- and it is left exactly as written
-rather than rewritten here.
+A fourth gap was open for most of this branch and is now closed: neither
+employment nor legal shipped a per-mutation battery document, so their commit
+messages' 52/52 and 56/56 were unauditable. Both batteries were re-run on their
+own package trees and are recorded here:
+
+  docs/lane-a/EMPLOYMENT-MUTATION-BATTERY.md    60 declared, 60 killed
+  docs/lane-a/LEGAL-MUTATION-BATTERY.md         64 declared, 64 killed
+  docs/lane-a/FINANCE-MUTATION-BATTERY.md       49 declared, 49 killed
+
+Neither new count matches its claim, and neither was forced to. Both re-runs
+first tried to recover the original evidence and both rejected it for the same
+reason: the original drivers computed no hashes, so restoration could not be
+proven and the logs could not be tied to any tree. Legal's recovered
+specification was still usable for correspondence -- all 56 of its anchors
+resolve exactly once in this tree and all 56 covering tests still exist under
+their names -- so the claimed battery is reproduced verbatim inside the larger
+set and all 56 are killed. Employment's could not be tied to any tree at all, so
+its 52/52 is neither confirmed nor refuted; the new 60/60 supersedes rather than
+corroborates it.
 
 ## PolicyAccount
 
