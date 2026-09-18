@@ -60,22 +60,24 @@ const BOUNDARY: u64 = LEGACY_ROOT_COMPATIBILITY_HEIGHT + 1;
 /// the two is `account_root_enabled_from_height`, which is exactly the
 /// difference an un-upgraded node has.
 struct Node {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     db: Arc<Database>,
     state: Arc<StateManager>,
     exec: BlockExecutor,
+    params: ChainParams,
 }
 
 fn node(params: ChainParams) -> Node {
     let dir = tempfile::TempDir::new().unwrap();
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
     let state = Arc::new(StateManager::new(db.clone(), CHAIN_ID));
-    let exec = BlockExecutor::new(state.clone(), db.clone(), params);
+    let exec = BlockExecutor::new(state.clone(), db.clone(), params.clone());
     Node {
-        _dir: dir,
+        dir,
         db,
         state,
         exec,
+        params,
     }
 }
 
@@ -115,6 +117,42 @@ impl Node {
     /// The account digest over COMMITTED state.
     fn committed_digest(&self) -> Hash {
         account_state_digest(&self.db).unwrap()
+    }
+
+    /// Stop this node and start it again on the same directory.
+    ///
+    /// A real restart, not a re-read: every handle on the old `Database` is
+    /// dropped before the new one opens — RocksDB refuses a directory whose lock
+    /// is still held, so a "restart" that left one alive would be a no-op that
+    /// passed. The in-memory state-root cache is restored the way
+    /// `PoAEngine::load_chain` restores it, out of `BlockStore::get_latest`,
+    /// because that is the only place a restarted node can get it from: the root
+    /// lives in a `RwLock` and nothing persists it separately.
+    fn restart(self) -> Node {
+        let Node {
+            dir,
+            db,
+            state,
+            exec,
+            params,
+        } = self;
+        drop(exec);
+        drop(state);
+        drop(db);
+
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), CHAIN_ID));
+        if let Some(block) = sumchain_storage::BlockStore::new(&db).get_latest().unwrap() {
+            state.set_state_root(block.header.state_root);
+        }
+        let exec = BlockExecutor::new(state.clone(), db.clone(), params.clone());
+        Node {
+            dir,
+            db,
+            state,
+            exec,
+            params,
+        }
     }
 
     /// Execute `block` and PUBLISH it the way a proposer does, returning the
@@ -636,26 +674,89 @@ fn a_boundary_inside_the_legacy_window_would_be_absorbed_not_detected() {
 // 6. Cost
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The per-block cost of the commitment at a realistic account count, as a
-/// number.
+/// The count of accounts holding value on mainnet, enumerated by
+/// transaction-graph closure and cross-checked against
+/// `chain_getSupplyInfo.accounted_account_supply` to the base unit.
+///
+/// It is a LOWER BOUND on the stored-row count the fold pays for and nothing
+/// more — a row whose balance and nonce are both zero is invisible to every RPC,
+/// and a contract address credited on a deployment carrying value appears in no
+/// transaction index. The production stored-row count is unmeasured; see
+/// `docs/operations/ACCOUNT-ROOT-ACTIVATION.md`. It is benchmarked here anyway,
+/// because it is the one count on this chain that was actually measured, and a
+/// cost model that only reports synthetic counts has not been anchored to
+/// anything.
+const MAINNET_ACCOUNTS_HOLDING_VALUE: usize = 18;
+
+/// The per-block cost of the commitment, measured at the count that was taken
+/// from the chain AND at a count large enough to see the slope.
 ///
 /// The fold is O(accounts) per block with O(1) memory, and that cost is the
 /// design decision rather than a footnote: it is paid on EVERY block by every
 /// node, so it is measured rather than assumed.
 ///
-/// `ACCOUNT_ROOT_COST_ACCOUNTS` overrides the count (default 100_000, which
-/// keeps the unoptimised test build quick). The measured numbers are recorded
-/// in the accompanying report. The assertion here is deliberately loose: it is
-/// a tripwire on the ORDER of the cost — that the fold is still a linear
-/// streaming scan and has not acquired a per-account allocation, map build or
-/// re-seek — not a benchmark gate, because a test machine's absolute timings
-/// are not a consensus parameter.
+/// # Why two counts and not one
+///
+/// One count gives a number; two give a shape, and the shape is what the
+/// operational threshold in `account_root.rs` is interpolated from. The small
+/// one is dominated by fixed iterator and open cost and says what the commitment
+/// costs on this chain TODAY; the large one is in the linear regime and says
+/// what it will cost as the family grows. Reporting only the large one would
+/// overstate today's cost per account; reporting only the small one would hide
+/// the slope entirely. Neither is an extrapolation to a production count, which
+/// remains unmeasured.
+///
+/// `ACCOUNT_ROOT_COST_ACCOUNTS` overrides the large count (default 100_000,
+/// which keeps the unoptimised test build quick). The assertion is deliberately
+/// loose: it is a tripwire on the ORDER of the cost — that the fold is still a
+/// linear streaming scan and has not acquired a per-account allocation, map
+/// build or re-seek — not a benchmark gate, because a test machine's absolute
+/// timings are not a consensus parameter.
 #[test]
 fn the_cost_of_the_account_commitment_at_a_realistic_account_count() {
     let accounts: usize = std::env::var("ACCOUNT_ROOT_COST_ACCOUNTS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(100_000);
+    assert!(
+        accounts > MAINNET_ACCOUNTS_HOLDING_VALUE,
+        "the large count must actually be larger, or this measures one point twice"
+    );
+
+    // ── The count taken from the chain. Measured first and on its own database,
+    //    so it is not reading pages the large run warmed.
+    {
+        let small = old_binary();
+        for i in 0..MAINNET_ACCOUNTS_HOLDING_VALUE {
+            small.seed(&addr(i as u8 + 1), (i as u128) * 1_000 + 1, i as u64);
+        }
+        assert_eq!(
+            account_row_count(&small.db).unwrap(),
+            MAINNET_ACCOUNTS_HOLDING_VALUE as u64,
+            "the instrument and the fixture must agree about how many rows exist"
+        );
+        let _ = small.committed_digest();
+        let started = Instant::now();
+        let digest = small.committed_digest();
+        let elapsed = started.elapsed();
+        eprintln!(
+            "ACCOUNT-ROOT COST: {MAINNET_ACCOUNTS_HOLDING_VALUE} accounts (the \
+             mainnet value-holding count, a LOWER BOUND on stored rows) | \
+             committed scan {elapsed:?} ({:.3} us/account) | {:.6} % of a 1,506 \
+             ms block interval | digest {digest}",
+            elapsed.as_secs_f64() * 1e6 / MAINNET_ACCOUNTS_HOLDING_VALUE as f64,
+            elapsed.as_secs_f64() * 100.0 / 1.506,
+        );
+        // At this count the scan must be far inside a block interval by any
+        // margin a test machine could plausibly produce. This is the one
+        // assertion in the cost tests that is about the CHAIN rather than about
+        // the shape of the function.
+        assert!(
+            elapsed.as_secs_f64() < 0.1,
+            "a fold over {MAINNET_ACCOUNTS_HOLDING_VALUE} rows took {elapsed:?}, \
+             which is not a fold over 18 rows"
+        );
+    }
 
     let n = old_binary();
     let mut batch = n.db.batch();
@@ -875,9 +976,20 @@ fn an_unsound_activation_pair_fails_before_the_chain_exists() {
         .init_from_genesis(&genesis)
         .expect_err("a chain must not be initialisable on an unsound pair")
         .to_string();
+    // WHICH layer names the fault is pinned by
+    // `runtime_activation.rs::the_shared_validator_reports_the_ordering_fault_before_the_window_fault`,
+    // not here: `validate_runtime_activation` runs `ChainParams::validate`
+    // first, so an unpinned journal gate is reported by the loader with the
+    // loader's wording, and the narrow validator's `...WithoutPinnedJournal` is
+    // never reached for this pair. Asserting on that wording made this test a
+    // second, quieter opinion about the ordering — it went red when the two
+    // entry points were merged, and what it was reporting was the merge, not a
+    // regression. What this test owns is that a chain cannot be CREATED on the
+    // pair and that the refusal is actionable: it must name the gate to fix.
     assert!(
-        err.contains("PINNED"),
-        "the startup refusal must be the activation precondition: {err}"
+        err.contains("application_journal_enabled_from_height")
+            && err.to_lowercase().contains("pin"),
+        "the startup refusal must name the gate to pin: {err}"
     );
 
     // And nothing was written: the refusal precedes the allocation, so the
@@ -1172,4 +1284,198 @@ fn the_row_count_agrees_with_the_fold_it_predicts() {
     n.seed(&addr(200), 1, 1);
     assert_eq!(account_row_count(&n.db).unwrap(), rows + 1);
     assert_ne!(digest, n.committed_digest());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 10. The commitment through every path by which state reaches a node
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Sections 1–9 establish what the digest IS: a function of the account set, the
+// same under the candidate fold and the committed scan, folded into the root
+// behind an activation height whose preconditions are checked before a block is
+// executed. What they do not establish is that it stays true as state moves.
+//
+// There are five ways account state reaches or changes on a node, and the
+// commitment has to survive all five or it is a commitment to whichever ones it
+// survives. This section is that set. Two of the five are proven elsewhere,
+// because the machinery they need lives elsewhere, and they are named here so
+// the set can be read as one thing:
+//
+// | path            | where                                                       |
+// |-----------------|-------------------------------------------------------------|
+// | publication     | `the_commitment_survives_publishing_a_chain_of_blocks`, below |
+// | restart         | `the_commitment_survives_a_restart`, below                  |
+// | reorg           | `crates/consensus/tests/reorg_execution.rs::a_reorg_converges_account_rows_supply_rows_journals_and_the_activated_root` |
+// | snapshot policy | `snapshot_commitment.rs::the_snapshot_policy_admits_only_what_the_commitment_can_check` |
+// | mixed versions  | `mixed_version_agrees_below_the_boundary_and_is_refused_above_it`, section 5 |
+//
+// The reorg case is in the consensus crate because a reorg is a consensus
+// operation: it needs the fork-choice planner and the journal unwind, neither of
+// which this crate can drive. The snapshot case is in `snapshot_commitment.rs`
+// because that is where the snapshot fixtures are.
+
+/// Publication: at every height, the digest the published root folded is the
+/// digest committed state reproduces — and an importer reaches both.
+///
+/// `the_candidate_fold_and_the_committed_scan_agree` in section 4 proves this
+/// for ONE block. One block is not the claim. The claim is that it holds as a
+/// chain accumulates, because the root folds the PREVIOUS root: an error at any
+/// height is carried forward, so a single-block test cannot distinguish "the
+/// fold is right" from "the fold is right the first time".
+///
+/// Five heights across the boundary, with real transactions creating accounts,
+/// moving balances and advancing nonces, checked at each height against a second
+/// node that only ever imported.
+#[test]
+fn the_commitment_survives_publishing_a_chain_of_blocks() {
+    let alice = key(1);
+    let bob = key(2);
+    let proposer = new_binary_from(BOUNDARY);
+    let importer = new_binary_from(BOUNDARY);
+    for n in [&proposer, &importer] {
+        n.seed(&alice.address(), 10_000_000, 0);
+        n.seed(&bob.address(), 5_000_000, 0);
+    }
+
+    // Start below the boundary and cross it, so the chain contains blocks whose
+    // roots do not fold the digest and blocks whose roots do. A commitment that
+    // only worked on a chain that had always had it would not be deployable.
+    let mut digests = Vec::new();
+    for (i, height) in (BOUNDARY - 2..=BOUNDARY + 2).enumerate() {
+        let txs = vec![
+            transfer(
+                &alice,
+                &addr(0x30 + i as u8),
+                1_000 + i as u128,
+                500,
+                i as u64,
+            ),
+            transfer(&bob, &addr(0x40 + i as u8), 2_000, 500, i as u64),
+        ];
+        let (block, root, _) = proposer.publish(height, txs);
+
+        let imported = importer
+            .import(&block)
+            .unwrap_or_else(|e| panic!("height {height}: the importer must agree: {e}"));
+        assert_eq!(
+            imported, root,
+            "height {height}: the importer's own execution must reach the \
+             published root"
+        );
+
+        // The two nodes hold the same account set, reached by different routes:
+        // one executed as proposer, the other as importer.
+        let committed = proposer.committed_digest();
+        assert_eq!(
+            committed,
+            importer.committed_digest(),
+            "height {height}: proposer and importer must hold one account set"
+        );
+        // And the committed scan agrees with the execution-path fold over the
+        // same database, which is the pair the root depends on.
+        assert_eq!(
+            committed,
+            digest_through_a_view(&proposer.db),
+            "height {height}: committed scan and candidate fold must agree"
+        );
+        digests.push((height, committed));
+    }
+
+    // The digest moved at every height — otherwise the equalities above would be
+    // satisfied by a fold that ignores its input.
+    for pair in digests.windows(2) {
+        assert_ne!(
+            pair[0].1, pair[1].1,
+            "heights {} and {} published different account state and must have \
+             different digests",
+            pair[0].0, pair[1].0
+        );
+    }
+    assert_eq!(
+        proposer.state.state_root(),
+        importer.state.state_root(),
+        "and the chains converge on one root"
+    );
+}
+
+/// Restart: a node stopped and started again reaches the same commitment, and
+/// the chain continues rather than forking at the next block.
+///
+/// The failure this excludes is a commitment that depends on anything a process
+/// accumulates — an iterator warmed by the writes that produced the rows, a
+/// cached count, an ordering that held because the memtable was still hot. The
+/// digest is claimed to be a function of the account SET; a restart is the
+/// cheapest way to ask whether it is a function of the PROCESS.
+///
+/// Both halves matter. Recomputing the same digest proves the stored rows
+/// survived; publishing the next block and reaching the root a never-restarted
+/// twin reaches proves the node came back onto the same chain rather than onto a
+/// plausible-looking fork.
+#[test]
+fn the_commitment_survives_a_restart() {
+    let alice = key(1);
+    let bob = key(2);
+
+    let build = || {
+        let n = new_binary_from(BOUNDARY);
+        n.seed(&alice.address(), 10_000_000, 0);
+        n.seed(&bob.address(), 5_000_000, 0);
+        n.seed(&addr(0xF0), 0, 0); // a zero row: stored, invisible to a balance query
+        for (i, height) in (BOUNDARY - 1..=BOUNDARY + 1).enumerate() {
+            n.publish(
+                height,
+                vec![transfer(
+                    &alice,
+                    &addr(0x50 + i as u8),
+                    1_000,
+                    500,
+                    i as u64,
+                )],
+            );
+        }
+        n
+    };
+
+    let restarted = build();
+    let twin = build();
+    let before = restarted.committed_digest();
+    let root_before = restarted.state.state_root();
+    let rows_before = account_row_count(&restarted.db).unwrap();
+    assert_eq!(before, twin.committed_digest(), "the twins start identical");
+
+    let restarted = restarted.restart();
+
+    assert_eq!(
+        restarted.committed_digest(),
+        before,
+        "the digest is a function of the account set, so a restart cannot move it"
+    );
+    assert_eq!(
+        account_row_count(&restarted.db).unwrap(),
+        rows_before,
+        "and the row count with it — including the zero row, which no balance \
+         query would have noticed going missing"
+    );
+    assert_eq!(
+        restarted.state.state_root(),
+        root_before,
+        "the state root a restarted node restores from its latest block header \
+         is the one it stopped at"
+    );
+    // The execution-path fold, over a fresh overlay on a freshly-opened
+    // database. This is the one that would break if the digest depended on a
+    // warm iterator.
+    assert_eq!(digest_through_a_view(&restarted.db), before);
+
+    // And the next block: same height, same transaction, on a restarted node and
+    // on one that never stopped.
+    let tx = vec![transfer(&alice, &addr(0x60), 4_242, 500, 3)];
+    let (_, root_restarted, _) = restarted.publish(BOUNDARY + 2, tx.clone());
+    let (_, root_twin, _) = twin.publish(BOUNDARY + 2, tx);
+    assert_eq!(
+        root_restarted, root_twin,
+        "a restarted node must continue the chain, not fork onto a root only it \
+         computes"
+    );
+    assert_eq!(restarted.committed_digest(), twin.committed_digest());
 }

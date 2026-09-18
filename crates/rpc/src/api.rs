@@ -62,7 +62,12 @@ pub trait SumChainApi {
     #[method(name = "get_latest_block")]
     async fn get_latest_block(&self) -> Result<BlockInfo, jsonrpsee::types::ErrorObjectOwned>;
 
-    /// Get block by height
+    /// Get block by height.
+    ///
+    /// `Ok(None)` means the CHAIN has no block at this height. A node seeded
+    /// from a state snapshot answers `-32003` for a height below its import
+    /// height instead, because it cannot make that claim: it holds no blocks
+    /// below the floor and `null` would be indistinguishable from knowledge.
     #[method(name = "get_block_by_height")]
     async fn get_block_by_height(
         &self,
@@ -467,7 +472,11 @@ pub trait SumChainApi {
     #[method(name = "get_validators")]
     async fn get_validators(&self) -> Result<ValidatorSetInfo, jsonrpsee::types::ErrorObjectOwned>;
 
-    /// Get multiple blocks in a range
+    /// Get multiple blocks in a range.
+    ///
+    /// Any height in the range that this node cannot answer for fails the whole
+    /// call with `-32003` rather than shortening the list: a truncated range is
+    /// not visibly truncated.
     #[method(name = "get_blocks")]
     async fn get_blocks(
         &self,
@@ -488,6 +497,10 @@ pub trait SumChainApi {
     async fn get_finality(&self) -> Result<FinalityInfo, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Check if a block at a given height is finalized
+    ///
+    /// `false` means "not finalized". A node that cannot know — a height below
+    /// its snapshot-import floor — answers `-32003`, because a caller waiting on
+    /// `false` would wait forever for a block that finalised long ago.
     #[method(name = "is_block_finalized")]
     async fn is_block_finalized(&self, height: u64) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
 
@@ -1012,7 +1025,10 @@ pub trait SumChainApi {
         tx_hash: String,
     ) -> Result<Option<MessageEventInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
-    /// Get all messages in a specific block (for debugging)
+    /// Get all messages in a specific block (for debugging).
+    ///
+    /// An empty list means the block carried no messages. A node below its
+    /// state-history floor answers `-32003` instead.
     #[method(name = "messaging_getMessagesInBlock")]
     async fn messaging_get_messages_in_block(
         &self,
@@ -1997,6 +2013,11 @@ pub trait SumChainApi {
     /// Each entry is a [`NodeRecordInfo`]: base58 `address`, role/status as
     /// strings, `staked_balance` as a native `u64`, `registered_at` as block
     /// height. Wire shape locked by JSON-shape tests in the server crate.
+    ///
+    /// Refused with `-32003` below this node's state-history floor, BEFORE the
+    /// walk runs. The backwards walk does not fail below the floor — it returns
+    /// the oldest snapshot this machine happens to hold, which is a wrong answer
+    /// the caller cannot distinguish from a right one.
     #[method(name = "storage_getActiveNodesAtHeight")]
     async fn storage_get_active_nodes_at_height(
         &self,

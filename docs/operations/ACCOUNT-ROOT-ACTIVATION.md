@@ -259,6 +259,7 @@ without them cannot be reproduced or challenged.
 | profile | `--release` |
 | store | RocksDB via this repo's `Database::open_default`, flushed and compacted before measuring |
 | test | `the_cost_of_the_account_commitment_with_a_cold_cache`, `crates/state/tests/account_state_root.rs` |
+| anchor | `the_cost_of_the_account_commitment_at_a_realistic_account_count` measures 18 rows AND the large count in the same run, so the table's smallest row is re-taken on every test run rather than quoted from this document |
 | command | `ACCOUNT_ROOT_COST_ACCOUNTS=<n> ACCOUNT_ROOT_EVICT_PAGE_CACHE=25769803776 CARGO_INCREMENTAL=0 cargo test --release -p sumchain-state --test account_state_root the_cost_of_the_account_commitment_with_a_cold_cache -- --nocapture --test-threads=1` |
 | runs | one per row count; no repetition, no variance reported |
 
@@ -394,10 +395,21 @@ fails it never joins rather than joins and diverges. An unreadable record is an
 error rather than a first start: treating it as absent would skip the only check
 that catches a rule changed underneath existing blocks.
 
+That the served value is actually comparable between two nodes is proven at the
+surface rather than in the library underneath it, by
+`crates/rpc/tests/operator_visible_activation_and_history.rs`. Two servers built
+the way `build_rpc_server` builds one, from identical chain-defined heights,
+serve one digest; one block of difference on one gate serves another; and the
+gate list served alongside it names WHICH height moved, so an operator who sees
+two digests disagree does not then diff two files by hand. A digest that is
+correct inside `sumchain_genesis` and unreachable over JSON-RPC coordinates
+nothing, which is why the proof is at this level.
+
 What is still manual is the comparison BETWEEN nodes. Each node reports its own
 digest; nothing compares two of them automatically, and step 4 below is
 therefore an operator action. That is a smaller gap than it was — the value to
-compare exists, is stable, and is scrapeable — and it is the remaining one.
+compare exists, is stable, is scrapeable, and has been shown to distinguish the
+one-block case — and it is the remaining one.
 
 ## History a seeded node must not serve
 
@@ -406,29 +418,66 @@ nothing below it. The blocks are not there, and if they were, replaying them is
 the sync the import avoided. So there are questions it cannot answer, and the
 requirement is that it refuses them rather than answering badly.
 
-`snapshot::can_serve_history_at` is the predicate. `imported_at` is the floor it
-reads, persisted in `cf::META` so a restart does not forget it.
+The floor is the recorded import height, persisted in `cf::META` so a restart
+does not forget it. One reader,
+`RpcServerImpl::refuse_below_history_floor`, is what every height-taking RPC
+applies, so `chain_getSyncCapability.state_history_floor` — the number an
+operator reads — and the number the query paths enforce cannot drift apart.
+Pinned by `the_advertised_floor_and_the_enforced_floor_are_the_same_number` in
+`crates/rpc/tests/operator_visible_activation_and_history.rs`.
 
-Every RPC that takes a height was audited against it:
+### The refusal has its own error code
 
-| RPC | reads historical state? | today |
+`-32003`, distinct from `-32001` (Not found). That distinction is the point of
+the whole section: **`-32001` says the thing is not there; `-32003` says this
+node is not in a position to say.** Every other way of declining a historical
+question is also the ordinary answer for a height with nothing at it, so a caller
+could not tell them apart:
+
+| shape | means "absent" | also meant "I cannot know" |
 |---|---|---|
-| `storage_getActiveNodesAtHeight` | **yes — walks BACKWARDS to the nearest snapshot** | **refuses below the floor** |
-| `get_block_by_height`, `sum_getBlockByHeight` | no — returns a stored block | returns `null` when absent |
-| `messaging_getMessagesInBlock` | no — returns stored rows | returns empty when absent |
-| `is_block_finalized` | no — compares against the finalized height | unaffected |
-| `validatorSet_getProposer` | no — derived from the validator set | unaffected |
+| `null` from a block lookup | the chain has no block there | the block was never on this machine |
+| a short list from a range | the chain has that many | the range crossed the floor |
+| an empty list | that block carried no messages | this node has no history there |
+| `false` from a finality check | not yet finalized | finalized long before this node existed |
 
-Only the first could return a WRONG answer: its backward walk runs off the
-bottom of a seeded node's history and returns whatever it finds there, which a
-caller cannot distinguish from a correct result. That one refuses now, naming
-the floor.
+### Every RPC that takes a height
 
-The rest return "absent", which is a defined answer and not a wrong one. The
-remaining wart is that "absent" does not say WHY — a caller cannot tell "this
-block never existed" from "this node was seeded above it". That is a reporting
-gap rather than a correctness one, and `chain_getSyncCapability.state_history_floor`
-is what a caller reads to resolve it.
+| RPC | below the floor | why |
+|---|---|---|
+| `storage_getActiveNodesAtHeight` | **refuses unconditionally, before the walk** | it walks BACKWARDS to the nearest snapshot; below the floor it does not fail, it returns the oldest record this machine holds, shaped exactly like a correct answer |
+| `get_block_by_height`, `sum_getBlockByHeight` | refuses **when the block is absent** | found is found — a node that holds the block knows the answer whatever its floor says. An absence ABOVE the floor is a real `null` |
+| `get_blocks` | refuses the **whole range** | a truncated range is not visibly truncated: ten asked for, four returned, reads as "the chain has four there" |
+| `is_block_finalized` | refuses unconditionally | `false` is what a caller polls on, and below the floor that poll never terminates |
+| `messaging_getMessagesInBlock` | refuses **when the list is empty** | same distinction as a block lookup |
+| `validatorSet_getProposer` | unaffected | derived from the validator set, not from history |
+
+A node that executed its own chain has no floor and none of this applies to it:
+`imported_at` is `None`, which is the permissive answer, and every path behaves
+exactly as it did before. An unreadable import record is an error rather than an
+absence — resolving a corrupt value to "never imported" would let a seeded node
+serve history it does not have, which is the failure the record exists to
+prevent.
+
+### What a seeded node may claim about itself
+
+Three claims, all read from the one recorded height, so they cannot disagree:
+
+* it may not **serve** state below the floor (above);
+* it may not **advertise** a reorg depth it holds no undo records for —
+  `chain_getSyncCapability.usable_reorg_depth` is `0` at the restore height and
+  grows one per block the node publishes itself;
+* it may not **accept** a reorg deeper than that. This one is not enforced here:
+  the clamp on the walk is the reorg planner's, reading
+  `journal::advertisable_reorg_depth`. The two numbers are derived from
+  different evidence — the import record on one side, the journals the database
+  actually holds on the other — and
+  `snapshot_commitment.rs::a_restored_node_cannot_accept_a_branch_it_cannot_unwind`
+  requires them to agree at every height.
+
+It also may not claim it could seed anyone else: `fast_sync_available` is
+`false` and `missing_families` names every family this snapshot format does not
+carry.
 
 ## Sequence
 
