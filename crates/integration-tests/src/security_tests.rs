@@ -148,6 +148,7 @@ impl SecurityTestNode {
             &sender,
             self.params.min_fee,
             1000000000, // block_timestamp
+            0,          // block_height: the gate is dormant, so any height behaves alike
         )
         .map_err(|e| format!("Failed to create collection: {}", e))?;
 
@@ -203,6 +204,7 @@ impl SecurityTestNode {
             &sender,
             fee,
             1000000000, // block_timestamp
+            0,          // block_height: the gate is dormant, so any height behaves alike
         )
         .map_err(|e| format!("Failed to mint token: {}", e))?;
 

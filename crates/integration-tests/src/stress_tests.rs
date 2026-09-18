@@ -367,6 +367,7 @@ fn stress_nft_minting() {
         &Address::ZERO,
         params.min_fee,
         1_000_000_000, // block_timestamp
+        0,             // block_height: the gate is dormant, so any height behaves alike
     )
     .expect("Should create collection");
     let collection_id = result.collection_id.unwrap();
@@ -411,6 +412,7 @@ fn stress_nft_minting() {
             &Address::ZERO,
             fee,
             1_000_000_000, // block_timestamp
+            0,             // block_height: the gate is dormant, so any height behaves alike
         )
         .expect("Should mint");
         assert!(result.success, "Mint failed: {:?}", result.error);
