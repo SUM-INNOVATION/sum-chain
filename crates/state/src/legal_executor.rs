@@ -8,9 +8,7 @@
 //! - SRC-855: Legal Proofs
 
 use sumchain_storage::exec_view::ExecutionView;
-use std::sync::Arc;
 
-use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
     legal::{
         BenefitDetermination, BenefitStatus, CaseAnchor, CaseStatus, CourtOrder, LegalOperation,
@@ -18,7 +16,6 @@ use sumchain_primitives::{
     },
     Address, Balance, BlockHeight, Hash, Timestamp,
 };
-use sumchain_storage::{Database, LegalStore};
 use tracing::debug;
 
 use crate::{Result, StateError, StateManager};
@@ -121,22 +118,23 @@ impl LegalExecutionResult {
     }
 }
 
-/// Legal executor for SRC-85X transactions
-pub struct LegalExecutor {
-    db: Arc<Database>,
-    #[allow(dead_code)]
-    params: ChainParams,
-}
+/// Legal executor for SRC-85X transactions.
+///
+/// No database handle, by construction: every operation takes the block's
+/// `ExecutionView` and no `self`, so `self.db` is not something this file can
+/// name. The committed twins stay in `sumchain_storage::legal_store` for the
+/// RPC server, which answers about the canonical chain.
+///
+/// The `ChainParams` this type used to hold was `#[allow(dead_code)]` and read
+/// by nothing; it went with the handle rather than being threaded through as a
+/// parameter no operation consults.
+pub struct LegalExecutor;
 
 impl LegalExecutor {
-    pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
-        Self { db, params }
-    }
-
     /// Execute a Legal transaction
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &LegalTxData,
         proposer: &Address,
@@ -146,8 +144,6 @@ impl LegalExecutor {
         _tx_index: u32,
         _tx_hash: Hash,
     ) -> Result<LegalExecutionResult> {
-        let store = LegalStore::new(&self.db);
-
         match data.operation {
             // SRC-851: Case Anchor Operations
             LegalOperation::AnchorCase => {
@@ -158,7 +154,7 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Issuer must be sender"));
                 }
 
-                if store.cases().exists(&case.case_id)? {
+                if Self::v_case_exists(view, &case.case_id)? {
                     return Ok(LegalExecutionResult::failure("Case already exists"));
                 }
 
@@ -166,7 +162,7 @@ impl LegalExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let case_id = case.case_id;
-                store.cases().put(&case)?;
+                Self::v_put_case(view, &case)?;
                 debug!("Case anchored: {:?}", case_id);
                 Ok(LegalExecutionResult::success_with_case(case_id))
             }
@@ -180,7 +176,7 @@ impl LegalExecutor {
                 let update: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let case = match store.cases().get(&update.case_id)? {
+                let case = match Self::v_get_case(view, &update.case_id)? {
                     Some(c) => c,
                     None => return Ok(LegalExecutionResult::failure("Case not found")),
                 };
@@ -192,7 +188,7 @@ impl LegalExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.cases().update_status(&update.case_id, update.status, block_timestamp)?;
+                Self::v_update_case_status(view, &update.case_id, update.status, block_timestamp)?;
                 Ok(LegalExecutionResult::success())
             }
 
@@ -204,7 +200,7 @@ impl LegalExecutor {
                 let d: CloseData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let case = match store.cases().get(&d.case_id)? {
+                let case = match Self::v_get_case(view, &d.case_id)? {
                     Some(c) => c,
                     None => return Ok(LegalExecutionResult::failure("Case not found")),
                 };
@@ -216,7 +212,7 @@ impl LegalExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.cases().update_status(&d.case_id, CaseStatus::Closed, block_timestamp)?;
+                Self::v_update_case_status(view, &d.case_id, CaseStatus::Closed, block_timestamp)?;
                 Ok(LegalExecutionResult::success())
             }
 
@@ -228,7 +224,7 @@ impl LegalExecutor {
                 let d: SealData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let case = match store.cases().get(&d.case_id)? {
+                let case = match Self::v_get_case(view, &d.case_id)? {
                     Some(c) => c,
                     None => return Ok(LegalExecutionResult::failure("Case not found")),
                 };
@@ -240,7 +236,7 @@ impl LegalExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.cases().update_status(&d.case_id, CaseStatus::Sealed, block_timestamp)?;
+                Self::v_update_case_status(view, &d.case_id, CaseStatus::Sealed, block_timestamp)?;
                 debug!("Case sealed: {:?}", d.case_id);
                 Ok(LegalExecutionResult::success())
             }
@@ -253,7 +249,7 @@ impl LegalExecutor {
                 let d: UnsealData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let case = match store.cases().get(&d.case_id)? {
+                let case = match Self::v_get_case(view, &d.case_id)? {
                     Some(c) => c,
                     None => return Ok(LegalExecutionResult::failure("Case not found")),
                 };
@@ -269,7 +265,7 @@ impl LegalExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.cases().update_status(&d.case_id, CaseStatus::Active, block_timestamp)?;
+                Self::v_update_case_status(view, &d.case_id, CaseStatus::Active, block_timestamp)?;
                 debug!("Case unsealed: {:?}", d.case_id);
                 Ok(LegalExecutionResult::success())
             }
@@ -283,18 +279,23 @@ impl LegalExecutor {
                 let d: ConsolidateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.cases().get(&d.case_id)?.is_none() {
+                if Self::v_get_case(view, &d.case_id)?.is_none() {
                     return Ok(LegalExecutionResult::failure("Case not found"));
                 }
-                if store.cases().get(&d.related_case_id)?.is_none() {
+                if Self::v_get_case(view, &d.related_case_id)?.is_none() {
                     return Ok(LegalExecutionResult::failure("Related case not found"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.cases().add_related_case(&d.case_id, &d.related_case_id, block_timestamp)?;
-                store.cases().update_status(&d.related_case_id, CaseStatus::Consolidated, block_timestamp)?;
+                Self::v_add_related_case(view, &d.case_id, &d.related_case_id, block_timestamp)?;
+                Self::v_update_case_status(
+                    view,
+                    &d.related_case_id,
+                    CaseStatus::Consolidated,
+                    block_timestamp,
+                )?;
                 Ok(LegalExecutionResult::success())
             }
 
@@ -306,14 +307,19 @@ impl LegalExecutor {
                 let d: TransferData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.cases().get(&d.case_id)?.is_none() {
+                if Self::v_get_case(view, &d.case_id)?.is_none() {
                     return Ok(LegalExecutionResult::failure("Case not found"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.cases().update_status(&d.case_id, CaseStatus::Transferred, block_timestamp)?;
+                Self::v_update_case_status(
+                    view,
+                    &d.case_id,
+                    CaseStatus::Transferred,
+                    block_timestamp,
+                )?;
                 Ok(LegalExecutionResult::success())
             }
 
@@ -327,11 +333,11 @@ impl LegalExecutor {
                 }
 
                 // Verify case exists
-                if store.cases().get(&event.case_id)?.is_none() {
+                if Self::v_get_case(view, &event.case_id)?.is_none() {
                     return Ok(LegalExecutionResult::failure("Case not found"));
                 }
 
-                if store.process_events().exists(&event.event_id)? {
+                if Self::v_process_event_exists(view, &event.event_id)? {
                     return Ok(LegalExecutionResult::failure("Event already exists"));
                 }
 
@@ -339,7 +345,7 @@ impl LegalExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let event_id = event.event_id;
-                store.process_events().put(&event)?;
+                Self::v_put_process_event(view, &event)?;
                 debug!("Process event recorded: {:?}", event_id);
                 Ok(LegalExecutionResult::success_with_event(event_id))
             }
@@ -353,7 +359,7 @@ impl LegalExecutor {
                 let d: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let event = match store.process_events().get(&d.event_id)? {
+                let event = match Self::v_get_process_event(view, &d.event_id)? {
                     Some(e) => e,
                     None => return Ok(LegalExecutionResult::failure("Event not found")),
                 };
@@ -365,7 +371,7 @@ impl LegalExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.process_events().update_status(&d.event_id, d.status)?;
+                Self::v_update_process_event_status(view, &d.event_id, d.status)?;
                 Ok(LegalExecutionResult::success())
             }
 
@@ -378,7 +384,7 @@ impl LegalExecutor {
                 let d: SupersedeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.process_events().get(&d.old_event_id)?.is_none() {
+                if Self::v_get_process_event(view, &d.old_event_id)?.is_none() {
                     return Ok(LegalExecutionResult::failure("Old event not found"));
                 }
 
@@ -387,11 +393,15 @@ impl LegalExecutor {
                 StateManager::v_increment_nonce(view, sender)?;
 
                 // Mark old as superseded
-                store.process_events().update_status(&d.old_event_id, ProcessEventStatus::Superseded)?;
+                Self::v_update_process_event_status(
+                    view,
+                    &d.old_event_id,
+                    ProcessEventStatus::Superseded,
+                )?;
 
                 // Store new event
                 let new_id = d.new_event.event_id;
-                store.process_events().put(&d.new_event)?;
+                Self::v_put_process_event(view, &d.new_event)?;
                 debug!("Event superseded: {:?} -> {:?}", d.old_event_id, new_id);
                 Ok(LegalExecutionResult::success_with_event(new_id))
             }
@@ -404,7 +414,7 @@ impl LegalExecutor {
                 let d: RevokeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let event = match store.process_events().get(&d.event_id)? {
+                let event = match Self::v_get_process_event(view, &d.event_id)? {
                     Some(e) => e,
                     None => return Ok(LegalExecutionResult::failure("Event not found")),
                 };
@@ -416,7 +426,11 @@ impl LegalExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.process_events().update_status(&d.event_id, ProcessEventStatus::Revoked)?;
+                Self::v_update_process_event_status(
+                    view,
+                    &d.event_id,
+                    ProcessEventStatus::Revoked,
+                )?;
                 Ok(LegalExecutionResult::success())
             }
 
@@ -430,11 +444,11 @@ impl LegalExecutor {
                 }
 
                 // Verify case exists
-                if store.cases().get(&order.case_id)?.is_none() {
+                if Self::v_get_case(view, &order.case_id)?.is_none() {
                     return Ok(LegalExecutionResult::failure("Case not found"));
                 }
 
-                if store.orders().exists(&order.order_id)? {
+                if Self::v_order_exists(view, &order.order_id)? {
                     return Ok(LegalExecutionResult::failure("Order already exists"));
                 }
 
@@ -442,7 +456,7 @@ impl LegalExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let order_id = order.order_id;
-                store.orders().put(&order)?;
+                Self::v_put_order(view, &order)?;
                 debug!("Order issued: {:?}", order_id);
                 Ok(LegalExecutionResult::success_with_order(order_id))
             }
@@ -456,7 +470,7 @@ impl LegalExecutor {
                 let d: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let order = match store.orders().get(&d.order_id)? {
+                let order = match Self::v_get_order(view, &d.order_id)? {
                     Some(o) => o,
                     None => return Ok(LegalExecutionResult::failure("Order not found")),
                 };
@@ -468,7 +482,7 @@ impl LegalExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.orders().update_status(&d.order_id, d.status, block_timestamp)?;
+                Self::v_update_order_status(view, &d.order_id, d.status, block_timestamp)?;
                 debug!("Order status updated: {:?} -> {:?}", d.order_id, d.status);
                 Ok(LegalExecutionResult::success())
             }
@@ -481,7 +495,7 @@ impl LegalExecutor {
                 let d: StayData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let order = match store.orders().get(&d.order_id)? {
+                let order = match Self::v_get_order(view, &d.order_id)? {
                     Some(o) => o,
                     None => return Ok(LegalExecutionResult::failure("Order not found")),
                 };
@@ -493,7 +507,12 @@ impl LegalExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.orders().update_status(&d.order_id, OrderStatus::Stayed, block_timestamp)?;
+                Self::v_update_order_status(
+                    view,
+                    &d.order_id,
+                    OrderStatus::Stayed,
+                    block_timestamp,
+                )?;
                 debug!("Order stayed: {:?}", d.order_id);
                 Ok(LegalExecutionResult::success())
             }
@@ -506,7 +525,7 @@ impl LegalExecutor {
                 let d: VacateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let order = match store.orders().get(&d.order_id)? {
+                let order = match Self::v_get_order(view, &d.order_id)? {
                     Some(o) => o,
                     None => return Ok(LegalExecutionResult::failure("Order not found")),
                 };
@@ -518,7 +537,12 @@ impl LegalExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.orders().update_status(&d.order_id, OrderStatus::Vacated, block_timestamp)?;
+                Self::v_update_order_status(
+                    view,
+                    &d.order_id,
+                    OrderStatus::Vacated,
+                    block_timestamp,
+                )?;
                 debug!("Order vacated: {:?}", d.order_id);
                 Ok(LegalExecutionResult::success())
             }
@@ -532,7 +556,7 @@ impl LegalExecutor {
                 let d: SupersedeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.orders().get(&d.old_order_id)?.is_none() {
+                if Self::v_get_order(view, &d.old_order_id)?.is_none() {
                     return Ok(LegalExecutionResult::failure("Old order not found"));
                 }
 
@@ -541,11 +565,16 @@ impl LegalExecutor {
                 StateManager::v_increment_nonce(view, sender)?;
 
                 // Mark old as superseded
-                store.orders().update_status(&d.old_order_id, OrderStatus::Superseded, block_timestamp)?;
+                Self::v_update_order_status(
+                    view,
+                    &d.old_order_id,
+                    OrderStatus::Superseded,
+                    block_timestamp,
+                )?;
 
                 // Store new order
                 let new_id = d.new_order.order_id;
-                store.orders().put(&d.new_order)?;
+                Self::v_put_order(view, &d.new_order)?;
                 debug!("Order superseded: {:?} -> {:?}", d.old_order_id, new_id);
                 Ok(LegalExecutionResult::success_with_order(new_id))
             }
@@ -558,7 +587,7 @@ impl LegalExecutor {
                 let d: ModifyData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let order = match store.orders().get(&d.order_id)? {
+                let order = match Self::v_get_order(view, &d.order_id)? {
                     Some(o) => o,
                     None => return Ok(LegalExecutionResult::failure("Order not found")),
                 };
@@ -570,7 +599,12 @@ impl LegalExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.orders().update_status(&d.order_id, OrderStatus::Modified, block_timestamp)?;
+                Self::v_update_order_status(
+                    view,
+                    &d.order_id,
+                    OrderStatus::Modified,
+                    block_timestamp,
+                )?;
                 Ok(LegalExecutionResult::success())
             }
 
@@ -583,7 +617,7 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Issuer must be sender"));
                 }
 
-                if store.benefits().exists(&benefit.benefit_id)? {
+                if Self::v_benefit_exists(view, &benefit.benefit_id)? {
                     return Ok(LegalExecutionResult::failure("Benefit already exists"));
                 }
 
@@ -591,7 +625,7 @@ impl LegalExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let benefit_id = benefit.benefit_id;
-                store.benefits().put(&benefit)?;
+                Self::v_put_benefit(view, &benefit)?;
                 debug!("Benefit determined: {:?}", benefit_id);
                 Ok(LegalExecutionResult::success_with_benefit(benefit_id))
             }
@@ -605,7 +639,7 @@ impl LegalExecutor {
                 let d: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let benefit = match store.benefits().get(&d.benefit_id)? {
+                let benefit = match Self::v_get_benefit(view, &d.benefit_id)? {
                     Some(b) => b,
                     None => return Ok(LegalExecutionResult::failure("Benefit not found")),
                 };
@@ -617,7 +651,7 @@ impl LegalExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.benefits().update_status(&d.benefit_id, d.status, block_timestamp)?;
+                Self::v_update_benefit_status(view, &d.benefit_id, d.status, block_timestamp)?;
                 debug!("Benefit status updated: {:?} -> {:?}", d.benefit_id, d.status);
                 Ok(LegalExecutionResult::success())
             }
@@ -630,7 +664,7 @@ impl LegalExecutor {
                 let d: TerminateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let benefit = match store.benefits().get(&d.benefit_id)? {
+                let benefit = match Self::v_get_benefit(view, &d.benefit_id)? {
                     Some(b) => b,
                     None => return Ok(LegalExecutionResult::failure("Benefit not found")),
                 };
@@ -642,7 +676,12 @@ impl LegalExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.benefits().update_status(&d.benefit_id, BenefitStatus::Terminated, block_timestamp)?;
+                Self::v_update_benefit_status(
+                    view,
+                    &d.benefit_id,
+                    BenefitStatus::Terminated,
+                    block_timestamp,
+                )?;
                 Ok(LegalExecutionResult::success())
             }
 
@@ -654,7 +693,7 @@ impl LegalExecutor {
                 let d: SuspendData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let benefit = match store.benefits().get(&d.benefit_id)? {
+                let benefit = match Self::v_get_benefit(view, &d.benefit_id)? {
                     Some(b) => b,
                     None => return Ok(LegalExecutionResult::failure("Benefit not found")),
                 };
@@ -666,7 +705,12 @@ impl LegalExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.benefits().update_status(&d.benefit_id, BenefitStatus::Suspended, block_timestamp)?;
+                Self::v_update_benefit_status(
+                    view,
+                    &d.benefit_id,
+                    BenefitStatus::Suspended,
+                    block_timestamp,
+                )?;
                 Ok(LegalExecutionResult::success())
             }
 
@@ -678,7 +722,7 @@ impl LegalExecutor {
                 let d: ReinstateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let benefit = match store.benefits().get(&d.benefit_id)? {
+                let benefit = match Self::v_get_benefit(view, &d.benefit_id)? {
                     Some(b) => b,
                     None => return Ok(LegalExecutionResult::failure("Benefit not found")),
                 };
@@ -694,7 +738,12 @@ impl LegalExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.benefits().update_status(&d.benefit_id, BenefitStatus::Approved, block_timestamp)?;
+                Self::v_update_benefit_status(
+                    view,
+                    &d.benefit_id,
+                    BenefitStatus::Approved,
+                    block_timestamp,
+                )?;
                 Ok(LegalExecutionResult::success())
             }
 
@@ -703,7 +752,7 @@ impl LegalExecutor {
                 let proof: LegalProofEnvelope = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.proofs().exists(&proof.proof_id)? {
+                if Self::v_proof_exists(view, &proof.proof_id)? {
                     return Ok(LegalExecutionResult::failure("Proof already exists"));
                 }
 
@@ -711,7 +760,7 @@ impl LegalExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let proof_id = proof.proof_id;
-                store.proofs().put(&proof)?;
+                Self::v_put_proof(view, &proof)?;
                 debug!("Legal proof submitted: {:?}", proof_id);
                 Ok(LegalExecutionResult::success_with_proof(proof_id))
             }
@@ -732,6 +781,7 @@ impl LegalExecutor {
 #[cfg(all(test, feature = "legacy_tests"))]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use sumchain_primitives::legal::{CaseType, LegalIssuerClass};
     use sumchain_storage::Database;
     use tempfile::TempDir;
@@ -744,14 +794,8 @@ mod tests {
     }
 
     #[test]
-    fn test_legal_executor_creation() {
-        let (db, _dir, _state) = setup();
-        let _executor = LegalExecutor::new(db, ChainParams::default());
-    }
-
-    #[test]
     fn test_anchor_case() {
-        let (db, _dir, state) = setup();
+        let (db, _dir, _state) = setup();
         // A block's candidate, opened here because a `#[test]` function
         // cannot take one as a parameter. An earlier scripted signature
         // rewrite added `view` to the parameter list of every test in this
@@ -759,7 +803,6 @@ mod tests {
         // out of sight.
         let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
         let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
-        let executor = LegalExecutor::new(db.clone(), ChainParams::default());
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
@@ -784,18 +827,29 @@ mod tests {
         let tx_data = LegalTxData {
             operation: LegalOperation::AnchorCase,
             data: bincode::serialize(&case).unwrap(),
+            recipient: Address::ZERO,
         };
 
-        let result = executor.execute(
-            &sender, &tx_data, &state, &proposer, 1000, 100, 1000000, 0, Hash::default(),
-        ).unwrap();
+        let result = LegalExecutor::execute(
+            view,
+            &sender,
+            &tx_data,
+            &proposer,
+            1000,
+            100,
+            1000000,
+            0,
+            Hash::default(),
+        )
+        .unwrap();
 
         assert!(result.success, "Anchor case failed: {:?}", result.error);
         assert_eq!(result.case_id, Some([10u8; 32]));
 
-        // Verify storage
-        let store = LegalStore::new(&db);
-        let retrieved = store.cases().get(&[10u8; 32]).unwrap().unwrap();
+        // Read the CANDIDATE: this executor stages now.
+        let retrieved = LegalExecutor::v_get_case(view, &[10u8; 32])
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.jurisdiction_code, "US-NY-SDNY");
     }
 }

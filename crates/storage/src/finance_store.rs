@@ -26,6 +26,133 @@ pub type ProofId = [u8; 32];
 pub type SubjectRef = [u8; 32];
 
 // =============================================================================
+// Shared key layout and codec
+// =============================================================================
+//
+// One builder per row and one codec per value type, called by the committed
+// stores below and by the candidate surface in `sumchain_state::finance_view`.
+// Saying the layout once, in one place, is the point: nine families across five
+// sub-stores is exactly the shape where the committed path and the candidate
+// path drift a byte apart and nothing notices until a replay disagrees.
+//
+// Every key here is the identifier itself, unprefixed. Every value is bincode.
+//
+// The four INDEX families are worth naming separately, because their values are
+// not presence markers: each one holds an accumulating bincode list. Appending
+// to one is therefore a read-modify-write, and on the candidate path that read
+// MUST see the candidate -- two credentials for one subject in a block would
+// otherwise each write a single-element list and the second would erase the
+// first.
+
+/// Issuer profiles are keyed by the issuer's address.
+pub fn issuer_key(issuer_address: &Address) -> &[u8] {
+    issuer_address.as_bytes()
+}
+
+/// The jurisdiction index is keyed by the jurisdiction code STRING's bytes.
+/// Its value is an accumulating bincode `Vec<Address>`.
+pub fn jurisdiction_index_key(jurisdiction_code: &str) -> &[u8] {
+    jurisdiction_code.as_bytes()
+}
+
+/// Address proofs are keyed by proof id.
+pub fn address_proof_key(proof_id: &AddressProofId) -> &[u8] {
+    proof_id
+}
+
+/// The address-proof subject index is keyed by subject ref. Its value is an
+/// accumulating bincode `Vec<AddressProofId>`.
+pub fn subject_address_index_key(subject_ref: &SubjectRef) -> &[u8] {
+    subject_ref
+}
+
+/// Bank standing credentials are keyed by credential id.
+pub fn bank_standing_key(credential_id: &BankStandingId) -> &[u8] {
+    credential_id
+}
+
+/// The bank-standing subject index is keyed by subject ref. Its value is an
+/// accumulating bincode `Vec<BankStandingId>`.
+pub fn subject_bank_index_key(subject_ref: &SubjectRef) -> &[u8] {
+    subject_ref
+}
+
+/// KYC attestations are keyed by attestation id.
+pub fn kyc_attestation_key(attestation_id: &KycAttestationId) -> &[u8] {
+    attestation_id
+}
+
+/// The KYC subject index is keyed by subject ref. Its value is an accumulating
+/// bincode `Vec<KycAttestationId>`.
+pub fn subject_kyc_index_key(subject_ref: &SubjectRef) -> &[u8] {
+    subject_ref
+}
+
+/// Finance proof envelopes are keyed by proof id.
+pub fn proof_key(proof_id: &ProofId) -> &[u8] {
+    proof_id
+}
+
+pub fn encode_issuer(issuer: &FinanceIssuerProfile) -> Result<Vec<u8>> {
+    bincode::serialize(issuer).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_issuer(bytes: &[u8]) -> Result<FinanceIssuerProfile> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_addresses(addresses: &[Address]) -> Result<Vec<u8>> {
+    bincode::serialize(addresses).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_addresses(bytes: &[u8]) -> Result<Vec<Address>> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_address_proof(proof: &AddressProof) -> Result<Vec<u8>> {
+    bincode::serialize(proof).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_address_proof(bytes: &[u8]) -> Result<AddressProof> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_bank_standing(credential: &BankStandingCredential) -> Result<Vec<u8>> {
+    bincode::serialize(credential).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_bank_standing(bytes: &[u8]) -> Result<BankStandingCredential> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_kyc_attestation(attestation: &KycAttestation) -> Result<Vec<u8>> {
+    bincode::serialize(attestation).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_kyc_attestation(bytes: &[u8]) -> Result<KycAttestation> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_proof(proof: &FinanceProofEnvelope) -> Result<Vec<u8>> {
+    bincode::serialize(proof).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_proof(bytes: &[u8]) -> Result<FinanceProofEnvelope> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+/// The value of all THREE subject indexes: `AddressProofId`, `BankStandingId`
+/// and `KycAttestationId` are the same `[u8; 32]`, so they share one codec even
+/// though they have three distinct key builders and three distinct families.
+pub fn encode_id_list(ids: &[[u8; 32]]) -> Result<Vec<u8>> {
+    bincode::serialize(ids).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_id_list(bytes: &[u8]) -> Result<Vec<[u8; 32]>> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+// =============================================================================
 // Issuer Profile Storage (SRC-891)
 // =============================================================================
 
@@ -41,9 +168,11 @@ impl<'a> FinanceIssuerStore<'a> {
 
     /// Store an issuer profile
     pub fn put(&self, issuer: &FinanceIssuerProfile) -> Result<()> {
-        let bytes = bincode::serialize(issuer)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::FINANCE_ISSUERS, issuer.issuer_address.as_bytes(), &bytes)?;
+        self.db.put(
+            cf::FINANCE_ISSUERS,
+            issuer_key(&issuer.issuer_address),
+            &encode_issuer(issuer)?,
+        )?;
 
         // Update jurisdiction index
         self.add_to_jurisdiction_index(&issuer.jurisdiction_code, &issuer.issuer_address)?;
@@ -53,19 +182,19 @@ impl<'a> FinanceIssuerStore<'a> {
 
     /// Get an issuer by address
     pub fn get(&self, issuer_address: &Address) -> Result<Option<FinanceIssuerProfile>> {
-        match self.db.get(cf::FINANCE_ISSUERS, issuer_address.as_bytes())? {
-            Some(bytes) => {
-                let issuer: FinanceIssuerProfile = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(issuer))
-            }
+        match self
+            .db
+            .get(cf::FINANCE_ISSUERS, issuer_key(issuer_address))?
+        {
+            Some(bytes) => Ok(Some(decode_issuer(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if issuer exists
     pub fn exists(&self, issuer_address: &Address) -> Result<bool> {
-        self.db.contains(cf::FINANCE_ISSUERS, issuer_address.as_bytes())
+        self.db
+            .contains(cf::FINANCE_ISSUERS, issuer_key(issuer_address))
     }
 
     /// Update issuer status
@@ -79,9 +208,11 @@ impl<'a> FinanceIssuerStore<'a> {
             Some(mut issuer) => {
                 issuer.status = status;
                 issuer.updated_at = timestamp;
-                let bytes = bincode::serialize(&issuer)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::FINANCE_ISSUERS, issuer_address.as_bytes(), &bytes)
+                self.db.put(
+                    cf::FINANCE_ISSUERS,
+                    issuer_key(issuer_address),
+                    &encode_issuer(&issuer)?,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "Issuer not found: {:?}",
@@ -94,8 +225,7 @@ impl<'a> FinanceIssuerStore<'a> {
     pub fn list_active(&self) -> Result<Vec<FinanceIssuerProfile>> {
         let mut issuers = Vec::new();
         for (_, value) in self.db.iter(cf::FINANCE_ISSUERS)? {
-            let issuer: FinanceIssuerProfile = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let issuer = decode_issuer(&value)?;
             if issuer.status.is_active() {
                 issuers.push(issuer);
             }
@@ -120,20 +250,21 @@ impl<'a> FinanceIssuerStore<'a> {
         let mut addresses = self.get_jurisdiction_issuer_addresses(jurisdiction_code)?;
         if !addresses.contains(issuer_address) {
             addresses.push(*issuer_address);
-            let bytes = bincode::serialize(&addresses)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::FINANCE_JURISDICTION_INDEX, jurisdiction_code.as_bytes(), &bytes)?;
+            self.db.put(
+                cf::FINANCE_JURISDICTION_INDEX,
+                jurisdiction_index_key(jurisdiction_code),
+                &encode_addresses(&addresses)?,
+            )?;
         }
         Ok(())
     }
 
     fn get_jurisdiction_issuer_addresses(&self, jurisdiction_code: &str) -> Result<Vec<Address>> {
-        match self.db.get(cf::FINANCE_JURISDICTION_INDEX, jurisdiction_code.as_bytes())? {
-            Some(bytes) => {
-                let addresses: Vec<Address> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(addresses)
-            }
+        match self.db.get(
+            cf::FINANCE_JURISDICTION_INDEX,
+            jurisdiction_index_key(jurisdiction_code),
+        )? {
+            Some(bytes) => decode_addresses(&bytes),
             None => Ok(Vec::new()),
         }
     }
@@ -155,9 +286,11 @@ impl<'a> AddressProofStore<'a> {
 
     /// Store an address proof
     pub fn put(&self, proof: &AddressProof) -> Result<()> {
-        let bytes = bincode::serialize(proof)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::FINANCE_ADDRESS_PROOFS, &proof.proof_id, &bytes)?;
+        self.db.put(
+            cf::FINANCE_ADDRESS_PROOFS,
+            address_proof_key(&proof.proof_id),
+            &encode_address_proof(proof)?,
+        )?;
 
         // Update subject index
         self.add_to_subject_index(&proof.subject_ref, &proof.proof_id)?;
@@ -167,19 +300,19 @@ impl<'a> AddressProofStore<'a> {
 
     /// Get an address proof by ID
     pub fn get(&self, proof_id: &AddressProofId) -> Result<Option<AddressProof>> {
-        match self.db.get(cf::FINANCE_ADDRESS_PROOFS, proof_id)? {
-            Some(bytes) => {
-                let proof: AddressProof = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(proof))
-            }
+        match self
+            .db
+            .get(cf::FINANCE_ADDRESS_PROOFS, address_proof_key(proof_id))?
+        {
+            Some(bytes) => Ok(Some(decode_address_proof(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if proof exists
     pub fn exists(&self, proof_id: &AddressProofId) -> Result<bool> {
-        self.db.contains(cf::FINANCE_ADDRESS_PROOFS, proof_id)
+        self.db
+            .contains(cf::FINANCE_ADDRESS_PROOFS, address_proof_key(proof_id))
     }
 
     /// Revoke address proof
@@ -193,9 +326,11 @@ impl<'a> AddressProofStore<'a> {
             Some(mut proof) => {
                 proof.revocation_ref = Some(revocation_ref);
                 proof.updated_at = timestamp;
-                let bytes = bincode::serialize(&proof)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::FINANCE_ADDRESS_PROOFS, proof_id, &bytes)
+                self.db.put(
+                    cf::FINANCE_ADDRESS_PROOFS,
+                    address_proof_key(proof_id),
+                    &encode_address_proof(&proof)?,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "Address proof not found: {:?}",
@@ -231,20 +366,21 @@ impl<'a> AddressProofStore<'a> {
         let mut ids = self.get_subject_proof_ids(subject_ref)?;
         if !ids.contains(proof_id) {
             ids.push(*proof_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::FINANCE_SUBJECT_ADDRESS_INDEX, subject_ref, &bytes)?;
+            self.db.put(
+                cf::FINANCE_SUBJECT_ADDRESS_INDEX,
+                subject_address_index_key(subject_ref),
+                &encode_id_list(&ids)?,
+            )?;
         }
         Ok(())
     }
 
     fn get_subject_proof_ids(&self, subject_ref: &SubjectRef) -> Result<Vec<AddressProofId>> {
-        match self.db.get(cf::FINANCE_SUBJECT_ADDRESS_INDEX, subject_ref)? {
-            Some(bytes) => {
-                let ids: Vec<AddressProofId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(ids)
-            }
+        match self.db.get(
+            cf::FINANCE_SUBJECT_ADDRESS_INDEX,
+            subject_address_index_key(subject_ref),
+        )? {
+            Some(bytes) => decode_id_list(&bytes),
             None => Ok(Vec::new()),
         }
     }
@@ -266,9 +402,11 @@ impl<'a> BankStandingStore<'a> {
 
     /// Store a bank standing credential
     pub fn put(&self, credential: &BankStandingCredential) -> Result<()> {
-        let bytes = bincode::serialize(credential)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::FINANCE_BANK_STANDINGS, &credential.credential_id, &bytes)?;
+        self.db.put(
+            cf::FINANCE_BANK_STANDINGS,
+            bank_standing_key(&credential.credential_id),
+            &encode_bank_standing(credential)?,
+        )?;
 
         // Update subject index
         self.add_to_subject_index(&credential.subject_ref, &credential.credential_id)?;
@@ -278,19 +416,19 @@ impl<'a> BankStandingStore<'a> {
 
     /// Get a bank standing credential by ID
     pub fn get(&self, credential_id: &BankStandingId) -> Result<Option<BankStandingCredential>> {
-        match self.db.get(cf::FINANCE_BANK_STANDINGS, credential_id)? {
-            Some(bytes) => {
-                let credential: BankStandingCredential = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(credential))
-            }
+        match self
+            .db
+            .get(cf::FINANCE_BANK_STANDINGS, bank_standing_key(credential_id))?
+        {
+            Some(bytes) => Ok(Some(decode_bank_standing(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if credential exists
     pub fn exists(&self, credential_id: &BankStandingId) -> Result<bool> {
-        self.db.contains(cf::FINANCE_BANK_STANDINGS, credential_id)
+        self.db
+            .contains(cf::FINANCE_BANK_STANDINGS, bank_standing_key(credential_id))
     }
 
     /// Update standing
@@ -304,9 +442,11 @@ impl<'a> BankStandingStore<'a> {
             Some(mut credential) => {
                 credential.standing = standing;
                 credential.updated_at = timestamp;
-                let bytes = bincode::serialize(&credential)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::FINANCE_BANK_STANDINGS, credential_id, &bytes)
+                self.db.put(
+                    cf::FINANCE_BANK_STANDINGS,
+                    bank_standing_key(credential_id),
+                    &encode_bank_standing(&credential)?,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "Bank standing credential not found: {:?}",
@@ -326,9 +466,11 @@ impl<'a> BankStandingStore<'a> {
             Some(mut credential) => {
                 credential.revocation_ref = Some(revocation_ref);
                 credential.updated_at = timestamp;
-                let bytes = bincode::serialize(&credential)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::FINANCE_BANK_STANDINGS, credential_id, &bytes)
+                self.db.put(
+                    cf::FINANCE_BANK_STANDINGS,
+                    bank_standing_key(credential_id),
+                    &encode_bank_standing(&credential)?,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "Bank standing credential not found: {:?}",
@@ -364,20 +506,21 @@ impl<'a> BankStandingStore<'a> {
         let mut ids = self.get_subject_credential_ids(subject_ref)?;
         if !ids.contains(credential_id) {
             ids.push(*credential_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::FINANCE_SUBJECT_BANK_INDEX, subject_ref, &bytes)?;
+            self.db.put(
+                cf::FINANCE_SUBJECT_BANK_INDEX,
+                subject_bank_index_key(subject_ref),
+                &encode_id_list(&ids)?,
+            )?;
         }
         Ok(())
     }
 
     fn get_subject_credential_ids(&self, subject_ref: &SubjectRef) -> Result<Vec<BankStandingId>> {
-        match self.db.get(cf::FINANCE_SUBJECT_BANK_INDEX, subject_ref)? {
-            Some(bytes) => {
-                let ids: Vec<BankStandingId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(ids)
-            }
+        match self.db.get(
+            cf::FINANCE_SUBJECT_BANK_INDEX,
+            subject_bank_index_key(subject_ref),
+        )? {
+            Some(bytes) => decode_id_list(&bytes),
             None => Ok(Vec::new()),
         }
     }
@@ -399,9 +542,11 @@ impl<'a> KycAttestationStore<'a> {
 
     /// Store a KYC attestation
     pub fn put(&self, attestation: &KycAttestation) -> Result<()> {
-        let bytes = bincode::serialize(attestation)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::FINANCE_KYC_ATTESTATIONS, &attestation.attestation_id, &bytes)?;
+        self.db.put(
+            cf::FINANCE_KYC_ATTESTATIONS,
+            kyc_attestation_key(&attestation.attestation_id),
+            &encode_kyc_attestation(attestation)?,
+        )?;
 
         // Update subject index
         self.add_to_subject_index(&attestation.subject_ref, &attestation.attestation_id)?;
@@ -411,19 +556,21 @@ impl<'a> KycAttestationStore<'a> {
 
     /// Get a KYC attestation by ID
     pub fn get(&self, attestation_id: &KycAttestationId) -> Result<Option<KycAttestation>> {
-        match self.db.get(cf::FINANCE_KYC_ATTESTATIONS, attestation_id)? {
-            Some(bytes) => {
-                let attestation: KycAttestation = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(attestation))
-            }
+        match self.db.get(
+            cf::FINANCE_KYC_ATTESTATIONS,
+            kyc_attestation_key(attestation_id),
+        )? {
+            Some(bytes) => Ok(Some(decode_kyc_attestation(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if attestation exists
     pub fn exists(&self, attestation_id: &KycAttestationId) -> Result<bool> {
-        self.db.contains(cf::FINANCE_KYC_ATTESTATIONS, attestation_id)
+        self.db.contains(
+            cf::FINANCE_KYC_ATTESTATIONS,
+            kyc_attestation_key(attestation_id),
+        )
     }
 
     /// Update status
@@ -437,9 +584,11 @@ impl<'a> KycAttestationStore<'a> {
             Some(mut attestation) => {
                 attestation.status = status;
                 attestation.updated_at = timestamp;
-                let bytes = bincode::serialize(&attestation)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::FINANCE_KYC_ATTESTATIONS, attestation_id, &bytes)
+                self.db.put(
+                    cf::FINANCE_KYC_ATTESTATIONS,
+                    kyc_attestation_key(attestation_id),
+                    &encode_kyc_attestation(&attestation)?,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "KYC attestation not found: {:?}",
@@ -460,9 +609,11 @@ impl<'a> KycAttestationStore<'a> {
                 attestation.status = KycStatus::Revoked;
                 attestation.revocation_ref = Some(revocation_ref);
                 attestation.updated_at = timestamp;
-                let bytes = bincode::serialize(&attestation)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::FINANCE_KYC_ATTESTATIONS, attestation_id, &bytes)
+                self.db.put(
+                    cf::FINANCE_KYC_ATTESTATIONS,
+                    kyc_attestation_key(attestation_id),
+                    &encode_kyc_attestation(&attestation)?,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "KYC attestation not found: {:?}",
@@ -498,20 +649,21 @@ impl<'a> KycAttestationStore<'a> {
         let mut ids = self.get_subject_attestation_ids(subject_ref)?;
         if !ids.contains(attestation_id) {
             ids.push(*attestation_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::FINANCE_SUBJECT_KYC_INDEX, subject_ref, &bytes)?;
+            self.db.put(
+                cf::FINANCE_SUBJECT_KYC_INDEX,
+                subject_kyc_index_key(subject_ref),
+                &encode_id_list(&ids)?,
+            )?;
         }
         Ok(())
     }
 
     fn get_subject_attestation_ids(&self, subject_ref: &SubjectRef) -> Result<Vec<KycAttestationId>> {
-        match self.db.get(cf::FINANCE_SUBJECT_KYC_INDEX, subject_ref)? {
-            Some(bytes) => {
-                let ids: Vec<KycAttestationId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(ids)
-            }
+        match self.db.get(
+            cf::FINANCE_SUBJECT_KYC_INDEX,
+            subject_kyc_index_key(subject_ref),
+        )? {
+            Some(bytes) => decode_id_list(&bytes),
             None => Ok(Vec::new()),
         }
     }
@@ -533,26 +685,24 @@ impl<'a> FinanceProofStore<'a> {
 
     /// Store a finance proof
     pub fn put(&self, proof: &FinanceProofEnvelope) -> Result<()> {
-        let bytes = bincode::serialize(proof)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::FINANCE_PROOFS, &proof.proof_id, &bytes)
+        self.db.put(
+            cf::FINANCE_PROOFS,
+            proof_key(&proof.proof_id),
+            &encode_proof(proof)?,
+        )
     }
 
     /// Get a proof by ID
     pub fn get(&self, proof_id: &ProofId) -> Result<Option<FinanceProofEnvelope>> {
-        match self.db.get(cf::FINANCE_PROOFS, proof_id)? {
-            Some(bytes) => {
-                let proof: FinanceProofEnvelope = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(proof))
-            }
+        match self.db.get(cf::FINANCE_PROOFS, proof_key(proof_id))? {
+            Some(bytes) => Ok(Some(decode_proof(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if proof exists
     pub fn exists(&self, proof_id: &ProofId) -> Result<bool> {
-        self.db.contains(cf::FINANCE_PROOFS, proof_id)
+        self.db.contains(cf::FINANCE_PROOFS, proof_key(proof_id))
     }
 
     /// Check if proof is valid (not expired)

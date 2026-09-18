@@ -25,6 +25,140 @@ pub type SubjectRef = [u8; 32];
 pub type EmployerRef = [u8; 32];
 
 // =============================================================================
+// Shared key layout and codec
+// =============================================================================
+//
+// One builder per row and one codec per value type, called by the committed
+// stores below and by the candidate surface in
+// `sumchain_state::employment_view`. Nine of the ten families here are
+// reachable from block execution; the tenth, the event log, is not -- it shares
+// the discipline anyway, so that no row in this file is encoded in two places
+// and no key in it is spelled twice.
+//
+// Every value is bincode. Every key is an identifier's own bytes, unprefixed:
+// a 20-byte address for the three address-keyed families, a 32-byte id or
+// commitment for the rest. The one exception is the event key, which is
+// height||index big-endian so that the height is a usable scan prefix.
+//
+// Five families share the SAME value type -- a bincode `Vec<[u8; 32]>` -- and
+// three share the same key shape. They are deliberately given separate
+// builders anyway: same shape is not the same row, and one of them could
+// change without the others.
+
+/// Issuer profiles are keyed by the issuer's address.
+pub fn issuer_key(issuer_address: &Address) -> &[u8] {
+    issuer_address.as_bytes()
+}
+
+/// Employment credentials are keyed by employment id.
+pub fn credential_key(employment_id: &EmploymentId) -> &[u8] {
+    employment_id
+}
+
+/// The employee index is keyed by the employee COMMITMENT (`employee_ref`),
+/// and its VALUE is an accumulating `Vec<EmploymentId>`, not a presence marker.
+pub fn employee_index_key(employee_ref: &SubjectRef) -> &[u8] {
+    employee_ref
+}
+
+/// The employee-address index is keyed by the employee's WALLET address --
+/// the same shape as [`issuer_key`], a different row.
+pub fn employee_address_index_key(employee_address: &Address) -> &[u8] {
+    employee_address.as_bytes()
+}
+
+/// The employer index is keyed by the employer commitment (`employer_ref`).
+pub fn employer_index_key(employer_ref: &EmployerRef) -> &[u8] {
+    employer_ref
+}
+
+/// Income attestations are keyed by attestation id.
+pub fn income_attestation_key(attestation_id: &IncomeAttestationId) -> &[u8] {
+    attestation_id
+}
+
+/// The subject income index is keyed by the subject commitment.
+pub fn subject_income_index_key(subject_ref: &SubjectRef) -> &[u8] {
+    subject_ref
+}
+
+/// The income holder-address index is keyed by the holder's WALLET address.
+pub fn income_holder_address_index_key(holder_address: &Address) -> &[u8] {
+    holder_address.as_bytes()
+}
+
+/// Proof envelopes are keyed by proof id.
+pub fn proof_key(proof_id: &ProofId) -> &[u8] {
+    proof_id
+}
+
+/// Events are keyed by height then index, both big-endian, so that
+/// [`event_height_prefix`] selects exactly one block.
+pub fn event_key(height: BlockHeight, index: u32) -> [u8; 12] {
+    let mut key = [0u8; 12];
+    key[..8].copy_from_slice(&height.to_be_bytes());
+    key[8..].copy_from_slice(&index.to_be_bytes());
+    key
+}
+
+/// The prefix every [`event_key`] at `height` begins with.
+pub fn event_height_prefix(height: BlockHeight) -> [u8; 8] {
+    height.to_be_bytes()
+}
+
+pub fn encode_issuer(issuer: &EmploymentIssuerProfile) -> Result<Vec<u8>> {
+    bincode::serialize(issuer).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_issuer(bytes: &[u8]) -> Result<EmploymentIssuerProfile> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_credential(credential: &EmploymentCredential) -> Result<Vec<u8>> {
+    bincode::serialize(credential).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_credential(bytes: &[u8]) -> Result<EmploymentCredential> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_attestation(attestation: &IncomeAttestation) -> Result<Vec<u8>> {
+    bincode::serialize(attestation).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_attestation(bytes: &[u8]) -> Result<IncomeAttestation> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_proof(proof: &EmploymentProofEnvelope) -> Result<Vec<u8>> {
+    bincode::serialize(proof).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_proof(bytes: &[u8]) -> Result<EmploymentProofEnvelope> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+/// The value every one of the five index families holds. `EmploymentId`,
+/// `IncomeAttestationId` and `ProofId` are all `[u8; 32]`, so one codec covers
+/// them -- which is a fact about the schema, not a convenience: a change to any
+/// one of those aliases has to be made here, deliberately.
+pub fn encode_id_list(ids: &[EmploymentId]) -> Result<Vec<u8>> {
+    bincode::serialize(ids).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_id_list(bytes: &[u8]) -> Result<Vec<EmploymentId>> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_event(event: &EmploymentEvent) -> Result<Vec<u8>> {
+    bincode::serialize(event).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_event(bytes: &[u8]) -> Result<EmploymentEvent> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+// =============================================================================
 // Issuer Profile Storage (SRC-881)
 // =============================================================================
 
@@ -40,26 +174,28 @@ impl<'a> EmploymentIssuerStore<'a> {
 
     /// Store an issuer profile
     pub fn put(&self, issuer: &EmploymentIssuerProfile) -> Result<()> {
-        let bytes = bincode::serialize(issuer)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::EMPLOYMENT_ISSUERS, issuer.issuer_address.as_bytes(), &bytes)
+        self.db.put(
+            cf::EMPLOYMENT_ISSUERS,
+            issuer_key(&issuer.issuer_address),
+            &encode_issuer(issuer)?,
+        )
     }
 
     /// Get an issuer by address
     pub fn get(&self, issuer_address: &Address) -> Result<Option<EmploymentIssuerProfile>> {
-        match self.db.get(cf::EMPLOYMENT_ISSUERS, issuer_address.as_bytes())? {
-            Some(bytes) => {
-                let issuer: EmploymentIssuerProfile = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(issuer))
-            }
+        match self
+            .db
+            .get(cf::EMPLOYMENT_ISSUERS, issuer_key(issuer_address))?
+        {
+            Some(bytes) => Ok(Some(decode_issuer(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if issuer exists
     pub fn exists(&self, issuer_address: &Address) -> Result<bool> {
-        self.db.contains(cf::EMPLOYMENT_ISSUERS, issuer_address.as_bytes())
+        self.db
+            .contains(cf::EMPLOYMENT_ISSUERS, issuer_key(issuer_address))
     }
 
     /// Update issuer status
@@ -73,9 +209,11 @@ impl<'a> EmploymentIssuerStore<'a> {
             Some(mut issuer) => {
                 issuer.status = status;
                 issuer.updated_at = timestamp;
-                let bytes = bincode::serialize(&issuer)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::EMPLOYMENT_ISSUERS, issuer_address.as_bytes(), &bytes)
+                self.db.put(
+                    cf::EMPLOYMENT_ISSUERS,
+                    issuer_key(issuer_address),
+                    &encode_issuer(&issuer)?,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "Issuer not found: {:?}",
@@ -88,8 +226,7 @@ impl<'a> EmploymentIssuerStore<'a> {
     pub fn list_active(&self) -> Result<Vec<EmploymentIssuerProfile>> {
         let mut issuers = Vec::new();
         for (_, value) in self.db.iter(cf::EMPLOYMENT_ISSUERS)? {
-            let issuer: EmploymentIssuerProfile = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let issuer = decode_issuer(&value)?;
             if issuer.status.is_active() {
                 issuers.push(issuer);
             }
@@ -114,9 +251,11 @@ impl<'a> EmploymentCredentialStore<'a> {
 
     /// Store an employment credential
     pub fn put(&self, credential: &EmploymentCredential) -> Result<()> {
-        let bytes = bincode::serialize(credential)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::EMPLOYMENT_CREDENTIALS, &credential.employment_id, &bytes)?;
+        self.db.put(
+            cf::EMPLOYMENT_CREDENTIALS,
+            credential_key(&credential.employment_id),
+            &encode_credential(credential)?,
+        )?;
 
         // Update indexes
         self.add_to_employee_index(&credential.employee_ref, &credential.employment_id)?;
@@ -128,19 +267,19 @@ impl<'a> EmploymentCredentialStore<'a> {
 
     /// Get a credential by ID
     pub fn get(&self, employment_id: &EmploymentId) -> Result<Option<EmploymentCredential>> {
-        match self.db.get(cf::EMPLOYMENT_CREDENTIALS, employment_id)? {
-            Some(bytes) => {
-                let credential: EmploymentCredential = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(credential))
-            }
+        match self
+            .db
+            .get(cf::EMPLOYMENT_CREDENTIALS, credential_key(employment_id))?
+        {
+            Some(bytes) => Ok(Some(decode_credential(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if credential exists
     pub fn exists(&self, employment_id: &EmploymentId) -> Result<bool> {
-        self.db.contains(cf::EMPLOYMENT_CREDENTIALS, employment_id)
+        self.db
+            .contains(cf::EMPLOYMENT_CREDENTIALS, credential_key(employment_id))
     }
 
     /// Update employment status
@@ -154,9 +293,11 @@ impl<'a> EmploymentCredentialStore<'a> {
             Some(mut credential) => {
                 credential.status = status;
                 credential.updated_at = timestamp;
-                let bytes = bincode::serialize(&credential)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::EMPLOYMENT_CREDENTIALS, employment_id, &bytes)
+                self.db.put(
+                    cf::EMPLOYMENT_CREDENTIALS,
+                    credential_key(employment_id),
+                    &encode_credential(&credential)?,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "Employment credential not found: {:?}",
@@ -177,9 +318,11 @@ impl<'a> EmploymentCredentialStore<'a> {
                 credential.status = EmploymentStatus::Ended;
                 credential.revocation_ref = Some(revocation_ref);
                 credential.updated_at = timestamp;
-                let bytes = bincode::serialize(&credential)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::EMPLOYMENT_CREDENTIALS, employment_id, &bytes)
+                self.db.put(
+                    cf::EMPLOYMENT_CREDENTIALS,
+                    credential_key(employment_id),
+                    &encode_credential(&credential)?,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "Employment credential not found: {:?}",
@@ -249,9 +392,11 @@ impl<'a> EmploymentCredentialStore<'a> {
         let mut ids = self.get_employee_credential_ids(employee_ref)?;
         if !ids.contains(employment_id) {
             ids.push(*employment_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::EMPLOYMENT_EMPLOYEE_INDEX, employee_ref, &bytes)?;
+            self.db.put(
+                cf::EMPLOYMENT_EMPLOYEE_INDEX,
+                employee_index_key(employee_ref),
+                &encode_id_list(&ids)?,
+            )?;
         }
         Ok(())
     }
@@ -260,9 +405,11 @@ impl<'a> EmploymentCredentialStore<'a> {
         let mut ids = self.get_employee_address_credential_ids(employee_address)?;
         if !ids.contains(employment_id) {
             ids.push(*employment_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::EMPLOYMENT_EMPLOYEE_ADDRESS_INDEX, employee_address.as_bytes(), &bytes)?;
+            self.db.put(
+                cf::EMPLOYMENT_EMPLOYEE_ADDRESS_INDEX,
+                employee_address_index_key(employee_address),
+                &encode_id_list(&ids)?,
+            )?;
         }
         Ok(())
     }
@@ -271,42 +418,41 @@ impl<'a> EmploymentCredentialStore<'a> {
         let mut ids = self.get_employer_credential_ids(employer_ref)?;
         if !ids.contains(employment_id) {
             ids.push(*employment_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::EMPLOYMENT_EMPLOYER_INDEX, employer_ref, &bytes)?;
+            self.db.put(
+                cf::EMPLOYMENT_EMPLOYER_INDEX,
+                employer_index_key(employer_ref),
+                &encode_id_list(&ids)?,
+            )?;
         }
         Ok(())
     }
 
     fn get_employee_credential_ids(&self, employee_ref: &SubjectRef) -> Result<Vec<EmploymentId>> {
-        match self.db.get(cf::EMPLOYMENT_EMPLOYEE_INDEX, employee_ref)? {
-            Some(bytes) => {
-                let ids: Vec<EmploymentId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(ids)
-            }
+        match self.db.get(
+            cf::EMPLOYMENT_EMPLOYEE_INDEX,
+            employee_index_key(employee_ref),
+        )? {
+            Some(bytes) => decode_id_list(&bytes),
             None => Ok(Vec::new()),
         }
     }
 
     fn get_employee_address_credential_ids(&self, employee_address: &Address) -> Result<Vec<EmploymentId>> {
-        match self.db.get(cf::EMPLOYMENT_EMPLOYEE_ADDRESS_INDEX, employee_address.as_bytes())? {
-            Some(bytes) => {
-                let ids: Vec<EmploymentId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(ids)
-            }
+        match self.db.get(
+            cf::EMPLOYMENT_EMPLOYEE_ADDRESS_INDEX,
+            employee_address_index_key(employee_address),
+        )? {
+            Some(bytes) => decode_id_list(&bytes),
             None => Ok(Vec::new()),
         }
     }
 
     fn get_employer_credential_ids(&self, employer_ref: &EmployerRef) -> Result<Vec<EmploymentId>> {
-        match self.db.get(cf::EMPLOYMENT_EMPLOYER_INDEX, employer_ref)? {
-            Some(bytes) => {
-                let ids: Vec<EmploymentId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(ids)
-            }
+        match self.db.get(
+            cf::EMPLOYMENT_EMPLOYER_INDEX,
+            employer_index_key(employer_ref),
+        )? {
+            Some(bytes) => decode_id_list(&bytes),
             None => Ok(Vec::new()),
         }
     }
@@ -328,9 +474,11 @@ impl<'a> IncomeAttestationStore<'a> {
 
     /// Store an income attestation
     pub fn put(&self, attestation: &IncomeAttestation) -> Result<()> {
-        let bytes = bincode::serialize(attestation)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::EMPLOYMENT_INCOME_ATTESTATIONS, &attestation.attestation_id, &bytes)?;
+        self.db.put(
+            cf::EMPLOYMENT_INCOME_ATTESTATIONS,
+            income_attestation_key(&attestation.attestation_id),
+            &encode_attestation(attestation)?,
+        )?;
 
         // Update indexes
         self.add_to_subject_index(&attestation.subject_ref, &attestation.attestation_id)?;
@@ -341,19 +489,21 @@ impl<'a> IncomeAttestationStore<'a> {
 
     /// Get an attestation by ID
     pub fn get(&self, attestation_id: &IncomeAttestationId) -> Result<Option<IncomeAttestation>> {
-        match self.db.get(cf::EMPLOYMENT_INCOME_ATTESTATIONS, attestation_id)? {
-            Some(bytes) => {
-                let attestation: IncomeAttestation = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(attestation))
-            }
+        match self.db.get(
+            cf::EMPLOYMENT_INCOME_ATTESTATIONS,
+            income_attestation_key(attestation_id),
+        )? {
+            Some(bytes) => Ok(Some(decode_attestation(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if attestation exists
     pub fn exists(&self, attestation_id: &IncomeAttestationId) -> Result<bool> {
-        self.db.contains(cf::EMPLOYMENT_INCOME_ATTESTATIONS, attestation_id)
+        self.db.contains(
+            cf::EMPLOYMENT_INCOME_ATTESTATIONS,
+            income_attestation_key(attestation_id),
+        )
     }
 
     /// Revoke attestation
@@ -367,9 +517,11 @@ impl<'a> IncomeAttestationStore<'a> {
             Some(mut attestation) => {
                 attestation.revocation_ref = Some(revocation_ref);
                 attestation.updated_at = timestamp;
-                let bytes = bincode::serialize(&attestation)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::EMPLOYMENT_INCOME_ATTESTATIONS, attestation_id, &bytes)
+                self.db.put(
+                    cf::EMPLOYMENT_INCOME_ATTESTATIONS,
+                    income_attestation_key(attestation_id),
+                    &encode_attestation(&attestation)?,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "Income attestation not found: {:?}",
@@ -427,9 +579,11 @@ impl<'a> IncomeAttestationStore<'a> {
         let mut ids = self.get_subject_attestation_ids(subject_ref)?;
         if !ids.contains(attestation_id) {
             ids.push(*attestation_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::EMPLOYMENT_SUBJECT_INCOME_INDEX, subject_ref, &bytes)?;
+            self.db.put(
+                cf::EMPLOYMENT_SUBJECT_INCOME_INDEX,
+                subject_income_index_key(subject_ref),
+                &encode_id_list(&ids)?,
+            )?;
         }
         Ok(())
     }
@@ -438,31 +592,31 @@ impl<'a> IncomeAttestationStore<'a> {
         let mut ids = self.get_holder_address_attestation_ids(holder_address)?;
         if !ids.contains(attestation_id) {
             ids.push(*attestation_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::EMPLOYMENT_INCOME_HOLDER_ADDRESS_INDEX, holder_address.as_bytes(), &bytes)?;
+            self.db.put(
+                cf::EMPLOYMENT_INCOME_HOLDER_ADDRESS_INDEX,
+                income_holder_address_index_key(holder_address),
+                &encode_id_list(&ids)?,
+            )?;
         }
         Ok(())
     }
 
     fn get_subject_attestation_ids(&self, subject_ref: &SubjectRef) -> Result<Vec<IncomeAttestationId>> {
-        match self.db.get(cf::EMPLOYMENT_SUBJECT_INCOME_INDEX, subject_ref)? {
-            Some(bytes) => {
-                let ids: Vec<IncomeAttestationId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(ids)
-            }
+        match self.db.get(
+            cf::EMPLOYMENT_SUBJECT_INCOME_INDEX,
+            subject_income_index_key(subject_ref),
+        )? {
+            Some(bytes) => decode_id_list(&bytes),
             None => Ok(Vec::new()),
         }
     }
 
     fn get_holder_address_attestation_ids(&self, holder_address: &Address) -> Result<Vec<IncomeAttestationId>> {
-        match self.db.get(cf::EMPLOYMENT_INCOME_HOLDER_ADDRESS_INDEX, holder_address.as_bytes())? {
-            Some(bytes) => {
-                let ids: Vec<IncomeAttestationId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(ids)
-            }
+        match self.db.get(
+            cf::EMPLOYMENT_INCOME_HOLDER_ADDRESS_INDEX,
+            income_holder_address_index_key(holder_address),
+        )? {
+            Some(bytes) => decode_id_list(&bytes),
             None => Ok(Vec::new()),
         }
     }
@@ -484,26 +638,24 @@ impl<'a> EmploymentProofStore<'a> {
 
     /// Store an employment proof
     pub fn put(&self, proof: &EmploymentProofEnvelope) -> Result<()> {
-        let bytes = bincode::serialize(proof)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::EMPLOYMENT_PROOFS, &proof.proof_id, &bytes)
+        self.db.put(
+            cf::EMPLOYMENT_PROOFS,
+            proof_key(&proof.proof_id),
+            &encode_proof(proof)?,
+        )
     }
 
     /// Get a proof by ID
     pub fn get(&self, proof_id: &ProofId) -> Result<Option<EmploymentProofEnvelope>> {
-        match self.db.get(cf::EMPLOYMENT_PROOFS, proof_id)? {
-            Some(bytes) => {
-                let proof: EmploymentProofEnvelope = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(proof))
-            }
+        match self.db.get(cf::EMPLOYMENT_PROOFS, proof_key(proof_id))? {
+            Some(bytes) => Ok(Some(decode_proof(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if proof exists
     pub fn exists(&self, proof_id: &ProofId) -> Result<bool> {
-        self.db.contains(cf::EMPLOYMENT_PROOFS, proof_id)
+        self.db.contains(cf::EMPLOYMENT_PROOFS, proof_key(proof_id))
     }
 
     /// Check if proof is valid (not expired)
@@ -531,29 +683,21 @@ impl<'a> EmploymentEventStore<'a> {
 
     /// Store an employment event
     pub fn put(&self, height: BlockHeight, index: u32, event: &EmploymentEvent) -> Result<()> {
-        let key = Self::make_key(height, index);
-        let bytes = bincode::serialize(event)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::EMPLOYMENT_SYSTEM_EVENTS, &key, &bytes)
+        self.db.put(
+            cf::EMPLOYMENT_SYSTEM_EVENTS,
+            &event_key(height, index),
+            &encode_event(event)?,
+        )
     }
 
     /// Get events by block height
     pub fn get_by_height(&self, height: BlockHeight) -> Result<Vec<EmploymentEvent>> {
-        let prefix = height.to_be_bytes();
+        let prefix = event_height_prefix(height);
         let mut events = Vec::new();
         for (_, value) in self.db.prefix_iter(cf::EMPLOYMENT_SYSTEM_EVENTS, &prefix)? {
-            let event: EmploymentEvent = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            events.push(event);
+            events.push(decode_event(&value)?);
         }
         Ok(events)
-    }
-
-    fn make_key(height: BlockHeight, index: u32) -> [u8; 12] {
-        let mut key = [0u8; 12];
-        key[..8].copy_from_slice(&height.to_be_bytes());
-        key[8..].copy_from_slice(&index.to_be_bytes());
-        key
     }
 }
 

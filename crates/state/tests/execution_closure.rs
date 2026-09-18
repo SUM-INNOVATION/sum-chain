@@ -102,6 +102,27 @@ use std::path::{Path, PathBuf};
 /// rows carrying twenty-nine occurrences, and takes all ten healthcare
 /// application families out of the execution set with them. Nothing else moves:
 /// no other subsystem's rows name a `HEALTHCARE_*` family.
+///
+/// The three wave-1 migrations reconciled onto this branch remove their own
+/// rows and nothing else. Each branch was cut before the wave-2 work existed,
+/// so each one's diff still showed the other subsystems' rows as present; the
+/// combined array is therefore derived from execution reachability, not from
+/// unioning the three sides. Taking the union would have restored rows that
+/// were correctly deleted.
+///
+/// ```text
+///   SRC-85X legal        10 rows, 26 occurrences,  8 LEGAL_* families
+///   SRC-88X employment    8 rows, 13 occurrences,  9 EMPLOYMENT_* families
+///   SRC-89X finance      11 rows, 14 occurrences,  9 FINANCE_* families
+/// ```
+///
+/// 75 rows over 99 occurrences becomes 46 over 46, and the committed family
+/// count falls from 34 to 8. What remains is `docclass_executor.rs` alone: all
+/// eight surviving families are `DOCCLASS_*`, so SRC-83X is now the only
+/// subsystem block execution can still commit to directly. No row naming
+/// `employment_executor.rs`, `legal_executor.rs` or `finance_executor.rs`
+/// survives, and no `EMPLOYMENT_*`, `LEGAL_*` or `FINANCE_*` family remains in
+/// the execution set.
 const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
     ("crates/state/src/docclass_executor.rs", "DocClassExecutor::create_identity_root", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
     ("crates/state/src/docclass_executor.rs", "DocClassExecutor::create_identity_root", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
@@ -149,46 +170,21 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
     ("crates/state/src/docclass_executor.rs", "DocClassExecutor::suspend_credential", "RevocationStore::put", "DOCCLASS_REVOCATIONS", 1),
     ("crates/state/src/docclass_executor.rs", "DocClassExecutor::update_issuer", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
     ("crates/state/src/docclass_executor.rs", "DocClassExecutor::update_issuer", "DocClassIssuerStore::put", "DOCCLASS_ISSUERS", 1),
-    ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "EmploymentCredentialStore::put", "EMPLOYMENT_CREDENTIALS+EMPLOYMENT_EMPLOYEE_ADDRESS_INDEX+EMPLOYMENT_EMPLOYEE_INDEX+EMPLOYMENT_EMPLOYER_INDEX", 1),
-    ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "EmploymentCredentialStore::revoke", "EMPLOYMENT_CREDENTIALS", 1),
-    ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "EmploymentCredentialStore::update_status", "EMPLOYMENT_CREDENTIALS", 3),
-    ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "EmploymentIssuerStore::put", "EMPLOYMENT_ISSUERS", 1),
-    ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "EmploymentIssuerStore::update_status", "EMPLOYMENT_ISSUERS", 4),
-    ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "EmploymentProofStore::put", "EMPLOYMENT_PROOFS", 1),
-    ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "IncomeAttestationStore::put", "EMPLOYMENT_INCOME_ATTESTATIONS+EMPLOYMENT_INCOME_HOLDER_ADDRESS_INDEX+EMPLOYMENT_SUBJECT_INCOME_INDEX", 1),
-    ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "IncomeAttestationStore::revoke", "EMPLOYMENT_INCOME_ATTESTATIONS", 1),
-    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "AddressProofStore::put", "FINANCE_ADDRESS_PROOFS+FINANCE_SUBJECT_ADDRESS_INDEX", 1),
-    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "AddressProofStore::revoke", "FINANCE_ADDRESS_PROOFS", 1),
-    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "BankStandingStore::put", "FINANCE_BANK_STANDINGS+FINANCE_SUBJECT_BANK_INDEX", 1),
-    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "BankStandingStore::revoke", "FINANCE_BANK_STANDINGS", 1),
-    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "BankStandingStore::update_standing", "FINANCE_BANK_STANDINGS", 1),
-    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "FinanceIssuerStore::put", "FINANCE_ISSUERS+FINANCE_JURISDICTION_INDEX", 1),
-    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "FinanceIssuerStore::update_status", "FINANCE_ISSUERS", 4),
-    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "FinanceProofStore::put", "FINANCE_PROOFS", 1),
-    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "KycAttestationStore::put", "FINANCE_KYC_ATTESTATIONS+FINANCE_SUBJECT_KYC_INDEX", 1),
-    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "KycAttestationStore::revoke", "FINANCE_KYC_ATTESTATIONS", 1),
-    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "KycAttestationStore::update_status", "FINANCE_KYC_ATTESTATIONS", 1),
-    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "BenefitStore::put", "LEGAL_BENEFITS+LEGAL_JURISDICTION_INDEX", 1),
-    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "BenefitStore::update_status", "LEGAL_BENEFITS", 4),
-    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "CaseStore::add_related_case", "LEGAL_CASES", 1),
-    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "CaseStore::put", "LEGAL_CASES+LEGAL_JURISDICTION_INDEX", 1),
-    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "CaseStore::update_status", "LEGAL_CASES", 6),
-    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "LegalProofStore::put", "LEGAL_PROOFS", 1),
-    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "OrderStore::put", "LEGAL_CASE_ORDER_INDEX+LEGAL_ORDERS", 2),
-    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "OrderStore::update_status", "LEGAL_ORDERS", 5),
-    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "ProcessEventStore::put", "LEGAL_CASE_EVENT_INDEX+LEGAL_EVENTS", 2),
-    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "ProcessEventStore::update_status", "LEGAL_EVENTS", 3),
 ];
 
 /// Occurrences, not rows: a caller reaching the same mutator three times is
 /// three places to fix.
-const MANIFEST_OCCURRENCES: usize = 99;
+const MANIFEST_OCCURRENCES: usize = 46;
 
 /// Application column families a block can still commit to directly.
 ///
 /// ONLY EVER DECREASE. Recorded at `1687789`. Lower than the 116 the unrooted
 /// audit reported, for the reason in [`UNREACHED_MUTATORS`].
-const LEDGER_CF_COUNT: usize = 34;
+///
+/// Not computed by subtracting the three wave-1 branches' declared values from
+/// each other: this was parked at `0` through the merge and read back off the
+/// ratchet, which reported 8. The eight are the `DOCCLASS_*` families.
+const LEDGER_CF_COUNT: usize = 8;
 
 /// Functions that commit application state but that no entry point reaches.
 ///
@@ -286,8 +282,8 @@ const ARMS: &[(&str, ArmKind, &str)] = &[
     ("Education", ArmKind::Overlay, "education_executor.rs"),
     (
         "Employment",
-        ArmKind::Committed,
-        "employment_executor.rs -> EmploymentStore sub-stores",
+        ArmKind::Overlay,
+        "employment_executor.rs -> employment_view",
     ),
     (
         "Equity",
@@ -296,8 +292,8 @@ const ARMS: &[(&str, ArmKind, &str)] = &[
     ),
     (
         "Finance",
-        ArmKind::Committed,
-        "finance_executor.rs -> FinanceStore sub-stores",
+        ArmKind::Overlay,
+        "finance_executor.rs -> finance_view",
     ),
     (
         "Governance",
@@ -324,11 +320,7 @@ const ARMS: &[(&str, ArmKind, &str)] = &[
         ArmKind::Overlay,
         "inference_settlement_executor.rs",
     ),
-    (
-        "Legal",
-        ArmKind::Committed,
-        "legal_executor.rs -> LegalStore sub-stores",
-    ),
+    ("Legal", ArmKind::Overlay, "legal_executor.rs -> legal_view"),
     (
         "Messaging",
         ArmKind::Overlay,
@@ -1909,7 +1901,7 @@ fn every_dispatcher_arm_is_declared() {
     let mixed = ARMS.iter().filter(|(_, k, _)| *k == ArmKind::Mixed).count();
     assert_eq!(
         (overlay, committed, mixed),
-        (26, 4, 0),
+        (29, 1, 0),
         "the overlay/committed/mixed split changed. Moving an arm from \
          Committed to Overlay is progress — update this and the manifest \
          together; any other movement is not."

@@ -8,9 +8,7 @@
 //! - SRC-895: 89X Proof Profiles
 
 use sumchain_storage::exec_view::ExecutionView;
-use std::sync::Arc;
 
-use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
     finance::{
         AccountStanding, AddressProof, BankStandingCredential, FinanceIssuerProfile,
@@ -19,7 +17,6 @@ use sumchain_primitives::{
     },
     Address, Balance, BlockHeight, Hash, Timestamp,
 };
-use sumchain_storage::{Database, FinanceStore};
 use tracing::debug;
 
 use crate::{Result, StateError, StateManager};
@@ -122,22 +119,19 @@ impl FinanceExecutionResult {
     }
 }
 
-/// Finance executor for SRC-89X transactions
-pub struct FinanceExecutor {
-    db: Arc<Database>,
-    #[allow(dead_code)]
-    params: ChainParams,
-}
+/// Finance executor for SRC-89X transactions.
+///
+/// No database handle, by construction: every operation takes the block's
+/// `ExecutionView` and no `self`, so `self.db` is not something this file can
+/// name. The committed twins stay in `sumchain_storage::finance_store` for the
+/// RPC server.
+pub struct FinanceExecutor;
 
 impl FinanceExecutor {
-    pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
-        Self { db, params }
-    }
-
     /// Execute a Finance transaction
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &FinanceTxData,
         proposer: &Address,
@@ -147,8 +141,6 @@ impl FinanceExecutor {
         _tx_index: u32,
         _tx_hash: Hash,
     ) -> Result<FinanceExecutionResult> {
-        let store = FinanceStore::new(&self.db);
-
         match data.operation {
             // =================================================================
             // SRC-891: Issuer Registry Operations
@@ -161,7 +153,7 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Issuer must be sender"));
                 }
 
-                if store.issuers().exists(&issuer.issuer_address)? {
+                if Self::v_issuer_exists(view, &issuer.issuer_address)? {
                     return Ok(FinanceExecutionResult::failure("Issuer already exists"));
                 }
 
@@ -169,7 +161,7 @@ impl FinanceExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let issuer_addr = issuer.issuer_address;
-                store.issuers().put(&issuer)?;
+                Self::v_put_issuer(view, &issuer)?;
                 debug!("Finance issuer registered: {}", issuer_addr);
                 Ok(FinanceExecutionResult::success_with_issuer(issuer_addr))
             }
@@ -182,7 +174,7 @@ impl FinanceExecutor {
                 let update: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let issuer = match store.issuers().get(sender)? {
+                let issuer = match Self::v_get_issuer(view, sender)? {
                     Some(i) => i,
                     None => return Ok(FinanceExecutionResult::failure("Issuer not found")),
                 };
@@ -194,38 +186,48 @@ impl FinanceExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.issuers().update_status(sender, update.status, block_timestamp)?;
+                Self::v_update_issuer_status(view, sender, update.status, block_timestamp)?;
                 Ok(FinanceExecutionResult::success())
             }
 
             FinanceOperation::SuspendIssuer => {
-                if !store.issuers().exists(sender)? {
+                if !Self::v_issuer_exists(view, sender)? {
                     return Ok(FinanceExecutionResult::failure("Issuer not found"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.issuers().update_status(sender, FinanceIssuerStatus::Suspended, block_timestamp)?;
+                Self::v_update_issuer_status(
+                    view,
+                    sender,
+                    FinanceIssuerStatus::Suspended,
+                    block_timestamp,
+                )?;
                 debug!("Finance issuer suspended: {}", sender);
                 Ok(FinanceExecutionResult::success())
             }
 
             FinanceOperation::RevokeIssuer => {
-                if !store.issuers().exists(sender)? {
+                if !Self::v_issuer_exists(view, sender)? {
                     return Ok(FinanceExecutionResult::failure("Issuer not found"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.issuers().update_status(sender, FinanceIssuerStatus::Revoked, block_timestamp)?;
+                Self::v_update_issuer_status(
+                    view,
+                    sender,
+                    FinanceIssuerStatus::Revoked,
+                    block_timestamp,
+                )?;
                 debug!("Finance issuer revoked: {}", sender);
                 Ok(FinanceExecutionResult::success())
             }
 
             FinanceOperation::ReactivateIssuer => {
-                let issuer = match store.issuers().get(sender)? {
+                let issuer = match Self::v_get_issuer(view, sender)? {
                     Some(i) => i,
                     None => return Ok(FinanceExecutionResult::failure("Issuer not found")),
                 };
@@ -237,7 +239,12 @@ impl FinanceExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.issuers().update_status(sender, FinanceIssuerStatus::Active, block_timestamp)?;
+                Self::v_update_issuer_status(
+                    view,
+                    sender,
+                    FinanceIssuerStatus::Active,
+                    block_timestamp,
+                )?;
                 debug!("Finance issuer reactivated: {}", sender);
                 Ok(FinanceExecutionResult::success())
             }
@@ -254,7 +261,7 @@ impl FinanceExecutor {
                 }
 
                 // Verify issuer is registered and active
-                match store.issuers().get(sender)? {
+                match Self::v_get_issuer(view, sender)? {
                     Some(issuer) => {
                         if !issuer.status.is_active() {
                             return Ok(FinanceExecutionResult::failure("Issuer is not active"));
@@ -266,7 +273,7 @@ impl FinanceExecutor {
                     None => return Ok(FinanceExecutionResult::failure("Issuer not registered")),
                 }
 
-                if store.address_proofs().exists(&proof.proof_id)? {
+                if Self::v_address_proof_exists(view, &proof.proof_id)? {
                     return Ok(FinanceExecutionResult::failure("Address proof already exists"));
                 }
 
@@ -274,7 +281,7 @@ impl FinanceExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let proof_id = proof.proof_id;
-                store.address_proofs().put(&proof)?;
+                Self::v_put_address_proof(view, &proof)?;
                 debug!("Address proof created: {:?}", proof_id);
                 Ok(FinanceExecutionResult::success_with_address_proof(proof_id))
             }
@@ -293,7 +300,7 @@ impl FinanceExecutor {
                 let d: RevokeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let proof = match store.address_proofs().get(&d.proof_id)? {
+                let proof = match Self::v_get_address_proof(view, &d.proof_id)? {
                     Some(p) => p,
                     None => return Ok(FinanceExecutionResult::failure("Address proof not found")),
                 };
@@ -305,7 +312,7 @@ impl FinanceExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.address_proofs().revoke(&d.proof_id, d.revocation_ref, block_timestamp)?;
+                Self::v_revoke_address_proof(view, &d.proof_id, d.revocation_ref, block_timestamp)?;
                 debug!("Address proof revoked: {:?}", d.proof_id);
                 Ok(FinanceExecutionResult::success())
             }
@@ -322,7 +329,7 @@ impl FinanceExecutor {
                 }
 
                 // Verify issuer is registered and active
-                match store.issuers().get(sender)? {
+                match Self::v_get_issuer(view, sender)? {
                     Some(issuer) => {
                         if !issuer.status.is_active() {
                             return Ok(FinanceExecutionResult::failure("Issuer is not active"));
@@ -334,7 +341,7 @@ impl FinanceExecutor {
                     None => return Ok(FinanceExecutionResult::failure("Issuer not registered")),
                 }
 
-                if store.bank_standings().exists(&credential.credential_id)? {
+                if Self::v_bank_standing_exists(view, &credential.credential_id)? {
                     return Ok(FinanceExecutionResult::failure("Bank standing credential already exists"));
                 }
 
@@ -342,7 +349,7 @@ impl FinanceExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let credential_id = credential.credential_id;
-                store.bank_standings().put(&credential)?;
+                Self::v_put_bank_standing(view, &credential)?;
                 debug!("Bank standing credential created: {:?}", credential_id);
                 Ok(FinanceExecutionResult::success_with_bank_standing(credential_id))
             }
@@ -356,7 +363,7 @@ impl FinanceExecutor {
                 let d: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let credential = match store.bank_standings().get(&d.credential_id)? {
+                let credential = match Self::v_get_bank_standing(view, &d.credential_id)? {
                     Some(c) => c,
                     None => return Ok(FinanceExecutionResult::failure("Bank standing credential not found")),
                 };
@@ -368,7 +375,7 @@ impl FinanceExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.bank_standings().update_standing(&d.credential_id, d.standing, block_timestamp)?;
+                Self::v_update_bank_standing(view, &d.credential_id, d.standing, block_timestamp)?;
                 debug!("Bank standing updated: {:?}", d.credential_id);
                 Ok(FinanceExecutionResult::success())
             }
@@ -382,7 +389,7 @@ impl FinanceExecutor {
                 let d: RevokeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let credential = match store.bank_standings().get(&d.credential_id)? {
+                let credential = match Self::v_get_bank_standing(view, &d.credential_id)? {
                     Some(c) => c,
                     None => return Ok(FinanceExecutionResult::failure("Bank standing credential not found")),
                 };
@@ -394,7 +401,12 @@ impl FinanceExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.bank_standings().revoke(&d.credential_id, d.revocation_ref, block_timestamp)?;
+                Self::v_revoke_bank_standing(
+                    view,
+                    &d.credential_id,
+                    d.revocation_ref,
+                    block_timestamp,
+                )?;
                 debug!("Bank standing credential revoked: {:?}", d.credential_id);
                 Ok(FinanceExecutionResult::success())
             }
@@ -411,7 +423,7 @@ impl FinanceExecutor {
                 }
 
                 // Verify issuer is registered and active
-                match store.issuers().get(sender)? {
+                match Self::v_get_issuer(view, sender)? {
                     Some(issuer) => {
                         if !issuer.status.is_active() {
                             return Ok(FinanceExecutionResult::failure("Issuer is not active"));
@@ -423,7 +435,7 @@ impl FinanceExecutor {
                     None => return Ok(FinanceExecutionResult::failure("Issuer not registered")),
                 }
 
-                if store.kyc_attestations().exists(&attestation.attestation_id)? {
+                if Self::v_kyc_attestation_exists(view, &attestation.attestation_id)? {
                     return Ok(FinanceExecutionResult::failure("KYC attestation already exists"));
                 }
 
@@ -431,7 +443,7 @@ impl FinanceExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let attestation_id = attestation.attestation_id;
-                store.kyc_attestations().put(&attestation)?;
+                Self::v_put_kyc_attestation(view, &attestation)?;
                 debug!("KYC attestation created: {:?}", attestation_id);
                 Ok(FinanceExecutionResult::success_with_kyc(attestation_id))
             }
@@ -445,7 +457,7 @@ impl FinanceExecutor {
                 let d: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let attestation = match store.kyc_attestations().get(&d.attestation_id)? {
+                let attestation = match Self::v_get_kyc_attestation(view, &d.attestation_id)? {
                     Some(a) => a,
                     None => return Ok(FinanceExecutionResult::failure("KYC attestation not found")),
                 };
@@ -457,7 +469,7 @@ impl FinanceExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.kyc_attestations().update_status(&d.attestation_id, d.status, block_timestamp)?;
+                Self::v_update_kyc_status(view, &d.attestation_id, d.status, block_timestamp)?;
                 debug!("KYC attestation updated: {:?}", d.attestation_id);
                 Ok(FinanceExecutionResult::success())
             }
@@ -471,7 +483,7 @@ impl FinanceExecutor {
                 let d: RevokeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let attestation = match store.kyc_attestations().get(&d.attestation_id)? {
+                let attestation = match Self::v_get_kyc_attestation(view, &d.attestation_id)? {
                     Some(a) => a,
                     None => return Ok(FinanceExecutionResult::failure("KYC attestation not found")),
                 };
@@ -483,7 +495,12 @@ impl FinanceExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.kyc_attestations().revoke(&d.attestation_id, d.revocation_ref, block_timestamp)?;
+                Self::v_revoke_kyc_attestation(
+                    view,
+                    &d.attestation_id,
+                    d.revocation_ref,
+                    block_timestamp,
+                )?;
                 debug!("KYC attestation revoked: {:?}", d.attestation_id);
                 Ok(FinanceExecutionResult::success())
             }
@@ -495,7 +512,7 @@ impl FinanceExecutor {
                 let proof: FinanceProofEnvelope = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.proofs().exists(&proof.proof_id)? {
+                if Self::v_proof_exists(view, &proof.proof_id)? {
                     return Ok(FinanceExecutionResult::failure("Proof already exists"));
                 }
 
@@ -503,7 +520,7 @@ impl FinanceExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let proof_id = proof.proof_id;
-                store.proofs().put(&proof)?;
+                Self::v_put_proof(view, &proof)?;
                 debug!("Finance proof submitted: {:?}", proof_id);
                 Ok(FinanceExecutionResult::success_with_proof(proof_id))
             }
@@ -524,9 +541,8 @@ impl FinanceExecutor {
 #[cfg(all(test, feature = "legacy_tests"))]
 mod tests {
     use super::*;
-    use sumchain_primitives::finance::{
-        AccountType, AddressProofType, AmlRisk, BalanceBracket, FinanceIssuerClass, KycLevel,
-    };
+    use std::sync::Arc;
+    use sumchain_primitives::finance::{AccountType, BalanceBracket, FinanceIssuerClass};
     use sumchain_storage::Database;
     use tempfile::TempDir;
 
@@ -537,29 +553,8 @@ mod tests {
         (db, dir, state)
     }
 
-    #[test]
-    fn test_finance_executor_creation() {
-        let (db, _dir, _state) = setup();
-        let _executor = FinanceExecutor::new(db, ChainParams::default());
-    }
-
-    #[test]
-    fn test_register_issuer() {
-        let (db, _dir, state) = setup();
-        // A block's candidate, opened here because a `#[test]` function
-        // cannot take one as a parameter. An earlier scripted signature
-        // rewrite added `view` to the parameter list of every test in this
-        // module, which is not valid Rust; only the `cfg` gate kept it
-        // out of sight.
-        let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
-        let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
-        let executor = FinanceExecutor::new(db.clone(), ChainParams::default());
-
-        let sender = Address::new([1u8; 20]);
-        let proposer = Address::new([99u8; 20]);
-        StateManager::v_credit(view, &sender, 1_000_000_000_000).unwrap();
-
-        let issuer = FinanceIssuerProfile {
+    fn sample_issuer(sender: Address) -> FinanceIssuerProfile {
+        FinanceIssuerProfile {
             issuer_address: sender,
             issuer_class: FinanceIssuerClass::RegulatedBank,
             issuer_commitment: [2u8; 32],
@@ -569,65 +564,83 @@ mod tests {
             registered_at_height: 100,
             created_at: 1000,
             updated_at: 1000,
-        };
+        }
+    }
 
-        let tx_data = FinanceTxData {
-            operation: FinanceOperation::RegisterIssuer,
-            data: bincode::serialize(&issuer).unwrap(),
-        };
+    fn tx(operation: FinanceOperation, payload: &impl serde::Serialize) -> FinanceTxData {
+        FinanceTxData {
+            operation,
+            data: bincode::serialize(payload).unwrap(),
+            recipient: Address::ZERO,
+        }
+    }
 
-        let result = executor.execute(
-            &sender, &tx_data, &state, &proposer, 1000, 100, 1000000, 0, Hash::default(),
-        ).unwrap();
+    #[test]
+    fn test_register_issuer() {
+        let (db, _dir, _state) = setup();
+        // A block's candidate, opened here because a `#[test]` function
+        // cannot take one as a parameter. An earlier scripted signature
+        // rewrite added `view` to the parameter list of every test in this
+        // module, which is not valid Rust; only the `cfg` gate kept it
+        // out of sight.
+        let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
+        let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
+
+        let sender = Address::new([1u8; 20]);
+        let proposer = Address::new([99u8; 20]);
+        StateManager::v_credit(view, &sender, 1_000_000_000_000).unwrap();
+
+        let issuer = sample_issuer(sender);
+        let result = FinanceExecutor::execute(
+            view,
+            &sender,
+            &tx(FinanceOperation::RegisterIssuer, &issuer),
+            &proposer,
+            1000,
+            100,
+            1000000,
+            0,
+            Hash::default(),
+        )
+        .unwrap();
 
         assert!(result.success, "Register issuer failed: {:?}", result.error);
         assert_eq!(result.issuer_address, Some(sender));
 
-        // Verify storage
-        let store = FinanceStore::new(&db);
-        let retrieved = store.issuers().get(&sender).unwrap().unwrap();
+        // Read the CANDIDATE: this executor stages now.
+        let retrieved = FinanceExecutor::v_get_issuer(view, &sender)
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.jurisdiction_code, "US-NY");
     }
 
     #[test]
     fn test_create_bank_standing() {
-        let (db, _dir, state) = setup();
-        // A block's candidate, opened here because a `#[test]` function
-        // cannot take one as a parameter. An earlier scripted signature
-        // rewrite added `view` to the parameter list of every test in this
-        // module, which is not valid Rust; only the `cfg` gate kept it
-        // out of sight.
+        let (db, _dir, _state) = setup();
         let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
         let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
-        let executor = FinanceExecutor::new(db.clone(), ChainParams::default());
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
         StateManager::v_credit(view, &sender, 1_000_000_000_000).unwrap();
 
-        // First register issuer
-        let issuer = FinanceIssuerProfile {
-            issuer_address: sender,
-            issuer_class: FinanceIssuerClass::RegulatedBank,
-            issuer_commitment: [2u8; 32],
-            jurisdiction_code: "US-NY".to_string(),
-            policy_id: [3u8; 32],
-            status: FinanceIssuerStatus::Active,
-            registered_at_height: 100,
-            created_at: 1000,
-            updated_at: 1000,
-        };
+        FinanceExecutor::execute(
+            view,
+            &sender,
+            &tx(FinanceOperation::RegisterIssuer, &sample_issuer(sender)),
+            &proposer,
+            1000,
+            100,
+            1000000,
+            0,
+            Hash::default(),
+        )
+        .unwrap();
 
-        let tx_data = FinanceTxData {
-            operation: FinanceOperation::RegisterIssuer,
-            data: bincode::serialize(&issuer).unwrap(),
-        };
-        executor.execute(&sender, &tx_data, &state, &proposer, 1000, 100, 1000000, 0, Hash::default()).unwrap();
-
-        // Now create bank standing credential
         let credential = BankStandingCredential {
             credential_id: [10u8; 32],
             subject_ref: [11u8; 32],
+            holder_address: Address::new([0x30; 20]),
             account_commitment: [12u8; 32],
             bank_ref: [13u8; 32],
             account_type: AccountType::Checking,
@@ -645,21 +658,25 @@ mod tests {
             updated_at: 1000,
         };
 
-        let tx_data = FinanceTxData {
-            operation: FinanceOperation::CreateBankStanding,
-            data: bincode::serialize(&credential).unwrap(),
-        };
-
-        let result = executor.execute(
-            &sender, &tx_data, &state, &proposer, 1000, 100, 1000000, 1, Hash::default(),
-        ).unwrap();
+        let result = FinanceExecutor::execute(
+            view,
+            &sender,
+            &tx(FinanceOperation::CreateBankStanding, &credential),
+            &proposer,
+            1000,
+            100,
+            1000000,
+            1,
+            Hash::default(),
+        )
+        .unwrap();
 
         assert!(result.success, "Create bank standing failed: {:?}", result.error);
         assert_eq!(result.bank_standing_id, Some([10u8; 32]));
 
-        // Verify storage
-        let store = FinanceStore::new(&db);
-        let retrieved = store.bank_standings().get(&[10u8; 32]).unwrap().unwrap();
+        let retrieved = FinanceExecutor::v_get_bank_standing(view, &[10u8; 32])
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.balance_bracket, BalanceBracket::Bracket5);
     }
 }

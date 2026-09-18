@@ -21,9 +21,9 @@ purpose.
 | PolicyAccount | `855ec009` | in the commit message |
 | Messaging + sponsored registration | `e293b03a` | in the commit message |
 | Tax | `1c5494c` | in the commit message |
-| Employment | `04eb5bc` (parallel) | in the commit message |
-| Legal | `026447f` (parallel) | in the commit message |
-| Finance | `0706862` (parallel) | in the commit message |
+| Employment (SRC-88X) | `623e41f` (was `04eb5bc`) | in the commit message |
+| Legal (SRC-85X) | `ddc4985` (was `026447f`) | in the commit message |
+| Finance (SRC-89X) | `d570469` (was `0706862`) | in the commit message |
 | Agreement (SRC-84X) | `2249ca8` | transcribed in full below |
 | Property (SRC-86X) | this wave | transcribed in full below |
 | Healthcare (SRC-87X) | this wave | transcribed in full below |
@@ -33,6 +33,17 @@ Agreement, property, healthcare and NFT are transcribed here. The six earlier
 inventories are recorded in their own commit messages and have not been copied
 into this file; a pointer is not a transcription, and listing them here from
 memory would be worse than listing them not at all.
+
+Employment, legal and finance were reviewed to an earlier and weaker bar than
+this wave, and their rows above carry the SHA they now have on this branch, not
+the SHA of the parallel branch they were authored on. Three gaps in that earlier
+review are closed by test-only additions on this branch: employment had no
+close/reopen restart-parity test, and none of the three had a publication
+byte-contract test of the kind property carries. One gap is NOT closed and is
+recorded here rather than implied away: neither employment nor legal committed a
+per-mutation battery document. Their commit messages report 52/52 and 56/56
+killed, but that record is not auditable in the tree, and this branch does not
+make it so. Finance's battery is at `docs/lane-a/FINANCE-MUTATION-BATTERY.md`.
 
 ## Agreement (SRC-84X)
 

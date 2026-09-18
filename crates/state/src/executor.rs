@@ -237,9 +237,13 @@ pub struct BlockExecutor {
     params: ChainParams,
     contract_executor: ContractExecutorState,
     docclass_executor: DocClassExecutor,
-    legal_executor: LegalExecutor,
-    employment_executor: EmploymentExecutor,
-    finance_executor: FinanceExecutor,
+    // No `LegalExecutor` / `EmploymentExecutor` / `FinanceExecutor` field:
+    // SRC-85X, SRC-88X and SRC-89X all execute through `ExecutionView`, so the
+    // block executor has no reason to hold a committed handle for any of them.
+    // Each of the three branches removed its own field; the cumulative answer
+    // removes all three, which is why no `self.<subsystem>_executor` remains
+    // for them below.
+    //
     // No `NodeRegistryExecutor` / `StorageMetadataExecutor` field: both
     // subsystems execute through `ExecutionView`, so the executor has no reason
     // to hold a committed handle to either. Keeping one would put a committed
@@ -331,9 +335,6 @@ impl BlockExecutor {
     pub fn new(state: Arc<StateManager>, db: Arc<Database>, params: ChainParams) -> Self {
         let contract_executor = ContractExecutorState::new(db.clone(), params.clone());
         let docclass_executor = DocClassExecutor::new(db.clone(), params.clone());
-        let legal_executor = LegalExecutor::new(db.clone(), params.clone());
-        let employment_executor = EmploymentExecutor::new(db.clone(), params.clone());
-        let finance_executor = FinanceExecutor::new(db.clone(), params.clone());
         let inference_settlement_executor =
             crate::inference_settlement_executor::InferenceSettlementExecutor::new(db.clone());
         Self {
@@ -342,9 +343,6 @@ impl BlockExecutor {
             params,
             contract_executor,
             docclass_executor,
-            legal_executor,
-            employment_executor,
-            finance_executor,
             inference_settlement_executor,
             beacon_block: parking_lot::Mutex::new(None),
         }
@@ -908,7 +906,8 @@ impl BlockExecutor {
                     }
                     TxPayload::Legal(legal_data) => {
                         // Execute Legal operation (SRC-85X)
-                        let result = self.legal_executor.execute(view,
+                        let result = LegalExecutor::execute(
+                            view,
                             &v2_tx.from,
                             &legal_data,
                             proposer,
@@ -1021,7 +1020,8 @@ impl BlockExecutor {
                     }
                     TxPayload::Employment(employment_data) => {
                         // Execute Employment operation (SRC-88X)
-                        let result = self.employment_executor.execute(view,
+                        let result = EmploymentExecutor::execute(
+                            view,
                             &v2_tx.from,
                             &employment_data,
                             proposer,
@@ -1059,7 +1059,8 @@ impl BlockExecutor {
                     }
                     TxPayload::Finance(finance_data) => {
                         // Execute Finance operation (SRC-89X)
-                        let result = self.finance_executor.execute(view,
+                        let result = FinanceExecutor::execute(
+                            view,
                             &v2_tx.from,
                             &finance_data,
                             proposer,
@@ -2680,7 +2681,8 @@ impl BlockExecutor {
                 }
 
                 // Execute Legal operation (SRC-85X)
-                let result = self.legal_executor.execute(view,
+                let result = LegalExecutor::execute(
+                    view,
                     &tx.from,
                     legal_data,
                     proposer,
@@ -2823,7 +2825,8 @@ impl BlockExecutor {
                 }
 
                 // Execute Employment operation (SRC-88X)
-                let result = self.employment_executor.execute(view,
+                let result = EmploymentExecutor::execute(
+                    view,
                     &tx.from,
                     employment_data,
                     proposer,
@@ -2871,7 +2874,8 @@ impl BlockExecutor {
                 }
 
                 // Execute Finance operation (SRC-89X)
-                let result = self.finance_executor.execute(view,
+                let result = FinanceExecutor::execute(
+                    view,
                     &tx.from,
                     finance_data,
                     proposer,

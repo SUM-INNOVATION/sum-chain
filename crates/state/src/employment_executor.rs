@@ -7,9 +7,7 @@
 //! - SRC-885: 88X Proof Profiles
 
 use sumchain_storage::exec_view::ExecutionView;
-use std::sync::Arc;
 
-use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
     employment::{
         EmploymentCredential, EmploymentIssuerProfile, EmploymentOperation, EmploymentProofEnvelope,
@@ -17,7 +15,6 @@ use sumchain_primitives::{
     },
     Address, Balance, BlockHeight, Hash, Timestamp,
 };
-use sumchain_storage::{Database, EmploymentStore};
 use tracing::debug;
 
 use crate::{Result, SchemaValidator, StateError, StateManager};
@@ -101,27 +98,25 @@ impl EmploymentExecutionResult {
     }
 }
 
-/// Employment executor for SRC-88X transactions
-pub struct EmploymentExecutor {
-    db: Arc<Database>,
-    #[allow(dead_code)]
-    params: ChainParams,
-    schema_validator: SchemaValidator,
-}
+/// Employment executor for SRC-88X transactions.
+///
+/// No database handle, by construction: every operation takes the block's
+/// `ExecutionView` and no `self`, so `self.db` is not something this file can
+/// name. The committed twins stay in `sumchain_storage::employment_store` for
+/// callers that answer about the published chain.
+///
+/// The `ChainParams` the old constructor took were never read — the field was
+/// `#[allow(dead_code)]` — and the `SchemaValidator` was built from
+/// `SchemaValidator::new()` once per executor. It is built here per call from
+/// the same constructor, so it carries the same default config and validates
+/// identically.
+pub struct EmploymentExecutor;
 
 impl EmploymentExecutor {
-    pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
-        Self {
-            db,
-            params,
-            schema_validator: SchemaValidator::new(),
-        }
-    }
-
     /// Execute an Employment transaction
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &EmploymentTxData,
         proposer: &Address,
@@ -131,7 +126,7 @@ impl EmploymentExecutor {
         _tx_index: u32,
         _tx_hash: Hash,
     ) -> Result<EmploymentExecutionResult> {
-        let store = EmploymentStore::new(&self.db);
+        let schema_validator = SchemaValidator::new();
 
         match data.operation {
             // =================================================================
@@ -145,13 +140,18 @@ impl EmploymentExecutor {
                     return Ok(EmploymentExecutionResult::failure("Issuer must be sender"));
                 }
 
-                if store.issuers().exists(&issuer.issuer_address)? {
+                if Self::v_issuer_exists(view, &issuer.issuer_address)? {
                     return Ok(EmploymentExecutionResult::failure("Issuer already exists"));
                 }
 
                 // PRIVACY ENFORCEMENT: Validate display_name doesn't contain PII
-                if let Err(reason) = self.schema_validator.validate_institutional_name(&issuer.display_name, "display_name") {
-                    debug!("Schema validation failed for issuer {}: {}", issuer.issuer_address, reason);
+                if let Err(reason) = schema_validator
+                    .validate_institutional_name(&issuer.display_name, "display_name")
+                {
+                    debug!(
+                        "Schema validation failed for issuer {}: {}",
+                        issuer.issuer_address, reason
+                    );
                     return Ok(EmploymentExecutionResult::failure(format!(
                         "Schema validation failed: {}",
                         reason
@@ -162,7 +162,7 @@ impl EmploymentExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let issuer_addr = issuer.issuer_address;
-                store.issuers().put(&issuer)?;
+                Self::v_put_issuer(view, &issuer)?;
                 debug!("Employment issuer registered: {}", issuer_addr);
                 Ok(EmploymentExecutionResult::success_with_issuer(issuer_addr))
             }
@@ -175,7 +175,7 @@ impl EmploymentExecutor {
                 let update: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let issuer = match store.issuers().get(sender)? {
+                let issuer = match Self::v_get_issuer(view, sender)? {
                     Some(i) => i,
                     None => return Ok(EmploymentExecutionResult::failure("Issuer not found")),
                 };
@@ -187,38 +187,43 @@ impl EmploymentExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.issuers().update_status(sender, update.status, block_timestamp)?;
+                Self::v_update_issuer_status(view, sender, update.status, block_timestamp)?;
                 Ok(EmploymentExecutionResult::success())
             }
 
             EmploymentOperation::SuspendIssuer => {
-                if !store.issuers().exists(sender)? {
+                if !Self::v_issuer_exists(view, sender)? {
                     return Ok(EmploymentExecutionResult::failure("Issuer not found"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.issuers().update_status(sender, IssuerStatus::Suspended, block_timestamp)?;
+                Self::v_update_issuer_status(
+                    view,
+                    sender,
+                    IssuerStatus::Suspended,
+                    block_timestamp,
+                )?;
                 debug!("Employment issuer suspended: {}", sender);
                 Ok(EmploymentExecutionResult::success())
             }
 
             EmploymentOperation::RevokeIssuer => {
-                if !store.issuers().exists(sender)? {
+                if !Self::v_issuer_exists(view, sender)? {
                     return Ok(EmploymentExecutionResult::failure("Issuer not found"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.issuers().update_status(sender, IssuerStatus::Revoked, block_timestamp)?;
+                Self::v_update_issuer_status(view, sender, IssuerStatus::Revoked, block_timestamp)?;
                 debug!("Employment issuer revoked: {}", sender);
                 Ok(EmploymentExecutionResult::success())
             }
 
             EmploymentOperation::ReactivateIssuer => {
-                let issuer = match store.issuers().get(sender)? {
+                let issuer = match Self::v_get_issuer(view, sender)? {
                     Some(i) => i,
                     None => return Ok(EmploymentExecutionResult::failure("Issuer not found")),
                 };
@@ -230,7 +235,7 @@ impl EmploymentExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.issuers().update_status(sender, IssuerStatus::Active, block_timestamp)?;
+                Self::v_update_issuer_status(view, sender, IssuerStatus::Active, block_timestamp)?;
                 debug!("Employment issuer reactivated: {}", sender);
                 Ok(EmploymentExecutionResult::success())
             }
@@ -247,7 +252,7 @@ impl EmploymentExecutor {
                 }
 
                 // Verify issuer is registered and active
-                match store.issuers().get(sender)? {
+                match Self::v_get_issuer(view, sender)? {
                     Some(issuer) => {
                         if !issuer.status.is_active() {
                             return Ok(EmploymentExecutionResult::failure("Issuer is not active"));
@@ -256,13 +261,14 @@ impl EmploymentExecutor {
                     None => return Ok(EmploymentExecutionResult::failure("Issuer not registered")),
                 }
 
-                if store.credentials().exists(&credential.employment_id)? {
+                if Self::v_credential_exists(view, &credential.employment_id)? {
                     return Ok(EmploymentExecutionResult::failure("Employment credential already exists"));
                 }
 
                 // PRIVACY ENFORCEMENT: Validate schema to prevent PII in free-form fields
                 // Hard rejection at consensus level for SRC-882 employment credentials
-                let validation_result = self.schema_validator.validate_employment_credential(&credential, _block_height);
+                let validation_result =
+                    schema_validator.validate_employment_credential(&credential, _block_height);
                 if !validation_result.is_valid() {
                     if let crate::ValidationResult::Invalid { reason } = validation_result {
                         debug!(
@@ -280,7 +286,7 @@ impl EmploymentExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let employment_id = credential.employment_id;
-                store.credentials().put(&credential)?;
+                Self::v_put_credential(view, &credential)?;
                 debug!("Employment credential created: {:?}", employment_id);
                 Ok(EmploymentExecutionResult::success_with_employment(employment_id))
             }
@@ -294,7 +300,7 @@ impl EmploymentExecutor {
                 let d: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let credential = match store.credentials().get(&d.employment_id)? {
+                let credential = match Self::v_get_credential(view, &d.employment_id)? {
                     Some(c) => c,
                     None => return Ok(EmploymentExecutionResult::failure("Employment credential not found")),
                 };
@@ -306,7 +312,12 @@ impl EmploymentExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.credentials().update_status(&d.employment_id, d.status, block_timestamp)?;
+                Self::v_update_credential_status(
+                    view,
+                    &d.employment_id,
+                    d.status,
+                    block_timestamp,
+                )?;
                 debug!("Employment credential updated: {:?}", d.employment_id);
                 Ok(EmploymentExecutionResult::success())
             }
@@ -319,7 +330,7 @@ impl EmploymentExecutor {
                 let d: SuspendData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let credential = match store.credentials().get(&d.employment_id)? {
+                let credential = match Self::v_get_credential(view, &d.employment_id)? {
                     Some(c) => c,
                     None => return Ok(EmploymentExecutionResult::failure("Employment credential not found")),
                 };
@@ -331,7 +342,12 @@ impl EmploymentExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.credentials().update_status(&d.employment_id, EmploymentStatus::Suspended, block_timestamp)?;
+                Self::v_update_credential_status(
+                    view,
+                    &d.employment_id,
+                    EmploymentStatus::Suspended,
+                    block_timestamp,
+                )?;
                 debug!("Employment credential suspended: {:?}", d.employment_id);
                 Ok(EmploymentExecutionResult::success())
             }
@@ -344,7 +360,7 @@ impl EmploymentExecutor {
                 let d: EndData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let credential = match store.credentials().get(&d.employment_id)? {
+                let credential = match Self::v_get_credential(view, &d.employment_id)? {
                     Some(c) => c,
                     None => return Ok(EmploymentExecutionResult::failure("Employment credential not found")),
                 };
@@ -356,7 +372,12 @@ impl EmploymentExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.credentials().update_status(&d.employment_id, EmploymentStatus::Ended, block_timestamp)?;
+                Self::v_update_credential_status(
+                    view,
+                    &d.employment_id,
+                    EmploymentStatus::Ended,
+                    block_timestamp,
+                )?;
                 debug!("Employment ended: {:?}", d.employment_id);
                 Ok(EmploymentExecutionResult::success())
             }
@@ -370,7 +391,7 @@ impl EmploymentExecutor {
                 let d: RevokeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let credential = match store.credentials().get(&d.employment_id)? {
+                let credential = match Self::v_get_credential(view, &d.employment_id)? {
                     Some(c) => c,
                     None => return Ok(EmploymentExecutionResult::failure("Employment credential not found")),
                 };
@@ -382,7 +403,12 @@ impl EmploymentExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.credentials().revoke(&d.employment_id, d.revocation_ref, block_timestamp)?;
+                Self::v_revoke_credential(
+                    view,
+                    &d.employment_id,
+                    d.revocation_ref,
+                    block_timestamp,
+                )?;
                 debug!("Employment credential revoked: {:?}", d.employment_id);
                 Ok(EmploymentExecutionResult::success())
             }
@@ -399,7 +425,7 @@ impl EmploymentExecutor {
                 }
 
                 // Verify issuer is registered and active
-                match store.issuers().get(sender)? {
+                match Self::v_get_issuer(view, sender)? {
                     Some(issuer) => {
                         if !issuer.status.is_active() {
                             return Ok(EmploymentExecutionResult::failure("Issuer is not active"));
@@ -408,7 +434,7 @@ impl EmploymentExecutor {
                     None => return Ok(EmploymentExecutionResult::failure("Issuer not registered")),
                 }
 
-                if store.income_attestations().exists(&attestation.attestation_id)? {
+                if Self::v_attestation_exists(view, &attestation.attestation_id)? {
                     return Ok(EmploymentExecutionResult::failure("Income attestation already exists"));
                 }
 
@@ -416,7 +442,7 @@ impl EmploymentExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let attestation_id = attestation.attestation_id;
-                store.income_attestations().put(&attestation)?;
+                Self::v_put_attestation(view, &attestation)?;
                 debug!("Income attestation created: {:?}", attestation_id);
                 Ok(EmploymentExecutionResult::success_with_attestation(attestation_id))
             }
@@ -435,7 +461,7 @@ impl EmploymentExecutor {
                 let d: RevokeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let attestation = match store.income_attestations().get(&d.attestation_id)? {
+                let attestation = match Self::v_get_attestation(view, &d.attestation_id)? {
                     Some(a) => a,
                     None => return Ok(EmploymentExecutionResult::failure("Income attestation not found")),
                 };
@@ -447,7 +473,12 @@ impl EmploymentExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.income_attestations().revoke(&d.attestation_id, d.revocation_ref, block_timestamp)?;
+                Self::v_revoke_attestation(
+                    view,
+                    &d.attestation_id,
+                    d.revocation_ref,
+                    block_timestamp,
+                )?;
                 debug!("Income attestation revoked: {:?}", d.attestation_id);
                 Ok(EmploymentExecutionResult::success())
             }
@@ -459,7 +490,7 @@ impl EmploymentExecutor {
                 let proof: EmploymentProofEnvelope = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.proofs().exists(&proof.proof_id)? {
+                if Self::v_proof_exists(view, &proof.proof_id)? {
                     return Ok(EmploymentExecutionResult::failure("Proof already exists"));
                 }
 
@@ -467,7 +498,7 @@ impl EmploymentExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let proof_id = proof.proof_id;
-                store.proofs().put(&proof)?;
+                Self::v_put_proof(view, &proof)?;
                 debug!("Employment proof submitted: {:?}", proof_id);
                 Ok(EmploymentExecutionResult::success_with_proof(proof_id))
             }
@@ -488,6 +519,7 @@ impl EmploymentExecutor {
 #[cfg(all(test, feature = "legacy_tests"))]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use sumchain_primitives::employment::{EmploymentIssuerClass, EmploymentType};
     use sumchain_storage::Database;
     use tempfile::TempDir;
@@ -499,31 +531,11 @@ mod tests {
         (db, dir, state)
     }
 
-    #[test]
-    fn test_employment_executor_creation() {
-        let (db, _dir, _state) = setup();
-        let _executor = EmploymentExecutor::new(db, ChainParams::default());
-    }
-
-    #[test]
-    fn test_register_issuer() {
-        let (db, _dir, state) = setup();
-        // A block's candidate, opened here because a `#[test]` function
-        // cannot take one as a parameter. An earlier scripted signature
-        // rewrite added `view` to the parameter list of every test in this
-        // module, which is not valid Rust; only the `cfg` gate kept it
-        // out of sight.
-        let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
-        let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
-        let executor = EmploymentExecutor::new(db.clone(), ChainParams::default());
-
-        let sender = Address::new([1u8; 20]);
-        let proposer = Address::new([99u8; 20]);
-        StateManager::v_credit(view, &sender, 1_000_000_000_000).unwrap();
-
-        let issuer = EmploymentIssuerProfile {
+    fn issuer_profile(sender: Address) -> EmploymentIssuerProfile {
+        EmploymentIssuerProfile {
             issuer_address: sender,
             issuer_class: EmploymentIssuerClass::PayrollProcessor,
+            display_name: "Payroll Co".to_string(),
             issuer_commitment: [2u8; 32],
             jurisdiction_code: "US-CA".to_string(),
             policy_id: [3u8; 32],
@@ -531,29 +543,12 @@ mod tests {
             registered_at_height: 100,
             created_at: 1000,
             updated_at: 1000,
-        };
-
-        let tx_data = EmploymentTxData {
-            operation: EmploymentOperation::RegisterIssuer,
-            data: bincode::serialize(&issuer).unwrap(),
-        };
-
-        let result = executor.execute(
-            &sender, &tx_data, &state, &proposer, 1000, 100, 1000000, 0, Hash::default(),
-        ).unwrap();
-
-        assert!(result.success, "Register issuer failed: {:?}", result.error);
-        assert_eq!(result.issuer_address, Some(sender));
-
-        // Verify storage
-        let store = EmploymentStore::new(&db);
-        let retrieved = store.issuers().get(&sender).unwrap().unwrap();
-        assert_eq!(retrieved.jurisdiction_code, "US-CA");
+        }
     }
 
     #[test]
-    fn test_create_employment_credential() {
-        let (db, _dir, state) = setup();
+    fn test_register_issuer() {
+        let (db, _dir, _state) = setup();
         // A block's candidate, opened here because a `#[test]` function
         // cannot take one as a parameter. An earlier scripted signature
         // rewrite added `view` to the parameter list of every test in this
@@ -561,34 +556,74 @@ mod tests {
         // out of sight.
         let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
         let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
-        let executor = EmploymentExecutor::new(db.clone(), ChainParams::default());
+
+        let sender = Address::new([1u8; 20]);
+        let proposer = Address::new([99u8; 20]);
+        StateManager::v_credit(view, &sender, 1_000_000_000_000).unwrap();
+
+        let issuer = issuer_profile(sender);
+        let tx_data = EmploymentTxData {
+            operation: EmploymentOperation::RegisterIssuer,
+            data: bincode::serialize(&issuer).unwrap(),
+            recipient: Address::ZERO,
+        };
+
+        let result = EmploymentExecutor::execute(
+            view,
+            &sender,
+            &tx_data,
+            &proposer,
+            1000,
+            100,
+            1000000,
+            0,
+            Hash::default(),
+        )
+        .unwrap();
+
+        assert!(result.success, "Register issuer failed: {:?}", result.error);
+        assert_eq!(result.issuer_address, Some(sender));
+
+        // Read the CANDIDATE: this executor stages now.
+        let retrieved = EmploymentExecutor::v_get_issuer(view, &sender)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retrieved.jurisdiction_code, "US-CA");
+    }
+
+    #[test]
+    fn test_create_employment_credential() {
+        let (db, _dir, _state) = setup();
+        let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
+        let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
         StateManager::v_credit(view, &sender, 1_000_000_000_000).unwrap();
 
         // First register issuer
-        let issuer = EmploymentIssuerProfile {
-            issuer_address: sender,
-            issuer_class: EmploymentIssuerClass::PayrollProcessor,
-            issuer_commitment: [2u8; 32],
-            jurisdiction_code: "US-CA".to_string(),
-            policy_id: [3u8; 32],
-            status: IssuerStatus::Active,
-            registered_at_height: 100,
-            created_at: 1000,
-            updated_at: 1000,
-        };
-
         let tx_data = EmploymentTxData {
             operation: EmploymentOperation::RegisterIssuer,
-            data: bincode::serialize(&issuer).unwrap(),
+            data: bincode::serialize(&issuer_profile(sender)).unwrap(),
+            recipient: Address::ZERO,
         };
-        executor.execute(&sender, &tx_data, &state, &proposer, 1000, 100, 1000000, 0, Hash::default()).unwrap();
+        EmploymentExecutor::execute(
+            view,
+            &sender,
+            &tx_data,
+            &proposer,
+            1000,
+            100,
+            1000000,
+            0,
+            Hash::default(),
+        )
+        .unwrap();
 
         // Now create employment credential
         let credential = EmploymentCredential {
             employment_id: [10u8; 32],
+            employee_address: Address::new([77u8; 20]),
             employee_ref: [11u8; 32],
             employer_ref: [12u8; 32],
             status: EmploymentStatus::Active,
@@ -600,6 +635,7 @@ mod tests {
             policy_id: [15u8; 32],
             revocation_ref: None,
             issuer_address: sender,
+            issuer_name: "Payroll Co".to_string(),
             issuer_class: EmploymentIssuerClass::PayrollProcessor,
             created_at: 1000,
             updated_at: 1000,
@@ -608,18 +644,29 @@ mod tests {
         let tx_data = EmploymentTxData {
             operation: EmploymentOperation::CreateEmployment,
             data: bincode::serialize(&credential).unwrap(),
+            recipient: Address::ZERO,
         };
 
-        let result = executor.execute(
-            &sender, &tx_data, &state, &proposer, 1000, 100, 1000000, 1, Hash::default(),
-        ).unwrap();
+        let result = EmploymentExecutor::execute(
+            view,
+            &sender,
+            &tx_data,
+            &proposer,
+            1000,
+            100,
+            1000000,
+            1,
+            Hash::default(),
+        )
+        .unwrap();
 
         assert!(result.success, "Create employment failed: {:?}", result.error);
         assert_eq!(result.employment_id, Some([10u8; 32]));
 
-        // Verify storage
-        let store = EmploymentStore::new(&db);
-        let retrieved = store.credentials().get(&[10u8; 32]).unwrap().unwrap();
+        // Read the CANDIDATE, not the database: nothing is committed here.
+        let retrieved = EmploymentExecutor::v_get_credential(view, &[10u8; 32])
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.employment_type, EmploymentType::FullTime);
     }
 }

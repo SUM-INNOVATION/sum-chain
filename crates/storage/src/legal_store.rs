@@ -26,6 +26,142 @@ pub type BenefitId = [u8; 32];
 pub type ProofId = [u8; 32];
 
 // =============================================================================
+// Shared key layout and codec
+// =============================================================================
+//
+// One builder per row shape and one codec per value type, called by the
+// committed stores below and by the candidate surface in
+// `sumchain_state::legal_view`. Six of the eight families execution touches key
+// a 32-byte identifier directly and hold a bincode struct; the other two key a
+// string and hold a bincode `Vec<[u8; 32]>`. Saying that once here, rather than
+// six times across six sub-stores, is what makes it checkable that the routed
+// path and the committed path build the same bytes.
+//
+// The `LegalStore` facade is five sub-stores over these eight families plus the
+// system-event journal, and before this commit each sub-store spelled out its
+// own `bincode::serialize` at every call site -- twenty-two of them. One of
+// those could have drifted without anything noticing.
+
+/// Cases are keyed by case id.
+pub fn case_key(case_id: &CaseId) -> &[u8] {
+    case_id
+}
+
+/// Process events are keyed by event id.
+pub fn process_event_key(event_id: &ProcessEventId) -> &[u8] {
+    event_id
+}
+
+/// Orders are keyed by order id.
+pub fn order_key(order_id: &OrderId) -> &[u8] {
+    order_id
+}
+
+/// Benefit determinations are keyed by benefit id.
+pub fn benefit_key(benefit_id: &BenefitId) -> &[u8] {
+    benefit_id
+}
+
+/// Proofs are keyed by proof id.
+pub fn proof_key(proof_id: &ProofId) -> &[u8] {
+    proof_id
+}
+
+/// The case→events index is keyed by the CASE id, and its VALUE is a bincode
+/// `Vec<ProcessEventId>` -- an accumulating list, not a presence marker.
+pub fn case_event_index_key(case_id: &CaseId) -> &[u8] {
+    case_id
+}
+
+/// The case→orders index is keyed by the CASE id, and its VALUE is a bincode
+/// `Vec<OrderId>`. Same shape as [`case_event_index_key`], different family:
+/// they are separate builders on purpose, so that breaking one cannot be
+/// hidden by the other still being right.
+pub fn case_order_index_key(case_id: &CaseId) -> &[u8] {
+    case_id
+}
+
+/// The jurisdiction index is keyed by `"{jurisdiction}:{id_type}"` -- the only
+/// STRING key in this subsystem, and the only key that is built rather than
+/// borrowed. `id_type` is `"case"` or `"benefit"`; cases and benefits share the
+/// family and are kept apart by that suffix alone.
+pub fn jurisdiction_index_key(jurisdiction: &str, id_type: &str) -> Vec<u8> {
+    format!("{}:{}", jurisdiction, id_type).into_bytes()
+}
+
+/// System events are keyed by big-endian `(block_height, tx_index)`, 8 bytes
+/// then 4. Not on the execution path -- nothing in the executor writes this
+/// family -- but it is a row shape of this store and gets one builder like the
+/// rest.
+pub fn legal_event_key(block_height: BlockHeight, tx_index: u32) -> [u8; 12] {
+    let mut key = [0u8; 12];
+    key[..8].copy_from_slice(&block_height.to_be_bytes());
+    key[8..12].copy_from_slice(&tx_index.to_be_bytes());
+    key
+}
+
+pub fn encode_case(case: &CaseAnchor) -> Result<Vec<u8>> {
+    bincode::serialize(case).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_case(bytes: &[u8]) -> Result<CaseAnchor> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_process_event(event: &ProcessEvent) -> Result<Vec<u8>> {
+    bincode::serialize(event).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_process_event(bytes: &[u8]) -> Result<ProcessEvent> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_order(order: &CourtOrder) -> Result<Vec<u8>> {
+    bincode::serialize(order).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_order(bytes: &[u8]) -> Result<CourtOrder> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_benefit(benefit: &BenefitDetermination) -> Result<Vec<u8>> {
+    bincode::serialize(benefit).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_benefit(bytes: &[u8]) -> Result<BenefitDetermination> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_proof(proof: &LegalProofEnvelope) -> Result<Vec<u8>> {
+    bincode::serialize(proof).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_proof(bytes: &[u8]) -> Result<LegalProofEnvelope> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+/// The value of all THREE index families: jurisdiction, case→events and
+/// case→orders. `CaseId`, `ProcessEventId`, `OrderId` and `BenefitId` are all
+/// `[u8; 32]`, so one codec covers them; that they are the same type is also
+/// why a mixed-up key builder would compile, which is what the parity test
+/// exists to catch.
+pub fn encode_id_list(ids: &[[u8; 32]]) -> Result<Vec<u8>> {
+    bincode::serialize(ids).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_id_list(bytes: &[u8]) -> Result<Vec<[u8; 32]>> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_legal_event(event: &LegalEvent) -> Result<Vec<u8>> {
+    bincode::serialize(event).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_legal_event(bytes: &[u8]) -> Result<LegalEvent> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+// =============================================================================
 // Case Anchor Storage (SRC-851)
 // =============================================================================
 
@@ -41,9 +177,11 @@ impl<'a> CaseStore<'a> {
 
     /// Store a case anchor
     pub fn put(&self, case: &CaseAnchor) -> Result<()> {
-        let bytes = bincode::serialize(case)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::LEGAL_CASES, &case.case_id, &bytes)?;
+        self.db.put(
+            cf::LEGAL_CASES,
+            case_key(&case.case_id),
+            &encode_case(case)?,
+        )?;
 
         // Update jurisdiction index
         self.add_to_jurisdiction_index(&case.jurisdiction_code, &case.case_id, "case")?;
@@ -53,19 +191,15 @@ impl<'a> CaseStore<'a> {
 
     /// Get a case by ID
     pub fn get(&self, case_id: &CaseId) -> Result<Option<CaseAnchor>> {
-        match self.db.get(cf::LEGAL_CASES, case_id)? {
-            Some(bytes) => {
-                let case: CaseAnchor = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(case))
-            }
+        match self.db.get(cf::LEGAL_CASES, case_key(case_id))? {
+            Some(bytes) => Ok(Some(decode_case(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if case exists
     pub fn exists(&self, case_id: &CaseId) -> Result<bool> {
-        self.db.contains(cf::LEGAL_CASES, case_id)
+        self.db.contains(cf::LEGAL_CASES, case_key(case_id))
     }
 
     /// Update case status
@@ -79,9 +213,8 @@ impl<'a> CaseStore<'a> {
             Some(mut case) => {
                 case.status = status;
                 case.updated_at = timestamp;
-                let bytes = bincode::serialize(&case)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::LEGAL_CASES, case_id, &bytes)
+                self.db
+                    .put(cf::LEGAL_CASES, case_key(case_id), &encode_case(&case)?)
             }
             None => Err(StorageError::NotFound(format!(
                 "Case not found: {:?}",
@@ -106,8 +239,7 @@ impl<'a> CaseStore<'a> {
     pub fn list_active(&self) -> Result<Vec<CaseAnchor>> {
         let mut cases = Vec::new();
         for (_, value) in self.db.iter(cf::LEGAL_CASES)? {
-            let case: CaseAnchor = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let case = decode_case(&value)?;
             if case.status == CaseStatus::Active || case.status == CaseStatus::Filed {
                 cases.push(case);
             }
@@ -127,9 +259,8 @@ impl<'a> CaseStore<'a> {
                 if !case.related_cases.contains(related_case_id) {
                     case.related_cases.push(*related_case_id);
                     case.updated_at = timestamp;
-                    let bytes = bincode::serialize(&case)
-                        .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                    self.db.put(cf::LEGAL_CASES, case_id, &bytes)?;
+                    self.db
+                        .put(cf::LEGAL_CASES, case_key(case_id), &encode_case(&case)?)?;
                 }
                 Ok(())
             }
@@ -147,30 +278,28 @@ impl<'a> CaseStore<'a> {
         id: &[u8; 32],
         id_type: &str,
     ) -> Result<()> {
-        let key = format!("{}:{}", jurisdiction, id_type);
-        let mut ids = self.get_jurisdiction_ids(&key)?;
+        let key = jurisdiction_index_key(jurisdiction, id_type);
+        let mut ids = self.get_jurisdiction_ids(jurisdiction, id_type)?;
         if !ids.contains(id) {
             ids.push(*id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::LEGAL_JURISDICTION_INDEX, key.as_bytes(), &bytes)?;
+            self.db
+                .put(cf::LEGAL_JURISDICTION_INDEX, &key, &encode_id_list(&ids)?)?;
         }
         Ok(())
     }
 
-    fn get_jurisdiction_ids(&self, key: &str) -> Result<Vec<[u8; 32]>> {
-        match self.db.get(cf::LEGAL_JURISDICTION_INDEX, key.as_bytes())? {
-            Some(bytes) => {
-                let ids: Vec<[u8; 32]> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(ids)
-            }
+    fn get_jurisdiction_ids(&self, jurisdiction: &str, id_type: &str) -> Result<Vec<[u8; 32]>> {
+        match self.db.get(
+            cf::LEGAL_JURISDICTION_INDEX,
+            &jurisdiction_index_key(jurisdiction, id_type),
+        )? {
+            Some(bytes) => decode_id_list(&bytes),
             None => Ok(Vec::new()),
         }
     }
 
     fn get_jurisdiction_case_ids(&self, jurisdiction: &str) -> Result<Vec<CaseId>> {
-        self.get_jurisdiction_ids(&format!("{}:case", jurisdiction))
+        self.get_jurisdiction_ids(jurisdiction, "case")
     }
 }
 
@@ -190,9 +319,11 @@ impl<'a> ProcessEventStore<'a> {
 
     /// Store a process event
     pub fn put(&self, event: &ProcessEvent) -> Result<()> {
-        let bytes = bincode::serialize(event)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::LEGAL_EVENTS, &event.event_id, &bytes)?;
+        self.db.put(
+            cf::LEGAL_EVENTS,
+            process_event_key(&event.event_id),
+            &encode_process_event(event)?,
+        )?;
 
         // Update case event index
         self.add_to_case_index(&event.case_id, &event.event_id)?;
@@ -202,19 +333,16 @@ impl<'a> ProcessEventStore<'a> {
 
     /// Get an event by ID
     pub fn get(&self, event_id: &ProcessEventId) -> Result<Option<ProcessEvent>> {
-        match self.db.get(cf::LEGAL_EVENTS, event_id)? {
-            Some(bytes) => {
-                let event: ProcessEvent = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(event))
-            }
+        match self.db.get(cf::LEGAL_EVENTS, process_event_key(event_id))? {
+            Some(bytes) => Ok(Some(decode_process_event(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if event exists
     pub fn exists(&self, event_id: &ProcessEventId) -> Result<bool> {
-        self.db.contains(cf::LEGAL_EVENTS, event_id)
+        self.db
+            .contains(cf::LEGAL_EVENTS, process_event_key(event_id))
     }
 
     /// Update event status
@@ -226,9 +354,11 @@ impl<'a> ProcessEventStore<'a> {
         match self.get(event_id)? {
             Some(mut event) => {
                 event.status = status;
-                let bytes = bincode::serialize(&event)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::LEGAL_EVENTS, event_id, &bytes)
+                self.db.put(
+                    cf::LEGAL_EVENTS,
+                    process_event_key(event_id),
+                    &encode_process_event(&event)?,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "Process event not found: {:?}",
@@ -263,20 +393,21 @@ impl<'a> ProcessEventStore<'a> {
         let mut ids = self.get_case_event_ids(case_id)?;
         if !ids.contains(event_id) {
             ids.push(*event_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::LEGAL_CASE_EVENT_INDEX, case_id, &bytes)?;
+            self.db.put(
+                cf::LEGAL_CASE_EVENT_INDEX,
+                case_event_index_key(case_id),
+                &encode_id_list(&ids)?,
+            )?;
         }
         Ok(())
     }
 
     fn get_case_event_ids(&self, case_id: &CaseId) -> Result<Vec<ProcessEventId>> {
-        match self.db.get(cf::LEGAL_CASE_EVENT_INDEX, case_id)? {
-            Some(bytes) => {
-                let ids: Vec<ProcessEventId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(ids)
-            }
+        match self
+            .db
+            .get(cf::LEGAL_CASE_EVENT_INDEX, case_event_index_key(case_id))?
+        {
+            Some(bytes) => decode_id_list(&bytes),
             None => Ok(Vec::new()),
         }
     }
@@ -298,9 +429,11 @@ impl<'a> OrderStore<'a> {
 
     /// Store an order
     pub fn put(&self, order: &CourtOrder) -> Result<()> {
-        let bytes = bincode::serialize(order)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::LEGAL_ORDERS, &order.order_id, &bytes)?;
+        self.db.put(
+            cf::LEGAL_ORDERS,
+            order_key(&order.order_id),
+            &encode_order(order)?,
+        )?;
 
         // Update case order index
         self.add_to_case_index(&order.case_id, &order.order_id)?;
@@ -310,19 +443,15 @@ impl<'a> OrderStore<'a> {
 
     /// Get an order by ID
     pub fn get(&self, order_id: &OrderId) -> Result<Option<CourtOrder>> {
-        match self.db.get(cf::LEGAL_ORDERS, order_id)? {
-            Some(bytes) => {
-                let order: CourtOrder = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(order))
-            }
+        match self.db.get(cf::LEGAL_ORDERS, order_key(order_id))? {
+            Some(bytes) => Ok(Some(decode_order(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if order exists
     pub fn exists(&self, order_id: &OrderId) -> Result<bool> {
-        self.db.contains(cf::LEGAL_ORDERS, order_id)
+        self.db.contains(cf::LEGAL_ORDERS, order_key(order_id))
     }
 
     /// Update order status
@@ -336,9 +465,11 @@ impl<'a> OrderStore<'a> {
             Some(mut order) => {
                 order.status = status;
                 order.updated_at = timestamp;
-                let bytes = bincode::serialize(&order)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::LEGAL_ORDERS, order_id, &bytes)
+                self.db.put(
+                    cf::LEGAL_ORDERS,
+                    order_key(order_id),
+                    &encode_order(&order)?,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "Order not found: {:?}",
@@ -372,8 +503,7 @@ impl<'a> OrderStore<'a> {
     pub fn list_active(&self, current_time: Timestamp) -> Result<Vec<CourtOrder>> {
         let mut orders = Vec::new();
         for (_, value) in self.db.iter(cf::LEGAL_ORDERS)? {
-            let order: CourtOrder = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let order = decode_order(&value)?;
             if order.is_in_effect(current_time) {
                 orders.push(order);
             }
@@ -386,20 +516,21 @@ impl<'a> OrderStore<'a> {
         let mut ids = self.get_case_order_ids(case_id)?;
         if !ids.contains(order_id) {
             ids.push(*order_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::LEGAL_CASE_ORDER_INDEX, case_id, &bytes)?;
+            self.db.put(
+                cf::LEGAL_CASE_ORDER_INDEX,
+                case_order_index_key(case_id),
+                &encode_id_list(&ids)?,
+            )?;
         }
         Ok(())
     }
 
     fn get_case_order_ids(&self, case_id: &CaseId) -> Result<Vec<OrderId>> {
-        match self.db.get(cf::LEGAL_CASE_ORDER_INDEX, case_id)? {
-            Some(bytes) => {
-                let ids: Vec<OrderId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(ids)
-            }
+        match self
+            .db
+            .get(cf::LEGAL_CASE_ORDER_INDEX, case_order_index_key(case_id))?
+        {
+            Some(bytes) => decode_id_list(&bytes),
             None => Ok(Vec::new()),
         }
     }
@@ -421,9 +552,11 @@ impl<'a> BenefitStore<'a> {
 
     /// Store a benefit determination
     pub fn put(&self, benefit: &BenefitDetermination) -> Result<()> {
-        let bytes = bincode::serialize(benefit)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::LEGAL_BENEFITS, &benefit.benefit_id, &bytes)?;
+        self.db.put(
+            cf::LEGAL_BENEFITS,
+            benefit_key(&benefit.benefit_id),
+            &encode_benefit(benefit)?,
+        )?;
 
         // Update jurisdiction index
         self.add_to_jurisdiction_index(&benefit.jurisdiction_code, &benefit.benefit_id)?;
@@ -433,19 +566,16 @@ impl<'a> BenefitStore<'a> {
 
     /// Get a benefit by ID
     pub fn get(&self, benefit_id: &BenefitId) -> Result<Option<BenefitDetermination>> {
-        match self.db.get(cf::LEGAL_BENEFITS, benefit_id)? {
-            Some(bytes) => {
-                let benefit: BenefitDetermination = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(benefit))
-            }
+        match self.db.get(cf::LEGAL_BENEFITS, benefit_key(benefit_id))? {
+            Some(bytes) => Ok(Some(decode_benefit(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if benefit exists
     pub fn exists(&self, benefit_id: &BenefitId) -> Result<bool> {
-        self.db.contains(cf::LEGAL_BENEFITS, benefit_id)
+        self.db
+            .contains(cf::LEGAL_BENEFITS, benefit_key(benefit_id))
     }
 
     /// Update benefit status
@@ -459,9 +589,11 @@ impl<'a> BenefitStore<'a> {
             Some(mut benefit) => {
                 benefit.status = status;
                 benefit.updated_at = timestamp;
-                let bytes = bincode::serialize(&benefit)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::LEGAL_BENEFITS, benefit_id, &bytes)
+                self.db.put(
+                    cf::LEGAL_BENEFITS,
+                    benefit_key(benefit_id),
+                    &encode_benefit(&benefit)?,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "Benefit not found: {:?}",
@@ -474,8 +606,7 @@ impl<'a> BenefitStore<'a> {
     pub fn get_by_subject(&self, subject_nullifier: &[u8; 32]) -> Result<Vec<BenefitDetermination>> {
         let mut benefits = Vec::new();
         for (_, value) in self.db.iter(cf::LEGAL_BENEFITS)? {
-            let benefit: BenefitDetermination = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let benefit = decode_benefit(&value)?;
             if benefit.subject_nullifier == *subject_nullifier {
                 benefits.push(benefit);
             }
@@ -512,8 +643,7 @@ impl<'a> BenefitStore<'a> {
     pub fn list_approved(&self, current_time: Timestamp) -> Result<Vec<BenefitDetermination>> {
         let mut benefits = Vec::new();
         for (_, value) in self.db.iter(cf::LEGAL_BENEFITS)? {
-            let benefit: BenefitDetermination = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let benefit = decode_benefit(&value)?;
             if benefit.is_valid(current_time) {
                 benefits.push(benefit);
             }
@@ -523,30 +653,28 @@ impl<'a> BenefitStore<'a> {
 
     // Index helpers
     fn add_to_jurisdiction_index(&self, jurisdiction: &str, benefit_id: &BenefitId) -> Result<()> {
-        let key = format!("{}:benefit", jurisdiction);
-        let mut ids = self.get_jurisdiction_ids(&key)?;
+        let key = jurisdiction_index_key(jurisdiction, "benefit");
+        let mut ids = self.get_jurisdiction_ids(jurisdiction)?;
         if !ids.contains(benefit_id) {
             ids.push(*benefit_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::LEGAL_JURISDICTION_INDEX, key.as_bytes(), &bytes)?;
+            self.db
+                .put(cf::LEGAL_JURISDICTION_INDEX, &key, &encode_id_list(&ids)?)?;
         }
         Ok(())
     }
 
-    fn get_jurisdiction_ids(&self, key: &str) -> Result<Vec<[u8; 32]>> {
-        match self.db.get(cf::LEGAL_JURISDICTION_INDEX, key.as_bytes())? {
-            Some(bytes) => {
-                let ids: Vec<[u8; 32]> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(ids)
-            }
+    fn get_jurisdiction_ids(&self, jurisdiction: &str) -> Result<Vec<[u8; 32]>> {
+        match self.db.get(
+            cf::LEGAL_JURISDICTION_INDEX,
+            &jurisdiction_index_key(jurisdiction, "benefit"),
+        )? {
+            Some(bytes) => decode_id_list(&bytes),
             None => Ok(Vec::new()),
         }
     }
 
     fn get_jurisdiction_benefit_ids(&self, jurisdiction: &str) -> Result<Vec<BenefitId>> {
-        self.get_jurisdiction_ids(&format!("{}:benefit", jurisdiction))
+        self.get_jurisdiction_ids(jurisdiction)
     }
 }
 
@@ -566,31 +694,29 @@ impl<'a> LegalProofStore<'a> {
 
     /// Store a proof
     pub fn put(&self, proof: &LegalProofEnvelope) -> Result<()> {
-        let bytes = bincode::serialize(proof)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::LEGAL_PROOFS, &proof.proof_id, &bytes)
+        self.db.put(
+            cf::LEGAL_PROOFS,
+            proof_key(&proof.proof_id),
+            &encode_proof(proof)?,
+        )
     }
 
     /// Get a proof by ID
     pub fn get(&self, proof_id: &ProofId) -> Result<Option<LegalProofEnvelope>> {
-        match self.db.get(cf::LEGAL_PROOFS, proof_id)? {
-            Some(bytes) => {
-                let proof: LegalProofEnvelope = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(proof))
-            }
+        match self.db.get(cf::LEGAL_PROOFS, proof_key(proof_id))? {
+            Some(bytes) => Ok(Some(decode_proof(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if proof exists
     pub fn exists(&self, proof_id: &ProofId) -> Result<bool> {
-        self.db.contains(cf::LEGAL_PROOFS, proof_id)
+        self.db.contains(cf::LEGAL_PROOFS, proof_key(proof_id))
     }
 
     /// Delete a proof
     pub fn delete(&self, proof_id: &ProofId) -> Result<()> {
-        self.db.delete(cf::LEGAL_PROOFS, proof_id)
+        self.db.delete(cf::LEGAL_PROOFS, proof_key(proof_id))
     }
 
     /// Get valid proofs for subject (not expired)
@@ -601,8 +727,7 @@ impl<'a> LegalProofStore<'a> {
     ) -> Result<Vec<LegalProofEnvelope>> {
         let mut proofs = Vec::new();
         for (_, value) in self.db.iter(cf::LEGAL_PROOFS)? {
-            let proof: LegalProofEnvelope = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let proof = decode_proof(&value)?;
             if proof.subject_nullifier == *subject_nullifier
                 && (proof.expires_at == 0 || proof.expires_at > current_time)
             {
@@ -616,8 +741,7 @@ impl<'a> LegalProofStore<'a> {
     pub fn get_by_profile(&self, profile_id: &str) -> Result<Vec<LegalProofEnvelope>> {
         let mut proofs = Vec::new();
         for (_, value) in self.db.iter(cf::LEGAL_PROOFS)? {
-            let proof: LegalProofEnvelope = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let proof = decode_proof(&value)?;
             if proof.profile_id == profile_id {
                 proofs.push(proof);
             }
@@ -642,13 +766,11 @@ impl<'a> LegalEventStore<'a> {
 
     /// Store an event
     pub fn put(&self, block_height: BlockHeight, tx_index: u32, event: &LegalEvent) -> Result<()> {
-        let mut key = [0u8; 12];
-        key[..8].copy_from_slice(&block_height.to_be_bytes());
-        key[8..12].copy_from_slice(&tx_index.to_be_bytes());
-
-        let bytes = bincode::serialize(event)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::LEGAL_SYSTEM_EVENTS, &key, &bytes)
+        self.db.put(
+            cf::LEGAL_SYSTEM_EVENTS,
+            &legal_event_key(block_height, tx_index),
+            &encode_legal_event(event)?,
+        )
     }
 
     /// Get events by block height range
@@ -671,9 +793,7 @@ impl<'a> LegalEventStore<'a> {
             let idx = u32::from_be_bytes(idx_bytes);
 
             if height >= start_height && height <= end_height {
-                let event: LegalEvent = bincode::deserialize(&value)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                events.push((height, idx, event));
+                events.push((height, idx, decode_legal_event(&value)?));
             }
         }
         Ok(events)
