@@ -177,7 +177,7 @@ pub use healthcare_executor::{HealthcareExecutionResult, HealthcareExecutor, Hea
 pub use legal_executor::{LegalExecutionResult, LegalExecutor, LegalGates};
 pub use mempool::{Mempool, MempoolConfig, MempoolStats};
 pub use messaging_executor::{MessagingExecutionResult, MessagingExecutor};
-pub use nft_executor::{NftExecutionResult, NftExecutor};
+pub use nft_executor::{NftExecutionResult, NftExecutor, NftGates};
 pub use node_registry::{NodeRegistryExecutionResult, NodeRegistryExecutor};
 pub use policy_account_executor::{PolicyAccountExecutionResult, PolicyAccountExecutor};
 pub use storage_metadata::{

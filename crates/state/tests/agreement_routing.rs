@@ -2673,3 +2673,252 @@ fn only_the_issuer_may_revoke_or_update_its_own_attestation() {
         "and nothing else in the packet moved"
     );
 }
+
+// ── Class 8: Agreement signature integrity, and its activation ───────────────
+//
+// `docs/lane-a/ACTIVATION-AUDIT.md` rows OV-28 and OV-29. One gate, because
+// they are two halves of one invariant: the rows in `AGREEMENT_SIGNATURES` and
+// the `signed` flags on the agreement's parties are supposed to be the same
+// fact recorded twice.
+//
+//   * OV-28 -- a signature naming a party the agreement does not bind is stored
+//     anyway, and `v_mark_party_signed` rewrites the agreement row while
+//     matching nobody. The signature family ends up holding rows for parties the
+//     agreement has never heard of.
+//   * OV-29 -- `RevokeSignature` deletes the signature row and leaves the
+//     party's flag set, so an agreement promoted to `Executed` by that very
+//     signature stays `Executed` with the signature gone, and no path anywhere
+//     recomputes it.
+//
+// Gated on `agreement_signature_integrity_enabled_from_height`. Activating
+// either alone leaves the two records disagreeing in a NEW way rather than the
+// old one: flag-clearing without the party check can clear a flag some other
+// signature set, and the party check without flag-clearing still lets every
+// revocation strand an `Executed` status.
+//
+// The pinning test above, `a_signature_for_a_party_outside_the_agreement_is_still_recorded`,
+// is untouched and still passes: it drives `execute_tx`, whose params leave this
+// gate closed, which is the release configuration.
+
+use sumchain_state::AgreementGates;
+
+/// Drive one Agreement operation through the gate seam.
+fn agreement_at(
+    view: &mut ExecutionView<'_, '_>,
+    sender: &Address,
+    op: AgreementOperation,
+    payload: &impl serde::Serialize,
+    gates: AgreementGates,
+) -> sumchain_state::AgreementExecutionResult {
+    let proposer = Address::new([9; 20]);
+    AgreementExecutor::execute_with_gates(
+        view,
+        sender,
+        &AgreementTxData {
+            operation: op,
+            data: bincode::serialize(payload).unwrap(),
+            recipient: Address::ZERO,
+        },
+        &proposer,
+        100,
+        1,
+        1_000,
+        0,
+        sumchain_primitives::Hash::ZERO,
+        gates,
+    )
+    .unwrap()
+}
+
+/// OV-28: a signature for somebody the agreement does not bind.
+#[test]
+fn a_signature_from_a_stranger_to_the_agreement_is_stored_only_below_the_gate() {
+    for gates in [AgreementGates::CLOSED, AgreementGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let actor = KeyPair::generate();
+        fund(&db, &actor, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        assert!(
+            agreement_at(
+                &mut view,
+                &actor.address(),
+                AgreementOperation::CommitAgreement,
+                &two_party_agreement(101),
+                gates
+            )
+            .success
+        );
+        let before = AgreementExecutor::v_get_agreement(&view, &[101u8; 32])
+            .unwrap()
+            .unwrap();
+
+        // 0xFE is neither of this agreement's two parties.
+        let stranger = agreement_at(
+            &mut view,
+            &actor.address(),
+            AgreementOperation::SignAgreement,
+            &signature_for(101, 0xFE, 0xCF, AgreementRole::Witness),
+            gates,
+        );
+        assert_eq!(
+            stranger.success, !gates.signature_integrity,
+            "an unbound party's signature is recorded, until the gate"
+        );
+        assert_eq!(
+            AgreementExecutor::v_get_signature(&view, &[0xCFu8; 32])
+                .unwrap()
+                .is_some(),
+            !gates.signature_integrity,
+            "and so is its row"
+        );
+
+        // Below the gate the agreement row is rewritten for nothing: no flag
+        // moved, but `updated_at` did. Above it the row is not touched at all.
+        let after = AgreementExecutor::v_get_agreement(&view, &[101u8; 32])
+            .unwrap()
+            .unwrap();
+        assert!(
+            after.parties.iter().all(|p| !p.signed),
+            "no flag flips under either gate — nobody matched"
+        );
+        assert_eq!(after.status, AgreementStatus::PendingSignatures);
+        assert_eq!(
+            after == before,
+            gates.signature_integrity,
+            "below the gate a signature matching nobody still rewrote the row"
+        );
+
+        // The bound parties still sign under either gate, so the gate narrows
+        // the rule rather than breaking it.
+        for (commitment, sig_id, role) in [
+            (0xA1u8, 0xC1u8, AgreementRole::Buyer),
+            (0xB2, 0xC2, AgreementRole::Seller),
+        ] {
+            assert!(
+                agreement_at(
+                    &mut view,
+                    &actor.address(),
+                    AgreementOperation::SignAgreement,
+                    &signature_for(101, commitment, sig_id, role),
+                    gates
+                )
+                .success,
+                "a bound party signs under either gate"
+            );
+        }
+        assert_eq!(
+            AgreementExecutor::v_get_agreement(&view, &[101u8; 32])
+                .unwrap()
+                .unwrap()
+                .status,
+            AgreementStatus::Executed,
+            "and both signatures still execute the agreement"
+        );
+    }
+}
+
+/// OV-29: the signature goes, the flag stays, and `Executed` stays with it.
+#[test]
+fn revoking_a_signature_leaves_the_agreement_executed_only_below_the_gate() {
+    #[derive(serde::Serialize)]
+    struct Revoke {
+        signature_id: [u8; 32],
+    }
+
+    for gates in [AgreementGates::CLOSED, AgreementGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let actor = KeyPair::generate();
+        fund(&db, &actor, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        assert!(
+            agreement_at(
+                &mut view,
+                &actor.address(),
+                AgreementOperation::CommitAgreement,
+                &two_party_agreement(102),
+                gates
+            )
+            .success
+        );
+        for (commitment, sig_id, role) in [
+            (0xA1u8, 0xC1u8, AgreementRole::Buyer),
+            (0xB2, 0xC2, AgreementRole::Seller),
+        ] {
+            assert!(
+                agreement_at(
+                    &mut view,
+                    &actor.address(),
+                    AgreementOperation::SignAgreement,
+                    &signature_for(102, commitment, sig_id, role),
+                    gates
+                )
+                .success
+            );
+        }
+        assert_eq!(
+            AgreementExecutor::v_get_agreement(&view, &[102u8; 32])
+                .unwrap()
+                .unwrap()
+                .status,
+            AgreementStatus::Executed,
+            "fully signed, under either gate"
+        );
+
+        assert!(
+            agreement_at(
+                &mut view,
+                &actor.address(),
+                AgreementOperation::RevokeSignature,
+                &Revoke {
+                    signature_id: [0xC1u8; 32],
+                },
+                gates
+            )
+            .success,
+            "the revocation itself succeeds under either gate"
+        );
+        assert!(
+            AgreementExecutor::v_get_signature(&view, &[0xC1u8; 32])
+                .unwrap()
+                .is_none(),
+            "and the signature row is gone under either gate"
+        );
+
+        let a = AgreementExecutor::v_get_agreement(&view, &[102u8; 32])
+            .unwrap()
+            .unwrap();
+        let buyer = a
+            .parties
+            .iter()
+            .find(|p| p.party_ref == PartyRef::Commitment([0xA1u8; 32]))
+            .expect("the buyer is bound");
+        assert_eq!(
+            buyer.signed, !gates.signature_integrity,
+            "the flag outlives the signature, until the gate"
+        );
+        assert_eq!(buyer.signed_at.is_some(), !gates.signature_integrity);
+        assert_eq!(
+            a.status,
+            if gates.signature_integrity {
+                AgreementStatus::PendingSignatures
+            } else {
+                AgreementStatus::Executed
+            },
+            "below the gate the agreement is Executed with the signature that \
+             executed it deleted"
+        );
+
+        // The other party is untouched either way: a revocation clears exactly
+        // one party's flag.
+        let seller = a
+            .parties
+            .iter()
+            .find(|p| p.party_ref == PartyRef::Commitment([0xB2u8; 32]))
+            .expect("the seller is bound");
+        assert!(seller.signed, "the seller's signature still stands");
+    }
+}

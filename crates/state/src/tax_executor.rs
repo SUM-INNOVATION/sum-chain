@@ -60,6 +60,9 @@ pub struct TaxGates {
     /// Executor-written timestamps are the block's, not a literal zero.
     /// ACTIVATION-AUDIT class 2.
     pub real_block_timestamp: bool,
+    /// The proof store and `TAX_SUBJECT_INDEX` stop disagreeing.
+    /// ACTIVATION-AUDIT rows OV-1, OV-2 and OV-3.
+    pub proof_lifecycle: bool,
 }
 
 impl TaxGates {
@@ -67,12 +70,14 @@ impl TaxGates {
     pub const CLOSED: Self = Self {
         authorization: false,
         real_block_timestamp: false,
+        proof_lifecycle: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
     pub const OPEN: Self = Self {
         authorization: true,
         real_block_timestamp: true,
+        proof_lifecycle: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -80,6 +85,7 @@ impl TaxGates {
         Self {
             authorization: TaxExecutor::authorization_gate_open(params, block_height),
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
+            proof_lifecycle: TaxExecutor::proof_lifecycle_gate_open(params, block_height),
         }
     }
 }
@@ -116,6 +122,36 @@ impl TaxExecutor {
     #[inline]
     pub fn authorization_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
         matches!(Self::authorization_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the Tax proof lifecycle rules.
+    ///
+    /// Reads `params.tax_proof_lifecycle_enabled_from_height`, and nothing else.
+    /// `None` -- the default, and what a genesis written before the field
+    /// existed resolves to -- closes the gate, so a node executes exactly what
+    /// it executed before the field was declared.
+    ///
+    /// Below the gate (ACTIVATION-AUDIT rows OV-1, OV-2 and OV-3):
+    ///
+    ///   * `IssueClaim` overwrites any existing proof row, because the proof id
+    ///     is chosen by the sender and nothing checks whether it is taken;
+    ///   * `RevokeClaim` reads its 32-byte payload field as a PROOF ID while
+    ///     calling it a subject nullifier, so revocation by subject never finds
+    ///     anything;
+    ///   * deleting a proof leaves its `TAX_SUBJECT_INDEX` entry behind.
+    ///
+    /// At and above it a duplicate proof id is refused, `RevokeClaim` resolves
+    /// its payload through the subject index, and the index row goes with the
+    /// proofs it named.
+    #[inline]
+    fn proof_lifecycle_activation(params: &ChainParams) -> Option<u64> {
+        params.tax_proof_lifecycle_enabled_from_height
+    }
+
+    /// Whether the Tax proof lifecycle rules are active at `block_height`.
+    #[inline]
+    pub fn proof_lifecycle_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::proof_lifecycle_activation(params), Some(h) if block_height >= h)
     }
 
     /// Is `sender` a registered tax issuer whose standing is still `Active`?
@@ -364,6 +400,16 @@ impl TaxExecutor {
                     return Ok(TaxExecutionResult::failure("Not active"));
                 }
 
+                // OV-1: the proof id comes from the sender's payload and nothing
+                // below the gate checks whether it is taken, so issuing a claim
+                // is a blind overwrite of anybody's proof -- and the replaced
+                // proof's subject-index entry is left naming a row whose subject
+                // is now somebody else's. Refused before the fee, like every
+                // other duplicate guard in this file.
+                if gates.proof_lifecycle && Self::v_get_proof(view, &proof.proof_id)?.is_some() {
+                    return Ok(TaxExecutionResult::failure("Proof already exists"));
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -386,6 +432,26 @@ impl TaxExecutor {
 
                 if issuer.status != TaxIssuerStatus::Active {
                     return Ok(TaxExecutionResult::failure("Not active"));
+                }
+
+                // OV-2 and OV-3. The payload field is a SUBJECT NULLIFIER and is
+                // named one; below the gate it is handed straight to the proof
+                // store, which keys by proof id, so a revocation naming a subject
+                // finds nothing and a revocation naming a proof id succeeds. At
+                // and above the gate it is resolved through the subject index,
+                // which is what it is a key for, and every proof the subject has
+                // goes -- together with the index row, so the deletion stops
+                // leaving a pointer to rows that are gone.
+                if gates.proof_lifecycle {
+                    if Self::v_get_subject_proof_ids(view, &d.subject_nullifier)?.is_empty() {
+                        return Ok(TaxExecutionResult::failure("Not found"));
+                    }
+
+                    StateManager::v_deduct(view, sender, fee)?;
+                    StateManager::v_credit(view, proposer, fee)?;
+                    StateManager::v_increment_nonce(view, sender)?;
+                    Self::v_delete_subject_proofs(view, &d.subject_nullifier)?;
+                    return Ok(TaxExecutionResult::success());
                 }
 
                 if Self::v_get_proof(view, &d.subject_nullifier)?.is_none() {

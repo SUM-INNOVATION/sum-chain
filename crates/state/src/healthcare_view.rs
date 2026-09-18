@@ -219,16 +219,29 @@ impl HealthcareExecutor {
         }
     }
 
-    /// The mirror of the above, and NOT its symmetric opposite: this one always
-    /// writes both the provider row and the index.
+    /// The mirror of the above, and -- below the gate -- NOT its symmetric
+    /// opposite: that one writes nothing when there is nothing to do, this one
+    /// always writes both the provider row and the index.
+    ///
+    /// ACTIVATION-AUDIT row OV-20. Removing an affiliation the provider never
+    /// had still rewrites the provider row with a bumped `updated_at`, and still
+    /// calls `v_remove_from_network_index`, which CREATES an empty list row
+    /// where the plan had no index row at all. With `state_precondition` open
+    /// the guard is the exact negation of the add path's: no membership in the
+    /// list, no write.
     pub fn v_remove_network_affiliation(
         view: &mut ExecutionView<'_, '_>,
         provider_id: &ProviderId,
         plan_id: &ProviderId,
         timestamp: Timestamp,
+        state_precondition_gate_open: bool,
     ) -> Result<()> {
         match Self::v_get_provider(view, provider_id)? {
             Some(mut provider) => {
+                if state_precondition_gate_open && !provider.network_affiliations.contains(plan_id)
+                {
+                    return Ok(());
+                }
                 provider.network_affiliations.retain(|p| p != plan_id);
                 provider.updated_at = timestamp;
                 let bytes = encode_provider(&provider).map_err(StateError::Storage)?;
@@ -397,14 +410,25 @@ impl HealthcareExecutor {
 
     /// Unconditional, unlike the add: removing a dependent that was never there
     /// still rewrites the row and bumps `updated_at`.
+    /// ACTIVATION-AUDIT row OV-20, the membership half. Below the gate this is
+    /// unconditional like its provider twin: removing a dependent the membership
+    /// never had still rewrites the row with a bumped `updated_at`. With
+    /// `state_precondition` open it is the negation of `v_add_dependent`'s
+    /// `contains` guard -- nothing to remove, nothing written.
     pub fn v_remove_dependent(
         view: &mut ExecutionView<'_, '_>,
         membership_id: &MembershipId,
         dependent_commitment: &[u8; 32],
         timestamp: Timestamp,
+        state_precondition_gate_open: bool,
     ) -> Result<()> {
         match Self::v_get_membership(view, membership_id)? {
             Some(mut membership) => {
+                if state_precondition_gate_open
+                    && !membership.dependents.contains(dependent_commitment)
+                {
+                    return Ok(());
+                }
                 membership.dependents.retain(|d| d != dependent_commitment);
                 membership.updated_at = timestamp;
                 let bytes = encode_membership(&membership).map_err(StateError::Storage)?;

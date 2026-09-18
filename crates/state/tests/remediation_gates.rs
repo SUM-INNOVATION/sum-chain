@@ -1,4 +1,4 @@
-//! The twelve remediation gates read the twelve fields they name.
+//! The sixteen remediation gates read the sixteen fields they name.
 //!
 //! The activation audit produced thirty-three remedies. Each is a consensus
 //! change, so each sits behind an activation height, and each height is read by
@@ -18,12 +18,17 @@
 //! as the unremediated binary — and every existing test passes.
 //!
 //! So the wiring is asserted against the source rather than against behaviour.
-//! Twelve accessors, twelve fields, and the pairing between them is the claim:
-//! the realistic bug in twelve near-identical three-line functions is not a
-//! missing one, it is two of them reading each other's field.
+//! Sixteen accessors, sixteen fields, and the pairing between them is the claim:
+//! the realistic bug in sixteen near-identical three-line functions is not a
+//! missing one, it is two of them reading each other's field. Four subsystems
+//! now declare TWO accessors apiece in one file -- `tax_executor.rs` has
+//! `authorization_activation` and `proof_lifecycle_activation`,
+//! `healthcare_executor.rs` has `authorization_activation` and
+//! `state_precondition_activation` -- which is exactly the neighbourhood the
+//! swap happens in.
 //!
 //! What this does NOT claim: that any gate is open, or that opening one is
-//! correct. `ChainParams::default()` leaves all twelve dormant, which is pinned
+//! correct. `ChainParams::default()` leaves all sixteen dormant, which is pinned
 //! below, and the mixed-version tests in the routing suites are what show the
 //! two sides disagreeing once a height is set.
 
@@ -95,6 +100,26 @@ const WIRING: &[(&str, &str, &str)] = &[
         "subsystem_tx_index_activation",
         "subsystem_tx_index_enabled_from_height",
     ),
+    (
+        "tax_executor.rs",
+        "proof_lifecycle_activation",
+        "tax_proof_lifecycle_enabled_from_height",
+    ),
+    (
+        "nft_executor.rs",
+        "token_authority_activation",
+        "nft_token_authority_enabled_from_height",
+    ),
+    (
+        "agreement_executor.rs",
+        "signature_integrity_activation",
+        "agreement_signature_integrity_enabled_from_height",
+    ),
+    (
+        "healthcare_executor.rs",
+        "state_precondition_activation",
+        "healthcare_state_precondition_enabled_from_height",
+    ),
 ];
 
 fn source(file: &str) -> String {
@@ -161,30 +186,34 @@ fn every_remediation_gate_reads_the_field_it_names() {
             read,
             BTreeSet::from([*field]),
             "{file}::{accessor} reads {read:?}, and must read only `{field}` — \
-             two of twelve near-identical accessors swapping fields is the \
+             two of sixteen near-identical accessors swapping fields is the \
              failure this pairing exists to catch"
         );
     }
 }
 
-/// The twelve fields are distinct, and there are twelve of them.
+/// The sixteen fields are distinct, and there are sixteen of them.
 ///
 /// A copy-paste that left two accessors pointing at one field would satisfy the
 /// pairing test above for one of them and be caught here.
 ///
-/// It was eleven. The twelfth is `subsystem_tx_index_enabled_from_height`, and
-/// its neighbour `subsystem_block_timestamp_enabled_from_height` is exactly the
-/// field a copy-paste would have left it reading — which is why the count and
-/// the distinctness are both asserted rather than either alone.
+/// It was eleven, then twelve. The twelfth was
+/// `subsystem_tx_index_enabled_from_height`, and its neighbour
+/// `subsystem_block_timestamp_enabled_from_height` is exactly the field a
+/// copy-paste would have left it reading — which is why the count and the
+/// distinctness are both asserted rather than either alone. Class 8 brought
+/// four more, two of them a SECOND accessor in a file that already had one
+/// (`tax_executor.rs`, `healthcare_executor.rs`), which is the same hazard one
+/// step closer.
 #[test]
-fn the_twelve_gates_are_twelve_distinct_fields() {
+fn the_sixteen_gates_are_sixteen_distinct_fields() {
     let fields: BTreeSet<&str> = WIRING.iter().map(|(_, _, f)| *f).collect();
     assert_eq!(
         fields.len(),
-        12,
-        "expected twelve distinct fields: {fields:?}"
+        16,
+        "expected sixteen distinct fields: {fields:?}"
     );
-    assert_eq!(WIRING.len(), 12, "expected twelve accessors");
+    assert_eq!(WIRING.len(), 16, "expected sixteen accessors");
 }
 
 /// Wiring a gate is not opening it: the release configuration is unchanged.
@@ -192,8 +221,8 @@ fn the_twelve_gates_are_twelve_distinct_fields() {
 /// This is the whole reason adding the fields is safe to do in one commit
 /// separate from any decision to activate. Every gate defaults dormant, so a
 /// node built from this commit executes exactly what a node built before it
-/// executed, and the thirty-three audit rows stay REACHABLE until a deployed
-/// `genesis.json` sets a height.
+/// executed, and every audit row behind one of them stays REACHABLE until a
+/// deployed `genesis.json` sets a height.
 #[test]
 fn every_remediation_gate_is_dormant_by_default() {
     let p = ChainParams::default();
@@ -246,6 +275,22 @@ fn every_remediation_gate_is_dormant_by_default() {
             "subsystem_tx_index_enabled_from_height",
             p.subsystem_tx_index_enabled_from_height,
         ),
+        (
+            "tax_proof_lifecycle_enabled_from_height",
+            p.tax_proof_lifecycle_enabled_from_height,
+        ),
+        (
+            "nft_token_authority_enabled_from_height",
+            p.nft_token_authority_enabled_from_height,
+        ),
+        (
+            "agreement_signature_integrity_enabled_from_height",
+            p.agreement_signature_integrity_enabled_from_height,
+        ),
+        (
+            "healthcare_state_precondition_enabled_from_height",
+            p.healthcare_state_precondition_enabled_from_height,
+        ),
     ];
     assert_eq!(dormant.len(), WIRING.len());
     for (name, value) in dormant {
@@ -259,7 +304,7 @@ fn every_remediation_gate_is_dormant_by_default() {
 
 /// A genesis written before these fields existed still parses, and reads dormant.
 ///
-/// `#[serde(default)]` is what makes adding twelve consensus-relevant fields a
+/// `#[serde(default)]` is what makes adding sixteen consensus-relevant fields a
 /// non-event for every `genesis.json` already distributed. If one of them lost
 /// the attribute, every existing file would fail to load — and it would fail at
 /// node start, on the operator's machine, not here.
@@ -275,7 +320,7 @@ fn a_genesis_written_before_these_fields_still_parses_dormant() {
         );
     }
     let back: ChainParams = serde_json::from_value(stripped).expect(
-        "a genesis with none of the twelve fields must still parse — this is what \
+        "a genesis with none of the sixteen fields must still parse — this is what \
          #[serde(default)] buys, and it is checked here rather than discovered at \
          a validator's node start",
     );
@@ -283,4 +328,8 @@ fn a_genesis_written_before_these_fields_still_parses_dormant() {
     assert_eq!(back.subsystem_block_timestamp_enabled_from_height, None);
     assert_eq!(back.tax_authorization_enabled_from_height, None);
     assert_eq!(back.subsystem_tx_index_enabled_from_height, None);
+    assert_eq!(back.tax_proof_lifecycle_enabled_from_height, None);
+    assert_eq!(back.nft_token_authority_enabled_from_height, None);
+    assert_eq!(back.agreement_signature_integrity_enabled_from_height, None);
+    assert_eq!(back.healthcare_state_precondition_enabled_from_height, None);
 }

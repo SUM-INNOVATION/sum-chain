@@ -1325,3 +1325,218 @@ fn the_claim_type_registry_is_writable_by_anyone_only_below_the_gate() {
         );
     }
 }
+
+// ── Class 8: the Tax proof lifecycle, and its activation ─────────────────────
+//
+// `docs/lane-a/ACTIVATION-AUDIT.md` rows OV-1, OV-2 and OV-3. One gate, because
+// they are one invariant: the `TAX_PROOFS` family and `TAX_SUBJECT_INDEX` are
+// supposed to agree, and each of the three is a different way they do not.
+//
+//   * OV-1 -- `IssueClaim` never checks whether the sender-chosen proof id is
+//     taken, so issuing is a blind overwrite. The replaced proof's subject-index
+//     entry survives, now naming a row about a different subject.
+//   * OV-2 -- `RevokeClaim` hands its `subject_nullifier` payload field straight
+//     to a store keyed by proof id. Both are `[u8; 32]`, so it compiles.
+//   * OV-3 -- deleting a proof removes the proof row and leaves the index entry.
+//
+// Gated on `tax_proof_lifecycle_enabled_from_height`. Splitting them would not
+// give an operator a smaller decision, it would give a differently broken chain:
+// index cleanup without the keying fix cleans the wrong subject's row, and the
+// keying fix without index cleanup strands entries faster than before.
+//
+// The two pinning tests above -- `deleting_a_proof_leaves_the_subject_index_entry_behind`
+// and `revoke_claim_keys_the_proof_store_by_nullifier` -- are untouched. They
+// drive the closed gate, which is the release configuration, and they still
+// pass: that is the claim that shipping this dormant changes nothing.
+
+/// OV-1: the proof id is the sender's to choose, and nothing checks it.
+#[test]
+fn issuing_a_claim_overwrites_an_existing_proof_only_below_the_gate() {
+    let victim_subject = [0xA1; 32];
+    let attacker_subject = [0xB2; 32];
+
+    for gates in [TaxGates::CLOSED, TaxGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let victim = KeyPair::generate();
+        let attacker = KeyPair::generate();
+        fund(&db, &victim, 100_000_000);
+        fund(&db, &attacker, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        for kp in [&victim, &attacker] {
+            assert!(
+                tax_at(
+                    &mut view,
+                    &kp.address(),
+                    TaxOperation::RegisterIssuer,
+                    &issuer_of(kp),
+                    gates
+                )
+                .success,
+                "both are registered ACTIVE issuers under either gate"
+            );
+        }
+
+        assert!(
+            tax_at(
+                &mut view,
+                &victim.address(),
+                TaxOperation::IssueClaim,
+                &proof(1, victim_subject),
+                gates
+            )
+            .success
+        );
+
+        // The same proof id, a different subject, a different issuer.
+        let stolen = tax_at(
+            &mut view,
+            &attacker.address(),
+            TaxOperation::IssueClaim,
+            &proof(1, attacker_subject),
+            gates,
+        );
+        assert_eq!(
+            stolen.success, !gates.proof_lifecycle,
+            "a blind overwrite of somebody else's proof id, until the gate"
+        );
+
+        let stored = TaxExecutor::v_get_proof(&view, &[1u8; 32])
+            .unwrap()
+            .expect("the proof row is there either way");
+        assert_eq!(
+            stored.subject_nullifier,
+            if gates.proof_lifecycle {
+                victim_subject
+            } else {
+                attacker_subject
+            },
+            "below the gate the row now belongs to the attacker's subject"
+        );
+
+        // And the victim's index entry outlives the row it named, pointing at a
+        // proof that is now about somebody else -- the OV-1 half that makes the
+        // overwrite worse than a plain replacement.
+        assert_eq!(
+            TaxExecutor::v_get_subject_proof_ids(&view, &victim_subject).unwrap(),
+            vec![[1u8; 32]],
+            "the victim's index entry survives under either gate"
+        );
+        assert_eq!(
+            TaxExecutor::v_get_subject_proof_ids(&view, &attacker_subject).unwrap(),
+            if gates.proof_lifecycle {
+                vec![]
+            } else {
+                vec![[1u8; 32]]
+            },
+            "below the gate TWO subjects name one proof row, and one of them is wrong"
+        );
+    }
+}
+
+/// OV-2 and OV-3: revocation by subject, and the index entry that outlived it.
+#[test]
+fn revocation_resolves_the_subject_and_clears_its_index_only_above_the_gate() {
+    #[derive(serde::Serialize)]
+    struct Revoke {
+        subject_nullifier: [u8; 32],
+    }
+    let subject = [0x22; 32];
+
+    for gates in [TaxGates::CLOSED, TaxGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        assert!(
+            tax_at(
+                &mut view,
+                &issuer.address(),
+                TaxOperation::RegisterIssuer,
+                &issuer_of(&issuer),
+                gates
+            )
+            .success
+        );
+        for id in [1u8, 2u8] {
+            assert!(
+                tax_at(
+                    &mut view,
+                    &issuer.address(),
+                    TaxOperation::IssueClaim,
+                    &proof(id, subject),
+                    gates
+                )
+                .success
+            );
+        }
+        assert_eq!(
+            TaxExecutor::v_get_subject_proof_ids(&view, &subject).unwrap(),
+            vec![[1u8; 32], [2u8; 32]],
+            "two proofs for the one subject, under either gate"
+        );
+
+        // OV-2. The field is a subject nullifier, and is named one. Below the
+        // gate it is used as a proof id, so this finds nothing.
+        let by_subject = tax_at(
+            &mut view,
+            &issuer.address(),
+            TaxOperation::RevokeClaim,
+            &Revoke {
+                subject_nullifier: subject,
+            },
+            gates,
+        );
+        assert_eq!(
+            by_subject.success, gates.proof_lifecycle,
+            "revoking by SUBJECT works only above the gate"
+        );
+
+        // The mirror of the same confusion: below the gate the proof id passed
+        // in the nullifier field is what actually revokes.
+        let by_proof_id = tax_at(
+            &mut view,
+            &issuer.address(),
+            TaxOperation::RevokeClaim,
+            &Revoke {
+                subject_nullifier: [1u8; 32],
+            },
+            gates,
+        );
+        assert_eq!(
+            by_proof_id.success, !gates.proof_lifecycle,
+            "revoking by PROOF ID works only below the gate"
+        );
+
+        // OV-3. Below the gate exactly one proof row went and the index still
+        // names both. Above it both rows went and the index row went with them.
+        let remaining: Vec<u8> = [1u8, 2u8]
+            .into_iter()
+            .filter(|id| {
+                TaxExecutor::v_get_proof(&view, &[*id; 32])
+                    .unwrap()
+                    .is_some()
+            })
+            .collect();
+        assert_eq!(
+            remaining,
+            if gates.proof_lifecycle {
+                Vec::<u8>::new()
+            } else {
+                vec![2u8]
+            },
+        );
+        assert_eq!(
+            TaxExecutor::v_get_subject_proof_ids(&view, &subject).unwrap(),
+            if gates.proof_lifecycle {
+                vec![]
+            } else {
+                vec![[1u8; 32], [2u8; 32]]
+            },
+            "below the gate the index still names the proof that was deleted"
+        );
+    }
+}

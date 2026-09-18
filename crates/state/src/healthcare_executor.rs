@@ -147,6 +147,9 @@ pub struct HealthcareGates {
     /// Executor-written timestamps are the block's, not a literal zero.
     /// ACTIVATION-AUDIT class 2.
     pub real_block_timestamp: bool,
+    /// A write arm reads the row it is about to change before it decides.
+    /// ACTIVATION-AUDIT rows OV-17 and OV-20.
+    pub state_precondition: bool,
 }
 
 impl HealthcareGates {
@@ -155,12 +158,14 @@ impl HealthcareGates {
     pub const CLOSED: Self = Self {
         authorization: false,
         real_block_timestamp: false,
+        state_precondition: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
     pub const OPEN: Self = Self {
         authorization: true,
         real_block_timestamp: true,
+        state_precondition: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -168,6 +173,10 @@ impl HealthcareGates {
         Self {
             authorization: HealthcareExecutor::authorization_gate_open(params, block_height),
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
+            state_precondition: HealthcareExecutor::state_precondition_gate_open(
+                params,
+                block_height,
+            ),
         }
     }
 }
@@ -209,6 +218,33 @@ impl HealthcareExecutor {
     #[inline]
     pub fn authorization_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
         matches!(Self::authorization_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the Healthcare state-precondition rules.
+    ///
+    /// Reads `params.healthcare_state_precondition_enabled_from_height`, and
+    /// nothing else. `None` -- the default, and what a genesis written before
+    /// the field existed resolves to -- closes the gate, so a node executes
+    /// exactly what it executed before the field was declared.
+    ///
+    /// Below the gate (ACTIVATION-AUDIT rows OV-17 and OV-20) `RenewMembership`
+    /// sets `status = Active` whatever the status was -- reviving a membership
+    /// that was suspended, terminated or cancelled, and bypassing
+    /// `ReinstateMembership`, which is the operation with a status guard on it
+    /// -- and the two removal arms write the row and the index whether or not
+    /// the thing being removed was ever there. At and above it renewal refuses
+    /// those three statuses, and a removal with nothing to remove writes
+    /// nothing, exactly as its `contains`-guarded add mirror does.
+    #[inline]
+    fn state_precondition_activation(params: &ChainParams) -> Option<u64> {
+        params.healthcare_state_precondition_enabled_from_height
+    }
+
+    /// Whether the Healthcare state-precondition rules are active at
+    /// `block_height`.
+    #[inline]
+    pub fn state_precondition_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::state_precondition_activation(params), Some(h) if block_height >= h)
     }
 
     /// Who may fill or partially fill a prescription, at the gate.
@@ -496,6 +532,7 @@ impl HealthcareExecutor {
                     &d.provider_id,
                     &d.plan_id,
                     block_timestamp,
+                    gates.state_precondition,
                 )?;
                 debug!("Network affiliation removed: {:?} -> {:?}", d.provider_id, d.plan_id);
                 Ok(HealthcareExecutionResult::success())
@@ -580,6 +617,28 @@ impl HealthcareExecutor {
 
                 if membership.issuer_address != *sender {
                     return Ok(HealthcareExecutionResult::failure("Only issuer can renew"));
+                }
+
+                // OV-17: `v_renew_membership` writes `status = Active`
+                // unconditionally, so below the gate a renewal is also an
+                // un-suspension, an un-termination and an un-cancellation --
+                // performed by an operation with no status guard at all, while
+                // the operation that exists for exactly that, `ReinstateMembership`,
+                // does have one and accepts only `Suspended`. A membership
+                // terminated a transaction earlier is Active by the end of the
+                // block. Refused before the fee, like `ReinstateMembership`'s
+                // own status guard.
+                if gates.state_precondition
+                    && matches!(
+                        membership.status,
+                        MembershipStatus::Suspended
+                            | MembershipStatus::Terminated
+                            | MembershipStatus::Cancelled
+                    )
+                {
+                    return Ok(HealthcareExecutionResult::failure(
+                        "A suspended, terminated or cancelled membership cannot be renewed",
+                    ));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -741,6 +800,7 @@ impl HealthcareExecutor {
                     &d.membership_id,
                     &d.dependent_commitment,
                     block_timestamp,
+                    gates.state_precondition,
                 )?;
                 debug!("Dependent removed from membership: {:?}", d.membership_id);
                 Ok(HealthcareExecutionResult::success())

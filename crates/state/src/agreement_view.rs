@@ -203,6 +203,52 @@ impl AgreementExecutor {
         }
     }
 
+    /// The inverse of [`AgreementExecutor::v_mark_party_signed`].
+    ///
+    /// ACTIVATION-AUDIT row OV-29. Deleting a signature row while the party's
+    /// `signed` flag stays set leaves an agreement `Executed` with the signature
+    /// that executed it gone, and no path anywhere recomputes the status. This
+    /// clears the flag and the timestamp, and walks the status back from
+    /// `Executed` to `PendingSignatures` when the agreement is no longer fully
+    /// signed -- exactly reversing the promotion `v_mark_party_signed` performs,
+    /// and only that one: an agreement moved to `Active`, `Terminated`,
+    /// `Superseded` or `Voided` by its own operation is not dragged backwards by
+    /// a revocation, because those statuses were not reached by signing.
+    ///
+    /// Reachable only through the gate; the signing path is untouched, so a node
+    /// below the activation height writes exactly what it wrote before.
+    pub fn v_unmark_party_signed(
+        view: &mut ExecutionView<'_, '_>,
+        agreement_id: &AgreementId,
+        party_ref_hash: &[u8; 32],
+        timestamp: Timestamp,
+    ) -> Result<()> {
+        match Self::v_get_agreement(view, agreement_id)? {
+            Some(mut agreement) => {
+                for party in &mut agreement.parties {
+                    if party.party_ref.as_hash() == *party_ref_hash {
+                        party.signed = false;
+                        party.signed_at = None;
+                    }
+                }
+                agreement.updated_at = timestamp;
+
+                if !agreement.is_fully_signed() && agreement.status == AgreementStatus::Executed {
+                    agreement.status = AgreementStatus::PendingSignatures;
+                }
+
+                let bytes = encode_commitment(&agreement).map_err(StateError::Storage)?;
+                view.put(
+                    cf::AGREEMENT_COMMITMENTS,
+                    commitment_key(agreement_id),
+                    &bytes,
+                )
+                .map_err(StateError::Storage)
+            }
+            None => Err(not_found("Agreement", agreement_id)),
+        }
+    }
+
     // ── Signatures ──────────────────────────────────────────────────────────
 
     pub fn v_get_signature(
