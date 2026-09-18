@@ -90,8 +90,58 @@ fn not_found_issuer(address: &Address) -> StateError {
     )))
 }
 
+/// How a row read with a size bound came back.
+///
+/// The third arm is the point: a row longer than the bound is reported by its
+/// stored LENGTH, without ever being decoded, so the caller can refuse the
+/// operation without paying for the value it refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundedRow<T> {
+    /// No row at that key.
+    Missing,
+    /// The row was there and within the bound, and was decoded.
+    Row(T),
+    /// The row's stored encoding is this many bytes, which is over the bound.
+    /// It was NOT decoded.
+    TooLarge(usize),
+}
+
 impl DocClassExecutor {
     // ── Identity roots, and the subject index ───────────────────────────────
+
+    /// The identity row, refusing to DECODE one whose stored encoding is longer
+    /// than `max_bytes`.
+    ///
+    /// ACTIVATION-AUDIT rows AL-10 and AL-11. The length is taken from the bytes
+    /// the view returned and compared before they reach `decode_identity_root`,
+    /// so the refusal costs one comparison and the multi-megabyte decode never
+    /// happens. `max_bytes: None` is the closed gate and is byte-for-byte
+    /// [`Self::v_get_identity_root`].
+    ///
+    /// The view read itself still copies the row out of the overlay or the
+    /// database — that copy is one buffer of the row's own size and is charged
+    /// against nothing, which is a smaller exposure than the decode this
+    /// refuses and is not what this gate is about.
+    pub fn v_get_identity_root_bounded(
+        view: &ExecutionView<'_, '_>,
+        identity_id: &CredentialId,
+        max_bytes: Option<usize>,
+    ) -> Result<BoundedRow<IdentityRoot>> {
+        match view
+            .get(cf::DOCCLASS_IDENTITY_ROOTS, identity_root_key(identity_id))
+            .map_err(StateError::Storage)?
+        {
+            Some(bytes) => {
+                if matches!(max_bytes, Some(max) if bytes.len() > max) {
+                    return Ok(BoundedRow::TooLarge(bytes.len()));
+                }
+                Ok(BoundedRow::Row(
+                    decode_identity_root(&bytes).map_err(StateError::Storage)?,
+                ))
+            }
+            None => Ok(BoundedRow::Missing),
+        }
+    }
 
     pub fn v_get_identity_root(
         view: &ExecutionView<'_, '_>,
@@ -214,6 +264,13 @@ impl DocClassExecutor {
     /// Read, set status and `updated_at`, write through `v_put_identity_root` --
     /// so the subject-index append runs again, exactly as the committed twin's
     /// `update_status` calls its own `put`.
+    ///
+    /// Reads through the UNBOUNDED `v_get_identity_root`, and that is not a hole
+    /// in the allocation bound: its only two callers, `deactivate_identity` and
+    /// `reactivate_identity`, have already read the same row through
+    /// `v_get_identity_root_bounded` and returned a failed receipt if it was
+    /// over the limit. The bound is enforced on the way in; this is the second
+    /// decode of a row that has already been measured.
     pub fn v_update_identity_status(
         view: &mut ExecutionView<'_, '_>,
         identity_id: &CredentialId,
@@ -496,6 +553,31 @@ impl DocClassExecutor {
     }
 
     // ── Issuer registry ─────────────────────────────────────────────────────
+
+    /// The issuer row, refusing to DECODE one whose stored encoding is longer
+    /// than `max_bytes`. See [`Self::v_get_identity_root_bounded`];
+    /// `DocClassIssuer::keys` accumulates the same way `IdentityRoot::keys`
+    /// does, through `RotateIssuerKey`.
+    pub fn v_get_docclass_issuer_bounded(
+        view: &ExecutionView<'_, '_>,
+        address: &Address,
+        max_bytes: Option<usize>,
+    ) -> Result<BoundedRow<DocClassIssuer>> {
+        match view
+            .get(cf::DOCCLASS_ISSUERS, docclass_issuer_key(address))
+            .map_err(StateError::Storage)?
+        {
+            Some(bytes) => {
+                if matches!(max_bytes, Some(max) if bytes.len() > max) {
+                    return Ok(BoundedRow::TooLarge(bytes.len()));
+                }
+                Ok(BoundedRow::Row(
+                    decode_docclass_issuer(&bytes).map_err(StateError::Storage)?,
+                ))
+            }
+            None => Ok(BoundedRow::Missing),
+        }
+    }
 
     pub fn v_get_docclass_issuer(
         view: &ExecutionView<'_, '_>,

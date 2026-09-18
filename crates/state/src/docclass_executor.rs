@@ -25,6 +25,7 @@ use sumchain_primitives::{
 };
 use tracing::{debug, warn};
 
+use crate::docclass_view::BoundedRow;
 use crate::{Result, SchemaValidator, StateError, StateManager};
 
 /// Domain separator for the keyless DocClass issuer-stake escrow account.
@@ -57,9 +58,25 @@ pub struct DocClassGates {
     /// Executor-written timestamps are the block's, not a literal zero.
     /// ACTIVATION-AUDIT class 2.
     pub real_block_timestamp: bool,
+    /// A transaction's sizing inputs are checked against a limit BEFORE the
+    /// value they size is built: an oversized payload is refused before it is
+    /// decoded, and a stored row past the limit is refused before it is decoded
+    /// and re-encoded. ACTIVATION-AUDIT rows AL-10 and AL-11.
+    pub allocation_bound: bool,
 }
 
 impl DocClassGates {
+    /// The stored-row length limit this gate imposes, or `None` when closed.
+    ///
+    /// `None` is what every bounded reader in `docclass_view.rs` treats as "no
+    /// limit", so a closed gate reads byte-for-byte what the unbounded reader
+    /// read.
+    #[inline]
+    pub fn row_limit(self) -> Option<usize> {
+        self.allocation_bound
+            .then_some(crate::MAX_ACCUMULATING_ROW_BYTES)
+    }
+
     /// Every gate closed -- the release configuration today, under both
     /// readings, because none of the fields these read exists in `ChainParams`.
     pub const CLOSED: Self = Self {
@@ -67,6 +84,7 @@ impl DocClassGates {
         subject_index_split: false,
         revocation_standing: false,
         real_block_timestamp: false,
+        allocation_bound: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -75,6 +93,7 @@ impl DocClassGates {
         subject_index_split: true,
         revocation_standing: true,
         real_block_timestamp: true,
+        allocation_bound: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -90,6 +109,7 @@ impl DocClassGates {
                 block_height,
             ),
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
+            allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
         }
     }
 }
@@ -266,6 +286,18 @@ impl DocClassExecutor {
         )
     }
 
+    /// A stored row longer than the bound, refused without being decoded.
+    ///
+    /// One wording for every family so the refusal is greppable, and the LENGTH
+    /// is in it: an operator reading a receipt needs to know the row is over the
+    /// limit and by how much, because the remedy is not "retry".
+    fn row_too_large(what: &str, bytes: usize) -> DocClassExecutionResult {
+        DocClassExecutionResult::failure(format!(
+            "{what} too large to modify: {bytes} bytes, limit {}",
+            crate::MAX_ACCUMULATING_ROW_BYTES
+        ))
+    }
+
     /// Execute a DocClass transaction with the activation decisions supplied
     /// directly.
     ///
@@ -289,6 +321,38 @@ impl DocClassExecutor {
     ) -> Result<DocClassExecutionResult> {
         let block_timestamp =
             crate::effective_block_timestamp(block_timestamp, gates.real_block_timestamp);
+
+        // ACTIVATION-AUDIT rows AL-10, AL-11, and the DocClass half of AL-12.
+        // Every arm below opens with `bincode::deserialize(data)` and no length
+        // check ahead of it, so the only thing bounding a DocClass payload
+        // today is `max_block_bytes`. One check here, before the dispatch,
+        // rather than one per arm: the arms are eighteen and the rule is one,
+        // and a per-arm check is a rule with eighteen chances to be forgotten.
+        //
+        // This is a refusal, not an error: below the gate an undecodable
+        // payload is `Err(...)` and takes the whole block with it, and an
+        // oversized one that happens to decode is admitted. Above the gate an
+        // oversized payload is a failed receipt in a valid block, whether or not
+        // it would have decoded. That difference is the consensus change the
+        // activation height coordinates.
+        //
+        // The refusal charges nothing and does not advance the nonce, because
+        // every arm below deducts the fee itself and every pre-existing
+        // `failure()` that fires before that deduction -- "Controller must be
+        // sender", "Identity already exists", "Not authorized" -- is already
+        // free. Refusing here is consistent with those rather than with the NFT
+        // executor, which deducts once up front. It is not a new spam surface:
+        // the transaction's bytes still occupy the block that `max_block_bytes`
+        // bounds, and what changes is that the node stops doing megabytes of
+        // work for them.
+        if gates.allocation_bound && data.data.len() > crate::MAX_SUBSYSTEM_PAYLOAD_BYTES {
+            return Ok(DocClassExecutionResult::failure(format!(
+                "DocClass payload too large: {} bytes, limit {}",
+                data.data.len(),
+                crate::MAX_SUBSYSTEM_PAYLOAD_BYTES
+            )));
+        }
+
         match data.operation {
             // Identity operations (SRC-800)
             DocClassOperation::CreateIdentityRoot => Self::create_identity_root(
@@ -474,6 +538,7 @@ impl DocClassExecutor {
                 fee,
                 block_height,
                 tx_index,
+                gates,
             ),
             DocClassOperation::DeactivateIssuer => Self::deactivate_issuer(
                 view,
@@ -553,9 +618,16 @@ impl DocClassExecutor {
         let add_data: AddKeyData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let mut identity = match Self::v_get_identity_root(view, &add_data.identity_id)? {
-            Some(i) => i,
-            None => return Ok(DocClassExecutionResult::failure("Identity not found")),
+        let mut identity = match Self::v_get_identity_root_bounded(
+            view,
+            &add_data.identity_id,
+            gates.row_limit(),
+        )? {
+            BoundedRow::Row(i) => i,
+            BoundedRow::Missing => {
+                return Ok(DocClassExecutionResult::failure("Identity not found"))
+            }
+            BoundedRow::TooLarge(n) => return Ok(Self::row_too_large("Identity root", n)),
         };
 
         if identity.controller != *sender && !identity.additional_controllers.contains(sender) {
@@ -599,9 +671,16 @@ impl DocClassExecutor {
         let remove_data: RemoveKeyData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let mut identity = match Self::v_get_identity_root(view, &remove_data.identity_id)? {
-            Some(i) => i,
-            None => return Ok(DocClassExecutionResult::failure("Identity not found")),
+        let mut identity = match Self::v_get_identity_root_bounded(
+            view,
+            &remove_data.identity_id,
+            gates.row_limit(),
+        )? {
+            BoundedRow::Row(i) => i,
+            BoundedRow::Missing => {
+                return Ok(DocClassExecutionResult::failure("Identity not found"))
+            }
+            BoundedRow::TooLarge(n) => return Ok(Self::row_too_large("Identity root", n)),
         };
 
         if identity.controller != *sender && !identity.additional_controllers.contains(sender) {
@@ -645,9 +724,16 @@ impl DocClassExecutor {
         let rotate_data: RotateKeyData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let mut identity = match Self::v_get_identity_root(view, &rotate_data.identity_id)? {
-            Some(i) => i,
-            None => return Ok(DocClassExecutionResult::failure("Identity not found")),
+        let mut identity = match Self::v_get_identity_root_bounded(
+            view,
+            &rotate_data.identity_id,
+            gates.row_limit(),
+        )? {
+            BoundedRow::Row(i) => i,
+            BoundedRow::Missing => {
+                return Ok(DocClassExecutionResult::failure("Identity not found"))
+            }
+            BoundedRow::TooLarge(n) => return Ok(Self::row_too_large("Identity root", n)),
         };
 
         if identity.controller != *sender && !identity.additional_controllers.contains(sender) {
@@ -693,9 +779,16 @@ impl DocClassExecutor {
         let add_data: AddControllerData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let mut identity = match Self::v_get_identity_root(view, &add_data.identity_id)? {
-            Some(i) => i,
-            None => return Ok(DocClassExecutionResult::failure("Identity not found")),
+        let mut identity = match Self::v_get_identity_root_bounded(
+            view,
+            &add_data.identity_id,
+            gates.row_limit(),
+        )? {
+            BoundedRow::Row(i) => i,
+            BoundedRow::Missing => {
+                return Ok(DocClassExecutionResult::failure("Identity not found"))
+            }
+            BoundedRow::TooLarge(n) => return Ok(Self::row_too_large("Identity root", n)),
         };
 
         if identity.controller != *sender {
@@ -740,9 +833,16 @@ impl DocClassExecutor {
         let remove_data: RemoveControllerData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let mut identity = match Self::v_get_identity_root(view, &remove_data.identity_id)? {
-            Some(i) => i,
-            None => return Ok(DocClassExecutionResult::failure("Identity not found")),
+        let mut identity = match Self::v_get_identity_root_bounded(
+            view,
+            &remove_data.identity_id,
+            gates.row_limit(),
+        )? {
+            BoundedRow::Row(i) => i,
+            BoundedRow::Missing => {
+                return Ok(DocClassExecutionResult::failure("Identity not found"))
+            }
+            BoundedRow::TooLarge(n) => return Ok(Self::row_too_large("Identity root", n)),
         };
 
         if identity.controller != *sender {
@@ -785,9 +885,16 @@ impl DocClassExecutor {
         let update_data: UpdateServiceData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let mut identity = match Self::v_get_identity_root(view, &update_data.identity_id)? {
-            Some(i) => i,
-            None => return Ok(DocClassExecutionResult::failure("Identity not found")),
+        let mut identity = match Self::v_get_identity_root_bounded(
+            view,
+            &update_data.identity_id,
+            gates.row_limit(),
+        )? {
+            BoundedRow::Row(i) => i,
+            BoundedRow::Missing => {
+                return Ok(DocClassExecutionResult::failure("Identity not found"))
+            }
+            BoundedRow::TooLarge(n) => return Ok(Self::row_too_large("Identity root", n)),
         };
 
         if identity.controller != *sender && !identity.additional_controllers.contains(sender) {
@@ -835,9 +942,16 @@ impl DocClassExecutor {
         let deactivate: DeactivateData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let existing = match Self::v_get_identity_root(view, &deactivate.identity_id)? {
-            Some(i) => i,
-            None => return Ok(DocClassExecutionResult::failure("Identity not found")),
+        let existing = match Self::v_get_identity_root_bounded(
+            view,
+            &deactivate.identity_id,
+            gates.row_limit(),
+        )? {
+            BoundedRow::Row(i) => i,
+            BoundedRow::Missing => {
+                return Ok(DocClassExecutionResult::failure("Identity not found"))
+            }
+            BoundedRow::TooLarge(n) => return Ok(Self::row_too_large("Identity root", n)),
         };
 
         if existing.controller != *sender {
@@ -885,9 +999,16 @@ impl DocClassExecutor {
         let reactivate: ReactivateData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let existing = match Self::v_get_identity_root(view, &reactivate.identity_id)? {
-            Some(i) => i,
-            None => return Ok(DocClassExecutionResult::failure("Identity not found")),
+        let existing = match Self::v_get_identity_root_bounded(
+            view,
+            &reactivate.identity_id,
+            gates.row_limit(),
+        )? {
+            BoundedRow::Row(i) => i,
+            BoundedRow::Missing => {
+                return Ok(DocClassExecutionResult::failure("Identity not found"))
+            }
+            BoundedRow::TooLarge(n) => return Ok(Self::row_too_large("Identity root", n)),
         };
 
         if existing.controller != *sender {
@@ -1500,8 +1621,10 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Can only update own profile"));
         }
 
-        let Some(recorded) = Self::v_get_docclass_issuer(view, sender)? else {
-            return Ok(DocClassExecutionResult::failure("Not registered"));
+        let recorded = match Self::v_get_docclass_issuer_bounded(view, sender, gates.row_limit())? {
+            BoundedRow::Row(i) => i,
+            BoundedRow::Missing => return Ok(DocClassExecutionResult::failure("Not registered")),
+            BoundedRow::TooLarge(n) => return Ok(Self::row_too_large("Issuer record", n)),
         };
 
         StateManager::v_deduct(view, sender, fee)?;
@@ -1537,6 +1660,7 @@ impl DocClassExecutor {
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct RotateKeyData {
@@ -1547,9 +1671,11 @@ impl DocClassExecutor {
         let rotate: RotateKeyData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let mut issuer = match Self::v_get_docclass_issuer(view, sender)? {
-            Some(i) => i,
-            None => return Ok(DocClassExecutionResult::failure("Not registered")),
+        let mut issuer = match Self::v_get_docclass_issuer_bounded(view, sender, gates.row_limit())?
+        {
+            BoundedRow::Row(i) => i,
+            BoundedRow::Missing => return Ok(DocClassExecutionResult::failure("Not registered")),
+            BoundedRow::TooLarge(n) => return Ok(Self::row_too_large("Issuer record", n)),
         };
 
         StateManager::v_deduct(view, sender, fee)?;
@@ -1625,8 +1751,11 @@ impl DocClassExecutor {
         // registration credited the stake to nobody. ACTIVATION-AUDIT row
         // OV-26.
         if gates.stake_escrow {
-            if let Some(mut issuer) = Self::v_get_docclass_issuer(view, &deactivate.issuer_address)?
-            {
+            if let BoundedRow::Row(mut issuer) = Self::v_get_docclass_issuer_bounded(
+                view,
+                &deactivate.issuer_address,
+                gates.row_limit(),
+            )? {
                 if issuer.stake_amount > 0 {
                     let refund = issuer.stake_amount;
                     StateManager::v_deduct(view, &docclass_stake_escrow_address(), refund)?;
