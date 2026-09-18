@@ -47,10 +47,58 @@
 //!
 use sumchain_primitives::{Block, BlockHeight, Hash, Receipt};
 
-use crate::db::{cf, Database};
+use crate::db::{cf, Database, WriteBatch};
 use crate::exec_view::ExecutionView;
 use crate::overlay::ApplicationOverlay;
 use crate::{Result, StorageError};
+
+/// Stage removal of the rows [`AcceptedCandidate::publish`] derived from a block
+/// that is being ABANDONED, for the rows where abandonment is not enough.
+///
+/// The inverse of publication's index writes, and it lives here so the two
+/// cannot drift: a family added to `publish` and not to this is a row that
+/// survives its own branch.
+///
+/// Published rows divide in two, and only one half belongs here.
+///
+/// * **Branch-safe, and deliberately KEPT.** `BLOCKS[block_hash]` and
+///   `TRANSACTIONS[tx_hash]` are keyed by the hash of their own contents, so an
+///   abandoned branch's rows cannot shadow the adopted branch's. Keeping them is
+///   what lets a node reorg BACK: an ancestor walk reads parents out of
+///   `BLOCKS`, and a branch deleted on abandonment can never be re-adopted.
+///   Journals are not here either — the unwind that consumes them deletes them.
+///
+/// * **Branch-unsafe, and removed.** `BLOCK_HEIGHT[height]` is keyed by height
+///   alone, so leaving it would point the canonical height index at an abandoned
+///   block — including at heights a shorter adopted branch never republishes.
+///   `RECEIPTS[tx_hash]` is keyed by the transaction hash, but its CONTENTS
+///   (status, fee) are branch-specific. The two address indexes are keyed by
+///   `(address, height, tx_index)` with no branch identity at all, so a stale row
+///   is indistinguishable from a canonical one.
+///
+/// Takes a borrowed batch: the caller puts this, the state restore and the head
+/// reset in one atomic write, which is what gives an interrupted unwind a single
+/// resting state.
+pub fn stage_deindex(batch: &mut WriteBatch<'_>, block: &Block) -> Result<()> {
+    let height = block.height();
+    batch.delete(cf::BLOCK_HEIGHT, &height.to_be_bytes())?;
+    for (tx_index, tx) in block.transactions.iter().enumerate() {
+        let tx_index = u32::try_from(tx_index)
+            .map_err(|_| StorageError::InvalidData("transaction index exceeds u32".to_string()))?;
+        batch.delete(cf::RECEIPTS, tx.hash().as_bytes())?;
+        batch.delete(
+            cf::TX_BY_SENDER,
+            &crate::schema::TxIndexStore::sender_key(&tx.sender(), height, tx_index),
+        )?;
+        if let Some(recipient) = tx.recipient() {
+            batch.delete(
+                cf::TX_BY_RECIPIENT,
+                &crate::schema::TxIndexStore::recipient_key(&recipient, height, tx_index),
+            )?;
+        }
+    }
+    Ok(())
+}
 
 /// A block being executed against buffered state. Nothing here has touched the
 /// database.

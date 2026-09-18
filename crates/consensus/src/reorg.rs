@@ -33,7 +33,14 @@
 //! It hung, inside consensus, holding the block it was importing.
 
 use sumchain_primitives::{Block, BlockHeight, Hash};
+use sumchain_state::executor::BlockExecutor;
+use sumchain_state::reorg_undo::{
+    stage_branch_unwind, stage_head_reset, BranchJournal, UnwindReport,
+};
+use sumchain_state::state::StateManager;
+use sumchain_storage::candidate::{stage_deindex, Acceptance};
 use sumchain_storage::schema::BlockStore;
+use sumchain_storage::Database;
 
 use crate::{ConsensusError, Result};
 
@@ -194,6 +201,234 @@ pub fn plan_reorg(
         old_branch: old_walk,
         new_branch: new_walk,
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Executing a plan
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// What a switch actually did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReorgOutcome {
+    /// Blocks abandoned, records replayed, checks performed.
+    pub unwound: UnwindReport,
+    /// Blocks adopted.
+    pub applied: u64,
+    /// Of those, how many were adopted because their header root EQUALLED the
+    /// root replay computed.
+    pub verified: u64,
+    /// Of those, how many were adopted under the historical compatibility
+    /// window despite a root mismatch.
+    ///
+    /// Reported rather than hidden. `LEGACY_ROOT_COMPATIBILITY_HEIGHT` is
+    /// 496,720, so below it `accept_imported` force-adopts a mismatching header
+    /// root, and a reorg over that range can "succeed" while the state it
+    /// replayed disagrees with the branch it adopted. A caller that treats a
+    /// force-adopted switch as a verified one is asserting something the chain
+    /// never checked; this is the number that makes the difference visible, and
+    /// a test that wants to prove the replay reproduced the branch asserts this
+    /// is zero.
+    pub force_adopted: u64,
+}
+
+/// The accumulator a node should be holding for `head`.
+///
+/// The block state root is a CHAINED accumulator: `compute_block_state_root`
+/// mixes the node's current root into every block's, so the in-memory value is
+/// part of the execution input and not a derivable summary of stored rows. It
+/// does not survive a restart, and it is not restored by unwinding state.
+///
+/// It is recoverable, exactly, from one place: the head block's own header. A
+/// node that has published block H holds H's accumulator, and `H.state_root` is
+/// that value — the publisher committed the block and the accumulator together.
+/// So this is the whole of accumulator recovery, for a restart and for a reorg
+/// alike.
+pub fn accumulator_of(head: &Block) -> Hash {
+    head.header.state_root
+}
+
+/// The head the database records, or `None` before anything is published.
+///
+/// Read from `META`, which the publisher writes in the SAME batch as the block's
+/// state. The head therefore never names a block whose state is partly applied,
+/// and that is what makes it a safe recovery point rather than a hint.
+pub fn recorded_head(block_store: &BlockStore) -> Result<Option<Block>> {
+    let Some(hash) = block_store.get_latest_hash()? else {
+        return Ok(None);
+    };
+    Ok(block_store.get_by_hash(&hash)?)
+}
+
+/// Unwind the abandoned branch, then apply the adopted one.
+///
+/// # Order, and why it is not negotiable
+///
+/// 1. **Unwind, newest-first, as one atomic batch**, including the head reset to
+///    the ancestor. Until this commits the node is on the old branch; after it
+///    the node is on the ancestor. There is no interior.
+/// 2. **Restore the accumulator** to the ancestor's, from the ancestor's header.
+/// 3. **Apply the new branch in order**, through the ordinary publication path —
+///    `execute_block`, `accept_imported`, `publish` — one block at a time, each
+///    its own atomic batch carrying its own head pointer.
+///
+/// Applying before unwinding would execute the new branch against the abandoned
+/// branch's state, and the roots it computed would be roots of a chain nobody
+/// has. Unwinding without restoring the accumulator would leave every adopted
+/// block's computed root chained from the wrong value, so `accept_imported`
+/// would reject the first of them — loudly, which is the safe direction, but for
+/// a reason that has nothing to do with the block.
+///
+/// # Interruption
+///
+/// Every write here is a commit of a batch that also carries the head pointer.
+/// Interrupt anywhere and the reopened database names a head whose state is
+/// fully applied: the old tip, the ancestor, or some prefix of the new branch.
+/// [`resume`] takes it from there.
+pub fn execute_reorg(
+    db: &Database,
+    state: &StateManager,
+    executor: &BlockExecutor,
+    plan: &ReorgPlan,
+    validators: &[[u8; 32]],
+    journal: &dyn BranchJournal,
+) -> Result<ReorgOutcome> {
+    let block_store = BlockStore::new(db);
+    let ancestor = block_store
+        .get_by_hash(&plan.ancestor_hash)?
+        .ok_or_else(|| {
+            ConsensusError::InvalidBlock(format!(
+                "reorg cannot be executed: the common ancestor {} named by the plan is not \
+                 in the block store",
+                plan.ancestor_hash
+            ))
+        })?;
+
+    // ONE batch: the state restore, the journal deletions, the de-indexing and
+    // the head reset. A `WriteBatch` has no interior, so an interruption leaves
+    // either all of it or none of it, and the head pointer moves with the state
+    // it names rather than beside it.
+    let unwound = if plan.old_branch.is_empty() {
+        UnwindReport::default()
+    } else {
+        let mut batch = db.batch();
+        let report = stage_branch_unwind(db, &mut batch, &plan.old_branch, journal)
+            .map_err(|e| ConsensusError::InvalidBlock(format!("reorg unwind refused: {e}")))?;
+        // The inverse of publication's index writes, in the SAME batch. Lives in
+        // `sumchain-storage` beside `publish`, so a family added to one and not
+        // the other is a compile-unit apart rather than a crate apart.
+        for abandoned in &plan.old_branch {
+            stage_deindex(&mut batch, abandoned)?;
+        }
+        stage_head_reset(&mut batch, &ancestor)?;
+        batch.commit()?;
+        report
+    };
+
+    // Only after the unwind is durable. Setting it earlier would leave the node
+    // holding the ancestor's accumulator over the old branch's state if the
+    // commit failed.
+    state.set_state_root(accumulator_of(&ancestor));
+
+    let mut outcome = apply_branch(db, state, executor, &plan.new_branch, validators)?;
+    outcome.unwound = unwound;
+    Ok(outcome)
+}
+
+/// Apply `branch` (ancestor-to-head order) through the ordinary publication
+/// path, skipping any prefix already published.
+///
+/// The skip is what makes this a resume rather than a replay: after an
+/// interrupted apply the head names some block on the branch, and re-executing
+/// it would run it against its own output. A block is "already applied" when the
+/// recorded head IS it — not when its rows happen to be present, which is a
+/// weaker condition that a partially-written batch could also satisfy, except
+/// that no partially-written batch can exist here.
+pub fn apply_branch(
+    db: &Database,
+    state: &StateManager,
+    executor: &BlockExecutor,
+    branch: &[Block],
+    validators: &[[u8; 32]],
+) -> Result<ReorgOutcome> {
+    let block_store = BlockStore::new(db);
+    let head = block_store.get_latest_hash()?;
+
+    // Everything up to and including the recorded head is already published.
+    let start = match head {
+        Some(h) => match branch.iter().position(|b| b.hash() == h) {
+            Some(i) => i + 1,
+            None => 0,
+        },
+        None => 0,
+    };
+
+    let mut outcome = ReorgOutcome::default();
+    for block in &branch[start..] {
+        let execution = executor.execute_block(block, state.state_root(), validators)?;
+        let (executed, _account_diff, _contract_diff) = execution.into_parts();
+        let accepted = executed.accept_imported(block).map_err(|e| {
+            ConsensusError::InvalidBlock(format!(
+                "reorg refused block {} at height {}: {e}",
+                block.hash(),
+                block.height()
+            ))
+        })?;
+        let accumulator = accepted.accumulator();
+        match accepted.acceptance() {
+            Acceptance::ExactRoot => outcome.verified += 1,
+            Acceptance::LegacyCompatibility { .. } => outcome.force_adopted += 1,
+            // Unreachable on this path: `accept_imported` never produces it.
+            Acceptance::Produced => {}
+        }
+        accepted.publish()?;
+        // After the commit, never before: the accumulator the next block chains
+        // from must be one that is durably published.
+        state.set_state_root(accumulator);
+        outcome.applied += 1;
+    }
+    Ok(outcome)
+}
+
+/// Bring a node that was interrupted mid-reorg to the plan's target.
+///
+/// Reads the head the database records, restores the accumulator from that
+/// block's header, and then does whatever remains:
+///
+/// * head is the OLD tip — nothing committed. Run the whole switch.
+/// * head is the ANCESTOR — the unwind committed, the apply had not started or
+///   had not committed its first block. Apply the new branch.
+/// * head is a block ON the new branch — apply the rest.
+///
+/// Those are the only three, because every write in [`execute_reorg`] is a batch
+/// carrying its own head pointer. Recovery therefore needs no crash marker and
+/// no journal of its own: the head IS the marker, and it is written by the same
+/// atomic write as the state it names.
+pub fn resume(
+    db: &Database,
+    state: &StateManager,
+    executor: &BlockExecutor,
+    plan: &ReorgPlan,
+    validators: &[[u8; 32]],
+    journal: &dyn BranchJournal,
+) -> Result<ReorgOutcome> {
+    let block_store = BlockStore::new(db);
+    let head = recorded_head(&block_store)?.ok_or_else(|| {
+        ConsensusError::InvalidBlock(
+            "cannot resume a reorg on a database with no recorded head".to_string(),
+        )
+    })?;
+    let head_hash = head.hash();
+
+    if plan.new_branch.iter().any(|b| b.hash() == head_hash) || head_hash == plan.ancestor_hash {
+        // The unwind is already durable. Restore the accumulator from the head
+        // and finish applying.
+        state.set_state_root(accumulator_of(&head));
+        return apply_branch(db, state, executor, &plan.new_branch, validators);
+    }
+
+    // The head is still on the abandoned branch: nothing was committed.
+    state.set_state_root(accumulator_of(&head));
+    execute_reorg(db, state, executor, plan, validators, journal)
 }
 
 #[cfg(test)]

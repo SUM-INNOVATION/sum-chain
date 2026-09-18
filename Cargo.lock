@@ -4447,6 +4447,7 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "bincode",
+ "hex",
  "parking_lot",
  "serde",
  "sumchain-crypto",
