@@ -3789,3 +3789,485 @@ fn registration_and_identity_creation_are_bound_to_the_sender() {
     assert_eq!(families_changed(&db, &view), Vec::<&str>::new());
     assert_eq!(StateManager::v_get_nonce(&view, &gov.address()).unwrap(), 0);
 }
+
+// ── OV-26: the registration stake, and the activation that governs it ────────
+//
+// `docs/lane-a/ACTIVATION-AUDIT.md` row OV-26, one of the four designated
+// release blockers. `register_issuer` deducts `fee + stake_amount` from the
+// sender and credits only `fee` to the proposer. No escrow row is written, no
+// refund path exists, and `the_registration_stake_is_deducted_from_the_sender_
+// and_paid_to_nobody` above pins the consequence: the total supply falls by an
+// amount an ordinary user chose, on a normal user action, silently.
+//
+// Correcting it moves account balances, and account balances are what every
+// subsequent receipt is computed from, so it is a CONSENSUS CHANGE and is gated
+// rather than fixed outright. The gate wants a
+// `docclass_stake_escrow_enabled_from_height` field in `ChainParams` that this
+// track cannot add; until it lands `DocClassGates::from_params` reads it as
+// closed and the pinning test above still passes unchanged.
+//
+// `DocClassGates` is the seam. Below the gate the stake is destroyed; at or
+// above it the stake is credited to `docclass_stake_escrow_address()` -- a
+// keyless account derived the same way `gov_escrow_address` is -- and
+// `DeactivateIssuer` returns it. `UpdateIssuer` can no longer restate the
+// recorded amount, because a row claiming a stake no balance backs is a refund
+// the sender wrote for itself.
+
+use sumchain_state::{docclass_stake_escrow_address, DocClassGates};
+
+/// Build the `DocClassTxData` a `RegisterIssuer` carries.
+fn docclass_payload(
+    operation: DocClassOperation,
+    subcode: DocSubcode,
+    payload: &impl serde::Serialize,
+) -> DocClassTxData {
+    DocClassTxData {
+        operation,
+        subcode,
+        data: bincode::serialize(payload).unwrap(),
+        recipient: Address::ZERO,
+    }
+}
+
+/// Registration under both gate values, over identical inputs.
+///
+/// Below: the sender loses `fee + stake`, the proposer gains `fee`, and
+/// `stake` exists nowhere — the supply is smaller than it was. Above: the
+/// sender loses the same amount, the proposer gains the same fee, and the stake
+/// is in the escrow account, so the supply is unchanged.
+#[test]
+fn a_registration_stake_is_destroyed_below_the_gate_and_escrowed_above_it() {
+    let gov = KeyPair::generate();
+    let proposer = Address::new([9; 20]);
+    let mut issuer = government_issuer(gov.address());
+    issuer.stake_amount = 1_000;
+    let data = docclass_payload(
+        DocClassOperation::RegisterIssuer,
+        DocSubcode::IssuerRegistry,
+        &issuer,
+    );
+
+    for gates in [DocClassGates::CLOSED, DocClassGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params_with_stake(1_000));
+        fund(&db, &gov, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let result = DocClassExecutor::execute_with_gates(
+            &mut view,
+            &params_with_stake(1_000),
+            &gov.address(),
+            &data,
+            &proposer,
+            100,
+            1,
+            1_000,
+            0,
+            sumchain_primitives::Hash::ZERO,
+            gates,
+        )
+        .unwrap();
+        assert!(result.success, "registration succeeds under either gate");
+
+        // Identical on both sides: the sender pays fee + stake.
+        assert_eq!(
+            StateManager::v_get_balance(&view, &gov.address()).unwrap(),
+            100_000_000 - 1_100,
+            "the sender pays fee + stake under either gate"
+        );
+        assert_eq!(
+            StateManager::v_get_balance(&view, &proposer).unwrap(),
+            100,
+            "the proposer takes the fee under either gate"
+        );
+
+        // The difference, and the whole of it.
+        let escrowed =
+            StateManager::v_get_balance(&view, &docclass_stake_escrow_address()).unwrap();
+        if gates.stake_escrow {
+            assert_eq!(escrowed, 1_000, "the stake is held, not destroyed");
+        } else {
+            assert_eq!(
+                escrowed, 0,
+                "below the gate the stake is credited to no account at all"
+            );
+        }
+    }
+}
+
+/// Deactivation returns the stake at the gate, and cannot return it twice.
+///
+/// Below the gate there is nothing to return. Above it the issuer gets the
+/// stake back and the recorded amount is zeroed, so a second `DeactivateIssuer`
+/// -- which the subsystem permits, because `deactivate_issuer` has no
+/// already-suspended guard -- cannot drain the escrow a second time.
+#[test]
+fn deactivation_refunds_the_escrowed_stake_once_and_only_at_the_gate() {
+    let gov = KeyPair::generate();
+    let proposer = Address::new([9; 20]);
+    let mut issuer = government_issuer(gov.address());
+    issuer.stake_amount = 1_000;
+
+    #[derive(serde::Serialize)]
+    struct Deactivate {
+        issuer_address: Address,
+    }
+
+    for gates in [DocClassGates::CLOSED, DocClassGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params_with_stake(1_000));
+        fund(&db, &gov, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+        let p = params_with_stake(1_000);
+
+        DocClassExecutor::execute_with_gates(
+            &mut view,
+            &p,
+            &gov.address(),
+            &docclass_payload(
+                DocClassOperation::RegisterIssuer,
+                DocSubcode::IssuerRegistry,
+                &issuer,
+            ),
+            &proposer,
+            100,
+            1,
+            1_000,
+            0,
+            sumchain_primitives::Hash::ZERO,
+            gates,
+        )
+        .unwrap();
+
+        let deactivate = docclass_payload(
+            DocClassOperation::DeactivateIssuer,
+            DocSubcode::IssuerRegistry,
+            &Deactivate {
+                issuer_address: gov.address(),
+            },
+        );
+
+        for round in 0..2u32 {
+            let r = DocClassExecutor::execute_with_gates(
+                &mut view,
+                &p,
+                &gov.address(),
+                &deactivate,
+                &proposer,
+                100,
+                1,
+                1_000,
+                1 + round,
+                sumchain_primitives::Hash::ZERO,
+                gates,
+            )
+            .unwrap();
+            assert!(r.success, "deactivation succeeds under either gate");
+        }
+
+        // Three fees paid: register, deactivate, deactivate.
+        let fees = 300u128;
+        let balance = StateManager::v_get_balance(&view, &gov.address()).unwrap();
+        let escrowed =
+            StateManager::v_get_balance(&view, &docclass_stake_escrow_address()).unwrap();
+
+        if gates.stake_escrow {
+            assert_eq!(
+                balance,
+                100_000_000 - fees,
+                "the stake came back exactly once, so only the fees are gone"
+            );
+            assert_eq!(escrowed, 0, "and the escrow is empty, not overdrawn");
+        } else {
+            assert_eq!(
+                balance,
+                100_000_000 - fees - 1_000,
+                "below the gate the stake is gone and deactivation returns none of it"
+            );
+            assert_eq!(escrowed, 0);
+        }
+    }
+}
+
+/// `UpdateIssuer` cannot restate the recorded stake at the gate.
+///
+/// Below the gate it rewrites the registry row wholesale, so an issuer declares
+/// any stake it likes for free (ACTIVATION-AUDIT row AU-34) -- and with the
+/// escrow in place that would be a refund the sender wrote for itself. Above
+/// the gate the recorded amount is preserved from the stored row, so the number
+/// the escrow would pay back is always the number the escrow was paid.
+#[test]
+fn an_update_cannot_inflate_the_recorded_stake_at_the_gate() {
+    let gov = KeyPair::generate();
+    let proposer = Address::new([9; 20]);
+    let mut issuer = government_issuer(gov.address());
+    issuer.stake_amount = 1_000;
+
+    for gates in [DocClassGates::CLOSED, DocClassGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params_with_stake(1_000));
+        fund(&db, &gov, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+        let p = params_with_stake(1_000);
+
+        DocClassExecutor::execute_with_gates(
+            &mut view,
+            &p,
+            &gov.address(),
+            &docclass_payload(
+                DocClassOperation::RegisterIssuer,
+                DocSubcode::IssuerRegistry,
+                &issuer,
+            ),
+            &proposer,
+            100,
+            1,
+            1_000,
+            0,
+            sumchain_primitives::Hash::ZERO,
+            gates,
+        )
+        .unwrap();
+
+        let mut inflated = issuer.clone();
+        inflated.stake_amount = 9_000_000;
+        DocClassExecutor::execute_with_gates(
+            &mut view,
+            &p,
+            &gov.address(),
+            &docclass_payload(
+                DocClassOperation::UpdateIssuer,
+                DocSubcode::IssuerRegistry,
+                &inflated,
+            ),
+            &proposer,
+            100,
+            1,
+            1_000,
+            1,
+            sumchain_primitives::Hash::ZERO,
+            gates,
+        )
+        .unwrap();
+
+        let recorded = DocClassExecutor::v_get_docclass_issuer(&view, &gov.address())
+            .unwrap()
+            .unwrap()
+            .stake_amount;
+        if gates.stake_escrow {
+            assert_eq!(
+                recorded, 1_000,
+                "the recorded stake is what the escrow holds, not what the payload asked for"
+            );
+        } else {
+            assert_eq!(
+                recorded, 9_000_000,
+                "below the gate the payload rewrites the row wholesale"
+            );
+        }
+    }
+}
+
+// ── BD-6: the subject-index shape collision, and the key split that ends it ──
+//
+// `docs/lane-a/ACTIVATION-AUDIT.md` row BD-6, the third designated release
+// blocker. `DOCCLASS_SUBJECT_INDEX` holds two incompatible value shapes at one
+// key: a `Vec<(CredentialId, DocSubcode)>` written by the identity path and a
+// bare `Vec<CredentialId>` written by the eligibility and credential paths. The
+// subject commitment is an arbitrary 32-byte payload value -- `create_identity_
+// root` stores the struct verbatim -- so the sender picks the colliding key.
+// Two cheap transactions arm it, the second silently destroys the first's
+// index, and a third detonates it: the identity reader cannot decode its own
+// row, the error leaves `execute_tx` as an `Err`, and the block is unexecutable
+// for everyone. `an_identity_and_a_credential_sharing_a_subject_commitment_
+// break_the_block` above pins all three steps and still passes unchanged.
+//
+// The split gives the identity shape a tagged 33-byte key of its own, which no
+// 32-byte legacy key can equal. Both halves of the defect go at once: there is
+// nothing left to corrupt, so there is nothing left to fail to decode. It is a
+// CONSENSUS CHANGE -- it moves where a row is written, and therefore which
+// blocks execute -- so it is gated on
+// `docclass_subject_index_split_enabled_from_height`, a `ChainParams` field
+// this track cannot add. Reads try the tagged key and fall back to the legacy
+// one, the same compatibility shape the undo journal's re-key uses, so rows
+// written before activation are still found.
+
+/// The collision, driven under both gate values over identical transactions.
+///
+/// Below the gate: the credential rewrites the identity's row, the subcode is
+/// gone, and the next identity operation is an `Err`. Above it: two rows at two
+/// keys, both readers see their own data, and the same third transaction
+/// succeeds.
+#[test]
+fn a_colliding_subject_commitment_ends_the_block_below_the_gate_and_is_harmless_above_it() {
+    let gov = KeyPair::generate();
+    let proposer = Address::new([9; 20]);
+    let shared = [0xDC; 32];
+    let mut root = identity(0x8A, gov.address());
+    root.subject_commitment = shared;
+    let mut att = eligibility(0x8B, gov.address());
+    att.subject_commitment = shared;
+
+    for gates in [DocClassGates::CLOSED, DocClassGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        fund(&db, &gov, 100_000_000);
+        DocClassStore::new(&db)
+            .issuers()
+            .put(&government_issuer(gov.address()))
+            .unwrap();
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+        let p = params();
+
+        // Arm: an identity root, then an attestation, both naming `shared`.
+        for (idx, data) in [
+            docclass_payload(
+                DocClassOperation::CreateIdentityRoot,
+                DocSubcode::IdentityRoot,
+                &root,
+            ),
+            docclass_payload(
+                DocClassOperation::IssueCredential,
+                DocSubcode::EligibilityAttestation,
+                &att,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let r = DocClassExecutor::execute_with_gates(
+                &mut view,
+                &p,
+                &gov.address(),
+                &data,
+                &proposer,
+                100,
+                1,
+                1_000,
+                idx as u32,
+                sumchain_primitives::Hash::ZERO,
+                gates,
+            )
+            .unwrap();
+            assert!(r.success, "both arming transactions succeed under either gate");
+        }
+
+        // Detonate: any later identity write on that subject.
+        let add_key = docclass_payload(
+            DocClassOperation::AddKey,
+            DocSubcode::IdentityRoot,
+            &AddKeyData {
+                identity_id: [0x8A; 32],
+                key: identity_key("auth-2", 0x87),
+            },
+        );
+        let outcome = DocClassExecutor::execute_with_gates(
+            &mut view,
+            &p,
+            &gov.address(),
+            &add_key,
+            &proposer,
+            100,
+            1,
+            1_000,
+            2,
+            sumchain_primitives::Hash::ZERO,
+            gates,
+        );
+
+        if gates.subject_index_split {
+            let r = outcome.expect("above the gate there is no collision to detonate");
+            assert!(r.success);
+            assert_eq!(
+                DocClassExecutor::v_get_subject_identity_entries(&view, &shared).unwrap(),
+                vec![([0x8Au8; 32], DocSubcode::IdentityRoot)],
+                "the identity index kept its own shape, subcode intact"
+            );
+            assert_eq!(
+                DocClassExecutor::v_get_subject_credential_ids(&view, &shared).unwrap(),
+                vec![[0x8Bu8; 32]],
+                "and the credential index kept its own, at the legacy key"
+            );
+            assert_ne!(
+                view.get(
+                    cf::DOCCLASS_SUBJECT_INDEX,
+                    &sumchain_storage::docclass_store::subject_identity_index_key(&shared)
+                )
+                .unwrap(),
+                None,
+                "because the identity shape has a key of its own"
+            );
+        } else {
+            let err = outcome
+                .expect_err("below the gate the collision still ends the block, unchanged");
+            assert!(err.to_string().contains("Serialization"), "{err}");
+            assert_eq!(
+                view.get(cf::DOCCLASS_SUBJECT_INDEX, &shared).unwrap(),
+                Some(bincode::serialize(&vec![[0x8Au8; 32], [0x8Bu8; 32]]).unwrap()),
+                "and the attestation still rewrote the row as a bare id list"
+            );
+        }
+    }
+}
+
+/// A row written before the activation is still found after it.
+///
+/// The compatibility direction: an identity indexed at the legacy bare key by a
+/// pre-activation block is read by a post-activation node, because the reader
+/// tries the tagged key and falls back. Without the fallback an upgraded node
+/// would report every pre-activation identity as having no subject index at
+/// all, which is a silent data loss rather than a visible one.
+#[test]
+fn an_identity_indexed_before_the_split_is_still_found_after_it() {
+    let (_state, db, _dir, _executor) = setup_with_params(params());
+    let gov = KeyPair::generate();
+    fund(&db, &gov, 100_000_000);
+    let proposer = Address::new([9; 20]);
+    DocClassStore::new(&db)
+        .issuers()
+        .put(&government_issuer(gov.address()))
+        .unwrap();
+
+    let subject = [0xE7; 32];
+    let mut root = identity(0x9A, gov.address());
+    root.subject_commitment = subject;
+
+    let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+    let mut view = ExecutionView::new(&mut overlay);
+
+    // Pre-activation block: the legacy key.
+    DocClassExecutor::execute_with_gates(
+        &mut view,
+        &params(),
+        &gov.address(),
+        &docclass_payload(
+            DocClassOperation::CreateIdentityRoot,
+            DocSubcode::IdentityRoot,
+            &root,
+        ),
+        &proposer,
+        100,
+        1,
+        1_000,
+        0,
+        sumchain_primitives::Hash::ZERO,
+        DocClassGates::CLOSED,
+    )
+    .unwrap();
+    assert!(
+        view.get(
+            cf::DOCCLASS_SUBJECT_INDEX,
+            &sumchain_storage::docclass_store::subject_identity_index_key(&subject)
+        )
+        .unwrap()
+        .is_none(),
+        "the pre-activation write used the legacy key and nothing else"
+    );
+
+    // Post-activation read: the same entry, found through the fallback.
+    assert_eq!(
+        DocClassExecutor::v_get_subject_identity_entries(&view, &subject).unwrap(),
+        vec![([0x9Au8; 32], DocSubcode::IdentityRoot)],
+        "an upgraded node still sees what a pre-activation block indexed"
+    );
+}

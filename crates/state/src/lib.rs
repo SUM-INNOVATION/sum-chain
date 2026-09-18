@@ -59,7 +59,9 @@ pub mod validator_quorum;
 pub use agreement_executor::{AgreementExecutionResult, AgreementExecutor};
 pub use cache::{CacheStats, CachedAccount, StateCache};
 pub use contract_executor::{ContractCallResult, ContractDeployResult, ContractExecutorState, ContractEvent, ContractMetadata};
-pub use docclass_executor::{DocClassExecutionResult, DocClassExecutor};
+pub use docclass_executor::{
+    docclass_stake_escrow_address, DocClassExecutionResult, DocClassExecutor, DocClassGates,
+};
 pub use employment_executor::{EmploymentExecutionResult, EmploymentExecutor};
 pub use equity_executor::{EquityExecutionResult, EquityExecutor};
 pub use executor::{BlockExecutor, TxExecutionResult};

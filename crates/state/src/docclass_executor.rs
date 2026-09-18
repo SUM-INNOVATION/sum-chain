@@ -27,6 +27,65 @@ use tracing::{debug, warn};
 
 use crate::{Result, SchemaValidator, StateError, StateManager};
 
+/// Domain separator for the keyless DocClass issuer-stake escrow account.
+///
+/// Mirrors `gov_escrow_address`'s construction: a blake3 hash of a fixed domain
+/// string, truncated to twenty bytes. Nobody holds a key for it, so the balance
+/// it accumulates can only move through the two paths in this file that move
+/// it -- registration in, deactivation out.
+const DOCCLASS_STAKE_ESCROW_DOMAIN: &[u8] = b"sumchain/docclass/issuer-stake-escrow/v1";
+
+/// The activation decisions a DocClass transaction executes under.
+///
+/// One value per chain-defined activation height this subsystem is gated on.
+/// [`DocClassExecutor::execute`] derives it from `ChainParams`;
+/// [`DocClassExecutor::execute_with_gates`] takes it directly, which is how a
+/// test drives an ungated node and a gated node over the same transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DocClassGates {
+    /// Issuer registration stakes are escrowed and refundable rather than
+    /// destroyed. ACTIVATION-AUDIT row OV-26.
+    pub stake_escrow: bool,
+    /// The identity subject index lives in its own key space, so it can no
+    /// longer be overwritten by a credential list at a colliding commitment.
+    /// ACTIVATION-AUDIT row BD-6.
+    pub subject_index_split: bool,
+}
+
+impl DocClassGates {
+    /// Every gate closed -- the release configuration today, under both
+    /// readings, because none of the fields these read exists in `ChainParams`.
+    pub const CLOSED: Self = Self {
+        stake_escrow: false,
+        subject_index_split: false,
+    };
+
+    /// Every gate open. For the gated half of a mixed-version test.
+    pub const OPEN: Self = Self {
+        stake_escrow: true,
+        subject_index_split: true,
+    };
+
+    /// Derive the decisions from the chain's parameters at `block_height`.
+    pub fn from_params(params: &ChainParams, block_height: BlockHeight) -> Self {
+        Self {
+            stake_escrow: DocClassExecutor::stake_escrow_gate_open(params, block_height),
+            subject_index_split: DocClassExecutor::subject_index_split_gate_open(
+                params,
+                block_height,
+            ),
+        }
+    }
+}
+
+/// The account a DocClass issuer's registration stake is held in.
+pub fn docclass_stake_escrow_address() -> Address {
+    let hash = blake3::hash(DOCCLASS_STAKE_ESCROW_DOMAIN);
+    let mut bytes = [0u8; 20];
+    bytes.copy_from_slice(&hash.as_bytes()[12..32]);
+    Address::new(bytes)
+}
+
 /// Result of DocClass execution
 #[derive(Debug)]
 pub struct DocClassExecutionResult {
@@ -62,7 +121,81 @@ impl DocClassExecutionResult {
 pub struct DocClassExecutor;
 
 impl DocClassExecutor {
-    /// Execute a DocClass transaction
+    /// The activation height for the DocClass issuer-stake escrow rule.
+    ///
+    /// **This is a seam for a `ChainParams` field that does not exist yet.**
+    /// `crates/genesis/**` belongs to another track, so the field cannot be
+    /// added from here. The field this function must read, once that track adds
+    /// it, is:
+    ///
+    /// ```text
+    /// /// SRC-80X DocClass issuer-stake escrow. Dormant by default (`None` ->
+    /// /// never open). Below the gate, `RegisterIssuer` deducts `fee +
+    /// /// stake_amount` from the sender and credits only `fee` to the
+    /// /// proposer: the stake is destroyed and the total supply falls by an
+    /// /// amount the sender chose. At and above the gate the stake is credited
+    /// /// to the keyless escrow account, `DeactivateIssuer` returns it, and
+    /// /// `UpdateIssuer` can no longer restate the recorded amount. Activation
+    /// /// is a consensus change -- it changes account balances and therefore
+    /// /// every subsequent receipt -- and needs a coordinated validator
+    /// /// upgrade.
+    /// #[serde(default)]
+    /// pub docclass_stake_escrow_enabled_from_height: Option<u64>,
+    /// ```
+    ///
+    /// Until it exists this returns `None`, which is exactly what an absent
+    /// `#[serde(default)] Option<u64>` resolves to, so production behaviour is
+    /// unchanged and the pinning test that records the destruction still passes.
+    #[inline]
+    fn stake_escrow_activation(params: &ChainParams) -> Option<u64> {
+        // Replace this body with `params.docclass_stake_escrow_enabled_from_height`.
+        let _ = params;
+        None
+    }
+
+    /// Whether the issuer-stake escrow rule is active at `block_height`.
+    #[inline]
+    pub fn stake_escrow_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::stake_escrow_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the DocClass subject-index split.
+    ///
+    /// **This is a seam for a `ChainParams` field that does not exist yet.**
+    /// The field this function must read, once `crates/genesis` adds it, is:
+    ///
+    /// ```text
+    /// /// SRC-80X DocClass subject-index key split. Dormant by default
+    /// /// (`None` -> never open). Below the gate the identity index and the
+    /// /// credential index share one key -- the bare 32-byte subject
+    /// /// commitment -- with two incompatible value shapes, so a sender who
+    /// /// picks a colliding commitment silently destroys one index and makes
+    /// /// the next identity operation on that subject a block-level error. At
+    /// /// and above the gate the identity shape writes a tagged 33-byte key of
+    /// /// its own; reads try the tagged key and fall back to the legacy one,
+    /// /// so rows written before activation are still found. Activation is a
+    /// /// consensus change -- it moves where a row is written and therefore
+    /// /// which blocks execute -- and needs a coordinated validator upgrade.
+    /// #[serde(default)]
+    /// pub docclass_subject_index_split_enabled_from_height: Option<u64>,
+    /// ```
+    #[inline]
+    fn subject_index_split_activation(params: &ChainParams) -> Option<u64> {
+        // Replace with `params.docclass_subject_index_split_enabled_from_height`.
+        let _ = params;
+        None
+    }
+
+    /// Whether the subject-index split is active at `block_height`.
+    #[inline]
+    pub fn subject_index_split_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::subject_index_split_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// Execute a DocClass transaction.
+    ///
+    /// Reads every activation height this subsystem is gated on out of `params`
+    /// and dispatches through [`Self::execute_with_gates`].
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
         view: &mut ExecutionView<'_, '_>,
@@ -74,7 +207,43 @@ impl DocClassExecutor {
         block_height: BlockHeight,
         block_timestamp: Timestamp,
         tx_index: u32,
+        tx_hash: Hash,
+    ) -> Result<DocClassExecutionResult> {
+        Self::execute_with_gates(
+            view,
+            params,
+            sender,
+            data,
+            proposer,
+            fee,
+            block_height,
+            block_timestamp,
+            tx_index,
+            tx_hash,
+            DocClassGates::from_params(params, block_height),
+        )
+    }
+
+    /// Execute a DocClass transaction with the activation decisions supplied
+    /// directly.
+    ///
+    /// The seam the mixed-version tests use: `gates` is the only thing that
+    /// differs between a node below an activation height and one at or above
+    /// it, so driving both values through one entry point is what makes the
+    /// divergence observable rather than asserted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_gates(
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
+        sender: &Address,
+        data: &DocClassTxData,
+        proposer: &Address,
+        fee: Balance,
+        block_height: BlockHeight,
+        block_timestamp: Timestamp,
+        tx_index: u32,
         _tx_hash: Hash,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         match data.operation {
             // Identity operations (SRC-800)
@@ -86,6 +255,7 @@ impl DocClassExecutor {
                 fee,
                 block_height,
                 tx_index,
+                gates,
             ),
             DocClassOperation::AddKey => Self::identity_add_key(
                 view,
@@ -95,6 +265,7 @@ impl DocClassExecutor {
                 fee,
                 block_height,
                 tx_index,
+                gates,
             ),
             DocClassOperation::RemoveKey => Self::identity_remove_key(
                 view,
@@ -104,6 +275,7 @@ impl DocClassExecutor {
                 fee,
                 block_height,
                 tx_index,
+                gates,
             ),
             DocClassOperation::RotateKey => Self::identity_rotate_key(
                 view,
@@ -113,6 +285,7 @@ impl DocClassExecutor {
                 fee,
                 block_height,
                 tx_index,
+                gates,
             ),
             DocClassOperation::AddController => Self::identity_add_controller(
                 view,
@@ -122,6 +295,7 @@ impl DocClassExecutor {
                 fee,
                 block_height,
                 tx_index,
+                gates,
             ),
             DocClassOperation::RemoveController => Self::identity_remove_controller(
                 view,
@@ -131,6 +305,7 @@ impl DocClassExecutor {
                 fee,
                 block_height,
                 tx_index,
+                gates,
             ),
             DocClassOperation::UpdateService => Self::identity_update_service(
                 view,
@@ -140,6 +315,7 @@ impl DocClassExecutor {
                 fee,
                 block_height,
                 tx_index,
+                gates,
             ),
             DocClassOperation::DeactivateIdentity => Self::deactivate_identity(
                 view,
@@ -150,6 +326,7 @@ impl DocClassExecutor {
                 block_height,
                 block_timestamp,
                 tx_index,
+                gates,
             ),
             DocClassOperation::ReactivateIdentity => Self::reactivate_identity(
                 view,
@@ -160,6 +337,7 @@ impl DocClassExecutor {
                 block_height,
                 block_timestamp,
                 tx_index,
+                gates,
             ),
 
             // Credential operations (SRC-802, SRC-810-813)
@@ -228,6 +406,7 @@ impl DocClassExecutor {
                 fee,
                 block_height,
                 tx_index,
+                gates,
             ),
             DocClassOperation::UpdateIssuer => Self::update_issuer(
                 view,
@@ -237,6 +416,7 @@ impl DocClassExecutor {
                 fee,
                 block_height,
                 tx_index,
+                gates,
             ),
             DocClassOperation::RotateIssuerKey => Self::rotate_issuer_key(
                 view,
@@ -257,6 +437,7 @@ impl DocClassExecutor {
                 block_height,
                 block_timestamp,
                 tx_index,
+                gates,
             ),
         }
     }
@@ -274,6 +455,7 @@ impl DocClassExecutor {
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         let identity: IdentityRoot = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid identity data: {}", e)))?;
@@ -290,7 +472,7 @@ impl DocClassExecutor {
         StateManager::v_credit(view, proposer, fee)?;
         StateManager::v_increment_nonce(view, sender)?;
 
-        Self::v_put_identity_root(view, &identity)?;
+        Self::v_put_identity_root(view, &identity, gates.subject_index_split)?;
 
         let event = DocClassEvent::IdentityRootCreated {
             identity_id: identity.identity_id,
@@ -312,6 +494,7 @@ impl DocClassExecutor {
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct AddKeyData {
@@ -336,7 +519,7 @@ impl DocClassExecutor {
         StateManager::v_increment_nonce(view, sender)?;
 
         identity.keys.push(add_data.key.clone());
-        Self::v_put_identity_root(view, &identity)?;
+        Self::v_put_identity_root(view, &identity, gates.subject_index_split)?;
 
         let event = DocClassEvent::KeyAdded {
             identity_id: add_data.identity_id,
@@ -357,6 +540,7 @@ impl DocClassExecutor {
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct RemoveKeyData {
@@ -381,7 +565,7 @@ impl DocClassExecutor {
         StateManager::v_increment_nonce(view, sender)?;
 
         identity.keys.retain(|k| k.key_id != remove_data.key_id);
-        Self::v_put_identity_root(view, &identity)?;
+        Self::v_put_identity_root(view, &identity, gates.subject_index_split)?;
 
         let event = DocClassEvent::KeyRemoved {
             identity_id: remove_data.identity_id,
@@ -401,6 +585,7 @@ impl DocClassExecutor {
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct RotateKeyData {
@@ -428,7 +613,7 @@ impl DocClassExecutor {
         identity.keys.retain(|k| k.key_id != rotate_data.old_key_id);
         let new_key_id = rotate_data.new_key.key_id.clone();
         identity.keys.push(rotate_data.new_key);
-        Self::v_put_identity_root(view, &identity)?;
+        Self::v_put_identity_root(view, &identity, gates.subject_index_split)?;
 
         let event = DocClassEvent::KeyRotated {
             identity_id: rotate_data.identity_id,
@@ -449,6 +634,7 @@ impl DocClassExecutor {
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct AddControllerData {
@@ -475,7 +661,7 @@ impl DocClassExecutor {
         if !identity.additional_controllers.contains(&add_data.controller) {
             identity.additional_controllers.push(add_data.controller);
         }
-        Self::v_put_identity_root(view, &identity)?;
+        Self::v_put_identity_root(view, &identity, gates.subject_index_split)?;
 
         let event = DocClassEvent::ControllerAdded {
             identity_id: add_data.identity_id,
@@ -495,6 +681,7 @@ impl DocClassExecutor {
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct RemoveControllerData {
@@ -519,7 +706,7 @@ impl DocClassExecutor {
         StateManager::v_increment_nonce(view, sender)?;
 
         identity.additional_controllers.retain(|c| c != &remove_data.controller);
-        Self::v_put_identity_root(view, &identity)?;
+        Self::v_put_identity_root(view, &identity, gates.subject_index_split)?;
 
         let event = DocClassEvent::ControllerRemoved {
             identity_id: remove_data.identity_id,
@@ -539,6 +726,7 @@ impl DocClassExecutor {
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct UpdateServiceData {
@@ -568,7 +756,7 @@ impl DocClassExecutor {
         } else {
             identity.services.push(update_data.service);
         }
-        Self::v_put_identity_root(view, &identity)?;
+        Self::v_put_identity_root(view, &identity, gates.subject_index_split)?;
 
         let event = DocClassEvent::ServiceUpdated {
             identity_id: update_data.identity_id,
@@ -589,6 +777,7 @@ impl DocClassExecutor {
         block_height: BlockHeight,
         block_timestamp: Timestamp,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct DeactivateData {
@@ -616,6 +805,7 @@ impl DocClassExecutor {
             &deactivate.identity_id,
             IdentityStatus::Deactivated,
             block_timestamp,
+            gates.subject_index_split,
         )?;
 
         let event = DocClassEvent::IdentityStatusChanged {
@@ -637,6 +827,7 @@ impl DocClassExecutor {
         block_height: BlockHeight,
         block_timestamp: Timestamp,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct ReactivateData {
@@ -664,6 +855,7 @@ impl DocClassExecutor {
             &reactivate.identity_id,
             IdentityStatus::Active,
             block_timestamp,
+            gates.subject_index_split,
         )?;
 
         let event = DocClassEvent::IdentityStatusChanged {
@@ -1169,6 +1361,7 @@ impl DocClassExecutor {
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         let issuer: DocClassIssuer = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
@@ -1190,6 +1383,13 @@ impl DocClassExecutor {
         let total = fee.saturating_add(issuer.stake_amount);
         StateManager::v_deduct(view, sender, total)?;
         StateManager::v_credit(view, proposer, fee)?;
+        // The stake. Below the activation it is credited to nobody and the
+        // supply shrinks by `issuer.stake_amount`; at or above it the stake is
+        // held by the keyless escrow address and the supply is conserved.
+        // ACTIVATION-AUDIT row OV-26.
+        if gates.stake_escrow && issuer.stake_amount > 0 {
+            StateManager::v_credit(view, &docclass_stake_escrow_address(), issuer.stake_amount)?;
+        }
         StateManager::v_increment_nonce(view, sender)?;
 
         let subcodes = issuer.authorized_subcodes.clone();
@@ -1216,6 +1416,7 @@ impl DocClassExecutor {
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         let updated: DocClassIssuer = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
@@ -1224,13 +1425,23 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Can only update own profile"));
         }
 
-        if !Self::v_issuer_is_registered(view, sender)? {
+        let Some(recorded) = Self::v_get_docclass_issuer(view, sender)? else {
             return Ok(DocClassExecutionResult::failure("Not registered"));
-        }
+        };
 
         StateManager::v_deduct(view, sender, fee)?;
         StateManager::v_credit(view, proposer, fee)?;
         StateManager::v_increment_nonce(view, sender)?;
+
+        let mut updated = updated;
+        // At or above the escrow activation the recorded stake is what the
+        // escrow actually holds, so an update cannot restate it: the row would
+        // otherwise claim a stake no balance backs, and `DeactivateIssuer`
+        // would refund a number the sender chose. ACTIVATION-AUDIT rows OV-26
+        // and AU-34.
+        if gates.stake_escrow {
+            updated.stake_amount = recorded.stake_amount;
+        }
 
         Self::v_put_docclass_issuer(view, &updated)?;
 
@@ -1308,6 +1519,7 @@ impl DocClassExecutor {
         block_height: BlockHeight,
         block_timestamp: Timestamp,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct DeactivateIssuerData {
@@ -1331,6 +1543,24 @@ impl DocClassExecutor {
         StateManager::v_deduct(view, sender, fee)?;
         StateManager::v_credit(view, proposer, fee)?;
         StateManager::v_increment_nonce(view, sender)?;
+
+        // Return the escrowed stake to the issuer whose registration posted it,
+        // and zero the recorded amount so a second deactivation cannot claim it
+        // twice. Below the activation there is nothing to return, because
+        // registration credited the stake to nobody. ACTIVATION-AUDIT row
+        // OV-26.
+        if gates.stake_escrow {
+            if let Some(mut issuer) = Self::v_get_docclass_issuer(view, &deactivate.issuer_address)?
+            {
+                if issuer.stake_amount > 0 {
+                    let refund = issuer.stake_amount;
+                    StateManager::v_deduct(view, &docclass_stake_escrow_address(), refund)?;
+                    StateManager::v_credit(view, &deactivate.issuer_address, refund)?;
+                    issuer.stake_amount = 0;
+                    Self::v_put_docclass_issuer(view, &issuer)?;
+                }
+            }
+        }
 
         Self::v_update_docclass_issuer_status(
             view,
