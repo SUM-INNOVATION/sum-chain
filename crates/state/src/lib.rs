@@ -161,12 +161,83 @@ pub fn effective_tx_index(tx_index: u32, gate_open: bool) -> u32 {
     }
 }
 
+/// The activation height for bounding a transaction's sizing inputs before the
+/// value they size is built.
+///
+/// Reads `params.subsystem_allocation_bound_enabled_from_height`.
+///
+/// ACTIVATION-AUDIT rows AL-9, AL-10 and AL-11. Below the gate an accumulating
+/// structure is read, decoded in full, appended to and re-encoded in full
+/// before `view.put` charges a byte against the candidate ceiling, and the
+/// payload driving it is decoded with no length check ahead of it. The ceiling
+/// therefore bounds what a block may COMMIT and bounds nothing about what one
+/// refused transaction may ALLOCATE — which matters because the release ceiling
+/// is `CANDIDATE_LIMIT_SCAFFOLD`, `1 << 30`, and not the 4,096 or 8,192 bytes
+/// the `*_index_allocation` files measured against.
+/// `crates/state/tests/release_ceiling_allocation.rs` measures the release
+/// configuration instead.
+///
+/// ONE field for DocClass and NFT because it is one rule at one seam: bound the
+/// input before building the value. A partial activation leaves the cheapest
+/// vector open — an attacker refused by the DocClass bound moves to the NFT one
+/// — so there is no configuration in which an operator wants one and not the
+/// other. This is the `subsystem_block_timestamp_enabled_from_height` argument,
+/// not the `subsystem_tx_index_enabled_from_height` one: the blast radius is
+/// identical on both sides (a previously-admitted oversized transaction becomes
+/// a failed one), so there is nothing to sequence.
+#[inline]
+fn subsystem_allocation_bound_activation(params: &sumchain_genesis::ChainParams) -> Option<u64> {
+    params.subsystem_allocation_bound_enabled_from_height
+}
+
+/// Whether a transaction's sizing inputs are bounded at `block_height`.
+#[inline]
+pub fn subsystem_allocation_bound_gate_open(
+    params: &sumchain_genesis::ChainParams,
+    block_height: u64,
+) -> bool {
+    matches!(subsystem_allocation_bound_activation(params), Some(h) if block_height >= h)
+}
+
+/// The longest subsystem transaction payload that may be decoded, in bytes.
+///
+/// Read only where [`subsystem_allocation_bound_gate_open`] said yes. Four times
+/// `ChainParams::max_metadata_bytes`'s default of 16,384, which is the chain's
+/// own existing statement of how large one operator-supplied blob may be. It is
+/// a binary constant and not a `ChainParams` field on purpose: the activation
+/// digest covers `Option<u64>` gates and nothing else, so a configurable limit
+/// would be a consensus-relevant number two validators could hold different
+/// values of with nothing to compare. The height is coordinated; the limit ships
+/// in the reviewed binary.
+pub const MAX_SUBSYSTEM_PAYLOAD_BYTES: usize = 65_536;
+
+/// The longest STORED encoding of an accumulating row that may be decoded, in
+/// bytes.
+///
+/// Read only where [`subsystem_allocation_bound_gate_open`] said yes. Checked
+/// against the bytes the view returned, before they are handed to a decoder, so
+/// the refusal costs one length comparison rather than a decode.
+///
+/// Bounding the row's BYTES subsumes bounding its entry count: every entry costs
+/// at least its own encoding, so a 1 MiB row holds at most about 42,000
+/// twenty-five-byte entries and the linear `contains`/`find` scans of
+/// ACTIVATION-AUDIT row AL-11 are bounded by the same constant that bounds
+/// AL-10. Two limits would be two things to keep consistent for no more safety.
+///
+/// A row already past this limit when the gate opens — there is no way to have
+/// one except by writing it below the gate — becomes unmodifiable rather than
+/// unreadable: the mutating operations refuse it with a failed receipt, reads
+/// are untouched. A row may also overshoot by at most one payload, because the
+/// check refuses the NEXT operation rather than the one that crossed.
+pub const MAX_ACCUMULATING_ROW_BYTES: usize = 1_048_576;
+
 pub use agreement_executor::{AgreementExecutionResult, AgreementExecutor, AgreementGates};
 pub use cache::{CacheStats, CachedAccount, StateCache};
 pub use contract_executor::{ContractCallResult, ContractDeployResult, ContractExecutorState, ContractEvent, ContractMetadata};
 pub use docclass_executor::{
     docclass_stake_escrow_address, DocClassExecutionResult, DocClassExecutor, DocClassGates,
 };
+pub use docclass_view::BoundedRow;
 pub use employment_executor::{EmploymentExecutionResult, EmploymentExecutor, EmploymentGates};
 pub use equity_executor::{EquityExecutionResult, EquityExecutor};
 pub use executor::{BlockExecutor, TxExecutionResult};
@@ -175,7 +246,7 @@ pub use healthcare_executor::{HealthcareExecutionResult, HealthcareExecutor, Hea
 pub use legal_executor::{LegalExecutionResult, LegalExecutor, LegalGates};
 pub use mempool::{Mempool, MempoolConfig, MempoolStats};
 pub use messaging_executor::{MessagingExecutionResult, MessagingExecutor};
-pub use nft_executor::{NftExecutionResult, NftExecutor};
+pub use nft_executor::{NftExecutionResult, NftExecutor, NftGates, MAX_NFT_BATCH_MINT_REQUESTS};
 pub use node_registry::{NodeRegistryExecutionResult, NodeRegistryExecutor};
 pub use policy_account_executor::{PolicyAccountExecutionResult, PolicyAccountExecutor};
 pub use storage_metadata::{

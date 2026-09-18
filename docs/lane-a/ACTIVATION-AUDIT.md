@@ -497,6 +497,74 @@ The sizing inputs an attacker controls are bounded only by
 `crates/state/src/executor.rs:3996` and `:3986`, at `min_fee: 1000` per
 transaction.
 
+**Those two limits were re-derived and the enforcement site corrected.** They
+come from this repository's own `genesis.json`, not from `ChainParams::default()`
+(which carries `max_block_bytes: 1_000_000`). They are enforced in
+`BlockExecutor::validate_block` at `crates/state/src/executor.rs:4061` and
+`:4071` — not `:3986`/`:3996`, which are inside `validate_header` — and
+`PoaEngine::do_import_block` calls `validate_block` BEFORE `execute_block`
+(`crates/consensus/src/poa.rs:627`), so a payload really is bounded by the block
+limit before any executor decodes it. There is no per-transaction size limit
+anywhere in the tree.
+
+**A measurement at the release configuration, run for this audit.**
+`crates/state/tests/release_ceiling_allocation.rs` measures a 1 GiB ceiling and
+a 2,000,000-byte block limit, and reports peak LIVE bytes — the high-water mark
+of allocated minus deallocated — alongside the cumulative churn every earlier
+file in this class reported. The two are not the same number and only the first
+decides whether a validator survives; every "allocated N B" figure transcribed
+above is cumulative churn and overstates footprint.
+
+What it found, measured:
+
+  * At the release ceiling the transactions the `*_index_allocation` files show
+    being REFUSED are **admitted, and commit**. The closed-gate half of every
+    pair in this class is a successful transaction, not a refused one.
+  * One `CreateIdentityRoot` at the block-size limit (1,900,160 B payload) is
+    admitted and peaks at 12,582,144 B live — **6.6x its payload**, 12.3x
+    cumulative — for one `min_fee`, from an empty chain.
+  * One `AddKey` against a committed identity row peaks at **4.00x the row** and
+    churns **5.00x**, and the candidate is charged 2.00x. Linear across 1, 4, 16
+    and 64 MiB — six doublings — so the factor is a slope, not a point.
+  * Nothing in `docclass_executor.rs` bounds the length of an `IdentityKey`'s
+    `key_id`, so one `AddKey` grows a row by **1,899,873 B** for one `min_fee`.
+
+Extrapolated from those points, and labelled as such in the test's own output: a
+single `put` charges its value AND the captured pre-image, so the largest row one
+write can still commit is about 536,870,912 B; at 1,899,873 B per transaction a
+row reaches that in about 282 blocks — roughly fourteen minutes at a 3,000 ms
+block time, for about 282,000 units of fee — and the next `AddKey` against it
+peaks at about 2.0 GiB live before the ceiling refuses it. The refusal is what
+costs the memory, which is the class.
+
+**Why three rows and not thirteen.** The measurement separates this class into
+two populations, and the separator is whether the attacker controls the LENGTH of
+what is appended. AL-9, AL-10 and AL-11 do: a DocClass `key_id`, `service_id` or
+`endpoint` is a `String` with no length check, so one transaction adds as much as
+a block may carry, and a `BatchMint` request count is a number the payload
+declares. AL-1 through AL-6 and AL-8 do not: every entry is a fixed 32-byte id,
+so one transaction adds 32 bytes. That difference is not a nuance, it is four
+orders of magnitude — DERIVED, not measured, from the same ceiling arithmetic.
+A row of `R` bytes costs about `2R` per write (value plus pre-image), so a block
+admits `k <= 2^29 / R` writes of it, and a 32-byte-per-write accumulator grows as
+`R^2 / 2^35` blocks. Reaching 536,870,912 B takes about 8.4 million blocks —
+roughly 291 days of uninterrupted, dedicated blocks at about 8.4 x 10^12 units of
+fee — against 282 blocks and 282,000 units for AL-10. The fixed-width rows are
+real and still unbounded across time; they are not the rows one transaction can
+reach, and they are left `none` deliberately rather than by omission.
+
+Two rows sit on the fixed side of that line and were still not taken. **AL-7** is
+attacker-length-controlled like AL-10 — `AssetAnchor.jurisdiction_code` is a
+free-form `String` that becomes the index KEY, so the attacker chooses both the
+width of the key and how many distinct keys the family holds — and it is
+UNTOUCHED here for scope, not because the analysis exempts it. It is the next row
+this gate should cover, and covering it needs nothing new: a length check on
+`jurisdiction_code` before the key is built, read from the same activation
+height. **AL-12** is narrowed rather than closed: the payload bound this gate
+adds applies to the DocClass and NFT dispatches only, and AL-12 names five
+subsystems, so it stays `none` until Agreement, Property and Healthcare carry the
+same check.
+
 | id | defect | source | verdict | gate | evidence | justification |
 |---|---|---|---|---|---|---|
 | AL-1 | Tax subject index: `v_add_to_subject_index` decodes an accumulating `Vec<ProofId>`, linear-searches, appends, reserializes — per claim, unbounded across blocks | Tax §unrestricted allocation | **REACHABLE** | none | `crates/state/src/tax_view.rs:139-143`; reached from `IssueClaim`, arm `crates/state/src/tax_executor.rs:227`; pinned at one size by `a_640_kib_subject_index_is_refused_by_the_ceiling_without_canonical_change` | attacker controls entry count by repeating `IssueClaim`; the ceiling that refused in the test is not the release ceiling |
@@ -507,11 +575,11 @@ transaction.
 | AL-6 | Property: all five accumulating indexes, same shape, measured at 3,204,575–3,205,320 B allocated each | Property §unrestricted allocation | **REACHABLE** | none | pinned by `all_five_indexes_allocate_their_whole_value_before_the_ceiling_refuses` | — |
 | AL-7 | Property jurisdiction index compounds it: its KEY is the raw UTF-8 of `AssetAnchor.jurisdiction_code`, taken from the payload with no length or character validation | Property §unrestricted allocation | **REACHABLE** | none | anchor arm `crates/state/src/property_executor.rs:176` stores the payload struct; no validation of `jurisdiction_code` in `property_executor.rs` | the attacker chooses both the width of the key and the number of distinct keys in the family — the only row in this class where attacker control extends to the key space |
 | AL-8 | Healthcare: seven accumulating structures — five index families plus `membership.dependents` and `prescription.fill_history` accumulating INSIDE a primary row, so the rebuilt buffer is the entire record; `PartialFillPrescription` rebuilds it twice in one transaction | Healthcare §unrestricted allocation | **REACHABLE** | none | pinned by `every_healthcare_accumulator_allocates_its_whole_value_before_the_ceiling_refuses`; in-row cases measured at 4,483,696 B and 4,483,993 B allocated against 168 B accounted | the worst accounted-to-allocated ratio in the inventory: 26,700:1 |
-| AL-9 | NFT: owner index and collection index, neither ever compacted; owner index grows by one `(collection id, token id)` pair per token held, collection index by one `u64` per token ever minted | NFT §unrestricted allocation | **REACHABLE** | none | appends `crates/state/src/nft_view.rs:171-190` and `:234-251`, called from `crates/state/src/nft_executor.rs:387-388` (mint) and `:461-462` (batch mint, inside the unbounded loop at `:442`); pinned by `both_accumulating_indexes_allocate_their_whole_value_before_the_ceiling_refuses` | `BatchMint` takes any number of requests (see OV-10), so one transaction drives many appends |
-| AL-10 | DocClass: seven structures, only three of them indexes; the four row-field cases (`IdentityRoot.keys`, `.additional_controllers`, `.services`, `DocClassIssuer.keys`) allocate twice over because the read decodes the whole row into owned values before the encode rebuilds it — up to 7,475,754 B allocated against 168 B accounted | DocClass §unrestricted allocation | **REACHABLE** | none | pinned by `all_seven_accumulating_structures_allocate_their_whole_value_before_the_ceiling_refuses`; `create_identity_root` stores the payload struct verbatim at `crates/state/src/docclass_executor.rs:278-293` | **one transaction seeds the row.** `CreateIdentityRoot` deserializes the whole `IdentityRoot` — keys, controllers and services included — from a payload bounded only by the 2,000,000-byte block limit, so the attacker does not need 20,000 transactions to reach a large row; every subsequent `AddKey`/`UpdateService` then re-decodes and re-encodes it |
-| AL-11 | `UpdateService` and `RotateIssuerKey` linear-scan their list on every append, `RotateIssuerKey` twice | DocClass §unrestricted allocation | **REACHABLE** | none | same structures as AL-10 | quadratic in a row whose size AL-10 shows is single-transaction seedable |
+| AL-9 | NFT: owner index and collection index, neither ever compacted; owner index grows by one `(collection id, token id)` pair per token held, collection index by one `u64` per token ever minted | NFT §unrestricted allocation | **REACHABLE** | none today. **REMEDIED, PENDING ACTIVATION:** `subsystem_allocation_bound_enabled_from_height`, implemented and dormant | appends `crates/state/src/nft_view.rs:171-190` and `:234-251`, called from `crates/state/src/nft_executor.rs:387-388` (mint) and `:461-462` (batch mint, inside the unbounded loop at `:442`); pinned by `both_accumulating_indexes_allocate_their_whole_value_before_the_ceiling_refuses` | `BatchMint` takes any number of requests (see OV-10), so one transaction drives many appends. **Measured at the release configuration** by `the_allocation_bound_gate_refuses_oversized_input_before_it_is_built`: a `BatchMint` of 2,000 requests, a 56,008-byte payload that fits inside a block many times over, churns **641,483,444 B** because the loop rebuilds both indexes once per request -- quadratic in a count the payload declares. Bounded to 512 requests, checked before the loop, the same transaction churns 98,109 B and writes no token row |
+| AL-10 | DocClass: seven structures, only three of them indexes; the four row-field cases (`IdentityRoot.keys`, `.additional_controllers`, `.services`, `DocClassIssuer.keys`) allocate twice over because the read decodes the whole row into owned values before the encode rebuilds it — up to 7,475,754 B allocated against 168 B accounted | DocClass §unrestricted allocation | **REACHABLE** | none today. **REMEDIED, PENDING ACTIVATION:** `subsystem_allocation_bound_enabled_from_height`, implemented and dormant | pinned by `all_seven_accumulating_structures_allocate_their_whole_value_before_the_ceiling_refuses`; `create_identity_root` stores the payload struct verbatim at `crates/state/src/docclass_executor.rs:278-293` | **one transaction seeds the row.** `CreateIdentityRoot` deserializes the whole `IdentityRoot` — keys, controllers and services included — from a payload bounded only by the 2,000,000-byte block limit, so the attacker does not need 20,000 transactions to reach a large row; every subsequent `AddKey`/`UpdateService` then re-decodes and re-encodes it. **Measured at the release configuration** by `release_ceiling_allocation.rs`: at the 1 GiB ceiling these transactions are not refused at all, they are ADMITTED and commit; one `AddKey` peaks at 4.00x the row and churns 5.00x, linear over six doublings, and one `AddKey` with a 1,899,800-byte `key_id` grows the row by 1,899,873 B for one `min_fee`. Two bounds close it: a payload over 65,536 B is refused before it is decoded (measured peak 84 B against the closed gate's 12,649,814 B) and a stored row over 1,048,576 B is refused before it is decoded (the 2 MiB decode never runs) |
+| AL-11 | `UpdateService` and `RotateIssuerKey` linear-scan their list on every append, `RotateIssuerKey` twice | DocClass §unrestricted allocation | **REACHABLE** | none today. **REMEDIED, PENDING ACTIVATION:** `subsystem_allocation_bound_enabled_from_height`, implemented and dormant | same structures as AL-10 | quadratic in a row whose size AL-10 shows is single-transaction seedable. Bounding the row's BYTES subsumes bounding its entry count -- every entry costs at least its own encoding -- so the same `MAX_ACCUMULATING_ROW_BYTES` that closes AL-10 bounds the scans here, and a second limit would be a second thing to keep consistent for no more safety |
 | AL-12 | Every subsystem payload is `bincode::deserialize`d from transaction data with no size or shape limit ahead of it, so the same exposure applies at the decode boundary | Agreement / Property / Healthcare / NFT / DocClass §unrestricted allocation | **REACHABLE**, with a measured bound | none | e.g. `crates/state/src/agreement_executor.rs:171, 193, 217, …`; no `with_limit` call exists in any `crates/state/src/*_executor.rs` | see the empirical note below — reachable, but the amplification is bounded in a way the blocker document does not record |
-| AL-13 | The claim these measurements cannot support: that arbitrary input never reaches an allocator abort, because the replacement value is built before the ceiling is charged | stated as a scope limit by Tax, Legal, Finance, Agreement, Property, Healthcare, NFT and DocClass | **UNDETERMINED** | — | the eight measurements are each one point; the release ceiling is 1 GiB (`crates/state/src/executor.rs:269`), not the 4,096/8,192 B the measurements used | **what would settle it:** a growth-to-abort analysis at the release ceiling — the maximum row size reachable under `max_block_bytes: 2000000` and a 1 GiB write-set ceiling, multiplied by the 2× (index) and 3× (in-row) allocation factors these measurements establish, compared against the memory a validator is specified to have. None of those three numbers is in this tree |
+| AL-13 | The claim these measurements cannot support: that arbitrary input never reaches an allocator abort, because the replacement value is built before the ceiling is charged | stated as a scope limit by Tax, Legal, Finance, Agreement, Property, Healthcare, NFT and DocClass | **UNDETERMINED** | — | the eight measurements are each one point; the release ceiling is 1 GiB (`crates/state/src/executor.rs:269`), not the 4,096/8,192 B the measurements used | **what would settle it:** a growth-to-abort analysis at the release ceiling — the maximum row size reachable under `max_block_bytes: 2000000` and a 1 GiB write-set ceiling, multiplied by the 2× (index) and 3× (in-row) allocation factors these measurements establish, compared against the memory a validator is specified to have. **Two of those three numbers are now measured** (see the preamble): the growth rate is 1,899,873 B per transaction against a DocClass identity row, and the allocation factor is 4.00x peak / 5.00x cumulative for the row-field cases, linear over six doublings. The third is still absent — this tree states no memory a validator is required to have — so the row stays UNDETERMINED, but it is now undetermined for ONE missing number rather than three. The gate below removes the growth rate from the question for AL-9, AL-10 and AL-11; it does not remove it for the rows that are still `none` |
 
 **An empirical note on AL-12, run for this audit.** The decode-boundary claim is
 about a payload whose declared length is far larger than the payload itself.

@@ -942,6 +942,56 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub subsystem_tx_index_enabled_from_height: Option<u64>,
+
+    /// A transaction's sizing inputs are bounded BEFORE the value they size is
+    /// built.
+    ///
+    /// Below the gate an accumulating structure is decoded, appended to and
+    /// re-encoded in full before `view.put` charges one byte against the
+    /// candidate ceiling, and the payload that drives it is `bincode`-decoded
+    /// with no length check ahead of it. So the ceiling bounds what a block may
+    /// COMMIT; it bounds nothing about what one refused transaction may
+    /// ALLOCATE. Measured at the release configuration -- a 1 GiB ceiling and
+    /// 2,000,000-byte blocks -- one `AddKey` against a committed DocClass
+    /// identity row peaks at 4.00x the row's size and churns 5.00x, and one
+    /// such transaction grows that row by 1,899,873 bytes for one `min_fee`,
+    /// so the row reaches the largest size a single write can still commit in
+    /// a few hundred blocks and the transaction after that peaks above two
+    /// gibibytes on its way to being refused.
+    ///
+    /// At and above the gate three checks fire before the allocation: a
+    /// subsystem payload longer than `MAX_SUBSYSTEM_PAYLOAD_BYTES` is refused
+    /// before it is decoded; a stored row whose encoding is longer than
+    /// `MAX_ACCUMULATING_ROW_BYTES` is refused before it is decoded, which
+    /// stops the row growing any further; and an NFT `BatchMint` naming more
+    /// than `MAX_NFT_BATCH_MINT_REQUESTS` tokens is refused before the loop
+    /// that rebuilds the owner index once per request.
+    ///
+    /// The limits themselves are binary constants, NOT fields here. An
+    /// activation height is a number validators must agree on and this digest
+    /// covers it; a size limit is a number validators must agree on and this
+    /// digest does NOT cover anything that is not an `Option<u64>` gate. Two
+    /// validators holding different limits would split at the first transaction
+    /// between them, with nothing to compare. So the limit lives where the rest
+    /// of the reviewed binary lives and only the height is configured.
+    ///
+    /// One field for both subsystems because it is one rule at one seam, and
+    /// because a partial activation leaves the cheapest vector open -- an
+    /// attacker refused by the DocClass bound simply moves to the NFT one.
+    /// There is no configuration in which an operator wants one and not the
+    /// other.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub subsystem_allocation_bound_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -1278,6 +1328,7 @@ impl Default for ChainParams {
             // Production-safe default: eight subsystems see the block's timestamp instead of a literal zero — dormant.
             subsystem_block_timestamp_enabled_from_height: None,
             subsystem_tx_index_enabled_from_height: None,
+            subsystem_allocation_bound_enabled_from_height: None,
         }
     }
 }
@@ -1599,6 +1650,10 @@ impl ChainParams {
             (
                 "subsystem_tx_index_enabled_from_height",
                 self.subsystem_tx_index_enabled_from_height,
+            ),
+            (
+                "subsystem_allocation_bound_enabled_from_height",
+                self.subsystem_allocation_bound_enabled_from_height,
             ),
         ]
     }

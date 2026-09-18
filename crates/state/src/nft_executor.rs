@@ -26,6 +26,51 @@ use tracing::{debug, info, warn};
 
 use crate::{Result, StateError, StateManager};
 
+/// The largest number of tokens one `BatchMint` may name.
+///
+/// Read only where the allocation-bound gate is open. The loop that services a
+/// batch rebuilds the owner index and the collection index once per request, so
+/// the transaction's cost is quadratic in this number: at 512 the owner index is
+/// rebuilt 512 times at an average of 256 forty-byte entries, about five
+/// megabytes of churn, and at the 2,000,000-byte block limit with no bound at
+/// all it is tens of gigabytes.
+///
+/// A binary constant rather than a `ChainParams` field, for the reason given on
+/// `MAX_SUBSYSTEM_PAYLOAD_BYTES`: the activation digest covers `Option<u64>`
+/// gates and nothing else, so a configurable limit is a consensus-relevant
+/// number with nothing to compare it against.
+pub const MAX_NFT_BATCH_MINT_REQUESTS: usize = 512;
+
+/// One value per chain-defined activation height this executor is gated on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NftGates {
+    /// An operation naming an absent collection or token, or carrying an
+    /// undecodable payload, produces a `Failed` receipt instead of making the
+    /// whole block unexecutable. ACTIVATION-AUDIT row OV-?? / the receipt-failure
+    /// rule.
+    pub receipt_failure: bool,
+    /// A transaction's sizing inputs are checked against a limit BEFORE the
+    /// value they size is built: an oversized payload is refused before it is
+    /// decoded, and a `BatchMint` naming more than
+    /// [`MAX_NFT_BATCH_MINT_REQUESTS`] tokens is refused before the loop that
+    /// rebuilds the owner index once per request. ACTIVATION-AUDIT row AL-9.
+    pub allocation_bound: bool,
+}
+
+impl NftGates {
+    /// Every gate closed -- the release configuration today.
+    pub const CLOSED: Self = Self {
+        receipt_failure: false,
+        allocation_bound: false,
+    };
+
+    /// Every gate open. For the gated half of a mixed-version test.
+    pub const OPEN: Self = Self {
+        receipt_failure: true,
+        allocation_bound: true,
+    };
+}
+
 /// Result of executing an NFT operation
 #[derive(Debug)]
 pub struct NftExecutionResult {
@@ -94,6 +139,21 @@ impl NftExecutor {
     /// Get current timestamp in milliseconds (now uses block timestamp for determinism)
     fn now_ms(block_timestamp: u64) -> u64 {
         block_timestamp
+    }
+
+    /// The activation height for bounding a transaction's sizing inputs.
+    ///
+    /// Reads `params.subsystem_allocation_bound_enabled_from_height` through
+    /// `crate::subsystem_allocation_bound_gate_open`, which is the same field
+    /// the DocClass bound reads. ACTIVATION-AUDIT row AL-9.
+    ///
+    /// Not its own field. The DocClass and NFT bounds are one rule at one seam
+    /// -- check the size before building the value -- with the same blast radius
+    /// on both sides, and an attacker refused by one simply uses the other. The
+    /// argument is spelled out on the field itself in `crates/genesis/src/lib.rs`.
+    #[inline]
+    fn allocation_bound_gate_open(params: &ChainParams, block_height: u64) -> bool {
+        crate::subsystem_allocation_bound_gate_open(params, block_height)
     }
 
     /// The activation height for the NFT receipt-failure rule.
@@ -169,7 +229,7 @@ impl NftExecutor {
         block_timestamp: u64,
         block_height: u64,
     ) -> Result<NftExecutionResult> {
-        Self::execute_with_gate(
+        Self::execute_with_gates(
             view,
             params,
             sender,
@@ -177,7 +237,10 @@ impl NftExecutor {
             proposer,
             fee,
             block_timestamp,
-            Self::receipt_failure_gate_open(params, block_height),
+            NftGates {
+                receipt_failure: Self::receipt_failure_gate_open(params, block_height),
+                allocation_bound: Self::allocation_bound_gate_open(params, block_height),
+            },
         )
     }
 
@@ -205,6 +268,40 @@ impl NftExecutor {
         block_timestamp: u64,
         receipt_failure_gate_open: bool,
     ) -> Result<NftExecutionResult> {
+        Self::execute_with_gates(
+            view,
+            params,
+            sender,
+            nft_data,
+            proposer,
+            fee,
+            block_timestamp,
+            NftGates {
+                receipt_failure: receipt_failure_gate_open,
+                allocation_bound: false,
+            },
+        )
+    }
+
+    /// Execute an NFT operation with every activation decision supplied
+    /// directly.
+    ///
+    /// [`Self::execute_with_gate`] is the one-gate spelling this replaced, kept
+    /// so that every mixed-version test written against the receipt-failure gate
+    /// still drives the seam it was written for. It supplies
+    /// `allocation_bound: false`, which is that binary's behaviour.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_gates(
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
+        sender: &Address,
+        nft_data: &NftTxData,
+        proposer: &Address,
+        fee: Balance,
+        block_timestamp: u64,
+        gates: NftGates,
+    ) -> Result<NftExecutionResult> {
+        let receipt_failure_gate_open = gates.receipt_failure;
         let outcome = Self::execute_ungated(
             view,
             params,
@@ -213,6 +310,7 @@ impl NftExecutor {
             proposer,
             fee,
             block_timestamp,
+            gates,
         );
 
         let err = match outcome {
@@ -255,9 +353,27 @@ impl NftExecutor {
         proposer: &Address,
         fee: Balance,
         block_timestamp: u64,
+        gates: NftGates,
     ) -> Result<NftExecutionResult> {
-        // Deduct fee from sender
+        // ACTIVATION-AUDIT row AL-9, and the NFT half of AL-12. Every arm below
+        // opens with `bincode::deserialize(&nft_data.data)` and no length check
+        // ahead of it. One check here rather than one per arm, for the reason
+        // the DocClass dispatch gives: the arms are many and the rule is one.
+        //
+        // AFTER the fee deduction, deliberately. Every pre-existing refusal in
+        // this executor charges the sender -- `deduct_fee` is the first thing
+        // `execute_ungated` does and every `failure()` below it returns having
+        // paid -- and an unpaid refusal would be the cheaper transaction to
+        // spam, which is the opposite of the point.
         Self::deduct_fee(view, sender, fee, proposer)?;
+
+        if gates.allocation_bound && nft_data.data.len() > crate::MAX_SUBSYSTEM_PAYLOAD_BYTES {
+            return Ok(NftExecutionResult::failure(format!(
+                "NFT payload too large: {} bytes, limit {}",
+                nft_data.data.len(),
+                crate::MAX_SUBSYSTEM_PAYLOAD_BYTES
+            )));
+        }
 
         match nft_data.operation {
             NftOperation::CreateCollection => {
@@ -289,6 +405,7 @@ impl NftExecutor {
                 &nft_data.collection_id,
                 &nft_data.data,
                 block_timestamp,
+                gates,
             ),
             NftOperation::Transfer => Self::execute_transfer(
                 view,
@@ -560,6 +677,7 @@ impl NftExecutor {
         collection_id: &[u8; 32],
         data: &[u8],
         block_timestamp: u64,
+        gates: NftGates,
     ) -> Result<NftExecutionResult> {
         // Get collection
         let mut collection = Self::v_get_collection(view, collection_id)?
@@ -584,6 +702,23 @@ impl NftExecutor {
             return Ok(NftExecutionResult::failure(
                 "Batch would exceed max supply".to_string(),
             ));
+        }
+
+        // ACTIVATION-AUDIT row AL-9. The loop below calls
+        // `v_add_to_owner_index` and `v_add_to_collection_index` once per
+        // request, and each of those reads an accumulating index, appends one
+        // entry and re-encodes the WHOLE of it. So the work this one
+        // transaction does is QUADRATIC in a count the payload declares: with
+        // `n` requests the owner index is rebuilt `n` times at an average size
+        // of `n/2` entries. The count is checked here, before the first
+        // rebuild, rather than being discovered when the candidate ceiling
+        // refuses the write partway through -- by which time the quadratic work
+        // has already been done and the whole block is unexecutable.
+        if gates.allocation_bound && count as usize > MAX_NFT_BATCH_MINT_REQUESTS {
+            return Ok(NftExecutionResult::failure(format!(
+                "BatchMint of {count} tokens exceeds the limit of \
+                 {MAX_NFT_BATCH_MINT_REQUESTS}"
+            )));
         }
 
         let first_token_id = collection.next_token_id;
