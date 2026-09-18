@@ -79,7 +79,7 @@ pub use storage_metadata::{
     ArchivePerEntry, CoverageSummaryV2, StorageMetadataExecutionResult, StorageMetadataExecutor,
     StorageMetadataV2ExecutionResult, MAX_ASSIGNED_COUNT_CHUNK_COUNT,
 };
-pub use property_executor::{PropertyExecutionResult, PropertyExecutor};
+pub use property_executor::{PropertyExecutionResult, PropertyExecutor, PropertyGates};
 pub use schema_validator::{SchemaValidator, SchemaValidatorConfig, ValidationResult};
 pub use snapshot::{
     sync_capability, usable_reorg_depth, RestoreResult, Snapshot, SnapshotHeader, SnapshotManager,
@@ -87,7 +87,7 @@ pub use snapshot::{
 };
 pub use staking_executor::{StakingExecutionResult, StakingExecutor};
 pub use state::StateManager;
-pub use tax_executor::{TaxExecutionResult, TaxExecutor};
+pub use tax_executor::{TaxExecutionResult, TaxExecutor, TaxGates};
 pub use token_executor::{TokenExecutionResult, TokenExecutor};
 
 // Type alias for convenience (used by executors)

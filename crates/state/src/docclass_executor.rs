@@ -50,6 +50,10 @@ pub struct DocClassGates {
     /// longer be overwritten by a credential list at a colliding commitment.
     /// ACTIVATION-AUDIT row BD-6.
     pub subject_index_split: bool,
+    /// The revocation family consults the issuer registry, so a suspended or
+    /// revoked issuer stops controlling what it issued. ACTIVATION-AUDIT row
+    /// AU-36.
+    pub revocation_standing: bool,
 }
 
 impl DocClassGates {
@@ -58,12 +62,14 @@ impl DocClassGates {
     pub const CLOSED: Self = Self {
         stake_escrow: false,
         subject_index_split: false,
+        revocation_standing: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
     pub const OPEN: Self = Self {
         stake_escrow: true,
         subject_index_split: true,
+        revocation_standing: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -71,6 +77,10 @@ impl DocClassGates {
         Self {
             stake_escrow: DocClassExecutor::stake_escrow_gate_open(params, block_height),
             subject_index_split: DocClassExecutor::subject_index_split_gate_open(
+                params,
+                block_height,
+            ),
+            revocation_standing: DocClassExecutor::revocation_standing_gate_open(
                 params,
                 block_height,
             ),
@@ -190,6 +200,38 @@ impl DocClassExecutor {
     #[inline]
     pub fn subject_index_split_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
         matches!(Self::subject_index_split_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the DocClass revocation-standing rule.
+    ///
+    /// **This is a seam for a `ChainParams` field that does not exist yet.**
+    /// The field this function must read, once `crates/genesis` adds it, is:
+    ///
+    /// ```text
+    /// /// SRC-80X DocClass revocation standing. Dormant by default (`None` ->
+    /// /// never open). Below the gate the whole revocation family -- revoke,
+    /// /// suspend, reactivate and supersede -- authorizes through
+    /// /// `check_revoke_auth`, which reads only the `issuer` field recorded on
+    /// /// the credential row and never consults the issuer registry. So a
+    /// /// suspended or revoked issuer keeps control of everything it issued,
+    /// /// while the ISSUE paths do consult the registry through
+    /// /// `v_can_issue_subcode`. At and above the gate the revocation family
+    /// /// asks the registry the same question. Activation is a consensus
+    /// /// change and needs a coordinated validator upgrade.
+    /// #[serde(default)]
+    /// pub docclass_revocation_standing_enabled_from_height: Option<u64>,
+    /// ```
+    #[inline]
+    fn revocation_standing_activation(params: &ChainParams) -> Option<u64> {
+        // Replace with `params.docclass_revocation_standing_enabled_from_height`.
+        let _ = params;
+        None
+    }
+
+    /// Whether the revocation-standing rule is active at `block_height`.
+    #[inline]
+    pub fn revocation_standing_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::revocation_standing_activation(params), Some(h) if block_height >= h)
     }
 
     /// Execute a DocClass transaction.
@@ -364,6 +406,7 @@ impl DocClassExecutor {
                 block_height,
                 block_timestamp,
                 tx_index,
+                gates,
             ),
             DocClassOperation::SuspendCredential => Self::suspend_credential(
                 view,
@@ -374,6 +417,7 @@ impl DocClassExecutor {
                 block_height,
                 block_timestamp,
                 tx_index,
+                gates,
             ),
             DocClassOperation::ReactivateCredential => Self::reactivate_credential(
                 view,
@@ -384,6 +428,7 @@ impl DocClassExecutor {
                 block_height,
                 block_timestamp,
                 tx_index,
+                gates,
             ),
             DocClassOperation::SupersedeCredential => Self::supersede_credential(
                 view,
@@ -394,6 +439,7 @@ impl DocClassExecutor {
                 block_height,
                 block_timestamp,
                 tx_index,
+                gates,
             ),
 
             // Issuer Registry operations
@@ -1068,6 +1114,7 @@ impl DocClassExecutor {
         block_height: BlockHeight,
         block_timestamp: Timestamp,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct RevokeData {
@@ -1078,7 +1125,7 @@ impl DocClassExecutor {
         let revoke: RevokeData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        if !Self::check_revoke_auth(view, sender, &revoke.credential_id)? {
+        if !Self::check_revoke_auth(view, sender, &revoke.credential_id, gates)? {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
@@ -1136,6 +1183,7 @@ impl DocClassExecutor {
         block_height: BlockHeight,
         block_timestamp: Timestamp,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct SuspendData {
@@ -1146,7 +1194,7 @@ impl DocClassExecutor {
         let suspend: SuspendData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        if !Self::check_revoke_auth(view, sender, &suspend.credential_id)? {
+        if !Self::check_revoke_auth(view, sender, &suspend.credential_id, gates)? {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
@@ -1204,6 +1252,7 @@ impl DocClassExecutor {
         block_height: BlockHeight,
         block_timestamp: Timestamp,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct ReactivateData {
@@ -1213,7 +1262,7 @@ impl DocClassExecutor {
         let reactivate: ReactivateData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        if !Self::check_revoke_auth(view, sender, &reactivate.credential_id)? {
+        if !Self::check_revoke_auth(view, sender, &reactivate.credential_id, gates)? {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
@@ -1275,6 +1324,7 @@ impl DocClassExecutor {
         block_height: BlockHeight,
         block_timestamp: Timestamp,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct SupersedeData {
@@ -1285,7 +1335,7 @@ impl DocClassExecutor {
         let supersede: SupersedeData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        if !Self::check_revoke_auth(view, sender, &supersede.old_credential_id)? {
+        if !Self::check_revoke_auth(view, sender, &supersede.old_credential_id, gates)? {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
@@ -1333,18 +1383,41 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(Some(supersede.new_credential_id)))
     }
 
+    /// Who may revoke, suspend, reactivate or supersede a credential.
+    ///
+    /// Below the revocation-standing gate this reads only the `issuer` field
+    /// recorded on the credential row, so a SUSPENDED or REVOKED issuer keeps
+    /// control of everything it issued -- while the ISSUE paths consult the
+    /// registry through `v_can_issue_subcode`. At the gate the registry is
+    /// consulted here too. The status question only, not the subcode or the
+    /// jurisdiction: an issuer whose authorization has been narrowed since must
+    /// still be able to revoke what it validly issued before, and refusing that
+    /// would strand credentials nobody could withdraw.
+    /// ACTIVATION-AUDIT row AU-36.
     fn check_revoke_auth(
         view: &ExecutionView<'_, '_>,
         sender: &Address,
         credential_id: &CredentialId,
+        gates: DocClassGates,
     ) -> Result<bool> {
-        if let Some(a) = Self::v_get_eligibility(view, credential_id)? {
-            return Ok(a.issuer == *sender);
+        let recorded_issuer = if let Some(a) = Self::v_get_eligibility(view, credential_id)? {
+            a.issuer
+        } else if let Some(c) = Self::v_get_credential(view, credential_id)? {
+            c.issuer
+        } else {
+            return Ok(false);
+        };
+
+        if recorded_issuer != *sender {
+            return Ok(false);
         }
-        if let Some(c) = Self::v_get_credential(view, credential_id)? {
-            return Ok(c.issuer == *sender);
+        if !gates.revocation_standing {
+            return Ok(true);
         }
-        Ok(false)
+        Ok(match Self::v_get_docclass_issuer(view, sender)? {
+            Some(issuer) => issuer.status.can_issue(),
+            None => false,
+        })
     }
 
     // ========================================================================

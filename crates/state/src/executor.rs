@@ -796,6 +796,7 @@ impl BlockExecutor {
                     TxPayload::Tax(tax_data) => {
                         // Execute Tax operation (SRC-82X)
                         let result = TaxExecutor::execute(view,
+                            &self.params,
                             &v2_tx.from,
                             &tax_data,
                             proposer,
@@ -946,6 +947,7 @@ impl BlockExecutor {
                         // Execute Property operation (SRC-86X)
                         let result = PropertyExecutor::execute(
                             view,
+                            &self.params,
                             &v2_tx.from,
                             &property_data,
                             proposer,
@@ -2548,6 +2550,7 @@ impl BlockExecutor {
 
                 // Execute Tax operation (SRC-82X)
                 let result = TaxExecutor::execute(view,
+                    &self.params,
                     &tx.from,
                     tax_data,
                     proposer,
@@ -2738,6 +2741,7 @@ impl BlockExecutor {
                 // Execute Property operation (SRC-86X)
                 let result = PropertyExecutor::execute(
                     view,
+                    &self.params,
                     &tx.from,
                     property_data,
                     proposer,

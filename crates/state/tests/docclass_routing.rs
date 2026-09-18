@@ -4271,3 +4271,88 @@ fn an_identity_indexed_before_the_split_is_still_found_after_it() {
         "an upgraded node still sees what a pre-activation block indexed"
     );
 }
+
+/// AU-36: the revocation family never consults the issuer registry.
+///
+/// `revoke`, `suspend`, `reactivate` and `supersede` all authorize through
+/// `check_revoke_auth`, which reads only the `issuer` field recorded on the
+/// credential row. The ISSUE paths do consult the registry, through
+/// `v_can_issue_subcode`, so a suspended or revoked issuer loses the ability to
+/// issue and keeps the ability to withdraw -- which is the wrong half to keep.
+/// `a_suspended_issuer_can_still_revoke_and_update_itself` above pins it and
+/// still passes unchanged.
+///
+/// Gated on `docclass_revocation_standing_enabled_from_height`, a `ChainParams`
+/// field this track cannot add. The gate asks the STATUS question only, not the
+/// subcode or the jurisdiction: an issuer whose authorization has been narrowed
+/// since must still be able to revoke what it validly issued, and refusing that
+/// would strand credentials nobody could withdraw.
+#[test]
+fn a_suspended_issuer_keeps_the_revocation_family_only_below_the_gate() {
+    for gates in [DocClassGates::CLOSED, DocClassGates::OPEN] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let gov = KeyPair::generate();
+        fund(&db, &gov, 100_000_000);
+        let store = DocClassStore::new(&db);
+        let mut suspended = government_issuer(gov.address());
+        suspended.status = DocClassIssuerStatus::Suspended;
+        store.issuers().put(&suspended).unwrap();
+        store
+            .eligibility()
+            .put(&eligibility(0xA5, gov.address()))
+            .unwrap();
+
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        // New issuance is refused on BOTH sides -- that half always worked.
+        assert!(
+            !DocClassExecutor::execute_with_gates(
+                &mut view,
+                &params(),
+                &gov.address(),
+                &docclass_payload(
+                    DocClassOperation::IssueCredential,
+                    DocSubcode::EligibilityAttestation,
+                    &eligibility(0xA6, gov.address()),
+                ),
+                &Address::new([9; 20]),
+                100,
+                1,
+                1_000,
+                0,
+                sumchain_primitives::Hash::ZERO,
+                gates,
+            )
+            .unwrap()
+            .success
+        );
+
+        let revoked = DocClassExecutor::execute_with_gates(
+            &mut view,
+            &params(),
+            &gov.address(),
+            &docclass_payload(
+                DocClassOperation::RevokeCredential,
+                DocSubcode::Revocation,
+                &ReasonedData {
+                    credential_id: [0xA5; 32],
+                    reason: RevocationReason::IssuerCompromise,
+                },
+            ),
+            &Address::new([9; 20]),
+            100,
+            1,
+            1_000,
+            1,
+            sumchain_primitives::Hash::ZERO,
+            gates,
+        )
+        .unwrap();
+        assert_eq!(
+            revoked.success,
+            !gates.revocation_standing,
+            "a suspended issuer keeps the revocation family, until the gate"
+        );
+    }
+}
