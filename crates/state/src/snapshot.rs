@@ -185,10 +185,14 @@ pub const REQUIRED_FAST_SYNC_FAMILIES: &[&str] = &[
 /// `META` key holding what a snapshot import did to this database.
 ///
 /// Re-exported rather than redeclared: the key, its encoding and its decode
-/// failure live together in `sumchain_storage::snapshot_meta`, so there is one
+/// failure live together in [`sumchain_storage::journal`], so there is one
 /// answer to "what is in that row" and one answer to "what if it is
 /// unreadable".
-pub use sumchain_storage::snapshot_meta::SNAPSHOT_IMPORT_META_KEY;
+///
+/// There used to be a second row, `snapshot/imported_at`, recording the same
+/// fact under a different write rule. Two rows for one fact do not conflict,
+/// they diverge, and no module that owns one of them can detect it.
+pub use sumchain_storage::journal::UNDO_HISTORY_FLOOR_META_KEY as SNAPSHOT_IMPORT_META_KEY;
 
 /// The families [`REQUIRED_FAST_SYNC_FAMILIES`] demands and
 /// [`SNAPSHOT_CARRIES`] does not supply.
@@ -437,16 +441,19 @@ impl SnapshotManager {
     ///    Only (3) is a verification against the network, and only above the
     ///    activation gate; [`RestoreResult::consensus_verified_from`] says which.
     ///
-    /// A failure at (2) leaves the rows written. That is deliberate and it is
-    /// stated rather than hidden: the alternative is a partial rollback whose
-    /// own correctness is unproven, and a node whose import failed must not
-    /// continue from either outcome. The error names the height so the operator
-    /// re-inits from a known-good directory.
+    /// A failure at (2) leaves the rows written, and the undo-history floor
+    /// with them. That is deliberate and it is stated rather than hidden: the
+    /// alternative is a partial rollback whose own correctness is unproven, and
+    /// a node whose import failed must not continue from either outcome. The
+    /// error names the height so the operator re-inits from a known-good
+    /// directory.
     ///
-    /// On success the import RECORDS what it did, in `cf::META`, because the
-    /// consequences outlive the process: this node holds no undo record for any
-    /// block at or below the import height and can reconstruct no historical
-    /// state below it. See [`sync_capability`] and [`state_history_floor`].
+    /// The import RECORDS what it did, in `cf::META`, because the consequences
+    /// outlive the process: this node holds no undo record for any block at or
+    /// below the import height and can reconstruct no historical state below
+    /// it. See [`sync_capability`] and [`state_history_floor`]. The record is
+    /// staged into the FIRST batch of rows rather than written after the last,
+    /// so no crash can leave restored state that does not know its own floor.
     pub fn import_account_family(&self, snapshot: &Snapshot) -> Result<RestoreResult> {
         self.check_header(snapshot)?;
 
@@ -459,24 +466,32 @@ impl SnapshotManager {
             snapshot.header.height, snapshot.header.account_count, snapshot.header.account_digest
         );
 
-        let state_store = StateStore::new(&self.db);
-        let mut restored_count = 0u64;
-
-        for account in &snapshot.accounts {
-            let address = Address::new(account.address);
-            state_store.put_account(
-                &address,
-                &AccountState {
-                    balance: account.balance,
-                    nonce: account.nonce,
-                },
-            )?;
-            restored_count += 1;
-
-            if restored_count % 10000 == 0 {
-                debug!("Imported {} accounts...", restored_count);
-            }
-        }
+        // The rows and the undo-history floor go in together, through the store
+        // that owns both encodings. This path deliberately holds no batch of
+        // its own: the ordering that closes the crash window — the floor staged
+        // into the FIRST batch of rows, never written after the last — is not
+        // something a caller should be able to get wrong, so the caller does
+        // not get to choose it. See `StateStore::import_accounts`.
+        let restored_count = StateStore::new(&self.db)
+            .import_accounts(
+                snapshot.accounts.iter().map(|a| {
+                    (
+                        Address::new(a.address),
+                        AccountState {
+                            balance: a.balance,
+                            nonce: a.nonce,
+                        },
+                    )
+                }),
+                snapshot.header.height,
+            )
+            .map_err(|e| {
+                StateError::Genesis(format!(
+                    "importing the account family at height {} failed: {e}",
+                    snapshot.header.height
+                ))
+            })?;
+        debug!("Imported {} accounts", restored_count);
 
         // What the DATABASE now holds, through the function consensus uses —
         // not what the file claimed. The two differ whenever the write did
@@ -495,14 +510,6 @@ impl SnapshotManager {
                 snapshot.header.height, snapshot.header.account_digest, committed
             )));
         }
-
-        // Record it, so a restart does not forget. Written AFTER the commitment
-        // check, so a database that failed the check is not marked as having
-        // been imported into.
-        sumchain_storage::snapshot_meta::record_snapshot_import(&self.db, snapshot.header.height)
-            .map_err(|e| {
-            StateError::Genesis(format!("recording the snapshot import height failed: {e}"))
-        })?;
 
         info!(
             "Account family imported: {} accounts at height {}, commitment {} \
@@ -798,7 +805,7 @@ pub fn sync_capability(db: &Database, current_height: BlockHeight) -> Result<Syn
 
 /// The height a snapshot was imported at, or `None`.
 pub fn imported_at(db: &Database) -> Result<Option<BlockHeight>> {
-    sumchain_storage::snapshot_meta::snapshot_import_height(db)
+    sumchain_storage::journal::undo_history_floor(db)
         .map_err(|e| StateError::Genesis(e.to_string()))
 }
 

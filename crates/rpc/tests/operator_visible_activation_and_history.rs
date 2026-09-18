@@ -290,12 +290,12 @@ async fn a_server_without_a_genesis_declines_rather_than_serving_a_default_diges
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Record a snapshot import, which is what makes a node's history floor
-/// nonzero. The key and encoding belong to `sumchain_storage::snapshot_meta`;
-/// this reaches for the public recorder rather than writing the row, so a change
-/// to that representation breaks the build here rather than silently producing a
+/// nonzero. The key and encoding belong to `sumchain_storage::journal`; this
+/// reaches for the public recorder rather than writing the row, so a change to
+/// that representation breaks the build here rather than silently producing a
 /// node this test believes is restricted and which is not.
 fn seed_import(db: &Database, height: u64) {
-    sumchain_storage::snapshot_meta::record_snapshot_import(db, height).unwrap();
+    sumchain_storage::journal::record_undo_history_floor(db, height).unwrap();
     assert_eq!(
         sumchain_state::snapshot::imported_at(db).unwrap(),
         Some(height),

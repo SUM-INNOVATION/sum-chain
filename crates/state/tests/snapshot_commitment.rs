@@ -27,7 +27,7 @@ use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
     Address, Block, BlockHeader, Hash, SignedTransaction, TransactionV2, TxPayload,
 };
-use sumchain_state::account_root::account_state_digest;
+use sumchain_state::account_root::{account_state_digest, account_state_digest_of};
 use sumchain_state::executor::BlockExecutor;
 use sumchain_state::snapshot::{
     can_serve_history_at, imported_at, missing_for_fast_sync, sync_capability, usable_reorg_depth,
@@ -410,6 +410,219 @@ fn a_failed_verification_writes_nothing() {
         account_state_digest(&target.db).unwrap(),
         empty,
         "the refusal precedes every write, so the target is untouched"
+    );
+    assert_eq!(
+        imported_at(&target.db).unwrap(),
+        None,
+        "including the floor: this refusal is the one that happens before any \
+         batch, so unlike the commitment check it leaves nothing at all"
+    );
+}
+
+/// A restore that is REFUSED after writing still leaves its history floor.
+///
+/// This inverts what the import used to do, and the inversion is the point.
+///
+/// The floor used to be recorded after the commitment check, on the rule that a
+/// database which failed the check should not be marked as imported. That rule
+/// optimises the wrong direction. The floor is a RESTRICTION: it narrows the
+/// heights this node will answer about and caps how deep a reorg it will
+/// attempt. Recording it on a database that turned out unusable costs
+/// availability on a directory the operator has already been told to discard.
+/// NOT recording it, on a database that holds restored rows, costs correctness
+/// — the node reads as one that executed every block it holds, offers its full
+/// reorg horizon, and answers historical questions about heights whose state it
+/// has never had.
+///
+/// So the floor goes in with the first rows, and a failed import is a database
+/// carrying both the rows it could not verify and the floor that describes
+/// them. Which is also why the error says the directory must not be used.
+#[test]
+fn a_failed_import_leaves_the_floor_that_describes_what_it_wrote() {
+    let source = committed_node();
+    let snapshot = chain_with_snapshot(&source, BOUNDARY);
+
+    let target = committed_node();
+    target.seed(&addr(250), 999_999, 0); // an account the snapshot does not mention
+
+    assert_eq!(
+        imported_at(&target.db).unwrap(),
+        None,
+        "precondition: nothing has restricted this node yet"
+    );
+
+    let err = target
+        .snapshots()
+        .import_account_family(&snapshot)
+        .expect_err("a restore that does not reproduce the commitment must fail")
+        .to_string();
+    assert!(
+        err.contains("did not reproduce the commitment") && err.contains("must not be used"),
+        "the refusal must say what is wrong and what to do: {err}"
+    );
+
+    // The rows are there — the doc says so and the operator is told so.
+    assert!(
+        StateStore::new(&target.db)
+            .get_account_opt(&Address::new(snapshot.accounts[0].address))
+            .unwrap()
+            .is_some(),
+        "the failure leaves the rows written; that is stated, not hidden"
+    );
+
+    // And so is the floor that describes them. Under the old ordering this was
+    // `None`, and a restart would have found restored state claiming a full
+    // reorg horizon over blocks it holds no undo records for.
+    assert_eq!(
+        imported_at(&target.db).unwrap(),
+        Some(BOUNDARY),
+        "a database holding restored rows must know its floor, even when the \
+         import that wrote them was refused"
+    );
+    assert!(
+        !can_serve_history_at(&target.db, BOUNDARY - 1).unwrap(),
+        "and the restriction must actually bind"
+    );
+}
+
+/// A snapshot with no accounts still records its floor.
+///
+/// The floor rides in the first batch of rows, and a snapshot with no rows
+/// writes no batch. A node restored to height `h` holding no accounts is still
+/// a node with no undo history below `h`, so the fact does not get to depend on
+/// whether the account set happened to be empty.
+#[test]
+fn an_import_that_carries_no_accounts_still_records_its_floor() {
+    let source = committed_node();
+    let mut snapshot = chain_with_snapshot(&source, BOUNDARY);
+    snapshot.accounts.clear();
+    snapshot.header.account_count = 0;
+    snapshot.header.account_digest =
+        account_state_digest_of(Vec::<(Address, AccountState)>::new()).unwrap();
+
+    let target = node({
+        let mut p = ChainParams::with_v2_enabled();
+        p.account_root_enabled_from_height = Some(BOUNDARY);
+        p.application_journal_enabled_from_height = Some(0);
+        p
+    });
+
+    target
+        .snapshots()
+        .import_account_family(&snapshot)
+        .expect("an empty account set is a legitimate snapshot of an empty chain");
+
+    assert_eq!(
+        imported_at(&target.db).unwrap(),
+        Some(BOUNDARY),
+        "no rows is not no floor"
+    );
+}
+
+/// The floor is staged INTO the first batch, not written after the last row.
+///
+/// The property this file can observe is the one above: a refused import still
+/// carries its floor. What it cannot observe in-process is the crash window —
+/// a process that dies between the rows and the floor. That window is closed by
+/// ordering, and ordering is a property of the source, so the source is what
+/// this reads.
+///
+/// It reads TWO files, because the ordering is deliberately not the caller's to
+/// choose: `StateStore::import_accounts` owns the batch and stages the floor
+/// into it, and `import_account_family` owns nothing but the call. A restore
+/// path that held its own batch could put the floor anywhere in it.
+///
+/// `storage/the_restore_floor_and_the_restored_state_commit_or_fail_together`
+/// proves the primitive does what staging claims; this proves the restore is
+/// the caller that uses it.
+#[test]
+fn the_floor_is_staged_with_the_first_rows_rather_than_written_after_the_last() {
+    // ── the store: the floor is staged before anything is committed ──────────
+    let schema = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../storage/src/schema.rs"
+    ))
+    .expect("schema.rs");
+    let body = {
+        let start = schema
+            .find("pub fn import_accounts<I>(")
+            .expect("StateStore::import_accounts");
+        let rest = &schema[start..];
+        let open = rest.find('{').expect("body");
+        let mut depth = 0i32;
+        let mut end = open;
+        for (i, c) in rest[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        &rest[open..=end]
+    };
+
+    let stage = body
+        .find("stage_undo_history_floor")
+        .expect("the import must stage the floor");
+    let commit = body
+        .find("batch.commit()")
+        .expect("the import must commit a batch");
+    assert!(
+        stage < commit,
+        "the floor must be staged before anything is committed"
+    );
+    assert_eq!(
+        body.matches("batch.commit()").count(),
+        1,
+        "one commit site, so 'the floor precedes it' is a claim about every \
+         batch and not just the first one written down"
+    );
+    assert!(
+        !body.contains("self.db.put(") && !body.contains("db.put("),
+        "every restored row goes through the batch the floor rides in; a direct \
+         put would be a row written outside it"
+    );
+
+    // ── the caller: it holds no batch, and it verifies only after ────────────
+    let caller = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/snapshot.rs"))
+        .expect("snapshot.rs");
+    let import = {
+        let start = caller
+            .find("pub fn import_account_family(")
+            .expect("import_account_family");
+        let end = caller[start..]
+            .find("\n    /// Chain id and format version.")
+            .expect("end of import_account_family");
+        &caller[start..start + end]
+    };
+
+    assert!(
+        !import.contains("db.batch()"),
+        "the restore must not hold a batch of its own — the ordering inside it \
+         is the store's to guarantee"
+    );
+    let call = import
+        .find("import_accounts(")
+        .expect("the restore must go through the store");
+    let verify = import
+        .find("account_state_digest(&self.db)")
+        .expect("the restore must re-derive the commitment from committed state");
+    assert!(
+        call < verify,
+        "the rows and their floor must be durable before the check that can \
+         refuse them"
+    );
+    assert!(
+        !import.contains("record_undo_history_floor")
+            && !import.contains("stage_undo_history_floor"),
+        "the floor is written by the store, once; a second write here is the \
+         window this closed"
     );
 }
 

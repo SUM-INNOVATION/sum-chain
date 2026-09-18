@@ -1889,32 +1889,42 @@ fn non_execution_paths_are_classified() {
         (Class::ChainStorage, 10, "blocks, transactions, receipts, their indexes, validator sets, pruning — not application state"),
 
         // 1 before the snapshot import recorded what it had done; 2 while that
-        // record was a `db.put` of its own; 1 again now. CHANGED DELIBERATELY,
-        // and the direction is the point.
+        // record was a `db.put` of its own; 1 again, and 1 is now the END state
+        // for a reason that took two corrections to reach.
         //
-        // The vanished site was `snapshot_meta::record_snapshot_import`'s own
-        // `db.put(cf::META, …)`. That module recorded the SAME FACT as
+        // The KEY was collapsed first. `snapshot_meta` recorded the SAME FACT as
         // `journal::UNDO_HISTORY_FLOOR_META_KEY` — the earliest height this node
         // has usable undo history for — under a second key, with its own
         // encoding, its own decode failure and a last-write-wins rule where the
         // journal's was monotone. Two rows for one fact do not conflict, they
-        // diverge, and they merge cleanly while being wrong together. They are
-        // collapsed onto the journal's key, and `snapshot_meta` is now three
-        // re-exports with no write of its own, which is why this scan — which
-        // follows resolvable calls and does not resolve a `pub use` rename —
-        // no longer finds a second site here.
+        // diverge, and they merge cleanly while being wrong together. That
+        // module is gone: not deprecated, not re-exported, deleted, and
+        // `storage/one_row_records_the_history_floor_and_the_retired_key_is_gone`
+        // scans production source so it cannot come back by hand.
         //
-        // The write still happens, and it is pinned where it now lives:
-        // `storage/one_row_records_the_history_floor_under_every_name_that_reaches_it`
-        // and `storage/the_restore_floor_and_the_restored_state_commit_or_fail_together`.
+        // Then the WRITE was collapsed. The import used to write each account
+        // row on its own and record the floor afterwards, which left a window: a
+        // crash between the last row and the floor leaves restored state at
+        // height `h` with NO floor, the journal family empty, the activation
+        // boundary reading as unestablished, and the node offering a reorg
+        // horizon over blocks it holds no undo records for. The import
+        // "succeeded" and nothing is left to notice.
         //
-        // And 1 is the END state, not a temporary dip. The production form is
-        // `journal::stage_undo_history_floor`, which stages the floor into the
-        // restore's OWN batch instead of committing a second one — because a
-        // restore that imports rows and then records the floor separately can
-        // crash between the two and leave restored state that does not know its
-        // own floor. When `snapshot.rs` adopts it, this class has exactly one
-        // committed write site: the import batch, carrying both facts.
+        // The first attempt at that fix put a `WriteBatch` in `snapshot.rs`,
+        // which the RAW guard next door refused — correctly, and it is worth
+        // recording why the refusal was right rather than inconvenient. The
+        // ordering that closes the window is not a thing a caller should be able
+        // to get wrong, so the caller does not get to hold the batch:
+        // `StateStore::import_accounts` owns it, stages the floor into the FIRST
+        // chunk, and writes the rows with the same key builder and encoder
+        // `put_account` uses. One call, one site, both facts.
+        //
+        // Pinned by `state/the_floor_is_staged_with_the_first_rows_rather_than_
+        // written_after_the_last` (the ordering, read from both files),
+        // `state/a_failed_import_leaves_the_floor_that_describes_what_it_wrote`
+        // (the observable consequence) and
+        // `storage/the_restore_floor_and_the_restored_state_commit_or_fail_together`
+        // (the primitive).
         (
             Class::Snapshot,
             1,
@@ -1956,10 +1966,19 @@ fn non_execution_paths_are_classified() {
     }
     for (class, expected, why) in EXPECTED {
         let found = counted.get(class).copied().unwrap_or(0);
+        // Name the sites on failure. A bare count tells whoever broke this that
+        // a number moved; it does not tell them which write moved it, and the
+        // first thing they do is reconstruct this list by hand.
+        let listed: Vec<String> = sites
+            .iter()
+            .filter(|s| s.class == *class)
+            .map(|s| format!("{} {} -> {} x{}", s.file, s.caller, s.callee, s.count))
+            .collect();
         assert_eq!(
             found, *expected,
             "{class:?} now has {found} committed write sites, recorded {expected}.\n  \
-             this class is excluded from the execution ledger because: {why}"
+             this class is excluded from the execution ledger because: {why}\n  \
+             sites now: {listed:#?}"
         );
     }
     let unexpected: Vec<_> = counted

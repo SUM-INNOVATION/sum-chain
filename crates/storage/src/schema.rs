@@ -320,6 +320,85 @@ impl<'a> StateStore<'a> {
         self.db.put(cf::STATE, &key, &encode_account(state)?)
     }
 
+    /// Write a restored account set, and the undo-history floor that describes
+    /// it, without ever leaving a database that holds one and not the other.
+    ///
+    /// # Why the floor is in here and not in the caller
+    ///
+    /// A restore that writes rows and then records its floor has a window
+    /// between the two. A crash in it leaves restored state at height `h` with
+    /// NO floor: the journal family is empty, the activation boundary reads as
+    /// unestablished, the planner offers its full reorg horizon, and the node
+    /// answers historical questions about heights whose state it has never had.
+    /// The import "succeeded" and nothing is left to notice.
+    ///
+    /// So the floor is staged into the FIRST batch, by the same code that
+    /// writes the rows, in the crate that owns both the row encoding and the
+    /// floor's. A caller cannot get the order wrong because a caller does not
+    /// choose it.
+    ///
+    /// # Why chunks rather than one batch
+    ///
+    /// One batch over the whole account set would make the import atomic, and
+    /// would also make its peak allocation a function of the snapshot it was
+    /// handed, with no ceiling anywhere. Whole-import atomicity was not on offer
+    /// regardless — a crash between chunks leaves a partial row set either way —
+    /// so what is bought here is the cheap property: the floor lands with the
+    /// first rows, in one atomic step, at the cost of one chunk of memory
+    /// rather than all of them.
+    ///
+    /// The remaining window is a floor with only some of its rows, which is the
+    /// safe direction: a floor only ever REFUSES, so it narrows what an
+    /// unusable database will answer rather than widening it.
+    ///
+    /// Returns how many rows were written. The first batch is always committed,
+    /// so an empty account set still records its floor — a node restored to
+    /// height `h` holding no accounts is still a node with no undo history
+    /// below `h`, and that fact does not get to depend on whether the set
+    /// happened to be empty.
+    pub fn import_accounts<I>(&self, rows: I, undo_history_floor: BlockHeight) -> Result<u64>
+    where
+        I: IntoIterator<Item = (Address, AccountState)>,
+    {
+        /// Accounts per batch. Bounded on purpose; see above.
+        const IMPORT_BATCH_ACCOUNTS: usize = 10_000;
+
+        let mut rows = rows.into_iter();
+        let mut written = 0u64;
+        let mut staged_floor = false;
+
+        loop {
+            let mut batch = self.db.batch();
+            if !staged_floor {
+                crate::journal::stage_undo_history_floor(self.db, &mut batch, undo_history_floor)?;
+                staged_floor = true;
+            }
+
+            let mut in_batch = 0usize;
+            for (address, state) in rows.by_ref().take(IMPORT_BATCH_ACCOUNTS) {
+                // The SAME key builder and the SAME encoder `put_account` uses.
+                // A second transcription of either here would be a second row
+                // format reachable only through the restore, which is the one
+                // path with no block to check it against.
+                batch.put(
+                    cf::STATE,
+                    &Self::account_key(&address),
+                    &encode_account(&state)?,
+                )?;
+                in_batch += 1;
+            }
+            batch.commit()?;
+            written += in_batch as u64;
+
+            // A short batch means the iterator is spent. An account count that
+            // is an exact multiple of the chunk size costs one extra empty
+            // commit, which is cheaper than peeking.
+            if in_batch < IMPORT_BATCH_ACCOUNTS {
+                return Ok(written);
+            }
+        }
+    }
+
     /// Get account balance
     pub fn get_balance(&self, address: &Address) -> Result<Balance> {
         Ok(self.get_account(address)?.balance)

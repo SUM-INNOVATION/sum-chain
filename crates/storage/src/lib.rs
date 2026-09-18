@@ -21,7 +21,6 @@ pub mod overlay;
 pub mod policy_account_store;
 pub mod property_store;
 pub mod pruner;
-pub mod snapshot_meta;
 pub mod schema;
 pub mod tax_store;
 

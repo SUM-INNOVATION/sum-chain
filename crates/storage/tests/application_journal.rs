@@ -1502,7 +1502,7 @@ fn the_database_size_estimate_counts_every_family_not_just_the_default() {
 //
 // Two `META` keys used to record the same fact — the earliest height for which
 // this node has usable generic undo history. `journal`'s
-// `application_journal/undo_history_floor` and `snapshot_meta`'s
+// `application_journal/undo_history_floor` and the snapshot module's
 // `snapshot/imported_at`, in two files, with two encodings and two write rules.
 //
 // Two rows for one fact do not conflict, they DIVERGE, and they merge cleanly
@@ -1511,35 +1511,32 @@ fn the_database_size_estimate_counts_every_family_not_just_the_default() {
 // different databases, and neither module can detect it because neither knows
 // the other exists.
 //
-// These tests pin the collapse, and the six things the surviving row has to do.
+// These tests pin the collapse, and the things the surviving row has to do.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// There is ONE key, and every name that still reaches the fact reaches that
-/// key — not a second row that happens to agree today.
+/// One key records the history floor, and the retired one is gone from the
+/// tree rather than merely unwritten.
 ///
-/// The bridge names in `snapshot_meta` are re-exports, so this is a tautology at
-/// the type level and the test says so deliberately: the assertion that matters
-/// is the one on the database, that writing through either name leaves exactly
-/// one row in `META` and that the retired `snapshot/imported_at` key is never
-/// written at all.
+/// Two rows once recorded this fact: the journal's monotone
+/// `application_journal/undo_history_floor` and the snapshot module's
+/// last-write-wins `snapshot/imported_at`. They did not conflict, they
+/// diverged, and neither module could detect it because neither knew the other
+/// existed. The collapse removed the second key, then the re-export bridge that
+/// kept its names resolving, and finally the module.
+///
+/// So the claim is no longer "both names reach one row" — there is one name.
+/// It is that the retired key is not written, not migrated, and not mentioned
+/// by any production source file, which is the only form of the claim that
+/// stays true when someone reintroduces the second row by hand.
 #[test]
-fn one_row_records_the_history_floor_under_every_name_that_reaches_it() {
+fn one_row_records_the_history_floor_and_the_retired_key_is_gone() {
     use sumchain_storage::journal::{
         record_undo_history_floor, undo_history_floor, UNDO_HISTORY_FLOOR_META_KEY,
     };
-    use sumchain_storage::snapshot_meta::{
-        record_snapshot_import, snapshot_import_height, SNAPSHOT_IMPORT_META_KEY,
-    };
 
-    /// The key the retired prototype used. Named here and nowhere else in the
-    /// tree: if it reappears in production code this test starts failing for
-    /// the right reason.
+    /// The key the retired prototype used.
     const RETIRED_KEY: &[u8] = b"snapshot/imported_at";
 
-    assert_eq!(
-        SNAPSHOT_IMPORT_META_KEY, UNDO_HISTORY_FLOOR_META_KEY,
-        "the two names must denote one key"
-    );
     assert_ne!(
         UNDO_HISTORY_FLOOR_META_KEY, RETIRED_KEY,
         "the surviving key is the journal's, and the retired one is gone"
@@ -1547,17 +1544,13 @@ fn one_row_records_the_history_floor_under_every_name_that_reaches_it() {
 
     let (d, _g) = db();
 
-    // Written through the snapshot-side name, read through the journal-side one.
-    record_snapshot_import(&d, 700).expect("record");
+    record_undo_history_floor(&d, 700).expect("record");
     assert_eq!(undo_history_floor(&d).unwrap(), Some(700));
-    assert_eq!(snapshot_import_height(&d).unwrap(), Some(700));
-
-    // Written through the journal-side name, read through the snapshot-side one.
     record_undo_history_floor(&d, 900).expect("record");
-    assert_eq!(snapshot_import_height(&d).unwrap(), Some(900));
+    assert_eq!(undo_history_floor(&d).unwrap(), Some(900));
 
-    // And the retired row was never touched by either. A dual write is exactly
-    // what this collapse removes, so its absence is the claim.
+    // The retired row was never touched. A dual write is exactly what this
+    // collapse removes, so its absence is the claim.
     assert_eq!(
         d.get(cf::META, RETIRED_KEY).unwrap(),
         None,
@@ -1569,31 +1562,67 @@ fn one_row_records_the_history_floor_under_every_name_that_reaches_it() {
         "one row, one encoding"
     );
 
-    // One write rule too: monotone, under BOTH names. The snapshot-side row used
-    // to be last-write-wins, which would have let a later import lower the floor
-    // and claim undo history no snapshot can carry.
-    record_snapshot_import(&d, 100).expect("record");
+    // Monotone. The snapshot-side row used to be last-write-wins, which would
+    // have let a later import lower the floor and claim undo history no
+    // snapshot can carry.
+    record_undo_history_floor(&d, 100).expect("record");
     assert_eq!(
         undo_history_floor(&d).unwrap(),
         Some(900),
-        "the surviving rule is monotone under every name that reaches it"
+        "the surviving rule is monotone"
     );
 
-    // And one decode failure, whose text says what follows from it. The state
+    // One decode failure, whose text says what follows from it. The state
     // crate's `imported_at` surfaces this string to an operator.
     d.put(cf::META, UNDO_HISTORY_FLOOR_META_KEY, &[0u8; 3])
         .unwrap();
-    for err in [
-        undo_history_floor(&d).expect_err("malformed").to_string(),
-        snapshot_import_height(&d)
-            .expect_err("malformed")
-            .to_string(),
-    ] {
-        assert!(
-            err.contains("must not serve any"),
-            "a malformed row must be an error that says what follows: {err}"
-        );
+    let err = undo_history_floor(&d).expect_err("malformed").to_string();
+    assert!(
+        err.contains("must not serve any"),
+        "a malformed row must be an error that says what follows: {err}"
+    );
+
+    // And the retired key, and the module that owned it, are absent from every
+    // production source file. The comment this replaces asserted that a
+    // reappearance would fail this test; it would not have, because nothing
+    // looked. Now something does.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/");
+    let mut offenders = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read_dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n != "target") {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if path.extension().is_some_and(|e| e == "rs")
+                && path.components().any(|c| c.as_os_str() == "src")
+            {
+                let text = std::fs::read_to_string(&path).expect("read");
+                // Matched as CODE, not as prose. `journal.rs` explains in a doc
+                // comment what the retired row was and why it is gone, and that
+                // explanation is the reason the collapse is legible to the next
+                // reader — it must not be what trips this guard. A byte-string
+                // literal of the key, or a path into the retired module, is a
+                // reintroduction; a sentence naming either is history.
+                if text.contains("b\"snapshot/imported_at\"")
+                    || text.contains("snapshot_meta::")
+                    || text.contains("mod snapshot_meta")
+                {
+                    offenders.push(path.display().to_string());
+                }
+            }
+        }
     }
+    assert!(
+        offenders.is_empty(),
+        "the retired key and its module must not reappear in production source: {offenders:?}"
+    );
 }
 
 /// The floor and the restored state land in ONE batch, so a crash cannot
