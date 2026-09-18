@@ -27,6 +27,9 @@ blake3 = { workspace = true }
 lru = "0.12"
 
 [dev-dependencies]
+# `JournalActivation::pinned` is feature-gated OFF in production builds, so it
+# exists only for test targets that need a boundary with no database behind it.
+sumchain-storage = { path = "../storage", features = ["activation-fixtures"] }
 tempfile = "3.10"
 wat = "1"
 # Build a REAL beacon carrier (valid EK + PoP) to exercise the gate-open →

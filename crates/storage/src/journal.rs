@@ -611,10 +611,32 @@ impl JournalActivation {
     /// no database — `resolve` ignores it for that variant — so this names that
     /// case directly, for a caller that has a configured height and no handle.
     ///
-    /// It is not a way around the classification: the value it produces answers
-    /// [`Self::requirement_at`] the same way any other does, and a boundary
-    /// pinned above the head is the ordinary "this chain has not activated the
-    /// generic journal yet" configuration rather than a bypass.
+    /// # Why it is not compiled into a production build
+    ///
+    /// Because the classification it answers is a SAFETY one, and this is the
+    /// one constructor that can answer it without consulting the database.
+    /// `JournalActivation::pinned(u64::MAX)` classifies every height as
+    /// [`JournalRequirement::PreActivation`], which is the value that turns the
+    /// missing-journal HALT into a silent fallback to the four legacy
+    /// per-subsystem journals — the incomplete unwind this whole boundary
+    /// exists to prevent. Nothing about the type stops a production caller
+    /// fabricating it, and no amount of documentation is a guard.
+    ///
+    /// So the compiler is the guard. This constructor exists only under
+    /// `cfg(test)` or the `activation-fixtures` feature, which is enabled ONLY
+    /// through the dev-dependencies of the crates whose tests need a boundary
+    /// with no database behind it. No production build of `sumchain-node`, or
+    /// of anything it links, turns it on; production code that tried to call it
+    /// would not compile. The one production path to an activation is
+    /// [`Self::resolve`], which reads this database's own undo-history floor
+    /// and cannot be talked out of it.
+    ///
+    /// Within a test it is not a way around the classification either: the
+    /// value it produces answers [`Self::requirement_at`] the same way any
+    /// other does, and a boundary pinned above the head is the ordinary "this
+    /// chain has not activated the generic journal yet" configuration rather
+    /// than a bypass.
+    #[cfg(any(test, feature = "activation-fixtures"))]
     pub fn pinned(boundary: BlockHeight) -> Self {
         Self {
             source: ActivationSource::Pinned(boundary),

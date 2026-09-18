@@ -21,5 +21,8 @@ parking_lot = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
+# `JournalActivation::pinned` is feature-gated OFF in production builds, so it
+# exists only for test targets that need a boundary with no database behind it.
+sumchain-storage = { path = "../storage", features = ["activation-fixtures"] }
 tempfile = "3.10"
 hex = { workspace = true }
