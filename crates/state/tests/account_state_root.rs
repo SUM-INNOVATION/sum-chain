@@ -712,3 +712,190 @@ fn the_cost_of_the_account_commitment_at_a_realistic_account_count() {
         "per-account fold cost {per_account_us:.3} us is not a linear streaming scan"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. The activation height itself
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Sections 1–6 establish what the commitment does once a height is chosen.
+// This section is about choosing one. Two constraints bind it, they bind in
+// opposite directions, and both are configuration facts — so both are checked
+// before a block is executed rather than at the boundary, where the node has
+// already been publishing.
+
+/// An activation at or below the legacy window is REFUSED, not merely
+/// documented.
+///
+/// `a_boundary_inside_the_legacy_window_would_be_absorbed_not_detected` above
+/// demonstrates what such a height does: the two binaries disagree about the
+/// root and the old one publishes the proposer's anyway, because
+/// `accept_imported` force-adopts at or below `LEGACY_ROOT_COMPATIBILITY_HEIGHT`.
+/// That test proves the hazard. This one proves the configuration is now
+/// unreachable, which is the difference between a comment and a guard.
+#[test]
+fn an_activation_inside_the_legacy_window_is_refused() {
+    for height in [
+        0,
+        1,
+        LEGACY_ROOT_COMPATIBILITY_HEIGHT - 1,
+        LEGACY_ROOT_COMPATIBILITY_HEIGHT,
+    ] {
+        let mut params = sound_activation();
+        params.account_root_enabled_from_height = Some(height);
+        let err = sumchain_state::account_root::validate_account_root_activation(&params)
+            .expect_err("an activation inside the legacy window must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("legacy root-compatibility cutoff")
+                && text.contains(&LEGACY_ROOT_COMPATIBILITY_HEIGHT.to_string()),
+            "the refusal must name the cutoff it is below: {text}"
+        );
+    }
+
+    // And one block above it is accepted, so the boundary is the boundary and
+    // not an interval somebody widened.
+    let mut params = sound_activation();
+    params.account_root_enabled_from_height = Some(BOUNDARY);
+    params.application_journal_enabled_from_height = Some(0);
+    sumchain_state::account_root::validate_account_root_activation(&params)
+        .expect("one block above the cutoff, with a journal far below, is sound");
+}
+
+/// The account gate requires a PINNED journal gate, at least one full reorg
+/// horizon below it.
+///
+/// Three refusals, one for each way the pair can be wrong, because they have
+/// different causes and an operator has to tell them apart:
+///
+/// * the journal gate ABSENT — `None` is not "off", it is "observed from this
+///   node's own chain", and a node-local boundary cannot support a commitment
+///   that is folded into the state root;
+/// * the journal gate LATER than the account gate — a band of heights where the
+///   root commits to account rows and no record exists to restore them;
+/// * the journal gate earlier but not far enough — a reorg at the activation
+///   height can walk `MAX_REORG_WALK` blocks back, so records must begin at
+///   least that far below it.
+///
+/// The failure all three prevent is the same and it is terminal: a reorg that
+/// reaches a height where the root includes account state and the journal cannot
+/// put the rows back leaves a chain that can neither revert nor agree.
+#[test]
+fn the_account_gate_requires_a_pinned_journal_gate_far_enough_below_it() {
+    let account = 13_800_000;
+    let horizon = sumchain_storage::pruner::UNDO_RETENTION_FLOOR;
+
+    // Absent.
+    let mut params = ChainParams::with_v2_enabled();
+    params.account_root_enabled_from_height = Some(account);
+    params.application_journal_enabled_from_height = None;
+    let text = sumchain_state::account_root::validate_account_root_activation(&params)
+        .expect_err("an unpinned journal boundary must be refused")
+        .to_string();
+    assert!(
+        text.contains("PINNED") && text.contains("node-local"),
+        "the refusal must say why `None` is not enough: {text}"
+    );
+
+    // Later than the account gate.
+    for journal in [account + 1, account + horizon] {
+        let mut params = ChainParams::with_v2_enabled();
+        params.account_root_enabled_from_height = Some(account);
+        params.application_journal_enabled_from_height = Some(journal);
+        let text = sumchain_state::account_root::validate_account_root_activation(&params)
+            .expect_err("a journal gate above the account gate must be refused")
+            .to_string();
+        assert!(
+            text.contains(&journal.to_string()) && text.contains(&account.to_string()),
+            "the refusal must name both heights: {text}"
+        );
+    }
+
+    // Earlier, but inside the reorg horizon.
+    for journal in [account, account - 1, account - horizon + 1] {
+        let mut params = ChainParams::with_v2_enabled();
+        params.account_root_enabled_from_height = Some(account);
+        params.application_journal_enabled_from_height = Some(journal);
+        sumchain_state::account_root::validate_account_root_activation(&params)
+            .expect_err("a journal gate inside the reorg horizon must be refused");
+    }
+
+    // Exactly one horizon below is the first sound pair, and anything earlier
+    // stays sound.
+    for journal in [account - horizon, account - horizon - 1, 0] {
+        let mut params = ChainParams::with_v2_enabled();
+        params.account_root_enabled_from_height = Some(account);
+        params.application_journal_enabled_from_height = Some(journal);
+        sumchain_state::account_root::validate_account_root_activation(&params)
+            .unwrap_or_else(|e| panic!("journal at {journal} must be accepted: {e}"));
+    }
+}
+
+/// The production default is sound, and stays sound.
+///
+/// `account_root_enabled_from_height == None` asks nothing of the journal gate,
+/// which is what lets this land on a running chain without touching its
+/// configuration at all.
+#[test]
+fn the_dormant_default_requires_nothing_of_the_journal() {
+    let params = ChainParams::default();
+    assert_eq!(params.account_root_enabled_from_height, None);
+    assert_eq!(params.application_journal_enabled_from_height, None);
+    sumchain_state::account_root::validate_account_root_activation(&params)
+        .expect("the dormant default must be sound");
+}
+
+/// The refusal happens at STARTUP, before any block is executed.
+///
+/// The distinction this test exists for: a check that fired at the activation
+/// boundary would fire on a node that had already been publishing for however
+/// long the operator had the bad configuration, at the moment the chain most
+/// needs it to keep working. `StateManager::init_from_genesis` runs before the
+/// first row of state exists, and a chain on an unsound pair cannot be created
+/// at all.
+#[test]
+fn an_unsound_activation_pair_fails_before_the_chain_exists() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = Arc::new(Database::open_default(dir.path()).unwrap());
+    let state = StateManager::new(db.clone(), CHAIN_ID);
+
+    let mut params = ChainParams::with_v2_enabled();
+    params.account_root_enabled_from_height = Some(13_800_000);
+    params.application_journal_enabled_from_height = None;
+    let genesis = sumchain_genesis::Genesis::new(
+        CHAIN_ID,
+        0,
+        vec!["GW1pJKzqDmmHczMGz5g7CV51RgDuR6kKw76yZ1cVbEv8".to_string()],
+        [("8zZ1pfbpUcAmoByWKYgJgiFZWpmhWQKJ4".to_string(), 500u128)]
+            .into_iter()
+            .collect(),
+        params,
+    );
+
+    let err = state
+        .init_from_genesis(&genesis)
+        .expect_err("a chain must not be initialisable on an unsound pair")
+        .to_string();
+    assert!(
+        err.contains("PINNED"),
+        "the startup refusal must be the activation precondition: {err}"
+    );
+
+    // And nothing was written: the refusal precedes the allocation, so the
+    // operator's data directory is exactly as they left it.
+    assert_eq!(
+        account_state_digest(&db).unwrap(),
+        account_state_digest(&Database::open_default(
+            tempfile::TempDir::new().unwrap().path()
+        )
+        .unwrap())
+        .unwrap(),
+        "a refused init must leave the account family empty"
+    );
+}
+
+/// A sound pair, for the tests above to vary one field of.
+fn sound_activation() -> ChainParams {
+    let mut params = ChainParams::with_v2_enabled();
+    params.application_journal_enabled_from_height = Some(0);
+    params
+}
