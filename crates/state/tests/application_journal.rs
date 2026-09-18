@@ -1,0 +1,260 @@
+//! The application journal under a REAL block, published the way a proposer
+//! publishes one.
+//!
+//! `crates/storage/tests/application_journal.rs` drives the machinery directly:
+//! it stages known rows through an `ExecutionView` so the assertions can name
+//! the exact bytes. This file answers the different question — does a block that
+//! went through `BlockExecutor::execute_block`, with real transactions, real fee
+//! debits and a real accumulator, leave a journal that restores what it changed.
+//!
+//! Publication is `common::publish_block`, which is the producer's own path:
+//! execute, fill in the computed root, `accept_produced`, `publish`. Nothing
+//! here hand-writes a row or hand-builds a batch.
+
+mod common;
+
+use std::sync::Arc;
+
+use sumchain_crypto::{sign, KeyPair};
+use sumchain_primitives::{Address, SignedTransaction, TransactionV2, TxPayload};
+use sumchain_state::executor::BlockExecutor;
+use sumchain_state::state::StateManager;
+use sumchain_storage::db::cf;
+use sumchain_storage::journal::{
+    ActivationSource, ApplicationJournal, JournalActivation, JournalRequirement, Preimage,
+};
+use sumchain_storage::schema::journal_key;
+use sumchain_storage::Database;
+
+const FEE: u128 = 10;
+
+fn setup() -> (
+    Arc<StateManager>,
+    Arc<Database>,
+    tempfile::TempDir,
+    BlockExecutor,
+) {
+    common::setup_with_params(sumchain_genesis::ChainParams::with_v2_enabled())
+}
+
+fn transfer(sender: &KeyPair, to: Address, amount: u128, nonce: u64) -> SignedTransaction {
+    let tx = TransactionV2 {
+        chain_id: common::CHAIN_ID,
+        from: sender.address(),
+        fee: FEE,
+        nonce,
+        payload: TxPayload::Transfer { to, amount },
+    };
+    let h = tx.signing_hash();
+    let s = sign(h.as_bytes(), sender.private_key());
+    SignedTransaction::new_v2(tx, *s.as_bytes(), *sender.public_key().as_bytes())
+}
+
+/// Every account row, as raw bytes.
+///
+/// Bytes rather than decoded balances: the claim is that undo restores the
+/// column family, and a decoded comparison would pass over a row rewritten to an
+/// equal value — which is still a write, and a row that was absent before must
+/// come back absent, not as a zero-balance row that reads the same.
+fn account_rows(db: &Database) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut out: Vec<(Vec<u8>, Vec<u8>)> = db
+        .prefix_iter(cf::STATE, b"acct")
+        .unwrap()
+        .map(|(k, v)| (k.to_vec(), v.to_vec()))
+        .collect();
+    out.sort();
+    out
+}
+
+/// A real block leaves a journal that walks its account rows back exactly.
+///
+/// The recipient and the proposer have no row before the block, so their entries
+/// must be absent-before and undo must DELETE them. Writing a default row
+/// instead would read identically through `get_account`, which returns the
+/// default for a missing key — the two are indistinguishable through the API and
+/// different on disk, and the difference becomes a fork the moment anything
+/// hashes stored rows.
+#[test]
+fn a_published_block_leaves_a_journal_that_restores_its_account_rows() {
+    let (state, db, _dir, executor) = setup();
+    let sender = KeyPair::generate();
+    let recipient = Address::new([0x5A; 20]);
+    let proposer = KeyPair::generate();
+    common::fund(&db, &sender, 1_000);
+
+    let before = account_rows(&db);
+    assert_eq!(before.len(), 1, "only the funded sender exists yet");
+
+    common::publish_block(
+        &state,
+        &executor,
+        1,
+        proposer.public_key().as_bytes(),
+        vec![transfer(&sender, recipient, 100, 0)],
+        &[],
+    );
+
+    let after = account_rows(&db);
+    assert_ne!(after, before, "the block must have moved balances");
+    assert!(
+        after.len() > before.len(),
+        "the recipient and the proposer are new rows"
+    );
+
+    // One journal, under this block's own (height, hash).
+    let hash = sumchain_storage::schema::BlockStore::new(&db)
+        .get_by_height(1)
+        .unwrap()
+        .expect("the block was published")
+        .hash();
+    let bytes = db
+        .get(cf::APPLICATION_JOURNAL, &journal_key(1, &hash))
+        .unwrap()
+        .expect("a published block leaves a journal");
+    let journal = ApplicationJournal::decode_for(&bytes, 1, &hash).expect("decode");
+
+    assert!(
+        journal.column_families().contains(cf::STATE),
+        "a transfer writes account rows, so cf::STATE must be journalled: {:?}",
+        journal.column_families()
+    );
+    // The sender existed; the recipient and proposer did not.
+    let kinds: Vec<&Preimage> = journal
+        .entries()
+        .iter()
+        .filter(|e| e.cf() == cf::STATE)
+        .map(|e| e.before())
+        .collect();
+    assert!(
+        kinds.iter().any(|p| matches!(p, Preimage::Value(_))),
+        "the funded sender had a row before the block"
+    );
+    assert!(
+        kinds.iter().any(|p| matches!(p, Preimage::Absent)),
+        "the recipient and the proposer did not"
+    );
+
+    // The rows are still what the block left, and undo walks them back exactly.
+    journal
+        .check_current_matches_after(&db)
+        .expect("nothing has moved since");
+    journal.undo_batch(&db).unwrap().commit().unwrap();
+    assert_eq!(
+        account_rows(&db),
+        before,
+        "undo must restore cf::STATE byte for byte, deleting the rows the block \
+         created rather than zeroing them"
+    );
+}
+
+/// Two published blocks each get their own journal, and unwinding them in
+/// reverse order walks the chain back block by block.
+#[test]
+fn consecutive_blocks_unwind_in_reverse_through_their_own_journals() {
+    let (state, db, _dir, executor) = setup();
+    let sender = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    common::fund(&db, &sender, 10_000);
+
+    let at_zero = account_rows(&db);
+    common::publish_block(
+        &state,
+        &executor,
+        1,
+        proposer.public_key().as_bytes(),
+        vec![transfer(&sender, Address::new([1; 20]), 100, 0)],
+        &[],
+    );
+    let after_one = account_rows(&db);
+    common::publish_block(
+        &state,
+        &executor,
+        2,
+        proposer.public_key().as_bytes(),
+        vec![transfer(&sender, Address::new([2; 20]), 200, 1)],
+        &[],
+    );
+    let after_two = account_rows(&db);
+    assert_ne!(at_zero, after_one);
+    assert_ne!(after_one, after_two);
+
+    let store = sumchain_storage::schema::BlockStore::new(&db);
+    let load = |h: u64| {
+        let hash = store.get_by_height(h).unwrap().unwrap().hash();
+        let bytes = db
+            .get(cf::APPLICATION_JOURNAL, &journal_key(h, &hash))
+            .unwrap()
+            .unwrap();
+        ApplicationJournal::decode_for(&bytes, h, &hash).unwrap()
+    };
+    let j1 = load(1);
+    let j2 = load(2);
+    assert_ne!(j1.block_hash(), j2.block_hash());
+
+    j2.check_current_matches_after(&db).expect("head first");
+    j2.undo_batch(&db).unwrap().commit().unwrap();
+    assert_eq!(
+        account_rows(&db),
+        after_one,
+        "undoing block 2 lands on block 1"
+    );
+
+    j1.check_current_matches_after(&db)
+        .expect("then its parent");
+    j1.undo_batch(&db).unwrap().commit().unwrap();
+    assert_eq!(account_rows(&db), at_zero, "and then on the parent state");
+}
+
+/// The activation boundary a real chain establishes is the first height it
+/// published, and a missing journal at or above it halts.
+#[test]
+fn the_boundary_a_real_chain_establishes_is_the_first_height_it_published() {
+    let (state, db, _dir, executor) = setup();
+    let sender = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    common::fund(&db, &sender, 10_000);
+
+    // Nothing published yet: no boundary, so nothing is required.
+    let none_yet = JournalActivation::resolve(&db, ActivationSource::ObservedFromChain).unwrap();
+    assert_eq!(none_yet.boundary(), None);
+    assert_eq!(
+        none_yet.requirement_at(1),
+        JournalRequirement::PreActivation
+    );
+
+    for (height, nonce) in [(3u64, 0u64), (4, 1)] {
+        common::publish_block(
+            &state,
+            &executor,
+            height,
+            proposer.public_key().as_bytes(),
+            vec![transfer(&sender, Address::new([7; 20]), 1, nonce)],
+            &[],
+        );
+    }
+
+    let act = JournalActivation::resolve(&db, ActivationSource::ObservedFromChain).unwrap();
+    assert_eq!(
+        act.boundary(),
+        Some(3),
+        "the first height this node published"
+    );
+    assert_eq!(act.requirement_at(2), JournalRequirement::PreActivation);
+    assert_eq!(act.requirement_at(3), JournalRequirement::Required);
+
+    // A block at a post-boundary height whose journal was never written halts,
+    // rather than being reverted with no undo data.
+    let phantom = sumchain_primitives::Hash::hash(b"a block this node never published");
+    let err = act
+        .load_for_revert(&db, 5, &phantom)
+        .expect_err("a missing post-activation journal must halt");
+    assert!(err.to_string().contains("refusing to revert"), "{err}");
+
+    // And the block it did publish loads.
+    let hash = sumchain_storage::schema::BlockStore::new(&db)
+        .get_by_height(3)
+        .unwrap()
+        .unwrap()
+        .hash();
+    assert!(act.load_for_revert(&db, 3, &hash).unwrap().is_some());
+}

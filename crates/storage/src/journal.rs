@@ -439,6 +439,201 @@ impl ApplicationJournal {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ACTIVATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Where the journal boundary comes from.
+///
+/// Deliberately NOT an `Option<BlockHeight>` whose `None` means "off". A journal
+/// that is never written cannot undo anything, and a gate defaulting to `None`
+/// is how the compute-pool and beacon journals ended up never written in
+/// production. There is no variant here that disables the journal: the WRITE
+/// side is ungated entirely — [`crate::candidate::AcceptedCandidate::publish`]
+/// writes a record for every block it publishes, with no gate to leave unset —
+/// and this enum only decides from which height a MISSING record is an error
+/// rather than ordinary pre-journal history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationSource {
+    /// Derive the boundary from the chain's own journal column family: the
+    /// lowest height for which a record exists.
+    ///
+    /// The production rule, and the reason no governance number is needed. A
+    /// node that upgrades at height H publishes journals from H upward, so the
+    /// lowest stored height IS the height at which this node's journal history
+    /// begins — and it is right across an upgrade without anyone choosing it,
+    /// where a hardcoded height would either demand journals for blocks an older
+    /// binary published or leave a window in which nothing is required.
+    ObservedFromChain,
+    /// A boundary fixed by configuration, for a deployment that wants every node
+    /// to agree on where journal history starts rather than each observing its
+    /// own.
+    ///
+    /// Chain-configurable rather than chain-consensus: these records are
+    /// node-local, never hashed into a block, so two nodes disagreeing about the
+    /// boundary cannot fork. What a pin buys is an operator-visible, uniform
+    /// answer to "from when must a revert find a journal".
+    Pinned(BlockHeight),
+}
+
+/// The resolved boundary: the height at and above which a journal MUST exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JournalActivation {
+    source: ActivationSource,
+    /// `None` means no record exists anywhere, so no height has journal history
+    /// yet. That is an OBSERVATION about the database, not a configuration that
+    /// can be left unset: it stops being `None` the moment the first block
+    /// publishes, which is every block this binary publishes.
+    boundary: Option<BlockHeight>,
+}
+
+/// What a missing journal means at a given height.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalRequirement {
+    /// At or above the boundary. A missing journal is an ERROR, and the revert
+    /// halts. There is no defined way to unwind a post-activation block without
+    /// its undo record, and proceeding would leave the rows it wrote in place
+    /// while the chain claims they are gone.
+    Required,
+    /// Below the boundary, or no boundary established. This block was published
+    /// before this database had journal history, so absence is expected and the
+    /// consumer falls back to the four legacy per-subsystem journals.
+    PreActivation,
+}
+
+impl JournalActivation {
+    /// Resolve the boundary against `db`.
+    pub fn resolve(db: &Database, source: ActivationSource) -> Result<Self> {
+        let boundary = match source {
+            ActivationSource::Pinned(h) => Some(h),
+            ActivationSource::ObservedFromChain => lowest_journal_height(db)?,
+        };
+        Ok(Self { source, boundary })
+    }
+
+    pub fn source(&self) -> ActivationSource {
+        self.source
+    }
+
+    /// The height at and above which a journal must exist, or `None` when this
+    /// database holds no journal at all.
+    pub fn boundary(&self) -> Option<BlockHeight> {
+        self.boundary
+    }
+
+    pub fn requirement_at(&self, height: BlockHeight) -> JournalRequirement {
+        match self.boundary {
+            Some(b) if height >= b => JournalRequirement::Required,
+            _ => JournalRequirement::PreActivation,
+        }
+    }
+
+    /// The journal for a block about to be reverted, or a defined answer for its
+    /// absence.
+    ///
+    /// The single function both the producer and the reorg consumer agree on, so
+    /// "what happens when the journal is missing" has one implementation rather
+    /// than one per call site.
+    ///
+    /// * present  — decoded and validated against the key it was read under;
+    ///   a record that disagrees, is truncated, is out of canonical order or
+    ///   carries an unimplemented version is an ERROR, never a shorter journal.
+    /// * absent, at or above the boundary — ERROR. The revert halts.
+    /// * absent, below the boundary — `Ok(None)`: pre-journal history, and the
+    ///   consumer falls back to the legacy per-subsystem journals.
+    ///
+    /// The third case is the only silence, and it is bounded by a height the
+    /// database itself establishes.
+    pub fn load_for_revert(
+        &self,
+        db: &Database,
+        height: BlockHeight,
+        block_hash: &Hash,
+    ) -> Result<Option<ApplicationJournal>> {
+        let key = crate::schema::journal_key(height, block_hash);
+        match db.get(crate::db::cf::APPLICATION_JOURNAL, &key)? {
+            Some(bytes) => Ok(Some(ApplicationJournal::decode_for(
+                &bytes, height, block_hash,
+            )?)),
+            None => match self.requirement_at(height) {
+                JournalRequirement::PreActivation => Ok(None),
+                JournalRequirement::Required => Err(invalid(format!(
+                    "no application journal for block {block_hash} at height {height}, \
+                     which is at or above this chain's journal boundary ({}); refusing \
+                     to revert a block whose undo record is missing rather than \
+                     unwinding part of it and reporting success",
+                    self.boundary
+                        .map(|b| b.to_string())
+                        .unwrap_or_else(|| "unestablished".to_string())
+                ))),
+            },
+        }
+    }
+}
+
+/// The lowest height for which this database holds a journal.
+///
+/// The journal key is height big-endian then the block hash, and RocksDB
+/// iterates in byte order, so the FIRST key is the lowest height. One seek, not
+/// a scan.
+fn lowest_journal_height(db: &Database) -> Result<Option<BlockHeight>> {
+    let mut it = db.iter(crate::db::cf::APPLICATION_JOURNAL)?;
+    let Some((key, _)) = it.next() else {
+        return Ok(None);
+    };
+    if key.len() < 8 {
+        return Err(invalid(format!(
+            "application journal key is {} byte(s); every key is an 8-byte \
+             big-endian height followed by a 32-byte block hash",
+            key.len()
+        )));
+    }
+    let mut h = [0u8; 8];
+    h.copy_from_slice(&key[..8]);
+    Ok(Some(u64::from_be_bytes(h)))
+}
+
+/// The highest record format version stored in this database.
+///
+/// Reads the version field of every stored record — a one-off scan of the
+/// journal column family, meant for a startup check rather than a hot path. The
+/// field sits at a fixed offset directly after the magic, so nothing is decoded
+/// beyond seven bytes per record.
+pub fn highest_stored_format_version(db: &Database) -> Result<Option<u16>> {
+    let mut highest: Option<u16> = None;
+    for (key, value) in db.iter(crate::db::cf::APPLICATION_JOURNAL)? {
+        if value.len() < MAGIC.len() + 2 || &value[..MAGIC.len()] != MAGIC {
+            return Err(invalid(format!(
+                "application journal at key {} is not a journal record; refusing to \
+                 report a version watermark over data this binary cannot parse",
+                hex::encode(&key)
+            )));
+        }
+        let v = u16::from_be_bytes([value[MAGIC.len()], value[MAGIC.len() + 1]]);
+        highest = Some(highest.map_or(v, |h: u16| h.max(v)));
+    }
+    Ok(highest)
+}
+
+/// Refuse to run against history this binary cannot read.
+///
+/// The downgrade check. Once a newer binary has written post-activation records
+/// in a format this one does not implement, this one cannot revert those blocks
+/// — and finding that out during a reorg is finding it out too late, with the
+/// chain already committed to unwinding. Called at startup, it turns a silent
+/// future failure into a refusal to start.
+pub fn refuse_downgrade(db: &Database) -> Result<()> {
+    match highest_stored_format_version(db)? {
+        Some(v) if v > FORMAT_VERSION_V1 => Err(invalid(format!(
+            "this database holds application journals in record format version {v}, \
+             and this binary implements version {FORMAT_VERSION_V1}. It cannot revert \
+             a block written by the newer binary, so it refuses to start rather than \
+             discovering that during a reorg."
+        ))),
+        _ => Ok(()),
+    }
+}
+
 fn usize_of(n: u64) -> Result<usize> {
     usize::try_from(n).map_err(|_| {
         invalid(format!(

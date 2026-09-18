@@ -14,7 +14,10 @@ use sumchain_storage::candidate::{
     BlockJournals, CandidateExecution, ExecutionSubject, JournalRecord,
 };
 use sumchain_storage::db::{cf, Database, ALL_CFS};
-use sumchain_storage::journal::{AfterImage, ApplicationJournal, Preimage};
+use sumchain_storage::journal::{
+    ActivationSource, AfterImage, ApplicationJournal, JournalActivation, JournalRequirement,
+    Preimage,
+};
 use sumchain_storage::schema::journal_key;
 use tempfile::TempDir;
 
@@ -742,4 +745,193 @@ fn repeated_writes_to_one_key_journal_the_value_the_block_started_from() {
         d.get(cf::STATE, b"k").unwrap().as_deref(),
         Some(&b"parent"[..])
     );
+}
+
+// ── Activation ─────────────────────────────────────────────────────────────
+
+/// The WRITE side has no gate to leave unset.
+///
+/// This is the answer to the defect the census found in the other two journals:
+/// `compute_pool_enabled_from_height` and `beacon_enabled_from_height` are
+/// `None` in production, so neither journal is ever written and every test that
+/// exercises them seeds rows by hand. There is no equivalent here to leave
+/// `None` — `publish` writes a record for every block it publishes, and this
+/// test publishes through the ordinary path with no parameter set anywhere.
+#[test]
+fn the_write_side_is_ungated_so_no_configuration_can_leave_it_unwritten() {
+    let (d, _g) = db();
+    for tag in 0..4u64 {
+        let block = block_at(100 + tag, tag);
+        publish_with(&d, &block, TEST_LIMIT, |view| {
+            view.put(cf::STATE, b"k", &tag.to_be_bytes())
+        })
+        .expect("publish");
+    }
+    assert_eq!(
+        journal_rows(&d).len(),
+        4,
+        "every published block must leave a record, with nothing to switch on"
+    );
+}
+
+/// The boundary is observed from the chain, so an upgrade needs no number.
+///
+/// A node that starts publishing journals at height H has journal history from H
+/// upward and none below it. The lowest stored height IS that boundary, so a
+/// revert below it meets the compatibility case and a revert above it requires
+/// a record.
+#[test]
+fn the_activation_boundary_is_observed_from_the_chains_own_journals() {
+    let (d, _g) = db();
+
+    // Before any block publishes: no boundary, so every height is pre-journal
+    // history. An observation about the database, not a gate left unset.
+    let empty = JournalActivation::resolve(&d, ActivationSource::ObservedFromChain).unwrap();
+    assert_eq!(empty.boundary(), None);
+    assert_eq!(empty.requirement_at(0), JournalRequirement::PreActivation);
+    assert_eq!(
+        empty.requirement_at(u64::MAX),
+        JournalRequirement::PreActivation
+    );
+
+    // This node starts publishing at height 500.
+    for h in [500u64, 501, 502] {
+        let block = block_at(h, h);
+        publish_with(&d, &block, TEST_LIMIT, |view| {
+            view.put(cf::STATE, b"k", b"v")
+        })
+        .expect("publish");
+    }
+
+    let act = JournalActivation::resolve(&d, ActivationSource::ObservedFromChain).unwrap();
+    assert_eq!(act.boundary(), Some(500));
+    assert_eq!(act.requirement_at(499), JournalRequirement::PreActivation);
+    assert_eq!(act.requirement_at(500), JournalRequirement::Required);
+    assert_eq!(act.requirement_at(502), JournalRequirement::Required);
+}
+
+/// A boundary can be pinned instead, for a deployment that wants one answer
+/// across every node rather than each observing its own.
+#[test]
+fn a_pinned_boundary_overrides_the_observed_one() {
+    let (d, _g) = db();
+    let block = block_at(500, 1);
+    publish_with(&d, &block, TEST_LIMIT, |view| {
+        view.put(cf::STATE, b"k", b"v")
+    })
+    .expect("publish");
+
+    let pinned = JournalActivation::resolve(&d, ActivationSource::Pinned(400)).unwrap();
+    assert_eq!(pinned.boundary(), Some(400));
+    assert_eq!(pinned.requirement_at(400), JournalRequirement::Required);
+    assert_eq!(
+        pinned.requirement_at(399),
+        JournalRequirement::PreActivation
+    );
+}
+
+/// A journal missing AT OR ABOVE the boundary halts. Below it, absence is the
+/// explicit compatibility case.
+///
+/// This is the case `state.rs` currently answers with `return Ok(())` when all
+/// four legacy journals are absent — a silent skip, which the contract forbids
+/// post-activation. The decision lives in one function so both sides give the
+/// same answer.
+#[test]
+fn a_missing_post_activation_journal_halts_and_a_pre_activation_one_does_not() {
+    let (d, _g) = db();
+    let published = block_at(500, 1);
+    publish_with(&d, &published, TEST_LIMIT, |view| {
+        view.put(cf::STATE, b"k", b"v")
+    })
+    .expect("publish");
+
+    let act = JournalActivation::resolve(&d, ActivationSource::ObservedFromChain).unwrap();
+    assert_eq!(act.boundary(), Some(500));
+
+    // Present: decoded and validated.
+    let found = act
+        .load_for_revert(&d, 500, &published.hash())
+        .expect("a published block's journal loads")
+        .expect("and is present");
+    assert_eq!(found.block_hash(), published.hash());
+
+    // Absent BELOW the boundary: the compatibility case, stated rather than
+    // stumbled into.
+    let old = block_at(499, 2);
+    assert!(act
+        .load_for_revert(&d, 499, &old.hash())
+        .expect("pre-activation absence is defined")
+        .is_none());
+
+    // Absent AT OR ABOVE it: a halt, naming the block and the boundary.
+    let phantom = block_at(501, 3);
+    let err = act
+        .load_for_revert(&d, 501, &phantom.hash())
+        .expect_err("a missing post-activation journal must halt");
+    assert!(err.to_string().contains("refusing to revert"), "{err}");
+    assert!(err.to_string().contains("501"), "{err}");
+
+    // A sibling at a height that DOES have journal history, but whose own record
+    // was never written, halts too — the boundary is a height, not a block.
+    let sibling = block_at(500, 4);
+    assert_ne!(sibling.hash(), published.hash());
+    assert!(act.load_for_revert(&d, 500, &sibling.hash()).is_err());
+}
+
+/// A corrupt record at or above the boundary halts; it does not read as absent.
+#[test]
+fn a_corrupt_journal_halts_rather_than_reading_as_no_journal() {
+    let (d, _g) = db();
+    let block = block_at(500, 1);
+    publish_with(&d, &block, TEST_LIMIT, |view| {
+        view.put(cf::STATE, b"k", b"v")
+    })
+    .expect("publish");
+
+    let key = journal_key(500, &block.hash());
+    let mut bytes = d.get(cf::APPLICATION_JOURNAL, &key).unwrap().unwrap();
+    bytes.truncate(bytes.len() - 3);
+    d.put(cf::APPLICATION_JOURNAL, &key, &bytes).unwrap();
+
+    let act = JournalActivation::resolve(&d, ActivationSource::ObservedFromChain).unwrap();
+    let err = act
+        .load_for_revert(&d, 500, &block.hash())
+        .expect_err("a truncated record must halt");
+    assert!(err.to_string().contains("truncated"), "{err}");
+}
+
+/// A binary refuses to run against journal history it cannot read.
+///
+/// The downgrade check. Discovering an unreadable record during a reorg is
+/// discovering it with the chain already committed to unwinding; this turns it
+/// into a refusal to start.
+#[test]
+fn a_binary_refuses_to_start_against_a_newer_record_format() {
+    let (d, _g) = db();
+    let block = block_at(500, 1);
+    publish_with(&d, &block, TEST_LIMIT, |view| {
+        view.put(cf::STATE, b"k", b"v")
+    })
+    .expect("publish");
+
+    assert_eq!(
+        sumchain_storage::journal::highest_stored_format_version(&d).unwrap(),
+        Some(sumchain_storage::journal::FORMAT_VERSION_V1)
+    );
+    sumchain_storage::journal::refuse_downgrade(&d).expect("its own records are readable");
+
+    // A record written by a future binary.
+    let key = journal_key(500, &block.hash());
+    let mut bytes = d.get(cf::APPLICATION_JOURNAL, &key).unwrap().unwrap();
+    bytes[5..7].copy_from_slice(&7u16.to_be_bytes());
+    d.put(cf::APPLICATION_JOURNAL, &key, &bytes).unwrap();
+
+    assert_eq!(
+        sumchain_storage::journal::highest_stored_format_version(&d).unwrap(),
+        Some(7)
+    );
+    let err = sumchain_storage::journal::refuse_downgrade(&d)
+        .expect_err("post-activation history in a newer format must refuse the downgrade");
+    assert!(err.to_string().contains("refuses to start"), "{err}");
 }
