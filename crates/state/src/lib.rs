@@ -66,7 +66,7 @@ pub use employment_executor::{EmploymentExecutionResult, EmploymentExecutor};
 pub use equity_executor::{EquityExecutionResult, EquityExecutor};
 pub use executor::{BlockExecutor, TxExecutionResult};
 pub use finance_executor::{FinanceExecutionResult, FinanceExecutor};
-pub use healthcare_executor::{HealthcareExecutionResult, HealthcareExecutor};
+pub use healthcare_executor::{HealthcareExecutionResult, HealthcareExecutor, HealthcareGates};
 pub use legal_executor::{LegalExecutionResult, LegalExecutor};
 pub use mempool::{Mempool, MempoolConfig, MempoolStats};
 pub use messaging_executor::{MessagingExecutionResult, MessagingExecutor};

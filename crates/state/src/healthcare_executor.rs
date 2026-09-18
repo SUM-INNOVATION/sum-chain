@@ -19,6 +19,8 @@ use sumchain_primitives::{
 };
 use tracing::debug;
 
+use sumchain_genesis::ChainParams;
+
 use crate::{Result, StateError, StateManager};
 
 /// Result of Healthcare operation execution
@@ -132,10 +134,139 @@ impl HealthcareExecutionResult {
 /// consulted by nothing; it left with the database handle.
 pub struct HealthcareExecutor;
 
+/// The activation decisions a Healthcare transaction executes under.
+///
+/// [`HealthcareExecutor::execute`] derives it from `ChainParams`;
+/// [`HealthcareExecutor::execute_with_gates`] takes it directly, which is how a
+/// test drives an ungated node and a gated node over the same transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HealthcareGates {
+    /// The subsystem's authorization rules are enforced. ACTIVATION-AUDIT rows
+    /// AU-1, AU-2, AU-4, AU-5, the revocation half of AU-3, and OV-18.
+    pub authorization: bool,
+}
+
+impl HealthcareGates {
+    /// Every gate closed -- the release configuration today, because the field
+    /// these read does not exist in `ChainParams`.
+    pub const CLOSED: Self = Self {
+        authorization: false,
+    };
+
+    /// Every gate open. For the gated half of a mixed-version test.
+    pub const OPEN: Self = Self {
+        authorization: true,
+    };
+
+    /// Derive the decisions from the chain's parameters at `block_height`.
+    pub fn from_params(params: &ChainParams, block_height: BlockHeight) -> Self {
+        Self {
+            authorization: HealthcareExecutor::authorization_gate_open(params, block_height),
+        }
+    }
+}
+
 impl HealthcareExecutor {
-    /// Execute a Healthcare transaction
+    /// The activation height for the Healthcare authorization rules.
+    ///
+    /// **This is a seam for a `ChainParams` field that does not exist yet.**
+    /// `crates/genesis/**` belongs to another track, so the field cannot be
+    /// added from here. The field this function must read, once that track adds
+    /// it, is:
+    ///
+    /// ```text
+    /// /// SRC-87X Healthcare authorization rules. Dormant by default (`None`
+    /// /// -> never open). Below the gate `SupersedeConsent`, `FillPrescription`
+    /// /// and `PartialFillPrescription` check NOTHING about the sender;
+    /// /// `AddNetworkAffiliation` and `RemoveNetworkAffiliation` check no
+    /// /// issuer; `IssuePrescription` never relates the sender to the named
+    /// /// prescriber; a consent's subject can neither revoke it; and a
+    /// /// prescription authorizing zero refills is fillable once more because
+    /// /// its guard is a conjunction. At and above the gate each of those is
+    /// /// enforced and the refused transaction is a `Failed` receipt. Activation
+    /// /// is a consensus change -- it changes which transactions succeed, and
+    /// /// receipts are folded into the state root -- and needs a coordinated
+    /// /// validator upgrade.
+    /// #[serde(default)]
+    /// pub healthcare_authorization_enabled_from_height: Option<u64>,
+    /// ```
+    ///
+    /// Until it exists this returns `None`, which is exactly what an absent
+    /// `#[serde(default)] Option<u64>` resolves to, so production behaviour is
+    /// unchanged and every pinning test that records the gap still passes.
+    #[inline]
+    fn authorization_activation(params: &ChainParams) -> Option<u64> {
+        // Replace with `params.healthcare_authorization_enabled_from_height`.
+        let _ = params;
+        None
+    }
+
+    /// Whether the Healthcare authorization rules are active at `block_height`.
+    #[inline]
+    pub fn authorization_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::authorization_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// Who may fill or partially fill a prescription, at the gate.
+    ///
+    /// Three addresses, and only three, because those are the only addresses a
+    /// `Prescription` actually carries. The pharmacy is a `PartyRef`, not an
+    /// address (`crates/sumchain-wire/src/healthcare.rs`), so a pharmacy cannot
+    /// be authorized from the row as it stands -- recorded rather than papered
+    /// over, because a rule that pretends to check a pharmacy and does not is
+    /// worse than one that says it cannot.
+    ///
+    ///   * the patient the prescription names;
+    ///   * the account that issued it;
+    ///   * the issuer of the prescriber's provider row.
+    fn may_fill(
+        view: &ExecutionView<'_, '_>,
+        prescription: &Prescription,
+        sender: &Address,
+    ) -> Result<bool> {
+        if prescription.patient_address == *sender || prescription.issuer_address == *sender {
+            return Ok(true);
+        }
+        Ok(
+            match Self::v_get_provider(view, &prescription.prescriber_provider_id)? {
+                Some(p) => p.issuer_address == *sender,
+                None => false,
+            },
+        )
+    }
+
+    /// Execute a Healthcare transaction.
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
+        sender: &Address,
+        data: &HealthcareTxData,
+        proposer: &Address,
+        fee: Balance,
+        block_height: BlockHeight,
+        block_timestamp: Timestamp,
+        tx_index: u32,
+        tx_hash: Hash,
+    ) -> Result<HealthcareExecutionResult> {
+        Self::execute_with_gates(
+            view,
+            sender,
+            data,
+            proposer,
+            fee,
+            block_height,
+            block_timestamp,
+            tx_index,
+            tx_hash,
+            HealthcareGates::from_params(params, block_height),
+        )
+    }
+
+    /// Execute a Healthcare transaction with the activation decisions supplied
+    /// directly. The seam the mixed-version tests use.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_gates(
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &HealthcareTxData,
@@ -145,6 +276,7 @@ impl HealthcareExecutor {
         block_timestamp: Timestamp,
         _tx_index: u32,
         _tx_hash: Hash,
+        gates: HealthcareGates,
     ) -> Result<HealthcareExecutionResult> {
         match data.operation {
             // =================================================================
@@ -304,8 +436,17 @@ impl HealthcareExecutor {
                 let d: AffiliationData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if Self::v_get_provider(view, &d.provider_id)?.is_none() {
-                    return Ok(HealthcareExecutionResult::failure("Provider not found"));
+                let provider = match Self::v_get_provider(view, &d.provider_id)? {
+                    Some(p) => p,
+                    None => return Ok(HealthcareExecutionResult::failure("Provider not found")),
+                };
+
+                // AU-4: the only guard below the gate is provider existence, so
+                // a stranger moves any provider between plan networks.
+                if gates.authorization && provider.issuer_address != *sender {
+                    return Ok(HealthcareExecutionResult::failure(
+                        "Only the provider's issuer can change its network affiliations",
+                    ));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -328,8 +469,17 @@ impl HealthcareExecutor {
                 let d: AffiliationData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if Self::v_get_provider(view, &d.provider_id)?.is_none() {
-                    return Ok(HealthcareExecutionResult::failure("Provider not found"));
+                let provider = match Self::v_get_provider(view, &d.provider_id)? {
+                    Some(p) => p,
+                    None => return Ok(HealthcareExecutionResult::failure("Provider not found")),
+                };
+
+                // AU-4: the only guard below the gate is provider existence, so
+                // a stranger moves any provider between plan networks.
+                if gates.authorization && provider.issuer_address != *sender {
+                    return Ok(HealthcareExecutionResult::failure(
+                        "Only the provider's issuer can change its network affiliations",
+                    ));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -653,8 +803,15 @@ impl HealthcareExecutor {
                     None => return Ok(HealthcareExecutionResult::failure("Consent not found")),
                 };
 
-                if consent.issuer_address != *sender {
-                    return Ok(HealthcareExecutionResult::failure("Only issuer can revoke"));
+                // AU-3: below the gate `RevokeConsent` requires the issuer, so
+                // the person the consent is ABOUT cannot withdraw it. At the
+                // gate the subject may, as well as the issuer.
+                let may_revoke = consent.issuer_address == *sender
+                    || (gates.authorization && consent.subject_address == *sender);
+                if !may_revoke {
+                    return Ok(HealthcareExecutionResult::failure(
+                        "Only the issuer or the subject can revoke",
+                    ));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -679,8 +836,37 @@ impl HealthcareExecutor {
                 let d: SupersedeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if Self::v_get_consent(view, &d.old_consent_id)?.is_none() {
-                    return Ok(HealthcareExecutionResult::failure("Old consent not found"));
+                let old = match Self::v_get_consent(view, &d.old_consent_id)? {
+                    Some(c) => c,
+                    None => return Ok(HealthcareExecutionResult::failure("Old consent not found")),
+                };
+
+                // AU-1: below the gate this arm checks NOTHING about the sender,
+                // so any account marks any consent `Superseded` and stores a
+                // replacement whose subject, recipient, scope and issuer all
+                // come from its own payload. Three conditions at the gate: the
+                // sender must be the old consent's issuer or its subject, the
+                // replacement must keep the same issuer as the sender, and it
+                // must be about the same subject -- otherwise supersession is a
+                // way to re-point a consent at somebody else.
+                if gates.authorization {
+                    let may_supersede =
+                        old.issuer_address == *sender || old.subject_address == *sender;
+                    if !may_supersede {
+                        return Ok(HealthcareExecutionResult::failure(
+                            "Only the issuer or the subject can supersede a consent",
+                        ));
+                    }
+                    if d.new_consent.issuer_address != *sender {
+                        return Ok(HealthcareExecutionResult::failure(
+                            "The replacement consent must be issued by the sender",
+                        ));
+                    }
+                    if d.new_consent.subject_address != old.subject_address {
+                        return Ok(HealthcareExecutionResult::failure(
+                            "A supersession cannot change the subject of a consent",
+                        ));
+                    }
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -714,8 +900,25 @@ impl HealthcareExecutor {
                 }
 
                 // Verify prescriber provider exists
-                if Self::v_get_provider(view, &prescription.prescriber_provider_id)?.is_none() {
-                    return Ok(HealthcareExecutionResult::failure("Prescriber provider not found"));
+                let prescriber =
+                    match Self::v_get_provider(view, &prescription.prescriber_provider_id)? {
+                        Some(p) => p,
+                        None => {
+                            return Ok(HealthcareExecutionResult::failure(
+                                "Prescriber provider not found",
+                            ))
+                        }
+                    };
+
+                // AU-5: below the gate the only sender check is against
+                // `issuer_address`, which comes from this same payload, so
+                // anyone who can register a provider issues prescriptions
+                // naming any other registered provider as prescriber. At the
+                // gate the sender must be the prescriber's own issuer.
+                if gates.authorization && prescriber.issuer_address != *sender {
+                    return Ok(HealthcareExecutionResult::failure(
+                        "Only the prescriber provider's issuer can issue its prescriptions",
+                    ));
                 }
 
                 if Self::v_prescription_exists(view, &prescription.prescription_id)? {
@@ -787,7 +990,28 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Prescription is not valid"));
                 }
 
-                if prescription.refills_remaining == 0 && prescription.status != PrescriptionStatus::Active {
+                // AU-2: below the gate neither fill arm checks the sender at
+                // all -- not patient, prescriber, pharmacy or issuer -- so a
+                // stranger fills anyone's prescription, controlled substances
+                // included.
+                if gates.authorization && !Self::may_fill(view, &prescription, sender)? {
+                    return Ok(HealthcareExecutionResult::failure(
+                        "Only the patient, the prescriber's issuer or the issuer can fill",
+                    ));
+                }
+
+                // OV-18: the inherited guard is a CONJUNCTION, so a prescription
+                // authorizing zero refills whose status is still `Active` passes
+                // it and is filled once more. At the gate either condition
+                // refuses on its own.
+                let no_fills_left = if gates.authorization {
+                    prescription.refills_remaining == 0
+                        || prescription.status != PrescriptionStatus::Active
+                } else {
+                    prescription.refills_remaining == 0
+                        && prescription.status != PrescriptionStatus::Active
+                };
+                if no_fills_left {
                     return Ok(HealthcareExecutionResult::failure("No fills remaining"));
                 }
 
@@ -815,6 +1039,13 @@ impl HealthcareExecutor {
 
                 if !prescription.is_valid(block_timestamp) {
                     return Ok(HealthcareExecutionResult::failure("Prescription is not valid"));
+                }
+
+                // AU-2, the second arm.
+                if gates.authorization && !Self::may_fill(view, &prescription, sender)? {
+                    return Ok(HealthcareExecutionResult::failure(
+                        "Only the patient, the prescriber's issuer or the issuer can fill",
+                    ));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;

@@ -984,6 +984,7 @@ impl BlockExecutor {
                         // Execute Healthcare operation (SRC-87X)
                         let result = HealthcareExecutor::execute(
                             view,
+                            &self.params,
                             &v2_tx.from,
                             &healthcare_data,
                             proposer,
@@ -2782,6 +2783,7 @@ impl BlockExecutor {
                 // Execute Healthcare operation (SRC-87X)
                 let result = HealthcareExecutor::execute(
                     view,
+                    &self.params,
                     &tx.from,
                     healthcare_data,
                     proposer,
