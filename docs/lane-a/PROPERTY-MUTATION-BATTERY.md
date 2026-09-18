@@ -2800,8 +2800,33 @@ test without_its_parent_each_dependent_row_is_refused ... FAILED
 * anchor sha256[:16] `5b10111fa1c6ecb8` -> replacement `03b4dc0547687b1c`
 * verdict: **KILLED**
 
-Anchor:
+> **Anchor strengthened and re-run after integration.** In the property package
+> this anchor resolved exactly once. In the integrated tree it resolves TWICE:
+> the neighbouring status code it was distinguished from stopped being unique
+> once the other subsystems' arms changed around it, so both the live arm and
+> the v2 arm now carry the identical line, differing only in indentation.
+>
+> The strengthened anchor is the same line with its own indentation pinned and
+> the leading newline included, so the deeper-indented live arm cannot match as
+> a substring. Re-run alone against the integrated tree:
+>
+> ```
+> old anchor occurrences: 2
+> strengthened anchor occurrences: 1 (expected 1)
+> verdict = KILLED
+> test the_v2_dispatch_surface_also_stages_property_rows ... FAILED
+> pre/post sha256 executor.rs 26fc3c1739825a0f... byte-identical: True
+> anchor resolves exactly once after restore: True
+> residue: 0 files
+> ```
+>
+> The other 118 property mutations were not re-run: their anchors are in
+> `property_view.rs`, `property_executor.rs` and `property_store.rs`, all three
+> byte-identical to the hashes recorded above.
+
+Anchor (strengthened; the leading newline is part of it):
 ```rust
+
                         status: TxStatus::Failed(13), // Property operation failed
 ```
 Replacement:
