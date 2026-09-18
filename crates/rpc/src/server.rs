@@ -9786,7 +9786,55 @@ mod education_rpc_phase4_tests {
         bincode::serialize(v).unwrap()
     }
 
+    /// Publish one block carrying `txs`, the way a proposer does: execute,
+    /// bind the root that execution produced into the header, accept, commit.
+    ///
+    /// `BlockExecutor::execute_tx` now stages into the block's
+    /// `ExecutionView`, and nothing it writes reaches canonical storage until
+    /// the candidate is published. These fixtures read back through the
+    /// COMMITTED `EducationExecutor` — the same reader the RPC handlers use —
+    /// so the block has to be published or the reads find nothing. Height and
+    /// block timestamp are supplied per call, so each seed step still executes
+    /// at exactly the height and timestamp it did before.
+    fn publish(
+        state: &Arc<StateManager>,
+        ex: &BlockExecutor,
+        height: u64,
+        timestamp: u64,
+        proposer: &KeyPair,
+        txs: Vec<SignedTransaction>,
+    ) -> Vec<sumchain_primitives::Receipt> {
+        use sumchain_primitives::{Block, BlockHeader, Hash};
+
+        let header = BlockHeader::new(
+            Hash::ZERO,
+            height,
+            timestamp,
+            Hash::ZERO,
+            Hash::ZERO,
+            *proposer.public_key().as_bytes(),
+        );
+        let mut block = Block::new(header, txs);
+        let exec = ex
+            .execute_block(&block, state.state_root(), &[])
+            .expect("execute_block");
+        block.header.state_root = exec.computed_root();
+        let (executed, _state_diff, _contract_diff) = exec.into_parts();
+        let receipts = executed.receipts().to_vec();
+        let accepted = executed.accept_produced(&block).expect("accept_produced");
+        let accumulator = accepted.accumulator();
+        accepted.publish().expect("publish");
+        // The next block chains from the root that was actually published.
+        state.set_state_root(accumulator);
+        receipts
+    }
+
     /// Commit a full education chain; return db + key ids for read tests.
+    // `run!` advances the nonce and height counters uniformly, so the last
+    // expansion's increments are dead. That was true before this fixture
+    // published blocks too — it was simply unreachable by the lint while the
+    // module did not compile.
+    #[allow(unused_assignments)]
     fn seed() -> (TempDir, Arc<Database>, [u8; 32], [u8; 32], [u8; 32], [u8; 32]) {
         let dir = TempDir::new().unwrap();
         let db = Arc::new(Database::open_default(dir.path()).unwrap());
@@ -9802,7 +9850,9 @@ mod education_rpc_phase4_tests {
         let mut hh = 1u64;
         macro_rules! run {
             ($s:expr,$o:expr,$d:expr) => {{
-                let r = ex.execute_tx(&etx(&sp, n, $s, $o, $d), &prop.address(), hh, 50).unwrap();
+                let rs = publish(&state, &ex, hh, 50, &prop, vec![etx(&sp, n, $s, $o, $d)]);
+                assert_eq!(rs.len(), 1, "one transaction in, one receipt out");
+                let r = &rs[0];
                 assert!(matches!(r.status, sumchain_primitives::TxStatus::Success), "seed step: {:?}", r.status);
                 n += 1; hh += 1;
             }};
@@ -9903,12 +9953,22 @@ mod education_rpc_phase4_tests {
         let inst = [0x31u8; 32];
         for (i, code) in ["A", "B", "C"].iter().enumerate() {
             let cid = sumchain_primitives::education::catalog_id(&inst, "CS", code, 1, 1);
-            let r = bex.execute_tx(&etx(&sp, i as u64, EducationStandard::CourseCatalog, catalog_op::CREATE_CATALOG_ENTRY, b(&CreateCatalogEntryData {
+            let data = b(&CreateCatalogEntryData {
                 catalog_id: cid, institution_id: inst, department: "CS".into(), course_code: (*code).into(),
                 course_title: None, title_commitment: None, course_level: 0, credit_hours: Some(3),
                 credit_commitment: None, prerequisites_count: 0, prerequisites_root: None, version: 1,
                 supersedes: None, nonce: 1,
-            })), &prop.address(), (i as u64) + 1, 0).unwrap();
+            });
+            let tx = etx(
+                &sp,
+                i as u64,
+                EducationStandard::CourseCatalog,
+                catalog_op::CREATE_CATALOG_ENTRY,
+                data,
+            );
+            let rs = publish(&state, &bex, (i as u64) + 1, 0, &prop, vec![tx]);
+            assert_eq!(rs.len(), 1, "one transaction in, one receipt out");
+            let r = &rs[0];
             assert!(matches!(r.status, sumchain_primitives::TxStatus::Success));
         }
         let ex = EducationExecutor::new(db.clone());
@@ -10488,11 +10548,10 @@ mod messaging_rpc_tests {
     #[tokio::test]
     async fn omninode_get_inference_consistency_groups_by_full_tuple() {
         use sumchain_primitives::inference_attestation::{
-            inference_attestation_key, InferenceAttestationDigest, InferenceAttestationRecord,
+            inference_attestation_key, session_index_key, InferenceAttestationDigest,
+            InferenceAttestationRecord,
         };
-        use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
         let (srv, db, _dir) = server();
-        let aexec = InferenceAttestationExecutor::new(db.clone());
 
         let mk = |v: u8, tuple: (u8, u8, u8, u8)| {
             let verifier = sumchain_primitives::Address::new([v; 20]);
@@ -10509,7 +10568,33 @@ mod messaging_rpc_tests {
                 included_at_height: 1,
                 tx_hash: sumchain_primitives::Hash::new([v; 32]),
             };
-            aexec.put(&inference_attestation_key("s", &verifier), &rec, &verifier, None).unwrap();
+            // `InferenceAttestationExecutor::put` is gone: the writer moved onto
+            // the block's `ExecutionView` as `stage`, and the candidate it
+            // stages into can only reach canonical storage through block
+            // publication, which is crate-private to `sumchain-storage`. The
+            // handler under test is a COMMITTED reader
+            // (`list_verifiers_by_session` + `get`), so this fixture needs
+            // committed rows, and writes exactly the pair `put` wrote in one
+            // atomic batch: the canonical record and its session-id index
+            // entry. No sponsor row — `put` was called with `None` here, and
+            // wrote none.
+            let value = bincode::serialize(&rec).unwrap();
+            let mut batch = db.batch();
+            batch
+                .put(
+                    sumchain_storage::cf::INFERENCE_ATTESTATIONS,
+                    &inference_attestation_key("s", &verifier),
+                    &value,
+                )
+                .unwrap();
+            batch
+                .put(
+                    sumchain_storage::cf::INFERENCE_ATTESTATIONS_BY_SESSION,
+                    &session_index_key("s", &verifier),
+                    &[],
+                )
+                .unwrap();
+            batch.commit().unwrap();
         };
         // Two verifiers agree on tuple A; one holds tuple B; a fourth shares only
         // response_hash with A but differs elsewhere → its own singleton group.
