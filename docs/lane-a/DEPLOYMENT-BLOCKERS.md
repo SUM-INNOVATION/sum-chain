@@ -1586,6 +1586,103 @@ What survives the correction is worse than a stray write:
     the earlier claim disagree, and the discrepancy is recorded rather than
     resolved by picking the more convenient number.
 
+## What the integration pass found, and what it left blocking
+
+The eleven subsystem inventories above are inherited defects, pinned and
+deliberately unfixed. This section is different: it records what integrating the
+journal, reorg, account-root and activation-audit work SURFACED, separated into
+what was closed and what still blocks. Each item names how it was established,
+so a later reader can re-establish it rather than trust it.
+
+### Closed during integration
+
+  * **Two workspace crates did not compile, and no gate noticed.**
+    `sumchain-scripts` had not built since `fd7bb8b` added
+    `account_root_enabled_from_height` to `ChainParams` without updating the
+    exhaustive struct literal in `scripts/src/setup_local_testnet.rs`;
+    `crates/integration-tests` had not built since `NftExecutor::execute` gained
+    a `block_height` parameter. Both were invisible because every gate run in
+    this lane scoped its build and test invocations to the crates under change.
+    Closed by `1e40353` and `8fea224`. The standing consequence is a gating
+    rule, not a code change: **`cargo build --workspace --all-targets` is part
+    of the gate**, because a scoped build cannot report a crate it never built.
+    The literal stays exhaustive on purpose — it caught the very next commit
+    that added eleven fields.
+
+  * **A snapshot restore could leave state that did not know its own floor.**
+    The restore wrote account rows one at a time and recorded the undo-history
+    floor afterwards. A crash between the two leaves restored state at height
+    `h` with no floor: the journal family is empty, the activation boundary
+    reads as unestablished, and the node offers a reorg horizon over blocks it
+    holds no undo records for. Closed by `f41c50f`: `StateStore::import_accounts`
+    stages the floor into the FIRST batch of rows, so the caller cannot get the
+    order wrong. Pinned by
+    `state/the_floor_is_staged_with_the_first_rows_rather_than_written_after_the_last`,
+    `state/a_failed_import_leaves_the_floor_that_describes_what_it_wrote` and
+    `storage/the_restore_floor_and_the_restored_state_commit_or_fail_together`.
+
+  * **The first start of an upgraded node validated no activation heights.**
+    `ACTIVATION_META_KEY` does not exist in the deployed binary, so every
+    upgrading node's first start has no record to compare against — and that
+    branch recorded the configured heights and asked nothing. Closed by
+    `6e64dd5`, which refuses a gate this binary introduced when it is dated at
+    or below a height the database already holds, grandfathering only the
+    eighteen gates that shipped in the binary that produced those blocks.
+
+### Still blocking
+
+  * **Thirty-three audit remedies are implemented and dormant.** The eleven
+    `*_enabled_from_height` fields they read now exist, are covered by the
+    activation digest and the startup change detection, and are read by the
+    eleven accessors (`state/every_remediation_gate_reads_the_field_it_names`).
+    None is set anywhere in this branch, and
+    `state/every_remediation_gate_is_dormant_by_default` pins that. So a release
+    node still runs the defective behaviour and the activation audit's blocking
+    count stays 121. This is no longer blocked on code: it is blocked on a
+    deployment decision to set eleven heights in every validator's runtime
+    `genesis.json` as one coordinated activation. See
+    `docs/lane-a/ACTIVATION-AUDIT.md` for the arithmetic and the row list.
+
+  * **Nothing in `crates/node` constructs a `Pruner`.** Established by grep over
+    `crates/node/src`: no construction site exists. `CapacityGuard` IS wired —
+    `crates/consensus/src/poa.rs:90` holds one, built at `:118`, and
+    `sum-node set-disk-budget` writes the row it reads at
+    `crates/node/src/main.rs:988` — so a node at its budget refuses to produce
+    and says why. That brake DELAYS disk exhaustion; it does not prevent it,
+    because nothing deletes anything. The `pruner` module and struct
+    documentation used to describe this uncalled type as running behaviour and
+    no longer does.
+
+  * **A reorg wholly below the journal activation boundary cannot restore every
+    family the block wrote.** Below the boundary the only undo records are the
+    four legacy per-subsystem journals, which cover account and contract rows
+    plus two dormant subsystems and nothing else; `cf::SUPPLY` is restorable
+    from none of them. This is pre-existing behaviour of pre-journal history and
+    is left alone deliberately — §7.1 of the contract. What the integration adds
+    is that a reorg may not CROSS the boundary:
+    `UndoRefusal::CrossesActivationCheckpoint` (`crates/state/src/reorg_undo.rs:548`,
+    returned at `:634`) refuses, rather than unwinding half a branch
+    from records that cannot restore it and reporting success. The refusal is
+    the guarantee; the gap below the boundary remains a gap.
+
+  * **`ImportRegisteredKeys` writes application state outside consensus.**
+    Recorded as OC-2 in the activation audit and counted in the closure ledger's
+    `Class::OperatorTooling`, pinned by
+    `operator_tooling_writes_are_declared_deployment_blockers`. A node that ran
+    it diverges from one that did not, and nothing records that it happened.
+
+  * **The `tx_index` half of TS-10 destroys data.** Every subsystem event in a
+    block is written at a key whose transaction index is a literal `0`, so the
+    family holds one row per block — the last event — and every earlier event in
+    that block is silently overwritten. The timestamp half is remediated behind
+    `subsystem_block_timestamp_enabled_from_height`; this half is not.
+
+  * **Fast sync is structurally unavailable.** The snapshot format carries the
+    account family alone of the ten families a sync requires, so
+    `restore_snapshot` refuses rather than producing a node that believes it is
+    synced. `missing_for_fast_sync` computes the gap from the format's own
+    declared family list rather than a hardcoded answer.
+
 ## What this file now is
 
 All eleven subsystem inventories are in this file and none of them is a pointer
