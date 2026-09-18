@@ -123,7 +123,8 @@ impl PerfNode {
     }
 
     fn fund_account(&self, addr: &Address, balance: u128) {
-        sumchain_storage::StateStore::new(&db).put_account(
+        sumchain_storage::StateStore::new(&self.db)
+            .put_account(
                 addr,
                 &sumchain_storage::schema::AccountState { balance, nonce: 0 },
             )
@@ -225,7 +226,8 @@ fn stress_account_reads() {
 
     // Write accounts
     for (i, addr) in accounts.iter().enumerate() {
-        node.sumchain_storage::StateStore::new(&db).put_account(
+        sumchain_storage::StateStore::new(&node.db)
+            .put_account(
                 addr,
                 &sumchain_storage::schema::AccountState {
                     balance: i as u128 * 1000,
@@ -268,7 +270,8 @@ fn stress_account_writes() {
         bytes[..8].copy_from_slice(&(i as u64).to_le_bytes());
         let addr = Address::new(bytes);
 
-        node.sumchain_storage::StateStore::new(&db).put_account(
+        sumchain_storage::StateStore::new(&node.db)
+            .put_account(
                 &addr,
                 &sumchain_storage::schema::AccountState {
                     balance: i as u128 * 1000,
