@@ -812,10 +812,30 @@ pub fn refuse_downgrade(db: &Database) -> Result<()> {
 ///
 /// This row removes the ambiguity, and it is the seam between the two halves of
 /// the work: **the restore path writes it** (see
-/// [`record_undo_history_floor`]), and everything that reads an activation
-/// honours it. [`JournalActivation::resolve`] raises the boundary to `floor + 1`,
-/// so the checkpoint (§7.3), the advertised depth (§13) and the planner's depth
+/// [`record_undo_history_floor`] and [`stage_undo_history_floor`]), and
+/// everything that reads an activation honours it.
+/// [`JournalActivation::resolve`] raises the boundary to `floor + 1`, so the
+/// checkpoint (§7.3), the advertised depth (§13) and the planner's depth
 /// refusal all bind without any further plumbing.
+///
+/// # This is the ONLY row that records the fact
+///
+/// A previous prototype recorded the same fact twice: this key, and
+/// `snapshot/imported_at` under a separate `snapshot_meta` module with its own
+/// encoding, its own decode failure and its own (non-monotone) write rule. Two
+/// rows for one fact merge without conflict and are wrong together — a restore
+/// that writes one and not the other leaves the journal boundary and the
+/// advertised history depth disagreeing about the same node, and nothing in
+/// either module can detect the disagreement because neither knows the other
+/// exists.
+///
+/// They are collapsed here. There is one key, one encoding, one decode failure
+/// and one write rule, and every consumer — the activation boundary, the
+/// startup gate, the reorg planner's depth refusal, and the sync-capability
+/// report an RPC serves — reads this row. Neither prototype shipped, so there
+/// is NO dual write, NO read fallback and NO migration: a database that somehow
+/// holds the old key is a database this binary has never written, and the old
+/// key is simply ignored.
 pub const UNDO_HISTORY_FLOOR_META_KEY: &[u8] = b"application_journal/undo_history_floor";
 
 /// The height a restore left this database at, if one did.
@@ -828,9 +848,10 @@ pub fn undo_history_floor(db: &Database) -> Result<Option<BlockHeight>> {
             Ok(Some(u64::from_be_bytes(h)))
         }
         Some(v) => Err(invalid(format!(
-            "the undo-history floor row is {} byte(s); it is an 8-byte big-endian block \\
-             height, and a row of any other width means something other than this binary \\
-             wrote it",
+            "the undo-history floor row is {} byte(s); it is an 8-byte big-endian block \
+             height, and a row of any other width means something other than this binary \
+             wrote it. This node cannot establish what history it holds and must not \
+             serve any",
             v.len()
         ))),
     }
@@ -847,16 +868,56 @@ pub fn undo_history_floor(db: &Database) -> Result<Option<BlockHeight>> {
 /// Monotone: a later restore may only raise the floor. Lowering it would claim
 /// undo history the node never acquired.
 pub fn record_undo_history_floor(db: &Database, height: BlockHeight) -> Result<()> {
+    let mut batch = db.batch();
+    if !stage_undo_history_floor(db, &mut batch, height)? {
+        return Ok(());
+    }
+    batch.commit()
+}
+
+/// Stage the floor into a batch the CALLER commits — the form a restore path
+/// must use.
+///
+/// # Why a staging form exists at all
+///
+/// [`record_undo_history_floor`] is a write of its own, so a restore that
+/// imports state and then calls it has a window between the two. A crash in
+/// that window leaves a database holding restored state at height `h` with NO
+/// floor recorded, which is precisely the shape this row exists to rule out:
+/// the journal family is empty, the boundary reads as unestablished, and the
+/// node treats every height below `h` as pre-activation history it may unwind
+/// from legacy diffs it does not have. The restore succeeded and the node is
+/// wrong about itself, with nothing left to notice it.
+///
+/// Staging removes the window. The floor goes into the SAME [`WriteBatch`] as
+/// the restored rows, RocksDB commits a batch atomically, and the two facts are
+/// exactly as durable as each other: either the node holds restored state and
+/// knows its floor, or it holds neither.
+///
+/// Returns whether anything was staged. `false` means the recorded floor is
+/// already at or above `height` and the batch was left untouched — monotone,
+/// for the same reason [`record_undo_history_floor`] is: lowering the floor
+/// would claim undo history the node never acquired.
+///
+/// The monotonicity check reads `db` as it is NOW, so a caller must not stage
+/// two floors into one batch and expect the second to see the first. A restore
+/// stages one.
+pub fn stage_undo_history_floor(
+    db: &Database,
+    batch: &mut WriteBatch<'_>,
+    height: BlockHeight,
+) -> Result<bool> {
     if let Some(existing) = undo_history_floor(db)? {
         if height <= existing {
-            return Ok(());
+            return Ok(false);
         }
     }
-    db.put(
+    batch.put(
         crate::db::cf::META,
         UNDO_HISTORY_FLOOR_META_KEY,
         &height.to_be_bytes(),
-    )
+    )?;
+    Ok(true)
 }
 
 /// `META` key holding the highest record format version this database has ever
@@ -912,6 +973,16 @@ pub struct JournalFormatState {
     /// The height at and above which a revert must find a journal, observed
     /// from this database.
     pub observed_boundary: Option<BlockHeight>,
+    /// The recorded undo-history floor — the height a snapshot restore or fast
+    /// sync left this database at, below which it holds no undo records of any
+    /// kind. `None` on a node that executed every block it holds.
+    ///
+    /// Read at startup and not merely at the first reorg, because it is the one
+    /// fact that distinguishes a restored database from a genuine pre-journal
+    /// chain: both have an empty journal family, and only one of them may fall
+    /// back to the legacy per-subsystem diffs. A node that never reads it at
+    /// boot cannot say what it holds until something asks it to prove it.
+    pub undo_history_floor: Option<BlockHeight>,
 }
 
 impl JournalFormatState {
@@ -960,6 +1031,7 @@ pub fn validate_startup(db: &Database) -> Result<JournalFormatState> {
         persisted: persisted_format_high_water(db)?,
         scanned: highest_stored_format_version(db)?,
         observed_boundary: lowest_journal_height(db)?,
+        undo_history_floor: undo_history_floor(db)?,
     };
     if let Some(v) = state.effective_high_water() {
         if v > FORMAT_VERSION_V1 {

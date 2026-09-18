@@ -888,6 +888,22 @@ async fn main() -> Result<()> {
                     ActivationSource::ObservedFromChain
                 }
             };
+
+            // The one row that says what history this node holds. Reported here
+            // because it is what makes an OBSERVED boundary trustworthy: an
+            // empty journal family on a restored database looks exactly like a
+            // genuine pre-journal chain, and only this row tells them apart. If
+            // it is set, the boundary below is `floor + 1` no matter what the
+            // genesis document pins.
+            if let Some(floor) = format.undo_history_floor {
+                println!(
+                    "NOTE: this database was populated by a snapshot restore or fast sync \
+                     at height {floor}. It holds NO undo records at or below that height \
+                     — journals are node-local and are never transmitted — so nothing \
+                     below {} can be rolled back here, and this tool will refuse to try.",
+                    floor + 1
+                );
+            }
             let journals = ActivatedJournal::resolve(&db, source)
                 .map_err(|e| anyhow::anyhow!("cannot resolve the journal boundary: {}", e))?;
 
