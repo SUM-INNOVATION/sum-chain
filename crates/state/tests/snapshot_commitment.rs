@@ -929,3 +929,164 @@ fn a_corrupt_import_record_is_an_error_not_an_absence() {
         "the refusal must say what follows from it: {err}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. The snapshot policy, as one proposition
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The snapshot half of the commitment's coherent set: what a snapshot may do,
+/// what it may not, and the fact that every branch is decided by the commitment
+/// rather than by a flag somebody set.
+///
+/// The other four paths by which account state reaches or changes on a node are
+/// proven beside this one, and the table in
+/// `account_state_root.rs`, section 10, names all five. This test is the
+/// snapshot row. The tests above each establish ONE of the five clauses below
+/// in isolation, with the fixtures and the reproduction that make it convincing;
+/// what they do not establish is that the clauses are consistent with each other
+/// — that the path admitted by clause 2 is the same path restricted by clause 4
+/// and checked by clause 5. A policy is the conjunction, so the conjunction is
+/// what is asserted here, on one source, one file and one target.
+///
+/// 1. A fast sync is REFUSED, and the refusal names every family it is short of.
+/// 2. An account-family import is ADMITTED, and what admits it is the
+///    commitment: the digest is recomputed from the target's COMMITTED state
+///    after the write, not read back out of the file that claimed it.
+/// 3. A file whose rows were altered in transit is refused at verification, and
+///    the target is untouched.
+/// 4. An admitted import does not let the node claim history it lacks: it
+///    advertises a floor, advertises zero usable reorg depth, refuses to serve
+///    below the floor, and still reports that it could not seed anyone else.
+/// 5. Above the gate the CHAIN checks the import at the node's first block —
+///    which is the only thing that ever ties a restored account set to the
+///    chain, because the digest in the file is a claim by whoever wrote it.
+#[test]
+fn the_snapshot_policy_admits_only_what_the_commitment_can_check() {
+    let alice = key(1);
+    let source = committed_node();
+    let snapshot = chain_with_snapshot(&source, BOUNDARY);
+
+    // ── 1. Fast sync: refused, by name.
+    let refused = committed_node();
+    let err = refused
+        .snapshots()
+        .restore_snapshot(&snapshot)
+        .expect_err("a fast sync must be refused while the format is incomplete")
+        .to_string();
+    assert!(
+        err.contains("fast sync is DISABLED") && err.contains("supply"),
+        "{err}"
+    );
+    assert_eq!(
+        imported_at(&refused.db).unwrap(),
+        None,
+        "a refused sync must not leave the target believing it was seeded"
+    );
+
+    // ── 3. A tampered file: refused before the account family is admitted, so
+    //    the order of these two clauses is itself part of the policy.
+    let tampered_file = {
+        let mut s = snapshot.clone();
+        let row: &mut SnapshotAccount = s.accounts.first_mut().expect("a non-empty snapshot");
+        row.balance += 1;
+        s
+    };
+    let target = committed_node();
+    let err = target
+        .snapshots()
+        .import_account_family(&tampered_file)
+        .expect_err("a row altered in transit must not be admitted")
+        .to_string();
+    assert!(
+        err.contains("account commitment") && err.contains("fold to"),
+        "the refusal must be the commitment failing to reproduce, and must show \
+         both values rather than saying 'invalid': {err}"
+    );
+    assert_eq!(
+        account_state_digest(&target.db).unwrap(),
+        account_state_digest(
+            &Database::open_default(tempfile::TempDir::new().unwrap().path()).unwrap()
+        )
+        .unwrap(),
+        "and a refused import writes nothing"
+    );
+    assert_eq!(imported_at(&target.db).unwrap(), None);
+
+    // ── 2. The honest file: admitted, and admitted BY THE COMMITMENT.
+    let admitted = committed_node();
+    clone_everything_but_accounts(&source, &admitted);
+    let result = admitted
+        .snapshots()
+        .import_account_family(&snapshot)
+        .expect("an honest account family must be admitted");
+    assert_eq!(
+        result.account_digest,
+        account_state_digest(&admitted.db).unwrap(),
+        "the value the import reports is the one recomputed from committed \
+         state, so a write that dropped a row fails here rather than at the \
+         next block"
+    );
+    assert_eq!(result.account_digest, snapshot.header.account_digest);
+    assert_eq!(result.height, snapshot.header.height);
+
+    // ── 4. And it restricts what the node may claim. Three claims, one
+    //    recorded import height, so they cannot drift apart.
+    let cap = sync_capability(&admitted.db, snapshot.header.height).unwrap();
+    assert_eq!(cap.imported_at, Some(snapshot.header.height));
+    assert_eq!(
+        cap.state_history_floor,
+        Some(snapshot.header.height),
+        "it may not SERVE state below the height it was seeded at"
+    );
+    assert_eq!(
+        cap.usable_reorg_depth, 0,
+        "it may not ADVERTISE a reorg depth it holds no undo records for"
+    );
+    assert_eq!(
+        cap.journal_history_begins_at,
+        Some(snapshot.header.height + 1)
+    );
+    assert!(
+        !cap.fast_sync_available && !cap.missing_families.is_empty(),
+        "and it may not claim it could seed anyone else"
+    );
+    assert!(!can_serve_history_at(&admitted.db, snapshot.header.height - 1).unwrap());
+    assert!(can_serve_history_at(&admitted.db, snapshot.header.height).unwrap());
+    assert_eq!(
+        usable_reorg_depth(snapshot.header.height, snapshot.header.height + 10),
+        10,
+        "the depth is earned one block at a time, and only after the import"
+    );
+    assert_eq!(
+        usable_reorg_depth(
+            snapshot.header.height,
+            snapshot.header.height + UNDO_RETENTION_FLOOR * 2
+        ),
+        UNDO_RETENTION_FLOOR,
+        "capped at the retention floor once it has been earned back"
+    );
+
+    // ── 5. The chain checks it at the first block. This is the clause that
+    //    makes clauses 2 and 3 worth anything: they check the file against
+    //    itself, and only this checks the node against the chain.
+    assert_eq!(
+        result.consensus_verified_from,
+        Some(snapshot.header.height + 1),
+        "restored at the gate, this node is checked by its very next block"
+    );
+    admitted.state.set_state_root(snapshot.header.state_root);
+    let next = source.publish(
+        BOUNDARY + 1,
+        vec![transfer(&alice, &addr(4), 2_000, 500, 1)],
+    );
+    let computed = admitted
+        .import(&next)
+        .expect("a correctly imported account family reproduces the chain's root");
+    assert_eq!(computed, next.header.state_root);
+    assert_eq!(
+        account_state_digest(&admitted.db).unwrap(),
+        account_state_digest(&source.db).unwrap(),
+        "and the two nodes now hold one account set, reached by a snapshot on \
+         one side and by execution on the other"
+    );
+}
