@@ -6309,7 +6309,9 @@ fn a_reorg_converges_account_rows_supply_rows_journals_and_the_activated_root() 
 fn publish_staging(
     db: &Database,
     block: &Block,
-    writes: impl FnOnce(&mut sumchain_storage::exec_view::ExecutionView<'_, '_>) -> sumchain_storage::Result<()>,
+    writes: impl FnOnce(
+        &mut sumchain_storage::exec_view::ExecutionView<'_, '_>,
+    ) -> sumchain_storage::Result<()>,
 ) {
     use sumchain_storage::candidate::{
         BlockJournals, CandidateExecution, ExecutionSubject, JournalRecord,
@@ -6489,7 +6491,10 @@ fn a_rollback_restores_accounts_contracts_supply_and_an_indexed_subsystem() {
     );
     assert_eq!(store.get_by_height(3).unwrap(), None);
     assert!(store.get_by_hash(&blocks[3].hash()).unwrap().is_none());
-    assert_eq!(store.get_by_height(2).unwrap().map(|b| b.hash()), Some(target.hash()));
+    assert_eq!(
+        store.get_by_height(2).unwrap().map(|b| b.hash()),
+        Some(target.hash())
+    );
 
     // The consumed journals are gone with the blocks they described, and the
     // target's is not.

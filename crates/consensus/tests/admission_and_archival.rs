@@ -459,7 +459,10 @@ async fn archival_writes_only_the_branch_safe_families_and_never_the_height_inde
     let (winner, loser) = siblings(&f).await;
 
     let node = Node::new(&f.genesis, f.key);
-    node.consensus.import_block(winner.clone()).await.expect("winner");
+    node.consensus
+        .import_block(winner.clone())
+        .await
+        .expect("winner");
 
     // The canonical database, immediately before a losing sibling arrives.
     let before = whole_db(&node.db);
@@ -473,7 +476,10 @@ async fn archival_writes_only_the_branch_safe_families_and_never_the_height_inde
         "the fixture must have a canonical height index to protect"
     );
 
-    node.consensus.import_block(loser.clone()).await.expect("loser");
+    node.consensus
+        .import_block(loser.clone())
+        .await
+        .expect("loser");
     let after = whole_db(&node.db);
 
     // What changed, as (family, key) pairs — additions and modifications alike.

@@ -1585,7 +1585,9 @@ fn one_row_records_the_history_floor_under_every_name_that_reaches_it() {
         .unwrap();
     for err in [
         undo_history_floor(&d).expect_err("malformed").to_string(),
-        snapshot_import_height(&d).expect_err("malformed").to_string(),
+        snapshot_import_height(&d)
+            .expect_err("malformed")
+            .to_string(),
     ] {
         assert!(
             err.contains("must not serve any"),
@@ -1614,7 +1616,9 @@ fn the_restore_floor_and_the_restored_state_commit_or_fail_together() {
     {
         let (d, _g) = db();
         let mut batch = d.batch();
-        batch.put(cf::STATE, b"restored-account", b"balance").unwrap();
+        batch
+            .put(cf::STATE, b"restored-account", b"balance")
+            .unwrap();
         assert!(
             stage_undo_history_floor(&d, &mut batch, RESTORED_AT).unwrap(),
             "a first floor is staged"
@@ -1632,7 +1636,9 @@ fn the_restore_floor_and_the_restored_state_commit_or_fail_together() {
     // ── the commit: both, atomically ────────────────────────────────────────
     let (d, dir) = db();
     let mut batch = d.batch();
-    batch.put(cf::STATE, b"restored-account", b"balance").unwrap();
+    batch
+        .put(cf::STATE, b"restored-account", b"balance")
+        .unwrap();
     assert!(stage_undo_history_floor(&d, &mut batch, RESTORED_AT).unwrap());
     batch.commit().expect("commit");
 

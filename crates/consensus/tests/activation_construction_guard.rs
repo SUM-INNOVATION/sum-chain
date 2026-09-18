@@ -217,7 +217,10 @@ fn the_fixture_feature_is_reachable_only_from_dev_dependencies() {
     );
 
     let mut enablers = BTreeSet::new();
-    for entry in std::fs::read_dir(root.join("crates")).expect("crates/").flatten() {
+    for entry in std::fs::read_dir(root.join("crates"))
+        .expect("crates/")
+        .flatten()
+    {
         let manifest = entry.path().join("Cargo.toml");
         let Ok(text) = std::fs::read_to_string(&manifest) else {
             continue;
@@ -225,10 +228,7 @@ fn the_fixture_feature_is_reachable_only_from_dev_dependencies() {
         if !text.contains("activation-fixtures") {
             continue;
         }
-        let rel = format!(
-            "crates/{}/Cargo.toml",
-            entry.file_name().to_string_lossy()
-        );
+        let rel = format!("crates/{}/Cargo.toml", entry.file_name().to_string_lossy());
         // Which table is it in? Everything after `[dev-dependencies]` and before
         // the next top-level table is a dev edge.
         let dev_start = text.find("[dev-dependencies]");
@@ -246,10 +246,7 @@ fn the_fixture_feature_is_reachable_only_from_dev_dependencies() {
 
     assert_eq!(
         enablers,
-        set(&[
-            "crates/consensus/Cargo.toml",
-            "crates/state/Cargo.toml",
-        ]),
+        set(&["crates/consensus/Cargo.toml", "crates/state/Cargo.toml"]),
         "exactly the two crates whose TESTS need a boundary with no database \
          behind it may enable the fixture constructor"
     );
@@ -318,10 +315,7 @@ fn every_production_site_that_resolves_an_activation_is_enumerated() {
     // Resolution against a database: the one production constructor.
     assert_eq!(
         files_mentioning(&sources, "JournalActivation::resolve"),
-        set(&[
-            "crates/node/src/node.rs",
-            "crates/state/src/reorg_undo.rs",
-        ]),
+        set(&["crates/node/src/node.rs", "crates/state/src/reorg_undo.rs"]),
         "an activation is resolved against a database at boot and inside \
          ActivatedJournal::resolve — a third site would be a third opinion about \
          the same database"
