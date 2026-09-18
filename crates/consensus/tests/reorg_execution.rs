@@ -6279,3 +6279,249 @@ fn a_reorg_converges_account_rows_supply_rows_journals_and_the_activated_root() 
     let (left, right) = (a.snapshot(), b.snapshot());
     assert_eq!(left, right, "{}", describe_divergence(&left, &right));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 19b. The operator rollback, family by family.
+//
+// `a_rollback_restores_every_family_the_legacy_diffs_never_covered` compares
+// whole-database snapshots, which is the strongest shape of assertion available
+// — and exactly as strong as the fixture that feeds it. Its blocks carry plain
+// transfers, so the families they move are `state` and `supply`, and its claim
+// about CONTRACTS and the application subsystems is true but vacuous: nothing
+// in that fixture ever wrote one.
+//
+// This drives the same `plan_rollback` + `execute_rollback` over blocks that
+// really do write a contract's code and storage, a supply row, and one INDEXED
+// application subsystem — a primary row plus the secondary index that points at
+// it, which is the shape that breaks worst under a partial unwind, because an
+// index left pointing at a row that is gone is a lookup that returns nothing
+// while the subsystem still believes the record exists.
+//
+// It publishes through `CandidateExecution` rather than through `BlockExecutor`
+// because the point is the FAMILIES, and driving a wasm deploy and a messaging
+// registration through the executor would make the fixture about transaction
+// admission instead. The publication path is the real one either way: the
+// generic journal is derived from the overlay's pre-image map, so what it
+// records is what the block wrote, whatever wrote it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Publish `block` through the real publication path, staging `writes`.
+fn publish_staging(
+    db: &Database,
+    block: &Block,
+    writes: impl FnOnce(&mut sumchain_storage::exec_view::ExecutionView<'_, '_>) -> sumchain_storage::Result<()>,
+) {
+    use sumchain_storage::candidate::{
+        BlockJournals, CandidateExecution, ExecutionSubject, JournalRecord,
+    };
+
+    let mut cand = CandidateExecution::new(db, 1 << 22);
+    {
+        let mut view = cand.view();
+        writes(&mut view).expect("stage the block's writes");
+    }
+    cand.finish_execution(
+        ExecutionSubject::of(block).expect("subject"),
+        block.header.state_root,
+        Vec::new(),
+        BlockJournals {
+            account: JournalRecord::NothingToUndo,
+            contract: JournalRecord::NothingToUndo,
+            compute_pool: JournalRecord::NothingToUndo,
+            beacon: JournalRecord::NothingToUndo,
+        },
+    )
+    .accept_imported(block)
+    .expect("accept")
+    .publish()
+    .expect("publish");
+}
+
+/// A `sum-node rollback` returns accounts, contracts, supply and an indexed
+/// application subsystem to the target — all four, in one atomic batch.
+///
+/// The bug this is the regression for: the old command reverted ACCOUNT rows out
+/// of `cf::STATE_DIFFS` with a loop of its own and then printed "Rollback
+/// complete." A contract's code and storage, the supply row, and every
+/// application subsystem's rows and indexes stayed exactly where the
+/// rolled-back blocks left them, on a chain that no longer contained the blocks
+/// that wrote them — and the operator was told it had worked.
+#[test]
+fn a_rollback_restores_accounts_contracts_supply_and_an_indexed_subsystem() {
+    // The four families under test, named so a failure says which one leaked.
+    // `MESSAGING_PUBLIC_KEYS` is the primary row of an application subsystem and
+    // `MESSAGING_SENDER_EVENTS` is a secondary index into it: an unwind that
+    // restores one and not the other leaves a lookup that disagrees with the
+    // record it points at.
+    const ACCOUNT: &[u8] = b"account-row";
+    const CODE: &[u8] = b"contract-code";
+    const SLOT: &[u8] = b"contract-slot";
+    const SUPPLY_KEY: &[u8] = b"total";
+    const SUBJECT: &[u8] = b"messaging-subject";
+    const INDEX_KEY: &[u8] = b"messaging-subject/event-0";
+
+    let dir = TempDir::new().expect("temp dir");
+    let db = Arc::new(Database::open_default(dir.path()).expect("open"));
+    let state = StateManager::new(db.clone(), CHAIN_ID);
+
+    // Heights 0..=2 build the state the rollback must return to; 3 and 4 move
+    // every one of the four families away from it.
+    let mut parent = Hash::ZERO;
+    let mut blocks = Vec::new();
+    for height in 0..=4u64 {
+        let header = BlockHeader::new(
+            parent,
+            height,
+            GENESIS_TS + height,
+            Hash::hash(&height.to_be_bytes()),
+            Hash::ZERO,
+            [0u8; 32],
+        );
+        let block = Block::new(header, Vec::new());
+        publish_staging(&db, &block, |view| {
+            let v = |tag: &str| format!("{tag}@{height}").into_bytes();
+            view.put(cf::STATE, ACCOUNT, &v("balance"))?;
+            view.put(cf::CONTRACT_CODE, CODE, &v("wasm"))?;
+            view.put(cf::CONTRACT_STORAGE, SLOT, &v("slot"))?;
+            view.put(cf::SUPPLY, SUPPLY_KEY, &v("supply"))?;
+            view.put(cf::MESSAGING_PUBLIC_KEYS, SUBJECT, &v("pubkey"))?;
+            // The index row appears only at and above the target, so the
+            // rollback has to DELETE it rather than merely rewrite it — a
+            // restore that only ever overwrites would pass without proving the
+            // absent-before case.
+            if height >= 3 {
+                view.put(cf::MESSAGING_SENDER_EVENTS, INDEX_KEY, &v("event"))?;
+            }
+            Ok(())
+        });
+        parent = block.hash();
+        blocks.push(block);
+    }
+
+    let target = blocks[2].clone();
+    let read = |family: &str, key: &[u8]| db.get(family, key).expect("read");
+    let four_families = || {
+        vec![
+            (cf::STATE, ACCOUNT, read(cf::STATE, ACCOUNT)),
+            (cf::CONTRACT_CODE, CODE, read(cf::CONTRACT_CODE, CODE)),
+            (cf::CONTRACT_STORAGE, SLOT, read(cf::CONTRACT_STORAGE, SLOT)),
+            (cf::SUPPLY, SUPPLY_KEY, read(cf::SUPPLY, SUPPLY_KEY)),
+            (
+                cf::MESSAGING_PUBLIC_KEYS,
+                SUBJECT,
+                read(cf::MESSAGING_PUBLIC_KEYS, SUBJECT),
+            ),
+            (
+                cf::MESSAGING_SENDER_EVENTS,
+                INDEX_KEY,
+                read(cf::MESSAGING_SENDER_EVENTS, INDEX_KEY),
+            ),
+        ]
+    };
+
+    // What the target looked like, read at height 4 and reconstructed from the
+    // fixture's own rule rather than snapshotted — the snapshot is taken below,
+    // but this asserts the fixture really moved all six rows.
+    let at_head = four_families();
+    for (family, _, value) in &at_head {
+        assert_eq!(
+            value.as_deref(),
+            Some(format!("{}@4", tag_for(family)).as_bytes()),
+            "the fixture must leave {family} at height 4 before the rollback"
+        );
+    }
+
+    let store = BlockStore::new(&db);
+    assert_eq!(store.get_latest_height().unwrap(), Some(4));
+
+    let journals = ActivatedJournal::resolve(&db, ActivationSource::ObservedFromChain)
+        .expect("resolve the real journal");
+    assert_eq!(
+        journals.activation().boundary(),
+        Some(0),
+        "every block here published a generic journal, so a missing record is an \
+         error at every height and the rollback is a post-activation one"
+    );
+
+    let plan = sumchain_consensus::reorg::plan_rollback(&store, 2, 10, &journals.activation())
+        .expect("plan");
+    assert_eq!(plan.depth(), 2);
+
+    let report = sumchain_consensus::reorg::execute_rollback(
+        &db,
+        &state,
+        &plan,
+        &journals,
+        journals.policy(),
+    )
+    .expect("execute");
+    assert_eq!(report.blocks, 2);
+    assert_eq!(
+        report.tolerated_absences, 0,
+        "a post-activation rollback that tolerated an absence would be the old \
+         bug wearing the new API"
+    );
+
+    // ── every family, by name ───────────────────────────────────────────────
+    for (family, _key, value) in four_families() {
+        if family == cf::MESSAGING_SENDER_EVENTS {
+            assert_eq!(
+                value, None,
+                "the secondary index row was written by an abandoned block and must \
+                 be GONE: an index that outlives the block that wrote it points at a \
+                 record the chain no longer contains"
+            );
+            continue;
+        }
+        assert_eq!(
+            value.as_deref(),
+            Some(format!("{}@2", tag_for(family)).as_bytes()),
+            "{family} must be back at the target's value; the old rollback restored \
+             cf::STATE alone and reported success"
+        );
+    }
+
+    // ── and the tip, and the blocks ─────────────────────────────────────────
+    assert_eq!(
+        store.get_latest_height().unwrap(),
+        Some(2),
+        "the canonical height index follows the rollback"
+    );
+    assert_eq!(store.get_by_height(3).unwrap(), None);
+    assert!(store.get_by_hash(&blocks[3].hash()).unwrap().is_none());
+    assert_eq!(store.get_by_height(2).unwrap().map(|b| b.hash()), Some(target.hash()));
+
+    // The consumed journals are gone with the blocks they described, and the
+    // target's is not.
+    for b in &blocks[3..] {
+        assert_eq!(
+            db.get(
+                cf::APPLICATION_JOURNAL,
+                &sumchain_storage::schema::journal_key(b.height(), &b.hash())
+            )
+            .unwrap(),
+            None,
+            "a rolled-back block's undo record is consumed in the same batch"
+        );
+    }
+    assert!(db
+        .get(
+            cf::APPLICATION_JOURNAL,
+            &sumchain_storage::schema::journal_key(target.height(), &target.hash())
+        )
+        .unwrap()
+        .is_some());
+}
+
+/// The value tag this fixture writes into `family`.
+fn tag_for(family: &str) -> &'static str {
+    match family {
+        f if f == cf::STATE => "balance",
+        f if f == cf::CONTRACT_CODE => "wasm",
+        f if f == cf::CONTRACT_STORAGE => "slot",
+        f if f == cf::SUPPLY => "supply",
+        f if f == cf::MESSAGING_PUBLIC_KEYS => "pubkey",
+        f if f == cf::MESSAGING_SENDER_EVENTS => "event",
+        other => panic!("unexpected family {other}"),
+    }
+}
