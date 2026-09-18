@@ -125,8 +125,17 @@
 //!   transaction's `to` field, so no recipient-index walk reaches it. The
 //!   contracts gate has been open on mainnet since height 8,900,000.
 //!
-//! So the number this cost model needs is **unmeasured**, and the instrument for
-//! measuring it ships here rather than the measurement: [`account_row_count`]
+//! The measurement was attempted, on 2026-09-18, and could not be taken. There
+//! is no SUM Chain data directory on this machine — every database this work
+//! touched was created by a test and destroyed with it — and the public mainnet
+//! RPC answers `-32601 Method not found` for `chain_getSyncCapability`, because
+//! that node runs a binary predating this work. No other RPC on the surface
+//! exposes a state-size or account-count statistic; that was checked rather than
+//! assumed.
+//!
+//! So the number this cost model needs is **unmeasured — ≥ 18, upper bound
+//! unknown** — and the instrument for measuring it ships here rather than the
+//! measurement: [`account_row_count`]
 //! runs the same scan as [`account_state_digest`], through the same prefix bound
 //! and the same stop condition, so it reports exactly the count the fold will
 //! pay for. It is exposed at node startup and as

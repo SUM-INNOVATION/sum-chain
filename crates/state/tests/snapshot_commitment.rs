@@ -153,7 +153,13 @@ fn addr(n: u8) -> Address {
     Address::new([n; 20])
 }
 
-fn transfer(from: &KeyPair, to: &Address, amount: u128, fee: u128, nonce: u64) -> SignedTransaction {
+fn transfer(
+    from: &KeyPair,
+    to: &Address,
+    amount: u128,
+    fee: u128,
+    nonce: u64,
+) -> SignedTransaction {
     let tx = TransactionV2 {
         chain_id: CHAIN_ID,
         from: from.address(),
@@ -454,7 +460,10 @@ fn a_snapshot_carries_only_the_account_family_so_a_restore_cannot_reproduce_a_ro
     let alice = key(1);
     let source = committed_node();
     let snapshot = chain_with_snapshot(&source, BOUNDARY);
-    let next = source.publish(BOUNDARY + 1, vec![transfer(&alice, &addr(4), 2_000, 500, 1)]);
+    let next = source.publish(
+        BOUNDARY + 1,
+        vec![transfer(&alice, &addr(4), 2_000, 500, 1)],
+    );
 
     let target = committed_node();
     target
@@ -532,10 +541,16 @@ fn above_the_gate_the_chain_verifies_a_fast_synced_node_at_its_first_block() {
 
     let tampered = committed_node();
     clone_everything_but_accounts(&source, &tampered);
-    tampered.snapshots().import_account_family(&snapshot).unwrap();
+    tampered
+        .snapshots()
+        .import_account_family(&snapshot)
+        .unwrap();
     tampered.state.set_state_root(snapshot.header.state_root);
 
-    let next = source.publish(BOUNDARY + 1, vec![transfer(&alice, &addr(4), 2_000, 500, 1)]);
+    let next = source.publish(
+        BOUNDARY + 1,
+        vec![transfer(&alice, &addr(4), 2_000, 500, 1)],
+    );
 
     // ── honest restore: the importer's own execution reaches the header root.
     let computed = honest
@@ -574,9 +589,15 @@ fn below_the_gate_a_fast_sync_cannot_be_verified_at_all() {
 
     let tampered = dormant_node();
     clone_everything_but_accounts(&source, &tampered);
-    let result = tampered.snapshots().import_account_family(&snapshot).unwrap();
+    let result = tampered
+        .snapshots()
+        .import_account_family(&snapshot)
+        .unwrap();
 
-    let next = source.publish(BOUNDARY + 1, vec![transfer(&alice, &addr(4), 2_000, 500, 1)]);
+    let next = source.publish(
+        BOUNDARY + 1,
+        vec![transfer(&alice, &addr(4), 2_000, 500, 1)],
+    );
     assert_eq!(
         result.consensus_verified_from, None,
         "with the gate closed the chain will never check this node's account \
@@ -827,7 +848,9 @@ fn the_import_height_survives_a_restart() {
 
     // It earns depth one block at a time, and the value comes from the database.
     assert_eq!(
-        sync_capability(&db, BOUNDARY + 700).unwrap().usable_reorg_depth,
+        sync_capability(&db, BOUNDARY + 700)
+            .unwrap()
+            .usable_reorg_depth,
         700
     );
     assert_eq!(

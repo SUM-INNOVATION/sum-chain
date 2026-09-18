@@ -71,6 +71,31 @@ No production database was available in the environment this work was done in,
 so the count could not be taken. The instrument ships instead of the
 measurement.
 
+### The attempt, and why it failed
+
+Recorded so this reads as a measurement that was attempted and could not be
+taken, rather than one nobody tried.
+
+Two routes exist and both were tried on 2026-09-18.
+
+**A production database on this machine.** There is none. The filesystem holds
+no SUM Chain data directory; every database this work touched was created by a
+test in a temporary directory and destroyed with it. `account_row_count` was run
+against synthetic databases from 18 to 10,000,000 rows, which measures the
+FUNCTION, not the chain.
+
+**The public mainnet RPC.** `https://rpc.sumchain.io` answers
+`chain_getBlockHeight` (12,929,466 at 2026-09-18T09:30:53Z) and every other
+method this chain has shipped, but returns `-32601 Method not found` for
+`chain_getSyncCapability`. That node runs a binary predating this work, so the
+row count is not reachable from it. No other endpoint exposes a state-size,
+account-count or column-family statistic — that was checked across the whole RPC
+surface, not assumed.
+
+So the count stands at: **≥ 18, upper bound unknown.** It must be taken on a
+node running this binary against the production database before the activation
+is scheduled, and recorded as described below.
+
 ### How to take the measurement
 
 On a node holding the production database, either read it from a running node:
