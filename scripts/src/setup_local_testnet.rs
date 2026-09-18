@@ -262,6 +262,23 @@ fn run_local() -> Result<()> {
             // no later than this one whenever this one is set; `None` here is
             // what makes the pair above legal rather than a startup refusal.
             account_root_enabled_from_height: None,
+            // The eleven remediation gates from the activation audit. All
+            // dormant, all for the same reason: each changes what a block
+            // means, so each is a coordinated consensus-breaking activation and
+            // none is a local convenience. `None` here is what an absent field
+            // resolves to, so a testnet built from this file behaves exactly as
+            // one built before the fields existed.
+            nft_receipt_failure_enabled_from_height: None,
+            docclass_stake_escrow_enabled_from_height: None,
+            docclass_subject_index_split_enabled_from_height: None,
+            docclass_revocation_standing_enabled_from_height: None,
+            healthcare_authorization_enabled_from_height: None,
+            legal_authorization_enabled_from_height: None,
+            finance_authorization_enabled_from_height: None,
+            employment_authorization_enabled_from_height: None,
+            property_authorization_enabled_from_height: None,
+            tax_authorization_enabled_from_height: None,
+            subsystem_block_timestamp_enabled_from_height: None,
             beacon_params: None, // issue #127: beacon parameter surface absent by default
             beacon_schedule: None, // issue #127: beacon height->epoch schedule absent by default
             messaging_sponsored_registration_enabled_from_height: None, // issue #145: sponsored registration dormant (coordinated activation only)

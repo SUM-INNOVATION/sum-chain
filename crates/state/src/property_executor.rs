@@ -212,9 +212,7 @@ impl PropertyExecutor {
     /// unchanged and `three_operations_check_no_authority_at_all` still passes.
     #[inline]
     fn authorization_activation(params: &ChainParams) -> Option<u64> {
-        // Replace with `params.property_authorization_enabled_from_height`.
-        let _ = params;
-        None
+        params.property_authorization_enabled_from_height
     }
 
     /// Whether the Property authority checks are active at `block_height`.

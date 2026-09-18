@@ -191,9 +191,7 @@ impl FinanceExecutor {
     /// unchanged and every pinning test that records the gap still passes.
     #[inline]
     fn authorization_activation(params: &ChainParams) -> Option<u64> {
-        // Replace with `params.finance_authorization_enabled_from_height`.
-        let _ = params;
-        None
+        params.finance_authorization_enabled_from_height
     }
 
     /// Whether the Finance issuer-standing rules are active at `block_height`.

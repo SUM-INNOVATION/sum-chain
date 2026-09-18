@@ -711,6 +711,208 @@ pub struct ChainParams {
     /// `#[serde(default)]` keeps every existing genesis file parse-compatible.
     #[serde(default)]
     pub messaging_sponsored_registration_enabled_from_height: Option<u64>,
+
+    /// NFT block denial becomes a charged failure.
+    ///
+    /// Below the gate, an NFT operation that violates a block-level rule — a bad
+    /// royalty, draining the sender inside the block — returns
+    /// `StateError::BlockValidation` and makes the whole block unexecutable. At
+    /// and above it the same conditions produce a `Failed` receipt that charges
+    /// the sender and leaves the block valid.
+    ///
+    /// Two nodes that disagree about this height disagree about whether a block
+    /// EXISTS, not merely about its root: the ungated node produces no block at
+    /// all where the gated one produces a block carrying a failed receipt.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub nft_receipt_failure_enabled_from_height: Option<u64>,
+
+    /// Registration stake is held instead of destroyed.
+    ///
+    /// Below the gate the stake debited at registration is credited to nobody and
+    /// leaves the money supply. At and above it the stake is held by a keyless
+    /// escrow address and refunded exactly once on deactivation.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub docclass_stake_escrow_enabled_from_height: Option<u64>,
+
+    /// The DocClass identity index gets a key of its own.
+    ///
+    /// Below the gate the identity index shares a 32-byte key space in which two
+    /// different subjects can collide. At and above it writes use a tagged
+    /// 33-byte key no legacy key can equal; reads still fall back to the legacy
+    /// key, so a collision committed BEFORE activation stays.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub docclass_subject_index_split_enabled_from_height: Option<u64>,
+
+    /// Only the issuer may revoke a DocClass credential.
+    ///
+    /// Below the gate revocation standing is unchecked.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub docclass_revocation_standing_enabled_from_height: Option<u64>,
+
+    /// Healthcare operations check the authority they were specified with.
+    ///
+    /// Below the gate the authorization rules in the subsystem's own specification
+    /// are not enforced, so an operation can be performed by a party with no
+    /// standing to perform it.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub healthcare_authorization_enabled_from_height: Option<u64>,
+
+    /// Legal consolidate, transfer and supersession check authority.
+    ///
+    /// Below the gate these four operations accept any sender. Supersession in
+    /// particular is three conditions and not one: the sender must hold the old
+    /// record, the replacement must be issued by the sender, and it must concern
+    /// the same subject — otherwise supersession is a way to overwrite someone
+    /// else's record.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub legal_authorization_enabled_from_height: Option<u64>,
+
+    /// A revoked finance issuer stops being an issuer.
+    ///
+    /// Below the gate revocation is recorded and then ignored by the operations
+    /// that should consult it.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub finance_authorization_enabled_from_height: Option<u64>,
+
+    /// A revoked employment issuer stops being an issuer.
+    ///
+    /// Below the gate revocation is recorded and then ignored by the operations
+    /// that should consult it.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub employment_authorization_enabled_from_height: Option<u64>,
+
+    /// Property operations bind to the row and the registry.
+    ///
+    /// Below the gate an operation need not be performed by a party the row or the
+    /// registry gives standing to.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub property_authorization_enabled_from_height: Option<u64>,
+
+    /// Tax operations bind to the row and the registry.
+    ///
+    /// Below the gate an operation need not be performed by a party the row or the
+    /// registry gives standing to.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub tax_authorization_enabled_from_height: Option<u64>,
+
+    /// Eight subsystems see the block's timestamp instead of a literal zero.
+    ///
+    /// Below the gate eight subsystems are handed `0` where the block's timestamp
+    /// belongs, so every time-dependent rule in them evaluates at the epoch —
+    /// a prescription validity window, for instance, is checked at time zero.
+    /// At and above it they receive the real block timestamp.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub subsystem_block_timestamp_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -1024,6 +1226,28 @@ impl Default for ChainParams {
             // #145) unavailable. Activation is a coordinated validator upgrade;
             // never set in default/mainnet config.
             messaging_sponsored_registration_enabled_from_height: None,
+            // Production-safe default: nft block denial becomes a charged failure — dormant.
+            nft_receipt_failure_enabled_from_height: None,
+            // Production-safe default: registration stake is held instead of destroyed — dormant.
+            docclass_stake_escrow_enabled_from_height: None,
+            // Production-safe default: the docclass identity index gets a key of its own — dormant.
+            docclass_subject_index_split_enabled_from_height: None,
+            // Production-safe default: only the issuer may revoke a docclass credential — dormant.
+            docclass_revocation_standing_enabled_from_height: None,
+            // Production-safe default: healthcare operations check the authority they were specified with — dormant.
+            healthcare_authorization_enabled_from_height: None,
+            // Production-safe default: legal consolidate, transfer and supersession check authority — dormant.
+            legal_authorization_enabled_from_height: None,
+            // Production-safe default: a revoked finance issuer stops being an issuer — dormant.
+            finance_authorization_enabled_from_height: None,
+            // Production-safe default: a revoked employment issuer stops being an issuer — dormant.
+            employment_authorization_enabled_from_height: None,
+            // Production-safe default: property operations bind to the row and the registry — dormant.
+            property_authorization_enabled_from_height: None,
+            // Production-safe default: tax operations bind to the row and the registry — dormant.
+            tax_authorization_enabled_from_height: None,
+            // Production-safe default: eight subsystems see the block's timestamp instead of a literal zero — dormant.
+            subsystem_block_timestamp_enabled_from_height: None,
         }
     }
 }
@@ -1297,6 +1521,50 @@ impl ChainParams {
             (
                 "messaging_sponsored_registration_enabled_from_height",
                 self.messaging_sponsored_registration_enabled_from_height,
+            ),
+            (
+                "nft_receipt_failure_enabled_from_height",
+                self.nft_receipt_failure_enabled_from_height,
+            ),
+            (
+                "docclass_stake_escrow_enabled_from_height",
+                self.docclass_stake_escrow_enabled_from_height,
+            ),
+            (
+                "docclass_subject_index_split_enabled_from_height",
+                self.docclass_subject_index_split_enabled_from_height,
+            ),
+            (
+                "docclass_revocation_standing_enabled_from_height",
+                self.docclass_revocation_standing_enabled_from_height,
+            ),
+            (
+                "healthcare_authorization_enabled_from_height",
+                self.healthcare_authorization_enabled_from_height,
+            ),
+            (
+                "legal_authorization_enabled_from_height",
+                self.legal_authorization_enabled_from_height,
+            ),
+            (
+                "finance_authorization_enabled_from_height",
+                self.finance_authorization_enabled_from_height,
+            ),
+            (
+                "employment_authorization_enabled_from_height",
+                self.employment_authorization_enabled_from_height,
+            ),
+            (
+                "property_authorization_enabled_from_height",
+                self.property_authorization_enabled_from_height,
+            ),
+            (
+                "tax_authorization_enabled_from_height",
+                self.tax_authorization_enabled_from_height,
+            ),
+            (
+                "subsystem_block_timestamp_enabled_from_height",
+                self.subsystem_block_timestamp_enabled_from_height,
             ),
         ]
     }

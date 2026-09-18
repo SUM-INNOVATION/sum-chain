@@ -109,9 +109,7 @@ impl TaxExecutor {
     /// unchanged and every pinning test that records the gap still passes.
     #[inline]
     fn authorization_activation(params: &ChainParams) -> Option<u64> {
-        // Replace with `params.tax_authorization_enabled_from_height`.
-        let _ = params;
-        None
+        params.tax_authorization_enabled_from_height
     }
 
     /// Whether the Tax claim-type authority check is active at `block_height`.

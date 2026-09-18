@@ -164,9 +164,7 @@ impl DocClassExecutor {
     /// unchanged and the pinning test that records the destruction still passes.
     #[inline]
     fn stake_escrow_activation(params: &ChainParams) -> Option<u64> {
-        // Replace this body with `params.docclass_stake_escrow_enabled_from_height`.
-        let _ = params;
-        None
+        params.docclass_stake_escrow_enabled_from_height
     }
 
     /// Whether the issuer-stake escrow rule is active at `block_height`.
@@ -197,9 +195,7 @@ impl DocClassExecutor {
     /// ```
     #[inline]
     fn subject_index_split_activation(params: &ChainParams) -> Option<u64> {
-        // Replace with `params.docclass_subject_index_split_enabled_from_height`.
-        let _ = params;
-        None
+        params.docclass_subject_index_split_enabled_from_height
     }
 
     /// Whether the subject-index split is active at `block_height`.
@@ -229,9 +225,7 @@ impl DocClassExecutor {
     /// ```
     #[inline]
     fn revocation_standing_activation(params: &ChainParams) -> Option<u64> {
-        // Replace with `params.docclass_revocation_standing_enabled_from_height`.
-        let _ = params;
-        None
+        params.docclass_revocation_standing_enabled_from_height
     }
 
     /// Whether the revocation-standing rule is active at `block_height`.

@@ -174,9 +174,7 @@ impl EmploymentExecutor {
     /// passes with the asymmetry its name describes.
     #[inline]
     fn authorization_activation(params: &ChainParams) -> Option<u64> {
-        // Replace with `params.employment_authorization_enabled_from_height`.
-        let _ = params;
-        None
+        params.employment_authorization_enabled_from_height
     }
 
     /// Whether the Employment issuer-standing rule is active at `block_height`.

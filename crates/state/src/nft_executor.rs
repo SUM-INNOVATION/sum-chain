@@ -126,9 +126,7 @@ impl NftExecutor {
     /// the mixed-version tests drive.
     #[inline]
     fn receipt_failure_activation(params: &ChainParams) -> Option<u64> {
-        // Replace this body with `params.nft_receipt_failure_enabled_from_height`.
-        let _ = params;
-        None
+        params.nft_receipt_failure_enabled_from_height
     }
 
     /// Whether the NFT receipt-failure rule is active at `block_height`.

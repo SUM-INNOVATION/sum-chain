@@ -196,9 +196,7 @@ impl LegalExecutor {
     /// unchanged and every pinning test that records the gap still passes.
     #[inline]
     fn authorization_activation(params: &ChainParams) -> Option<u64> {
-        // Replace with `params.legal_authorization_enabled_from_height`.
-        let _ = params;
-        None
+        params.legal_authorization_enabled_from_height
     }
 
     /// Whether the Legal authority checks are active at `block_height`.

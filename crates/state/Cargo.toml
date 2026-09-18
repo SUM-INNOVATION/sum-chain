@@ -32,6 +32,9 @@ lru = "0.12"
 sumchain-storage = { path = "../storage", features = ["activation-fixtures"] }
 tempfile = "3.10"
 wat = "1"
+# `remediation_gates.rs` round-trips ChainParams through JSON to prove a genesis
+# written before the eleven remediation fields existed still parses dormant.
+serde_json = { workspace = true }
 # Build a REAL beacon carrier (valid EK + PoP) to exercise the gate-open →
 # #127-runtime → fail-closed-pending-stateful path end to end.
 sumchain-beacon-crypto = { path = "../beacon-crypto" }

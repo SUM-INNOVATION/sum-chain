@@ -88,9 +88,7 @@ pub mod validator_quorum;
 /// unchanged and every `..._is_always_zero` pinning test still passes.
 #[inline]
 fn subsystem_block_timestamp_activation(params: &sumchain_genesis::ChainParams) -> Option<u64> {
-    // Replace with `params.subsystem_block_timestamp_enabled_from_height`.
-    let _ = params;
-    None
+    params.subsystem_block_timestamp_enabled_from_height
 }
 
 /// Whether executor-written block timestamps are real at `block_height`.

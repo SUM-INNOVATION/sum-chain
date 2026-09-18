@@ -202,9 +202,7 @@ impl HealthcareExecutor {
     /// unchanged and every pinning test that records the gap still passes.
     #[inline]
     fn authorization_activation(params: &ChainParams) -> Option<u64> {
-        // Replace with `params.healthcare_authorization_enabled_from_height`.
-        let _ = params;
-        None
+        params.healthcare_authorization_enabled_from_height
     }
 
     /// Whether the Healthcare authorization rules are active at `block_height`.
