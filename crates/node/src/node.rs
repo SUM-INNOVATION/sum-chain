@@ -529,6 +529,24 @@ impl Node {
             );
         }
 
+        // The SRC-201 registry's provenance, on every start and not only the one
+        // the seed ran on. `cf::MESSAGING_PUBLIC_KEYS` is read by consensus, so
+        // a node whose copy did not come from its own execution can produce
+        // receipts its peers do not — and the rows look identical either way.
+        // The digest is the value an operator compares against the other
+        // validators': equal digests mean equal registries, and a mismatch is
+        // visible here rather than as a diverged state root later.
+        if let Some(seed) = &cap.messaging_registry_seed {
+            warn!(
+                "This node's SRC-201 messaging public-key registry was SEEDED by an \
+                 operator at height {}, not built by this node's execution: {} key(s), \
+                 digest {}. That family is read by consensus. Every validator on this \
+                 chain must report the SAME digest — compare it across the set via \
+                 chain_getSyncCapability before trusting any messaging receipt.",
+                seed.seeded_at_height, seed.key_count, seed.digest
+            );
+        }
+
         // The account-row count, and the thresholds it is measured against.
         //
         // The account-state commitment folds one record per stored row, once per

@@ -268,8 +268,13 @@ enum Commands {
     },
 
     /// Export every registered SRC-201 messaging public key to NDJSON.
-    /// Used to migrate registrations from one validator to another after
-    /// `messaging_registerSponsored` direct-write divergence (recovery tool).
+    ///
+    /// Read-only, and the diagnostic half of the pair: two operators who suspect
+    /// their registries disagree export and diff. The import half will only
+    /// replay an export into a database at genesis with an empty registry — see
+    /// `import-registered-keys` — so this is not a migration path for a running
+    /// chain. On a running chain a diverged registry is repaired by resync.
+    ///
     /// Node must be stopped on the source data dir.
     ExportRegisteredKeys {
         /// Data directory to read from
@@ -281,8 +286,24 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
-    /// Import SRC-201 messaging public keys from NDJSON.
-    /// Reads each registration record and writes it to MESSAGING_PUBLIC_KEYS.
+    /// Seed the SRC-201 messaging public-key registry from NDJSON — AT GENESIS
+    /// ONLY.
+    ///
+    /// REFUSED unless this database has executed no block above genesis, holds
+    /// no registration of its own, and has not already been seeded.
+    /// `MESSAGING_PUBLIC_KEYS` is read by consensus, so a node whose copy
+    /// differs from its peers' produces different receipts for identical
+    /// blocks — and nothing afterwards can tell a seeded row from a registered
+    /// one, which is why a mid-chain import has no remedy but a resync. Above
+    /// genesis, resync is the answer; this command will not pretend otherwise.
+    ///
+    /// A seed is a COORDINATED INITIAL CONDITION, exactly like a genesis edit:
+    /// every validator must seed the same set, or they are forked from block
+    /// one. The command records a permanent marker carrying a digest of what it
+    /// wrote, reported in the startup log on every later start and served on
+    /// `chain_getSyncCapability`, so the set can be compared across the
+    /// validator set before the first messaging transaction.
+    ///
     /// Node must be stopped on the target data dir.
     ImportRegisteredKeys {
         /// Data directory to write to
@@ -292,10 +313,6 @@ enum Commands {
         /// Input file path. Use "-" or omit to read from stdin.
         #[arg(short, long)]
         input: Option<PathBuf>,
-
-        /// Skip records whose address is already registered locally
-        #[arg(long, default_value = "true")]
-        skip_existing: bool,
 
         /// Skip confirmation prompt
         #[arg(long)]
@@ -1051,7 +1068,6 @@ async fn main() -> Result<()> {
         Commands::ImportRegisteredKeys {
             data_dir,
             input,
-            skip_existing,
             yes,
         } => {
             use std::io::BufRead;
@@ -1132,9 +1148,93 @@ async fn main() -> Result<()> {
                 ));
             }
 
-            println!("WARNING: This will write {} registered public key record(s)", records.len());
-            println!("  to MESSAGING_PUBLIC_KEYS in data dir {:?}.", data_dir);
-            println!("  skip_existing = {}", skip_existing);
+            // ── the refusal, before anything is written and before anyone is
+            //    asked to type "yes" ──────────────────────────────────────────
+            //
+            // OC-2. This command used to loop `set_public_key` over the records
+            // at any height, with `--skip-existing` to merge them into whatever
+            // was already there. `cf::MESSAGING_PUBLIC_KEYS` is read by
+            // consensus at three sites — `SendMessage` requires the sender to
+            // hold a registered key, and both the plain and the sponsored
+            // `RegisterPublicKey` refuse a duplicate — so a node that ran it
+            // accepts transactions its peers refuse. The receipts differ, the
+            // receipts are folded into the state root, and the roots differ.
+            // That is the previous halt's exact shape, produced by an operator
+            // command with no consensus event to explain it.
+            //
+            // It is also unobservable afterwards: a seeded row and a registered
+            // row are the same bytes, so an operator who ran it mid-chain cannot
+            // be told which rows to remove. There is no repair, only a resync.
+            //
+            // So the command is narrowed to the ONE shape that is not a mutation
+            // of executed state — an initial condition on a database that has
+            // executed no block above genesis and holds no registration of its
+            // own — and `--skip-existing` is gone, because a registry that must
+            // be empty has nothing to skip.
+            //
+            // The refusal is checked here and AGAIN, unconditionally, inside
+            // `MessagingStore::seed_registry_at_genesis`. This copy exists so the
+            // operator is refused with the reason instead of being asked to
+            // confirm an operation that cannot succeed; the library copy is the
+            // one that makes the unsafe write unreachable, including from any
+            // caller written later.
+            info!("Opening database at {:?}", data_dir);
+            let db = Database::open_default(&data_dir)?;
+            let store = MessagingStore::new(&db);
+            let tip = sumchain_storage::schema::BlockStore::new(&db).get_latest_height()?;
+
+            if let Some(height) = tip {
+                if height > 0 {
+                    anyhow::bail!(
+                        "Refusing to seed the SRC-201 public-key registry: this database is \
+                         at height {height}.\n\
+                         \n\
+                         MESSAGING_PUBLIC_KEYS is read by consensus. Writing it here changes \
+                         the receipts this node produces for blocks it has ALREADY executed, \
+                         and nothing afterwards can tell a seeded row from a registered one \
+                         — there is no repair for it, only a resync.\n\
+                         \n\
+                         Seeding is permitted only on a database that has executed no block \
+                         above genesis. To correct a diverged registry on a running chain, \
+                         resync this node."
+                    );
+                }
+            }
+            if let Some(existing) = sumchain_storage::messaging_store::registry_seed(&db)? {
+                anyhow::bail!(
+                    "Refusing to seed the SRC-201 public-key registry: this node was already \
+                     seeded at height {} with {} key(s), digest {}.\n\
+                     \n\
+                     A second seed would leave this node unable to say what its registry \
+                     contains, which is the whole point of the marker.",
+                    existing.seeded_at_height,
+                    existing.key_count,
+                    existing.digest
+                );
+            }
+            if !store.iter_all_pubkeys()?.is_empty() {
+                anyhow::bail!(
+                    "Refusing to seed the SRC-201 public-key registry: it already holds at \
+                     least one registration.\n\
+                     \n\
+                     A seed is an initial condition, not a merge. A partial overwrite leaves \
+                     a registry no operator can describe and no peer can compare."
+                );
+            }
+
+            println!(
+                "This will SEED {} registration(s) into MESSAGING_PUBLIC_KEYS",
+                records.len()
+            );
+            println!(
+                "  in data dir {:?}, which is at genesis and holds none.",
+                data_dir
+            );
+            println!();
+            println!("That family is read by consensus. A seed is a COORDINATED initial");
+            println!("condition: every validator on this chain must seed the SAME set, or");
+            println!("they are forked from block one. The digest printed below is what you");
+            println!("compare across the validator set.");
             println!();
             println!("The node must be stopped before running this command.");
             println!();
@@ -1149,27 +1249,22 @@ async fn main() -> Result<()> {
                 }
             }
 
-            info!("Opening database at {:?}", data_dir);
-            let db = Database::open_default(&data_dir)?;
-            let store = MessagingStore::new(&db);
-
-            let mut wrote = 0u64;
-            let mut skipped = 0u64;
-            for (address, key) in &records {
-                if skip_existing && store.has_public_key(address).unwrap_or(false) {
-                    skipped += 1;
-                    continue;
-                }
-                store.set_public_key(address, key)?;
-                wrote += 1;
-            }
+            // The rows and the marker recording that an operator put them there
+            // go in ONE batch, inside the store. The caller does not get to
+            // choose that ordering: a crash between them would leave a seeded
+            // registry that does not say it was seeded, which is the exact fact
+            // this change exists to preserve.
+            let seed = store.seed_registry_at_genesis(tip, &records)?;
 
             println!();
-            println!("Import complete.");
-            println!("  Wrote:   {}", wrote);
-            println!("  Skipped: {} (already registered locally)", skipped);
+            println!("Registry seeded.");
+            println!("  Keys:   {}", seed.key_count);
+            println!("  Height: {}", seed.seeded_at_height);
+            println!("  Digest: {}", seed.digest);
             println!();
-            println!("Start the node and the chain should accept previously-diverged blocks.");
+            println!("This node will report the seed in its startup log on every later start");
+            println!("and on chain_getSyncCapability. Compare the digest with every other");
+            println!("validator before trusting any messaging receipt on this chain.");
         }
 
         Commands::InspectV2Rows { data_dir } => {

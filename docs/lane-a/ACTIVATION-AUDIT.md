@@ -648,7 +648,7 @@ root; the rows the receipts were computed from are not.
 | id | defect | source | verdict | gate | evidence | justification |
 |---|---|---|---|---|---|---|
 | OC-1 | Startup index backfill writes `MESSAGING_SENDER_EVENTS` and `MESSAGING_PAYMENTS_BY_RECIPIENT` directly through `Database::put`, outside any candidate and outside block execution | designated blocker (out-of-consensus messaging writes) | **REACHABLE**, not consensus-divergent | none — the marker at `config_keys::INDEX_BACKFILL_V1` is an idempotency flag, not an activation gate | called unconditionally at node startup, `crates/node/src/node.rs:148-150`, before the state manager is constructed at `:159`; body `crates/storage/src/messaging_store.rs:712-770`, raw writes at `:748` and in the payments loop following; failure fails startup | **every release node runs this on every boot** until the marker is set, so reachability is not in question. The two families it writes are pure indexes: neither is read by `messaging_executor.rs` or `executor.rs`, and neither is in the root (see above). So it cannot diverge consensus — but it is an unversioned, ungated, full-family rewrite performed outside the candidate, and the write set is proportional to `MESSAGING_EVENTS`, which is unbounded |
-| OC-2 | The `ImportRegisteredKeys` operator command writes `MESSAGING_PUBLIC_KEYS` directly, and that family **is** read by consensus | designated blocker (out-of-consensus messaging writes) | **REACHABLE, and consensus-divergent** | none | CLI subcommand declared `crates/node/src/main.rs:257-270`, write loop `:1073-1084` calling `MessagingStore::set_public_key` (`crates/storage/src/messaging_store.rs:908`); the same family is read by the executor at `crates/state/src/messaging_executor.rs:321` (SendMessage requires a registered key), `:750` (RegisterPublicKey duplicate guard) and `crates/state/src/executor.rs:2030` (sponsored-registration duplicate guard) | **this is the halt shape.** A validator that has run the import accepts a `SendMessage` its peers refuse, or refuses a `RegisterPublicKey` its peers accept. Receipts differ; receipts are folded into the root at `crates/state/src/executor.rs:3633-3637`; the roots differ. Nothing in the tree prevents one validator running it and others not — the command requires only a stopped node and write access to the data directory |
+| OC-2 | The `ImportRegisteredKeys` operator command writes `MESSAGING_PUBLIC_KEYS` directly, and that family **is** read by consensus | designated blocker (out-of-consensus messaging writes) | **WAS REACHABLE and consensus-divergent; CLOSED** by option (b) below — the command now refuses above genesis height and into a non-empty registry, and records a permanent marker | none, and none possible: this is an operator path, not a transaction path, so there is no height at which a gate could open it | CLI subcommand declared `crates/node/src/main.rs:257-270`, write loop `:1073-1084` calling `MessagingStore::set_public_key` (`crates/storage/src/messaging_store.rs:908`); the same family is read by the executor at `crates/state/src/messaging_executor.rs:321` (SendMessage requires a registered key), `:750` (RegisterPublicKey duplicate guard) and `crates/state/src/executor.rs:2030` (sponsored-registration duplicate guard) | **this is the halt shape.** A validator that has run the import accepts a `SendMessage` its peers refuse, or refuses a `RegisterPublicKey` its peers accept. Receipts differ; receipts are folded into the root at `crates/state/src/executor.rs:3633-3637`; the roots differ. Nothing in the tree prevents one validator running it and others not — the command requires only a stopped node and write access to the data directory |
 | OC-3 | The remaining out-of-consensus write sites in the designated inventory — roughly seven operator, two genesis, one snapshot and three raw reorg | designated blocker (out-of-consensus messaging writes) | **UNDETERMINED** | — | an exhaustive search of this worktree for writes into `MESSAGING_*` families returns raw `put`/`delete` statements in exactly two files, `crates/storage/src/messaging_store.rs` (8) and `crates/state/src/messaging_view.rs` (4), and exactly **two** non-test callers of any writing store method: `crates/node/src/node.rs:149` (OC-1) and `crates/node/src/main.rs:1082` (OC-2). `crates/state/src/state.rs`, `crates/state/src/snapshot.rs` and `crates/consensus/src/` contain no `MESSAGING` reference at all; every `MessagingStore::new` site in `crates/rpc/src/server.rs` (`:3193, 3215, 3262, 3292, 3325, 3363, 3385, 3473, 3496`) was read and all are reads | **what would settle it:** the tree or branch the designated count of thirteen was taken against, or its enumeration with file and line. This worktree at `b6f4f6a` does not contain thirteen such sites, and I will not manufacture the difference by counting statements inside the store as call sites. Until the source of that count is reconciled, the gap between two and thirteen is unestablished, and it blocks |
 | JR-1 | The per-block undo journal key changed shape — from height alone to `height ‖ block_hash` — with no activation gate in the tree | designated blocker (journal re-keying without activation) | **REACHABLE, and not consensus-relevant** | none, and none required | new key `crates/storage/src/schema.rs:43-48`, written at `:362`; legacy key retained at `:56-58`; **reads fall back** to the legacy form at `:377` and `:421`, and **deletes remove both** forms at `:394` and `:442`; the families are `cf::STATE_DIFFS` and `cf::CONTRACT_STATE_DIFFS`, neither of which appears in `compute_block_state_root` | the new key is used on every block a release node executes, so the path is reachable. It is **not** a consensus change, and this audit confirms the claim the code makes about itself at `crates/storage/src/schema.rs:40-42` rather than taking it on trust: the journals are node-local undo data and no application family reaches the root. The upgrade direction is handled — an old journal is still readable and still deletable. The residual hazard is the **downgrade** direction: a journal written by the new binary is invisible to an old one, so a rollback after a re-keyed block has been executed loses that block's undo record. That is a rollback-coordination item for `docs/operations/production-checklist.md`, not an activation-height item |
 | JR-2 | Both journal activation gates are `None`, so neither the compute-pool nor the beacon journal is ever written in production | designated blocker (journal re-keying without activation), second direction | **GATED OFF**, and the gate cannot be opened by configuration alone | `compute_pool_enabled_from_height` and `beacon_enabled_from_height`, both absent from `genesis.json` and therefore `None` (`crates/genesis/src/lib.rs:533, 541`) | the gates are consulted at `crates/state/src/executor.rs:3668` and `:3675` for the root fold, and the journals are bound at `:3315-3318` with the comment "Both gates are `None` in production, so neither journal is ever written; presence, not the gate, drives the revert"; revert is presence-driven at `crates/state/src/state.rs:359-381` and `:457` | **this is the strongest gate in the audit, and the only one that is fail-closed in the loader.** `ChainParams::validate` (`crates/genesis/src/lib.rs:941-969`) rejects `Some(_)` for **both** gates outright, so a genesis admitted through `Genesis::from_file` (`:1056-1061`) — the only path `crates/node/src/main.rs:372` uses — cannot open them. **What would re-expose it:** not a config edit. It takes a code change to `ChainParams::validate` removing those two rejections, shipped alongside the `ComputePoolParams` and `BeaconParams` surfaces they are waiting on, and then a coordinated genesis edit. The "defect of writing nothing" is therefore real, deliberate, and unreachable by configuration; the revert path is driven by journal presence rather than by the gate, so a dormant chain has nothing to revert and nothing to get wrong |
@@ -684,10 +684,14 @@ root; the rows the receipts were computed from are not.
      downgrade hazard, recorded in JR-1.
   4. **Out-of-consensus writes into messaging families** — split. OC-1 is
      **REACHABLE** and runs on every boot but touches only executor-unread
-     indexes. OC-2 is **REACHABLE and consensus-divergent**, and is the one that
-     reproduces the previous halt's shape. OC-3, the remainder of the designated
-     inventory, is **UNDETERMINED**: I could not find thirteen sites in this
-     worktree and will not report a count I cannot cite.
+     indexes. OC-2 **was REACHABLE and consensus-divergent**, and was the one
+     that reproduced the previous halt's shape; it is now **CLOSED** — the
+     import refuses above genesis height and into a non-empty registry, and
+     records a digest-carrying marker reported at startup and on
+     `chain_getSyncCapability`. See "OC-2: closed, by option (b) with a digest"
+     below, including the residual it does not close. OC-3, the remainder of the
+     designated inventory, is **UNDETERMINED**: I could not find thirteen sites
+     in this worktree and will not report a count I cannot cite.
 
 ### OC-2: the change required, in files this track does not own
 
@@ -730,6 +734,70 @@ is stated here precisely rather than attempted:
     move the problem rather than solve it.
   * **Until one of those lands, OC-2 stays REACHABLE and consensus-divergent**,
     and is counted as blocking.
+
+### OC-2: closed, by option (b) with a digest
+
+Option (b) landed. What was implemented, and the one place it goes further than
+the requirement above:
+
+  * **The refusal.** The write now goes through
+    `MessagingStore::seed_registry_at_genesis`
+    (`crates/storage/src/messaging_store.rs`), which refuses unless the database
+    has executed no block above genesis (`BlockStore::get_latest_height()` is
+    `None` or `Some(0)`), the registry holds no row of its own, and no seed has
+    already been recorded. `crates/node/src/main.rs` checks the same three
+    questions first so the operator is refused with a reason rather than asked to
+    confirm an operation that cannot succeed, but the library copy is the one
+    that makes the unsafe write unreachable — including from any caller written
+    later. The `--skip-existing` merge flag is gone with the merge: a registry
+    that must be empty has nothing to skip.
+  * **The marker.** The rows and a `cf::META` row recording the seed go in ONE
+    batch, so no crash can leave a seeded registry that does not say it was
+    seeded. It is read back by `sumchain_state::sync_capability`, warned at every
+    later startup by `Node::report_sync_capability`, and served on
+    `chain_getSyncCapability` as `messaging_registry_seed`. A node that ran the
+    seed and restarted still says so.
+  * **Why a digest, which the requirement did not ask for.** The refusal closes
+    the mid-chain write. It does not close the remaining hazard, and stating the
+    hazard is the point of this row: two validators can still seed **different
+    sets at genesis** and be forked from block one, because the rows look
+    identical either way and neither node has executed anything yet to disagree
+    about. A seed is a coordinated initial condition, exactly like a genesis
+    edit, and the audit's own rule for those is a byte-identical artefact
+    compared across the set. So the marker carries a blake3 over the seeded
+    registrations **in address order** — a property of the set, not of the
+    operator's file order — and that digest is what two validators compare
+    through `chain_getSyncCapability` before the first messaging transaction,
+    rather than inferring the divergence from a diverged root afterwards.
+  * **What was considered and rejected: deleting the subcommand.** The argument
+    for deletion is real and worth recording, because it is nearly decisive:
+    `cf::MESSAGING_PUBLIC_KEYS` is fully reconstructible by executing the chain,
+    so any import produces a state execution would not — including at genesis,
+    where replay produces an *empty* family. On that reading every import
+    diverges and only the block at which it shows up differs. What defeats it is
+    that the coordinated-genesis case is a real launch-time operation (it is why
+    `ExportRegisteredKeys` exists at all), and deleting the supported half of an
+    export/import pair does not remove the capability — an operator with write
+    access to the data directory still has it, and now without the marker. The
+    refusal plus the digest keeps the one sound use, makes the unsound ones
+    unreachable, and makes the residual coordination requirement checkable.
+    Deletion would have kept none of that.
+  * **Residual, stated plainly.** A genesis seed is still a coordination
+    obligation on the operators, not a fact the chain enforces: nothing refuses a
+    node whose digest differs from its peers'. This row claims only that the
+    divergence is now *visible before it matters*, not that it is prevented.
+    Enforcing it would mean folding the digest into the genesis artefact, which
+    is a `crates/genesis` change and a consensus surface this track does not
+    own.
+  * **Pinned by** `crates/storage/tests/messaging_registry_seed.rs` (the
+    refusals, that a refusal writes nothing, the marker across a reopen, the
+    digest's set-identity), `crates/node/tests/import_registered_keys_guard.rs`
+    (the real binary: non-zero exit above genesis, the supported shape, the
+    marker in the *next* process), `crates/rpc/tests/operator_visible_activation_and_history.rs::a_seeded_messaging_registry_is_visible_to_a_peer_and_two_seeds_are_comparable`
+    (the peer-visible surface) and
+    `crates/state/tests/execution_closure.rs::operator_tooling_writes_are_declared_deployment_blockers`
+    (that the operator door into a `MESSAGING_*` family is the guarded one and
+    nothing else).
 
 ## Class 10 — The rows where a gate actually decides the answer
 
@@ -860,7 +928,10 @@ what one ordinary transaction costs the network, then by what it costs a person.
      third, with the colliding key chosen freely by the attacker (AU-35).
   3. **OC-2, operator key import diverges consensus.** Not a transaction — a
      supported operator command that writes a family the executor reads, whose
-     effect reaches the state root through receipts.
+     effect reaches the state root through receipts. **CLOSED**: the command
+     refuses above genesis height and into a non-empty registry, and a node that
+     seeded says so at every startup and on `chain_getSyncCapability`, with a
+     digest of the set it was seeded from.
 
 ### Tier 2 — authorization absent where it is least tolerable
 

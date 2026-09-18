@@ -536,3 +536,105 @@ async fn a_restored_node_advertises_no_more_than_it_holds() {
         "and the refusal must name what is missing rather than being a flag"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. The one provenance a node carries that its own execution did not produce
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// OC-2. A node whose SRC-201 registry was SEEDED by an operator says so to any
+/// peer that asks, and says the same thing every node compares against.
+///
+/// `cf::MESSAGING_PUBLIC_KEYS` is read by consensus, so two nodes holding
+/// different registries produce different receipts for identical blocks and
+/// therefore different state roots. `sumchain import-registered-keys` refuses
+/// above genesis, which stops the mid-chain write; what it cannot stop is two
+/// validators seeding DIFFERENT sets at genesis, because the rows look the same
+/// either way and neither node has executed anything yet to disagree about.
+///
+/// The digest is the answer to that, and it is only an answer if it leaves the
+/// process: a marker that lives in `cf::META` and is invisible over JSON-RPC
+/// coordinates nothing, for the same reason the activation digest above does
+/// not. This drives the real handler.
+#[tokio::test]
+async fn a_seeded_messaging_registry_is_visible_to_a_peer_and_two_seeds_are_comparable() {
+    use sumchain_primitives::{Address, RegisteredPublicKey};
+    use sumchain_storage::messaging_store::MessagingStore;
+
+    fn key(n: u8) -> (Address, RegisteredPublicKey) {
+        let public_key = [n; 32];
+        let address = Address::from_public_key(&public_key);
+        (
+            address,
+            RegisteredPublicKey {
+                public_key,
+                address,
+                registered_at_block: 0,
+                registered_at: 1_700_000_000,
+                updated_at_block: 0,
+            },
+        )
+    }
+
+    // A node that executed its own history claims no seed. That absence is a
+    // positive claim and it is the normal one.
+    let unseeded = serve(&genesis_with(sound(Some(13_800_000))));
+    let cap = unseeded.server.chain_get_sync_capability().await.unwrap();
+    assert!(
+        cap.messaging_registry_seed.is_none(),
+        "a node whose registry came from its own execution must not claim a seed"
+    );
+
+    let a = serve(&genesis_with(sound(Some(13_800_000))));
+    let written = MessagingStore::new(&a.db)
+        .seed_registry_at_genesis(None, &[key(1), key(2), key(3)])
+        .expect("seeding an empty registry at genesis is the supported shape");
+
+    let cap = a.server.chain_get_sync_capability().await.unwrap();
+    let seen = cap
+        .messaging_registry_seed
+        .expect("a seeded node must say so on the surface a peer reads");
+    assert_eq!(seen.key_count, 3);
+    assert_eq!(seen.seeded_at_height, 0);
+    assert_eq!(
+        seen.digest, written.digest,
+        "the served digest is the recorded one; two numbers here would be worse \
+         than none, because operators would compare the wrong one"
+    );
+
+    // A second validator seeded from the same set agrees, in a different order.
+    let b = serve(&genesis_with(sound(Some(13_800_000))));
+    MessagingStore::new(&b.db)
+        .seed_registry_at_genesis(None, &[key(3), key(1), key(2)])
+        .unwrap();
+    let their = b
+        .server
+        .chain_get_sync_capability()
+        .await
+        .unwrap()
+        .messaging_registry_seed
+        .unwrap();
+    assert_eq!(
+        their.digest, seen.digest,
+        "two validators seeded from the same registrations must be able to \
+         establish that they agree"
+    );
+
+    // And one seeded from a different set does not — which is the comparison
+    // that has to work, because it is the fork.
+    let c = serve(&genesis_with(sound(Some(13_800_000))));
+    MessagingStore::new(&c.db)
+        .seed_registry_at_genesis(None, &[key(1), key(2), key(4)])
+        .unwrap();
+    let diverged = c
+        .server
+        .chain_get_sync_capability()
+        .await
+        .unwrap()
+        .messaging_registry_seed
+        .unwrap();
+    assert_eq!(diverged.key_count, seen.key_count, "the same count, and");
+    assert_ne!(
+        diverged.digest, seen.digest,
+        "a different set. A count alone would certify this pair as matching"
+    );
+}
