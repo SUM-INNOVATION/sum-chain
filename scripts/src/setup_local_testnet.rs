@@ -253,6 +253,15 @@ fn run_local() -> Result<()> {
             // production rule and not an off position: the write side is ungated,
             // so the first block a node publishes establishes the boundary.
             application_journal_enabled_from_height: None,
+            // The account-state commitment's activation gate. Dormant, which is
+            // the production configuration: turning it on changes the block
+            // hash, so it is a coordinated consensus-breaking activation and
+            // never a local default.
+            //
+            // `ChainParams::validate` requires the journal gate to be set and
+            // no later than this one whenever this one is set; `None` here is
+            // what makes the pair above legal rather than a startup refusal.
+            account_root_enabled_from_height: None,
             beacon_params: None, // issue #127: beacon parameter surface absent by default
             beacon_schedule: None, // issue #127: beacon height->epoch schedule absent by default
             messaging_sponsored_registration_enabled_from_height: None, // issue #145: sponsored registration dormant (coordinated activation only)
