@@ -4372,7 +4372,10 @@ fn a_colliding_subject_commitment_ends_the_block_below_the_gate_and_is_harmless_
                 gates,
             )
             .unwrap();
-            assert!(r.success, "both arming transactions succeed under either gate");
+            assert!(
+                r.success,
+                "both arming transactions succeed under either gate"
+            );
         }
 
         // Detonate: any later identity write on that subject.
@@ -4421,8 +4424,8 @@ fn a_colliding_subject_commitment_ends_the_block_below_the_gate_and_is_harmless_
                 "because the identity shape has a key of its own"
             );
         } else {
-            let err = outcome
-                .expect_err("below the gate the collision still ends the block, unchanged");
+            let err =
+                outcome.expect_err("below the gate the collision still ends the block, unchanged");
             assert!(err.to_string().contains("Serialization"), "{err}");
             assert_eq!(
                 view.get(cf::DOCCLASS_SUBJECT_INDEX, &shared).unwrap(),
@@ -4573,8 +4576,7 @@ fn a_suspended_issuer_keeps_the_revocation_family_only_below_the_gate() {
         )
         .unwrap();
         assert_eq!(
-            revoked.success,
-            !gates.revocation_standing,
+            revoked.success, !gates.revocation_standing,
             "a suspended issuer keeps the revocation family, until the gate"
         );
     }

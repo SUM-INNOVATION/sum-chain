@@ -4088,8 +4088,7 @@ fn the_subject_can_revoke_its_own_consent_only_at_the_gate() {
             gates,
         );
         assert_eq!(
-            r.success,
-            gates.authorization,
+            r.success, gates.authorization,
             "the subject of a consent can withdraw it only once the gate is open"
         );
     }
@@ -4222,7 +4221,10 @@ fn a_stranger_can_change_network_affiliations_only_below_the_gate() {
             &d,
             gates,
         );
-        assert!(own.success, "the issuer keeps the operation under either gate");
+        assert!(
+            own.success,
+            "the issuer keeps the operation under either gate"
+        );
     }
 }
 
@@ -4261,8 +4263,7 @@ fn a_prescription_naming_another_issuers_prescriber_is_refused_only_at_the_gate(
             gates,
         );
         assert_eq!(
-            r.success,
-            !gates.authorization,
+            r.success, !gates.authorization,
             "anyone who can register a provider issues prescriptions naming any \
              other registered provider, until the gate"
         );
@@ -4328,8 +4329,7 @@ fn a_prescription_with_no_refills_is_filled_once_more_below_the_gate_only() {
             gates,
         );
         assert_eq!(
-            r.success,
-            !gates.authorization,
+            r.success, !gates.authorization,
             "a prescription authorizing zero refills is fillable once more, until the gate"
         );
     }

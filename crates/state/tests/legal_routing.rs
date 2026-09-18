@@ -3564,8 +3564,26 @@ fn consolidate_and_transfer_lose_their_authority_gap_at_the_gate() {
 
         let a = case_of(&owner, 0x41, "US-NY");
         let b = case_of(&other, 0x42, "US-NY");
-        assert!(legal_at(&mut view, &owner.address(), LegalOperation::AnchorCase, &a, gates).success);
-        assert!(legal_at(&mut view, &other.address(), LegalOperation::AnchorCase, &b, gates).success);
+        assert!(
+            legal_at(
+                &mut view,
+                &owner.address(),
+                LegalOperation::AnchorCase,
+                &a,
+                gates
+            )
+            .success
+        );
+        assert!(
+            legal_at(
+                &mut view,
+                &other.address(),
+                LegalOperation::AnchorCase,
+                &b,
+                gates
+            )
+            .success
+        );
 
         let consolidated = legal_at(
             &mut view,
@@ -3578,8 +3596,7 @@ fn consolidate_and_transfer_lose_their_authority_gap_at_the_gate() {
             gates,
         );
         assert_eq!(
-            consolidated.success,
-            !gates.authorization,
+            consolidated.success, !gates.authorization,
             "any funded account attaches one stranger's case to another's, until the gate"
         );
 
@@ -3631,12 +3648,28 @@ fn a_supersession_cannot_overwrite_another_live_order_at_the_gate() {
         let mut view = ExecutionView::new(&mut overlay);
 
         let case = case_of(&court, 0x43, "US-NY");
-        assert!(legal_at(&mut view, &court.address(), LegalOperation::AnchorCase, &case, gates).success);
+        assert!(
+            legal_at(
+                &mut view,
+                &court.address(),
+                LegalOperation::AnchorCase,
+                &case,
+                gates
+            )
+            .success
+        );
         let target = order_of(&court, 0x44, 0x43);
         let victim = order_of(&court, 0x45, 0x43);
         for o in [&target, &victim] {
             assert!(
-                legal_at(&mut view, &court.address(), LegalOperation::IssueOrder, o, gates).success
+                legal_at(
+                    &mut view,
+                    &court.address(),
+                    LegalOperation::IssueOrder,
+                    o,
+                    gates
+                )
+                .success
             );
         }
 
@@ -3656,7 +3689,10 @@ fn a_supersession_cannot_overwrite_another_live_order_at_the_gate() {
         );
 
         if gates.authorization {
-            assert!(!r.success, "at the gate neither half of the defect is reachable");
+            assert!(
+                !r.success,
+                "at the gate neither half of the defect is reachable"
+            );
             assert_eq!(
                 LegalExecutor::v_get_order(&view, &victim.order_id)
                     .unwrap()
@@ -3666,7 +3702,10 @@ fn a_supersession_cannot_overwrite_another_live_order_at_the_gate() {
                 "and the order that was never named is untouched"
             );
         } else {
-            assert!(r.success, "below the gate the stranger's supersession lands");
+            assert!(
+                r.success,
+                "below the gate the stranger's supersession lands"
+            );
             assert_eq!(
                 LegalExecutor::v_get_order(&view, &victim.order_id)
                     .unwrap()
@@ -3696,9 +3735,27 @@ fn a_superseded_event_must_name_a_case_that_exists_at_the_gate() {
         let mut view = ExecutionView::new(&mut overlay);
 
         let case = case_of(&firm, 0x46, "US-NY");
-        assert!(legal_at(&mut view, &firm.address(), LegalOperation::AnchorCase, &case, gates).success);
+        assert!(
+            legal_at(
+                &mut view,
+                &firm.address(),
+                LegalOperation::AnchorCase,
+                &case,
+                gates
+            )
+            .success
+        );
         let ev = event_of(&firm, 0x47, 0x46);
-        assert!(legal_at(&mut view, &firm.address(), LegalOperation::RecordEvent, &ev, gates).success);
+        assert!(
+            legal_at(
+                &mut view,
+                &firm.address(),
+                LegalOperation::RecordEvent,
+                &ev,
+                gates
+            )
+            .success
+        );
 
         // The replacement names a case id that was never anchored.
         let dangling = event_of(&firm, 0x48, 0xDD);
@@ -3713,8 +3770,7 @@ fn a_superseded_event_must_name_a_case_that_exists_at_the_gate() {
             gates,
         );
         assert_eq!(
-            r.success,
-            !gates.authorization,
+            r.success, !gates.authorization,
             "the attacker chooses the unanchored case id, until the gate"
         );
         assert_eq!(

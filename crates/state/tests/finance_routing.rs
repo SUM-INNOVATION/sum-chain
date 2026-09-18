@@ -3501,8 +3501,7 @@ fn update_issuer_cannot_walk_around_reactivate_at_the_gate() {
             gates,
         );
         assert_eq!(
-            restored.success,
-            !gates.authorization,
+            restored.success, !gates.authorization,
             "Active from Revoked, in one transaction, until the gate"
         );
         assert_eq!(
