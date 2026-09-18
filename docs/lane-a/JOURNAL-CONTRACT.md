@@ -987,12 +987,30 @@ Stated because a clearly named gap is worth more than a silence.
   `BranchJournal` is a trait and a producer that does not validate on the way in
   would reach them; but the tests that exercise those conditions against the real
   journal assert the DECODER's refusal, which is what actually fires.
-* **The checkpoint's availability cost is argued, not observed.** §7.3 shows the
-  arithmetic that bounds it to the first `MAX_REORG_WALK` blocks after
-  activation, and a test pins that arithmetic, but no test stands up a node that
-  is actually refused a crossing reorg and measures what an operator has to do
-  next. The recovery is a resync, and that claim rests on the same reasoning as
-  §8.1's.
+* **The checkpoint is now exercised under real multi-validator fork choice**,
+  both halves:
+  `crates/consensus/tests/checkpoint_multi_validator.rs` stands up three
+  validators taking turns as proposer, builds three DIFFERENT rival chains that
+  fork below the boundary, and requires all three switches to be refused with
+  byte-identical messages, the head unmoved and the canonical height index still
+  naming the honest blocks — then requires the chain to keep advancing, the node
+  that refused to produce again, and every block it publishes to still be
+  journalled. A second test requires a switch wholly at or above the boundary to
+  be PERFORMED, so "refuses crossing branches" and "refuses everything" are
+  distinguishable observations.
+
+  What that fixture has to remove to measure anything: **finality**.
+  `plan_reorg` refuses to walk at or below the finalized height, and it does so
+  BEFORE the checkpoint is consulted, so on a chain with an ordinary finality
+  depth finality is what refuses a deep crossing switch and the checkpoint never
+  gets a turn. The fixture puts finality out of reach on purpose. The corollary
+  is that the checkpoint's practical importance is confined to the window where
+  the activation boundary is DEEPER than finality — which is exactly the window
+  right after an upgrade, and is the window it was designed for.
+
+  Still not observed: what an OPERATOR does next. The recovery from a refused
+  crossing switch is a resync, and that claim rests on the same reasoning as
+  §8.1's rather than on a test.
 * **Nothing measures the journal against a contract-heavy or NFT-heavy write
   set.** §12's figures come from transfer blocks. A block whose write set is
   dominated by large contract values would journal more per transaction —
