@@ -7538,7 +7538,13 @@ mod tests {
 
         // The unified reorg-revert path is a clean no-op under the dormant gate
         // (no account/contract/C1 diff at this height).
-        state.revert_block_state_diffs(1, &Hash::ZERO).unwrap();
+        state
+            .revert_block_state_diffs(
+                1,
+                &Hash::ZERO,
+                sumchain_storage::journal::JournalRequirement::PreActivation,
+            )
+            .unwrap();
         assert!(
             store.load_state_map().unwrap().is_empty(),
             "dormant reorg-revert must touch nothing"
@@ -8222,7 +8228,13 @@ mod tests {
         // roll back atomically.
         // The journal is keyed by the PUBLISHED block, so the revert must name it.
         // `Hash::ZERO` was the pre-publication header root, not a block hash.
-        state.revert_block_state_diffs(1, &blk.hash()).unwrap();
+        state
+            .revert_block_state_diffs(
+                1,
+                &blk.hash(),
+                sumchain_storage::journal::JournalRequirement::PreActivation,
+            )
+            .unwrap();
         assert!(
             store.load_state_map().unwrap().is_empty(),
             "beacon state reverted"
@@ -8295,7 +8307,13 @@ mod tests {
             .unwrap();
         assert!(r1[0].is_success());
 
-        state.revert_block_state_diffs(1, &blk.hash()).unwrap();
+        state
+            .revert_block_state_diffs(
+                1,
+                &blk.hash(),
+                sumchain_storage::journal::JournalRequirement::PreActivation,
+            )
+            .unwrap();
         // A fresh executor replays the identical block.
         let ex2 = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
         let r2 = execute_and_publish(&ex2, &state, &mut blk, &pubs);
@@ -8556,7 +8574,11 @@ mod tests {
             let snap = store.get_membership(0).unwrap();
             assert_eq!(snap, Some(pubs.clone()));
             state
-                .revert_block_state_diffs(1, &boundary.hash())
+                .revert_block_state_diffs(
+                    1,
+                    &boundary.hash(),
+                    sumchain_storage::journal::JournalRequirement::PreActivation,
+                )
                 .unwrap();
             assert_eq!(
                 store.get_membership(0).unwrap(),
@@ -8657,7 +8679,13 @@ mod tests {
         assert!(store.has_journal(height, &Hash::ZERO).unwrap());
 
         // ONE call reverts BOTH families atomically.
-        state.revert_block_state_diffs(height, &Hash::ZERO).unwrap();
+        state
+            .revert_block_state_diffs(
+                height,
+                &Hash::ZERO,
+                sumchain_storage::journal::JournalRequirement::PreActivation,
+            )
+            .unwrap();
 
         assert_eq!(
             state.get_balance(&acct).unwrap(),
@@ -8738,7 +8766,13 @@ mod tests {
 
         // The unified revert MUST abort — nothing committed.
         assert!(
-            state.revert_block_state_diffs(height, &Hash::ZERO).is_err(),
+            state
+                .revert_block_state_diffs(
+                    height,
+                    &Hash::ZERO,
+                    sumchain_storage::journal::JournalRequirement::PreActivation,
+                )
+                .is_err(),
             "corrupt C1 journal aborts the unified revert before commit"
         );
 

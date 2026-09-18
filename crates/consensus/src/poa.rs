@@ -19,8 +19,9 @@ use sumchain_primitives::{
     Block, BlockHeader, BlockHeight, Hash, SignedTransaction, Timestamp,
     ValidatorSet, ValidatorSetEntry, ValidatorStatus,
 };
-use sumchain_state::reorg_undo::{MissingJournalPolicy, SubsystemJournals};
+use sumchain_state::reorg_undo::ActivatedJournal;
 use sumchain_state::{BlockExecutor, Mempool, StateManager};
+use sumchain_storage::journal::ActivationSource;
 use sumchain_storage::{
     BlockStore, Database, DelegationStore, StakingStore, TxStore, ValidatorSetStore,
 };
@@ -56,7 +57,14 @@ enum Admission {
 /// unbounded. What actually limits how deep a switch may go is finality, which
 /// is checked separately and refuses a walk below the finalized height. This
 /// only stops a walk that would never meet.
-const MAX_REORG_WALK: u64 = 4_096;
+///
+/// Public because it is also the UNDO RETENTION HORIZON. A block within this
+/// many of the head can still be named on an abandoned branch, so its journal
+/// must still exist: `sumchain_storage::pruner::UNDO_RETENTION_FLOOR` is a copy
+/// of this number (the pruner sits below consensus and cannot import it), and
+/// `the_pruning_floor_covers_every_reorg_this_engine_will_plan` pins the two
+/// together from this side.
+pub const MAX_REORG_WALK: u64 = 4_096;
 
 pub struct PoAEngine {
     /// Database
@@ -771,11 +779,14 @@ impl PoAEngine {
     ///    below finality, or a walk past the allocation bound — before anything
     ///    is written.
     /// 3. [`execute_reorg`] unwinds the abandoned branch newest-first from its
-    ///    per-block journals, validating each pre-image against the value the
-    ///    journal says the block left, in ONE batch that also carries the
-    ///    de-indexing and the head reset; restores the accumulator from the
-    ///    ancestor's header; and applies the adopted branch through the ordinary
-    ///    publication path, one atomic batch per block.
+    ///    per-block journals — the REAL encoded application journal at and above
+    ///    this chain's activation boundary, decoded and validated on the way in,
+    ///    and the legacy per-subsystem diffs below it — checking each row against
+    ///    the value the journal says the block left, in ONE batch that also
+    ///    carries the journal deletions, the de-indexing and the head reset;
+    ///    restores the accumulator from the ancestor's header; and applies the
+    ///    adopted branch through the ordinary publication path, one atomic batch
+    ///    per block.
     ///
     /// Nothing outside this arm changes. A block that extends the head or loses
     /// fork choice takes the same path it did before.
@@ -804,10 +815,32 @@ impl PoAEngine {
         let finalized = block_store.get_finalized_height()?.unwrap_or(0);
         let plan = plan_reorg(block_store, &old_head, &block, finalized, MAX_REORG_WALK)?;
 
-        // The four per-subsystem journals the publisher writes. See
-        // `sumchain_state::reorg_undo`: the unwind depends only on their SHAPE,
-        // so a generic application journal substitutes here and nowhere else.
-        let journals = SubsystemJournals::new(&self.db);
+        // The journal this node reverts from, resolved per block against its own
+        // activation boundary: the generic application journal at and above it,
+        // the four legacy per-subsystem journals below it, never both for one
+        // block. See `sumchain_state::reorg_undo::ActivatedJournal`.
+        //
+        // The boundary comes from this chain's OWN gate,
+        // `application_journal_enabled_from_height` — `None` observes it from
+        // the journal history this database holds, `Some(h)` pins it. Neither
+        // position disables anything: the write side is ungated, so a node that
+        // has published a block has journal history and a boundary.
+        let journals = ActivatedJournal::resolve(
+            &self.db,
+            ActivationSource::from_configured_height(
+                self.params.application_journal_enabled_from_height,
+            ),
+        )
+        .map_err(|e| {
+            ConsensusError::InvalidBlock(format!(
+                "cannot resolve the application-journal activation boundary: {e}"
+            ))
+        })?;
+        // Derived from the same `JournalActivation` the journal itself holds, so
+        // the policy and the journal cannot disagree about where the boundary
+        // is. A missing record at or above it HALTS the reorg; below it, absence
+        // is pre-journal history and is counted and logged.
+        let missing = journals.policy();
         let outcome = execute_reorg(
             &self.db,
             &self.state,
@@ -815,17 +848,7 @@ impl PoAEngine {
             &plan,
             active_validators,
             &journals,
-            // Absence is tolerated, and that is forced rather than chosen. The
-            // publisher writes NO row for `JournalRecord::NothingToUndo`, so a
-            // block that mutated nothing and a block whose undo record is
-            // missing are the same zero bytes on disk. Halting on absence would
-            // therefore refuse every reorg over an empty block.
-            //
-            // This becomes `RequiredFrom(h)` the moment the producer writes a
-            // POSITIVE nothing-to-undo record and genesis declares the height
-            // from which it does. Until then the count is surfaced instead: a
-            // switch with tolerated absences has not fully unwound its branch.
-            MissingJournalPolicy::ToleratedEverywhere,
+            missing,
         )?;
 
         // Only after the switch is durable.

@@ -10,16 +10,20 @@
 //! Exactly one thing: a journal is a per-block sequence of
 //!
 //! ```text
-//! (column family, key, value BEFORE the block, value AFTER the block)
+//! (column family, key, value BEFORE the block, what the block LEFT)
 //! ```
 //!
-//! addressed by `(height, BLOCK HASH)`, with `Option<Vec<u8>>` on both sides so
+//! addressed by `(height, BLOCK HASH)`. `before` is an `Option<Vec<u8>>` so
 //! "absent before" and "had value V before" are different values rather than the
-//! same empty slice. That is [`UndoRecord`], and [`BranchJournal`] is the whole
-//! of what a producer must implement. Nothing here decodes a journal, knows its
-//! wire format, or assumes bincode: [`SubsystemJournals`] is one implementation
-//! over the four journals that exist today, and a generic application journal is
-//! another.
+//! same empty slice; what the block left is an [`ExpectedAfter`], because one
+//! producer stores the post-image in full and the other stores a tag over it,
+//! and both answer the only question asked of them. That is [`UndoRecord`], and
+//! [`BranchJournal`] is the whole of what a producer must implement.
+//!
+//! Nothing in this module's CORE decodes a journal or knows a wire format.
+//! [`SubsystemJournals`] is an adapter over the four per-subsystem journals,
+//! [`ApplicationJournalReader`] reads and decodes the generic application
+//! journal, and [`ActivatedJournal`] composes them by height.
 //!
 //! # Why the block HASH and not the height
 //!
@@ -49,14 +53,30 @@
 //!
 //! # Ordering
 //!
-//! Newest block first; within a block, last record first. Both matter, and both
-//! are the reverse of the order the mutations were applied. A block that writes
-//! key K twice journals two records, and undoing them in forward order leaves
-//! the intermediate value; a branch whose blocks N and N+1 both write K and is
-//! unwound oldest-first leaves N's post-value rather than the ancestor's. The
-//! existing per-subsystem revert already replays a single block's records in
-//! reverse (`ContractStateDiff` in `revert_block_state_diffs`); this extends the
-//! same rule to the branch.
+//! **Newest block first**, always. A branch whose blocks N and N+1 both write K
+//! and is unwound oldest-first lands on N's post-value rather than the
+//! ancestor's, so this one is not negotiable for any producer.
+//!
+//! **Within a block**, it depends on what the producer's records ARE, and the
+//! producer says which in [`JournalHeader::ordering`]:
+//!
+//! * [`EntryOrdering::NetByKey`] — one entry per `(cf, key)`, first pre-image
+//!   and final value. Order is then immaterial, because no two entries of the
+//!   block can interact. [`stage_branch_unwind`] PROVES the uniqueness before
+//!   relying on it; a duplicate is [`UndoRefusal::DuplicateJournalKey`].
+//! * [`EntryOrdering::ApplicationOrder`] — an append log that may hold a key
+//!   twice. Replayed last-first, because undoing two writes to one key in
+//!   forward order leaves the intermediate value. This is what the four legacy
+//!   per-subsystem journals are (`ContractStateDiff` in
+//!   `revert_block_state_diffs` already replays in reverse for this reason).
+//!
+//! That distinction is the resolution of a real disagreement between the two
+//! halves of this design: the producer proves a total `(cf, key)` sort and has
+//! no application order to give, while this consumer was originally written
+//! demanding one. Neither was wrong about its own side. The uniqueness invariant
+//! is what makes the demand unnecessary, and stating it as a checked declaration
+//! rather than an assumption is what keeps a future append-log producer from
+//! silently inheriting the wrong rule.
 //!
 //! # What this module does NOT do
 //!
@@ -72,15 +92,72 @@ use std::collections::BTreeMap;
 
 use sumchain_primitives::{Block, BlockHeight, Hash};
 use sumchain_storage::db::{Database, WriteBatch};
+use sumchain_storage::journal::{
+    ActivationSource, JournalActivation, JournalRequirement, Preimage as StoragePreimage,
+};
 use sumchain_storage::schema::{ContractStateDiff, StateStore};
 use sumchain_storage::{cf, StorageError};
 
+/// What the journal says the block LEFT at a key, in whichever form its producer
+/// stored it.
+///
+/// Two forms, because the two producers made different and both-defensible
+/// choices, and collapsing them would mean one of them lying:
+///
+/// * [`ExpectedAfter::Exact`] — the value itself. The four legacy per-subsystem
+///   journals store the post-image in full, so the check is a byte comparison.
+/// * [`ExpectedAfter::Tagged`] — a domain-separated 8-byte digest over
+///   `(family, key, value)`. The generic application journal stores this, on the
+///   argument that a before-image must be RESTORED exactly while an after-image
+///   only has to be RECOGNISED.
+///
+/// The consumer does not care which: both answer the only question it asks —
+/// "does this row still hold what the block left?" — and both answer it about
+/// the row's CURRENT committed (or staged) value, which is the point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpectedAfter {
+    /// The block left exactly this. `None` = the block deleted the key.
+    Exact(Option<Vec<u8>>),
+    /// The block left a value with this tag. `AfterImage::Absent` = deleted.
+    Tagged(sumchain_storage::journal::AfterImage),
+}
+
+impl ExpectedAfter {
+    /// Whether `current` is what the block left.
+    ///
+    /// `cf` and `key` are arguments rather than fields because the tag binds
+    /// them: a digest recomputed under a different family or key does not match,
+    /// which is what stops a tag being transplanted between entries.
+    pub fn matches(&self, cf: &str, key: &[u8], current: Option<&[u8]>) -> bool {
+        match self {
+            ExpectedAfter::Exact(v) => v.as_deref() == current,
+            ExpectedAfter::Tagged(tag) => {
+                &sumchain_storage::journal::AfterImage::of(cf, key, current) == tag
+            }
+        }
+    }
+
+    /// A short rendering for an error message. Never the whole value: a
+    /// journalled value is block-controlled and can be large.
+    pub fn describe(&self) -> String {
+        match self {
+            ExpectedAfter::Exact(v) => describe(v),
+            ExpectedAfter::Tagged(sumchain_storage::journal::AfterImage::Absent) => {
+                "absent (by tag)".to_string()
+            }
+            ExpectedAfter::Tagged(sumchain_storage::journal::AfterImage::Digest(d)) => {
+                format!("a value tagged {}", hex::encode(d))
+            }
+        }
+    }
+}
+
 /// One journalled mutation, normalized away from whatever encoded it.
 ///
-/// `before` and `after` are both `Option`: `None` means the key did not exist.
-/// Collapsing that into an empty vector is the defect this type exists to avoid
-/// — an undo that cannot express "delete a key that was not there before" turns
-/// an abandoned creation into a permanent zero row.
+/// `before` is an `Option`: `None` means the key did not exist. Collapsing that
+/// into an empty vector is the defect this type exists to avoid — an undo that
+/// cannot express "delete a key that was not there before" turns an abandoned
+/// creation into a permanent zero row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UndoRecord {
     /// Column family the row lives in.
@@ -89,13 +166,13 @@ pub struct UndoRecord {
     pub key: Vec<u8>,
     /// Value before the block applied this mutation. `None` = absent.
     pub before: Option<Vec<u8>>,
-    /// Value after the block applied this mutation. `None` = deleted.
+    /// What the block left, so the undo can be checked against the state it is
+    /// about to overwrite.
     ///
-    /// Present so the undo can be checked against the state it is about to
-    /// overwrite. A journal that records only `before` can be replayed but never
-    /// validated, and an unvalidatable undo is one that cannot tell restoration
-    /// from corruption.
-    pub after: Option<Vec<u8>>,
+    /// A journal that records only `before` can be replayed but never validated,
+    /// and an unvalidatable undo is one that cannot tell restoration from
+    /// corruption.
+    pub after: ExpectedAfter,
 }
 
 /// What a journal SAYS it is, independently of where it was filed.
@@ -115,6 +192,52 @@ pub struct JournalHeader {
     pub height: BlockHeight,
     pub block_hash: Hash,
     pub version: u32,
+    /// What the producer claims about the SHAPE of its record list. See
+    /// [`EntryOrdering`] — this is the field that settles what "replay order"
+    /// means for this journal, and the unwind VALIDATES the claim rather than
+    /// taking it.
+    pub ordering: EntryOrdering,
+}
+
+/// The ordering contract a producer's record list satisfies.
+///
+/// # Why this is a field and not a convention
+///
+/// The two sides of this design arrived at different answers and each was right
+/// about its own producer. The generic application journal proves a TOTAL SORT
+/// over `(cf, key)` and has no notion of application order to offer: its entries
+/// come from an overlay pre-image map, one per key, already collapsed. The four
+/// legacy per-subsystem journals are append logs and CAN hold two records for
+/// one key inside one block, so for them the reverse of application order is the
+/// only correct replay.
+///
+/// Reconciling those by picking one and asserting it for both would have been a
+/// silent bug in whichever producer it did not describe. What actually
+/// reconciles them is the UNIQUENESS INVARIANT, stated here and checked by
+/// [`stage_branch_unwind`]:
+///
+/// > If a block's records hold at most one entry per `(cf, key)`, then no two
+/// > records of that block can interact, so every order over them replays to the
+/// > same state, and a deterministic `(cf, key)` order is sufficient.
+///
+/// So a producer declares which case it is in, and the unwind holds it to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryOrdering {
+    /// **One net entry per `(cf, key)`**: first pre-image, final value, in
+    /// ascending `(cf, key)` order.
+    ///
+    /// The unwind VALIDATES the uniqueness — a duplicate is
+    /// [`UndoRefusal::DuplicateJournalKey`], not a merge — and having validated
+    /// it, may replay the entries in any order it likes. This is the generic
+    /// application journal.
+    NetByKey,
+    /// **Application order**, possibly with a key repeated inside one block.
+    ///
+    /// The unwind must replay these LAST-FIRST, because undoing two writes to
+    /// one key in forward order leaves the intermediate value. This is what the
+    /// four legacy per-subsystem journals are, and it is the pre-activation
+    /// path only.
+    ApplicationOrder,
 }
 
 /// Journal format versions this reader understands.
@@ -128,7 +251,9 @@ pub const SUPPORTED_JOURNAL_VERSIONS: &[u32] = &[
     // on the wire; `SubsystemJournals` reports 0 for them, which is a statement
     // about what this tree writes today and not a field it reads back. See that
     // type's documentation.
-    0, // 1 — the generic application journal, once it lands.
+    0, // 1 — the generic application journal. `ApplicationJournalReader` reports
+    // this by reading `FORMAT_VERSION_V1` OUT of the record, so an unimplemented
+    // version reaches here as the number the record actually carries.
     1,
 ];
 
@@ -175,17 +300,40 @@ pub enum MissingJournalPolicy {
     RequiredFrom(BlockHeight),
     /// Absence is tolerated at EVERY height, counted and logged.
     ///
-    /// This is what the current storage format forces, and it is a weakness
-    /// rather than a choice. The publisher writes no row at all for
-    /// `JournalRecord::NothingToUndo`, so "this block mutated nothing" and "this
-    /// block's undo record is missing" are the same bytes on disk — zero of
-    /// them. Until the producer writes a POSITIVE nothing-to-undo record, no
-    /// reader can tell the two apart, and halting on absence would refuse every
-    /// reorg over an empty block.
+    /// This is the PRE-ACTIVATION policy, and nothing else. It is correct for a
+    /// database with no generic-journal history at all — every block in it was
+    /// published by a binary that wrote only the four per-subsystem journals,
+    /// which write no row for a block that mutated nothing in their family, so
+    /// "mutated nothing" and "record lost" really are the same zero bytes there
+    /// and halting would refuse every reorg over an empty block.
+    ///
+    /// It is NOT correct anywhere the generic journal is active. That journal
+    /// writes a record for every block it publishes, including a zero-entry one,
+    /// so absence carries information again and
+    /// [`MissingJournalPolicy::RequiredFrom`] is the policy — see
+    /// [`MissingJournalPolicy::from_activation`], which is how the production
+    /// path picks between them rather than by a call site's judgement.
     ToleratedEverywhere,
 }
 
 impl MissingJournalPolicy {
+    /// The policy a node's own journal history implies.
+    ///
+    /// `RequiredFrom(boundary)` whenever this database has journal history, so
+    /// every block at or above the boundary must produce a record and a missing
+    /// one halts. `ToleratedEverywhere` only when the boundary is unestablished
+    /// — a database that holds no generic journal at all, which is pre-journal
+    /// history end to end.
+    ///
+    /// Derived rather than chosen, so the answer cannot vary between the reorg
+    /// driver, a rollback tool and a test.
+    pub fn from_activation(activation: &JournalActivation) -> Self {
+        match activation.boundary() {
+            Some(b) => MissingJournalPolicy::RequiredFrom(b),
+            None => MissingJournalPolicy::ToleratedEverywhere,
+        }
+    }
+
     fn tolerates(&self, height: BlockHeight) -> bool {
         match self {
             MissingJournalPolicy::RequiredFrom(from) => height < *from,
@@ -200,13 +348,24 @@ impl MissingJournalPolicy {
 /// can answer them is usable by every part of this module regardless of how it
 /// stores anything.
 pub trait BranchJournal {
-    /// This block's header and records, IN THE ORDER THE BLOCK APPLIED THEM.
+    /// This block's header and records.
     ///
-    /// The unwind reverses them, so a producer that returns them in an
-    /// unspecified or unstable order makes the unwind's result unspecified too.
-    /// Sorting by key is NOT sufficient and is not what this asks for: two
-    /// mutations of one key inside a block are distinguishable only by their
-    /// application order.
+    /// The header's [`JournalHeader::ordering`] says what the record list is,
+    /// and the unwind holds the producer to it:
+    ///
+    /// * [`EntryOrdering::NetByKey`] — at most one record per `(cf, key)`, each
+    ///   carrying the value at the START of the block and the value the block
+    ///   finally left. Order among records is then immaterial, and
+    ///   [`stage_branch_unwind`] proves the uniqueness before relying on that.
+    /// * [`EntryOrdering::ApplicationOrder`] — records in the order the block
+    ///   applied them, a key possibly appearing more than once. The unwind
+    ///   replays them last-first; a producer that returns these in an
+    ///   unspecified or unstable order makes the unwind's result unspecified
+    ///   too.
+    ///
+    /// A producer that can collapse to net entries should say
+    /// [`EntryOrdering::NetByKey`] and be checked, rather than say
+    /// [`EntryOrdering::ApplicationOrder`] and be trusted.
     fn lookup(&self, height: BlockHeight, block_hash: &Hash) -> JournalLookup;
 
     /// The `(column family, key)` rows that hold this block's journal, so the
@@ -285,6 +444,28 @@ pub enum UndoRefusal {
         block: Hash,
         version: u32,
         supported: &'static [u32],
+    },
+
+    /// The journal declared [`EntryOrdering::NetByKey`] and holds two records
+    /// for one `(cf, key)`.
+    ///
+    /// Refused, never merged. The declaration is what licenses the unwind to
+    /// stop caring about replay order; a record list that breaks it is one whose
+    /// correct replay order is unknown, and picking either record's pre-image
+    /// would be picking one at random. Post-activation this is a corrupt or
+    /// foreign record, which is a halt for the same reason
+    /// [`UndoRefusal::UnreadableJournal`] is.
+    #[error(
+        "refusing to undo block {block} at height {height}: its journal declares one net \
+         entry per (column family, key) and holds two for {cf} key {key}; a record list \
+         that breaks that invariant has no knowable replay order, and merging the two \
+         would pick one pre-image at random"
+    )]
+    DuplicateJournalKey {
+        height: BlockHeight,
+        block: Hash,
+        cf: String,
+        key: String,
     },
 
     #[error("storage error during unwind: {0}")]
@@ -452,17 +633,48 @@ pub fn stage_branch_unwind(
             });
         }
 
-        // Last record first, for the same reason the blocks run newest-first.
+        // ── the ordering declaration is checked, not taken ───────────────────
+        //
+        // A producer claiming `NetByKey` is claiming the property that lets this
+        // loop stop caring about replay order. It is verified here, before a
+        // single record is applied, so the licence and the thing it licenses
+        // cannot come apart. `ApplicationOrder` makes no such claim and gets no
+        // such check — it is replayed last-first instead, below.
+        if header.ordering == EntryOrdering::NetByKey {
+            let mut seen: BTreeMap<(&str, &[u8]), ()> = BTreeMap::new();
+            for record in &records {
+                if seen
+                    .insert((record.cf.as_str(), record.key.as_slice()), ())
+                    .is_some()
+                {
+                    return Err(UndoRefusal::DuplicateJournalKey {
+                        height,
+                        block: hash,
+                        cf: record.cf.clone(),
+                        key: hex::encode(&record.key),
+                    });
+                }
+            }
+        }
+
+        // Last record first. For `ApplicationOrder` that is load-bearing: two
+        // writes to one key inside a block undo correctly only in reverse. For
+        // `NetByKey` it is immaterial — the uniqueness check above just proved
+        // no two records of this block touch the same key — and it costs
+        // nothing to use one loop for both.
         for record in records.iter().rev() {
             let current = view.get(&record.cf, &record.key)?;
             report.checks += 1;
-            if current != record.after {
+            if !record
+                .after
+                .matches(&record.cf, &record.key, current.as_deref())
+            {
                 return Err(UndoRefusal::CurrentValueMismatch {
                     height,
                     block: hash,
                     cf: record.cf.clone(),
                     key: hex::encode(&record.key),
-                    expected: describe(&record.after),
+                    expected: record.after.describe(),
                     found: describe(&current),
                 });
             }
@@ -510,9 +722,13 @@ pub fn stage_head_reset(batch: &mut WriteBatch<'_>, ancestor: &Block) -> Result<
 /// [`BranchJournal`] over the four per-subsystem revert journals the publisher
 /// writes today: account, contract, compute-pool and beacon.
 ///
-/// This is an ADAPTER, not the contract. It exists so the unwind above can be
-/// exercised against the real publication path before a generic application
-/// journal lands, and so that when one does, the difference is one type.
+/// This is an ADAPTER, not the contract, and it is the PRE-ACTIVATION producer.
+/// [`ActivatedJournal`] uses it for blocks below the activation boundary, where
+/// these four journals are the only undo record a block has, and uses
+/// [`ApplicationJournalReader`] at and above it. It is also still the right
+/// thing to drive a test whose subject is these four journals — their corruption
+/// reporting, their per-hash addressing, and the measured gap between what they
+/// cover and what a block writes.
 ///
 /// The four are concatenated in a fixed family order, and each family's records
 /// keep the order its own journal stored them in. That is the ordering the
@@ -568,7 +784,7 @@ impl BranchJournal for SubsystemJournals<'_> {
                         cf: cf::STATE.to_string(),
                         key: StateStore::account_key(addr),
                         before: encoded_before,
-                        after: Some(encoded_after),
+                        after: ExpectedAfter::Exact(Some(encoded_after)),
                     });
                 }
             }
@@ -591,7 +807,7 @@ impl BranchJournal for SubsystemJournals<'_> {
                         cf: cf_name.to_string(),
                         key: record.key.clone(),
                         before: record.old.clone(),
-                        after: record.new.clone(),
+                        after: ExpectedAfter::Exact(record.new.clone()),
                     });
                 }
             }
@@ -616,7 +832,7 @@ impl BranchJournal for SubsystemJournals<'_> {
                                 cf: cf::COMPUTE_POOL_STATE.to_string(),
                                 key: record.key.clone(),
                                 before: record.old.clone(),
-                                after: record.new.clone(),
+                                after: ExpectedAfter::Exact(record.new.clone()),
                             });
                         }
                     }
@@ -640,7 +856,7 @@ impl BranchJournal for SubsystemJournals<'_> {
                             cf: cf::BEACON_STATE.to_string(),
                             key: record.key.clone(),
                             before: record.old.clone(),
-                            after: record.new.clone(),
+                            after: ExpectedAfter::Exact(record.new.clone()),
                         });
                     }
                 }
@@ -662,6 +878,10 @@ impl BranchJournal for SubsystemJournals<'_> {
                     height,
                     block_hash: *block_hash,
                     version: 0,
+                    // Append logs, four of them concatenated. A block that
+                    // writes one contract key twice leaves two records here, so
+                    // this producer cannot claim `NetByKey` and does not.
+                    ordering: EntryOrdering::ApplicationOrder,
                 },
                 records: out,
             }
@@ -705,4 +925,210 @@ pub fn subsystem_journal_rows(height: BlockHeight, block_hash: &Hash) -> Vec<(St
 
 fn journal_row_key(height: BlockHeight, block_hash: &Hash) -> Vec<u8> {
     sumchain_storage::schema::journal_key(height, block_hash)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The generic application journal, read from disk and replayed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// [`BranchJournal`] over the REAL encoded application journal.
+///
+/// This is not an adapter over an oracle and not a shape the tests invented: it
+/// reads `cf::APPLICATION_JOURNAL`, hands the bytes to
+/// [`sumchain_storage::journal::ApplicationJournal::decode_for`] — magic,
+/// format version, `(height, block hash)` identity, canonical `(cf, key)` order,
+/// framing, trailing bytes, all of it — and turns the decoded entries into
+/// [`UndoRecord`]s. Every refusal the record format defines therefore reaches
+/// the unwind as [`JournalLookup::Unreadable`], which is a halt.
+///
+/// # Absence is classified, not guessed
+///
+/// Lookup goes through [`JournalActivation::load_for_revert`], the single
+/// function the producer and this consumer share:
+///
+/// * present → decoded and validated;
+/// * absent at or above the boundary → an ERROR, surfaced as `Unreadable` so the
+///   unwind halts with the producer's own message rather than as `Absent`, which
+///   a tolerant policy could swallow;
+/// * absent below the boundary → `Absent`, and the policy decides.
+///
+/// The third case is the only silence and it is bounded by a height this
+/// database establishes. It is also unreachable through [`ActivatedJournal`],
+/// which never asks this reader about a pre-activation block in the first place.
+pub struct ApplicationJournalReader<'a> {
+    db: &'a Database,
+    activation: JournalActivation,
+}
+
+impl<'a> ApplicationJournalReader<'a> {
+    pub fn new(db: &'a Database, activation: JournalActivation) -> Self {
+        Self { db, activation }
+    }
+
+    pub fn activation(&self) -> JournalActivation {
+        self.activation
+    }
+}
+
+impl BranchJournal for ApplicationJournalReader<'_> {
+    fn lookup(&self, height: BlockHeight, block_hash: &Hash) -> JournalLookup {
+        match self.activation.load_for_revert(self.db, height, block_hash) {
+            Err(e) => JournalLookup::Unreadable(format!("application journal: {e}")),
+            Ok(None) => JournalLookup::Absent,
+            Ok(Some(journal)) => {
+                let records = journal
+                    .entries()
+                    .iter()
+                    .map(|e| UndoRecord {
+                        cf: e.cf().to_string(),
+                        key: e.key().to_vec(),
+                        before: match e.before() {
+                            StoragePreimage::Absent => None,
+                            StoragePreimage::Value(v) => Some(v.clone()),
+                        },
+                        after: ExpectedAfter::Tagged(e.after().clone()),
+                    })
+                    .collect();
+                JournalLookup::Present {
+                    header: JournalHeader {
+                        height: journal.height(),
+                        block_hash: journal.block_hash(),
+                        // Read back OUT OF THE RECORD, not echoed from the key.
+                        // `decode_for` has already refused a record whose stored
+                        // identity disagrees with the key it was read under, so
+                        // the identity check in `stage_branch_unwind` is a second
+                        // reading of the same fields rather than a tautology —
+                        // which is the difference between this producer and the
+                        // four legacy ones.
+                        version: u32::from(journal.format_version()),
+                        // The producer sorts by `(cf, key)` over an entry set
+                        // that admits each pair once, and `decode_for` refuses a
+                        // record whose entries are not strictly increasing. The
+                        // claim is checked again by the unwind.
+                        ordering: EntryOrdering::NetByKey,
+                    },
+                    records,
+                }
+            }
+        }
+    }
+
+    fn rows(&self, height: BlockHeight, block_hash: &Hash) -> Vec<(String, Vec<u8>)> {
+        application_journal_rows(height, block_hash)
+    }
+}
+
+/// The `(column family, key)` row holding one block's generic application
+/// journal.
+///
+/// Free and public for the same reason [`subsystem_journal_rows`] is: "which
+/// rows on disk hold this block's undo record" is a fact about this node's
+/// storage format, independent of which journal implementation drives a given
+/// unwind. A journal row that outlives the block it describes is an undo record
+/// for a block on no chain.
+pub fn application_journal_rows(height: BlockHeight, block_hash: &Hash) -> Vec<(String, Vec<u8>)> {
+    vec![(
+        cf::APPLICATION_JOURNAL.to_string(),
+        sumchain_storage::schema::journal_key(height, block_hash),
+    )]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Precedence: which journal governs which block.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The production [`BranchJournal`]: the generic application journal at and
+/// above the activation boundary, the four legacy per-subsystem journals below
+/// it, and **never both for one block**.
+///
+/// # The precedence rule, stated
+///
+/// The contract left this open (§7.2, open point 1) because the producer could
+/// not settle it: both records restore pre-images for overlapping families, and
+/// whether applying both is safe depends on an audit of what each legacy diff
+/// covers. This is the consumer's answer, and it does not need that audit,
+/// because it never applies both.
+///
+/// * **Below the boundary** — `PreActivation`. The block was published by a
+///   binary that wrote no generic journal. The legacy journals are the only undo
+///   record there is, so they are used, exactly as before this branch. An absent
+///   one is tolerated by the policy and counted.
+/// * **At or above the boundary** — `Required`. The generic journal is
+///   AUTHORITATIVE and MANDATORY. It is derived from the overlay's pre-images,
+///   so it covers every family the block wrote — including the ones the four
+///   legacy journals were always missing — and there is no family for which
+///   consulting a legacy diff could add information. A missing, corrupt,
+///   mis-keyed, duplicate-keyed or identity-mismatched record HALTS the unwind.
+///
+/// Applying both would be, at best, redundant: the two restore the same
+/// pre-image for a key both cover, so the second write is a no-op. It would also
+/// be unjustified — "at best" is not a proof, and proving it would need the
+/// audit the contract says nobody has done. Choosing per block needs no such
+/// proof, so that is what this does.
+///
+/// # Crossing the boundary
+///
+/// Per BLOCK, not per reorg. The classification is a function of one height, and
+/// a range spanning the boundary is simply a sequence of per-block answers. The
+/// unwind runs head-first, so it walks from the required region into the
+/// fallback region, never the reverse.
+///
+/// # Journal rows
+///
+/// [`BranchJournal::rows`] returns BOTH families' rows at every height. That is
+/// deliberate and is not "applying both": it deletes undo data rather than
+/// applying it. A post-activation block has legacy rows too — the publisher
+/// still writes them — and leaving them behind would leave undo records for
+/// blocks on no chain. Deleting a row that does not exist is a no-op.
+pub struct ActivatedJournal<'a> {
+    application: ApplicationJournalReader<'a>,
+    legacy: SubsystemJournals<'a>,
+    activation: JournalActivation,
+}
+
+impl<'a> ActivatedJournal<'a> {
+    pub fn new(db: &'a Database, activation: JournalActivation) -> Self {
+        Self {
+            application: ApplicationJournalReader::new(db, activation),
+            legacy: SubsystemJournals::new(db),
+            activation,
+        }
+    }
+
+    /// Resolve the boundary against `db` and build the journal, from the chain's
+    /// own configured activation rule.
+    pub fn resolve(db: &'a Database, source: ActivationSource) -> Result<Self, StorageError> {
+        Ok(Self::new(db, JournalActivation::resolve(db, source)?))
+    }
+
+    pub fn activation(&self) -> JournalActivation {
+        self.activation
+    }
+
+    /// The missing-journal policy this activation implies. Pass it to
+    /// [`stage_branch_unwind`] beside this journal; the two must agree, and
+    /// deriving both from one `JournalActivation` is how they are made to.
+    pub fn policy(&self) -> MissingJournalPolicy {
+        MissingJournalPolicy::from_activation(&self.activation)
+    }
+
+    /// Which journal governs `height`. Public so a caller can report it.
+    pub fn governing(&self, height: BlockHeight) -> JournalRequirement {
+        self.activation.requirement_at(height)
+    }
+}
+
+impl BranchJournal for ActivatedJournal<'_> {
+    fn lookup(&self, height: BlockHeight, block_hash: &Hash) -> JournalLookup {
+        match self.activation.requirement_at(height) {
+            JournalRequirement::Required => self.application.lookup(height, block_hash),
+            JournalRequirement::PreActivation => self.legacy.lookup(height, block_hash),
+        }
+    }
+
+    fn rows(&self, height: BlockHeight, block_hash: &Hash) -> Vec<(String, Vec<u8>)> {
+        let mut rows = application_journal_rows(height, block_hash);
+        rows.extend(subsystem_journal_rows(height, block_hash));
+        rows
+    }
 }

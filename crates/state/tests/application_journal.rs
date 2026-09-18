@@ -258,3 +258,77 @@ fn the_boundary_a_real_chain_establishes_is_the_first_height_it_published() {
         .hash();
     assert!(act.load_for_revert(&db, 3, &hash).unwrap().is_some());
 }
+
+/// The legacy revert path refuses a block at or above the activation boundary,
+/// and its `Ok(())` over an absent journal survives only below it.
+///
+/// `StateManager::revert_block_state_diffs` reverts from the four per-subsystem
+/// diffs. Those cover strictly fewer families than a block writes — `cf::SUPPLY`
+/// most visibly — so at and above the boundary reverting from them would report
+/// success while leaving rows the block wrote in place. That is the silent-skip
+/// the contract forbids post-activation, and it is closed by the signature: the
+/// caller must pass its classification, and `Required` is refused before
+/// anything is read.
+///
+/// Below the boundary the old behaviour is intact, including the `Ok(())` for a
+/// block with no diffs at all — which is correct there, because a block
+/// published by a binary that wrote no journal for a family it did not touch is
+/// indistinguishable from one whose record was lost, and there is no third thing
+/// to consult.
+#[test]
+fn the_legacy_revert_path_refuses_a_post_activation_block() {
+    let (state, db, _dir, executor) = setup();
+    let sender = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    common::fund(&db, &sender, 10_000);
+
+    common::publish_block(
+        &state,
+        &executor,
+        1,
+        proposer.public_key().as_bytes(),
+        vec![transfer(&sender, Address::new([7; 20]), 1, 0)],
+        &[],
+    );
+    let hash = sumchain_storage::schema::BlockStore::new(&db)
+        .get_by_height(1)
+        .unwrap()
+        .unwrap()
+        .hash();
+
+    let err = state
+        .revert_block_state_diffs(1, &hash, JournalRequirement::Required)
+        .expect_err("the legacy path must refuse a post-activation block");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("generic journal is authoritative and mandatory"),
+        "the refusal must say which record governs and why: {msg}"
+    );
+    assert!(
+        msg.contains("ActivatedJournal"),
+        "and must name the path that does govern it: {msg}"
+    );
+
+    // The refusal read nothing and wrote nothing: the diffs are still there for
+    // the correct path to consume.
+    assert!(db
+        .get(cf::STATE_DIFFS, &journal_key(1, &hash))
+        .unwrap()
+        .is_some());
+
+    // Below the boundary the same call is the old behaviour, and an absence is
+    // the tolerated silence.
+    let absent = sumchain_primitives::Hash::hash(b"a block with no diffs at all");
+    state
+        .revert_block_state_diffs(9, &absent, JournalRequirement::PreActivation)
+        .expect("pre-activation absence is Ok(()), which is the only place it is");
+
+    // And the real revert below the boundary still works.
+    state
+        .revert_block_state_diffs(1, &hash, JournalRequirement::PreActivation)
+        .expect("pre-activation revert from the legacy diffs is unchanged");
+    assert!(db
+        .get(cf::STATE_DIFFS, &journal_key(1, &hash))
+        .unwrap()
+        .is_none());
+}

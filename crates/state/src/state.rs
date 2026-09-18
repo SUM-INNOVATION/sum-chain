@@ -9,6 +9,7 @@ use parking_lot::RwLock;
 use sumchain_genesis::Genesis;
 use sumchain_primitives::{Address, Balance, BlockHeight, ChainId, Hash, Nonce};
 use sumchain_storage::exec_view::ExecutionView;
+use sumchain_storage::journal::JournalRequirement;
 use sumchain_storage::schema::{decode_account, encode_account, ACCOUNT_KEY_PREFIX};
 use sumchain_storage::{cf, schema::AccountState, Database, StateStore};
 use tracing::{debug, info};
@@ -340,7 +341,7 @@ impl StateManager {
     }
 
     /// Atomically revert BOTH the account `StateDiff` and the contract
-    /// `ContractStateDiff` for a block, as one logical operation. Used by reorg.
+    /// `ContractStateDiff` for a block, as one logical operation.
     ///
     /// All restores — account old-states, contract CF restores/deletes (replayed
     /// in reverse record order) — and the deletion of both diff records are
@@ -348,8 +349,48 @@ impl StateManager {
     /// error (e.g. an unknown `cf_kind`) returns before commit, so nothing is
     /// applied and both diffs remain intact for a clean retry. This avoids the
     /// inconsistent state where accounts revert but contract state is orphaned.
-    pub fn revert_block_state_diffs(&self, height: BlockHeight, block_hash: &Hash) -> Result<()> {
+    ///
+    /// # This is the PRE-ACTIVATION path, and it says so in its signature
+    ///
+    /// `requirement` is the caller's classification of `height` against the
+    /// generic application journal's activation boundary
+    /// ([`sumchain_storage::journal::JournalActivation::requirement_at`]), and
+    /// it is a parameter rather than an internal lookup so that no call site can
+    /// reach this function without having decided.
+    ///
+    /// * [`JournalRequirement::PreActivation`] — the four legacy per-subsystem
+    ///   journals are the only undo record the block has, so this reverts from
+    ///   them, and their joint absence is `Ok(())`: a block published by a binary
+    ///   that wrote no journal for a family it did not touch is indistinguishable
+    ///   from one whose record was lost, and there is no third thing to consult.
+    ///   That silence is the pre-activation policy, and it is the ONLY place it
+    ///   survives.
+    /// * [`JournalRequirement::Required`] — REFUSED, without reading anything.
+    ///   At and above the boundary the generic application journal is
+    ///   authoritative and mandatory, the legacy diffs cover strictly fewer
+    ///   families than the block wrote, and reverting from them would report
+    ///   success over rows nothing restored. The reorg path for these heights is
+    ///   `sumchain_state::reorg_undo::ActivatedJournal`, which refuses a missing
+    ///   record instead of returning `Ok(())` over it.
+    pub fn revert_block_state_diffs(
+        &self,
+        height: BlockHeight,
+        block_hash: &Hash,
+        requirement: JournalRequirement,
+    ) -> Result<()> {
         use sumchain_storage::{cf, ContractStateDiff};
+
+        if requirement == JournalRequirement::Required {
+            return Err(StateError::InvalidOperation(format!(
+                "refusing to revert block {block_hash} at height {height} from the four \
+                 per-subsystem journals: that height is at or above this chain's \
+                 application-journal activation boundary, where the generic journal is \
+                 authoritative and mandatory. The legacy diffs cover fewer families than \
+                 a block writes, so reverting from them here would report success while \
+                 leaving rows the block wrote in place. Unwind through \
+                 sumchain_state::reorg_undo::ActivatedJournal instead."
+            )));
+        }
         let store = StateStore::new(&self.db);
         let account_diff = store.get_state_diff(height, block_hash)?;
         let contract_diff = store.get_contract_state_diff(height, block_hash)?;

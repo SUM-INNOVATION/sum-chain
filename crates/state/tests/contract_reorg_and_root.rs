@@ -101,7 +101,7 @@ fn deploy_diff_captured_and_reverted() {
     // coordinated path.
     state.save_state_diff(1, &Hash::ZERO, state_diff).unwrap();
     state.save_contract_state_diff(1, &Hash::ZERO, contract_diff).unwrap();
-    state.revert_block_state_diffs(1, &Hash::ZERO).unwrap();
+    state.revert_block_state_diffs(1, &Hash::ZERO, sumchain_storage::journal::JournalRequirement::PreActivation).unwrap();
 
     // Deploy fully undone: code, storage, metadata all gone.
     assert!(db.get(cf::CONTRACT_CODE, &code_key).unwrap().is_none(), "code reverted");
@@ -109,7 +109,7 @@ fn deploy_diff_captured_and_reverted() {
     assert!(db.get(cf::CONTRACT_METADATA, &code_key).unwrap().is_none(), "metadata reverted");
     // Account state restored, and BOTH diff records deleted.
     assert_eq!(state.get_balance(&deployer.address()).unwrap(), 10_000_000, "account restored");
-    assert!(state.revert_block_state_diffs(1, &Hash::ZERO).is_ok(), "diffs already consumed -> no-op");
+    assert!(state.revert_block_state_diffs(1, &Hash::ZERO, sumchain_storage::journal::JournalRequirement::PreActivation).is_ok(), "diffs already consumed -> no-op");
 }
 
 #[test]
@@ -193,13 +193,13 @@ fn call_overwrite_and_delete_revert_at_state_level() {
     diff.sort();
 
     state.save_contract_state_diff(7, &Hash::ZERO, diff).unwrap();
-    state.revert_block_state_diffs(7, &Hash::ZERO).unwrap();
+    state.revert_block_state_diffs(7, &Hash::ZERO, sumchain_storage::journal::JournalRequirement::PreActivation).unwrap();
 
     // Overwrite reverted to "old"; delete reverted to restore "prior".
     assert_eq!(db.get(cf::CONTRACT_STORAGE, &over_key).unwrap().as_deref(), Some(b"old".as_ref()));
     assert_eq!(db.get(cf::CONTRACT_STORAGE, &del_key).unwrap().as_deref(), Some(b"prior".as_ref()));
     // Diff consumed.
-    assert!(state.revert_block_state_diffs(7, &Hash::ZERO).is_ok());
+    assert!(state.revert_block_state_diffs(7, &Hash::ZERO, sumchain_storage::journal::JournalRequirement::PreActivation).is_ok());
 }
 
 #[test]
@@ -225,11 +225,11 @@ fn unknown_cf_kind_aborts_revert_atomically() {
     state.save_contract_state_diff(9, &Hash::ZERO, cd).unwrap();
 
     // Revert must fail and apply NOTHING.
-    assert!(state.revert_block_state_diffs(9, &Hash::ZERO).is_err());
+    assert!(state.revert_block_state_diffs(9, &Hash::ZERO, sumchain_storage::journal::JournalRequirement::PreActivation).is_err());
     // Account NOT reverted (still post-block value).
     assert_eq!(state.get_balance(&addr).unwrap(), 50, "account must not be partially reverted");
     // Both diffs intact -> a retry still hits the same error (proves not deleted).
-    assert!(state.revert_block_state_diffs(9, &Hash::ZERO).is_err(), "diffs must be preserved for retry");
+    assert!(state.revert_block_state_diffs(9, &Hash::ZERO, sumchain_storage::journal::JournalRequirement::PreActivation).is_err(), "diffs must be preserved for retry");
 }
 
 // ── Abandonment ──────────────────────────────────────────────────────────────

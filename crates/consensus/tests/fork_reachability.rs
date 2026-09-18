@@ -168,6 +168,15 @@ impl ProbeNode {
     /// destroyed the first's undo journal. Asking by block hash is what lets
     /// this probe distinguish "A's journal is intact" from "A's journal was
     /// overwritten by B's".
+    fn raw_application_journal_row(&self, height: u64, block_hash: &Hash) -> Option<Vec<u8>> {
+        self.db()
+            .get(
+                cf::APPLICATION_JOURNAL,
+                &sumchain_storage::schema::journal_key(height, block_hash),
+            )
+            .expect("read cf::APPLICATION_JOURNAL")
+    }
+
     fn raw_state_diff_row(&self, height: u64, block_hash: &Hash) -> Option<Vec<u8>> {
         self.db()
             .get(
@@ -266,6 +275,12 @@ struct Evidence {
 
     diff_row_before: Option<Vec<u8>>,
     diff_row_after: Option<Vec<u8>>,
+    /// The GENERIC application-journal row for A's own height-1 block, before
+    /// and after the import. Present before and gone after is the evidence that
+    /// the real encoded record — not an oracle, and not only the legacy diffs —
+    /// is what the live reorg path consumed.
+    app_journal_row_before: Option<Vec<u8>>,
+    app_journal_row_after: Option<Vec<u8>>,
     diff_addrs_before: Option<BTreeSet<String>>,
     diff_addrs_after: Option<BTreeSet<String>>,
     /// Addresses B's block touches.
@@ -457,6 +472,13 @@ async fn run_probe() -> Evidence {
         let a_hash = block_a.hash();
         let diff_row_before = node_a.raw_state_diff_row(1, &a_hash);
         let diff_addrs_before = node_a.state_diff_addresses(1, &a_hash);
+        let app_journal_row_before = node_a.raw_application_journal_row(1, &a_hash);
+        assert!(
+            app_journal_row_before.is_some(),
+            "A must have written a generic application journal for its own height-1 \
+             block: `publish` writes one unconditionally, so its absence would mean \
+             the block never went through the publication path"
+        );
         assert!(
             diff_row_before.is_some(),
             "A must have written an undo journal for its own height-1 block"
@@ -500,6 +522,7 @@ async fn run_probe() -> Evidence {
         let accounts_a_after = node_a.account_snapshot();
         let diff_row_after = node_a.raw_state_diff_row(1, &a_hash);
         let diff_addrs_after = node_a.state_diff_addresses(1, &a_hash);
+        let app_journal_row_after = node_a.raw_application_journal_row(1, &a_hash);
 
         let import_result_str = match &import_result {
             Ok(()) => "Ok(())".to_string(),
@@ -535,6 +558,8 @@ async fn run_probe() -> Evidence {
             accounts_b,
             diff_row_before,
             diff_row_after,
+            app_journal_row_before,
+            app_journal_row_after,
             diff_addrs_before,
             diff_addrs_after,
             b_touched,
@@ -614,6 +639,34 @@ async fn depth1_sibling_import_reaches_the_reorg_path() {
     assert_eq!(
         ev.head_after, ev.b_hash,
         "A's head must have moved to B's block{}",
+        ev.report()
+    );
+
+    // ── the unwind ran on the REAL encoded application journal ───────────────
+    //
+    // `PoAEngine::import_reorg` resolves an `ActivatedJournal` against this
+    // node's own activation boundary. A published its genesis and its height-1
+    // block through `publish`, which writes a record for each, so the observed
+    // boundary is 0 and height 1 is in the REQUIRED region: the unwind read A's
+    // height-1 record off `cf::APPLICATION_JOURNAL`, decoded it through
+    // `ApplicationJournal::decode_for` — magic, format version, identity against
+    // the key, canonical order, framing — checked every row against the 8-byte
+    // after-tag it carries, and deleted the record in the same batch that applied
+    // the restores. No oracle, no snapshot diff.
+    //
+    // Present before and gone after is the observable form of that. It is not
+    // circumstantial: nothing else in the import path touches this family, and a
+    // reorg driven by anything else would have left the row behind.
+    assert!(
+        ev.app_journal_row_before.is_some(),
+        "A must have had a generic application journal for its own height-1 block{}",
+        ev.report()
+    );
+    assert!(
+        ev.app_journal_row_after.is_none(),
+        "the generic application-journal row for the ABANDONED block must have been \
+         consumed and deleted by the unwind; if it survived, the live reorg path did \
+         not run on the real encoded record{}",
         ev.report()
     );
 

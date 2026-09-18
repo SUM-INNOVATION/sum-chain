@@ -40,10 +40,11 @@ use sumchain_genesis::ChainParams;
 use sumchain_primitives::{Address, Block, BlockHeader, Hash, SignedTransaction, Transaction};
 use sumchain_state::executor::BlockExecutor;
 use sumchain_state::reorg_undo::{
-    stage_branch_unwind, BranchJournal, JournalHeader, JournalLookup, MissingJournalPolicy,
-    SubsystemJournals, UndoRecord, UndoRefusal,
+    stage_branch_unwind, ActivatedJournal, BranchJournal, EntryOrdering, ExpectedAfter,
+    JournalHeader, JournalLookup, MissingJournalPolicy, SubsystemJournals, UndoRecord, UndoRefusal,
 };
 use sumchain_state::state::StateManager;
+use sumchain_storage::journal::{ActivationSource, JournalActivation, JournalRequirement};
 use sumchain_storage::schema::BlockStore;
 use sumchain_storage::{cf, Database};
 use tempfile::TempDir;
@@ -55,10 +56,14 @@ const NO_VALIDATORS: &[[u8; 32]] = &[];
 
 /// The strict missing-journal policy: a journal is required at every height.
 ///
-/// Correct for the fixtures below because `ObservedJournal` records one for
-/// every block, including an empty block — which is exactly the POSITIVE
-/// nothing-to-undo record today's publisher does not write. Tests whose subject
-/// is the tolerant policy name it explicitly.
+/// Correct for the fixtures below because every block they publish goes through
+/// `publish`, which writes an application-journal envelope unconditionally —
+/// including a zero-entry one for a block that wrote nothing. So absence carries
+/// information at every height here, and requiring a record refuses nothing
+/// legitimate. It is the same policy `ActivatedJournal::policy` derives for a
+/// chain whose observed boundary is height 0, which is every chain these
+/// fixtures build. Tests whose subject is the tolerant policy name it
+/// explicitly.
 const JOURNAL_REQUIRED: MissingJournalPolicy = MissingJournalPolicy::RequiredFrom(0);
 
 /// Fixed timestamp, so two independently-built genesis blocks are byte-equal.
@@ -94,7 +99,25 @@ fn convergent_cfs() -> Vec<&'static str> {
 /// `BLOCKS` and `TRANSACTIONS` are branch-safe and kept. `BLOCK_HEIGHT`,
 /// `RECEIPTS` and the two address indexes are removed by `stage_deindex` and
 /// rewritten by `publish`. `META` carries the head, which the unwind moves
-/// explicitly. The four `*_state_diffs` families ARE the journals.
+/// explicitly, and the journal format watermark, which is not per-block state.
+/// The four `*_state_diffs` families ARE the legacy journals, and
+/// `APPLICATION_JOURNAL` is the generic one.
+///
+/// # Why `APPLICATION_JOURNAL` belongs on this list
+///
+/// It is UNDO DATA, in the same class as the four `*_state_diffs` families
+/// already here, and it is node-local by the contract's own §0: never hashed
+/// into a block, never folded into a state root, never sent over the wire,
+/// never read by consensus. It is not application state that a reorg must
+/// restore; it is the record that says how to restore application state, and a
+/// reorg consumes it — `BranchJournal::rows` deletes each block's row in the
+/// same batch that applies its restores.
+///
+/// Listing it here is not a widening to make a red assertion go green. It puts
+/// a new family in the class its four siblings were already in, and the
+/// consequence is visible in the assertion below: with it excluded, the set of
+/// families a block writes and no LEGACY journal records is `[supply]` again —
+/// the same real, still-open shortfall the entry has always measured.
 ///
 /// Everything not listed here is state, and a journal that does not cover it
 /// cannot undo a block that wrote it.
@@ -110,6 +133,7 @@ const NOT_JOURNALLED: &[&str] = &[
     cf::CONTRACT_STATE_DIFFS,
     cf::COMPUTE_POOL_STATE_DIFFS,
     cf::BEACON_STATE_DIFFS,
+    cf::APPLICATION_JOURNAL,
 ];
 
 fn state_cfs() -> Vec<&'static str> {
@@ -145,11 +169,16 @@ fn state_cfs() -> Vec<&'static str> {
 /// the production answer to the same thing, and it is being built elsewhere.
 /// When it lands it replaces this type and nothing else.
 ///
-/// Record order is capture order within a family and families in a fixed order,
-/// which is stable but NOT the order the block applied them. That is enough here
-/// because a snapshot diff has at most one record per key, so within one block
-/// no two records can interact. A real journal has more than one record per key
-/// and must preserve application order; see the contract note on ordering.
+/// Record order is ascending `(cf, key)`, and a snapshot diff holds at most one
+/// record per key by construction — so this oracle satisfies
+/// [`EntryOrdering::NetByKey`] exactly as the real journal does, and declares
+/// it, and `stage_branch_unwind` validates the declaration for both.
+///
+/// It is kept as a COMPARATOR rather than as the thing under test.
+/// [`Node::real_journal`] drives the acceptance path; `assert_oracle_agrees`
+/// checks the real decoded journal against this ground truth, so a producer bug
+/// that made both wrong in the same way is not what the convergence tests would
+/// be measuring.
 #[derive(Default)]
 struct ObservedJournal {
     per_block: BTreeMap<(u64, Hash), Vec<UndoRecord>>,
@@ -183,7 +212,7 @@ impl ObservedJournal {
                 cf: k.0.clone(),
                 key: k.1.clone(),
                 before: before.get(k).cloned(),
-                after: after.get(k).cloned(),
+                after: ExpectedAfter::Exact(after.get(k).cloned()),
             })
             .collect();
         self.per_block.insert((height, hash), records);
@@ -198,6 +227,10 @@ impl BranchJournal for ObservedJournal {
                     height,
                     block_hash: *block_hash,
                     version: 0,
+                    // A snapshot diff holds at most one record per key by
+                    // construction, so this oracle really is `NetByKey` and
+                    // `stage_branch_unwind` is entitled to check it.
+                    ordering: EntryOrdering::NetByKey,
                 },
                 records: r.clone(),
             },
@@ -323,6 +356,38 @@ impl Node {
         block
     }
 
+    /// Execute and ACCEPT a block, then die before `publish` commits.
+    ///
+    /// Returns the block that was never published. Nothing is written: the
+    /// overlay buffers every write, `into_batch` is crate-private to
+    /// `sumchain-storage`, and dropping an `AcceptedCandidate` drops the
+    /// overlay with it. This is the crash-before-publication state.
+    fn execute_and_abandon(
+        &self,
+        parent: &Block,
+        proposer: &KeyPair,
+        txs: Vec<SignedTransaction>,
+    ) -> Block {
+        let header = BlockHeader::new(
+            parent.hash(),
+            parent.height() + 1,
+            GENESIS_TS + parent.height() + 1,
+            Hash::ZERO,
+            Hash::ZERO,
+            *proposer.public_key().as_bytes(),
+        );
+        let mut block = Block::new(header, txs);
+        let execution = self
+            .executor
+            .execute_block(&block, self.state.state_root(), NO_VALIDATORS)
+            .expect("execute_block");
+        block.header.state_root = execution.computed_root();
+        let (executed, _account_diff, _contract_diff) = execution.into_parts();
+        let accepted = executed.accept_produced(&block).expect("accept_produced");
+        drop(accepted); // process death, one instruction before `publish`
+        block
+    }
+
     /// Adopt the journals another node recorded for the blocks it published.
     ///
     /// A node that receives a branch over the network does not have its undo
@@ -383,6 +448,105 @@ impl Node {
     /// measuring the producer instead of the unwind.
     fn subsystem_journals(&self) -> SubsystemJournals<'_> {
         SubsystemJournals::new(&self.db)
+    }
+
+    /// The REAL journal: the encoded records this node's publisher wrote, read
+    /// back off disk, decoded and validated.
+    ///
+    /// This is what the acceptance path below runs on. `ActivatedJournal`
+    /// resolves the boundary from the node's own journal history and then
+    /// dispatches per block — the generic application journal at and above it,
+    /// the legacy per-subsystem diffs below it, never both. Every block these
+    /// fixtures publish goes through `publish`, which writes a record
+    /// unconditionally, so the observed boundary is height 0 and every block is
+    /// in the required region.
+    ///
+    /// Nothing here is an oracle. `ApplicationJournalReader` reads
+    /// `cf::APPLICATION_JOURNAL`, `ApplicationJournal::decode_for` checks magic,
+    /// format version, `(height, block hash)` identity, canonical `(cf, key)`
+    /// order and framing, and the after-images are 8-byte tags recomputed
+    /// against committed rows rather than values copied from a snapshot.
+    fn real_journal(&self) -> ActivatedJournal<'_> {
+        ActivatedJournal::resolve(&self.db, ActivationSource::ObservedFromChain)
+            .expect("resolve the journal activation boundary")
+    }
+}
+
+/// The real journal and the snapshot-diff oracle must describe the same block.
+///
+/// The oracle stays in this file as a COMPARATOR. It is ground truth by
+/// construction — it is the difference between the database before publication
+/// and the database after — so checking the decoded record against it is a check
+/// on the producer that does not depend on the producer being right.
+///
+/// Two directions:
+///
+/// * every row the block actually changed must have an entry in the journal,
+///   with the same pre-image;
+/// * any extra entry the journal carries must be a NO-OP write — a key written
+///   with the value it already held, which the overlay journals (it captured a
+///   pre-image on the write) and a snapshot diff cannot see. Verified through
+///   the entry's own after-tag: recomputing the tag over the PRE-image and
+///   finding it matches is exactly the statement "the block left what it found".
+fn assert_oracle_agrees(node: &Node, block: &Block) {
+    let height = block.height();
+    let hash = block.hash();
+
+    let JournalLookup::Present { records: real, .. } = node.real_journal().lookup(height, &hash)
+    else {
+        panic!("the real journal must hold a record for every published block");
+    };
+    let JournalLookup::Present {
+        records: oracle, ..
+    } = node.journals().lookup(height, &hash)
+    else {
+        panic!("the oracle must have recorded the block");
+    };
+
+    let real_by_key: BTreeMap<(String, Vec<u8>), &UndoRecord> = real
+        .iter()
+        .map(|r| ((r.cf.clone(), r.key.clone()), r))
+        .collect();
+    assert_eq!(
+        real_by_key.len(),
+        real.len(),
+        "the real journal must hold one net entry per (cf, key)"
+    );
+
+    for o in &oracle {
+        let found = real_by_key
+            .get(&(o.cf.clone(), o.key.clone()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "block {hash} at height {height} changed {} / {} and the real journal                      has no entry for it",
+                    o.cf,
+                    hex::encode(&o.key)
+                )
+            });
+        assert_eq!(
+            found.before, o.before,
+            "pre-image disagreement at {} / {}: the journal says {:?}, the block's own              before/after snapshot says {:?}",
+            o.cf,
+            hex::encode(&o.key),
+            found.before,
+            o.before
+        );
+    }
+
+    let oracle_keys: BTreeMap<(String, Vec<u8>), ()> = oracle
+        .iter()
+        .map(|r| ((r.cf.clone(), r.key.clone()), ()))
+        .collect();
+    for ((cf_name, key), r) in &real_by_key {
+        if oracle_keys.contains_key(&(cf_name.clone(), key.clone())) {
+            continue;
+        }
+        assert!(
+            r.after.matches(cf_name, key, r.before.as_deref()),
+            "the journal carries an entry for {} / {} that the block's before/after              snapshot does not show as changed, and its after-tag does not match its              pre-image either — so it is neither a no-op write nor a real change",
+            cf_name,
+            hex::encode(key)
+        );
     }
 }
 
@@ -534,7 +698,7 @@ fn a_multi_block_reorg_converges_with_the_branch_it_adopted() {
         &a.executor,
         &plan,
         NO_VALIDATORS,
-        &*a.journals(),
+        &a.real_journal(),
         JOURNAL_REQUIRED,
     )
     .expect("execute_reorg");
@@ -607,7 +771,7 @@ fn unwinding_a_branch_restores_the_fork_point_byte_for_byte() {
         &node.db,
         &mut batch,
         &branch,
-        &*node.journals(),
+        &node.real_journal(),
         JOURNAL_REQUIRED,
     )
     .expect("unwind must be accepted");
@@ -663,7 +827,7 @@ fn unwinding_oldest_first_would_land_on_an_intermediate_value() {
     // The WRONG order: blocks oldest-first, records forward within each block.
     // Written out here rather than exercised through the real API, which has no
     // way to express it — that is the point.
-    let journals = node.journals();
+    let journals = node.real_journal();
     let mut batch = node.db.batch();
     for blk in &branch {
         let JournalLookup::Present { records, .. } = journals.lookup(blk.height(), &blk.hash())
@@ -754,7 +918,7 @@ fn two_siblings_at_one_height_reorg_to_and_from_without_contamination() {
             &node.executor,
             &plan,
             NO_VALIDATORS,
-            &*node.journals(),
+            &node.real_journal(),
             JOURNAL_REQUIRED,
         )
         .expect("execute_reorg");
@@ -886,6 +1050,7 @@ fn a_preimage_that_does_not_match_current_state_is_refused_loudly() {
                     height: h,
                     block_hash: *b,
                     version: 0,
+                    ordering: EntryOrdering::NetByKey,
                 },
                 records: self.0.clone(),
             }
@@ -901,7 +1066,7 @@ fn a_preimage_that_does_not_match_current_state_is_refused_loudly() {
     };
     let mut lying = truthful.clone();
     // One record's post-image is replaced with a value the block never wrote.
-    lying[0].after = Some(b"this row never held these bytes".to_vec());
+    lying[0].after = ExpectedAfter::Exact(Some(b"this row never held these bytes".to_vec()));
     let target_cf = lying[0].cf.clone();
     let target_key = lying[0].key.clone();
 
@@ -946,7 +1111,7 @@ fn a_preimage_that_does_not_match_current_state_is_refused_loudly() {
         &node.db,
         &mut batch,
         &[block],
-        &*node.journals(),
+        &node.real_journal(),
         JOURNAL_REQUIRED,
     )
     .expect("the real journal must still be accepted");
@@ -994,7 +1159,7 @@ fn a_refusal_partway_through_a_branch_leaves_the_whole_branch_applied() {
                     header,
                     mut records,
                 } if h == self.lie_at => {
-                    records[0].after = Some(b"never written".to_vec());
+                    records[0].after = ExpectedAfter::Exact(Some(b"never written".to_vec()));
                     JournalLookup::Present { header, records }
                 }
                 other => other,
@@ -1206,7 +1371,7 @@ fn a_reorg_crossing_an_activation_boundary_reproduces_both_sides() {
             &a.executor,
             &plan,
             NO_VALIDATORS,
-            &*a.journals(),
+            &a.real_journal(),
             JOURNAL_REQUIRED,
         )
         .unwrap_or_else(|e| panic!("reorg {name} failed: {e}"));
@@ -1277,7 +1442,7 @@ fn a_downgrade_across_an_activation_boundary_leaves_nothing_behind() {
         &node.db,
         &mut batch,
         &branch,
-        &*node.journals(),
+        &node.real_journal(),
         JOURNAL_REQUIRED,
     )
     .expect("unwind");
@@ -1359,7 +1524,7 @@ fn an_unwind_interrupted_before_commit_reopens_on_the_old_branch_and_retries_cle
             &a.db,
             &mut batch,
             &branch_a,
-            &*a.journals(),
+            &a.real_journal(),
             JOURNAL_REQUIRED,
         )
         .expect("stage");
@@ -1394,7 +1559,7 @@ fn an_unwind_interrupted_before_commit_reopens_on_the_old_branch_and_retries_cle
         &a.executor,
         &plan,
         NO_VALIDATORS,
-        &*a.journals(),
+        &a.real_journal(),
         JOURNAL_REQUIRED,
     )
     .expect("resume");
@@ -1452,7 +1617,7 @@ fn an_apply_interrupted_between_blocks_resumes_on_the_committed_prefix() {
             &a.executor,
             &plan,
             NO_VALIDATORS,
-            &*a.journals(),
+            &a.real_journal(),
             JOURNAL_REQUIRED,
         )
         .expect("reference reorg");
@@ -1482,7 +1647,7 @@ fn an_apply_interrupted_between_blocks_resumes_on_the_committed_prefix() {
             &a.db,
             &mut batch,
             &plan.old_branch,
-            &*a.journals(),
+            &a.real_journal(),
             JOURNAL_REQUIRED,
         )
         .expect("stage");
@@ -1518,7 +1683,7 @@ fn an_apply_interrupted_between_blocks_resumes_on_the_committed_prefix() {
         &a.executor,
         &plan,
         NO_VALIDATORS,
-        &*a.journals(),
+        &a.real_journal(),
         JOURNAL_REQUIRED,
     )
     .expect("resume the apply");
@@ -1707,7 +1872,7 @@ fn a_plan_whose_ancestor_is_missing_is_refused_before_any_write() {
         &node.executor,
         &plan,
         NO_VALIDATORS,
-        &*node.journals(),
+        &node.real_journal(),
         JOURNAL_REQUIRED,
     )
     .expect_err("a missing ancestor must be refused");
@@ -1755,7 +1920,7 @@ fn an_extension_applies_without_unwinding_anything() {
         &a.executor,
         &plan,
         NO_VALIDATORS,
-        &*a.journals(),
+        &a.real_journal(),
         JOURNAL_REQUIRED,
     )
     .expect("extension");
@@ -1774,41 +1939,57 @@ fn an_extension_applies_without_unwinding_anything() {
 /// The four per-subsystem journals do not cover every column family a block
 /// writes, and the shortfall reaches the authoritative commitment.
 ///
-/// # Why this is a test and not a note
+/// # What this measures, now that the generic journal exists
 ///
-/// Every convergence test above is driven by `ObservedJournal`, a journal built
-/// by observation that satisfies the contract in full. That is deliberate: it
-/// isolates the CONSUMER — the ancestor walk, the newest-first unwind, the
-/// current-value check, the atomic batch, the resume — from whether any
-/// particular producer is complete. But it would be dishonest to leave the
-/// reader believing the journals that exist today would do.
+/// It measures the LEGACY shortfall, which is why the activation boundary is
+/// not a formality. It publishes one ordinary block, takes the ground-truth diff
+/// of every state column family, and subtracts what `SubsystemJournals` reports.
+/// What is left is the set of rows a reorg driven by today's per-subsystem
+/// journals would fail to restore — and therefore the set of rows that a
+/// PRE-ACTIVATION reorg still cannot restore, because below the boundary those
+/// four journals are all there is.
 ///
-/// So this measures the difference directly. It publishes one ordinary block,
-/// takes the ground-truth diff of every state column family, and subtracts what
-/// `SubsystemJournals` reports. What is left is the set of rows a reorg driven
-/// by today's journals would fail to restore.
-///
-/// # What the shortfall is, and why it matters
+/// # The shortfall
 ///
 /// `cf::SUPPLY`. The supply ledger, the protocol reserve and the per-address
-/// service-grant rows are written by block execution and have no undo journal of
-/// any kind. They are not inert: `SupplyStore::v_state_digest` is folded into
-/// `compute_block_state_root` once the correction marker is set, so these rows
-/// are part of the authoritative commitment. A reorg that cannot restore them
-/// replays the adopted branch against supply state the abandoned branch left
-/// behind, computes a different root for every adopted block, and — below
-/// `LEGACY_ROOT_COMPATIBILITY_HEIGHT` — has that mismatch forgiven and
+/// service-grant rows are written by block execution and have no hand-written
+/// undo journal of any kind. They are not inert: `SupplyStore::v_state_digest`
+/// is folded into `compute_block_state_root` once the correction marker is set,
+/// so these rows are part of the authoritative commitment. A reorg that cannot
+/// restore them replays the adopted branch against supply state the abandoned
+/// branch left behind, computes a different root for every adopted block, and —
+/// below `LEGACY_ROOT_COMPATIBILITY_HEIGHT` — has that mismatch forgiven and
 /// published.
 ///
-/// This is a PRODUCER-side obligation. A generic application journal built from
-/// `ApplicationOverlay` pre-images covers it without knowing it exists, because
-/// the overlay captures a pre-image for every key written through it regardless
-/// of family. The four hand-written journals cover four families by name.
+/// # Why the assertion stays, and what changed about it
 ///
-/// The assertion is two-sided on purpose. It pins the families that ARE covered,
-/// so a regression that drops one fails here; and it pins the shortfall, so
-/// closing it fails here too and the entry is removed deliberately rather than
-/// drifting out of the record.
+/// Its old message said to delete it "when a journal covers every family". A
+/// journal now does: the generic application journal is derived from
+/// `ApplicationOverlay` pre-images, so it covers `cf::SUPPLY` without knowing
+/// the family exists, and the third block of assertions below proves that on the
+/// same fixture rather than asserting it from the shape. What it does NOT do is
+/// make the four legacy journals complete — nothing can, short of rewriting
+/// them — and those four are still the only record below the activation
+/// boundary. So the entry is not deleted. It is what the boundary is FOR, and
+/// deleting it would delete the measurement of the gap the boundary exists to
+/// close.
+///
+/// # A note on `application_journal` itself
+///
+/// The generic journal's own column family is written by every block, and it is
+/// covered by none of the four legacy journals — so a naive reading of "families
+/// a block writes and no journal records" now includes it. It is excluded, by
+/// `NOT_JOURNALLED`, because it is node-local UNDO DATA rather than application
+/// state: the same class as the four `*_state_diffs` families that were always
+/// on that list, never hashed into a block or folded into a state root, and
+/// consumed by the reorg rather than restored by it. That exclusion is a
+/// classification, not a widening — see `NOT_JOURNALLED`'s own note — and the
+/// assertion below is unchanged in what it measures.
+///
+/// The assertion is three-sided. It pins the families that ARE covered by the
+/// legacy journals, so a regression that drops one fails here; it pins the
+/// legacy shortfall, so a change to it is deliberate; and it pins that the
+/// generic journal closes that shortfall, so a regression there fails here too.
 #[test]
 fn the_subsystem_journals_do_not_cover_every_family_a_block_writes() {
     let alice = key(1);
@@ -1857,10 +2038,39 @@ fn the_subsystem_journals_do_not_cover_every_family_a_block_writes() {
     assert_eq!(
         uncovered.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
         vec![cf::SUPPLY],
-        "the set of families a block writes and no journal records has changed. \
-         Adding one is a reorg-correctness regression: those rows cannot be \
-         restored. Removing `supply` is the fix this entry is waiting for — \
-         delete this assertion when a journal covers every family, and say so."
+        "the set of families a block writes and the four LEGACY journals do not \
+         record has changed. Adding one widens the gap a pre-activation reorg \
+         cannot close. Removing `supply` would mean the legacy journals \
+         themselves were completed, which is a different change from the generic \
+         journal covering it — that is asserted separately below, and it is why \
+         this entry is not deleted: below the activation boundary these four are \
+         still the only undo record a block has."
+    );
+
+    // ── and the generic journal covers what they do not ─────────────────────
+    //
+    // Same fixture, same block. The generic journal is derived from the
+    // overlay's pre-image map, so it covers `cf::SUPPLY` without naming it —
+    // there is no allowlist for a family to be missing from.
+    let generic = match node.real_journal().lookup(1, &block.hash()) {
+        JournalLookup::Present { records, .. } => records,
+        other => panic!("the generic journal must have recorded the block: {other:?}"),
+    };
+    let generic_families: std::collections::BTreeSet<&str> =
+        generic.iter().map(|r| r.cf.as_str()).collect();
+    for c in &touched {
+        assert!(
+            generic_families.contains(c.as_str()),
+            "the generic journal must cover {c}, which a block wrote; it is derived \
+             from the overlay's pre-images, so a family missing from it would mean \
+             the write did not go through the overlay at all"
+        );
+    }
+    assert!(
+        generic_families.contains(cf::SUPPLY),
+        "in particular it must cover `supply` — the family the four hand-written \
+         journals have never recorded, and the one whose absence reaches the state \
+         root"
     );
 
     // And the consequence, demonstrated rather than asserted from the shape: an
@@ -1982,7 +2192,7 @@ fn a_reorg_driven_by_the_incomplete_journals_force_adopts_its_roots() {
         &a2.executor,
         &plan2,
         NO_VALIDATORS,
-        &*a2.journals(),
+        &a2.real_journal(),
         JOURNAL_REQUIRED,
     )
     .expect("switch");
@@ -2036,6 +2246,7 @@ fn a_journal_that_names_a_different_block_is_refused() {
                     height: h,
                     block_hash: self.claims,
                     version: 0,
+                    ordering: EntryOrdering::NetByKey,
                 },
                 records: self.records.clone(),
             }
@@ -2119,6 +2330,7 @@ fn a_journal_at_an_unknown_format_version_is_refused() {
                     height: h,
                     block_hash: *b,
                     version: self.version,
+                    ordering: EntryOrdering::NetByKey,
                 },
                 records: self.records.clone(),
             }
@@ -2437,20 +2649,25 @@ fn a_tolerated_absence_leaves_the_block_it_skipped_applied() {
     );
 }
 
-/// An empty block has no journal under today's publisher, which is why the live
-/// path cannot yet require one.
+/// An empty block has no LEGACY journal row, and a positive GENERIC one.
 ///
-/// `JournalRecord::NothingToUndo` exists to say "this block mutated nothing" as
-/// a positive statement, and `publish` then writes NO row for it. On disk that is
-/// indistinguishable from a missing undo record — zero bytes either way — so a
-/// reader cannot tell "nothing to undo" from "undo record lost", and requiring a
-/// journal would refuse every reorg over an empty block.
+/// # What changed, and why this test was rewritten rather than deleted
 ///
-/// That is a PRODUCER-side obligation: write the positive record. When it is
-/// met, `PoAEngine::import_reorg` moves from `ToleratedEverywhere` to
-/// `RequiredFrom(h)` and this test's expectation inverts.
+/// It used to assert only the first half, and its note said the live path could
+/// not require a journal until a producer wrote a positive nothing-to-undo
+/// record — because `JournalRecord::NothingToUndo` makes `publish` write NO row,
+/// so on disk "this block mutated nothing" and "this block's undo record is
+/// lost" are the same zero bytes, and requiring one would refuse every reorg
+/// over an empty block.
+///
+/// That producer now exists. `publish` writes an application-journal envelope
+/// for every block unconditionally, including a zero-entry one, so the two
+/// conditions are no longer the same bytes: "mutated nothing" is a record whose
+/// `entry_count` is 0, and "record lost" is no row. The test keeps the original
+/// assertion — the legacy journals really do still write nothing, which is why
+/// they cannot be the post-activation record — and adds the half that closes it.
 #[test]
-fn an_empty_block_has_no_journal_row_at_all() {
+fn an_empty_block_has_no_legacy_journal_row_and_a_positive_generic_one() {
     let proposer = key(9);
     let node = Node::new(ChainParams::with_v2_enabled());
     let genesis = node.produce(None, &proposer, Vec::new());
@@ -2478,17 +2695,1458 @@ fn an_empty_block_has_no_journal_row_at_all() {
     drop(batch);
     assert!(matches!(err, UndoRefusal::MissingJournal { .. }), "{err}");
 
-    // And under the policy the live path actually uses, it is tolerated.
+    // And under the pre-activation policy — which is what a database with no
+    // generic journal history would resolve to — it is tolerated.
     let mut batch = node.db.batch();
     let report = stage_branch_unwind(
         &node.db,
         &mut batch,
-        &[empty],
+        &[empty.clone()],
         &node.subsystem_journals(),
         MissingJournalPolicy::ToleratedEverywhere,
     )
-    .expect("the live policy tolerates it");
+    .expect("the pre-activation policy tolerates it");
     drop(batch);
     assert_eq!(report.tolerated_absences, 1);
     assert_eq!(report.records, 0);
+
+    // ── the half that closes it ──────────────────────────────────────────────
+    //
+    // The generic journal has a row for the same block, and it is a POSITIVE
+    // zero-entry record rather than an absence.
+    let row = node
+        .db
+        .get(
+            cf::APPLICATION_JOURNAL,
+            &sumchain_storage::schema::journal_key(1, &empty.hash()),
+        )
+        .expect("read the journal row")
+        .expect("an empty block must still leave a journal envelope");
+    let decoded = sumchain_storage::journal::ApplicationJournal::decode_for(&row, 1, &empty.hash())
+        .expect("the envelope must decode");
+    assert!(
+        decoded.is_empty(),
+        "a block that wrote nothing must leave a record with no entries, not no record"
+    );
+    assert_eq!(decoded.height(), 1);
+    assert_eq!(decoded.block_hash(), empty.hash());
+
+    // So the STRICT policy — the one the live path now runs — accepts it, with
+    // no tolerated absence. "Mutated nothing" and "record lost" are different
+    // bytes, so requiring a record no longer refuses an empty block.
+    let mut batch = node.db.batch();
+    let report = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[empty.clone()],
+        &node.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect("the strict policy accepts an empty block through the generic journal");
+    drop(batch);
+    assert_eq!(report.blocks, 1, "the block's record was consumed");
+    assert_eq!(report.records, 0, "and it had nothing to restore");
+    assert_eq!(
+        report.tolerated_absences, 0,
+        "no absence was tolerated: the record was there"
+    );
+
+    // And with the row removed, the same policy HALTS. That is the whole point
+    // of the positive record: the two conditions are now distinguishable.
+    node.db
+        .delete(
+            cf::APPLICATION_JOURNAL,
+            &sumchain_storage::schema::journal_key(1, &empty.hash()),
+        )
+        .expect("delete the journal row");
+    let mut batch = node.db.batch();
+    let err = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[empty],
+        &node.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect_err("a missing post-activation record must halt");
+    drop(batch);
+    assert!(
+        matches!(err, UndoRefusal::UnreadableJournal { .. }),
+        "the producer's own load_for_revert refusal must surface, not a silent \
+         Absent that a tolerant policy could swallow: {err}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. The generic application journal, driving the acceptance path
+//
+// Everything below runs on the REAL encoded record: written by `publish`, read
+// back off disk through `ApplicationJournalReader`, decoded and validated by
+// `ApplicationJournal::decode_for`. The snapshot-diff oracle appears only as a
+// comparator, through `assert_oracle_agrees`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The row on disk that holds one block's generic journal.
+fn journal_row(node: &Node, block: &Block) -> Vec<u8> {
+    node.db
+        .get(
+            cf::APPLICATION_JOURNAL,
+            &sumchain_storage::schema::journal_key(block.height(), &block.hash()),
+        )
+        .expect("read the journal row")
+        .expect("every published block leaves a journal row")
+}
+
+fn put_journal_row(node: &Node, block: &Block, bytes: &[u8]) {
+    node.db
+        .put(
+            cf::APPLICATION_JOURNAL,
+            &sumchain_storage::schema::journal_key(block.height(), &block.hash()),
+            bytes,
+        )
+        .expect("overwrite the journal row");
+}
+
+/// Every row of one column family, for a byte-level comparison.
+fn family(node: &Node, cf_name: &str) -> BTreeMap<Vec<u8>, Vec<u8>> {
+    node.db
+        .iter(cf_name)
+        .expect("iterate")
+        .map(|(k, v)| (k.into_vec(), v.into_vec()))
+        .collect()
+}
+
+/// A block that writes one key several times leaves ONE net entry for it, whose
+/// pre-image is the value at the START of the block.
+///
+/// Three transfers from one sender in one block rewrite that sender's account
+/// row three times. The overlay captures the pre-image on the FIRST write and
+/// never overwrites it, so the journal holds one entry carrying the balance the
+/// block started from — not the intermediate value after the second transfer,
+/// which was never a value the chain committed to.
+///
+/// This is also the invariant that settles the ordering contract. With one entry
+/// per key, no two entries of a block can interact, so a deterministic
+/// `(cf, key)` order is sufficient and "application order" is a question the
+/// consumer does not have to ask.
+#[test]
+fn multiple_writes_to_one_key_produce_one_correct_net_undo_entry() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+
+    let at_fork = family(&node, cf::STATE);
+    let alice_key = sumchain_storage::StateStore::account_key(&alice.address());
+    let alice_before = at_fork.get(&alice_key).cloned();
+
+    let block = node.produce(
+        Some(&genesis),
+        &proposer,
+        vec![
+            transfer(&alice, &carol.address(), 1_000, 500, 0),
+            transfer(&alice, &carol.address(), 2_000, 500, 1),
+            transfer(&alice, &carol.address(), 3_000, 500, 2),
+        ],
+    );
+    assert_eq!(block.transactions.len(), 3);
+
+    let JournalLookup::Present { records, header } = node.real_journal().lookup(1, &block.hash())
+    else {
+        panic!("the published block must have a real journal");
+    };
+    assert_eq!(header.ordering, EntryOrdering::NetByKey);
+
+    let for_alice: Vec<&UndoRecord> = records
+        .iter()
+        .filter(|r| r.cf == cf::STATE && r.key == alice_key)
+        .collect();
+    assert_eq!(
+        for_alice.len(),
+        1,
+        "three writes to one key must journal ONE net entry, not three"
+    );
+    assert_eq!(
+        for_alice[0].before, alice_before,
+        "the entry's pre-image must be the value at the START of the block, not \
+         an intermediate one"
+    );
+
+    assert_oracle_agrees(&node, &block);
+
+    // And it undoes exactly: the account row returns to the fork point.
+    let mut batch = node.db.batch();
+    stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[block.clone()],
+        &node.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect("unwind");
+    sumchain_storage::candidate::stage_deindex(&mut batch, &block).expect("deindex");
+    sumchain_state::reorg_undo::stage_head_reset(&mut batch, &genesis).expect("head");
+    batch.commit().expect("commit");
+
+    assert_eq!(
+        family(&node, cf::STATE),
+        at_fork,
+        "one net entry per key must restore the whole family to the fork point"
+    );
+}
+
+/// The current-value check compares against each entry's FINAL value, and a row
+/// that has moved on refuses the WHOLE unwind.
+///
+/// The journal's after-image is an 8-byte domain-separated tag over
+/// `(family, key, value)`. This recomputes it from what is committed right now
+/// and compares. The interesting case is the one the tag has to get right: a key
+/// the block wrote MORE THAN ONCE, where "what the block left" is the final
+/// value and not the intermediate one. So the fixture writes three times, then
+/// puts the INTERMEDIATE value back — a value the key genuinely held during the
+/// block — and requires that to be refused too. A check against anything but the
+/// final value would accept it.
+#[test]
+fn current_value_validation_compares_against_each_entrys_final_value() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+
+    // One block that writes alice's row twice, and one that writes it once more,
+    // so an intermediate value for the two-write block is observable.
+    let first = node.produce(
+        Some(&genesis),
+        &proposer,
+        vec![transfer(&alice, &carol.address(), 1_000, 500, 0)],
+    );
+    let alice_key = sumchain_storage::StateStore::account_key(&alice.address());
+    let intermediate = node
+        .db
+        .get(cf::STATE, &alice_key)
+        .expect("read")
+        .expect("alice has a row");
+
+    let second = node.produce(
+        Some(&first),
+        &proposer,
+        vec![
+            transfer(&alice, &carol.address(), 2_000, 500, 1),
+            transfer(&alice, &carol.address(), 3_000, 500, 2),
+        ],
+    );
+    let after_second = node
+        .db
+        .get(cf::STATE, &alice_key)
+        .expect("read")
+        .expect("alice has a row");
+    assert_ne!(intermediate, after_second);
+
+    let before_any_write = node.snapshot();
+
+    // ── the row still holds what the block left: accepted ───────────────────
+    let mut batch = node.db.batch();
+    let report = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[second.clone()],
+        &node.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect("an untouched row must validate");
+    drop(batch);
+    assert!(report.checks >= report.records);
+    assert!(report.records > 0);
+
+    // ── the row holds a value the key really held DURING the block: refused ──
+    node.db
+        .put(cf::STATE, &alice_key, &intermediate)
+        .expect("plant the intermediate value");
+    let mut batch = node.db.batch();
+    let err = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[second.clone()],
+        &node.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect_err("a row holding an intermediate value is not a row the block left");
+    drop(batch);
+    match &err {
+        UndoRefusal::CurrentValueMismatch { cf: c, key: k, .. } => {
+            assert_eq!(*c, cf::STATE);
+            assert_eq!(*k, hex::encode(&alice_key));
+        }
+        other => panic!("wrong refusal: {other:?}"),
+    }
+    node.db
+        .put(cf::STATE, &alice_key, &after_second)
+        .expect("restore");
+
+    // ── a row deleted since the block: refused, and nothing is written ───────
+    node.db.delete(cf::STATE, &alice_key).expect("delete");
+    let mut batch = node.db.batch();
+    let err = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[second.clone()],
+        &node.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect_err("an absent row where the block left a value must be refused");
+    drop(batch);
+    assert!(
+        matches!(err, UndoRefusal::CurrentValueMismatch { .. }),
+        "{err}"
+    );
+    node.db
+        .put(cf::STATE, &alice_key, &after_second)
+        .expect("restore");
+
+    assert_eq!(
+        node.snapshot(),
+        before_any_write,
+        "every refusal above must have written nothing at all"
+    );
+}
+
+/// The unwind is atomic: a refusal partway through a branch driven by the REAL
+/// journal leaves the entire branch applied.
+///
+/// The counterpart for the oracle already exists. This one matters separately
+/// because the real journal's refusal can come from the DECODER — a corrupt
+/// record for the second block down — which is a path the oracle cannot reach at
+/// all. Everything is staged into one borrowed batch that the caller drops, so
+/// the blocks already unwound never reach the database.
+#[test]
+fn a_refusal_partway_through_a_real_journal_branch_writes_nothing() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+
+    let mut branch = Vec::new();
+    let mut parent = genesis;
+    for n in 0..3u64 {
+        let blk = node.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+        parent = blk.clone();
+        branch.push(blk);
+    }
+    // Truncate the MIDDLE block's record. The unwind runs newest-first, so it
+    // stages the newest block and then meets a record that will not decode.
+    // Truncation rather than a flipped byte: a flipped after-TAG still decodes
+    // and is caught later by the current-value check, which is a different
+    // refusal on a different code path — this one is about the decoder.
+    let mut bytes = journal_row(&node, &branch[1]);
+    bytes.truncate(bytes.len() - 1);
+    put_journal_row(&node, &branch[1], &bytes);
+
+    // Taken AFTER the corruption, so what is compared is the effect of the
+    // refused unwind and not the effect of the fixture damaging a row.
+    let before = node.snapshot();
+
+    let mut batch = node.db.batch();
+    let err = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &branch,
+        &node.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect_err("a corrupt record partway down the branch must refuse the whole unwind");
+    drop(batch);
+    assert!(
+        matches!(err, UndoRefusal::UnreadableJournal { .. }),
+        "{err}"
+    );
+
+    assert_eq!(
+        node.snapshot(),
+        before,
+        "the newest block was already staged when the refusal came; dropping the \
+         batch must leave the whole branch applied rather than half of it"
+    );
+}
+
+/// Supply state converges through the real journal, and the legacy journals
+/// cannot make it converge.
+///
+/// `cf::SUPPLY` — the supply ledger, the protocol reserve, the per-address
+/// service-grant rows — is written by block execution, folded into
+/// `compute_block_state_root` through `SupplyStore::v_state_digest`, and covered
+/// by NO hand-written journal. `the_subsystem_journals_do_not_cover_every_family_a_block_writes`
+/// measures exactly that gap. The generic journal closes it without knowing the
+/// family exists, because it is derived from overlay pre-images rather than from
+/// a list.
+///
+/// Two halves, so this is a demonstration rather than an assertion about shape:
+/// the legacy journals leave the abandoned branch's supply rows in place, and
+/// the real journal restores them byte for byte. `force_adopted == 0` is what
+/// makes the second half mean something — without it the historical
+/// compatibility window would forgive the very root mismatch a stale supply row
+/// causes.
+#[test]
+fn supply_state_converges_through_the_real_journal() {
+    let alice = key(1);
+    let bob = key(2);
+    let carol = key(3);
+    let proposer = key(9);
+    let params = ChainParams::with_v2_enabled();
+    let (a, b, genesis) = two_nodes(params, &[(&alice, 10_000_000), (&bob, 10_000_000)]);
+
+    let mut branch_a = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..3u64 {
+        let blk = a.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+        parent = blk.clone();
+        branch_a.push(blk);
+    }
+    let mut branch_b = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..2u64 {
+        let blk = b.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&bob, &carol.address(), 4_000, 700, n)],
+        );
+        parent = blk.clone();
+        branch_b.push(blk);
+    }
+
+    // The two branches really do disagree about supply, or this proves nothing.
+    assert_ne!(
+        family(&a, cf::SUPPLY),
+        family(&b, cf::SUPPLY),
+        "the fixture must make the two branches disagree about the supply family"
+    );
+
+    // ── half one: the legacy journals cannot restore it ──────────────────────
+    {
+        let mut batch = a.db.batch();
+        stage_branch_unwind(
+            &a.db,
+            &mut batch,
+            &branch_a,
+            &a.subsystem_journals(),
+            MissingJournalPolicy::ToleratedEverywhere,
+        )
+        .expect("the incomplete journals unwind what they cover");
+        let supply_before = family(&a, cf::SUPPLY);
+        batch.commit().expect("commit");
+        assert_eq!(
+            family(&a, cf::SUPPLY),
+            supply_before,
+            "the four per-subsystem journals record no supply row, so an unwind \
+             driven by them leaves every one of them exactly where the abandoned \
+             branch left it"
+        );
+    }
+
+    // That database is now half-unwound, so the second half runs on a fresh pair
+    // built the same way rather than on top of it.
+    let params = ChainParams::with_v2_enabled();
+    let (a, b, genesis) = two_nodes(params, &[(&alice, 10_000_000), (&bob, 10_000_000)]);
+    let mut branch_a = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..3u64 {
+        let blk = a.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+        parent = blk.clone();
+        branch_a.push(blk);
+    }
+    let mut branch_b = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..2u64 {
+        let blk = b.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&bob, &carol.address(), 4_000, 700, n)],
+        );
+        parent = blk.clone();
+        branch_b.push(blk);
+    }
+    for blk in &branch_b {
+        a.retain(blk);
+    }
+    for blk in &branch_a {
+        assert_oracle_agrees(&a, blk);
+    }
+
+    // ── half two: the real journal restores it, and the roots verify ─────────
+    let store = BlockStore::new(&a.db);
+    let plan = plan_reorg(
+        &store,
+        branch_a.last().unwrap(),
+        branch_b.last().unwrap(),
+        NO_FINALITY,
+        DEEP,
+    )
+    .expect("plan");
+    let outcome = execute_reorg(
+        &a.db,
+        &a.state,
+        &a.executor,
+        &plan,
+        NO_VALIDATORS,
+        &a.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect("the reorg must succeed through the real journal");
+
+    assert_eq!(outcome.unwound.blocks, 3);
+    assert_eq!(outcome.unwound.tolerated_absences, 0);
+    assert_eq!(outcome.applied, 2);
+    assert_eq!(
+        outcome.force_adopted, 0,
+        "every adopted block's replayed root must EQUAL its header root; a \
+         force-adopted block would mean the supply rows were still wrong and the \
+         compatibility window forgave it"
+    );
+
+    assert_eq!(
+        family(&a, cf::SUPPLY),
+        family(&b, cf::SUPPLY),
+        "the supply family must be byte-identical to the node that built the \
+         branch that was adopted"
+    );
+    let (left, right) = (a.snapshot(), b.snapshot());
+    assert_eq!(left, right, "{}", describe_divergence(&left, &right));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 10. Post-activation refusals, through the real record
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Every way a post-activation record can be wrong HALTS the reorg.
+///
+/// Five conditions, all against the same block, each restoring the good record
+/// afterwards so the next one is measured in isolation:
+///
+/// * **missing** — the row deleted;
+/// * **corrupt** — a byte flipped;
+/// * **mis-keyed** — a sibling's record filed under this block's key;
+/// * **duplicate-key** — a record holding two entries for one `(cf, key)`;
+/// * **identity-mismatched** — a record whose own header names another block.
+///
+/// The last two are refused by the DECODER — the canonical-order check catches a
+/// repeated key, and the `(height, block hash)` check catches a transplanted
+/// record — which is why they reach the unwind as `UnreadableJournal` rather
+/// than as `DuplicateJournalKey` or `JournalIdentityMismatch`. Both of those
+/// variants remain reachable for a producer that does not validate on the way
+/// in; here the producer refuses first, which is strictly earlier and strictly
+/// louder, and the test asserts that rather than pretending otherwise.
+#[test]
+fn every_post_activation_record_fault_halts_the_reorg() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+    let block = node.produce(
+        Some(&genesis),
+        &proposer,
+        vec![transfer(&alice, &carol.address(), 1_000, 500, 0)],
+    );
+    let good = journal_row(&node, &block);
+    let before = node.snapshot();
+
+    // A genuine sibling, built on a SECOND node over the same genesis. It has to
+    // be built elsewhere: producing it here would apply its state on top of
+    // `block`'s, and then `block`'s own record would no longer match the rows it
+    // describes — which is a different failure from the one under test.
+    let other = Node::new(ChainParams::with_v2_enabled());
+    other.seed(&alice, 10_000_000);
+    let other_genesis = other.produce(None, &proposer, Vec::new());
+    assert_eq!(
+        other_genesis.hash(),
+        genesis.hash(),
+        "the two nodes must share a genesis, or the sibling is not a sibling"
+    );
+    let sibling = other.produce(
+        Some(&other_genesis),
+        &proposer,
+        vec![transfer(&alice, &carol.address(), 2_000, 500, 0)],
+    );
+    assert_eq!(sibling.height(), 1);
+    assert_ne!(sibling.hash(), block.hash());
+
+    // ── missing ──────────────────────────────────────────────────────────────
+    node.db
+        .delete(
+            cf::APPLICATION_JOURNAL,
+            &sumchain_storage::schema::journal_key(1, &block.hash()),
+        )
+        .expect("delete");
+    let mut batch = node.db.batch();
+    let err = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[block.clone()],
+        &node.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect_err("a missing post-activation record must halt");
+    drop(batch);
+    assert!(
+        err.to_string().contains("no application journal for block"),
+        "the halt must name the block and the boundary: {err}"
+    );
+    put_journal_row(&node, &block, &good);
+
+    // ── corrupt ──────────────────────────────────────────────────────────────
+    let mut corrupt = good.clone();
+    corrupt[0] ^= 0xff;
+    put_journal_row(&node, &block, &corrupt);
+    let mut batch = node.db.batch();
+    let err = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[block.clone()],
+        &node.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect_err("a corrupt record must halt");
+    drop(batch);
+    assert!(
+        matches!(err, UndoRefusal::UnreadableJournal { .. }),
+        "{err}"
+    );
+    assert!(err.to_string().contains("magic"), "{err}");
+    put_journal_row(&node, &block, &good);
+
+    // ── mis-keyed: the sibling's record, filed under this block ──────────────
+    let siblings_record = journal_row(&other, &sibling);
+    assert_ne!(siblings_record, good);
+    put_journal_row(&node, &block, &siblings_record);
+    let mut batch = node.db.batch();
+    let err = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[block.clone()],
+        &node.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect_err("a record filed under the wrong block must halt");
+    drop(batch);
+    assert!(
+        err.to_string().contains("another block's undo record"),
+        "the record carries its own identity, so this is caught by comparing it \
+         with the key it was read under rather than by luck: {err}"
+    );
+    put_journal_row(&node, &block, &good);
+
+    // ── duplicate key inside one record ──────────────────────────────────────
+    //
+    // Built by hand: `bind` refuses to construct one, which is the producer-side
+    // half of the same invariant. The entry list is the good record's first
+    // entry repeated, so the bytes are well-formed in every other respect and
+    // the only thing wrong with them is the repetition.
+    let dup = record_with_first_entry_repeated(&good);
+    put_journal_row(&node, &block, &dup);
+    let mut batch = node.db.batch();
+    let err = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[block.clone()],
+        &node.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect_err("a record with two entries for one key must halt");
+    drop(batch);
+    assert!(
+        err.to_string().contains("canonical order"),
+        "a repeated (cf, key) is not strictly increasing, so the decoder refuses \
+         it before the unwind ever sees the entries: {err}"
+    );
+    put_journal_row(&node, &block, &good);
+
+    // ── identity mismatch: the record's own header names another block ───────
+    let mut transplanted = good.clone();
+    // The header is magic(5) || version(2) || height(8) || block_hash(32).
+    transplanted[15..47].copy_from_slice(sibling.hash().as_bytes());
+    put_journal_row(&node, &block, &transplanted);
+    let mut batch = node.db.batch();
+    let err = stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[block.clone()],
+        &node.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect_err("a record whose header names another block must halt");
+    drop(batch);
+    assert!(
+        err.to_string().contains("another block's undo record"),
+        "{err}"
+    );
+    put_journal_row(&node, &block, &good);
+
+    // Nothing above wrote a thing.
+    assert_eq!(
+        node.snapshot(),
+        before,
+        "every refusal must leave the database exactly as it was"
+    );
+
+    // And the good record still unwinds, so the five refusals above are the
+    // checks firing rather than the fixture being unusable.
+    let mut batch = node.db.batch();
+    stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[block],
+        &node.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect("the untouched record must still be accepted");
+    drop(batch);
+}
+
+/// Re-encode a record with its FIRST entry repeated, leaving everything else
+/// byte-identical.
+///
+/// Hand-built because no constructor will make one: `ApplicationJournal::bind`
+/// refuses a duplicate `(cf, key)` on the way in. Parsing here is deliberately
+/// minimal — it reads the header, copies the first entry's bytes, and bumps
+/// `entry_count` — so the fixture depends on the wire format's framing and not
+/// on any helper that could hide a mistake.
+fn record_with_first_entry_repeated(good: &[u8]) -> Vec<u8> {
+    const HEADER: usize = 5 + 2 + 8 + 32 + 8; // magic, version, height, hash, count
+    let count = u64::from_be_bytes(good[47..55].try_into().unwrap());
+    assert!(
+        count >= 1,
+        "the fixture block must have journalled something"
+    );
+
+    // Walk exactly one entry to find its length.
+    let mut at = HEADER;
+    let take_u64 = |bytes: &[u8], at: &mut usize| -> usize {
+        let v = u64::from_be_bytes(bytes[*at..*at + 8].try_into().unwrap()) as usize;
+        *at += 8;
+        v
+    };
+    let cf_len = take_u64(good, &mut at);
+    at += cf_len;
+    let key_len = take_u64(good, &mut at);
+    at += key_len;
+    match good[at] {
+        0 => at += 1,
+        1 => {
+            at += 1;
+            let value_len = take_u64(good, &mut at);
+            at += value_len;
+        }
+        other => panic!("unexpected before_tag {other}"),
+    }
+    match good[at] {
+        0 => at += 1,
+        1 => at += 1 + 8,
+        other => panic!("unexpected after_tag {other}"),
+    }
+    let first_entry = good[HEADER..at].to_vec();
+
+    let mut out = good[..47].to_vec();
+    out.extend_from_slice(&(count + 1).to_be_bytes());
+    out.extend_from_slice(&first_entry);
+    out.extend_from_slice(&good[HEADER..]);
+    out
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 11. Activation: the journal's own gate, and reorgs across its boundary
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The journal's activation gate is its own, and opening it leaves the two
+/// dormant subsystem gates exactly where they were.
+///
+/// `compute_pool_enabled_from_height` and `beacon_enabled_from_height` gate
+/// dormant CONSENSUS subsystems: opening either changes which state a block
+/// commits, and `Genesis::validate` rejects any `Some(_)` for them. Reusing one
+/// of them to switch on undo-journal enforcement would have tied a node-local
+/// storage decision to a coordinated consensus activation. So the journal has
+/// `application_journal_enabled_from_height`, and this pins that they are three
+/// independent fields.
+#[test]
+fn the_journal_activation_gate_is_its_own_and_leaves_the_dormant_gates_closed() {
+    let default = ChainParams::default();
+    assert_eq!(
+        default.application_journal_enabled_from_height, None,
+        "the production default is None: the boundary is OBSERVED from the chain's \
+         own journal history, which is not an off position — the write side is \
+         ungated, so the first published block establishes it"
+    );
+    assert_eq!(default.compute_pool_enabled_from_height, None);
+    assert_eq!(default.beacon_enabled_from_height, None);
+
+    let mut pinned = ChainParams::default();
+    pinned.application_journal_enabled_from_height = Some(1_000);
+    assert_eq!(
+        pinned.compute_pool_enabled_from_height, None,
+        "pinning the journal boundary must not open the compute-pool gate"
+    );
+    assert_eq!(
+        pinned.beacon_enabled_from_height, None,
+        "pinning the journal boundary must not open the beacon gate"
+    );
+
+    // And the translation into the storage-side rule is the one-site mapping.
+    assert_eq!(
+        ActivationSource::from_configured_height(None),
+        ActivationSource::ObservedFromChain
+    );
+    assert_eq!(
+        ActivationSource::from_configured_height(Some(1_000)),
+        ActivationSource::Pinned(1_000)
+    );
+}
+
+/// A reorg whose range spans the activation boundary decides PER BLOCK: the
+/// generic journal at and above it, the legacy journals below it, never both.
+///
+/// The boundary is pinned partway up the abandoned branch. Below it the generic
+/// records are DELETED from disk, so any block that still consulted them would
+/// halt; above it the legacy rows are deleted, so any block that fell back would
+/// find nothing. Passing therefore means each block was classified correctly and
+/// only one record was consulted for it.
+///
+/// The unwind runs head-first, so it walks from the required region into the
+/// fallback region — never the reverse, which is the direction that would need a
+/// re-classification mid-range.
+#[test]
+fn a_reorg_across_the_journal_activation_boundary_decides_per_block() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+
+    let mut branch = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..4u64 {
+        let blk = node.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+        parent = blk.clone();
+        branch.push(blk);
+    }
+
+    const BOUNDARY: u64 = 3;
+    let activation =
+        JournalActivation::resolve(&node.db, ActivationSource::Pinned(BOUNDARY)).expect("resolve");
+    assert_eq!(activation.boundary(), Some(BOUNDARY));
+    let journal = ActivatedJournal::new(&node.db, activation);
+    assert_eq!(
+        journal.policy(),
+        MissingJournalPolicy::RequiredFrom(BOUNDARY),
+        "the policy must be derived from the same activation the journal holds"
+    );
+
+    // Remove the record each side is NOT supposed to consult.
+    for blk in &branch {
+        if blk.height() < BOUNDARY {
+            node.db
+                .delete(
+                    cf::APPLICATION_JOURNAL,
+                    &sumchain_storage::schema::journal_key(blk.height(), &blk.hash()),
+                )
+                .expect("delete the generic record below the boundary");
+        } else {
+            for (cf_name, key) in
+                sumchain_state::reorg_undo::subsystem_journal_rows(blk.height(), &blk.hash())
+            {
+                node.db.delete(&cf_name, &key).expect("delete a legacy row");
+            }
+        }
+    }
+
+    let mut batch = node.db.batch();
+    let report = stage_branch_unwind(&node.db, &mut batch, &branch, &journal, journal.policy())
+        .expect("a branch spanning the boundary must unwind, each block from its own record");
+    for blk in &branch {
+        sumchain_storage::candidate::stage_deindex(&mut batch, blk).expect("deindex");
+    }
+    sumchain_state::reorg_undo::stage_head_reset(&mut batch, &genesis).expect("head");
+    batch.commit().expect("commit");
+
+    assert_eq!(
+        report.blocks, 4,
+        "every block on the branch was accounted for"
+    );
+    assert_eq!(
+        report.tolerated_absences, 0,
+        "no block's record was missing: below the boundary the legacy rows are \
+         there, at and above it the generic ones are"
+    );
+
+    // Account state returns to the fork point. The families the legacy journals
+    // never covered are only restored for the blocks at and above the boundary —
+    // which is exactly the shortfall the pre-activation region is stuck with,
+    // and why the boundary exists rather than being a formality.
+    assert_eq!(
+        node.head().map(|h| h.hash()),
+        Some(genesis.hash()),
+        "the head moved back to the fork point"
+    );
+
+    // Classification is per height and nothing else.
+    assert_eq!(journal.governing(0), JournalRequirement::PreActivation);
+    assert_eq!(
+        journal.governing(BOUNDARY - 1),
+        JournalRequirement::PreActivation
+    );
+    assert_eq!(journal.governing(BOUNDARY), JournalRequirement::Required);
+    assert_eq!(
+        journal.governing(BOUNDARY + 100),
+        JournalRequirement::Required
+    );
+}
+
+/// Below the boundary a missing record is tolerated; at and above it, the same
+/// absence halts. One branch, one policy, two answers decided by height.
+#[test]
+fn the_activation_boundary_decides_whether_an_absence_halts() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+
+    let mut branch = Vec::new();
+    let mut parent = genesis;
+    for n in 0..3u64 {
+        let blk = node.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+        parent = blk.clone();
+        branch.push(blk);
+    }
+
+    // Strip EVERY undo record from the whole branch, so absence is the only
+    // condition under test.
+    for blk in &branch {
+        node.db
+            .delete(
+                cf::APPLICATION_JOURNAL,
+                &sumchain_storage::schema::journal_key(blk.height(), &blk.hash()),
+            )
+            .expect("delete");
+        for (cf_name, key) in
+            sumchain_state::reorg_undo::subsystem_journal_rows(blk.height(), &blk.hash())
+        {
+            node.db.delete(&cf_name, &key).expect("delete");
+        }
+    }
+
+    // Boundary above the branch: every block is pre-activation, every absence is
+    // tolerated and counted.
+    let below = ActivatedJournal::new(
+        &node.db,
+        JournalActivation::resolve(&node.db, ActivationSource::Pinned(100)).expect("resolve"),
+    );
+    let mut batch = node.db.batch();
+    let report = stage_branch_unwind(&node.db, &mut batch, &branch, &below, below.policy())
+        .expect("pre-activation absence is tolerated");
+    drop(batch);
+    assert_eq!(report.tolerated_absences, 3);
+    assert_eq!(report.records, 0);
+
+    // Boundary at the foot of the branch: the same absence halts.
+    let at = ActivatedJournal::new(
+        &node.db,
+        JournalActivation::resolve(&node.db, ActivationSource::Pinned(1)).expect("resolve"),
+    );
+    let mut batch = node.db.batch();
+    let err = stage_branch_unwind(&node.db, &mut batch, &branch, &at, at.policy())
+        .expect_err("post-activation absence must halt");
+    drop(batch);
+    assert!(
+        err.to_string().contains("no application journal for block"),
+        "{err}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 12. Retention: pruning must not outrun the reorg horizon
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The undo-retention floor is the deepest reorg this engine will plan.
+///
+/// `sumchain_storage::pruner::UNDO_RETENTION_FLOOR` is a duplicate of
+/// `sumchain_consensus::poa::MAX_REORG_WALK`, because the pruner sits below
+/// consensus and cannot import it. This is the consensus-side half of the pin;
+/// `pruner.rs` asserts the same equality from its own side, so the two cannot
+/// drift apart without one of them failing.
+///
+/// If the floor were lower, `plan_reorg` would still be willing to name a block
+/// whose journal pruning had already removed — and post-activation that block's
+/// unwind HALTS, correctly and uselessly, because the node deleted the record it
+/// now needs.
+#[test]
+fn the_pruning_floor_covers_every_reorg_this_engine_will_plan() {
+    assert_eq!(
+        sumchain_storage::pruner::UNDO_RETENTION_FLOOR,
+        sumchain_consensus::poa::MAX_REORG_WALK,
+        "pruning must never remove undo data for a block a reorg can still name"
+    );
+}
+
+/// Pruning keeps every journal inside the reorg horizon, and a branch that deep
+/// still unwinds afterwards.
+///
+/// The end-to-end version of the pruner's own unit test: publish a branch, run
+/// the pruner at a head far above it, and require the branch to unwind through
+/// the records that survived. Written against a configuration that ASKS for a
+/// short retention, so what is being tested is the floor overriding it rather
+/// than a generous default doing the work.
+#[test]
+fn a_branch_inside_the_reorg_horizon_still_unwinds_after_pruning() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let node = Node::new(ChainParams::with_v2_enabled());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+    let at_fork = node.snapshot();
+
+    let mut branch = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..3u64 {
+        let blk = node.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+        parent = blk.clone();
+        branch.push(blk);
+    }
+
+    // A head just inside the horizon, and a configuration asking to keep almost
+    // nothing. The floor is what must save the records.
+    let head_height = sumchain_storage::pruner::UNDO_RETENTION_FLOOR;
+    let pruner = sumchain_storage::pruner::Pruner::new(
+        node.db.clone(),
+        sumchain_storage::pruner::PrunerConfig {
+            enabled: true,
+            blocks_to_keep: 0,
+            state_diffs_to_keep: 1,
+            compact_after_prune: false,
+            ..Default::default()
+        },
+    );
+    pruner.prune(head_height).expect("prune");
+
+    for blk in &branch {
+        assert!(
+            node.db
+                .get(
+                    cf::APPLICATION_JOURNAL,
+                    &sumchain_storage::schema::journal_key(blk.height(), &blk.hash()),
+                )
+                .expect("read")
+                .is_some(),
+            "block {} is within {} of the head and must keep its journal",
+            blk.height(),
+            head_height
+        );
+    }
+
+    let mut batch = node.db.batch();
+    stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &branch,
+        &node.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect("a revertible branch must still unwind after pruning");
+    for blk in &branch {
+        sumchain_storage::candidate::stage_deindex(&mut batch, blk).expect("deindex");
+    }
+    sumchain_state::reorg_undo::stage_head_reset(&mut batch, &genesis).expect("head");
+    batch.commit().expect("commit");
+
+    assert_eq!(
+        node.snapshot(),
+        at_fork,
+        "{}",
+        describe_divergence(&node.snapshot(), &at_fork)
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 13. Crash recovery across the whole state machine
+//
+// Four points, because those are the four places a crash can land relative to
+// the three durable transitions a switch makes: the journal's publication, the
+// canonical state it describes, and the head that names it.
+//
+// The apply side has only ONE resting state per block, and that is the whole of
+// its recovery argument: `publish` stages the journal, the block's state rows,
+// the block row, the transactions, the receipts, the indexes and the head into
+// one `WriteBatch` and commits it once, and a `WriteBatch` has no interior. So
+// "crashed before publication" and "crashed after the journal write" are not two
+// windows around one block — they are the two sides of a single instruction, and
+// the tests below prove exactly that rather than asserting it from the shape.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **Crash BEFORE publication.** Neither state nor journal, and the head has not
+/// moved.
+///
+/// The block is executed and ACCEPTED — everything short of the commit — and
+/// then dropped. The database must be byte-identical across every column family
+/// afterwards, and identical again after a real restart, so what is being
+/// measured is durable emptiness rather than an unflushed memtable.
+#[test]
+fn a_crash_before_publication_leaves_neither_state_nor_journal() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let params = ChainParams::with_v2_enabled();
+    let node = Node::new(params.clone());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+    let head_before = node.head().map(|h| h.hash());
+
+    let everything_before: BTreeMap<(String, Vec<u8>), Vec<u8>> = convergent_cfs()
+        .into_iter()
+        .flat_map(|f| {
+            node.db
+                .iter(f)
+                .expect("iterate")
+                .map(move |(k, v)| ((f.to_string(), k.into_vec()), v.into_vec()))
+        })
+        .collect();
+
+    let abandoned = node.execute_and_abandon(
+        &genesis,
+        &proposer,
+        vec![transfer(&alice, &carol.address(), 1_000, 500, 0)],
+    );
+
+    let node = node.restart(params);
+    let everything_after: BTreeMap<(String, Vec<u8>), Vec<u8>> = convergent_cfs()
+        .into_iter()
+        .flat_map(|f| {
+            node.db
+                .iter(f)
+                .expect("iterate")
+                .map(move |(k, v)| ((f.to_string(), k.into_vec()), v.into_vec()))
+        })
+        .collect();
+
+    assert_eq!(
+        everything_after,
+        everything_before,
+        "a candidate abandoned before publication must leave the database \
+         byte-identical:\n{}",
+        describe_divergence(&everything_before, &everything_after)
+    );
+    assert!(
+        node.db
+            .get(
+                cf::APPLICATION_JOURNAL,
+                &sumchain_storage::schema::journal_key(1, &abandoned.hash()),
+            )
+            .expect("read")
+            .is_none(),
+        "no journal may exist for a block that was never published: an undo record \
+         for a block that did not happen is worse than none, because a reader \
+         cannot tell it from one that did"
+    );
+    assert_eq!(node.head().map(|h| h.hash()), head_before);
+}
+
+/// **Crash AFTER the journal write.** The journal and the state it describes are
+/// the same commit, so a restart finds both or neither — never one.
+///
+/// This is the property the apply side rests on, and it is checkable rather than
+/// merely argued: the record is read back after a real reopen, decoded, and
+/// required to identify the block whose rows are also there and whose hash the
+/// head names. The negative half is the test above.
+#[test]
+fn a_crash_after_the_journal_write_finds_the_block_and_its_journal_together() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let params = ChainParams::with_v2_enabled();
+    let node = Node::new(params.clone());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+    let block = node.produce(
+        Some(&genesis),
+        &proposer,
+        vec![transfer(&alice, &carol.address(), 1_000, 500, 0)],
+    );
+    let balance_after = node.balance(&alice.address());
+
+    let node = node.restart(params);
+
+    // The head names the block.
+    assert_eq!(node.head().map(|h| h.hash()), Some(block.hash()));
+    // The state it wrote is there.
+    assert_eq!(node.balance(&alice.address()), balance_after);
+    // And so is the journal, identifying that same block.
+    let record = node
+        .db
+        .get(
+            cf::APPLICATION_JOURNAL,
+            &sumchain_storage::schema::journal_key(1, &block.hash()),
+        )
+        .expect("read")
+        .expect("the journal is in the same commit as the state it describes");
+    let decoded =
+        sumchain_storage::journal::ApplicationJournal::decode_for(&record, 1, &block.hash())
+            .expect("decode");
+    assert_eq!(decoded.block_hash(), block.hash());
+    assert_eq!(decoded.height(), 1);
+    assert!(
+        !decoded.is_empty(),
+        "the block wrote rows, so it journalled them"
+    );
+
+    // The record still describes the state on disk, which is what makes the
+    // reopened node able to revert it. Checked through the unwind's own
+    // validation rather than by inspection.
+    let mut batch = node.db.batch();
+    stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &[block],
+        &node.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect("the surviving record must still validate against the surviving state");
+    drop(batch);
+}
+
+/// **Crash DURING reversal**, before the unwind batch commits.
+///
+/// The batch is dropped one instruction before `commit`. What must survive is
+/// not only the old branch's state but every JOURNAL the interrupted unwind was
+/// consuming: restores and the journal's own deletion are in the SAME batch, so
+/// dropping it leaves the undo data intact and the retry has everything it had
+/// the first time. A design that deleted journals in an earlier batch would
+/// leave this state unrecoverable — rows unrestored, and the record saying how
+/// already gone.
+#[test]
+fn a_crash_during_reversal_leaves_every_journal_it_was_consuming() {
+    let alice = key(1);
+    let carol = key(3);
+    let proposer = key(9);
+    let params = ChainParams::with_v2_enabled();
+    let node = Node::new(params.clone());
+    node.seed(&alice, 10_000_000);
+    let genesis = node.produce(None, &proposer, Vec::new());
+
+    let mut branch = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..3u64 {
+        let blk = node.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+        parent = blk.clone();
+        branch.push(blk);
+    }
+    let on_old_branch = node.snapshot();
+    let records: Vec<Vec<u8>> = branch.iter().map(|b| journal_row(&node, b)).collect();
+
+    {
+        let mut batch = node.db.batch();
+        stage_branch_unwind(
+            &node.db,
+            &mut batch,
+            &branch,
+            &node.real_journal(),
+            JOURNAL_REQUIRED,
+        )
+        .expect("stage");
+        for blk in &branch {
+            sumchain_storage::candidate::stage_deindex(&mut batch, blk).expect("deindex");
+        }
+        sumchain_state::reorg_undo::stage_head_reset(&mut batch, &genesis).expect("head");
+        drop(batch); // process death, one instruction before `commit`
+    }
+
+    let node = node.restart(params);
+    assert_eq!(
+        node.snapshot(),
+        on_old_branch,
+        "an uncommitted batch must have changed nothing"
+    );
+    assert_eq!(
+        node.head().map(|h| h.hash()),
+        Some(branch[2].hash()),
+        "the head still names the old tip, which is how the node knows the unwind \
+         never became durable"
+    );
+    for (blk, expected) in branch.iter().zip(&records) {
+        assert_eq!(
+            &journal_row(&node, blk),
+            expected,
+            "block {}'s journal must survive byte-for-byte: it is deleted in the \
+             same batch that applies its restores, so an interrupted unwind keeps \
+             both or neither",
+            blk.height()
+        );
+    }
+
+    // And the retry works, from exactly the state the crash left.
+    let mut batch = node.db.batch();
+    stage_branch_unwind(
+        &node.db,
+        &mut batch,
+        &branch,
+        &node.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect("the retry must succeed with no manual repair");
+    for blk in &branch {
+        sumchain_storage::candidate::stage_deindex(&mut batch, blk).expect("deindex");
+    }
+    sumchain_state::reorg_undo::stage_head_reset(&mut batch, &genesis).expect("head");
+    batch.commit().expect("commit");
+    assert_eq!(node.head().map(|h| h.hash()), Some(genesis.hash()));
+    for blk in &branch {
+        assert!(
+            node.db
+                .get(
+                    cf::APPLICATION_JOURNAL,
+                    &sumchain_storage::schema::journal_key(blk.height(), &blk.hash()),
+                )
+                .expect("read")
+                .is_none(),
+            "a consumed journal must be gone in the same commit that consumed it"
+        );
+    }
+}
+
+/// **Crash BEFORE the new head is committed**: the unwind is durable, no block
+/// of the adopted branch has been published, and the head names the ancestor.
+///
+/// This is the resting state the previous test's retry lands in, and it is the
+/// one with no marker of its own — the head IS the marker. `resume` reads it,
+/// restores the accumulator from that block's header, and applies the whole new
+/// branch. Nothing re-runs the unwind, because the head says it is done.
+#[test]
+fn a_crash_before_the_new_head_is_committed_resumes_from_the_ancestor() {
+    let alice = key(1);
+    let bob = key(2);
+    let carol = key(3);
+    let proposer = key(9);
+    let params = ChainParams::with_v2_enabled();
+    let (a, b, genesis) = two_nodes(params.clone(), &[(&alice, 10_000_000), (&bob, 10_000_000)]);
+
+    let mut branch_a = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..3u64 {
+        let blk = a.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000, 500, n)],
+        );
+        parent = blk.clone();
+        branch_a.push(blk);
+    }
+    let mut branch_b = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..2u64 {
+        let blk = b.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&bob, &carol.address(), 3_000, 500, n)],
+        );
+        parent = blk.clone();
+        branch_b.push(blk);
+    }
+    for blk in &branch_b {
+        a.retain(blk);
+    }
+
+    let store = BlockStore::new(&a.db);
+    let plan = plan_reorg(
+        &store,
+        branch_a.last().unwrap(),
+        branch_b.last().unwrap(),
+        NO_FINALITY,
+        DEEP,
+    )
+    .expect("plan");
+
+    // The unwind commits — and then the process dies before `apply_branch` has
+    // published anything.
+    {
+        let mut batch = a.db.batch();
+        stage_branch_unwind(
+            &a.db,
+            &mut batch,
+            &plan.old_branch,
+            &a.real_journal(),
+            JOURNAL_REQUIRED,
+        )
+        .expect("stage");
+        for blk in &plan.old_branch {
+            sumchain_storage::candidate::stage_deindex(&mut batch, blk).expect("deindex");
+        }
+        sumchain_state::reorg_undo::stage_head_reset(&mut batch, &genesis).expect("head");
+        batch.commit().expect("commit");
+    }
+
+    let a = a.restart(params);
+    assert_eq!(
+        a.head().map(|h| h.hash()),
+        Some(genesis.hash()),
+        "the head must name the ancestor: that is the marker, and it moved in the \
+         same batch as the state it names"
+    );
+
+    // Recovery. The accumulator is gone with the process and comes back from the
+    // head block's own header, which is the only place it is recoverable from.
+    let head = a.head().expect("head");
+    a.state.set_state_root(accumulator_of(&head));
+    let outcome = resume(
+        &a.db,
+        &a.state,
+        &a.executor,
+        &plan,
+        NO_VALIDATORS,
+        &a.real_journal(),
+        JOURNAL_REQUIRED,
+    )
+    .expect("resume from the ancestor");
+
+    assert_eq!(
+        outcome.unwound,
+        Default::default(),
+        "resume must NOT unwind again: the head already said the unwind was durable"
+    );
+    assert_eq!(outcome.applied, 2, "the whole new branch is applied");
+    assert_eq!(outcome.force_adopted, 0);
+
+    let (left, right) = (a.snapshot(), b.snapshot());
+    assert_eq!(left, right, "{}", describe_divergence(&left, &right));
 }
