@@ -30,7 +30,7 @@ verdict, and the blocking count is what it was less the one row the integration
 pass CLOSED outright.** That is not a formality; it is the finding of the
 remediation pass.
 
-Every one of the thirty-five is a CONSENSUS CHANGE — it changes which
+Every one of the forty-eight is a CONSENSUS CHANGE — it changes which
 transactions succeed, which blocks exist, or what an account balance is, and
 receipts are folded into the state root — so none of them may simply be applied.
 Each is implemented behind an activation height, exactly as the other
@@ -62,7 +62,7 @@ So the verdict stays REACHABLE, and the blocking count stays 120 — 121 at the
 audit, less OC-2, which the integration pass closed outright rather than gated.
 
 What changed is the SHAPE of the remaining precondition, and that is worth
-stating plainly rather than burying in an unchanged number. Before, thirty-five
+stating plainly rather than burying in an unchanged number. Before, forty-eight
 rows were blocked on code in a crate nobody had written. Now they are blocked on
 a deployment decision: setting twelve heights in the runtime `genesis.json` of
 every validator, as one coordinated consensus-breaking activation. That decision
@@ -962,22 +962,26 @@ exist, because `crates/genesis` belongs to another track. An absent
 a closed gate means a release-configured node executes exactly the code it
 executed before. Nothing became unreachable, so nothing stops blocking.
 
-The arithmetic that WOULD move, stated so the next pass can check it: the twelve
-fields now exist, so the remaining half of the precondition is that they are SET
-to a height in the deployed runtime `genesis.json`. When they are, thirty-five
-rows move from REACHABLE to GATED OFF — the remediated behaviour becomes the
-behaviour — and the blocking count falls from 120 to 85.
+The arithmetic that WOULD move, stated so the next pass can check it: the
+seventeen remediation fields now exist, so the remaining half of the
+precondition is that they are SET to a height in the deployed runtime
+`genesis.json`. When they are, forty-eight rows move from REACHABLE to GATED OFF
+— the remediated behaviour becomes the behaviour — and the blocking count falls
+from 120 to 72.
 
-The thirty-five were re-derived from this table rather than carried forward:
-the rows that are both fully REMEDIED, PENDING ACTIVATION and currently blocking are
-BD-1..BD-6, TS-1..TS-11, AU-1, AU-2, AU-4, AU-5, AU-13..AU-16, AU-19, AU-22,
-AU-23, AU-25, AU-27, AU-30, AU-31, AU-36, OV-18 and OV-26. That is thirty-five
-rows, none of them among the two partial ones and none of them OC-2, which is
-closed rather than pending. AU-3 and AU-34 do NOT move, because only part of
-each is remedied and the rest is still reachable; a row is GATED OFF only when
-the whole of it is. Until the fields land and an operator sets them the count is
-120, and reporting 85 before then would be the exact failure this document was
-written to prevent.
+The forty-eight were re-derived from this table rather than carried forward, and
+the figure has moved twice as later passes landed: thirty-five after the
+remediation pass, forty-eight now that Class 4 bounded three allocation rows and
+Class 8 closed ten. The rows that are both fully REMEDIED, PENDING ACTIVATION
+and currently blocking are AL-9, AL-10, AL-11, AU-1, AU-2, AU-4, AU-5,
+AU-13..AU-16, AU-19, AU-22, AU-23, AU-25, AU-27, AU-30, AU-31, AU-36,
+BD-1..BD-6, OV-1, OV-2, OV-3, OV-12, OV-13, OV-14, OV-17, OV-18, OV-20, OV-26,
+OV-28, OV-29 and TS-1..TS-11. That is forty-eight rows, none of them among the
+two partial ones and none of them OC-2, which is closed rather than pending.
+AU-3 and AU-34 do NOT move, because only part of each is remedied and the rest
+is still reachable; a row is GATED OFF only when the whole of it is. Until the
+fields land and an operator sets them the count is 120, and reporting 72 before
+then would be the exact failure this document was written to prevent.
 
 Six further rows are **BLOCKED, STRUCTURAL** (AU-9, AU-10, AU-11, AU-18, AU-21,
 AU-32): no guard can close them, because the subsystem records no address, no
