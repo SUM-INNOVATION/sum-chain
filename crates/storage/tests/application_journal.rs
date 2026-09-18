@@ -1755,3 +1755,97 @@ fn a_restored_node_rebuilds_its_usable_depth_one_published_block_at_a_time() {
     );
     assert_eq!(depth(RESTORED_AT + 5), 5);
 }
+
+/// The size estimate is what the capacity brake reads, and on the old
+/// implementation the brake could never have fired.
+///
+/// The sibling test above proves the estimate MOVES. This proves the move is
+/// load-bearing: the two facts that made the old reading a constant, and the
+/// consequence for the one thing in this tree that acts on it.
+///
+/// Kept separate rather than folded in, because it is a different claim. "The
+/// number changes when rows are written" is about `approximate_size`; "the node
+/// stops producing before it runs out of disk" is about
+/// `CapacityGuard::assess`, and a brake wired to a constant reports `Healthy`
+/// at every budget forever — silently, with no error and no metric, which is
+/// exactly how it survived.
+#[test]
+fn the_capacity_brake_could_not_have_fired_on_the_old_size_estimate() {
+    use sumchain_storage::pruner::{CapacityGuard, CapacityVerdict};
+
+    // ── fact one: nothing in this schema lives in the default family ────────
+    //
+    // The old implementation read `rocksdb.estimate-live-data-size` on the
+    // database handle, which is the DEFAULT column family's property. This is
+    // why that was a constant: there is no row in this schema for it to count,
+    // today or ever, because the default family is not among the families the
+    // database opens.
+    assert!(
+        !ALL_CFS.contains(&"default"),
+        "the default column family holds nothing in this schema, which is what \
+         made the old estimate a constant; if it is ever added here, the reason \
+         this regression exists has changed"
+    );
+
+    let (d, _g) = db();
+    let empty = d.approximate_size();
+
+    // ── fact two: the family the brake exists for is a NAMED one ────────────
+    //
+    // `application_journal` is the family that grows without bound when pruning
+    // is disabled, and it is the growth §12.3 forecasts. An estimate that
+    // cannot see it cannot brake on it, so the rows here go there rather than
+    // into `cf::STATE`.
+    for i in 0..6_000u32 {
+        d.put(cf::APPLICATION_JOURNAL, &i.to_be_bytes(), &[9u8; 256])
+            .unwrap();
+    }
+    let loaded = d.approximate_size();
+    assert!(
+        loaded > empty,
+        "the estimate must see the application-journal family, which is the one \
+         the disk budget exists for: {loaded} against an empty {empty}"
+    );
+
+    // ── monotone, not a one-off step ────────────────────────────────────────
+    for i in 6_000..12_000u32 {
+        d.put(cf::APPLICATION_JOURNAL, &i.to_be_bytes(), &[9u8; 256])
+            .unwrap();
+    }
+    let more = d.approximate_size();
+    assert!(
+        more > loaded,
+        "the estimate must keep tracking growth rather than saturating: {more} \
+         against {loaded}"
+    );
+
+    // ── the consequence: the brake actually engages ─────────────────────────
+    //
+    // A budget the database has now exceeded. On the old constant this verdict
+    // was `Healthy` for every budget above the floor, forever — a node with a
+    // recorded budget would have produced blocks straight onto a full disk and
+    // reported nothing.
+    let budget = empty + (more - empty) / 2;
+    let guard = CapacityGuard::new(budget);
+    assert!(
+        guard.assess(more).is_stop(),
+        "a database past its budget must stop producing; got {:?} for {more} \
+         bytes against a budget of {budget}",
+        guard.assess(more)
+    );
+    assert_eq!(
+        guard.assess(empty),
+        CapacityVerdict::Healthy,
+        "and the same guard must have been healthy when the database was empty, \
+         or the fixture proved nothing about the growth in between"
+    );
+
+    // Unbudgeted is still unbounded, which is the shipped default: this build
+    // prunes nothing, and a node with no budget recorded behaves exactly as it
+    // did before any of this existed.
+    assert_eq!(
+        CapacityGuard::unbounded().assess(more),
+        CapacityVerdict::Healthy,
+        "no budget means no brake, which is the default this tree ships"
+    );
+}
