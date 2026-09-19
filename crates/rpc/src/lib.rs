@@ -8,6 +8,7 @@ pub mod governance_types;
 pub mod inference_settlement_types;
 pub mod health;
 pub mod metrics;
+pub mod pagination;
 pub mod policy_account_types;
 pub mod registry_types;
 pub mod rate_limit;
@@ -18,6 +19,7 @@ pub use auth::{generate_api_key, ApiKeyValidator, RpcAuthConfig};
 pub use health::{HealthCheck, HealthServer, HealthServerHandle, LivenessStatus, MetricsProvider, ReadinessChecks, ReadinessStatus};
 pub use jsonrpsee::server::ServerHandle;
 pub use metrics::{GlobalMetrics, Metrics, MetricsSnapshot};
+pub use pagination::{page_of, RPC_PAGE_DEFAULT, RPC_PAGE_MAX, RPC_PAGE_OFFSET_MAX};
 pub use rate_limit::{RateLimitConfig, RateLimitError, RateLimiter};
 pub use server::{P2pStatsProvider, PeerInfoProvider, RpcServer, RpcTimeoutConfig};
 pub use types::*;
@@ -53,6 +55,17 @@ pub enum RpcError {
     /// and "I cannot know" are different claims, and only one of them is true.
     #[error("Below this node's state-history floor: {0}")]
     BelowHistoryFloor(String),
+
+    /// The caller asked for a page this node will not serve.
+    ///
+    /// Its own error code, for the same reason `BelowHistoryFloor` has one: the
+    /// alternative is to CLAMP the request down to the maximum and answer it,
+    /// and a clamped answer is a truncated answer that looks exactly like a
+    /// complete one. A caller who asks for 100,000 rows and silently receives
+    /// 1,000 has no way to learn that the other 99,000 exist. Refusing says so,
+    /// and says it in a code a client can branch on rather than in prose.
+    #[error("Page out of bounds: {0}")]
+    PageOutOfBounds(String),
 }
 
 impl From<RpcError> for jsonrpsee::types::ErrorObjectOwned {
@@ -69,6 +82,13 @@ impl From<RpcError> for jsonrpsee::types::ErrorObjectOwned {
             // is not there, -32003 says this node is not in a position to say.
             RpcError::BelowHistoryFloor(msg) => {
                 jsonrpsee::types::ErrorObject::owned(-32003, msg, None::<()>)
+            }
+            // Distinct from -32602 (Invalid params) on purpose: the parameter
+            // is well formed and the node understood it, and refused it. A
+            // client that retries with a smaller page is doing the right thing;
+            // a client that treats it as a malformed request is not.
+            RpcError::PageOutOfBounds(msg) => {
+                jsonrpsee::types::ErrorObject::owned(-32004, msg, None::<()>)
             }
             _ => jsonrpsee::types::ErrorObject::owned(-32603, e.to_string(), None::<()>),
         }

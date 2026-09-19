@@ -206,6 +206,40 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"employment_getCredential","params":["<employment_id>"]}'
 ```
 
+## Pagination on the list reads
+
+Every per-family list read below is **paginated and bounded**. Two trailing
+optional parameters, `limit` and `offset`, are appended after that method's own
+arguments:
+
+  * omit both and you get the first **100** rows — this is what a caller written
+    before pagination existed sends, and it keeps working;
+  * `limit` may not exceed **1000** and `offset` may not exceed **1,000,000**;
+  * a request above either bound is **refused** with JSON-RPC error code
+    **`-32004`**, never silently truncated to the maximum. A short answer from
+    this node therefore always means there is no more to say. Retry with a
+    smaller `limit` and page with `offset`.
+
+Ordering is deterministic, so the same `offset` returns the same page and
+consecutive pages neither overlap nor skip.
+
+```bash
+# first page (100 rows)
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tax_listClaimTypes","params":[]}'
+
+# second page of 50
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tax_listClaimTypes","params":[50,50]}'
+```
+
+Three reads are deliberately NOT paginated, because a bound would make their
+answers wrong rather than short: `docclass_getSummary` and
+`employment_getSummary`'s counts are counts over the whole set, and
+`employment_verifyEmployment` is a yes/no question that must see every
+credential. `employment_getSummary` does paginate its `active_employment` list
+while leaving its three counts exact.
+
 ## Tax — SRC-82X (registry reads)
 
 > Status:             code-backed

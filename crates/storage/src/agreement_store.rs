@@ -18,6 +18,7 @@ use sumchain_primitives::{
 };
 
 use crate::db::{cf, Database};
+use crate::page::{paged_resolve, paged_scan, PageSpec};
 use crate::{Result, StorageError};
 
 // Type aliases for clarity
@@ -633,6 +634,48 @@ impl<'a> ExecutorLinkStore<'a> {
                 link_id
             ))),
         }
+    }
+
+    /// One bounded page of the executor links bound to `agreement_id`, in key
+    /// order (SC-4).
+    ///
+    /// This is a full scan with a filter, not an index read — there is no
+    /// by-agreement index — so the walk is still over the family. What the page
+    /// bounds is the response and the number of decoded links held at once.
+    pub fn get_by_agreement_paged(
+        &self,
+        agreement_id: &AgreementId,
+        page: PageSpec,
+    ) -> Result<Vec<ExecutorLink>> {
+        paged_scan(
+            self.db,
+            cf::AGREEMENT_EXECUTOR_LINKS,
+            page,
+            |v| decode_executor_link(v),
+            |l: &ExecutorLink| l.agreement_id == *agreement_id,
+        )
+    }
+
+    /// One bounded page of the executor links an executor contract indexes, in
+    /// the order the index stores them (SC-4).
+    pub fn get_by_executor_paged(
+        &self,
+        executor: &Address,
+        page: PageSpec,
+    ) -> Result<Vec<ExecutorLink>> {
+        let link_ids = self.get_executor_link_ids(executor)?;
+        paged_resolve(&link_ids, page, |id| self.get(id), |_| true)
+    }
+
+    /// One bounded page of active executor links, in key order (SC-4).
+    pub fn list_active_paged(&self, page: PageSpec) -> Result<Vec<ExecutorLink>> {
+        paged_scan(
+            self.db,
+            cf::AGREEMENT_EXECUTOR_LINKS,
+            page,
+            |v| decode_executor_link(v),
+            |l: &ExecutorLink| l.state == ExecutorState::Active,
+        )
     }
 
     /// Get executor links by agreement

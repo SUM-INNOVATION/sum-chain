@@ -16,6 +16,7 @@ use sumchain_primitives::{
 };
 
 use crate::db::{cf, Database};
+use crate::page::{paged_scan, PageSpec};
 use crate::{Result, StorageError};
 
 // =============================================================================
@@ -153,6 +154,21 @@ impl<'a> TaxClaimTypeStore<'a> {
         Ok(entries)
     }
 
+    /// One bounded page of registered claim types, in key order (SC-1).
+    ///
+    /// `list_all` is the same walk with no ceiling on what comes back. This is
+    /// what the RPC calls; that one survives for in-process callers whose
+    /// input is not caller-controlled.
+    pub fn list_all_paged(&self, page: PageSpec) -> Result<Vec<TaxClaimTypeEntry>> {
+        paged_scan(
+            self.db,
+            cf::TAX_CLAIM_TYPES,
+            page,
+            |v| decode_claim_type(v),
+            |_| true,
+        )
+    }
+
     /// List claim types by prefix (e.g., "tax.filed." returns all filing-related types)
     pub fn list_by_prefix(&self, prefix: &str) -> Result<Vec<TaxClaimTypeEntry>> {
         let mut entries = Vec::new();
@@ -259,6 +275,32 @@ impl<'a> TaxIssuerStore<'a> {
         Ok(issuers)
     }
 
+    /// One bounded page of issuers of `class`, in key order (SC-1).
+    pub fn list_by_class_paged(
+        &self,
+        class: sumchain_primitives::tax::TaxIssuerClass,
+        page: PageSpec,
+    ) -> Result<Vec<TaxIssuer>> {
+        paged_scan(
+            self.db,
+            cf::TAX_ISSUERS,
+            page,
+            |v| decode_issuer(v),
+            |i: &TaxIssuer| i.tax_class == class,
+        )
+    }
+
+    /// One bounded page of active issuers, in key order (SC-1).
+    pub fn list_active_paged(&self, page: PageSpec) -> Result<Vec<TaxIssuer>> {
+        paged_scan(
+            self.db,
+            cf::TAX_ISSUERS,
+            page,
+            |v| decode_issuer(v),
+            |i: &TaxIssuer| i.status == TaxIssuerStatus::Active,
+        )
+    }
+
     /// List all active issuers
     pub fn list_active(&self) -> Result<Vec<TaxIssuer>> {
         let mut issuers = Vec::new();
@@ -316,6 +358,17 @@ impl<'a> TaxPolicyStore<'a> {
             policies.push(policy);
         }
         Ok(policies)
+    }
+
+    /// One bounded page of policies, in key order (SC-1).
+    pub fn list_all_paged(&self, page: PageSpec) -> Result<Vec<TaxPolicy>> {
+        paged_scan(
+            self.db,
+            cf::TAX_POLICIES,
+            page,
+            |v| decode_policy(v),
+            |_| true,
+        )
     }
 
     /// List policies by template type

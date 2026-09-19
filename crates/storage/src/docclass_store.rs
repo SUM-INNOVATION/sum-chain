@@ -14,6 +14,7 @@ use sumchain_primitives::{
 };
 
 use crate::db::{cf, Database};
+use crate::page::{paged_resolve, paged_scan, PageSpec};
 use crate::{Result, StorageError};
 
 // =============================================================================
@@ -257,6 +258,29 @@ impl<'a> IdentityRootStore<'a> {
             .contains(cf::DOCCLASS_IDENTITY_ROOTS, identity_root_key(identity_id))
     }
 
+    /// One bounded page of the identity roots a controller controls, in key
+    /// order (SC-7).
+    ///
+    /// A full scan with a filter — there is no by-controller index. The page
+    /// bounds the response and the decoded roots held at once; `IdentityRoot`
+    /// is the largest row in the subsystem (AL-10), so that bound is the
+    /// point.
+    pub fn get_by_controller_paged(
+        &self,
+        controller: &Address,
+        page: PageSpec,
+    ) -> Result<Vec<IdentityRoot>> {
+        paged_scan(
+            self.db,
+            cf::DOCCLASS_IDENTITY_ROOTS,
+            page,
+            |v| decode_identity_root(v),
+            |i: &IdentityRoot| {
+                i.controller == *controller || i.additional_controllers.contains(controller)
+            },
+        )
+    }
+
     /// Get identity by controller address
     pub fn get_by_controller(&self, controller: &Address) -> Result<Vec<IdentityRoot>> {
         let mut identities = Vec::new();
@@ -376,6 +400,28 @@ impl<'a> EligibilityStore<'a> {
     pub fn exists(&self, credential_id: &CredentialId) -> Result<bool> {
         self.db
             .contains(cf::DOCCLASS_ELIGIBILITY, eligibility_key(credential_id))
+    }
+
+    /// One bounded page of an issuer's eligibility attestations, in index
+    /// order (SC-7).
+    pub fn get_by_issuer_paged(
+        &self,
+        issuer: &Address,
+        page: PageSpec,
+    ) -> Result<Vec<EligibilityAttestation>> {
+        let ids = self.get_issuer_credentials(issuer)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
+    }
+
+    /// One bounded page of a subject's eligibility attestations, in index
+    /// order (SC-7).
+    pub fn get_by_subject_paged(
+        &self,
+        subject_commitment: &[u8; 32],
+        page: PageSpec,
+    ) -> Result<Vec<EligibilityAttestation>> {
+        let ids = self.get_subject_credentials(subject_commitment)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
     }
 
     /// Get attestations by issuer
@@ -522,6 +568,71 @@ impl<'a> CredentialStore<'a> {
     pub fn exists(&self, credential_id: &CredentialId) -> Result<bool> {
         self.db
             .contains(cf::DOCCLASS_CREDENTIALS, credential_key(credential_id))
+    }
+
+    /// One bounded page of the credentials a holder address holds within
+    /// `subcodes`, in key order (SC-7).
+    ///
+    /// `docclass_getAcademicCredentialsByHolder` did this as three separate
+    /// whole-family `get_by_subcode` scans and filtered each result by holder
+    /// afterwards — three scans per call, each returning every credential of
+    /// its subcode. Both predicates move inside one scan, so the call costs one
+    /// walk and retains at most `limit` credentials.
+    pub fn get_by_holder_in_subcodes_paged(
+        &self,
+        holder: &Address,
+        subcodes: &[DocSubcode],
+        page: PageSpec,
+    ) -> Result<Vec<AcademicCredential>> {
+        paged_scan(
+            self.db,
+            cf::DOCCLASS_CREDENTIALS,
+            page,
+            |v| decode_credential(v),
+            |c: &AcademicCredential| c.subject_address == *holder && subcodes.contains(&c.subcode),
+        )
+    }
+
+    /// One bounded page of the credentials carrying `subcode`, in key order
+    /// (SC-7).
+    ///
+    /// `docclass_getAcademicCredentialsByHolder` calls this once per subcode,
+    /// so the per-call bound is per-subcode: three subcode scans become three
+    /// bounded pages rather than three whole-family `Vec`s.
+    pub fn get_by_subcode_paged(
+        &self,
+        subcode: DocSubcode,
+        page: PageSpec,
+    ) -> Result<Vec<AcademicCredential>> {
+        paged_scan(
+            self.db,
+            cf::DOCCLASS_CREDENTIALS,
+            page,
+            |v| decode_credential(v),
+            |c: &AcademicCredential| c.subcode == subcode,
+        )
+    }
+
+    /// One bounded page of an issuer's academic credentials, in index order
+    /// (SC-7).
+    pub fn get_by_issuer_paged(
+        &self,
+        issuer: &Address,
+        page: PageSpec,
+    ) -> Result<Vec<AcademicCredential>> {
+        let ids = self.get_issuer_credentials(issuer)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
+    }
+
+    /// One bounded page of a subject's academic credentials, in index order
+    /// (SC-7).
+    pub fn get_by_subject_paged(
+        &self,
+        subject_commitment: &[u8; 32],
+        page: PageSpec,
+    ) -> Result<Vec<AcademicCredential>> {
+        let ids = self.get_subject_credentials(subject_commitment)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
     }
 
     /// Get credentials by subcode
@@ -694,6 +805,23 @@ impl<'a> RevocationStore<'a> {
         }
     }
 
+    /// One bounded page of a revoker's revocation records, in key order
+    /// (SC-7). No RPC method reaches this today (DE-12); the bound is here so
+    /// that a future `#[method]` cannot expose an unbounded one.
+    pub fn get_by_revoker_paged(
+        &self,
+        revoker: &Address,
+        page: PageSpec,
+    ) -> Result<Vec<RevocationRecord>> {
+        paged_scan(
+            self.db,
+            cf::DOCCLASS_REVOCATIONS,
+            page,
+            |v| decode_revocation_record(v),
+            |r: &RevocationRecord| r.revoker == *revoker,
+        )
+    }
+
     /// Get all revocations by revoker
     pub fn get_by_revoker(&self, revoker: &Address) -> Result<Vec<RevocationRecord>> {
         let mut records = Vec::new();
@@ -794,6 +922,88 @@ impl<'a> DocClassIssuerStore<'a> {
             }
             None => Err(StorageError::NotFound(format!("Issuer not found: {}", address))),
         }
+    }
+
+    /// How many issuers the family holds.
+    ///
+    /// `docclass_getSummary` wanted this number and got it by building a `Vec`
+    /// of every issuer and taking `.len()`. A count is not a page: bounding it
+    /// to 100 rows would make the answer WRONG rather than short, so the fix is
+    /// to retain nothing instead of to return less.
+    pub fn count(&self) -> Result<u64> {
+        let mut n = 0u64;
+        for entry in self.db.iter_checked_from(cf::DOCCLASS_ISSUERS, None)? {
+            let _ = entry?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// One bounded page of registered issuers, in key order (SC-7).
+    ///
+    /// This is the reader `docclass_getIssuers` takes `limit`/`offset` for.
+    /// That method already skipped and took — but only AFTER `get_all` had
+    /// built a `Vec` holding every issuer in the family, so the bound it
+    /// advertised was on the response and never on the read. The skip and the
+    /// take now happen inside the scan, which stops at `offset + limit` rows.
+    pub fn get_all_paged(&self, page: PageSpec) -> Result<Vec<DocClassIssuer>> {
+        paged_scan(
+            self.db,
+            cf::DOCCLASS_ISSUERS,
+            page,
+            |v| decode_docclass_issuer(v),
+            |_| true,
+        )
+    }
+
+    /// One bounded page of issuers that may issue, in key order (SC-7). No RPC
+    /// method reaches this today (DE-12).
+    pub fn get_active_paged(&self, page: PageSpec) -> Result<Vec<DocClassIssuer>> {
+        paged_scan(
+            self.db,
+            cf::DOCCLASS_ISSUERS,
+            page,
+            |v| decode_docclass_issuer(v),
+            |i: &DocClassIssuer| i.status.can_issue(),
+        )
+    }
+
+    /// One bounded page of the issuers valid in a jurisdiction, in key order
+    /// (SC-7). The predicate is the one `get_by_jurisdiction` applies, moved
+    /// inside the scan instead of running over a fully built `get_all`.
+    pub fn get_by_jurisdiction_paged(
+        &self,
+        jurisdiction: &str,
+        page: PageSpec,
+    ) -> Result<Vec<DocClassIssuer>> {
+        paged_scan(
+            self.db,
+            cf::DOCCLASS_ISSUERS,
+            page,
+            |v| decode_docclass_issuer(v),
+            |i: &DocClassIssuer| {
+                i.jurisdictions.is_empty()
+                    || i.jurisdictions
+                        .iter()
+                        .any(|j| j == jurisdiction || j == "*")
+            },
+        )
+    }
+
+    /// One bounded page of the issuers authorised for `subcode`, in key order
+    /// (SC-7). No RPC method reaches this today (DE-12).
+    pub fn get_by_subcode_paged(
+        &self,
+        subcode: DocSubcode,
+        page: PageSpec,
+    ) -> Result<Vec<DocClassIssuer>> {
+        paged_scan(
+            self.db,
+            cf::DOCCLASS_ISSUERS,
+            page,
+            |v| decode_docclass_issuer(v),
+            |i: &DocClassIssuer| i.authorized_subcodes.contains(&subcode),
+        )
     }
 
     /// Get all registered issuers
