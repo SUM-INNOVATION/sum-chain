@@ -1084,3 +1084,133 @@ decisions:
    `docs/operations/production-checklist.md` converts with the nominal 3 s and is
    therefore roughly 2x too long wherever it gives a date. A UTC schedule built
    on that conversion is a coordinated restart that misses.
+
+## Part 2b — Three gates arrived after this packet was written
+
+The packet covers seventeen. Twenty now exist: a later pass added the proof
+presence, index-key bound, NFT update-path parity and no-op receipt gates, and
+folded one constant into the protocol digest.
+
+They are NOT scheduled below, and the omission is deliberate rather than an
+oversight. Each needs the same treatment Part 1 gives the seventeen — behaviour
+enabled, migration, mixed-version effect, rollback, risk if activated and risk
+if deferred — and writing a wave for a gate that has not had that treatment is
+exactly the shortcut this packet exists to prevent. By cost shape they belong in
+Wave 1, which is where the next pass should propose them once each has its
+section.
+
+## Part 3 — The recommendation: three waves, one deferral
+
+Part 1 gives the owner seventeen independent decisions. Part 2 says what is
+being decided. This part is the answer a reviewer asked for: **the fewest waves
+that are still safe, with heights.** It is a recommendation, not a setting — no
+height is written anywhere in this branch.
+
+### What actually constrains the grouping
+
+§0.5 establishes there are **no dependencies among the gates**: any order is
+legal, including all at one height. So the constraint is not correctness, it is
+what happens when a wave turns out to be wrong. Two facts decide it:
+
+1. **§0.3 — a height, once passed, is frozen.** Rollback is NOT "move the height
+   back". A gate that has fired has fired, and the blocks produced under it are
+   the chain. So "reversible" here means *reversible in effect*, not in
+   configuration.
+2. **Gates differ in what an error costs.** A gate that only REFUSES more
+   transactions costs availability, is visible in the next block as failed
+   receipts, and writes nothing new. A gate that changes WHERE A ROW LANDS
+   writes rows that persist and cannot be unwritten. A gate that changes WHETHER
+   A BLOCK EXISTS costs liveness.
+
+Those three cost shapes are the waves. Grouping by subsystem would have been
+tidier and would have mixed all three shapes into every wave.
+
+### Wave 0 — compatibility enforcement (a prerequisite, not an activation)
+
+The peer-compatibility enforcement height must be **at or below the first
+behavioural activation below**, because from the moment any gate fires, an
+undeclared peer is indistinguishable from an incompatible one. This is a
+precondition on the schedule rather than a member of it.
+
+### Wave 1 — refusal-only. Recommended height 13,775,436 (head + ~14 days)
+
+Gates 4, 5, 6, 7, 8, 9, 10, 13, 14, 15, 16, 17.
+
+Twelve gates whose entire effect is that some transactions which used to succeed
+now produce a failed receipt: the six authorization gates, revocation standing,
+the allocation bound, the tax proof lifecycle, NFT token authority, agreement
+signature integrity, and the healthcare state preconditions.
+
+  * **Data migration:** none. No existing row changes shape or location.
+  * **Mixed-version:** prevented by Wave 0. Absent it, the two sides disagree
+    about receipts, and receipts are folded into the state root, so they fork.
+  * **Rollback:** none available (§0.3). The mitigation is that the failure mode
+    is a refusal — an operation stops working, loudly, and the operator sees
+    failed receipts in the next block rather than silent divergence.
+  * **Why one wave and not twelve:** they share a failure shape and a diagnosis.
+    If legitimate traffic starts failing, the failed receipt names the
+    subsystem, so a twelve-gate wave is still diagnosable. That is the argument
+    for bundling, and it holds only because of the receipt.
+
+### Wave 2 — data shape. Recommended height 14,580,772 (head + ~28 days)
+
+Gates 3, 11, 12.
+
+The DocClass subject-index split, the block timestamp reaching eight
+subsystems, and the transaction index in event keys.
+
+  * **Data migration:** none required, and none possible. Rows written before
+    the height keep their old shape; a collision committed before gate 3 fires
+    stays collided. Gate 12 changes the number of rows a block writes — one per
+    event rather than one per block — so **disk growth changes at this height**
+    and that is the one number to watch.
+  * **Mixed-version:** as Wave 1.
+  * **Rollback:** none, and here it matters more: rows written under the new
+    shape persist. This is the irreversible wave.
+  * **Why separate from Wave 1:** Wave 1 writes nothing new. This one does, and
+    permanently. Bundling them would make a disk-growth surprise indistinguishable
+    from an authorization surprise.
+  * **Why fourteen days after Wave 1:** long enough that Wave 1's refusal
+    behaviour is observed across a full traffic cycle before anything
+    irreversible is written.
+
+### Wave 3 — block existence. Recommended height 14,983,440 (head + ~35 days)
+
+Gate 1, `nft_receipt_failure_enabled_from_height`.
+
+Alone, because it is the only gate whose disagreement means a node produces **no
+block at all** rather than a different one. Below it, an NFT operation naming an
+absent collection makes the whole block unexecutable; at and above, it is a
+charged failed receipt.
+
+  * **Data migration:** none. **Rollback:** none.
+  * **Why last and alone:** it is the only gate that converts a liveness failure
+    into a receipt. If it misbehaves the symptom is a proposer that cannot
+    produce, which is the one symptom that must not be confused with anything
+    else.
+
+### Deferred — Gate 2, indefinitely, pending a decision this repository cannot make
+
+`docclass_stake_escrow_enabled_from_height`. Part 1 records that it needs a data
+decision the repo has no answer to: what happens to stake already destroyed
+under the old rule. Activating it starts holding stake correctly and does
+nothing about the stake already gone. **That is an owner decision about existing
+value, not an engineering one, and it should not be bundled into a wave to make
+a schedule look complete.**
+
+### UTC estimates
+
+At the **measured** 1.502 s/block and 57,524 blocks/day (§0.9 — not the nominal
+3,000 ms, which is wrong by a factor of two and would double every estimate
+here), from head ≈12,970,100 on 2026-09-18:
+
+| wave | height | ≈ elapsed | ≈ UTC |
+|---|---|---|---|
+| 1 | 13,775,436 | 14 days | 2026-10-02 |
+| 2 | 14,580,772 | 28 days | 2026-10-16 |
+| 3 | 14,983,440 | 35 days | 2026-10-23 |
+
+**Every height must be re-derived against the head at the moment of decision.**
+These are anchored to a head measured on 2026-09-18 and drift by roughly 57,524
+blocks per day of delay. A height that has already passed when the genesis is
+written is refused at startup (§0.2), which is the safe direction.
