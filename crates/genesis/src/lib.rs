@@ -2040,6 +2040,256 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub property_asset_relationship_enabled_from_height: Option<u64>,
+
+    /// Agreement arms that need a party's authority refuse, as UNSUPPORTED.
+    ///
+    /// ACTIVATION-AUDIT rows AU-9, AU-10 and AU-11. Below the gate a signature
+    /// names its party in its own payload and nothing compares that party to
+    /// the sender, so any funded account signs on behalf of any party and
+    /// carries a two-party agreement to `Executed` alone (AU-9); the
+    /// `signature` bytes it carries are stored and checked against nothing
+    /// (AU-10); and any funded account terminates, voids or supersedes any
+    /// agreement, revokes any IP action, and drives any executor link through
+    /// its whole lifecycle (AU-11). At and above the gate every one of those
+    /// arms returns a FAILED receipt whose reason is that the operation is
+    /// unsupported, before the deduct -- which is where this executor's other
+    /// refusals return, so a refused Agreement transaction writes nothing and
+    /// costs nothing, exactly as `Agreement not found` already does.
+    ///
+    /// **Why refusal and not a guard.** There is nothing to compare a sender
+    /// to. `AgreementCommitment` carries no address at all, and `PartyRef` is
+    /// either a 32-byte commitment or a 32-byte subject id -- neither is an
+    /// `Address`, and neither can be turned into one without inventing the
+    /// mapping. Verifying the stored `signature` is no better off: it would
+    /// need a canonical signing input, and this subsystem defines none. Both
+    /// repairs are wire changes to `crates/sumchain-wire/src/agreement.rs`, and
+    /// an executor that guessed either would be enforcing a rule nobody set.
+    ///
+    /// **What the gate deliberately leaves reachable.** `CommitAgreement`,
+    /// `RecordIpAction`, `LinkExecutor` and the three attestation arms. The
+    /// first three CREATE a row under an id of the sender's choosing and
+    /// nothing existing is harmed by them; the attestation arms already check
+    /// `issuer_address == sender`, which is the guard the rest of the subsystem
+    /// is missing, and are the reason this defect is specific rather than
+    /// architectural. So the family is not stranded: an agreement can still be
+    /// recorded. What it can no longer do is CHANGE, which is the half that
+    /// today any stranger can do.
+    ///
+    /// **`UpdateAgreement` is in the gate although AU-11 does not name it.**
+    /// It takes an `AgreementStatus` straight from the payload and writes it
+    /// over any agreement, with `Agreement not found` as its only guard -- so
+    /// it reaches `Terminated`, `Voided` and `Superseded`, the three states
+    /// AU-11 is about, and a gate that closed the arms the row names while
+    /// leaving this one open would close nothing. `RevokeSignature` is in for
+    /// the same reason on AU-9's side: it deletes any signature row for any
+    /// sender, and authorising the writing of a signature while leaving its
+    /// deletion open is not an authorization rule.
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub agreement_party_authority_unsupported_enabled_from_height: Option<u64>,
+
+    /// A consent records the subject's own signature over the grant.
+    ///
+    /// ACTIVATION-AUDIT row AU-3, the GRANT half. Below the gate `GrantConsent`
+    /// checks `issuer_address == sender` and nothing else, so a disclosure
+    /// authorization naming any person is recorded by the issuer alone and the
+    /// person it is about never participates. The REVOCATION half is already
+    /// remedied under `healthcare_authorization_enabled_from_height`, so today
+    /// a subject can withdraw a consent they were never asked to give.
+    ///
+    /// At and above the gate the `GrantConsent` payload is a
+    /// `ConsentGrantRequest`: the envelope, the subject's ed25519 public key
+    /// and the subject's signature over
+    /// `ConsentEnvelope::grant_signing_input`, a domain-separated digest of the
+    /// fields that decide what is being disclosed, about whom, to whom and for
+    /// how long. The key must derive to the envelope's own `subject_address`
+    /// and the signature must verify. The issuer still has to be the sender, so
+    /// the transaction carries BOTH parties: the issuer signs the transaction,
+    /// the subject signs the consent.
+    ///
+    /// **Why a signature, and not a sender check.** The obvious cheap repair --
+    /// require the SUBJECT to send the transaction -- was written out and
+    /// rejected on what it costs: `issuer_address` would then be unverified,
+    /// and anyone could record a consent attributing the disclosure to an
+    /// issuer who had nothing to do with it. That trades a false claim about
+    /// the subject for a false claim about the issuer. A `SignedTransaction`
+    /// carries exactly one signature, so no sender check can make a
+    /// two-party record out of a one-party transaction; the second party's
+    /// agreement has to be IN the payload, which is what this gate puts there.
+    ///
+    /// **A versioned payload, not a new field on the stored row.**
+    /// `ConsentEnvelope` is what the consent family stores and what
+    /// `healthcare_store` encodes; appending to it would change what an
+    /// existing encoding decodes to on disk. `ConsentGrantRequest` wraps it
+    /// instead, so the stored bytes are unchanged and only the TRANSACTION
+    /// payload is versioned: below the gate the payload is a bare envelope, at
+    /// and above it the wrapper, and each side refuses the other's encoding
+    /// rather than silently reinterpreting it.
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub healthcare_consent_subject_signature_enabled_from_height: Option<u64>,
+
+    /// Issuer self-registration refuses, as UNSUPPORTED, where no registrar
+    /// exists.
+    ///
+    /// ACTIVATION-AUDIT rows AU-18 (Tax) and AU-21 (Finance). Below the gate
+    /// `RegisterIssuer` in both subsystems takes the applicant's own payload
+    /// and writes it to the issuer registry: the guards are `address == sender`
+    /// and "not already registered", and the CLASS and the STATUS come from the
+    /// payload. So any funded account registers itself as an ACTIVE
+    /// `TaxAuthority` or an ACTIVE `CentralBank` in one transaction, and the
+    /// registry -- which is publicly readable and which every other
+    /// authorization rule in those subsystems resolves against -- says so. At
+    /// and above the gate both arms return a FAILED receipt whose reason is
+    /// that the operation is unsupported, before the deduct, where each
+    /// subsystem's other registration refusals already return.
+    ///
+    /// **Why refusal and not a registrar.** A registry authorizes nothing it
+    /// does not take from the applicant. Making these arms meaningful needs an
+    /// authority the chain names -- a registrar address, a governance action, a
+    /// genesis-seeded set -- and no `ChainParams` field names one for either
+    /// subsystem, nothing in `genesis.json` seeds either registry, and no
+    /// governance path in this tree writes to them. Inventing one inside an
+    /// executor would be a rule nobody set, and picking WHICH classes may
+    /// self-assert would be the same invention in a smaller font.
+    ///
+    /// **What it costs, stated plainly.** With no registrar, a chain at this
+    /// height has no way to get a Tax or Finance issuer at all, so the arms
+    /// that require one can never be satisfied and those subsystems are
+    /// deferred rather than repaired. That is the intended trade: a deferred
+    /// subsystem records nothing, and an open one records an authority that
+    /// authorized itself. Nothing is stranded that ever worked, because there
+    /// has never been a lawful issuer to strand -- every registration this
+    /// chain could accept today is a self-assertion.
+    ///
+    /// ONE field for two subsystems, for the reason
+    /// `subsystem_proof_unsupported_enabled_from_height` is one field for
+    /// seven: it is one rule and the two arms are the same four statements. An
+    /// operator who closed one of the two would be shipping a chain in which
+    /// "the registry authorizes registrations" was true in Finance and false in
+    /// Tax.
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub subsystem_issuer_self_registration_unsupported_enabled_from_height: Option<u64>,
+
+    /// Property `SubmitProof` refuses, as UNSUPPORTED.
+    ///
+    /// ACTIVATION-AUDIT row AU-32. Below the gate the arm checks nothing about
+    /// the sender and nothing about the proof: its only guard is a duplicate
+    /// id, and everything else -- the profile, the policy ids, the subject
+    /// nullifier, the validity window and the proof bytes -- is written from
+    /// the payload verbatim. So any funded account writes any row into the
+    /// Property proof family, under any subject it likes. At and above the gate
+    /// the arm returns a FAILED receipt whose reason is that the operation is
+    /// unsupported, before the deduct, where its own duplicate-id refusal
+    /// already returns.
+    ///
+    /// **Why refusal and not an issuer check.** `PropertyProofEnvelope` carries
+    /// no issuer address, and Property has no issuer registry at all -- no
+    /// `v_get_issuer` exists in `property_executor.rs` or in
+    /// `property_view.rs`, and no `ChainParams` field names a Property
+    /// registrar. There is neither an address in the payload to check nor a
+    /// registry to check it against.
+    ///
+    /// **And nothing downstream is stranded**, which is what decided this one.
+    /// The only consumer of a Property proof row is
+    /// `PropertyOperation::VerifyProof`, and that arm already refuses as
+    /// UNSUPPORTED under `subsystem_proof_unsupported_enabled_from_height`. A
+    /// submission at this height therefore stores a row that nothing can read
+    /// back for any purpose -- so refusing it removes an unauthenticated write
+    /// and takes no capability with it.
+    ///
+    /// Its own height, and not the `VerifyProof` one, because they are
+    /// different rules about different arms: that gate is about a verifier this
+    /// tree does not have, this one is about an issuer this subsystem does not
+    /// record. An operator must be able to sequence them, and a reader of
+    /// either receipt must be able to tell which claim was refused.
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub property_proof_submission_unsupported_enabled_from_height: Option<u64>,
+
+    /// A collection cannot record a royalty this chain will never pay.
+    ///
+    /// ACTIVATION-AUDIT row RY-1. Below the gate `CreateCollection` stores
+    /// `royalty_bps` and `royalty_recipient` from the payload, both are
+    /// returned over JSON-RPC by `nft_getCollection`, and no execution path
+    /// consults either: `execute_transfer` and `v_transfer_token` move a token
+    /// and no balance at all. A marketplace reading the chain is told a royalty
+    /// exists that the chain has no code to pay. At and above the gate a
+    /// creation whose `royalty_bps` is non-zero returns a FAILED receipt
+    /// whose reason is that royalty enforcement is unsupported. A collection
+    /// with no royalty is created exactly as before.
+    ///
+    /// **Why refusal and not payment.** A transfer carries no consideration for
+    /// a royalty to be a fraction of: `NftTransferData` is `{ to }`, `NftTxData`
+    /// carries a collection, a token, an operation and free bytes, and the only
+    /// value-bearing payload on the transaction is a NATIVE transfer that
+    /// carries no NFT. Adding a price field would not be enough either -- a
+    /// `Transfer` is signed by the SELLER and names the buyer, while
+    /// `SignedTransaction` carries one signature checked against `from`, so a
+    /// price alone would authorise debiting an account whose holder signed
+    /// nothing. Paying a royalty needs a two-sided order, a standing listing or
+    /// an escrowed bid: a new wire type and, for two of the three, a new state
+    /// family. That is a protocol, not a field, and it is not something an
+    /// executor may decide.
+    ///
+    /// **What the gate closes is the CLAIM, not the payment.** The unsafe
+    /// operation here is recording -- and publishing over RPC -- a promise the
+    /// chain cannot keep. Refusing it strands nothing: no royalty has ever been
+    /// paid on this chain, so no collection loses income it was receiving, and
+    /// a creator who wants one can wait for the protocol rather than be told by
+    /// the chain that they already have one.
+    ///
+    /// It only reaches CREATION because creation is the only place
+    /// `royalty_bps` can ever be set: `NftUpdateCollectionConfigData` has no
+    /// `new_royalty_bps` field at all (RY-2's second half), and a recipient on
+    /// a zero-royalty collection is already refused by
+    /// `nft_update_path_parity_enabled_from_height`. Collections created BELOW
+    /// this height keep the royalty they recorded; a gate changes what a node
+    /// does next, not what a chain already wrote.
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub nft_unpayable_royalty_refused_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -2416,6 +2666,16 @@ impl Default for ChainParams {
             property_state_precondition_enabled_from_height: None,
             // Production-safe default: a property merge records the relationship it asserts — dormant.
             property_asset_relationship_enabled_from_height: None,
+            // Production-safe default: Agreement arms needing a party's authority refuse as unsupported — dormant.
+            agreement_party_authority_unsupported_enabled_from_height: None,
+            // Production-safe default: a consent carries the subject's own signature — dormant.
+            healthcare_consent_subject_signature_enabled_from_height: None,
+            // Production-safe default: issuer self-registration refuses where no registrar exists — dormant.
+            subsystem_issuer_self_registration_unsupported_enabled_from_height: None,
+            // Production-safe default: Property SubmitProof refuses as unsupported — dormant.
+            property_proof_submission_unsupported_enabled_from_height: None,
+            // Production-safe default: a collection cannot record a royalty this chain will never pay — dormant.
+            nft_unpayable_royalty_refused_enabled_from_height: None,
         }
     }
 }
@@ -2871,6 +3131,26 @@ impl ChainParams {
                 "property_asset_relationship_enabled_from_height",
                 self.property_asset_relationship_enabled_from_height,
             ),
+            (
+                "agreement_party_authority_unsupported_enabled_from_height",
+                self.agreement_party_authority_unsupported_enabled_from_height,
+            ),
+            (
+                "healthcare_consent_subject_signature_enabled_from_height",
+                self.healthcare_consent_subject_signature_enabled_from_height,
+            ),
+            (
+                "subsystem_issuer_self_registration_unsupported_enabled_from_height",
+                self.subsystem_issuer_self_registration_unsupported_enabled_from_height,
+            ),
+            (
+                "property_proof_submission_unsupported_enabled_from_height",
+                self.property_proof_submission_unsupported_enabled_from_height,
+            ),
+            (
+                "nft_unpayable_royalty_refused_enabled_from_height",
+                self.nft_unpayable_royalty_refused_enabled_from_height,
+            ),
         ]
     }
 
@@ -2911,7 +3191,7 @@ impl ChainParams {
     }
 }
 
-/// The thirty remediation gates, by field name.
+/// The thirty-seven remediation gates, by field name.
 ///
 /// The count in this sentence has been wrong twice, both times because a wave
 /// added gates and nothing checked the prose. It is checked now:
@@ -2964,6 +3244,11 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "subsystem_tx_write_set_bound_enabled_from_height",
     "property_state_precondition_enabled_from_height",
     "property_asset_relationship_enabled_from_height",
+    "agreement_party_authority_unsupported_enabled_from_height",
+    "healthcare_consent_subject_signature_enabled_from_height",
+    "subsystem_issuer_self_registration_unsupported_enabled_from_height",
+    "property_proof_submission_unsupported_enabled_from_height",
+    "nft_unpayable_royalty_refused_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started

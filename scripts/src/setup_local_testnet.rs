@@ -301,6 +301,11 @@ fn run_local() -> Result<()> {
             subsystem_proof_unsupported_enabled_from_height: None,
             property_state_precondition_enabled_from_height: None,
             property_asset_relationship_enabled_from_height: None,
+            agreement_party_authority_unsupported_enabled_from_height: None,
+            healthcare_consent_subject_signature_enabled_from_height: None,
+            subsystem_issuer_self_registration_unsupported_enabled_from_height: None,
+            property_proof_submission_unsupported_enabled_from_height: None,
+            nft_unpayable_royalty_refused_enabled_from_height: None,
             beacon_params: None, // issue #127: beacon parameter surface absent by default
             beacon_schedule: None, // issue #127: beacon height->epoch schedule absent by default
             messaging_sponsored_registration_enabled_from_height: None, // issue #145: sponsored registration dormant (coordinated activation only)

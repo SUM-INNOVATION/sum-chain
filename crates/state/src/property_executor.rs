@@ -184,6 +184,11 @@ pub struct PropertyGates {
     /// bounds the accumulating list it writes into.
     /// ACTIVATION-AUDIT row OV-22, the merge half.
     pub asset_relationship: bool,
+    /// `SubmitProof` refuses as UNSUPPORTED, for every payload.
+    /// ACTIVATION-AUDIT row AU-32. `PropertyProofEnvelope` carries no issuer
+    /// address and Property has no issuer registry, so the arm has neither an
+    /// address in the payload to check nor a registry to check it against.
+    pub proof_submission_unsupported: bool,
 }
 
 impl PropertyGates {
@@ -195,6 +200,7 @@ impl PropertyGates {
         proof_unsupported: false,
         state_precondition: false,
         asset_relationship: false,
+        proof_submission_unsupported: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -205,6 +211,7 @@ impl PropertyGates {
         proof_unsupported: true,
         state_precondition: true,
         asset_relationship: true,
+        proof_submission_unsupported: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -219,6 +226,10 @@ impl PropertyGates {
                 block_height,
             ),
             asset_relationship: PropertyExecutor::asset_relationship_gate_open(
+                params,
+                block_height,
+            ),
+            proof_submission_unsupported: PropertyExecutor::proof_submission_unsupported_gate_open(
                 params,
                 block_height,
             ),
@@ -437,6 +448,40 @@ impl PropertyExecutor {
             }
             _ => Ok(None),
         }
+    }
+
+    /// The activation height for the Property proof-submission refusal.
+    ///
+    /// Reads `params.property_proof_submission_unsupported_enabled_from_height`,
+    /// and nothing else. `None` -- the default, and what a genesis written
+    /// before the field existed resolves to -- closes the gate, so a node
+    /// executes exactly what it executed before the field was declared.
+    ///
+    /// ACTIVATION-AUDIT row AU-32. Below the gate `SubmitProof` verifies
+    /// nothing about the proof and checks nothing about the sender; its sole
+    /// guard is a duplicate id. At and above it the arm returns a FAILED
+    /// receipt carrying [`crate::PROPERTY_PROOF_SUBMISSION_UNSUPPORTED`],
+    /// before the deduct.
+    ///
+    /// Its own height, and not `subsystem_proof_unsupported_enabled_from_height`,
+    /// because they are different rules about different arms: that gate is
+    /// about a verifier this tree does not have, this one about an issuer this
+    /// subsystem does not record. An operator must be able to sequence them,
+    /// and a reader of either receipt must be able to tell which claim was
+    /// refused.
+    #[inline]
+    fn proof_submission_unsupported_activation(params: &ChainParams) -> Option<u64> {
+        params.property_proof_submission_unsupported_enabled_from_height
+    }
+
+    /// Whether the Property proof-submission refusal is active at
+    /// `block_height`.
+    #[inline]
+    pub fn proof_submission_unsupported_gate_open(
+        params: &ChainParams,
+        block_height: BlockHeight,
+    ) -> bool {
+        matches!(Self::proof_submission_unsupported_activation(params), Some(h) if block_height >= h)
     }
 
     /// A stored index row longer than the bound, refused without being decoded.
@@ -1776,6 +1821,38 @@ impl PropertyExecutor {
             // SRC-866: Proof Operations
             // =================================================================
             PropertyOperation::SubmitProof => {
+                // ACTIVATION-AUDIT row AU-32. Below the gate this arm checks
+                // NOTHING about the sender and nothing about the proof: its
+                // only guard is a duplicate id, and the profile, the policy
+                // ids, the subject nullifier, the validity window and the
+                // proof bytes are all written from the payload verbatim. Any
+                // funded account writes any row into the Property proof family,
+                // about any subject it names.
+                //
+                // At and above the gate it refuses as UNSUPPORTED. There is
+                // nothing to authorize against: `PropertyProofEnvelope` carries
+                // no issuer address, and Property has no issuer registry at all
+                // -- no `v_get_issuer` exists in this file or in
+                // `property_view.rs`, and no `ChainParams` field names a
+                // Property registrar.
+                //
+                // And nothing downstream is stranded, which is what decided it.
+                // The only consumer of a row this arm writes is the
+                // `VerifyProof` arm below, and that arm already refuses as
+                // UNSUPPORTED under
+                // `subsystem_proof_unsupported_enabled_from_height`. A
+                // submission at this height therefore stores a row nothing can
+                // read back for any purpose, so refusing it removes an
+                // unauthenticated write and takes no capability with it.
+                //
+                // Refused before the deduct and before the decode, where this
+                // arm's own duplicate refusal returns.
+                if gates.proof_submission_unsupported {
+                    return Ok(PropertyExecutionResult::failure(
+                        crate::PROPERTY_PROOF_SUBMISSION_UNSUPPORTED,
+                    ));
+                }
+
                 let proof: PropertyProofEnvelope = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 

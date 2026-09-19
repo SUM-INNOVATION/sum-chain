@@ -1260,7 +1260,19 @@ fn the_claim_type_registry_is_writable_by_anyone_only_below_the_gate() {
         claim_type: String,
     }
 
-    for gates in [TaxGates::CLOSED, TaxGates::OPEN] {
+    // NOT `TaxGates::OPEN`: `issuer_self_registration_unsupported` refuses
+    // `RegisterIssuer` for every payload (AU-18), and every case below needs a
+    // registered issuer to exist before the rule it IS about can be reached.
+    // That is the stated cost of that gate rather than a conflict with it --
+    // with no registrar, a chain at that height has no way to obtain a Tax
+    // issuer at all -- and these tests pin the rules that apply while one does.
+    for gates in [
+        TaxGates::CLOSED,
+        TaxGates {
+            issuer_self_registration_unsupported: false,
+            ..TaxGates::OPEN
+        },
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let authority = KeyPair::generate();
         let stranger = KeyPair::generate();
@@ -1355,7 +1367,19 @@ fn issuing_a_claim_overwrites_an_existing_proof_only_below_the_gate() {
     let victim_subject = [0xA1; 32];
     let attacker_subject = [0xB2; 32];
 
-    for gates in [TaxGates::CLOSED, TaxGates::OPEN] {
+    // NOT `TaxGates::OPEN`: `issuer_self_registration_unsupported` refuses
+    // `RegisterIssuer` for every payload (AU-18), and every case below needs a
+    // registered issuer to exist before the rule it IS about can be reached.
+    // That is the stated cost of that gate rather than a conflict with it --
+    // with no registrar, a chain at that height has no way to obtain a Tax
+    // issuer at all -- and these tests pin the rules that apply while one does.
+    for gates in [
+        TaxGates::CLOSED,
+        TaxGates {
+            issuer_self_registration_unsupported: false,
+            ..TaxGates::OPEN
+        },
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let victim = KeyPair::generate();
         let attacker = KeyPair::generate();
@@ -1444,7 +1468,19 @@ fn revocation_resolves_the_subject_and_clears_its_index_only_above_the_gate() {
     }
     let subject = [0x22; 32];
 
-    for gates in [TaxGates::CLOSED, TaxGates::OPEN] {
+    // NOT `TaxGates::OPEN`: `issuer_self_registration_unsupported` refuses
+    // `RegisterIssuer` for every payload (AU-18), and every case below needs a
+    // registered issuer to exist before the rule it IS about can be reached.
+    // That is the stated cost of that gate rather than a conflict with it --
+    // with no registrar, a chain at that height has no way to obtain a Tax
+    // issuer at all -- and these tests pin the rules that apply while one does.
+    for gates in [
+        TaxGates::CLOSED,
+        TaxGates {
+            issuer_self_registration_unsupported: false,
+            ..TaxGates::OPEN
+        },
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let issuer = KeyPair::generate();
         fund(&db, &issuer, 100_000_000);

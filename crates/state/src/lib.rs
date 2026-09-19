@@ -412,6 +412,131 @@ pub const VERIFY_PROOF_UNSUPPORTED: &str =
     "VerifyProof is unsupported: this chain implements no verifier for subsystem \
      proofs, and a proof that cannot be checked must not be reported as verified";
 
+/// The activation height for the issuer self-registration refusal.
+///
+/// Reads `params.subsystem_issuer_self_registration_unsupported_enabled_from_height`,
+/// and nothing else. `None` -- the default, and what a genesis written before
+/// the field existed resolves to -- closes the gate, so a node executes exactly
+/// what it executed before the field was declared.
+///
+/// ACTIVATION-AUDIT rows AU-18 (Tax) and AU-21 (Finance). Below the gate both
+/// `RegisterIssuer` arms take the applicant's own payload and write it into the
+/// issuer registry: the guards are `address == sender` and "not already
+/// registered", and the CLASS and the STATUS are the applicant's. So one funded
+/// account becomes an ACTIVE `TaxAuthority`, or an ACTIVE `CentralBank`, in one
+/// transaction -- and the registry is what every other authorization rule in
+/// those subsystems resolves against. At and above the gate both arms return a
+/// FAILED receipt carrying [`ISSUER_SELF_REGISTRATION_UNSUPPORTED`], before the
+/// deduct, where each subsystem's other registration refusals return.
+///
+/// **Why refusal and not a registrar.** No `ChainParams` field names a
+/// registrar for either subsystem, nothing in `genesis.json` seeds either
+/// registry, and no governance path in this tree writes to them. Inventing an
+/// authority inside an executor is a rule nobody set, and choosing which
+/// classes may self-assert is the same invention in a smaller font.
+///
+/// ONE field for two subsystems, on the
+/// `subsystem_proof_unsupported_enabled_from_height` argument: one rule, two
+/// identical bodies, the same blast radius on each side. There is no
+/// configuration in which an operator wants a registry to authorize
+/// registrations in Finance and not in Tax.
+/// The accessor is named SHORTER than its field, alone among the thirty-five,
+/// and that is deliberate rather than sloppy: `every_remediation_gate_reads_the_field_it_names`
+/// locates an accessor by the literal text `fn <name>(params: &`, so a
+/// signature rustfmt wraps onto three lines is one the pairing test cannot
+/// find. The full name does not fit in one hundred columns beside
+/// `&sumchain_genesis::ChainParams`. The pairing is by (file, accessor) and is
+/// asserted against the BODY, so the name carrying fewer words costs nothing;
+/// a signature the test silently skips would cost the whole check.
+#[inline]
+fn subsystem_issuer_registration_activation(params: &sumchain_genesis::ChainParams) -> Option<u64> {
+    params.subsystem_issuer_self_registration_unsupported_enabled_from_height
+}
+
+/// Whether the issuer self-registration refusal is active at `block_height`.
+#[inline]
+pub fn subsystem_issuer_self_registration_unsupported_gate_open(
+    params: &sumchain_genesis::ChainParams,
+    block_height: u64,
+) -> bool {
+    matches!(subsystem_issuer_registration_activation(params), Some(h) if block_height >= h)
+}
+
+/// The reason a gated `RegisterIssuer` refuses, in Tax and in Finance.
+///
+/// One string rather than two, so the two arms cannot drift into saying
+/// different things about the same absence. It says UNSUPPORTED and names the
+/// missing registrar: "already registered" or "invalid class" would both be
+/// claims about the REQUEST, and the request is not what is wrong. What is
+/// wrong is that this chain has no way to tell a real issuer from an applicant
+/// who typed `TaxAuthority` into their own payload.
+pub const ISSUER_SELF_REGISTRATION_UNSUPPORTED: &str =
+    "RegisterIssuer is unsupported: this chain names no registrar for this \
+     subsystem's issuers, and a registry that authorizes nothing it does not \
+     take from the applicant must not record an authority";
+
+/// The reason a gated Agreement arm refuses when it needs a party's authority.
+///
+/// One string for every such arm, for the same reason
+/// [`VERIFY_PROOF_UNSUPPORTED`] is one string for seven. It says UNSUPPORTED
+/// rather than "not authorized": "not authorized" is a claim about the SENDER,
+/// and would imply that some other sender would have been authorized. None
+/// would be. `AgreementCommitment` carries no address, so there is no sender
+/// this subsystem could accept.
+pub const AGREEMENT_PARTY_AUTHORITY_UNSUPPORTED: &str =
+    "Agreement: this operation needs a party's authority and is unsupported -- \
+     an agreement records no party address, so no sender can be authorized and \
+     no stored signature can be checked";
+
+/// The reason a gated Property `SubmitProof` refuses.
+///
+/// It names the SUBMISSION as unsupported and does not say "proof already
+/// exists" or "invalid proof": both would be claims about the argument, and the
+/// argument is not what is wrong. What is wrong is that Property records no
+/// issuer, so the chain cannot tell whose proof this is, and the only arm that
+/// could read the row back already refuses as unsupported itself.
+pub const PROPERTY_PROOF_SUBMISSION_UNSUPPORTED: &str =
+    "SubmitProof is unsupported for Property: this subsystem records no issuer \
+     for a proof and has no registry to check one against, so a submission \
+     authenticates nobody";
+
+/// The reason a gated NFT `CreateCollection` refuses a non-zero royalty.
+///
+/// It names ROYALTY ENFORCEMENT as unsupported rather than the royalty as
+/// invalid. A `royalty_bps` of 500 is a perfectly well-formed number; what
+/// cannot be done is paying it, because no transfer on this chain carries a
+/// price for it to be a fraction of and no execution path moves a balance on a
+/// transfer at all.
+pub const UNPAYABLE_ROYALTY_UNSUPPORTED: &str =
+    "Royalty enforcement is unsupported: no NFT transfer on this chain carries \
+     consideration and none pays a royalty, so a collection must not record one";
+
+/// A gated `GrantConsent` whose payload is still the unremediated encoding.
+///
+/// Three separate reasons rather than one, for the three ways a consent grant
+/// can fail to carry the subject's agreement, because a relying party reading
+/// the receipt has to be able to tell a client that has not been upgraded from
+/// one that supplied the wrong key from one that supplied a bad signature. The
+/// first is a CLIENT-VERSION fact and says so.
+pub const CONSENT_GRANT_REQUEST_REQUIRED: &str =
+    "GrantConsent requires a ConsentGrantRequest: at this height the payload \
+     must carry the subject's public key and signature alongside the envelope, \
+     and a bare ConsentEnvelope no longer authorizes a disclosure";
+
+/// The subject's public key does not derive to the envelope's subject.
+///
+/// The check that makes the signature mean something: without it the signature
+/// would prove only that SOMEBODY signed the grant, and the somebody would be
+/// whoever the issuer chose to put in the payload.
+pub const CONSENT_SUBJECT_KEY_MISMATCH: &str =
+    "GrantConsent: the supplied public key does not derive to the consent's \
+     subject_address, so the signature is not the subject's";
+
+/// The subject's signature does not verify over the grant's signing input.
+pub const CONSENT_SUBJECT_SIGNATURE_INVALID: &str =
+    "GrantConsent: the subject's signature does not verify over this consent's \
+     grant signing input";
+
 /// What Equity's only proof-write path says when it succeeds.
 ///
 /// `EquityOperation::SubmitOwnershipProof` (discriminant 70) is the ONLY
