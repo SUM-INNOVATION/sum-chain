@@ -240,6 +240,23 @@ pub fn subsystem_no_op_receipt_gate_open(
 
 /// The activation height for the `VerifyProof` presence check.
 ///
+/// **RETIRED AND SUPERSEDED by
+/// [`subsystem_proof_unsupported_gate_open`].** No execution path
+/// calls [`subsystem_proof_presence_gate_open`] any more; the branch it drove
+/// is gone from all six arms. It removed two of the three false positives and
+/// kept the third -- a payload naming a proof the subsystem happens to hold
+/// still returned SUCCESS from an operation called `VerifyProof`, which is read
+/// downstream as "verified". Presence is not verification, so presence must not
+/// be REPORTED as verification, and a gate that can still produce that receipt
+/// is the defect rather than the fix. The accessor, the field and their rows in
+/// every gate table are kept: removing a declared `ChainParams` field changes
+/// the activation digest's field set for a gate no chain has ever opened, and
+/// `crates/state/tests/remediation_gates.rs` pins the accessor to the field it
+/// names. Setting a height for it now changes nothing.
+///
+/// The paragraphs below are the reasoning as it stood when the gate was added,
+/// and are kept rather than rewritten, because the disagreement is the record.
+///
 /// Reads `params.subsystem_proof_presence_enabled_from_height`, and nothing
 /// else. `None` -- the default, and what a genesis written before the field
 /// existed resolves to -- closes the gate, so a node executes exactly what it
@@ -281,22 +298,80 @@ pub fn subsystem_proof_presence_gate_open(
     matches!(subsystem_proof_presence_activation(params), Some(h) if block_height >= h)
 }
 
+/// The activation height for the `VerifyProof` unsupported-operation refusal.
+///
+/// Reads `params.subsystem_proof_unsupported_enabled_from_height`,
+/// and nothing else. `None` -- the default, and what a genesis written before
+/// the field existed resolves to -- closes the gate, so a node executes exactly
+/// what it executed before the field was declared.
+///
+/// ACTIVATION-AUDIT rows AU-6, AU-12, AU-17, AU-20, AU-26 and AU-29 (= PR-1 to
+/// PR-6), plus the Property `VerifyProof` arm that no audit row names -- PR-7
+/// asserts "Property has no separate `VerifyProof`" and that is false:
+/// `property_executor.rs` has one, it is reachable, and below the gate it is
+/// the same deduct/credit/increment/`success()` as the other six.
+///
+/// SEVEN arms. At and above the gate every one of them returns a FAILED receipt
+/// carrying [`VERIFY_PROOF_UNSUPPORTED`], for every payload, before the deduct
+/// -- which is where the sibling `SubmitProof` arm's duplicate-id refusal
+/// returns, so a refused proof operation costs the same as the other refusals
+/// in its own subsystem. The payload is not inspected and the proof family is
+/// not consulted: whether the named proof is present is not a fact about
+/// whether it is valid, and branching on it would put back the implication that
+/// a present proof was checked.
+///
+/// **Why refusal rather than a verifier.** Established from source, not
+/// inherited: no proof system is in the workspace dependency graph -- the zk
+/// crates exist only under `tools/`, which the root `Cargo.toml` EXCLUDES from
+/// the workspace precisely so it has no dependency edge into production; there
+/// is no verifying key, circuit or trusted-setup artefact in source, `configs/`,
+/// `genesis.json` or `deploy/`; `crates/sumchain-wire` declares no verification
+/// REQUEST type, so a `VerifyProof` payload carries no expected public inputs to
+/// check anything against; the per-subsystem `ProofType` enums carry `Groth16`
+/// and `Plonk` discriminants that nothing in the tree ever matches on; and
+/// `proof_data` and `public_inputs` are read in exactly four non-test places in
+/// the whole tree, every one of which hashes them into an identifier and none of
+/// which checks one against the other. A verifier is therefore not implementable
+/// from what is here, and the honest thing an operation that cannot be performed
+/// can do is say so.
+///
+/// ONE field for seven subsystems, on the
+/// `subsystem_block_timestamp_enabled_from_height` argument: one rule, seven
+/// identical bodies, and the same blast radius on every side. There is no
+/// configuration in which an operator wants `VerifyProof` to be unsupported in
+/// Legal and supported-but-unverifying in Property.
+#[inline]
+fn subsystem_proof_unsupported_activation(params: &sumchain_genesis::ChainParams) -> Option<u64> {
+    params.subsystem_proof_unsupported_enabled_from_height
+}
+
+/// Whether the `VerifyProof` unsupported refusal is active at `block_height`.
+#[inline]
+pub fn subsystem_proof_unsupported_gate_open(
+    params: &sumchain_genesis::ChainParams,
+    block_height: u64,
+) -> bool {
+    matches!(subsystem_proof_unsupported_activation(params), Some(h) if block_height >= h)
+}
+
+/// The reason a gated `VerifyProof` refuses, in every subsystem that has one.
+///
+/// One string rather than seven, so the seven arms cannot drift into saying
+/// different things about the same absence. It says UNSUPPORTED and not "not
+/// found", because "not found" carries the implication that a proof which WAS
+/// found would have been checked, and nothing in this tree checks one.
+pub const VERIFY_PROOF_UNSUPPORTED: &str =
+    "VerifyProof is unsupported: this chain implements no verifier for subsystem \
+     proofs, and a proof that cannot be checked must not be reported as verified";
+
 /// The width of a subsystem proof id, in bytes.
 ///
-/// Read only where [`subsystem_proof_presence_gate_open`] said yes. Every
-/// subsystem's `ProofId` is `[u8; 32]`, and a `VerifyProof` payload that is not
-/// exactly this long cannot name one.
+/// Every subsystem's `ProofId` is `[u8; 32]`. No execution path reads this any
+/// more: it was the length the retired presence check measured a `VerifyProof`
+/// payload against, and the gated arms no longer inspect the payload at all. It
+/// stays because it is a true statement about the wire types that the tests
+/// which build proof ids are entitled to name, rather than repeat as a literal.
 pub const PROOF_ID_BYTES: usize = 32;
-
-/// The proof id a gated `VerifyProof` payload names, if it names one.
-///
-/// `None` for any payload that is not exactly [`PROOF_ID_BYTES`] bytes. Written
-/// once, here, so six subsystems cannot drift apart on what a `VerifyProof`
-/// payload is the way they would if each parsed it itself.
-#[inline]
-pub fn verify_proof_target(payload: &[u8]) -> Option<[u8; PROOF_ID_BYTES]> {
-    <[u8; PROOF_ID_BYTES]>::try_from(payload).ok()
-}
 
 /// The longest subsystem transaction payload that may be decoded, in bytes.
 ///

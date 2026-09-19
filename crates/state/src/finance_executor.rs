@@ -138,9 +138,11 @@ pub struct FinanceGates {
     /// Executor-written timestamps are the block's, not a literal zero.
     /// ACTIVATION-AUDIT class 2.
     pub real_block_timestamp: bool,
-    /// `VerifyProof` refuses a payload that does not name a proof this
-    /// subsystem holds. ACTIVATION-AUDIT row AU-26 (= PR-4).
-    pub proof_presence: bool,
+    /// `VerifyProof` refuses as UNSUPPORTED, for every payload.
+    /// ACTIVATION-AUDIT AU-26 (= PR-4). Supersedes the retired presence check: no
+    /// verifier exists in this tree, so the operation cannot be performed
+    /// and must not report success.
+    pub proof_unsupported: bool,
     /// A payload-chosen index key is bounded before it becomes a key.
     /// ACTIVATION-AUDIT row the Finance instance of AL-7.
     pub allocation_bound: bool,
@@ -151,7 +153,7 @@ impl FinanceGates {
     pub const CLOSED: Self = Self {
         authorization: false,
         real_block_timestamp: false,
-        proof_presence: false,
+        proof_unsupported: false,
         allocation_bound: false,
     };
 
@@ -159,7 +161,7 @@ impl FinanceGates {
     pub const OPEN: Self = Self {
         authorization: true,
         real_block_timestamp: true,
-        proof_presence: true,
+        proof_unsupported: true,
         allocation_bound: true,
     };
 
@@ -168,7 +170,7 @@ impl FinanceGates {
         Self {
             authorization: FinanceExecutor::authorization_gate_open(params, block_height),
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
-            proof_presence: crate::subsystem_proof_presence_gate_open(params, block_height),
+            proof_unsupported: crate::subsystem_proof_unsupported_gate_open(params, block_height),
             allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
         }
     }
@@ -759,27 +761,29 @@ impl FinanceExecutor {
 
             FinanceOperation::VerifyProof => {
                 // ACTIVATION-AUDIT AU-26 (= PR-4). Below the gate this arm reads no
-                // payload and no proof, and reports success for a proof the chain
-                // has never held. At and above it the payload must be the 32 bytes
-                // of a proof id and that proof must be present. Presence is NOT
-                // verification and this does not claim to be: nothing in this tree
-                // checks `proof_data` against `public_inputs`. What it removes is
-                // the false positive.
+                // payload and no proof and returns SUCCESS, so the chain reports a
+                // verified proof for a proof it has never held, for a payload that
+                // is not a proof id, and for proof bytes nothing has ever looked
+                // at. At and above the gate it refuses as UNSUPPORTED, for every
+                // payload: no verifier for Finance proofs exists in this tree --
+                // nothing checks `proof_data` against `public_inputs`, there is no
+                // proof system in the workspace, no verifying key anywhere, and no
+                // wire type for a verification request -- and an operation that
+                // cannot be performed must say so rather than succeed.
+                //
+                // The proof family is deliberately NOT consulted. Whether the named
+                // proof is present is not a fact about whether it is valid, and
+                // branching on it would restore the implication that a present
+                // proof was checked. That is why the presence gate this replaces
+                // is retired rather than kept beneath this one.
                 //
                 // Refused BEFORE the deduct, which is where the sibling
                 // `SubmitProof` arm's duplicate-id refusal returns, so a refused
                 // proof operation costs the same in both.
-                if gates.proof_presence {
-                    let Some(proof_id) = crate::verify_proof_target(&data.data) else {
-                        return Ok(FinanceExecutionResult::failure(format!(
-                            "VerifyProof payload must be a {}-byte proof id, got {} bytes",
-                            crate::PROOF_ID_BYTES,
-                            data.data.len()
-                        )));
-                    };
-                    if !Self::v_proof_exists(view, &proof_id)? {
-                        return Ok(FinanceExecutionResult::failure("Proof not found"));
-                    }
+                if gates.proof_unsupported {
+                    return Ok(FinanceExecutionResult::failure(
+                        crate::VERIFY_PROOF_UNSUPPORTED,
+                    ));
                 }
                 // Verification is read-only - just record the request
                 StateManager::v_deduct(view, sender, fee)?;

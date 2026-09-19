@@ -191,6 +191,11 @@ const WIRING: &[(&str, &str, &str)] = &[
         "collection_id_nonce_activation",
         "nft_collection_id_nonce_enabled_from_height",
     ),
+    (
+        "lib.rs",
+        "subsystem_proof_unsupported_activation",
+        "subsystem_proof_unsupported_enabled_from_height",
+    ),
 ];
 
 fn source(file: &str) -> String {
@@ -290,19 +295,28 @@ fn every_remediation_gate_reads_the_field_it_names() {
 /// accessors to EIGHT — the densest the hazard has ever been, and the reason
 /// the pairing is asserted per accessor rather than per file.
 ///
+/// The twenty-ninth, `subsystem_proof_unsupported_activation`, is
+/// a SIXTH `lib.rs` accessor, and it sits directly beside
+/// `subsystem_proof_presence_activation` — the gate it supersedes, whose field
+/// name shares its first three words. Those two are the closest pair in the
+/// table, and a swap between them would be invisible behaviourally: the
+/// superseded one is read by nothing, so an accessor that picked up its field
+/// would simply never open, which is indistinguishable from an operator who has
+/// not set a height.
+///
 /// That hazard is not hypothetical here. Making one accessor read its
 /// neighbour's field was killed by `every_remediation_gate_reads_the_field_it_names`
 /// while the behavioural suite for that subsystem still reported every test
 /// passing.
 #[test]
-fn the_twenty_eight_gates_are_twenty_eight_distinct_fields() {
+fn the_twenty_nine_gates_are_twenty_nine_distinct_fields() {
     let fields: BTreeSet<&str> = WIRING.iter().map(|(_, _, f)| *f).collect();
     assert_eq!(
         fields.len(),
-        28,
-        "expected twenty-eight distinct fields: {fields:?}"
+        29,
+        "expected twenty-nine distinct fields: {fields:?}"
     );
-    assert_eq!(WIRING.len(), 28, "expected twenty-eight accessors");
+    assert_eq!(WIRING.len(), 29, "expected twenty-nine accessors");
 }
 
 /// Wiring a gate is not opening it: the release configuration is unchanged.
@@ -428,6 +442,10 @@ fn every_remediation_gate_is_dormant_by_default() {
             "nft_collection_id_nonce_enabled_from_height",
             p.nft_collection_id_nonce_enabled_from_height,
         ),
+        (
+            "subsystem_proof_unsupported_enabled_from_height",
+            p.subsystem_proof_unsupported_enabled_from_height,
+        ),
     
     ];
     assert_eq!(dormant.len(), WIRING.len());
@@ -532,5 +550,5 @@ fn the_genesis_gate_list_matches_the_accessor_table() {
     // such branches lost three attributes, three doc blocks and two
     // activation_heights entries, and left this list at 20 against a table of
     // 28, all of which compiled.
-    assert_eq!(in_genesis.len(), 28);
+    assert_eq!(in_genesis.len(), 29);
 }

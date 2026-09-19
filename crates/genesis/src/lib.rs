@@ -1187,6 +1187,19 @@ pub struct ChainParams {
     /// A `VerifyProof` transaction stops reporting success for a proof that
     /// does not exist.
     ///
+    /// **RETIRED AND SUPERSEDED by
+    /// `subsystem_proof_unsupported_enabled_from_height`.** No
+    /// execution path reads this field any longer. It removed two of the three
+    /// false positives below and kept the third: above it, a payload naming a
+    /// proof the subsystem happens to hold still returned SUCCESS from an
+    /// operation called `VerifyProof`, which is read downstream as "verified"
+    /// — and presence is not verification. The field, its accessor and its rows
+    /// in every gate table are kept rather than deleted, because removing a
+    /// declared field changes the activation digest's field set for a gate no
+    /// chain has ever opened; setting it now changes nothing. The paragraphs
+    /// below are the reasoning as it stood and are kept rather than rewritten,
+    /// because the disagreement is the record.
+    ///
     /// **This gate does not make anything verify a proof.** No proof verifier
     /// exists in this tree: nothing consumes `proof_data` against
     /// `public_inputs`, in any subsystem. What the six arms do below the gate
@@ -1765,6 +1778,67 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub nft_collection_id_nonce_enabled_from_height: Option<u64>,
+
+    /// `VerifyProof` refuses, as UNSUPPORTED, in every subsystem that has one.
+    ///
+    /// ACTIVATION-AUDIT rows AU-6, AU-12, AU-17, AU-20, AU-26 and AU-29 (= PR-1
+    /// to PR-6), plus the Property `VerifyProof` arm that no row names. Below
+    /// the gate all SEVEN arms are the same three statements -- deduct, credit,
+    /// increment -- followed by `success()`, so the chain returns a receipt
+    /// meaning "this proof verified" for a proof it has never held, for a
+    /// payload that is not a proof id, and for a proof whose bytes nothing has
+    /// ever looked at. At and above the gate every one of them returns a FAILED
+    /// receipt whose reason is that the operation is unsupported, before the
+    /// deduct -- which is where the sibling `SubmitProof` arm's duplicate-id
+    /// refusal returns, so the fee treatment of a refused proof operation stays
+    /// uniform within each subsystem.
+    ///
+    /// **Why refusal and not verification.** A verifier cannot be written from
+    /// what this tree holds, and that was established from source rather than
+    /// inherited: no proof system is in the workspace dependency graph (the zk
+    /// crates exist only under `tools/`, which `Cargo.toml` EXCLUDES from the
+    /// workspace so it has no dependency edge into production); no verifying
+    /// key, circuit or trusted-setup artefact exists in source, `configs/`,
+    /// `genesis.json` or `deploy/`; `crates/sumchain-wire` declares no
+    /// verification-REQUEST type, so a `VerifyProof` payload carries no
+    /// expected public inputs to check a proof against; and the `proof_data`
+    /// and `public_inputs` fields of every subsystem envelope are read in
+    /// exactly four places in the whole tree, all of which hash them into an
+    /// identifier and none of which checks one against the other. An operation
+    /// that cannot be performed must say so, not return success.
+    ///
+    /// **This SUPERSEDES `subsystem_proof_presence_enabled_from_height`**,
+    /// whose branch is retired from the arms in the same change. That gate
+    /// removed two of the three false positives and kept the third: above it, a
+    /// payload naming a proof the subsystem happens to hold still returned
+    /// SUCCESS, and a success receipt from an operation called `VerifyProof` is
+    /// read as "verified" by anything downstream. Presence is not verification,
+    /// so presence must not be reported as verification. The field, its
+    /// accessor and its rows in every gate table are kept -- removing a
+    /// declared `ChainParams` field changes the activation digest's field set
+    /// for a gate no chain has ever opened -- but nothing on an execution path
+    /// reads it any more, so there is no configuration of this binary in which
+    /// `VerifyProof` returns a success receipt.
+    ///
+    /// ONE field for seven subsystems, for the reason
+    /// `subsystem_block_timestamp_enabled_from_height` is one field for eight:
+    /// it is one rule, the seven arms are the same three statements, and the
+    /// blast radius is identical on every side -- a transaction that was a
+    /// success receipt becomes a failed one. There is nothing to sequence, and
+    /// an operator who closed six of the seven would be shipping a chain in
+    /// which `VerifyProof` meant one thing in Legal and another in Property.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub subsystem_proof_unsupported_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -2134,6 +2208,8 @@ impl Default for ChainParams {
             nft_index_symmetry_enabled_from_height: None,
             // Production-safe default: a collection id stops being a function of the block clock alone — dormant.
             nft_collection_id_nonce_enabled_from_height: None,
+            // Production-safe default: VerifyProof stops claiming to verify — dormant.
+            subsystem_proof_unsupported_enabled_from_height: None,
         }
     }
 }
@@ -2573,6 +2649,10 @@ impl ChainParams {
                 "nft_collection_id_nonce_enabled_from_height",
                 self.nft_collection_id_nonce_enabled_from_height,
             ),
+            (
+                "subsystem_proof_unsupported_enabled_from_height",
+                self.subsystem_proof_unsupported_enabled_from_height,
+            ),
         ]
     }
 
@@ -2657,6 +2737,7 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "nft_charged_receipt_enabled_from_height",
     "nft_index_symmetry_enabled_from_height",
     "nft_collection_id_nonce_enabled_from_height",
+    "subsystem_proof_unsupported_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started
