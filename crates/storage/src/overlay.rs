@@ -84,6 +84,47 @@
 //! contents. It is not an allocator-level or process-level memory guarantee,
 //! and must not be presented as one.
 //!
+//! ## What one transaction may charge
+//!
+//! `limit` bounds a BLOCK. It cannot bound a transaction, and a bound on a
+//! block is not a bound on a transaction divided by the transaction count: a
+//! block's write set is not bounded by the block's size, because a
+//! read-modify-write charges the PRE-IMAGE of a row the block does not carry.
+//! A hundred-byte payload that rewrites a one-megabyte row charges two
+//! megabytes, so a block at this repository's declared limits — 2,000,000
+//! bytes, 1,000 transactions — can charge about two gigabytes out of entirely
+//! valid transactions. No ceiling a validator can survive admits that, which
+//! means the block ceiling refuses blocks of valid transactions, and the
+//! refusal lands on the whole block.
+//!
+//! [`ApplicationOverlay::begin_transaction`] opens a SCOPE bounding what one
+//! transaction may charge, measured from `logical_bytes` at the moment the
+//! scope opened. It is the same deterministic accounting: a pure function of
+//! the bytes staged, identical on every validator, independent of allocator
+//! behaviour and of wall time.
+//!
+//! The scope exists so the refusal can be attributed. Without one, a refusal
+//! says only "this block is too large" and the caller's only move is to
+//! abandon the block. With one, the caller learns that ONE transaction crossed
+//! its own bound, calls [`ApplicationOverlay::rollback_transaction`] to put the
+//! overlay back exactly as the transaction found it, and carries on with the
+//! rest of the block.
+//!
+//! An overlay that is never given a scope is byte-for-byte the overlay that
+//! existed before scopes did: no bound is checked, no reversal record is built,
+//! and no extra byte is allocated. That is what lets a rule built on scopes sit
+//! behind a dormant activation height whose closed side is indistinguishable
+//! from the unremediated binary.
+//!
+//! What a scope does NOT do is make the block ceiling a sufficiency bound.
+//! `per-transaction bound x max_txs_per_block` is far larger than any
+//! survivable block ceiling and is meant to be: the per-transaction bound has
+//! to admit the largest HONEST transaction, and a thousand of those do not have
+//! to fit in one block. The block ceiling remains a SAFETY bound derived from
+//! the deployment memory limit, and what closes the gap between them is a
+//! proposer that declines to INCLUDE the transaction that would cross it —
+//! see `crates/consensus/src/poa.rs`.
+//!
 //! Every mutation is transactional. The complete new total is computed and
 //! validated before any of `logical_bytes`, `preimages` or `writes` is touched,
 //! so a refused operation leaves the overlay byte-identical. Anything less makes
@@ -186,6 +227,41 @@ fn try_copy(src: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// What one [`ApplicationOverlay::stage`] call displaced, so that the
+/// transaction which made it can be undone without re-reading the database.
+///
+/// The displaced entry is MOVED out of the write map by `BTreeMap::insert`,
+/// never cloned. A rollback log that copied the value it displaces would double
+/// the footprint of exactly the read-modify-write case the per-transaction
+/// bound exists to bound — a 1 MiB row rewritten twice in one transaction would
+/// hold three copies instead of two, behind the accounting's back.
+struct Undo {
+    cf: String,
+    key: Vec<u8>,
+    /// The buffered entry this stage REPLACED. `None` means the stage inserted
+    /// a new entry, which a rollback removes.
+    displaced: Option<Op>,
+    /// Whether this stage was the one that captured the pre-image for `key`.
+    /// Only the first write to a key captures one, so only that stage's undo
+    /// may remove it.
+    captured_preimage: bool,
+}
+
+/// An open per-transaction scope: the bound one transaction's own charge is
+/// held to, and the material to undo it.
+struct TxScope {
+    /// `logical_bytes` at the instant the scope opened. The transaction's own
+    /// charge is the difference from here, so the bound is independent of how
+    /// full the block already was — which is what makes it a property of the
+    /// TRANSACTION and therefore the same number on every validator.
+    base: u64,
+    /// The most this transaction alone may charge.
+    limit: u64,
+    /// Reversal records, oldest first. Replayed in reverse by
+    /// [`ApplicationOverlay::rollback_transaction`].
+    undo: Vec<Undo>,
+}
+
 /// Buffered writes over a [`Database`], with overlay-first reads.
 pub struct ApplicationOverlay<'a> {
     db: &'a Database,
@@ -202,6 +278,15 @@ pub struct ApplicationOverlay<'a> {
     /// See the module's Accounting section. Logical write-set bytes only.
     logical_bytes: u64,
     limit: u64,
+    /// The open per-transaction scope, if any.
+    ///
+    /// `None` is the WHOLE of the unscoped behaviour: no per-transaction bound
+    /// is checked, no undo record is built, and not one byte is allocated for
+    /// one. An overlay that is never given a scope therefore behaves — and
+    /// allocates — exactly as it did before scopes existed, which is what lets
+    /// the rule that uses them sit behind a dormant activation height without
+    /// the dormant path differing from the unremediated binary.
+    tx_scope: Option<TxScope>,
     /// A process-unique identity for this candidate.
     ///
     /// Nothing inside the overlay uses it. It exists so a long-lived component
@@ -279,6 +364,7 @@ impl<'a> ApplicationOverlay<'a> {
             preimages: HashMap::new(),
             logical_bytes: 0,
             limit,
+            tx_scope: None,
             id: Self::next_id(),
         }
     }
@@ -344,12 +430,35 @@ impl<'a> ApplicationOverlay<'a> {
             None => next = add(next, add(key_len, new_value_len)?)?,
         }
 
+        // The per-transaction bound is checked FIRST, and the order is a
+        // decision rather than an accident. When one write would cross both
+        // bounds at once, the two refusals are not interchangeable: crossing
+        // the per-transaction bound refuses a TRANSACTION and the block
+        // survives it, while crossing the block ceiling refuses the BLOCK.
+        // Reporting the recoverable one first is strictly better for liveness,
+        // and fixing the order here is what makes it the same answer on every
+        // validator instead of a function of which comparison a compiler
+        // happened to emit first.
+        //
+        // `saturating_sub`, not `-`: a transaction whose net effect is to
+        // SHRINK the write set — replacing a buffered value with a smaller one
+        // staged before the scope opened — drives `next` below `base`, and its
+        // own charge is then zero rather than an underflow.
+        if let Some(scope) = &self.tx_scope {
+            let charged = next.saturating_sub(scope.base);
+            if charged > scope.limit {
+                return Err(StorageError::TransactionWriteSetExceeded {
+                    limit: scope.limit,
+                    would_reach: charged,
+                });
+            }
+        }
+
         if next > self.limit {
-            return Err(StorageError::InvalidData(format!(
-                "overlay exceeded its {} logical byte limit (would reach {next}); \
-                 the candidate branch is too large to evaluate in memory",
-                self.limit
-            )));
+            return Err(StorageError::OverlayLimitExceeded {
+                limit: self.limit,
+                would_reach: next,
+            });
         }
 
         // Phase 2 — build every owned buffer fallibly, still mutating nothing.
@@ -394,6 +503,36 @@ impl<'a> ApplicationOverlay<'a> {
             })
         })?;
 
+        // The undo record's own two buffers, built HERE for the reason every
+        // other buffer in this phase is: the commit section below must not
+        // allocate anything it cannot report a failure for. Built ONLY when a
+        // scope is open, so an unscoped overlay allocates nothing extra and is
+        // byte-for-byte the overlay that existed before scopes did.
+        //
+        // Both are small and already bounded: a column-family name comes from
+        // the fixed set decided at open time, and a key that reaches here has
+        // already had its own length charged against both ceilings above.
+        let undo_material = if self.tx_scope.is_some() {
+            let undo_key = try_copy(key)?;
+            let undo_cf = try_copy(cf.as_bytes()).and_then(|b| {
+                String::from_utf8(b).map_err(|e| {
+                    StorageError::InvalidData(format!("column family name is not utf-8: {e}"))
+                })
+            })?;
+            Some((undo_cf, undo_key))
+        } else {
+            None
+        };
+        // Room for the record, reserved fallibly while nothing observable has
+        // changed. Capacity is not observable state, so growing it here does
+        // not break the "a refused operation leaves the overlay byte-identical"
+        // rule; failing to grow it AFTER the write map had been mutated would.
+        if let Some(scope) = &mut self.tx_scope {
+            scope.undo.try_reserve(1).map_err(|e| {
+                StorageError::InvalidData(format!("overlay could not extend its undo log: {e}"))
+            })?;
+        }
+
         // ── commit point ───────────────────────────────────────────────────
         //
         // Nothing above this line mutated the overlay, and nothing below this
@@ -417,12 +556,129 @@ impl<'a> ApplicationOverlay<'a> {
                 .or_default()
                 .insert(pre_key, pre);
         }
-        self.writes
+        // `insert` hands back the entry it replaced, MOVED. That moved value
+        // is the whole of the undo record's payload, so a rollback costs no
+        // copy of a block-sized value.
+        let displaced = self
+            .writes
             .entry(owned_cf_for_write)
             .or_default()
             .insert(owned_write_key, owned_op);
+        if let (Some(scope), Some((undo_cf, undo_key))) = (&mut self.tx_scope, undo_material) {
+            scope.undo.push(Undo {
+                cf: undo_cf,
+                key: undo_key,
+                displaced,
+                captured_preimage: needs_preimage,
+            });
+        }
         self.logical_bytes = next;
         Ok(())
+    }
+
+    // ── Per-transaction scopes ──────────────────────────────────────────────
+    //
+    // See the module's "What one transaction may charge" section.
+
+    /// Open a scope bounding what the NEXT transaction may charge, in logical
+    /// write-set bytes, and start recording how to undo it.
+    ///
+    /// Idempotence is not offered: opening a scope while one is already open is
+    /// an error rather than a no-op or a nesting. A nested scope would have to
+    /// decide whose bound and whose undo log an inner write belongs to, and the
+    /// caller that reached here twice has lost track of a transaction boundary
+    /// — which is exactly the state in which silently carrying on rolls a
+    /// transaction back to the wrong place.
+    pub fn begin_transaction(&mut self, limit: u64) -> Result<()> {
+        if self.tx_scope.is_some() {
+            return Err(StorageError::InvalidData(
+                "a per-transaction overlay scope is already open; scopes do not nest, \
+                 and opening a second one would roll the first one back to the wrong \
+                 point"
+                    .to_string(),
+            ));
+        }
+        self.tx_scope = Some(TxScope {
+            base: self.logical_bytes,
+            limit,
+            undo: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// What the open scope's transaction has charged so far, or `None` if no
+    /// scope is open.
+    pub fn transaction_bytes(&self) -> Option<u64> {
+        self.tx_scope
+            .as_ref()
+            .map(|s| self.logical_bytes.saturating_sub(s.base))
+    }
+
+    /// The open scope's bound, or `None` if no scope is open.
+    pub fn transaction_limit(&self) -> Option<u64> {
+        self.tx_scope.as_ref().map(|s| s.limit)
+    }
+
+    /// Close the open scope, KEEPING everything it staged.
+    ///
+    /// Returns what it charged. Dropping the undo log here is what makes the
+    /// log's memory cost per-transaction rather than per-block: a block of a
+    /// thousand transactions holds one transaction's reversal records at a
+    /// time, not a thousand transactions' worth.
+    pub fn commit_transaction(&mut self) -> Option<u64> {
+        let scope = self.tx_scope.take()?;
+        Some(self.logical_bytes.saturating_sub(scope.base))
+    }
+
+    /// Close the open scope, UNDOING everything it staged.
+    ///
+    /// Afterwards the overlay is in the state it was in when
+    /// [`Self::begin_transaction`] was called: the same buffered writes, the
+    /// same captured pre-images, and the same `logical_bytes`. That is asserted
+    /// directly in this module's tests by comparing a full observable snapshot
+    /// taken before the scope opened against one taken after it rolled back.
+    ///
+    /// Replayed in REVERSE. A key written twice inside one transaction has two
+    /// records, and only reverse order restores the first write's displaced
+    /// value and then removes it — forward order would leave the intermediate
+    /// value behind, which is a state no instant ever held.
+    ///
+    /// `logical_bytes` is RESTORED to the scope's base rather than recomputed.
+    /// Every record is replayed, so the write and pre-image maps are exactly
+    /// what they were, and the base is exactly what the accounting said about
+    /// them at that moment. Recomputing would be a second implementation of the
+    /// accounting that could disagree with the first.
+    pub fn rollback_transaction(&mut self) -> Option<u64> {
+        let scope = self.tx_scope.take()?;
+        let charged = self.logical_bytes.saturating_sub(scope.base);
+        // Nothing in this loop allocates. The pre-image drop reads by
+        // reference; the write restore MOVES the record's own two buffers into
+        // maps that already hold that column family and, in the replace case,
+        // that key. A rollback that could fail on allocation would be a
+        // rollback that leaves the overlay half-undone, which is worse than the
+        // charge it was refusing.
+        for record in scope.undo.into_iter().rev() {
+            if record.captured_preimage {
+                if let Some(m) = self.preimages.get_mut(&record.cf) {
+                    m.remove(&record.key);
+                }
+            }
+            match record.displaced {
+                Some(op) => {
+                    self.writes
+                        .entry(record.cf)
+                        .or_default()
+                        .insert(record.key, op);
+                }
+                None => {
+                    if let Some(m) = self.writes.get_mut(&record.cf) {
+                        m.remove(&record.key);
+                    }
+                }
+            }
+        }
+        self.logical_bytes = scope.base;
+        Some(charged)
     }
 
     /// Buffer a write.
@@ -1121,5 +1377,202 @@ mod tests {
         // Still usable afterwards.
         ov.put(cf::STATE, b"s", b"ok").unwrap();
         assert_eq!(ov.get(cf::STATE, b"s").unwrap().unwrap(), b"ok".to_vec());
+    }
+    // ── Per-transaction scopes ──────────────────────────────────────────────
+
+    /// EVERYTHING observable, values included.
+    ///
+    /// Stronger than `snapshot` above, which compares the pre-image KEYS. A
+    /// rollback that restored the right set of keys with the wrong values would
+    /// pass that one, and the wrong value is precisely what a reversal log gets
+    /// wrong when it replays in the wrong order.
+    fn deep_snapshot(
+        ov: &ApplicationOverlay<'_>,
+    ) -> (
+        u64,
+        Vec<(String, Vec<u8>, Option<Vec<u8>>)>,
+        Vec<(String, Vec<u8>, Option<Vec<u8>>)>,
+    ) {
+        let mut writes: Vec<(String, Vec<u8>, Option<Vec<u8>>)> = ov
+            .writes
+            .iter()
+            .flat_map(|(c, m)| {
+                m.iter().map(move |(k, op)| {
+                    (
+                        c.clone(),
+                        k.clone(),
+                        match op {
+                            Op::Put(v) => Some(v.clone()),
+                            Op::Delete => None,
+                        },
+                    )
+                })
+            })
+            .collect();
+        writes.sort();
+        let mut pre: Vec<(String, Vec<u8>, Option<Vec<u8>>)> = ov
+            .preimages
+            .iter()
+            .flat_map(|(c, m)| {
+                m.iter()
+                    .map(move |(k, v)| (c.clone(), k.clone(), v.clone()))
+            })
+            .collect();
+        pre.sort();
+        (ov.logical_bytes(), writes, pre)
+    }
+
+    #[test]
+    fn an_overlay_with_no_scope_open_is_the_overlay_that_existed_before_scopes() {
+        // The closed side of the gate. No scope, no bound, no reversal record —
+        // and the accounting is the same number it was.
+        let (d, _g) = db();
+        let mut ov = ApplicationOverlay::new(&d, TEST_LIMIT);
+        ov.put(cf::STATE, b"k", &vec![7u8; 4096]).unwrap();
+        assert_eq!(ov.transaction_bytes(), None);
+        assert_eq!(ov.transaction_limit(), None);
+        assert_eq!(ov.commit_transaction(), None);
+        assert_eq!(ov.rollback_transaction(), None);
+        assert_eq!(
+            ov.logical_bytes(),
+            1 + 0 + 1 + 4096,
+            "the key once for the captured (absent) pre-image and once for the \
+             write, plus the value; no scope changed the accounting"
+        );
+    }
+
+    #[test]
+    fn a_scope_bounds_the_transaction_and_not_the_block() {
+        let (d, _g) = db();
+        // A block ceiling far above the per-transaction bound, which is the
+        // real configuration: the two are two orders of magnitude apart.
+        let mut ov = ApplicationOverlay::new(&d, 1 << 20);
+
+        // First transaction: 4 KiB, admitted.
+        ov.begin_transaction(8192).unwrap();
+        ov.put(cf::STATE, b"a", &vec![1u8; 4000]).unwrap();
+        assert_eq!(ov.transaction_bytes(), Some(4002));
+        assert_eq!(ov.commit_transaction(), Some(4002));
+
+        // Second transaction: charges from ZERO again, not from 4002. The bound
+        // is a property of the transaction, so how full the block already was
+        // must not change the answer — otherwise two validators that ordered
+        // the block differently would disagree about which transaction failed.
+        ov.begin_transaction(8192).unwrap();
+        ov.put(cf::STATE, b"b", &vec![1u8; 8000]).unwrap();
+        assert_eq!(ov.transaction_bytes(), Some(8002));
+        assert_eq!(ov.commit_transaction(), Some(8002));
+
+        assert_eq!(ov.logical_bytes(), 4002 + 8002);
+    }
+
+    #[test]
+    fn a_rollback_restores_the_overlay_exactly() {
+        let (d, _g) = db();
+        // A committed row, so the transaction below captures a PRE-IMAGE — the
+        // read-modify-write case, which is the one this whole bound is about.
+        d.put(cf::STATE, b"row", &vec![9u8; 2000]).unwrap();
+
+        let mut ov = ApplicationOverlay::new(&d, TEST_LIMIT);
+        // Something staged BEFORE the scope, which the rollback must not touch.
+        ov.put(cf::STATE, b"before", b"keep").unwrap();
+        // And a key written before the scope AND again inside it, so the
+        // rollback has to restore a displaced value rather than remove a key.
+        ov.put(cf::STATE, b"shared", b"original").unwrap();
+        let before = deep_snapshot(&ov);
+
+        ov.begin_transaction(1 << 20).unwrap();
+        ov.put(cf::STATE, b"row", &vec![8u8; 2000]).unwrap();
+        ov.put(cf::STATE, b"shared", b"intermediate").unwrap();
+        ov.put(cf::STATE, b"shared", b"final").unwrap();
+        ov.put(cf::STATE, b"fresh", b"new").unwrap();
+        ov.delete(cf::STATE, b"before").unwrap();
+        assert_ne!(
+            deep_snapshot(&ov),
+            before,
+            "the scope really did change things"
+        );
+
+        ov.rollback_transaction();
+        assert_eq!(
+            deep_snapshot(&ov),
+            before,
+            "a rollback must restore the writes, their VALUES, the captured \
+             pre-images and the accounted total — `shared` back to `original` \
+             and not to `intermediate`, which is what a forward replay would \
+             leave"
+        );
+        assert_eq!(
+            ov.get(cf::STATE, b"before").unwrap().unwrap(),
+            b"keep".to_vec()
+        );
+        assert_eq!(ov.get(cf::STATE, b"fresh").unwrap(), None);
+        assert_eq!(
+            ov.get(cf::STATE, b"row").unwrap().unwrap(),
+            vec![9u8; 2000],
+            "and the read falls back through to the database row the scope \
+             overwrote"
+        );
+    }
+
+    #[test]
+    fn the_refusal_is_typed_and_names_both_numbers() {
+        let (d, _g) = db();
+        let mut ov = ApplicationOverlay::new(&d, TEST_LIMIT);
+        ov.begin_transaction(1024).unwrap();
+        let err = ov.put(cf::STATE, b"k", &vec![0u8; 2000]).unwrap_err();
+        match err {
+            StorageError::TransactionWriteSetExceeded { limit, would_reach } => {
+                assert_eq!(limit, 1024);
+                assert_eq!(would_reach, 2002);
+            }
+            other => panic!("the per-transaction refusal must be its own variant: {other}"),
+        }
+        // And the refusal is transactional in the module's existing sense: the
+        // crossing write changed nothing.
+        assert_eq!(ov.transaction_bytes(), Some(0));
+        assert_eq!(ov.logical_bytes(), 0);
+    }
+
+    #[test]
+    fn the_per_transaction_bound_is_checked_before_the_block_ceiling() {
+        // Both are crossed by one write. The recoverable refusal must be the
+        // one reported, because refusing a transaction leaves the block alive
+        // and refusing the block does not.
+        let (d, _g) = db();
+        let mut ov = ApplicationOverlay::new(&d, 100);
+        ov.begin_transaction(50).unwrap();
+        match ov.put(cf::STATE, b"k", &vec![0u8; 1000]).unwrap_err() {
+            StorageError::TransactionWriteSetExceeded { .. } => {}
+            other => panic!("the transaction bound must be reported first: {other}"),
+        }
+    }
+
+    #[test]
+    fn scopes_do_not_nest() {
+        let (d, _g) = db();
+        let mut ov = ApplicationOverlay::new(&d, TEST_LIMIT);
+        ov.begin_transaction(1024).unwrap();
+        assert!(
+            ov.begin_transaction(1024).is_err(),
+            "a second scope would have to roll the first one back to the wrong \
+             point, and a caller that opened one has lost a transaction boundary"
+        );
+    }
+
+    #[test]
+    fn a_transaction_that_shrinks_the_write_set_charges_zero_rather_than_underflowing() {
+        let (d, _g) = db();
+        let mut ov = ApplicationOverlay::new(&d, TEST_LIMIT);
+        ov.put(cf::STATE, b"k", &vec![0u8; 4000]).unwrap();
+        let before = ov.logical_bytes();
+        ov.begin_transaction(16).unwrap();
+        // Replaces a buffered 4000-byte value with a 1-byte one: `next` drops
+        // BELOW the scope's base. A subtraction here would underflow; the
+        // charge is zero and the write is admitted.
+        ov.put(cf::STATE, b"k", b"x").unwrap();
+        assert_eq!(ov.transaction_bytes(), Some(0));
+        assert!(ov.logical_bytes() < before);
+        assert_eq!(ov.commit_transaction(), Some(0));
     }
 }

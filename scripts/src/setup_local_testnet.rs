@@ -281,6 +281,7 @@ fn run_local() -> Result<()> {
             subsystem_block_timestamp_enabled_from_height: None,
             subsystem_tx_index_enabled_from_height: None,
             subsystem_allocation_bound_enabled_from_height: None,
+            subsystem_tx_write_set_bound_enabled_from_height: None,
             tax_proof_lifecycle_enabled_from_height: None,
             nft_token_authority_enabled_from_height: None,
             agreement_signature_integrity_enabled_from_height: None,

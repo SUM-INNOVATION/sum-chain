@@ -186,6 +186,13 @@ impl TxStatus {
             TxStatus::Failed(392) => "malformed sponsored messaging registration payload",
             TxStatus::Failed(393) => "invalid registrant public key (not a canonical Ed25519 point)",
             TxStatus::Failed(394) => "messaging public key already registered for this registrant",
+            // Per-transaction write-set bound (`MAX_TX_WRITE_SET_BYTES`),
+            // above `subsystem_tx_write_set_bound_enabled_from_height`.
+            // Isolated 400-block. The fee IS consumed and the nonce IS
+            // advanced: the transaction was executed far enough to charge more
+            // than its bound allows, so the work was done and refusing to
+            // charge for it would make the refusal free to repeat.
+            TxStatus::Failed(400) => "transaction exceeded the per-transaction write-set bound",
             TxStatus::Failed(_) => "failed",
         }
     }

@@ -3146,6 +3146,21 @@ impl BlockExecutor {
         // proposer.
         let subject = ExecutionSubject::of(block)?;
 
+        // ── the per-transaction write-set bound ─────────────────────────────
+        //
+        // Resolved ONCE for the block, not per transaction: it is a function of
+        // the height, and re-deriving it inside the loop would be a thousand
+        // chances for two transactions in one block to disagree about which
+        // rules they executed under.
+        //
+        // Below the gate no scope is ever opened, and an overlay with no scope
+        // open checks nothing, records nothing and allocates nothing for one —
+        // so the closed side of this gate is byte-for-byte the binary that
+        // existed before it.
+        let tx_write_set_bound_open =
+            crate::subsystem_tx_write_set_bound_gate_open(&self.params, block.height());
+        let mut refused_for_write_set = 0usize;
+
         for (idx, tx) in block.transactions.iter().enumerate() {
             // Record pre-execution state for diff
             let sender = tx.sender();
@@ -3176,7 +3191,10 @@ impl BlockExecutor {
                 (sender_before, recipient_before, proposer_before)
             };
 
-            let result = {
+            if tx_write_set_bound_open {
+                candidate.begin_transaction(crate::MAX_TX_WRITE_SET_BYTES)?;
+            }
+            let attempted = {
                 let mut view = candidate.view();
                 self.execute_tx_with_validators(
                     &mut view,
@@ -3189,7 +3207,121 @@ impl BlockExecutor {
                     // event rows must be keyed by.
                     idx as u32,
                     active_validator_pubkeys,
-                )?
+                )
+            };
+
+            let result = match attempted {
+                Ok(r) => {
+                    if tx_write_set_bound_open {
+                        candidate.commit_transaction();
+                    }
+                    r
+                }
+
+                // ── the transaction crossed its OWN bound ───────────────────
+                //
+                // Recognised by TYPE, never by message text. This arm can only
+                // be reached with the gate open, because a scope is the only
+                // thing that produces this error and no scope is opened below
+                // the gate.
+                Err(StateError::Storage(
+                    sumchain_storage::StorageError::TransactionWriteSetExceeded {
+                        limit,
+                        would_reach,
+                    },
+                )) if tx_write_set_bound_open => {
+                    // Undo everything this transaction staged. The candidate is
+                    // left exactly as the transaction found it — the same
+                    // buffered writes, the same captured pre-images, the same
+                    // charged total — so the block's other transactions execute
+                    // against a state this one never touched.
+                    candidate.rollback_transaction();
+                    refused_for_write_set += 1;
+                    warn!(
+                        tx = %tx.hash(),
+                        index = idx,
+                        limit,
+                        would_reach,
+                        "transaction exceeded the per-transaction write-set bound; \
+                         rolled back, charged its fee, and the block continues"
+                    );
+
+                    // The fee is charged and the nonce advanced, in a scope of
+                    // their own so that this charge is atomic too. The work WAS
+                    // done: the transaction executed far enough to stage more
+                    // than its bound allows, and a refusal that cost the sender
+                    // nothing would be a refusal that is free to repeat every
+                    // block. A zero-amount self-transfer is how the rest of this
+                    // executor charges a fee without moving value, so the
+                    // accounting — debit, nonce, proposer credit — is the same
+                    // code path and cannot drift from it.
+                    //
+                    // A sender who cannot afford the fee takes a zero-fee
+                    // receipt rather than failing the block: `validate_tx`
+                    // approved the balance before execution began and the
+                    // rollback restored that state, so this is a storage
+                    // failure rather than an affordability one, and a block is
+                    // not the place to discover it.
+                    let fee = tx.fee();
+                    let sender_addr = tx.sender();
+                    candidate.begin_transaction(crate::MAX_TX_WRITE_SET_BYTES)?;
+                    let charged = {
+                        let mut view = candidate.view();
+                        StateManager::v_transfer(
+                            &mut view,
+                            &sender_addr,
+                            &sender_addr,
+                            0,
+                            fee,
+                            &proposer,
+                        )
+                    };
+                    let fee_paid = match charged {
+                        Ok(()) => {
+                            candidate.commit_transaction();
+                            fee
+                        }
+                        Err(e) => {
+                            candidate.rollback_transaction();
+                            warn!(
+                                tx = %tx.hash(),
+                                error = %e,
+                                "could not charge the fee for a write-set-refused \
+                                 transaction; it takes a zero-fee receipt"
+                            );
+                            0
+                        }
+                    };
+
+                    TxExecutionResult {
+                        tx_hash: tx.hash(),
+                        status: sumchain_primitives::TxStatus::Failed(
+                            crate::TX_WRITE_SET_BOUND_RECEIPT_CODE,
+                        ),
+                        fee_paid,
+                    }
+                }
+
+                // ── the BLOCK crossed its ceiling ───────────────────────────
+                //
+                // Not recoverable: this block cannot be evaluated. What is
+                // added is WHICH transaction crossed it, which is the only
+                // thing a proposer can act on — see
+                // `PoAEngine::create_block`.
+                Err(StateError::Storage(
+                    sumchain_storage::StorageError::OverlayLimitExceeded { limit, would_reach },
+                )) => {
+                    return Err(StateError::BlockWriteSetExceeded {
+                        tx_index: idx,
+                        detail: sumchain_storage::StorageError::OverlayLimitExceeded {
+                            limit,
+                            would_reach,
+                        }
+                        .to_string(),
+                    });
+                }
+
+                Err(e) => return Err(e),
             };
 
             // Record post-execution state for diff, from the candidate the
@@ -3229,6 +3361,16 @@ impl BlockExecutor {
             );
 
             receipts.push(receipt);
+        }
+
+        if refused_for_write_set > 0 {
+            info!(
+                refused = refused_for_write_set,
+                height = block.height(),
+                bound = crate::MAX_TX_WRITE_SET_BYTES,
+                "transactions refused by the per-transaction write-set bound; each was \
+                 rolled back and charged, and the block was executed without them"
+            );
         }
 
         // ── Validator earned-credit accrual (800B correction) ──

@@ -112,4 +112,15 @@ impl<'v, 'db> ExecutionView<'v, 'db> {
     pub fn is_empty(&self) -> bool {
         self.overlay.is_empty()
     }
+
+    /// What the open per-transaction scope has charged so far, or `None` if
+    /// none is open.
+    ///
+    /// Read-only. The view deliberately exposes no way to OPEN, COMMIT or ROLL
+    /// BACK a scope: a transaction boundary is the block executor's to draw,
+    /// and an executor arm that could close its own scope could also hide its
+    /// own charge from the bound that is measuring it.
+    pub fn transaction_bytes(&self) -> Option<u64> {
+        self.overlay.transaction_bytes()
+    }
 }
