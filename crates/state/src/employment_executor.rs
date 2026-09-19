@@ -128,6 +128,10 @@ pub struct EmploymentGates {
     /// verifier exists in this tree, so the operation cannot be performed
     /// and must not report success.
     pub proof_unsupported: bool,
+
+    /// An accumulating index row past the bound is refused before it is
+    /// decoded. ACTIVATION-AUDIT row AL-2.
+    pub allocation_bound: bool,
 }
 
 impl EmploymentGates {
@@ -136,6 +140,8 @@ impl EmploymentGates {
         authorization: false,
         real_block_timestamp: false,
         proof_unsupported: false,
+
+        allocation_bound: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -143,6 +149,8 @@ impl EmploymentGates {
         authorization: true,
         real_block_timestamp: true,
         proof_unsupported: true,
+
+        allocation_bound: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -151,7 +159,20 @@ impl EmploymentGates {
             authorization: EmploymentExecutor::authorization_gate_open(params, block_height),
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
             proof_unsupported: crate::subsystem_proof_unsupported_gate_open(params, block_height),
+            allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
         }
+    }
+
+    /// The stored-row length limit this gate imposes, or `None` when closed.
+    ///
+    /// `None` is what the bounded readers treat as "no limit", so a closed gate
+    /// reads byte-for-byte what the unbounded reader read. The same spelling
+    /// `AgreementGates::row_limit` and `DocClassGates::row_limit` use, reading
+    /// the same constant, because it is the same rule.
+    #[inline]
+    pub fn row_limit(self) -> Option<usize> {
+        self.allocation_bound
+            .then_some(crate::MAX_ACCUMULATING_ROW_BYTES)
     }
 }
 
@@ -200,6 +221,106 @@ impl EmploymentExecutor {
             Some(issuer) => issuer.status.is_active(),
             None => false,
         })
+    }
+
+    /// A stored index row longer than the bound, refused without being decoded.
+    ///
+    /// The DocClass and Agreement wording verbatim, and for the reason those
+    /// give: one phrasing across every family so the refusal is greppable, with
+    /// the LENGTH in it, because the remedy for a row over the limit is not
+    /// "retry".
+    fn row_too_large(what: &str, bytes: usize) -> EmploymentExecutionResult {
+        EmploymentExecutionResult::failure(format!(
+            "{what} too large to modify: {bytes} bytes, limit {}",
+            crate::MAX_ACCUMULATING_ROW_BYTES
+        ))
+    }
+
+    /// Every index row `v_put_credential` would append to, checked against the
+    /// bound before the first of them is decoded.
+    ///
+    /// ACTIVATION-AUDIT row AL-2. `v_put_credential` appends the employment id
+    /// to THREE accumulating rows -- the employee commitment's, the employee
+    /// wallet address's and the employer commitment's -- and each append
+    /// decodes the whole row, pushes one 32-byte id and re-encodes the whole
+    /// row, before `view.put` charges the candidate a single byte. So one
+    /// credential does that three times, and a row grown below the gate costs
+    /// its own size several times over on every later credential naming the
+    /// same key.
+    ///
+    /// No read AT ALL while the gate is closed, not merely no refusal: a read
+    /// here would move a decode earlier than the unremediated binary reaches
+    /// it, which is what `employment_routing.rs`'s corrupt-row pins record.
+    ///
+    /// Checked before `v_deduct`, because every other refusal in this arm is
+    /// checked there too -- an Employment refusal writes nothing at all, and a
+    /// bound that charged for the refusal would be the one exception.
+    fn credential_indexes_within_bound(
+        view: &ExecutionView<'_, '_>,
+        credential: &EmploymentCredential,
+        max_bytes: Option<usize>,
+    ) -> Result<Option<EmploymentExecutionResult>> {
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        if let Some(bytes) = Self::v_employee_index_row_len(view, &credential.employee_ref)? {
+            if bytes > max {
+                return Ok(Some(Self::row_too_large(
+                    "Employment employee index",
+                    bytes,
+                )));
+            }
+        }
+        if let Some(bytes) =
+            Self::v_employee_address_index_row_len(view, &credential.employee_address)?
+        {
+            if bytes > max {
+                return Ok(Some(Self::row_too_large(
+                    "Employment employee address index",
+                    bytes,
+                )));
+            }
+        }
+        if let Some(bytes) = Self::v_employer_index_row_len(view, &credential.employer_ref)? {
+            if bytes > max {
+                return Ok(Some(Self::row_too_large(
+                    "Employment employer index",
+                    bytes,
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Both index rows `v_put_attestation` would append to, checked against the
+    /// bound before either is decoded. ACTIVATION-AUDIT row AL-2, income half.
+    fn attestation_indexes_within_bound(
+        view: &ExecutionView<'_, '_>,
+        attestation: &IncomeAttestation,
+        max_bytes: Option<usize>,
+    ) -> Result<Option<EmploymentExecutionResult>> {
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        if let Some(bytes) = Self::v_subject_income_index_row_len(view, &attestation.subject_ref)? {
+            if bytes > max {
+                return Ok(Some(Self::row_too_large(
+                    "Employment subject income index",
+                    bytes,
+                )));
+            }
+        }
+        if let Some(bytes) =
+            Self::v_holder_address_index_row_len(view, &attestation.holder_address)?
+        {
+            if bytes > max {
+                return Ok(Some(Self::row_too_large(
+                    "Employment income holder address index",
+                    bytes,
+                )));
+            }
+        }
+        Ok(None)
     }
 
     /// Execute an Employment transaction.
@@ -403,6 +524,13 @@ impl EmploymentExecutor {
                     }
                 }
 
+                // ACTIVATION-AUDIT row AL-2, the credential half.
+                if let Some(refusal) =
+                    Self::credential_indexes_within_bound(view, &credential, gates.row_limit())?
+                {
+                    return Ok(refusal);
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -597,6 +725,13 @@ impl EmploymentExecutor {
 
                 if Self::v_attestation_exists(view, &attestation.attestation_id)? {
                     return Ok(EmploymentExecutionResult::failure("Income attestation already exists"));
+                }
+
+                // ACTIVATION-AUDIT row AL-2, the income half.
+                if let Some(refusal) =
+                    Self::attestation_indexes_within_bound(view, &attestation, gates.row_limit())?
+                {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;

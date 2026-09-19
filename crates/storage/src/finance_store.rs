@@ -249,7 +249,11 @@ impl<'a> FinanceIssuerStore<'a> {
     /// index stores them (SC-3).
     ///
     /// The index row is still decoded whole — it is one row, and bounding it is
-    /// OV-7's problem, not this one. What this bounds is the point-reads: at
+    /// AL-4's problem, not this one (recorded here as OV-7's before OV-7 turned
+    /// out to be about the index's MEANING rather than its size). AL-4's bound
+    /// sits on the WRITE path, so it stops the row growing past
+    /// `MAX_ACCUMULATING_ROW_BYTES` once activated and does not retroactively
+    /// bound a row already larger. What this bounds is the point-reads: at
     /// most `offset + limit` of them, against one per index entry.
     pub fn get_by_jurisdiction_paged(
         &self,
