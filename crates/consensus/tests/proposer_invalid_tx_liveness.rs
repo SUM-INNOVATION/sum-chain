@@ -634,3 +634,134 @@ async fn a_restart_neither_resurrects_the_halt_nor_replays_a_height() {
          destroyed: a restart is not evidence about a transaction"
     );
 }
+
+// ── 6. More poison than the budget ──────────────────────────────────────────
+
+/// A fixture with `n` independently funded senders.
+///
+/// Independent because `drop_with_sender_tail` removes a sender's whole tail in
+/// one drop: ten poisoned transactions from ONE sender cost one drop, and would
+/// make a test of the drop budget a test of nothing. Ten senders cost ten.
+fn many_senders(n: usize) -> (Genesis, [u8; 32], Vec<KeyPair>) {
+    let validator = KeyPair::generate();
+    let senders: Vec<KeyPair> = (0..n).map(|_| KeyPair::generate()).collect();
+    let mut alloc = HashMap::from([(validator.address().to_base58(), 100_000_000u128)]);
+    for kp in &senders {
+        alloc.insert(kp.address().to_base58(), 1_000_000_000_000u128);
+    }
+    let genesis = Genesis::new(
+        CHAIN_ID,
+        0,
+        vec![validator.public_key().to_base58()],
+        alloc,
+        params(),
+    );
+    (genesis, *validator.private_key().as_bytes(), senders)
+}
+
+/// Twelve unexecutable transactions, from twelve senders, still yield a block
+/// that carries the honest traffic behind them.
+///
+/// Twelve because the fitting loop used to have ONE budget of eight, shared
+/// between the proportional headroom truncation and the drop of a named
+/// transaction. Nine transactions that cannot execute exhausted it, the
+/// proposal that survived still refused, and `create_block` returned the
+/// error — no block, and for the transient ones nothing evicted either, so the
+/// same nine were selected first on the next tick. The halt was back by a side
+/// door, for nine `min_fee`s.
+///
+/// So the budgets are separate: a drop is attributable progress, a headroom
+/// truncation is a guess that converges, and one must not consume the other's
+/// allowance.
+#[tokio::test]
+async fn more_unexecutable_transactions_than_the_old_budget_still_yields_a_block() {
+    // Twelve poisoned senders and four clean ones. Clean senders are the point:
+    // the poisoned senders' own later nonces go with their poison, correctly,
+    // so a test that only had those could not tell "the block carried the
+    // honest traffic" from "the block was empty".
+    let (genesis, key, senders) = many_senders(16);
+    let node = Node::new(&genesis, key);
+    let sink = Address::new([0xAB; 20]);
+    let (poisoned, clean) = senders.split_at(12);
+
+    let mut proposal: Vec<SignedTransaction> = poisoned
+        .iter()
+        .map(|kp| mint_absent_collection_tx(kp, 0, 9_000_000))
+        .collect();
+    // Behind each poison, that sender's own nonce 1 — which must go with it.
+    let tails: Vec<SignedTransaction> = poisoned
+        .iter()
+        .map(|kp| transfer_tx(kp, sink, 1, 5_000_000))
+        .collect();
+    proposal.extend(tails.iter().cloned());
+    // And traffic from senders nobody poisoned, which must be carried.
+    let honest: Vec<SignedTransaction> = clean
+        .iter()
+        .map(|kp| transfer_tx(kp, sink, 0, 1_000))
+        .collect();
+    proposal.extend(honest.iter().cloned());
+
+    let block = node.consensus.propose_block(proposal).await.expect(
+        "twelve unexecutable transactions must not stop a block being \
+         produced. Under one shared budget of eight this returned an error, \
+         which is the halt with a different number on it",
+    );
+    let carried = hashes(&block.transactions);
+    println!(
+        "BUDGET: 12 poisons + 12 tails + 4 clean -> block {} carried {}",
+        block.hash(),
+        block.tx_count()
+    );
+    assert!(
+        honest.iter().all(|t| carried.contains(&t.hash())),
+        "every transaction from a sender nobody poisoned must be carried. An \
+         empty block every tick is a chain that advances while nothing \
+         confirms, which is the halt wearing a different face"
+    );
+    for tx in &tails {
+        assert!(
+            !carried.contains(&tx.hash()),
+            "and a transfer at nonce 1 behind a dropped nonce 0 must NOT be \
+             carried: it would take an InvalidNonce receipt and then be \
+             deleted from the mempool by remove_batch"
+        );
+    }
+}
+
+/// A flood larger than the whole drop budget still yields a block.
+///
+/// Seventy senders, every one of them poisoned, is past
+/// `MAX_REFUSED_TX_DROPS`. The budget exists to bound the proposer's work — a
+/// slot spent executing is its own denial of service — but a bound on work must
+/// never become a bound on liveness. So the loop gives up on FITTING and falls
+/// back to halving the proposal until something is accepted, which the empty
+/// proposal always is.
+///
+/// What this does NOT claim is that the flood is harmless. It costs this
+/// proposer up to sixty-four re-executions and a slot that carries little or
+/// nothing. The structural answer is a per-transaction scope inside
+/// `execute_block`, so one refusal is rolled back and the block continues in
+/// ONE pass — which changes what a block contains and needs an activation gate.
+#[tokio::test]
+async fn a_flood_larger_than_the_drop_budget_still_yields_a_block() {
+    let (genesis, key, senders) = many_senders(70);
+    let node = Node::new(&genesis, key);
+
+    let proposal: Vec<SignedTransaction> = senders
+        .iter()
+        .map(|kp| mint_absent_collection_tx(kp, 0, 9_000_000))
+        .collect();
+
+    let block = node.consensus.propose_block(proposal).await.expect(
+        "the fitting budget bounds WORK, not liveness. Running out of it must \
+         produce a short block, never no block",
+    );
+    println!(
+        "FLOOD: 70 poisons -> block {} at height {} carrying {}",
+        block.hash(),
+        block.height(),
+        block.tx_count()
+    );
+    assert_eq!(block.height(), 1, "the chain advanced");
+    assert_ne!(block.header.proposer_sig, [0u8; 64], "and it is signed");
+}
