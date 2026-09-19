@@ -978,20 +978,32 @@ fn a_restart_forgets_declarations_and_the_window_fails_closed_above_the_height()
 
 /// The two swarm-level halves of the disconnect, pinned at their source.
 ///
-/// `Swarm::disconnect_peer_id` and `SwarmEvent::ConnectionEstablished` live
-/// inside `NetworkService::run`, which owns the swarm and cannot be entered
-/// without a live TCP listener and a second node whose listen address this crate
-/// never reports. The wiring is therefore asserted the way
-/// `crates/node/tests/consensus_participation_guard.rs` asserts the node's
-/// routes: against the source, so that deleting either half fails a test instead
-/// of silently restoring the defect.
+/// # What this still owns, now that `live_admission.rs` exists
 ///
-/// The two halves are `DisconnectPeer` actually reaching the swarm, and the ban
-/// being consulted BEFORE the connection is registered — a gate placed after
-/// `peer_connected` would announce the banned peer to everything above before
-/// dropping it.
+/// The BEHAVIOUR — a banned peer being hung up on and refused when it dials
+/// back — is now asserted against two real nodes over real TCP in
+/// `crates/p2p/tests/live_admission.rs`, which became possible only once
+/// `SwarmEvent::NewListenAddr` stopped being discarded. Read that first: it is
+/// the stronger test, because it proves the gate is REACHED and not merely
+/// written.
+///
+/// What a live test cannot see is ORDER inside the arm. A gate that ran after
+/// `peer_connected` would still hang up, still keep the peer out of the
+/// connected set in the end, and still pass every assertion over there — while
+/// having already announced `PeerConnected` to everything above and already
+/// moved the inbound counter. That window is invisible from outside and visible
+/// in the source, so it is asserted here.
+///
+/// # And that the gate is the PREDICATE, not a second copy of it
+///
+/// This arm used to call `self.peer_manager.is_banned(&peer_id)` — a narrower
+/// check written beside `can_accept_inbound`, which had no caller anywhere. Two
+/// predicates, one of them dead, is how a refusal comes to be believed rather
+/// than enforced: the connection limits and the reputation floor described a
+/// policy nothing applied. The needles below are the real predicates, so
+/// re-splitting them fails here.
 #[test]
-fn the_disconnect_command_reaches_the_swarm_and_the_ban_gate_precedes_registration() {
+fn the_disconnect_command_reaches_the_swarm_and_the_admission_gate_precedes_registration() {
     let src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/network.rs"),
     )
@@ -1011,21 +1023,41 @@ fn the_disconnect_command_reaches_the_swarm_and_the_ban_gate_precedes_registrati
         .find("SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {")
         .expect("the swarm handler must have a ConnectionEstablished arm");
     let body = &src[established..];
-    let gate = body.find("self.peer_manager.is_banned(&peer_id)").expect(
-        "a banned peer's reconnection must be refused where the connection \
-             is reported; without this the ban refuses nothing, because nothing \
-             in the loop consulted `can_accept_inbound`",
-    );
     let register = body
         .find("self.peer_manager.peer_connected(peer_id")
         .expect("the arm registers the peer");
+
+    // Both halves of the admission policy, each before registration. The
+    // inbound half is the full predicate including capacity; the outbound half
+    // is the peer-facing part only, because refusing a connection this node
+    // asked for on an inbound or per-IP limit would be refusing its own dial.
+    for needle in [
+        "self.peer_manager.can_accept_inbound(&peer_id, None)",
+        "self.peer_manager.peer_is_admissible(&peer_id)",
+    ] {
+        let gate = body.find(needle).unwrap_or_else(|| {
+            panic!(
+                "the connection handler must consult `{needle}`. A ban, a \
+                 reputation floor and a connection limit that nothing in this \
+                 loop reads refuse nothing at all — which is what this arm did \
+                 when it carried its own narrower `is_banned` check instead"
+            )
+        });
+        assert!(
+            gate < register,
+            "`{needle}` is consulted AFTER `peer_connected` registers the peer. \
+             A refusal in that order has already announced `PeerConnected` to \
+             everything above and already moved the inbound counter, and no test \
+             outside this process can see that it did"
+        );
+    }
+
+    let hangup = body
+        .find("swarm.disconnect_peer_id(peer_id)")
+        .expect("the gate must hang up on a refused connection");
     assert!(
-        gate < register,
-        "the ban must be checked BEFORE the peer is registered and announced"
-    );
-    assert!(
-        body[gate..register].contains("swarm.disconnect_peer_id(peer_id)"),
-        "the gate must hang up, not just skip registration and leave the banned \
-         peer connected"
+        hangup < register,
+        "the refusal must close the connection, not just skip registration and \
+         leave the refused peer connected and gossiping"
     );
 }
