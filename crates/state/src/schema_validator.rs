@@ -645,15 +645,25 @@ mod tests {
     use super::*;
     use sumchain_primitives::DocSubcode;
 
-    /// Every test below asserts about credentials at block height 100.
-    /// `SchemaValidator::new()` carries the SHIPPED activation height (385_000),
-    /// so a validator built that way returns `Valid` for everything at height
-    /// 100 without looking at the credential — which made the "should be
-    /// rejected" tests fail and, worse, made the "should be accepted" tests
+    /// A validator that actually enforces at the heights these tests use.
+    ///
+    /// Every test routed through this asserts about credentials at block height
+    /// 100. `SchemaValidator::new()` carries the SHIPPED activation height
+    /// (385_000), so a validator built that way returns `Valid` for everything
+    /// at height 100 without looking at the credential — which made the "should
+    /// be rejected" tests fail and, worse, made the "should be accepted" tests
     /// pass without validating anything. Pin the activation height at 0 so the
     /// assertions are about the schema rules and not about the height.
-    /// `test_backward_compatibility_before_activation` builds its own validator
-    /// on purpose and is deliberately NOT routed through this.
+    ///
+    /// Fourteen of the sixteen tests in this module route through this. The
+    /// other two — `test_backward_compatibility_before_activation` and
+    /// `test_disabled_validator` — build their own config on purpose, because
+    /// the height and the `enabled` flag are their respective subjects.
+    ///
+    /// Pinning the height is NECESSARY AND NOT SUFFICIENT: a validator that
+    /// returned `Valid` unconditionally would still satisfy every "should be
+    /// accepted" assertion, which is how these went unnoticed. So each test
+    /// below also carries an input that must produce the OPPOSITE verdict.
     fn enforcing_validator() -> SchemaValidator {
         SchemaValidator::with_config(SchemaValidatorConfig {
             activation_height: 0,
@@ -689,6 +699,84 @@ mod tests {
         }
     }
 
+    /// Assert that `result` is a REJECTION whose reason names `needle`.
+    ///
+    /// `!is_valid()` on its own cannot tell "refused by the rule this test
+    /// names" from "refused by some other rule the fixture happens to trip",
+    /// and the reason string is what a node operator reads when a credential
+    /// is refused, so every rejection below is pinned to its reason.
+    fn assert_rejected_for(result: &ValidationResult, needle: &str, context: &str) {
+        match result {
+            ValidationResult::Invalid { reason } => assert!(
+                reason.contains(needle),
+                "{}: rejected, but the reason does not name `{}`: {}",
+                context,
+                needle,
+                reason
+            ),
+            ValidationResult::Valid => panic!(
+                "{}: expected a rejection naming `{}`, got Valid",
+                context, needle
+            ),
+        }
+    }
+
+    /// An SRC-882 employment credential differing only in `issuer_name`.
+    ///
+    /// `issuer_name` is the ONLY free-form field
+    /// `validate_employment_credential` reads -- every other field is a
+    /// commitment, an address, an enum or a timestamp -- so holding the rest
+    /// fixed is what makes an accept/reject pair in one test a controlled
+    /// comparison rather than two unrelated fixtures.
+    fn employment_credential(issuer_name: &str) -> EmploymentCredential {
+        use sumchain_primitives::employment::{
+            EmploymentIssuerClass, EmploymentStatus, EmploymentType,
+        };
+
+        EmploymentCredential {
+            employment_id: [1u8; 32],
+            employee_address: sumchain_primitives::Address::new([1u8; 20]),
+            employee_ref: [2u8; 32],
+            employer_ref: [3u8; 32],
+            status: EmploymentStatus::Active,
+            tenure_commitment: [4u8; 32],
+            role_commitment: Some([5u8; 32]),
+            employment_type: EmploymentType::FullTime,
+            valid_from: 1000,
+            expiry: 0,
+            policy_id: [6u8; 32],
+            revocation_ref: None,
+            issuer_address: sumchain_primitives::Address::new([7u8; 20]),
+            issuer_name: issuer_name.to_string(),
+            issuer_class: EmploymentIssuerClass::Employer,
+            created_at: 1000,
+            updated_at: 1000,
+        }
+    }
+
+    /// An SRC-825 tax disclosure envelope differing only in `hint_uri`.
+    ///
+    /// `hint_uri` is the only field `validate_tax_disclosure` reads; the rest
+    /// are hashes, enums and timestamps.
+    fn tax_envelope(hint_uri: Option<&str>) -> TaxDisclosureEnvelope {
+        use sumchain_primitives::tax::DisclosureContentType;
+
+        TaxDisclosureEnvelope {
+            payload_hash: [1u8; 32],
+            payload_size: 1024,
+            hint_uri: hint_uri.map(|h| h.to_string()),
+            encryption_meta: None,
+            content_type: DisclosureContentType::TaxReturn,
+            claim_id: Some([2u8; 32]),
+            proof_id: None,
+            created_at: 1000,
+        }
+    }
+
+    /// GUARANTEE: above the activation height a transcript carrying NO
+    /// attributes is accepted, so the allowlist never refuses the smallest
+    /// credential a registrar can issue -- and that acceptance is the allowlist
+    /// consulting an empty list, not the allowlist being skipped.
     #[test]
     fn test_valid_transcript_minimal() {
         let validator = enforcing_validator();
@@ -706,8 +794,27 @@ mod tests {
 
         let result = validator.validate_academic_credential(&credential, 100);
         assert!(result.is_valid(), "Minimal transcript should be valid");
+
+        // POSITIVE CONTROL. `Valid` above is evidence only if the same
+        // validator, on the same fixture, can still say `Invalid`. One key
+        // that is not on the transcript allowlist -- carrying no PII at all,
+        // because the allowlist denies by default -- must flip the verdict.
+        let mut unlisted = credential.clone();
+        unlisted.metadata.attributes.push(CredentialAttribute {
+            name: "registrar_note".to_string(),
+            value: "none".to_string(),
+        });
+        assert_rejected_for(
+            &validator.validate_academic_credential(&unlisted, 100),
+            "'registrar_note'",
+            "one unlisted key added to the minimal transcript",
+        );
     }
 
+    /// GUARANTEE: the transcript keys on `transcript_allowed_keys` are accepted
+    /// above the activation height, and `gpa_bracket` -- struck from that
+    /// allowlist because a bracket can de-anonymize a small cohort -- is not
+    /// quietly back on it.
     #[test]
     fn test_valid_transcript_with_allowed_attributes() {
         let validator = enforcing_validator();
@@ -749,8 +856,26 @@ mod tests {
             result.is_valid(),
             "Transcript with allowed attributes should be valid"
         );
+
+        // POSITIVE CONTROL: the removed key, in the slot the commitment
+        // occupies, on an otherwise identical credential. If this is accepted
+        // the allowlist has been widened back to a de-anonymization vector.
+        let mut bracketed = credential.clone();
+        bracketed.metadata.attributes[3] = CredentialAttribute {
+            name: "gpa_bracket".to_string(),
+            value: "3.5-4.0".to_string(),
+        };
+        assert_rejected_for(
+            &validator.validate_academic_credential(&bracketed, 100),
+            "'gpa_bracket'",
+            "the removed gpa_bracket key on an otherwise valid transcript",
+        );
     }
 
+    /// GUARANTEE: a transcript carrying a `student_name` attribute is refused
+    /// above the activation height, so a plaintext student name cannot reach
+    /// chain state through SRC-810 metadata -- and it is the KEY that refuses
+    /// it, not the fixture: the same value under `student_commitment` passes.
     #[test]
     fn test_invalid_transcript_with_student_name() {
         let validator = enforcing_validator();
@@ -762,7 +887,7 @@ mod tests {
             issue_date: "2025-05".to_string(),
             completion_date: None,
             attributes: vec![CredentialAttribute {
-                name: "student_name".to_string(), // ← DISALLOWED PII
+                name: "student_name".to_string(), // <- DISALLOWED PII
                 value: "John Doe".to_string(),
             }],
         };
@@ -774,15 +899,28 @@ mod tests {
             !result.is_valid(),
             "Transcript with student_name should be rejected"
         );
+        assert_rejected_for(
+            &result,
+            "student_name",
+            "a transcript carrying a plaintext student name",
+        );
 
-        if let ValidationResult::Invalid { reason } = result {
-            assert!(
-                reason.contains("student_name"),
-                "Error should mention disallowed key"
-            );
-        }
+        // POSITIVE CONTROL: same credential, same value, allowlisted key.
+        let mut committed = credential.clone();
+        committed.metadata.attributes[0].name = "student_commitment".to_string();
+        assert!(
+            validator
+                .validate_academic_credential(&committed, 100)
+                .is_valid(),
+            "the same value under the allowlisted student_commitment key must pass, \
+             or the rejection above is not about the key"
+        );
     }
 
+    /// GUARANTEE: a transcript carrying an exact `gpa` is refused above the
+    /// activation height, while the allowlisted `grades_commitment` carrying
+    /// the same bytes is accepted -- grade information reaches the chain only
+    /// as a commitment.
     #[test]
     fn test_invalid_transcript_with_exact_gpa() {
         let validator = enforcing_validator();
@@ -794,7 +932,7 @@ mod tests {
             issue_date: "2025-05".to_string(),
             completion_date: None,
             attributes: vec![CredentialAttribute {
-                name: "gpa".to_string(), // ← DISALLOWED (use gpa_bracket instead)
+                name: "gpa".to_string(), // <- DISALLOWED (carry grades_commitment instead)
                 value: "3.85".to_string(),
             }],
         };
@@ -806,8 +944,22 @@ mod tests {
             !result.is_valid(),
             "Transcript with exact GPA should be rejected"
         );
+        assert_rejected_for(&result, "'gpa'", "a transcript carrying an exact GPA");
+
+        // POSITIVE CONTROL: the allowlisted commitment form of the same fact.
+        let mut committed = credential.clone();
+        committed.metadata.attributes[0].name = "grades_commitment".to_string();
+        assert!(
+            validator
+                .validate_academic_credential(&committed, 100)
+                .is_valid(),
+            "grades_commitment is the allowlisted way to carry grade information"
+        );
     }
 
+    /// GUARANTEE: a transcript carrying a detailed `courses` list is refused
+    /// above the activation height, while `courses_commitment` is accepted --
+    /// per-course records stay off chain.
     #[test]
     fn test_invalid_transcript_with_courses() {
         let validator = enforcing_validator();
@@ -819,7 +971,7 @@ mod tests {
             issue_date: "2025-05".to_string(),
             completion_date: None,
             attributes: vec![CredentialAttribute {
-                name: "courses".to_string(), // ← DISALLOWED (detailed course list)
+                name: "courses".to_string(), // <- DISALLOWED (detailed course list)
                 value: "[{\"code\": \"CS101\", \"grade\": \"A\"}]".to_string(),
             }],
         };
@@ -831,8 +983,28 @@ mod tests {
             !result.is_valid(),
             "Transcript with detailed courses should be rejected"
         );
+        assert_rejected_for(&result, "'courses'", "a transcript carrying a course list");
+
+        // POSITIVE CONTROL: the allowlisted commitment form of the same fact.
+        let mut committed = credential.clone();
+        committed.metadata.attributes[0].name = "courses_commitment".to_string();
+        assert!(
+            validator
+                .validate_academic_credential(&committed, 100)
+                .is_valid(),
+            "courses_commitment is the allowlisted way to carry course information"
+        );
     }
 
+    /// GUARANTEE: the activation height is a strict `<` boundary. A credential
+    /// the allowlist would refuse is accepted at EVERY height below
+    /// `activation_height` and refused from that height on, so credentials
+    /// already on chain when the rule ships stay valid and the first block that
+    /// enforces it is exactly `activation_height` -- not one before, not one
+    /// after.
+    ///
+    /// This test builds its own validator on purpose and is deliberately NOT
+    /// routed through `enforcing_validator`: the height is its subject.
     #[test]
     fn test_backward_compatibility_before_activation() {
         let config = SchemaValidatorConfig {
@@ -863,14 +1035,35 @@ mod tests {
             "Should pass before activation height (backward compatibility)"
         );
 
+        // The block immediately before activation is still unenforced. `<` and
+        // `<=` differ by exactly this block, and they are a consensus fork
+        // apart.
+        assert!(
+            validator
+                .validate_academic_credential(&credential, 999)
+                .is_valid(),
+            "height 999 is below activation 1000 and must not be enforced"
+        );
+
         // At block 1000+ (after activation), should fail
         let result = validator.validate_academic_credential(&credential, 1000);
+        assert!(!result.is_valid(), "Should fail after activation height");
+        assert_rejected_for(
+            &result,
+            "student_name",
+            "the activation block itself enforces the allowlist",
+        );
         assert!(
-            !result.is_valid(),
-            "Should fail after activation height"
+            !validator
+                .validate_academic_credential(&credential, 1001)
+                .is_valid(),
+            "enforcement does not stop after the activation block"
         );
     }
 
+    /// GUARANTEE: the SRC-811 diploma allowlist accepts its own keys above the
+    /// activation height, and the allowlists are PER SUBCODE -- a key that is
+    /// allowed on a transcript is not thereby allowed on a diploma.
     #[test]
     fn test_diploma_with_allowed_keys() {
         let validator = enforcing_validator();
@@ -901,14 +1094,33 @@ mod tests {
 
         let result = validator.validate_academic_credential(&credential, 100);
         assert!(result.is_valid(), "Diploma with allowed keys should be valid");
+
+        // POSITIVE CONTROL: `semester` is on the SRC-810 transcript allowlist
+        // and NOT on the SRC-811 diploma one. If a diploma accepts it, the
+        // validator is consulting one shared list, or none.
+        let mut cross_subcode = credential.clone();
+        cross_subcode.metadata.attributes.push(CredentialAttribute {
+            name: "semester".to_string(),
+            value: "Spring".to_string(),
+        });
+        assert_rejected_for(
+            &validator.validate_academic_credential(&cross_subcode, 100),
+            "'semester'",
+            "a transcript-only key on a diploma",
+        );
     }
 
+    /// GUARANTEE: `metadata.title` is capped at `MAX_TITLE_LENGTH` bytes above
+    /// the activation height, and the cap is inclusive -- a title of exactly
+    /// `MAX_TITLE_LENGTH` is accepted and one byte more is refused. The cap is
+    /// consensus-visible, so its exact boundary decides whether two binaries
+    /// write the same state.
     #[test]
     fn test_excessive_title_length() {
         let validator = enforcing_validator();
 
         let metadata = CredentialMetadata {
-            title: "A".repeat(300), // Exceeds MAX_TITLE_LENGTH (200)
+            title: "A".repeat(MAX_TITLE_LENGTH + 1),
             credential_type: "transcript".to_string(),
             program: None,
             issue_date: "2025-05".to_string(),
@@ -923,8 +1135,30 @@ mod tests {
             !result.is_valid(),
             "Excessive title length should be rejected"
         );
+        assert_rejected_for(&result, "metadata.title", "a title one byte over the cap");
+
+        // POSITIVE CONTROL: exactly at the cap, which must be accepted -- a
+        // validator that refused every long title, or refused everything,
+        // would fail here.
+        let mut at_cap = credential.clone();
+        at_cap.metadata.title = "A".repeat(MAX_TITLE_LENGTH);
+        assert!(
+            validator
+                .validate_academic_credential(&at_cap, 100)
+                .is_valid(),
+            "a title of exactly MAX_TITLE_LENGTH ({}) is within the cap",
+            MAX_TITLE_LENGTH
+        );
     }
 
+    /// GUARANTEE: `enabled: false` suspends enforcement at every height, and it
+    /// is the FLAG that suspends it -- the same credential, at the same height,
+    /// under the same activation height, is refused with `enabled: true`. The
+    /// flag is an operator-facing kill switch, so "disabled accepts everything"
+    /// is only meaningful alongside "enabled does not".
+    ///
+    /// This test builds its own validator on purpose and is deliberately NOT
+    /// routed through `enforcing_validator`: the flag is its subject.
     #[test]
     fn test_disabled_validator() {
         let config = SchemaValidatorConfig {
@@ -949,12 +1183,26 @@ mod tests {
         let credential = make_test_credential(DocSubcode::AcademicTranscript, metadata);
 
         let result = validator.validate_academic_credential(&credential, 100);
-        assert!(
-            result.is_valid(),
-            "Should pass when validator is disabled"
+        assert!(result.is_valid(), "Should pass when validator is disabled");
+
+        // POSITIVE CONTROL: the same config with the flag flipped, and nothing
+        // else changed.
+        let enabled = SchemaValidator::with_config(SchemaValidatorConfig {
+            activation_height: 0,
+            enabled: true,
+        });
+        assert_rejected_for(
+            &enabled.validate_academic_credential(&credential, 100),
+            "student_name",
+            "the same credential with enabled: true",
         );
     }
 
+    /// GUARANTEE: encryption metadata and an encrypted payload hint are
+    /// themselves accepted above the activation height -- and they are NOT an
+    /// exemption: an encrypted credential still has its attribute keys checked
+    /// against the allowlist, because the attributes are stored in the clear
+    /// whatever the payload does.
     #[test]
     fn test_valid_encrypted_credential() {
         use sumchain_primitives::agreement::{EncryptionAlgorithm, EncryptionMeta};
@@ -990,9 +1238,20 @@ mod tests {
         credential.payload_hint = Some("bafybeig...encrypted".to_string());
 
         let result = validator.validate_academic_credential(&credential, 100);
-        assert!(
-            result.is_valid(),
-            "Valid encrypted credential should pass"
+        assert!(result.is_valid(), "Valid encrypted credential should pass");
+
+        // POSITIVE CONTROL: the same encrypted credential with one PII key in
+        // its cleartext attributes. Encrypting the payload must not buy an
+        // exemption from the allowlist.
+        let mut with_pii = credential.clone();
+        with_pii.metadata.attributes.push(CredentialAttribute {
+            name: "student_name".to_string(),
+            value: "John Doe".to_string(),
+        });
+        assert_rejected_for(
+            &validator.validate_academic_credential(&with_pii, 100),
+            "student_name",
+            "an encrypted credential with a cleartext PII attribute",
         );
     }
 
@@ -1000,108 +1259,94 @@ mod tests {
     // SRC-88X Employment Tests
     // =========================================================================
 
+    /// GUARANTEE: an SRC-882 credential whose `issuer_name` is an institutional
+    /// name is accepted above the activation height, and an EMPTY `issuer_name`
+    /// is not -- the field is required, so an issuer cannot erase its own
+    /// identity from the credential it signs.
     #[test]
     fn test_valid_employment_credential() {
-        use sumchain_primitives::employment::{
-            EmploymentCredential, EmploymentIssuerClass, EmploymentStatus, EmploymentType,
-        };
-
         let validator = enforcing_validator();
 
-        let credential = EmploymentCredential {
-            employment_id: [1u8; 32],
-            employee_address: sumchain_primitives::Address::new([1u8; 20]),
-            employee_ref: [2u8; 32],
-            employer_ref: [3u8; 32],
-            status: EmploymentStatus::Active,
-            tenure_commitment: [4u8; 32],
-            role_commitment: Some([5u8; 32]),
-            employment_type: EmploymentType::FullTime,
-            valid_from: 1000,
-            expiry: 0,
-            policy_id: [6u8; 32],
-            revocation_ref: None,
-            issuer_address: sumchain_primitives::Address::new([7u8; 20]),
-            issuer_name: "SUM INNOVATION INC".to_string(), // Valid institutional name
-            issuer_class: EmploymentIssuerClass::Employer,
-            created_at: 1000,
-            updated_at: 1000,
-        };
+        let credential = employment_credential("SUM INNOVATION INC");
 
         let result = validator.validate_employment_credential(&credential, 100);
-        assert!(
-            result.is_valid(),
-            "Valid employment credential should pass"
+        assert!(result.is_valid(), "Valid employment credential should pass");
+
+        // POSITIVE CONTROL: the only free-form field, emptied.
+        assert_rejected_for(
+            &validator.validate_employment_credential(&employment_credential(""), 100),
+            "issuer_name",
+            "an employment credential with an empty issuer_name",
         );
     }
 
+    /// GUARANTEE: an `issuer_name` that is an email address -- containing both
+    /// `@` and `.` -- is refused above the activation height, so a personal
+    /// mailbox cannot be written to chain as an employer's name. The rule is
+    /// exactly that conjunction: the control pins `hr@company`, with no dot, as
+    /// accepted, so a future tightening has to update this test rather than
+    /// pass it by accident.
     #[test]
     fn test_invalid_employment_with_email() {
-        use sumchain_primitives::employment::{
-            EmploymentCredential, EmploymentIssuerClass, EmploymentStatus, EmploymentType,
-        };
-
         let validator = enforcing_validator();
 
-        let credential = EmploymentCredential {
-            employment_id: [1u8; 32],
-            employee_address: sumchain_primitives::Address::new([1u8; 20]),
-            employee_ref: [2u8; 32],
-            employer_ref: [3u8; 32],
-            status: EmploymentStatus::Active,
-            tenure_commitment: [4u8; 32],
-            role_commitment: Some([5u8; 32]),
-            employment_type: EmploymentType::FullTime,
-            valid_from: 1000,
-            expiry: 0,
-            policy_id: [6u8; 32],
-            revocation_ref: None,
-            issuer_address: sumchain_primitives::Address::new([7u8; 20]),
-            issuer_name: "hr@company.com".to_string(), // Invalid: email address
-            issuer_class: EmploymentIssuerClass::Employer,
-            created_at: 1000,
-            updated_at: 1000,
-        };
+        let credential = employment_credential("hr@company.com"); // Invalid: email address
 
         let result = validator.validate_employment_credential(&credential, 100);
         assert!(
             !result.is_valid(),
             "Employment with email in issuer_name should be rejected"
         );
+        assert_rejected_for(
+            &result,
+            "email address",
+            "an employment credential naming a mailbox as its issuer",
+        );
+
+        // POSITIVE CONTROL: `@` without `.` is not what the rule matches.
+        assert!(
+            validator
+                .validate_employment_credential(&employment_credential("hr@company"), 100)
+                .is_valid(),
+            "the email rule is `@` AND `.`; a name with no dot is outside it"
+        );
     }
 
+    /// GUARANTEE: an `issuer_name` containing ten or more digits is refused
+    /// above the activation height as a possible phone number, and the
+    /// threshold is exactly ten -- nine digits is accepted. A digit count is a
+    /// consensus decision here, so its boundary has to be pinned in both
+    /// directions.
     #[test]
     fn test_invalid_employment_with_phone() {
-        use sumchain_primitives::employment::{
-            EmploymentCredential, EmploymentIssuerClass, EmploymentStatus, EmploymentType,
-        };
-
         let validator = enforcing_validator();
 
-        let credential = EmploymentCredential {
-            employment_id: [1u8; 32],
-            employee_address: sumchain_primitives::Address::new([1u8; 20]),
-            employee_ref: [2u8; 32],
-            employer_ref: [3u8; 32],
-            status: EmploymentStatus::Active,
-            tenure_commitment: [4u8; 32],
-            role_commitment: Some([5u8; 32]),
-            employment_type: EmploymentType::FullTime,
-            valid_from: 1000,
-            expiry: 0,
-            policy_id: [6u8; 32],
-            revocation_ref: None,
-            issuer_address: sumchain_primitives::Address::new([7u8; 20]),
-            issuer_name: "1-800-555-1234".to_string(), // Invalid: phone number
-            issuer_class: EmploymentIssuerClass::Employer,
-            created_at: 1000,
-            updated_at: 1000,
-        };
+        // Eleven ASCII digits.
+        let credential = employment_credential("1-800-555-1234");
 
         let result = validator.validate_employment_credential(&credential, 100);
         assert!(
             !result.is_valid(),
             "Employment with phone number in issuer_name should be rejected"
+        );
+        assert_rejected_for(
+            &result,
+            "phone number",
+            "an employment credential naming a phone number as its issuer",
+        );
+
+        // POSITIVE CONTROL: nine ASCII digits, one below the threshold.
+        let nine_digits = "1-800-555-12";
+        assert_eq!(
+            nine_digits.chars().filter(|c| c.is_ascii_digit()).count(),
+            9,
+            "the control has to sit one digit below the threshold to pin it"
+        );
+        assert!(
+            validator
+                .validate_employment_credential(&employment_credential(nine_digits), 100)
+                .is_valid(),
+            "nine digits is below the ten-digit phone-number threshold"
         );
     }
 
@@ -1109,48 +1354,65 @@ mod tests {
     // SRC-82X Tax Tests
     // =========================================================================
 
+    /// GUARANTEE: an SRC-825 envelope whose `hint_uri` is a bare storage
+    /// reference is accepted above the activation height, an envelope with no
+    /// hint at all is accepted, and the `MAX_HINT_LENGTH` cap is live -- a hint
+    /// one byte over it is refused.
     #[test]
     fn test_valid_tax_disclosure() {
-        use sumchain_primitives::tax::{DisclosureContentType, TaxDisclosureEnvelope};
-
         let validator = enforcing_validator();
 
-        let envelope = TaxDisclosureEnvelope {
-            payload_hash: [1u8; 32],
-            payload_size: 1024,
-            hint_uri: Some("ipfs://bafybeig...".to_string()), // Valid IPFS CID
-            encryption_meta: None,
-            content_type: DisclosureContentType::TaxReturn,
-            claim_id: Some([2u8; 32]),
-            proof_id: None,
-            created_at: 1000,
-        };
+        let envelope = tax_envelope(Some("ipfs://bafybeig...")); // Valid IPFS CID
 
         let result = validator.validate_tax_disclosure(&envelope, 100);
         assert!(result.is_valid(), "Valid tax disclosure should pass");
+
+        assert!(
+            validator
+                .validate_tax_disclosure(&tax_envelope(None), 100)
+                .is_valid(),
+            "an envelope with no hint has nothing to validate"
+        );
+
+        // POSITIVE CONTROL: one byte over the hint cap.
+        let over_cap = format!("ipfs://{}", "a".repeat(MAX_HINT_LENGTH + 1 - 7));
+        assert_eq!(over_cap.len(), MAX_HINT_LENGTH + 1);
+        assert_rejected_for(
+            &validator.validate_tax_disclosure(&tax_envelope(Some(&over_cap)), 100),
+            "hint_uri",
+            "a hint_uri one byte over MAX_HINT_LENGTH",
+        );
     }
 
+    /// GUARANTEE: an SRC-825 `hint_uri` carrying a PII query parameter is
+    /// refused above the activation height, so a tax disclosure cannot point at
+    /// a URL that names the taxpayer -- and it is the PARAMETER that refuses
+    /// it: the same host and path without the query is accepted.
     #[test]
     fn test_invalid_tax_disclosure_with_pii_in_uri() {
-        use sumchain_primitives::tax::{DisclosureContentType, TaxDisclosureEnvelope};
-
         let validator = enforcing_validator();
 
-        let envelope = TaxDisclosureEnvelope {
-            payload_hash: [1u8; 32],
-            payload_size: 1024,
-            hint_uri: Some("https://example.com/tax?name=John&ssn=123-45-6789".to_string()), // Invalid: PII in URL
-            encryption_meta: None,
-            content_type: DisclosureContentType::TaxReturn,
-            claim_id: Some([2u8; 32]),
-            proof_id: None,
-            created_at: 1000,
-        };
+        // Invalid: PII in URL
+        let envelope = tax_envelope(Some("https://example.com/tax?name=John&ssn=123-45-6789"));
 
         let result = validator.validate_tax_disclosure(&envelope, 100);
         assert!(
             !result.is_valid(),
             "Tax disclosure with PII in URL should be rejected"
+        );
+        assert_rejected_for(
+            &result,
+            "name=",
+            "a hint_uri whose query names the taxpayer",
+        );
+
+        // POSITIVE CONTROL: same host and path, query removed.
+        assert!(
+            validator
+                .validate_tax_disclosure(&tax_envelope(Some("https://example.com/tax")), 100)
+                .is_valid(),
+            "the same URL without the PII query must pass, or the rejection \
+             above is not about the query"
         );
     }
 
@@ -1158,6 +1420,20 @@ mod tests {
     // SRC-87X Healthcare Tests
     // =========================================================================
 
+    /// GUARANTEE: SRC-871 membership records are accepted UNCONDITIONALLY above
+    /// the activation height. That is a deliberate absence of rules, not a rule
+    /// that passes: `validate_healthcare_membership` ignores its argument
+    /// entirely because every field of a `MembershipRecord` is a hash, an
+    /// address, an enum or a timestamp, with no free-form string to carry PII.
+    /// If a rejection path is ever added to this surface, this test fails and
+    /// whoever adds it has to record it here.
+    ///
+    /// Because the subject accepts everything by construction, no input to it
+    /// can produce the opposite verdict. The positive control is therefore the
+    /// SAME validator instance refusing an academic credential inside this
+    /// test: without it, this test would pass against a validator that returned
+    /// `Valid` for everything -- which is exactly the defect that made this
+    /// module's tests vacuous.
     #[test]
     fn test_valid_healthcare_membership() {
         use sumchain_primitives::agreement::PartyRef;
@@ -1196,6 +1472,29 @@ mod tests {
         assert!(
             result.is_valid(),
             "Valid healthcare membership should pass (privacy-safe by design)"
+        );
+
+        // POSITIVE CONTROL: this validator is enforcing, so the acceptance
+        // above is the healthcare surface having no rules rather than the
+        // validator having no teeth.
+        let pii = make_test_credential(
+            DocSubcode::AcademicTranscript,
+            CredentialMetadata {
+                title: "Academic Transcript".to_string(),
+                credential_type: "transcript".to_string(),
+                program: None,
+                issue_date: "2025-05".to_string(),
+                completion_date: None,
+                attributes: vec![CredentialAttribute {
+                    name: "student_name".to_string(),
+                    value: "John Doe".to_string(),
+                }],
+            },
+        );
+        assert_rejected_for(
+            &validator.validate_academic_credential(&pii, 100),
+            "student_name",
+            "the same validator instance on an academic credential",
         );
     }
 }
