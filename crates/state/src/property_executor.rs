@@ -165,6 +165,15 @@ pub struct PropertyGates {
     /// A payload-chosen index key is bounded before it becomes a key.
     /// ACTIVATION-AUDIT row AL-7.
     pub allocation_bound: bool,
+    /// `VerifyProof` refuses as UNSUPPORTED, for every payload.
+    ///
+    /// NO ACTIVATION-AUDIT ROW NAMES THIS ARM, and one row denies it exists:
+    /// PR-7 reads "Property has no separate `VerifyProof`". It does --
+    /// `PropertyOperation::VerifyProof = 51` decodes, dispatches, and below the
+    /// gate is the same deduct/credit/increment/`success()` as the six arms the
+    /// audit does name. The retired presence gate covered six of seven for that
+    /// reason; this one covers all seven.
+    pub proof_unsupported: bool,
 }
 
 impl PropertyGates {
@@ -173,6 +182,7 @@ impl PropertyGates {
         authorization: false,
         real_block_timestamp: false,
         allocation_bound: false,
+        proof_unsupported: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -180,6 +190,7 @@ impl PropertyGates {
         authorization: true,
         real_block_timestamp: true,
         allocation_bound: true,
+        proof_unsupported: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -188,6 +199,7 @@ impl PropertyGates {
             authorization: PropertyExecutor::authorization_gate_open(params, block_height),
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
             allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
+            proof_unsupported: crate::subsystem_proof_unsupported_gate_open(params, block_height),
         }
     }
 }
@@ -1195,6 +1207,29 @@ impl PropertyExecutor {
             }
 
             PropertyOperation::VerifyProof => {
+                // NO ACTIVATION-AUDIT ROW NAMES THIS ARM. PR-7 states "Property
+                // has no separate `VerifyProof`", which is false: this is it, it
+                // is reachable (`verify_proof_succeeds_for_a_proof_that_does_not_exist`
+                // in `property_routing.rs` drives it through `execute_tx`), and
+                // below the gate it is the same three statements as the six arms
+                // the audit does name -- deduct, credit, increment, SUCCESS, with
+                // the payload never read.
+                //
+                // At and above the gate it refuses as UNSUPPORTED, for every
+                // payload: no verifier for Property proofs exists in this tree --
+                // nothing checks `proof_data` against `public_inputs`, there is no
+                // proof system in the workspace, no verifying key anywhere, and no
+                // wire type for a verification request -- and an operation that
+                // cannot be performed must say so rather than succeed.
+                //
+                // Refused BEFORE the deduct, which is where the sibling
+                // `SubmitProof` arm's duplicate-id refusal returns, so a refused
+                // proof operation costs the same in both.
+                if gates.proof_unsupported {
+                    return Ok(PropertyExecutionResult::failure(
+                        crate::VERIFY_PROOF_UNSUPPORTED,
+                    ));
+                }
                 // Verification is read-only - just record the request
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
