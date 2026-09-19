@@ -116,6 +116,12 @@ class Structure:
                 registered structure, written into an assertion. `locator`
                 captures the literal in a group named "count", there is no
                 region, and `expect` must be ("count", other).
+              "section": the region is prose, delimited by `terminator` (or the
+                end of the file) rather than by a bracket. Entries are found by
+                pattern, as in "scan", but coverage is not enforced: a gate name
+                may legitimately be MENTIONED in prose without that mention
+                being an entry. Used for the decision packet, which is Markdown
+                and has no brackets to balance.
     entry     regex for one well-formed entry. Group "name" is the entry's
               gate/limit name. Group "field" is the value it reads, when the
               shape has one; it must agree with "name".
@@ -123,11 +129,24 @@ class Structure:
               Defaults to GATE; None disables coverage (only sensible in
               "elements" mode, where full-coverage splitting already holds).
     expect    ("eq", other) | ("subset", other) | ("count", other) | ("free",)
+              | ("partition", sibling, whole)
               -- the relation this structure must bear to another registered
               structure: same name set, subset of it, or (for "count") a
-              literal equal to its number of entries.
+              literal equal to its number of entries. "partition" is the
+              three-way form: this structure and `sibling` must be DISJOINT and
+              their union must EQUAL `whole`. It exists because a document can
+              cover a gate in two mutually exclusive ways -- given a section, or
+              named as deliberately not given one -- and the property worth
+              checking is that every gate is in exactly one of them.
     minimum   a floor on the entry count. A registered structure that yields
-              fewer FAILS: finding nothing is not a pass.
+              fewer FAILS: finding nothing is not a pass. Zero is allowed only
+              where emptiness is a MEANINGFUL state that the locator still
+              proves is being maintained -- see the Part 0a entry.
+    terminator  "section" mode only: regex ending the region. None means the
+              region runs to the end of the file.
+    masked    whether to strip Rust comments and string literals before
+              matching. False for documents, where `mask` would be reading
+              Markdown as Rust and blanking whatever followed a `//` in a URL.
     """
 
     name: str
@@ -139,6 +158,8 @@ class Structure:
     minimum: int
     token: str | None = GATE
     note: str = ""
+    terminator: str | None = None
+    masked: bool = True
 
 
 REGISTRY: list[Structure] = [
@@ -334,6 +355,47 @@ REGISTRY: list[Structure] = [
         minimum=0,
         token=None,
     ),
+    Structure(
+        name="packet::decision-packet gate sections",
+        path="docs/lane-a/ACTIVATION-DECISION-PACKET.md",
+        locator=r"\n## Part 1A ",
+        mode="section",
+        # Part 1A runs to the end of the file through 1B and 1C, so one region
+        # holds all three classes. Every gate section is a heading of the form
+        # `### R7 -- `gate``; the prefix says which class, and the check does
+        # not care which, only that the gate has a section somewhere.
+        terminator=None,
+        entry=rf"^### [A-Z]+\d+ — `(?P<name>{GATE})`",
+        expect=(
+            "partition",
+            "packet::Part 0a gates deliberately uncovered",
+            "genesis::ChainParams gate fields",
+        ),
+        minimum=40,
+        token=None,
+        masked=False,
+        note="a gate an owner is asked to schedule must have been written up",
+    ),
+    Structure(
+        name="packet::Part 0a gates deliberately uncovered",
+        path="docs/lane-a/ACTIVATION-DECISION-PACKET.md",
+        locator=r"\n## Part 0a ",
+        mode="section",
+        terminator=r"^## ",
+        entry=rf"^  \* `(?P<name>{GATE})` — ",
+        expect=("subset", "genesis::ChainParams gate fields"),
+        # ZERO IS LEGAL HERE, and it is the only entry in the registry for
+        # which that is true. An empty Part 0a means the packet has caught up
+        # with `ChainParams` -- the state this pair exists to make reachable --
+        # and the partition above still forces every gate into a section, so
+        # nothing stops being checked when this goes to zero. What may not
+        # happen is the SECTION vanishing: the locator must still match, so a
+        # packet that drops the acknowledgement instead of the deficit fails.
+        minimum=0,
+        token=None,
+        masked=False,
+        note="named here rather than left to be discovered by counting",
+    ),
 ]
 
 
@@ -458,6 +520,38 @@ class Verdict:
         self.problems.append((cls, detail))
 
 
+def finish(st: Structure, v: Verdict, raw: str, matched: list[re.Match]) -> Verdict:
+    """Turn matched entries into a name set, and check what a name set alone can.
+
+    Shared by every mode that produces entries, so that a mode added later
+    cannot quietly skip the duplicate and floor checks -- which is failure
+    mode 3 in the header, one shape covered and the next forgotten.
+    """
+    for m in matched:
+        groups = m.groupdict()
+        name = groups["name"]
+        v.names.append(name)
+        read = groups.get("field")
+        if read is not None and read != name:
+            v.fail("mismatched-name", f"entry named {name!r} reads {read!r}")
+
+    seen: dict[str, int] = {}
+    for n in v.names:
+        seen[n] = seen.get(n, 0) + 1
+    dupes = sorted(n for n, c in seen.items() if c > 1)
+    if dupes:
+        v.fail("duplicate", f"{len(dupes)} name(s) appear more than once: {dupes}")
+
+    if len(v.names) < st.minimum:
+        v.fail(
+            "empty",
+            f"{len(v.names)} entries, below the declared floor of {st.minimum} "
+            "-- a registered structure that yields (almost) nothing is not a "
+            "pass, it is a structure that stopped being checked",
+        )
+    return v
+
+
 def inspect(st: Structure, root: Path) -> Verdict:
     """Everything that can be decided about one structure on its own."""
     v = Verdict(st.name)
@@ -466,7 +560,7 @@ def inspect(st: Structure, root: Path) -> Verdict:
         v.fail("file-missing", f"{st.path} does not exist")
         return v
     raw = src_path.read_text()
-    nocomment, skeleton = mask(raw)
+    nocomment, skeleton = mask(raw) if st.masked else (raw, raw)
 
     hits = list(re.finditer(st.locator, skeleton))
     if not hits:
@@ -492,6 +586,18 @@ def inspect(st: Structure, root: Path) -> Verdict:
         # there. The comparison happens in the relation phase.
         v.count = int(head.group("count"))
         return v
+
+    if st.mode == "section":
+        # No bracket to balance. The region runs from the end of the heading
+        # that located it to the next terminator, or to the end of the file.
+        lo = head.end()
+        if st.terminator is None:
+            hi = len(nocomment)
+        else:
+            stop = re.search(st.terminator, nocomment[lo:], re.M)
+            hi = lo + (stop.start() if stop else len(nocomment) - lo)
+        matched = list(re.compile(st.entry, re.S | re.M).finditer(nocomment, lo, hi))
+        return finish(st, v, raw, matched)
 
     open_at = head.end() - 1
     if open_at < head.start() or skeleton[open_at] not in CLOSE:
@@ -553,29 +659,7 @@ def inspect(st: Structure, root: Path) -> Verdict:
         v.fail("registry-error", f"unknown mode {st.mode!r}")
         return v
 
-    for m in matched:
-        groups = m.groupdict()
-        name = groups["name"]
-        v.names.append(name)
-        read = groups.get("field")
-        if read is not None and read != name:
-            v.fail("mismatched-name", f"entry named {name!r} reads {read!r}")
-
-    seen: dict[str, int] = {}
-    for n in v.names:
-        seen[n] = seen.get(n, 0) + 1
-    dupes = sorted(n for n, c in seen.items() if c > 1)
-    if dupes:
-        v.fail("duplicate", f"{len(dupes)} name(s) appear more than once: {dupes}")
-
-    if len(v.names) < st.minimum:
-        v.fail(
-            "empty",
-            f"{len(v.names)} entries, below the declared floor of {st.minimum} "
-            "-- a registered structure that yields (almost) nothing is not a "
-            "pass, it is a structure that stopped being checked",
-        )
-    return v
+    return finish(st, v, raw, matched)
 
 
 def run(root: Path, out=sys.stdout) -> int:
@@ -584,13 +668,19 @@ def run(root: Path, out=sys.stdout) -> int:
         print("REGISTRY ERROR: duplicate structure names", file=out)
         return 2
     for st in REGISTRY:
-        if st.expect[0] in ("eq", "subset", "count") and st.expect[1] not in names:
-            print(
-                f"REGISTRY ERROR: {st.name} expects {st.expect[0]} against "
-                f"unregistered {st.expect[1]!r}",
-                file=out,
-            )
-            return 2
+        refs = (
+            st.expect[1:]
+            if st.expect[0] in ("eq", "subset", "count", "partition")
+            else ()
+        )
+        for ref in refs:
+            if ref not in names:
+                print(
+                    f"REGISTRY ERROR: {st.name} expects {st.expect[0]} against "
+                    f"unregistered {ref!r}",
+                    file=out,
+                )
+                return 2
 
     print(f"registry: {len(REGISTRY)} structures, root {root}\n", file=out)
     verdicts: dict[str, Verdict] = {st.name: inspect(st, root) for st in REGISTRY}
@@ -602,13 +692,35 @@ def run(root: Path, out=sys.stdout) -> int:
         rel = st.expect[0]
         if rel == "free":
             continue
-        mine, other = verdicts[st.name], verdicts[st.expect[1]]
-        if not mine.ok or not other.ok:
+        mine = verdicts[st.name]
+        refs = [verdicts[r] for r in st.expect[1:]]
+        broken = [r.structure for r in refs if not r.ok]
+        if not mine.ok or broken:
             mine.fail(
                 "set-unverifiable",
-                f"cannot be compared with {st.expect[1]!r}: "
-                + ("its own shape failed" if not mine.ok else "the reference's shape failed"),
+                f"cannot be compared with {list(st.expect[1:])}: "
+                + ("its own shape failed" if not mine.ok else f"{broken} failed shape"),
             )
+            continue
+        other = refs[0]
+        if rel == "partition":
+            sibling, whole = set(refs[0].names), set(refs[1].names)
+            a = set(mine.names)
+            if a & sibling:
+                mine.fail(
+                    "set-mismatch",
+                    f"overlaps {st.expect[1]!r} on {sorted(a & sibling)} -- a gate "
+                    "is either given a section or named as deliberately not "
+                    "given one, never both",
+                )
+            union = a | sibling
+            if union != whole:
+                mine.fail(
+                    "set-mismatch",
+                    f"{st.name!r} + {st.expect[1]!r} != {st.expect[2]!r}; "
+                    f"gates in neither {sorted(whole - union)}; "
+                    f"named but not declared {sorted(union - whole)}",
+                )
             continue
         if rel == "count":
             if mine.count != len(other.names):
@@ -634,7 +746,11 @@ def run(root: Path, out=sys.stdout) -> int:
 
     for st in REGISTRY:
         v = verdicts[st.name]
-        rel = "" if st.expect[0] == "free" else f"  [{st.expect[0]} {st.expect[1]}]"
+        rel = (
+            ""
+            if st.expect[0] == "free"
+            else f"  [{st.expect[0]} {' + '.join(st.expect[1:])}]"
+        )
         body = f"says {v.count}" if st.mode == "count" else f"{len(v.names)} entries"
         print(f"  {'PASS' if v.ok else 'FAIL'}  {st.name}  ({body}){rel}", file=out)
         for cls, detail in v.problems:
