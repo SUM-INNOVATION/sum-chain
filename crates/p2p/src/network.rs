@@ -231,6 +231,24 @@ pub enum NetworkEvent {
         peer: PeerId,
         digest: sumchain_primitives::Hash,
     },
+    /// The swarm bound a listen address, and this is the address it bound.
+    ///
+    /// # Why this exists
+    ///
+    /// `SwarmEvent::NewListenAddr` used to be logged and discarded, and that
+    /// discard was the reason this crate had no live two-node test: a second
+    /// node cannot dial a node whose bound address nothing reports, so every
+    /// swarm-level claim had to be pinned by reading `network.rs` as TEXT
+    /// instead of by connecting two nodes and watching what they do.
+    ///
+    /// Reporting it is also what makes `/ip4/127.0.0.1/tcp/0` usable: an
+    /// OS-assigned port is the only way to run several nodes in one process
+    /// without picking ports and hoping. [`NetworkService::listen_addrs`] is
+    /// the same fact polled rather than awaited, for a caller that starts
+    /// listening after the swarm already bound.
+    ///
+    /// A local Rust enum, not a wire type: this changes no byte on the network.
+    Listening(Multiaddr),
 }
 
 /// Commands to send to the network
@@ -360,6 +378,12 @@ pub struct NetworkService {
     peer_manager: Arc<PeerManager>,
     /// Rate limiter for incoming messages
     rate_limiter: PeerRateLimiter,
+    /// Addresses the swarm is actually bound to, as the swarm reported them.
+    ///
+    /// Not the configured `listen_addr`: with `/tcp/0` the configured value
+    /// names no port, and with `/ip4/0.0.0.0` it names no interface. This is
+    /// what a peer can actually dial. See [`NetworkEvent::Listening`].
+    listen_addrs: RwLock<Vec<Multiaddr>>,
 }
 
 impl NetworkService {
@@ -392,6 +416,7 @@ impl NetworkService {
             sync_state: RwLock::new(SyncState::Initializing),
             peer_manager,
             rate_limiter: PeerRateLimiter::new(rate_limit),
+            listen_addrs: RwLock::new(Vec::new()),
         };
 
         (service, command_rx)
@@ -414,6 +439,7 @@ impl NetworkService {
             sync_state: RwLock::new(SyncState::Initializing),
             peer_manager,
             rate_limiter: PeerRateLimiter::new(RateLimitConfig::default()),
+            listen_addrs: RwLock::new(Vec::new()),
         };
 
         (service, command_rx)
@@ -453,6 +479,21 @@ impl NetworkService {
     /// Get local peer ID
     pub fn local_peer_id(&self) -> Option<PeerId> {
         *self.local_peer_id.read()
+    }
+
+    /// The addresses the swarm is bound to, as the swarm reported them.
+    ///
+    /// Empty until the swarm binds; `[]` therefore means "not listening yet",
+    /// never "not configured". A caller that must not race the bind should
+    /// subscribe first and await [`NetworkEvent::Listening`] — this accessor is
+    /// for the caller that arrives afterwards, for which a broadcast event is
+    /// already gone.
+    ///
+    /// These are exactly what a second node can dial. The configured
+    /// `listen_addr` is not: `/tcp/0` names no port and `/ip4/0.0.0.0` names no
+    /// interface, and both are resolved by the OS at bind time.
+    pub fn listen_addrs(&self) -> Vec<Multiaddr> {
+        self.listen_addrs.read().clone()
     }
 
     /// Check if running
@@ -819,26 +860,52 @@ impl NetworkService {
             // bootnodes (dialed at startup) + identify + gossipsub.
 
             SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
-                // A ban that only refuses the peer through `can_accept_inbound`
-                // refuses nothing: nothing in this loop consulted that. The ban
-                // is enforced HERE, before `peer_connected` registers the peer
-                // and before `PeerConnected` tells the node about it, so a
-                // refused peer cannot get back in by dialling again.
-                if self.peer_manager.is_banned(&peer_id) {
-                    warn!(
-                        "Refusing connection from banned peer {}; closing it again",
-                        peer_id
-                    );
-                    let _ = swarm.disconnect_peer_id(peer_id);
-                    return;
-                }
-
                 // Determine connection direction from endpoint
                 let direction = if endpoint.is_dialer() {
                     ConnectionDirection::Outbound
                 } else {
                     ConnectionDirection::Inbound
                 };
+
+                // THE admission decision, and the only one.
+                //
+                // `PeerManager::can_accept_inbound` had no caller anywhere:
+                // the ban was enforced by a separate, narrower check written
+                // beside it, and the connection limits in `ConnectionLimits`
+                // and the `max_inbound` in `NetworkConfig` described a policy
+                // nothing applied. Two predicates, one of them dead, is how a
+                // refusal comes to be believed rather than enforced — so the
+                // gate calls the predicate, and the predicate is the policy.
+                //
+                // Direction matters and is not cosmetic. An OUTBOUND
+                // connection is one this node dialed: refusing it on an
+                // inbound or per-IP limit would be refusing this node's own
+                // decision after the fact, so only the peer-facing half
+                // (`peer_is_admissible`: ban, reputation) applies. Note also
+                // that `can_connect_outbound` is NOT that half — it is a
+                // dial-time predicate whose backoff and `Disconnected`-state
+                // requirement are wrong once a connection exists.
+                //
+                // Checked BEFORE `peer_connected` registers the peer and
+                // before `PeerConnected` tells the node about it, so a refused
+                // peer is never announced and cannot get back in by dialling
+                // again.
+                let admitted = match direction {
+                    // `None` for the remote IP: the per-IP clause stays inert,
+                    // deliberately. `PeerManager::can_accept_inbound` says why.
+                    ConnectionDirection::Inbound => {
+                        self.peer_manager.can_accept_inbound(&peer_id, None)
+                    }
+                    ConnectionDirection::Outbound => self.peer_manager.peer_is_admissible(&peer_id),
+                };
+                if !admitted {
+                    warn!(
+                        "Refusing {:?} connection from {}; closing it again",
+                        direction, peer_id
+                    );
+                    let _ = swarm.disconnect_peer_id(peer_id);
+                    return;
+                }
 
                 // Register with peer manager
                 self.peer_manager.peer_connected(peer_id, direction, None);
@@ -868,6 +935,19 @@ impl NetworkService {
 
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!("Listening on: {}", address);
+                // Recorded and announced, not merely logged. Until it was, a
+                // node's bound address existed only in a log line, so nothing
+                // could dial this node without a port fixed in advance — which
+                // is why every swarm-level claim in this crate used to be
+                // pinned by reading this file as text. See
+                // `NetworkEvent::Listening`.
+                self.listen_addrs.write().push(address.clone());
+                let _ = self.event_tx.send(NetworkEvent::Listening(address));
+            }
+
+            SwarmEvent::ExpiredListenAddr { address, .. } => {
+                info!("No longer listening on: {}", address);
+                self.listen_addrs.write().retain(|a| a != &address);
             }
 
             // Handle sync protocol events

@@ -337,18 +337,74 @@ impl PeerManager {
         debug!("Registered peer {} with {} addresses", peer_id, entry.addresses.len());
     }
 
-    /// Check if a new inbound connection can be accepted
+    /// Whether this node will hold a connection with `peer_id` AT ALL — in
+    /// either direction, whatever this node's remaining capacity.
+    ///
+    /// The half of the admission policy that is about the PEER rather than
+    /// about this node's budget: an unexpired ban, and a reputation below
+    /// [`thresholds::DISCONNECT_THRESHOLD`]. Split out because it is the whole
+    /// of what an ALREADY ESTABLISHED connection can still be judged on:
+    ///
+    /// * an outbound connection is one this node asked for, so refusing it on
+    ///   an inbound or per-IP limit would be refusing this node's own decision;
+    /// * a second connection to a peer already connected consumes no new slot,
+    ///   and `Swarm::disconnect_peer_id` closes EVERY connection to a peer — so
+    ///   a capacity refusal there would kill the connection that is working.
+    ///
+    /// [`Self::can_accept_inbound`] and [`Self::can_connect_outbound`] are this
+    /// predicate plus the capacity each of them is entitled to check.
+    pub fn peer_is_admissible(&self, peer_id: &PeerId) -> bool {
+        let peers = self.peers.read();
+        let Some(entry) = peers.get(peer_id) else {
+            // No entry is not evidence against the peer. It is also why
+            // `ban_peer` CREATES one rather than writing the ban nowhere.
+            return true;
+        };
+        if entry.is_banned() {
+            debug!("Rejecting banned peer: {}", peer_id);
+            return false;
+        }
+        if entry.score < thresholds::DISCONNECT_THRESHOLD {
+            debug!("Rejecting low-score peer: {} (score: {})", peer_id, entry.score);
+            return false;
+        }
+        true
+    }
+
+    /// Whether `peer_id` currently holds a connection this node has registered.
+    pub fn is_connected(&self, peer_id: &PeerId) -> bool {
+        self.peers
+            .read()
+            .get(peer_id)
+            .is_some_and(|e| e.state == PeerState::Connected)
+    }
+
+    /// Check if a new inbound connection can be accepted.
+    ///
+    /// # Where this is consulted
+    ///
+    /// `SwarmEvent::ConnectionEstablished` in [`crate::NetworkService::run`],
+    /// for the inbound half. It had NO caller before that — the limits in
+    /// [`ConnectionLimits`] and the `max_inbound` in `NetworkConfig` described a
+    /// policy nothing applied, and the ban was enforced by a separate, narrower
+    /// check written beside it. One live predicate is the point: two, one of
+    /// them dead, is how a ban comes to be believed rather than enforced.
+    ///
+    /// `remote_ip` is `None` from that call site, so the per-IP clause below is
+    /// still inert in production. That is deliberate and is stated rather than
+    /// fixed: `max_per_ip` defaults to 3, and every node of a devnet sharing
+    /// `127.0.0.1` would start refusing its fourth peer the moment the address
+    /// were threaded through. Making it live is a separate decision about a
+    /// default, not part of giving the predicate a caller.
     pub fn can_accept_inbound(&self, peer_id: &PeerId, remote_ip: Option<IpAddr>) -> bool {
-        // Check if peer is banned
-        if let Some(entry) = self.peers.read().get(peer_id) {
-            if entry.is_banned() {
-                debug!("Rejecting banned peer: {}", peer_id);
-                return false;
-            }
-            if entry.score < thresholds::DISCONNECT_THRESHOLD {
-                debug!("Rejecting low-score peer: {} (score: {})", peer_id, entry.score);
-                return false;
-            }
+        if !self.peer_is_admissible(peer_id) {
+            return false;
+        }
+
+        // An already-connected peer consumes no NEW capacity, so the limits
+        // below have nothing to say about it. See `peer_is_admissible`.
+        if self.is_connected(peer_id) {
+            return true;
         }
 
         // Check inbound limit
@@ -378,13 +434,29 @@ impl PeerManager {
         true
     }
 
-    /// Check if a new outbound connection can be initiated
+    /// Check if a new outbound connection can be INITIATED.
+    ///
+    /// A dial-time predicate, and it stays one: `should_attempt_connection`
+    /// refuses any state but `Disconnected` and applies an exponential backoff,
+    /// both of which are right before a dial and wrong after a connection
+    /// exists. It is therefore NOT the predicate the outbound half of the
+    /// `ConnectionEstablished` gate calls — that calls
+    /// [`Self::peer_is_admissible`], the part the two share.
+    ///
+    /// It has no production caller, and the honest reason is that this crate
+    /// has no dial-by-`PeerId` site: `dial_bootnodes` and
+    /// `NetworkCommand::Dial` both take a `Multiaddr`, which need not carry a
+    /// peer id at all, and the bootnode retry loop (#237) must stay
+    /// unconditional or a wedged node stops retrying. It is kept because a ban
+    /// and a backoff are real dial-time policy and `PeerManager::stats` /
+    /// `get_connection_candidates` are the shape a dialer would be built from —
+    /// but it is not doing any work today and this comment says so rather than
+    /// implying otherwise.
     pub fn can_connect_outbound(&self, peer_id: &PeerId) -> bool {
-        // Check if peer is banned
+        if !self.peer_is_admissible(peer_id) {
+            return false;
+        }
         if let Some(entry) = self.peers.read().get(peer_id) {
-            if entry.is_banned() {
-                return false;
-            }
             if !entry.should_attempt_connection() {
                 return false;
             }
@@ -404,19 +476,38 @@ impl PeerManager {
         true
     }
 
-    /// Mark peer as connected
+    /// Mark peer as connected.
+    ///
+    /// # Why the counters move only on the FIRST connection to a peer
+    ///
+    /// libp2p opens more than one connection to the same peer routinely (a
+    /// simultaneous dial is the common case). The counters used to move once per
+    /// `ConnectionEstablished` and back down once per peer — [`Self::peer_disconnected`]
+    /// clears `direction`, so the second `ConnectionClosed` finds nothing to
+    /// decrement — which leaks the count UPWARD, permanently, once per extra
+    /// connection.
+    ///
+    /// While nothing consulted [`Self::can_accept_inbound`] that leak was
+    /// cosmetic: it corrupted `stats()`. Now that the inbound half of the
+    /// `ConnectionEstablished` gate consults it, a leaked count is a node that
+    /// refuses every inbound connection forever, so the fix is a precondition of
+    /// the wiring and not a tidy-up. The counters now mean "connected peers in
+    /// this direction", which is the unit `ConnectionLimits` is written in.
     pub fn peer_connected(&self, peer_id: PeerId, direction: ConnectionDirection, remote_ip: Option<IpAddr>) {
         let mut peers = self.peers.write();
         let entry = peers.entry(peer_id).or_insert_with(|| PeerEntry::new(peer_id));
 
+        let was_connected = entry.state == PeerState::Connected;
         entry.state = PeerState::Connected;
         entry.direction = Some(direction);
         entry.last_seen = Instant::now();
         entry.successful_connections += 1;
 
-        match direction {
-            ConnectionDirection::Inbound => *self.inbound_count.write() += 1,
-            ConnectionDirection::Outbound => *self.outbound_count.write() += 1,
+        if !was_connected {
+            match direction {
+                ConnectionDirection::Inbound => *self.inbound_count.write() += 1,
+                ConnectionDirection::Outbound => *self.outbound_count.write() += 1,
+            }
         }
 
         // Track IP mapping

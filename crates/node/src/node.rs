@@ -804,6 +804,14 @@ impl Node {
                 // Handle network events
                 Ok(event) = network_events.recv() => {
                     match event {
+                        // The swarm bound an address. Carries no peer and
+                        // reaches no engine, so it is not a route into
+                        // consensus; it is here because the event exists and
+                        // this match has no catch-all, which is the property
+                        // `consensus_participation_guard.rs` depends on.
+                        NetworkEvent::Listening(addr) => {
+                            info!("P2P listening on {}", addr);
+                        }
                         NetworkEvent::PeerConnected(peer) => {
                             info!("Peer connected: {}", peer);
                             metrics.p2p.record_peer_connected();
