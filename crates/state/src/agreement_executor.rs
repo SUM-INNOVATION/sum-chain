@@ -359,6 +359,31 @@ impl AgreementExecutor {
     ) -> Result<AgreementExecutionResult> {
         let block_timestamp =
             crate::effective_block_timestamp(block_timestamp, gates.real_block_timestamp);
+
+        // ACTIVATION-AUDIT row AL-12, the Agreement third. Every arm below
+        // `bincode::deserialize`s `data.data` with no size or shape limit ahead
+        // of it, and `CommitAgreement` stores an `AgreementCommitment` whose
+        // `parties` list is taken from the payload verbatim -- so one
+        // transaction bounded only by `max_block_bytes` decides how many party
+        // indexes the next `v_put_agreement` rebuilds, and how large the
+        // agreement row every later arm decodes is.
+        //
+        // This is a refusal, not an error, and the DocClass arm's reasoning
+        // applies unchanged: below the gate an undecodable payload is `Err(..)`
+        // and takes the whole block with it, and an oversized one that happens
+        // to decode is admitted; above the gate an oversized payload is a
+        // failed receipt in a valid block whether or not it would have decoded.
+        // The refusal charges nothing and does not advance the nonce, because
+        // every arm below deducts the fee itself and every pre-existing
+        // `failure()` that fires before that deduction is already free.
+        if gates.allocation_bound && data.data.len() > crate::MAX_SUBSYSTEM_PAYLOAD_BYTES {
+            return Ok(AgreementExecutionResult::failure(format!(
+                "Agreement payload too large: {} bytes, limit {}",
+                data.data.len(),
+                crate::MAX_SUBSYSTEM_PAYLOAD_BYTES
+            )));
+        }
+
         match data.operation {
             // SRC-841: Agreement Commitment Operations
             AgreementOperation::CommitAgreement => {

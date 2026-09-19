@@ -4822,3 +4822,137 @@ fn removing_what_was_never_there_writes_a_row_only_below_the_gate() {
         );
     }
 }
+
+/// OV-19: the controlled-substance rule is enforced on the path that MOVES a
+/// prescription and, below the gate, on no other -- so it is reached by
+/// issuing the prescription already in the state the rule forbids.
+///
+/// The row's other clause -- "the same prescription can be filled, held,
+/// released and cancelled like any other" -- is NOT a defect and is not gated:
+/// SRC-876 calls itself "NON-TRANSFERABLE for controlled substances",
+/// `TransferRequested` is the only transfer state the enum has, and a
+/// prescription that could not be filled would be a prescription for nothing.
+/// The subsystem states one rule about `is_controlled` and this is it; what was
+/// missing was not more rules, it was this rule on the second path to the same
+/// state.
+#[test]
+fn a_controlled_prescription_is_issued_straight_into_transfer_requested_until_the_gate() {
+    for gates in PRECONDITION {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        let addr = issuer.address();
+        HealthcareStore::new(&db)
+            .providers()
+            .put(&provider(0x5A, addr, vec![]))
+            .unwrap();
+
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+        let before = StateManager::v_get_balance(&view, &addr).unwrap();
+
+        let mut rx = prescription(0x5B, 0x5A, addr, 2);
+        rx.is_controlled = true;
+        rx.status = PrescriptionStatus::TransferRequested;
+        let issued = healthcare_at(
+            &mut view,
+            &addr,
+            HealthcareOperation::IssuePrescription,
+            &rx,
+            gates,
+        );
+
+        assert_eq!(
+            issued.success, !gates.state_precondition,
+            "a controlled prescription issued directly into `TransferRequested` is \
+             admitted below the gate and refused above it: {:?}",
+            issued.error
+        );
+
+        if gates.state_precondition {
+            assert_eq!(
+                issued.error.as_deref(),
+                Some("Controlled substance prescriptions cannot be transferred"),
+                "and refused in the UPDATE path's own words, because it is the same \
+                 rule and not a second one"
+            );
+            assert!(
+                HealthcareExecutor::v_get_prescription(&view, &[0x5Bu8; 32])
+                    .unwrap()
+                    .is_none(),
+                "nothing is staged"
+            );
+            assert_eq!(
+                StateManager::v_get_balance(&view, &addr).unwrap(),
+                before,
+                "and nothing is charged -- the refusal lands before `v_deduct`, like \
+                 the duplicate guard beside it"
+            );
+        } else {
+            let stored = HealthcareExecutor::v_get_prescription(&view, &[0x5Bu8; 32])
+                .unwrap()
+                .expect("below the gate it commits");
+            assert_eq!(
+                stored.status,
+                PrescriptionStatus::TransferRequested,
+                "and it is committed in exactly the state `UpdatePrescription` exists \
+                 to keep it out of"
+            );
+            assert!(stored.is_controlled);
+        }
+    }
+}
+
+/// The discriminator for the test above: the gate refuses ONE (controlled,
+/// `TransferRequested`) PAIR, not controlled prescriptions and not the status.
+///
+/// Its own `#[test]` rather than a second loop in that one, because
+/// `execution_boundary.rs`'s `no_test_publishes_a_candidate_by_hand` reads a
+/// function body in order: a candidate read followed by a database write is the
+/// shape of a hand-rolled publisher, and appending this loop after that one
+/// produced exactly that shape out of two independent fixtures. Splitting is
+/// the fix; the guard is right to be name-blind about it.
+#[test]
+fn the_controlled_transfer_guard_refuses_the_pair_and_not_either_half_of_it() {
+    for gates in PRECONDITION {
+        for (label, controlled, status) in [
+            (
+                "controlled, ordinary status",
+                true,
+                PrescriptionStatus::Active,
+            ),
+            (
+                "uncontrolled, transfer requested",
+                false,
+                PrescriptionStatus::TransferRequested,
+            ),
+        ] {
+            let (_state, db, _dir, _executor) = setup_with_params(params());
+            let issuer = KeyPair::generate();
+            fund(&db, &issuer, 100_000_000);
+            let addr = issuer.address();
+            HealthcareStore::new(&db)
+                .providers()
+                .put(&provider(0x5A, addr, vec![]))
+                .unwrap();
+            let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+            let mut view = ExecutionView::new(&mut overlay);
+            let mut rx = prescription(0x5C, 0x5A, addr, 2);
+            rx.is_controlled = controlled;
+            rx.status = status;
+            assert!(
+                healthcare_at(
+                    &mut view,
+                    &addr,
+                    HealthcareOperation::IssuePrescription,
+                    &rx,
+                    gates,
+                )
+                .success,
+                "{label} must be admitted on BOTH sides (state_precondition={}) -- the \
+                 gate refuses the pair, not either half of it",
+                gates.state_precondition
+            );
+        }
+    }
+}

@@ -155,6 +155,11 @@ pub struct HealthcareGates {
     /// verifier exists in this tree, so the operation cannot be performed
     /// and must not report success.
     pub proof_unsupported: bool,
+    /// A transaction's sizing inputs are bounded before the value they size is
+    /// built: the payload before it is deserialized, and the accumulating row
+    /// an arm would append to before it is decoded.
+    /// ACTIVATION-AUDIT rows AL-8 and the Healthcare third of AL-12.
+    pub allocation_bound: bool,
 }
 
 impl HealthcareGates {
@@ -165,6 +170,7 @@ impl HealthcareGates {
         real_block_timestamp: false,
         state_precondition: false,
         proof_unsupported: false,
+        allocation_bound: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -173,6 +179,7 @@ impl HealthcareGates {
         real_block_timestamp: true,
         state_precondition: true,
         proof_unsupported: true,
+        allocation_bound: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -185,7 +192,20 @@ impl HealthcareGates {
                 block_height,
             ),
             proof_unsupported: crate::subsystem_proof_unsupported_gate_open(params, block_height),
+            allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
         }
+    }
+
+    /// The stored-row length limit this gate imposes, or `None` when closed.
+    ///
+    /// `None` is what the bounded callers below treat as "no limit", so a
+    /// closed gate reads byte-for-byte what the unbounded binary read. The
+    /// same spelling `AgreementGates::row_limit` and `DocClassGates::row_limit`
+    /// use, reading the same constant, because it is the same rule.
+    #[inline]
+    pub fn row_limit(self) -> Option<usize> {
+        self.allocation_bound
+            .then_some(crate::MAX_ACCUMULATING_ROW_BYTES)
     }
 }
 
@@ -283,6 +303,164 @@ impl HealthcareExecutor {
         )
     }
 
+    /// A stored row longer than the bound, refused without being decoded.
+    ///
+    /// The Agreement and DocClass wording verbatim, and for the same reason
+    /// they give: one phrasing across every family so the refusal is greppable,
+    /// with the LENGTH in it, because the remedy for a row over the limit is
+    /// not "retry".
+    fn row_too_large(what: &str, bytes: usize) -> HealthcareExecutionResult {
+        HealthcareExecutionResult::failure(format!(
+            "{what} too large to modify: {bytes} bytes, limit {}",
+            crate::MAX_ACCUMULATING_ROW_BYTES
+        ))
+    }
+
+    /// Every provider-network-index row this registration would append to,
+    /// checked against the bound before the first of them is decoded.
+    ///
+    /// ACTIVATION-AUDIT row AL-8. `v_put_provider` appends the provider id to
+    /// one accumulating row per plan the profile names, so one registration
+    /// does that `p` times and a row grown below the gate costs its own size
+    /// several times over on every later registration naming the same plan.
+    fn network_indexes_within_bound(
+        view: &ExecutionView<'_, '_>,
+        plan_ids: &[[u8; 32]],
+        max_bytes: Option<usize>,
+    ) -> Result<Option<HealthcareExecutionResult>> {
+        // No read AT ALL while the gate is closed, not merely no refusal: a
+        // read here would touch a family the unremediated binary does not
+        // touch until later in the arm, and this subsystem's corrupt-row
+        // behaviour is pinned per family.
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        for plan_id in plan_ids {
+            if let Some(bytes) = Self::v_network_index_row_len(view, plan_id)? {
+                if bytes > max {
+                    return Ok(Some(Self::row_too_large(
+                        "Healthcare provider network index",
+                        bytes,
+                    )));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// The member-index row this membership would append to, checked against
+    /// the bound before it is decoded. ACTIVATION-AUDIT row AL-8.
+    fn member_index_within_bound(
+        view: &ExecutionView<'_, '_>,
+        member_nullifier: &[u8; 32],
+        max_bytes: Option<usize>,
+    ) -> Result<Option<HealthcareExecutionResult>> {
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        match Self::v_member_index_row_len(view, member_nullifier)? {
+            Some(bytes) if bytes > max => {
+                Ok(Some(Self::row_too_large("Healthcare member index", bytes)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// The subject-consent-index row this consent would append to, checked
+    /// against the bound before it is decoded. ACTIVATION-AUDIT row AL-8.
+    fn subject_consent_index_within_bound(
+        view: &ExecutionView<'_, '_>,
+        subject_nullifier: &[u8; 32],
+        max_bytes: Option<usize>,
+    ) -> Result<Option<HealthcareExecutionResult>> {
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        match Self::v_subject_consent_index_row_len(view, subject_nullifier)? {
+            Some(bytes) if bytes > max => Ok(Some(Self::row_too_large(
+                "Healthcare subject consent index",
+                bytes,
+            ))),
+            _ => Ok(None),
+        }
+    }
+
+    /// Both prescription-index rows this prescription would append to, checked
+    /// against the bound before either is decoded. ACTIVATION-AUDIT row AL-8.
+    fn prescription_indexes_within_bound(
+        view: &ExecutionView<'_, '_>,
+        patient_nullifier: &[u8; 32],
+        prescriber_id: &[u8; 32],
+        max_bytes: Option<usize>,
+    ) -> Result<Option<HealthcareExecutionResult>> {
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        if let Some(bytes) = Self::v_patient_rx_index_row_len(view, patient_nullifier)? {
+            if bytes > max {
+                return Ok(Some(Self::row_too_large(
+                    "Healthcare patient prescription index",
+                    bytes,
+                )));
+            }
+        }
+        if let Some(bytes) = Self::v_prescriber_rx_index_row_len(view, prescriber_id)? {
+            if bytes > max {
+                return Ok(Some(Self::row_too_large(
+                    "Healthcare prescriber prescription index",
+                    bytes,
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The membership ROW this dependent would be appended INSIDE, checked
+    /// against the bound before the row is decoded.
+    ///
+    /// ACTIVATION-AUDIT row AL-8, the first in-row case. Checked before the
+    /// arm's own `v_get_membership`, not after it: the decode is the cost this
+    /// bound exists to refuse, so a check that ran after the row was already
+    /// decoded would refuse the write and pay for the read anyway.
+    fn membership_row_within_bound(
+        view: &ExecutionView<'_, '_>,
+        membership_id: &[u8; 32],
+        max_bytes: Option<usize>,
+    ) -> Result<Option<HealthcareExecutionResult>> {
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        match Self::v_membership_row_len(view, membership_id)? {
+            Some(bytes) if bytes > max => Ok(Some(Self::row_too_large(
+                "Healthcare membership row",
+                bytes,
+            ))),
+            _ => Ok(None),
+        }
+    }
+
+    /// The prescription ROW this fill would be appended INSIDE, checked against
+    /// the bound before the row is decoded. ACTIVATION-AUDIT row AL-8, the
+    /// second in-row case; same placement reasoning as
+    /// [`Self::membership_row_within_bound`], and it matters more here because
+    /// `PartialFillPrescription` rebuilds this row twice.
+    fn prescription_row_within_bound(
+        view: &ExecutionView<'_, '_>,
+        prescription_id: &[u8; 32],
+        max_bytes: Option<usize>,
+    ) -> Result<Option<HealthcareExecutionResult>> {
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        match Self::v_prescription_row_len(view, prescription_id)? {
+            Some(bytes) if bytes > max => Ok(Some(Self::row_too_large(
+                "Healthcare prescription row",
+                bytes,
+            ))),
+            _ => Ok(None),
+        }
+    }
+
     /// Execute a Healthcare transaction.
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
@@ -328,6 +506,35 @@ impl HealthcareExecutor {
     ) -> Result<HealthcareExecutionResult> {
         let block_timestamp =
             crate::effective_block_timestamp(block_timestamp, gates.real_block_timestamp);
+
+        // ACTIVATION-AUDIT row AL-12, the Healthcare third. Every arm below
+        // `bincode::deserialize`s `data.data` with no size or shape limit ahead
+        // of it, and three of those arms store the deserialized struct
+        // VERBATIM: `RegisterProvider` a `ProviderProfile` with its
+        // `network_affiliations`, `IssueMembership` a `MembershipRecord` with
+        // its `dependents`, `IssuePrescription` a `Prescription` with its
+        // `fill_history`. That is the `CreateIdentityRoot` shape of AL-10 three
+        // times over -- one transaction bounded only by `max_block_bytes`
+        // decides how large the row every later arm decodes, appends to and
+        // re-encodes is, and AL-8's two in-row accumulators rebuild the ENTIRE
+        // record each time.
+        //
+        // This is a refusal, not an error, and the DocClass arm's reasoning
+        // applies unchanged: below the gate an undecodable payload is `Err(..)`
+        // and takes the whole block with it, and an oversized one that happens
+        // to decode is admitted; above the gate an oversized payload is a
+        // failed receipt in a valid block whether or not it would have decoded.
+        // The refusal charges nothing and does not advance the nonce, because
+        // every arm below deducts the fee itself and every pre-existing
+        // `failure()` that fires before that deduction is already free.
+        if gates.allocation_bound && data.data.len() > crate::MAX_SUBSYSTEM_PAYLOAD_BYTES {
+            return Ok(HealthcareExecutionResult::failure(format!(
+                "Healthcare payload too large: {} bytes, limit {}",
+                data.data.len(),
+                crate::MAX_SUBSYSTEM_PAYLOAD_BYTES
+            )));
+        }
+
         match data.operation {
             // =================================================================
             // SRC-871: Provider Registry Operations
@@ -342,6 +549,16 @@ impl HealthcareExecutor {
 
                 if Self::v_provider_exists(view, &provider.provider_id)? {
                     return Ok(HealthcareExecutionResult::failure("Provider already exists"));
+                }
+
+                // ACTIVATION-AUDIT row AL-8, the network-index family: one
+                // append per affiliation the profile declares.
+                if let Some(refusal) = Self::network_indexes_within_bound(
+                    view,
+                    &provider.network_affiliations,
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -499,6 +716,15 @@ impl HealthcareExecutor {
                     ));
                 }
 
+                // ACTIVATION-AUDIT row AL-8, the network-index family again.
+                if let Some(refusal) = Self::network_indexes_within_bound(
+                    view,
+                    std::slice::from_ref(&d.plan_id),
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -564,6 +790,15 @@ impl HealthcareExecutor {
 
                 if Self::v_membership_exists(view, &membership.membership_id)? {
                     return Ok(HealthcareExecutionResult::failure("Membership already exists"));
+                }
+
+                // ACTIVATION-AUDIT row AL-8, the member-index family.
+                if let Some(refusal) = Self::member_index_within_bound(
+                    view,
+                    &membership.member_nullifier,
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -760,6 +995,17 @@ impl HealthcareExecutor {
                 let d: DependentData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
+                // ACTIVATION-AUDIT row AL-8, the membership in-row case.
+                // BEFORE the arm's own `v_get_membership`, because the decode
+                // of the whole `MembershipRecord` is exactly the cost this
+                // bound exists to refuse -- `v_add_dependent` then decodes and
+                // re-encodes that same record a second and third time.
+                if let Some(refusal) =
+                    Self::membership_row_within_bound(view, &d.membership_id, gates.row_limit())?
+                {
+                    return Ok(refusal);
+                }
+
                 let membership = match Self::v_get_membership(view, &d.membership_id)? {
                     Some(m) => m,
                     None => return Ok(HealthcareExecutionResult::failure("Membership not found")),
@@ -827,6 +1073,15 @@ impl HealthcareExecutor {
 
                 if Self::v_consent_exists(view, &consent.consent_id)? {
                     return Ok(HealthcareExecutionResult::failure("Consent already exists"));
+                }
+
+                // ACTIVATION-AUDIT row AL-8, the subject-consent family.
+                if let Some(refusal) = Self::subject_consent_index_within_bound(
+                    view,
+                    &consent.subject_nullifier,
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -943,6 +1198,18 @@ impl HealthcareExecutor {
                     }
                 }
 
+                // ACTIVATION-AUDIT row AL-8, the subject-consent family: the
+                // replacement's id is appended to the index of the subject the
+                // REPLACEMENT names, which below the authorization gate need
+                // not be the subject the old consent named.
+                if let Some(refusal) = Self::subject_consent_index_within_bound(
+                    view,
+                    &d.new_consent.subject_nullifier,
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -997,6 +1264,46 @@ impl HealthcareExecutor {
 
                 if Self::v_prescription_exists(view, &prescription.prescription_id)? {
                     return Ok(HealthcareExecutionResult::failure("Prescription already exists"));
+                }
+
+                // ACTIVATION-AUDIT row AL-8, both prescription-index families:
+                // one `IssuePrescription` appends to the patient index and the
+                // prescriber index in the same transaction.
+                if let Some(refusal) = Self::prescription_indexes_within_bound(
+                    view,
+                    &prescription.patient_nullifier,
+                    &prescription.prescriber_provider_id,
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
+                }
+
+                // ACTIVATION-AUDIT row OV-19. `UpdatePrescription` refuses to
+                // move a controlled prescription into `TransferRequested`, and
+                // that is the subsystem's ONLY rule about `is_controlled` --
+                // SRC-876 calls itself "NON-TRANSFERABLE for controlled
+                // substances" and `TransferRequested` is the only transfer
+                // state there is. Below the gate the rule is enforced on the
+                // path that MOVES a prescription and on no other, and this arm
+                // stores the payload's `status` VERBATIM -- so the state the
+                // guard exists to keep a controlled prescription out of is
+                // reached by issuing it there in the first place, for one
+                // `min_fee`, by the same issuer the guard would have refused.
+                //
+                // At and above the gate the creation path carries the same
+                // check as the update path. Refused before the fee, like the
+                // duplicate guard above it. Deliberately NOT a normalization of
+                // `status` to `Active`: which initial states are lawful for a
+                // prescription is a policy this tree does not state, and
+                // inventing one here would refuse lawful `Pending` issuance to
+                // close a hole that is about one state.
+                if gates.state_precondition
+                    && prescription.is_controlled
+                    && prescription.status == PrescriptionStatus::TransferRequested
+                {
+                    return Ok(HealthcareExecutionResult::failure(
+                        "Controlled substance prescriptions cannot be transferred",
+                    ));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -1055,6 +1362,18 @@ impl HealthcareExecutor {
                 let d: FillData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
+                // ACTIVATION-AUDIT row AL-8, the prescription in-row case.
+                // BEFORE the arm's own `v_get_prescription`, because the decode
+                // of the whole `Prescription` is exactly the cost this bound
+                // exists to refuse.
+                if let Some(refusal) = Self::prescription_row_within_bound(
+                    view,
+                    &d.prescription_id,
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
+                }
+
                 let prescription = match Self::v_get_prescription(view, &d.prescription_id)? {
                     Some(p) => p,
                     None => return Ok(HealthcareExecutionResult::failure("Prescription not found")),
@@ -1105,6 +1424,20 @@ impl HealthcareExecutor {
                 }
                 let d: PartialFillData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
+
+                // ACTIVATION-AUDIT row AL-8, the prescription in-row case, and
+                // the arm that rebuilds the record TWICE in one transaction --
+                // once in `v_add_fill_history` and once in
+                // `v_update_prescription_status`. Checked before the arm's own
+                // `v_get_prescription`, which is a third decode of the same
+                // row.
+                if let Some(refusal) = Self::prescription_row_within_bound(
+                    view,
+                    &d.prescription_id,
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
+                }
 
                 let prescription = match Self::v_get_prescription(view, &d.prescription_id)? {
                     Some(p) => p,

@@ -176,6 +176,29 @@ impl LegalExecutor {
         }
     }
 
+    /// The STORED length of a jurisdiction-index row, without decoding it.
+    ///
+    /// ACTIVATION-AUDIT row AL-3. `v_add_to_jurisdiction_index` decodes the
+    /// whole row, pushes one 32-byte id and re-encodes the whole row, and
+    /// `view.put` only then accounts for a byte. The caller that wants to
+    /// refuse an oversized row therefore has to know its size WITHOUT paying
+    /// for the decode, and a length is the only thing it needs: `None` for an
+    /// absent row, `Some(n)` for one of `n` bytes. The same shape and the same
+    /// reasoning as `AgreementView::v_party_index_row_len`.
+    pub fn v_jurisdiction_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        jurisdiction: &str,
+        id_type: &str,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::LEGAL_JURISDICTION_INDEX,
+                &jurisdiction_index_key(jurisdiction, id_type),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
+    }
+
     fn v_add_to_jurisdiction_index(
         view: &mut ExecutionView<'_, '_>,
         jurisdiction: &str,
@@ -268,6 +291,19 @@ impl LegalExecutor {
         }
     }
 
+    /// The STORED length of a case-event-index row, without decoding it.
+    /// ACTIVATION-AUDIT row AL-3, the second of its three families; same
+    /// reasoning as [`Self::v_jurisdiction_index_row_len`].
+    pub fn v_case_event_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        case_id: &CaseId,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(cf::LEGAL_CASE_EVENT_INDEX, case_event_index_key(case_id))
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
+    }
+
     fn v_add_to_case_event_index(
         view: &mut ExecutionView<'_, '_>,
         case_id: &CaseId,
@@ -346,6 +382,19 @@ impl LegalExecutor {
             Some(bytes) => decode_id_list(&bytes).map_err(StateError::Storage),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// The STORED length of a case-order-index row, without decoding it.
+    /// ACTIVATION-AUDIT row AL-3, the third of its three families; same
+    /// reasoning as [`Self::v_jurisdiction_index_row_len`].
+    pub fn v_case_order_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        case_id: &CaseId,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(cf::LEGAL_CASE_ORDER_INDEX, case_order_index_key(case_id))
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
     }
 
     fn v_add_to_case_order_index(

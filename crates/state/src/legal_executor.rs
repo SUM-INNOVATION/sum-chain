@@ -187,6 +187,18 @@ impl LegalGates {
             no_op_receipt: crate::subsystem_no_op_receipt_gate_open(params, block_height),
         }
     }
+
+    /// The stored-row length limit this gate imposes, or `None` when closed.
+    ///
+    /// `None` is what the bounded callers below treat as "no limit", so a
+    /// closed gate reads byte-for-byte what the unbounded binary read. The
+    /// same spelling `AgreementGates::row_limit` and `DocClassGates::row_limit`
+    /// use, reading the same constant, because it is the same rule.
+    #[inline]
+    pub fn row_limit(self) -> Option<usize> {
+        self.allocation_bound
+            .then_some(crate::MAX_ACCUMULATING_ROW_BYTES)
+    }
 }
 
 impl LegalExecutor {
@@ -223,6 +235,86 @@ impl LegalExecutor {
     #[inline]
     pub fn authorization_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
         matches!(Self::authorization_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// A stored index row longer than the bound, refused without being decoded.
+    ///
+    /// The Agreement and DocClass wording verbatim, and for the same reason
+    /// they give: one phrasing across every family so the refusal is greppable,
+    /// with the LENGTH in it, because the remedy for a row over the limit is
+    /// not "retry".
+    fn row_too_large(what: &str, bytes: usize) -> LegalExecutionResult {
+        LegalExecutionResult::failure(format!(
+            "{what} too large to modify: {bytes} bytes, limit {}",
+            crate::MAX_ACCUMULATING_ROW_BYTES
+        ))
+    }
+
+    /// The jurisdiction-index row this anchor would append to, checked against
+    /// the bound before it is decoded.
+    ///
+    /// ACTIVATION-AUDIT row AL-3, the family AL-7 already bounds the KEY of.
+    /// The two halves are independent and both are needed:
+    /// `MAX_INDEX_KEY_TEXT_BYTES` bounds how wide one key may be,
+    /// `MAX_ACCUMULATING_ROW_BYTES` bounds how large the value under it may
+    /// grow -- an attacker refused by the first still reaches the second by
+    /// reusing one short, lawful code. Exactly the pairing Finance's
+    /// jurisdiction index already carries.
+    fn jurisdiction_index_within_bound(
+        view: &ExecutionView<'_, '_>,
+        jurisdiction: &str,
+        id_type: &str,
+        max_bytes: Option<usize>,
+    ) -> Result<Option<LegalExecutionResult>> {
+        // No read AT ALL while the gate is closed, not merely no refusal: a
+        // read here would touch a family the unremediated binary does not
+        // touch until later in the arm, and this subsystem's corrupt-row
+        // behaviour is pinned per family.
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        match Self::v_jurisdiction_index_row_len(view, jurisdiction, id_type)? {
+            Some(bytes) if bytes > max => {
+                Ok(Some(Self::row_too_large("Legal jurisdiction index", bytes)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// The case-event-index row this event would append to, checked against the
+    /// bound before it is decoded. ACTIVATION-AUDIT row AL-3, second family.
+    fn case_event_index_within_bound(
+        view: &ExecutionView<'_, '_>,
+        case_id: &[u8; 32],
+        max_bytes: Option<usize>,
+    ) -> Result<Option<LegalExecutionResult>> {
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        match Self::v_case_event_index_row_len(view, case_id)? {
+            Some(bytes) if bytes > max => {
+                Ok(Some(Self::row_too_large("Legal case event index", bytes)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// The case-order-index row this order would append to, checked against the
+    /// bound before it is decoded. ACTIVATION-AUDIT row AL-3, third family.
+    fn case_order_index_within_bound(
+        view: &ExecutionView<'_, '_>,
+        case_id: &[u8; 32],
+        max_bytes: Option<usize>,
+    ) -> Result<Option<LegalExecutionResult>> {
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        match Self::v_case_order_index_row_len(view, case_id)? {
+            Some(bytes) if bytes > max => {
+                Ok(Some(Self::row_too_large("Legal case order index", bytes)))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Execute a Legal transaction.
@@ -300,6 +392,21 @@ impl LegalExecutor {
                         case.jurisdiction_code.len(),
                         crate::MAX_INDEX_KEY_TEXT_BYTES
                     )));
+                }
+
+                // ACTIVATION-AUDIT row AL-3, the jurisdiction family. The KEY
+                // bound directly above and this VALUE bound are independent:
+                // a short, lawful code still names a row that grows by one
+                // 32-byte id per anchor forever, and every later anchor under
+                // that code decodes, appends to and re-encodes the whole of
+                // it. Refused before the fee, like the guards above it.
+                if let Some(refusal) = Self::jurisdiction_index_within_bound(
+                    view,
+                    &case.jurisdiction_code,
+                    "case",
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -521,6 +628,13 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Event already exists"));
                 }
 
+                // ACTIVATION-AUDIT row AL-3, the case-event family.
+                if let Some(refusal) =
+                    Self::case_event_index_within_bound(view, &event.case_id, gates.row_limit())?
+                {
+                    return Ok(refusal);
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -582,6 +696,18 @@ impl LegalExecutor {
                             "The replacement event names a case that does not exist",
                         ));
                     }
+                }
+
+                // ACTIVATION-AUDIT row AL-3, the case-event family: a
+                // supersession appends the replacement's id to the index of
+                // the case the REPLACEMENT names, which AU-16 shows need not
+                // be the case the old event named.
+                if let Some(refusal) = Self::case_event_index_within_bound(
+                    view,
+                    &d.new_event.case_id,
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -646,6 +772,13 @@ impl LegalExecutor {
 
                 if Self::v_order_exists(view, &order.order_id)? {
                     return Ok(LegalExecutionResult::failure("Order already exists"));
+                }
+
+                // ACTIVATION-AUDIT row AL-3, the case-order family.
+                if let Some(refusal) =
+                    Self::case_order_index_within_bound(view, &order.case_id, gates.row_limit())?
+                {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -780,6 +913,17 @@ impl LegalExecutor {
                     }
                 }
 
+                // ACTIVATION-AUDIT row AL-3, the case-order family: the
+                // replacement's id is appended to the index of the case the
+                // REPLACEMENT names.
+                if let Some(refusal) = Self::case_order_index_within_bound(
+                    view,
+                    &d.new_order.case_id,
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -857,6 +1001,20 @@ impl LegalExecutor {
                         benefit.jurisdiction_code.len(),
                         crate::MAX_INDEX_KEY_TEXT_BYTES
                     )));
+                }
+
+                // ACTIVATION-AUDIT row AL-3, the jurisdiction family again --
+                // the same column family cases use, kept apart only by the
+                // `":benefit"` suffix `v_put_benefit` appends, so it is a
+                // second writer of one accumulating row shape and needs the
+                // same bound.
+                if let Some(refusal) = Self::jurisdiction_index_within_bound(
+                    view,
+                    &benefit.jurisdiction_code,
+                    "benefit",
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;

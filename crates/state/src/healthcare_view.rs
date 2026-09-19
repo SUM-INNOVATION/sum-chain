@@ -133,6 +133,30 @@ impl HealthcareExecutor {
         }
     }
 
+    /// The STORED length of a provider-network-index row, without decoding it.
+    ///
+    /// ACTIVATION-AUDIT row AL-8. Each accumulating structure in this subsystem
+    /// is read, decoded in full, appended to and re-encoded in full before
+    /// `view.put` accounts for a byte -- and for the two IN-ROW cases the
+    /// buffer rebuilt is the entire record, which is why this row carries the
+    /// worst accounted-to-allocated ratio in the inventory. The caller that
+    /// wants to refuse an oversized row therefore has to know its size WITHOUT
+    /// paying for the decode, and a length is the only thing it needs: `None`
+    /// for an absent row, `Some(n)` for one of `n` bytes. The same shape and
+    /// the same reasoning as `AgreementView::v_party_index_row_len`.
+    pub fn v_network_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        plan_id: &ProviderId,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::HEALTHCARE_PROVIDER_NETWORK_INDEX,
+                provider_network_index_key(plan_id),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
+    }
+
     fn v_add_to_network_index(
         view: &mut ExecutionView<'_, '_>,
         provider_id: &ProviderId,
@@ -314,6 +338,22 @@ impl HealthcareExecutor {
         }
     }
 
+    /// The STORED length of a member-index row, without decoding it.
+    /// ACTIVATION-AUDIT row AL-8; same reasoning as
+    /// [`Self::v_network_index_row_len`].
+    pub fn v_member_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        member_nullifier: &[u8; 32],
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::HEALTHCARE_MEMBER_INDEX,
+                member_index_key(member_nullifier),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
+    }
+
     fn v_add_to_member_index(
         view: &mut ExecutionView<'_, '_>,
         member_nullifier: &[u8; 32],
@@ -378,6 +418,27 @@ impl HealthcareExecutor {
             }
             None => Err(not_found("Membership", membership_id)),
         }
+    }
+
+    /// The STORED length of a membership row, without decoding it.
+    ///
+    /// ACTIVATION-AUDIT row AL-8, the first of its two IN-ROW cases.
+    /// `membership.dependents` accumulates inside the primary record, so the
+    /// buffer `v_add_dependent` rebuilds is the WHOLE `MembershipRecord` and
+    /// not a list of ids -- and `IssueMembership` stores a `MembershipRecord`
+    /// deserialized verbatim from the payload, `dependents` included, so one
+    /// transaction seeds the row rather than twenty thousand. That is the
+    /// `CreateIdentityRoot` shape of AL-10, in Healthcare, and it is why this
+    /// half of AL-8 is not the fixed-32-bytes-per-transaction case the rest of
+    /// the class is.
+    pub fn v_membership_row_len(
+        view: &ExecutionView<'_, '_>,
+        membership_id: &MembershipId,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(cf::HEALTHCARE_MEMBERSHIPS, membership_key(membership_id))
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
     }
 
     /// An accumulating list INSIDE the membership row rather than in an index
@@ -492,6 +553,22 @@ impl HealthcareExecutor {
             Some(bytes) => decode_consent_ids(&bytes).map_err(StateError::Storage),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// The STORED length of a subject-consent-index row, without decoding it.
+    /// ACTIVATION-AUDIT row AL-8; same reasoning as
+    /// [`Self::v_network_index_row_len`].
+    pub fn v_subject_consent_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        subject_nullifier: &[u8; 32],
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::HEALTHCARE_SUBJECT_CONSENT_INDEX,
+                subject_consent_index_key(subject_nullifier),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
     }
 
     fn v_add_to_subject_index(
@@ -620,6 +697,22 @@ impl HealthcareExecutor {
         }
     }
 
+    /// The STORED length of a patient-prescription-index row, without decoding
+    /// it. ACTIVATION-AUDIT row AL-8; same reasoning as
+    /// [`Self::v_network_index_row_len`].
+    pub fn v_patient_rx_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        patient_nullifier: &[u8; 32],
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::HEALTHCARE_PATIENT_RX_INDEX,
+                patient_rx_index_key(patient_nullifier),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
+    }
+
     fn v_add_to_patient_index(
         view: &mut ExecutionView<'_, '_>,
         patient_nullifier: &[u8; 32],
@@ -637,6 +730,22 @@ impl HealthcareExecutor {
             &bytes,
         )
         .map_err(StateError::Storage)
+    }
+
+    /// The STORED length of a prescriber-prescription-index row, without
+    /// decoding it. ACTIVATION-AUDIT row AL-8; same reasoning as
+    /// [`Self::v_network_index_row_len`].
+    pub fn v_prescriber_rx_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        prescriber_id: &ProviderId,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::HEALTHCARE_PRESCRIBER_RX_INDEX,
+                prescriber_rx_index_key(prescriber_id),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
     }
 
     fn v_add_to_prescriber_index(
@@ -733,6 +842,27 @@ impl HealthcareExecutor {
     /// `PartialFillPrescription` calls this and then
     /// `v_update_prescription_status` on the SAME row in the SAME transaction,
     /// so the status write must read what this one staged or the fill is lost.
+    /// The STORED length of a prescription row, without decoding it.
+    ///
+    /// ACTIVATION-AUDIT row AL-8, the second of its two IN-ROW cases, and the
+    /// one `PartialFillPrescription` rebuilds TWICE in a single transaction --
+    /// once in `v_add_fill_history` and once in `v_update_prescription_status`.
+    /// `IssuePrescription` stores a `Prescription` deserialized verbatim from
+    /// the payload, `fill_history` included, so the same single-transaction
+    /// seeding [`Self::v_membership_row_len`] describes applies here.
+    pub fn v_prescription_row_len(
+        view: &ExecutionView<'_, '_>,
+        prescription_id: &PrescriptionId,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::HEALTHCARE_PRESCRIPTIONS,
+                prescription_key(prescription_id),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
+    }
+
     pub fn v_add_fill_history(
         view: &mut ExecutionView<'_, '_>,
         prescription_id: &PrescriptionId,
