@@ -1665,6 +1665,25 @@ so a later reader can re-establish it rather than trust it.
 
 ### Still blocking
 
+  * **`CANDIDATE_LIMIT_SCAFFOLD` is a live consensus parameter that says of
+    itself that it must not ship.** `crates/state/src/executor.rs:269` defines a
+    1 GiB ceiling on a block's logical write set, and `:3118` uses it on the
+    production `execute_block` path. It is UNGATED: it decides today which
+    blocks are applicable. Its own documentation says it is "SCAFFOLDING", that
+    "the real ceiling is a versioned consensus parameter derived from measured
+    write sets", that "a limit that can refuse a write helps decide whether a
+    block is applicable, which makes it consensus-relevant and not a number a
+    storage or executor module may invent", and that it "must be replaced before
+    publication".
+
+    Two binaries compiled with different values disagree about which blocks are
+    valid. Since `817e141` they at least no longer do so silently — the value is
+    folded into the protocol digest peers exchange and compare, so a mismatched
+    peer is refused rather than admitted. That converts a silent fork into a
+    refusal; it does not derive the number. Deriving it from measured write sets
+    and versioning it as a chain parameter is outstanding, and the scaffold's own
+    comment is the specification.
+
   * **Thirty-three audit remedies are implemented and dormant.** The eleven
     `*_enabled_from_height` fields they read now exist, are covered by the
     activation digest and the startup change detection, and are read by the
