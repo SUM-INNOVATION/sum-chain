@@ -7,7 +7,7 @@
 //! whether their nodes compute the same state root, because the rules a node
 //! enforces are only half configuration: `MAX_SUBSYSTEM_PAYLOAD_BYTES`,
 //! `MAX_ACCUMULATING_ROW_BYTES`, `MAX_NFT_BATCH_MINT_REQUESTS`,
-//! `CANDIDATE_LIMIT_SCAFFOLD` and the rest ship in the BINARY. Two nodes built
+//! `MAX_BLOCK_WRITE_SET_BYTES` and the rest ship in the BINARY. Two nodes built
 //! from different commits enforce different validity and report the same
 //! activation digest.
 //!
@@ -95,10 +95,10 @@ fn two_binaries_with_different_consensus_constants_produce_different_digests() {
         "MAX_SUBSYSTEM_PAYLOAD_BYTES",
         "MAX_ACCUMULATING_ROW_BYTES",
         "MAX_NFT_BATCH_MINT_REQUESTS",
-        // Live on the production `execute_block` path today, ungated, and
-        // self-disclaimed as "consensus-relevant and not a number a storage or
-        // executor module may invent".
-        "CANDIDATE_LIMIT_SCAFFOLD",
+        // Live on the production `execute_block` path today, ungated, and the
+        // value the scaffold that used to sit here was replaced by: a limit
+        // that can refuse a write helps decide whether a block is applicable.
+        "MAX_BLOCK_WRITE_SET_BYTES",
         // The seam that decides whether a divergent root is adopted or refused,
         // which is what absorbs the activation-height defect below the window.
         "LEGACY_ROOT_COMPATIBILITY_HEIGHT",

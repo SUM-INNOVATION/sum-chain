@@ -155,18 +155,20 @@ pub fn consensus_limits() -> Vec<(&'static str, LimitValue)> {
             "MAX_INDEX_KEY_TEXT_BYTES",
             LimitValue::Num(crate::MAX_INDEX_KEY_TEXT_BYTES as u128),
         ),
-        // ── Block applicability. `CANDIDATE_LIMIT_SCAFFOLD` is the one the
-        //    census found that nobody was looking for: a LIVE 1 GiB ceiling on a
-        //    block's logical write set, read on the production `execute_block`
-        //    path, whose own doc comment says "a limit that can refuse a write
-        //    helps decide whether a block is applicable, which makes it
+        // ── Block applicability. The census found this one when it was still
+        //    `CANDIDATE_LIMIT_SCAFFOLD`, a LIVE 1 GiB ceiling on a block's
+        //    logical write set read on the production `execute_block` path,
+        //    whose own doc comment said "a limit that can refuse a write helps
+        //    decide whether a block is applicable, which makes it
         //    consensus-relevant and not a number a storage or executor module
         //    may invent". It is exactly the hazard this digest exists for, and
-        //    it is ungated — two binaries with different scaffolds disagree
-        //    about a large block today, not at some future height.
+        //    it is ungated — two binaries with different ceilings disagree about
+        //    a large block today, not at some future height. The scaffold has
+        //    since been replaced by a derived value; the entry is what makes
+        //    that value comparable rather than merely written down.
         (
-            "CANDIDATE_LIMIT_SCAFFOLD",
-            LimitValue::Num(crate::executor::CANDIDATE_LIMIT_SCAFFOLD as u128),
+            "MAX_BLOCK_WRITE_SET_BYTES",
+            LimitValue::Num(crate::MAX_BLOCK_WRITE_SET_BYTES as u128),
         ),
         // `candidate.rs` calls this "a consensus rule" in as many words: at or
         // below it a root mismatch is force-adopted, above it the same mismatch

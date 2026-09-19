@@ -259,15 +259,6 @@ pub struct BlockExecutor {
     beacon_block: parking_lot::Mutex<Option<crate::beacon_manager::BeaconBlockState>>,
 }
 
-/// Stand-in ceiling for a block's logical write set, in bytes.
-///
-/// SCAFFOLDING. The real ceiling is a versioned consensus parameter derived from
-/// measured write sets: a limit that can refuse a write helps decide whether a
-/// block is applicable, which makes it consensus-relevant and not a number a
-/// storage or executor module may invent. This exists only so the migration can
-/// proceed locally, and must be replaced before publication.
-pub const CANDIDATE_LIMIT_SCAFFOLD: u64 = 1 << 30;
-
 /// Everything one block's execution produced, INCLUDING the unpublished
 /// candidate that holds its buffered writes.
 ///
@@ -3109,13 +3100,15 @@ impl BlockExecutor {
         // Built FIRST: expired-challenge slashing and the beacon accumulator
         // both need it, and both run before the transaction loop.
         //
-        // TEMPORARY LIMIT — scaffolding, not the final value. The ceiling is a
-        // versioned consensus parameter derived from measured write sets,
-        // because a limit that can refuse a write participates in deciding
-        // whether a block is applicable. It is not defined yet, so this constant
-        // stands in while the migration proceeds locally and MUST be replaced by
-        // the parameter before any of this is proposed for publication.
-        let mut candidate = CandidateExecution::new(&self.db, CANDIDATE_LIMIT_SCAFFOLD);
+        // The ceiling is `crate::MAX_BLOCK_WRITE_SET_BYTES`, the versioned
+        // consensus parameter derived from measured write sets that replaced the
+        // scaffolding constant this line used to read. A limit that can refuse a
+        // write participates in deciding whether a block is applicable, so it is
+        // folded into `protocol_digest::consensus_limits` and two binaries
+        // holding different values produce different digests. The derivation,
+        // with every measured figure separated from every assumed one, is on the
+        // constant.
+        let mut candidate = CandidateExecution::new(&self.db, crate::MAX_BLOCK_WRITE_SET_BYTES);
 
         {
             // Slashing here forfeits locked grants, which are supply writes and
@@ -4175,7 +4168,7 @@ mod tests {
 
         let mut deployed = Address::ZERO;
         {
-            let mut overlay = ApplicationOverlay::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+            let mut overlay = ApplicationOverlay::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
             let mut view = ExecutionView::new(&mut overlay);
 
             // The same shape `execute_block` has: a scope armed first, work that
@@ -4304,7 +4297,7 @@ mod tests {
             .unwrap();
 
         let tx = create_signed_tx(&sender, recipient.address(), 100, 10, 0);
-        let mut candidate = CandidateExecution::new(&db2, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db2, crate::MAX_BLOCK_WRITE_SET_BYTES);
         assert!(executor.validate_tx(&mut candidate.view(), &tx).is_ok());
     }
 
@@ -4327,7 +4320,7 @@ mod tests {
             .unwrap();
 
         let tx = create_signed_tx(&sender, recipient.address(), 100, 10, 0); // But tx has nonce 0
-        let mut candidate = CandidateExecution::new(&db2, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db2, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let result = executor.validate_tx(&mut candidate.view(), &tx);
         assert!(matches!(result, Err(StateError::InvalidNonce { .. })));
     }
@@ -4336,7 +4329,7 @@ mod tests {
     fn test_execute_tx() {
         let (state, db, _dir) = setup();
         let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
 
         let sender = KeyPair::generate();
         let recipient = KeyPair::generate();
@@ -4370,7 +4363,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
 
@@ -4424,7 +4417,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
 
@@ -4549,7 +4542,7 @@ mod tests {
         use sumchain_primitives::{FileLifecycleV2, FileVisibilityV2, Hash};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
@@ -4593,7 +4586,7 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
@@ -4621,7 +4614,7 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
@@ -4649,7 +4642,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, EncryptedKeyBundleV2, Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
@@ -4684,7 +4677,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, EncryptedKeyBundleV2, Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
@@ -4721,7 +4714,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
@@ -4811,7 +4804,7 @@ mod tests {
         let mut params = ChainParams::with_v2_enabled();
         params.max_chunk_count_per_file = 4;
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor = BlockExecutor::new(state.clone(), db.clone(), params);
 
         let owner = KeyPair::generate();
@@ -4863,7 +4856,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
@@ -4918,7 +4911,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
@@ -5128,7 +5121,7 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -5180,7 +5173,7 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -5245,7 +5238,7 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -5321,7 +5314,7 @@ mod tests {
         let mut params = ChainParams::with_v2_enabled();
         params.assignment_replication_factor = 1; // each chunk has exactly one assigned archive
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor = BlockExecutor::new(state.clone(), db.clone(), params.clone());
         let proposer = KeyPair::generate();
 
@@ -5390,7 +5383,7 @@ mod tests {
         params.max_chunk_indices_per_tx = 4;
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor = BlockExecutor::new(state.clone(), db.clone(), params);
         let proposer = KeyPair::generate();
 
@@ -5434,7 +5427,7 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -5542,7 +5535,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -5636,7 +5629,7 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -5719,7 +5712,7 @@ mod tests {
         let r = params.assignment_replication_factor;
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor = BlockExecutor::new(state.clone(), db.clone(), params.clone());
         let proposer = KeyPair::generate();
 
@@ -5825,7 +5818,7 @@ mod tests {
         use sumchain_primitives::Hash;
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6048,7 +6041,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6085,7 +6078,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6119,7 +6112,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6167,7 +6160,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, EncryptedKeyBundleV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6201,7 +6194,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6266,7 +6259,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6468,7 +6461,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6528,7 +6521,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6564,7 +6557,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6619,7 +6612,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6680,7 +6673,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, EncryptedKeyBundleV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6743,7 +6736,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, EncryptedKeyBundleV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6821,7 +6814,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6923,7 +6916,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
@@ -7081,7 +7074,7 @@ mod tests {
     #[test]
     fn test_register_archive_writes_snapshot_at_block_height() {
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -7104,7 +7097,7 @@ mod tests {
     #[test]
     fn test_get_active_nodes_at_height_walks_back_to_nearest_snapshot() {
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -7147,7 +7140,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -7259,7 +7252,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -7362,7 +7355,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
 
@@ -7460,7 +7453,7 @@ mod tests {
     #[test]
     fn test_active_file_v2_has_no_abandoned_at_height() {
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -7493,7 +7486,7 @@ mod tests {
     #[test]
     fn test_v2_gate_rejects_when_disabled() {
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let mut params = ChainParams::default();
         params.v2_enabled_from_height = None; // explicit; matches Default
         let executor = BlockExecutor::new(state.clone(), db.clone(), params);
@@ -7531,7 +7524,7 @@ mod tests {
     #[test]
     fn test_v2_gate_rejects_before_activation_height() {
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let mut params = ChainParams::default();
         const ACTIVATION_HEIGHT: u64 = 1_000_000;
         params.v2_enabled_from_height = Some(ACTIVATION_HEIGHT);
@@ -7554,7 +7547,7 @@ mod tests {
     #[test]
     fn test_v2_gate_accepts_at_activation_height() {
         let (state, db, _dir) = setup();
-        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut candidate = CandidateExecution::new(&db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let mut params = ChainParams::default();
         const ACTIVATION_HEIGHT: u64 = 1_000_000;
         params.v2_enabled_from_height = Some(ACTIVATION_HEIGHT);
@@ -7801,7 +7794,7 @@ mod tests {
     {
         use sumchain_storage::overlay::ApplicationOverlay;
 
-        let mut overlay = ApplicationOverlay::new(db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut overlay = ApplicationOverlay::new(db, crate::MAX_BLOCK_WRITE_SET_BYTES);
         let mut view = ExecutionView::new(&mut overlay);
         let journal = executor
             .apply_compute_pool_ops(&mut view, height, ops)
