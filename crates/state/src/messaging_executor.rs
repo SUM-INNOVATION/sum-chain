@@ -940,24 +940,114 @@ fn recipient_hash_for_address(address: &Address) -> [u8; 32] {
     recipient_hash(address)
 }
 
-// FIXME: tests reference primitives fields removed during schema migration; gated until updated.
 #[cfg(all(test, feature = "legacy_tests"))]
 mod tests {
     use super::*;
+    // Scoped to this module: the production code above holds no
+    // `Arc<Database>` any more, so a file-level import would be unused.
+    use std::sync::Arc;
     use sumchain_storage::Database;
     use tempfile::TempDir;
 
-    fn setup() -> (Arc<Database>, TempDir, Arc<StateManager>) {
+    fn setup() -> (Arc<Database>, TempDir) {
         let dir = TempDir::new().unwrap();
         let db = Arc::new(Database::open_default(dir.path()).unwrap());
-        let state = Arc::new(StateManager::new(db.clone(), 1));
-        (db, dir, state)
+        (db, dir)
     }
 
+    /// Replaces `test_messaging_executor_creation`, which asserted that
+    /// `MessagingExecutor::new(db, params)` returned a value. That constructor
+    /// no longer exists: `MessagingExecutor` is a unit struct and every entry
+    /// point is an associated function over an `ExecutionView`, so "can it be
+    /// constructed" is not a question about the type any more. What the old
+    /// test was standing in for — that the executor's dispatch reaches a real
+    /// operation and stages it on the candidate — is asserted directly here.
     #[test]
-    fn test_messaging_executor_creation() {
-        let (db, _dir, _state) = setup();
+    fn register_public_key_stages_on_the_candidate() {
+        let (db, _dir) = setup();
+        let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
+        let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
         let params = ChainParams::default();
-        let _executor = MessagingExecutor::new(db, params);
+
+        // The registration path requires the key to derive to the sender, so
+        // the sender address is derived rather than chosen.
+        let public_key = [7u8; 32];
+        let sender = Address::from_public_key(&public_key);
+        let proposer = Address::new([99u8; 20]);
+
+        assert!(
+            !MessagingExecutor::v_has_public_key(view, &sender).unwrap(),
+            "no key is registered before the transaction runs"
+        );
+
+        let tx_data = MessagingTxData {
+            operation: MessagingOperation::RegisterPublicKey,
+            data: bincode::serialize(&RegisterPublicKeyData { public_key }).unwrap(),
+        };
+
+        let result = MessagingExecutor::execute(
+            view,
+            &params,
+            &sender,
+            &tx_data,
+            &proposer,
+            1000,
+            100,
+            1_000_000,
+            0,
+            Hash::default(),
+        )
+        .unwrap();
+        assert!(
+            result.success,
+            "RegisterPublicKey failed: {:?}",
+            result.error
+        );
+
+        // Read the CANDIDATE: this executor stages, it does not commit.
+        let registered = MessagingExecutor::v_get_public_key(view, &sender)
+            .unwrap()
+            .expect("the key is on the candidate");
+        assert_eq!(registered.public_key, public_key);
+        assert_eq!(registered.address, sender);
+    }
+
+    /// The same entry point must refuse a key that does not derive to the
+    /// sender, and refuse it as a failed result rather than an error.
+    #[test]
+    fn register_public_key_refuses_a_key_that_is_not_the_senders() {
+        let (db, _dir) = setup();
+        let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
+        let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
+        let params = ChainParams::default();
+
+        let public_key = [7u8; 32];
+        let not_the_sender = Address::new([1u8; 20]);
+        assert_ne!(Address::from_public_key(&public_key), not_the_sender);
+        let proposer = Address::new([99u8; 20]);
+
+        let tx_data = MessagingTxData {
+            operation: MessagingOperation::RegisterPublicKey,
+            data: bincode::serialize(&RegisterPublicKeyData { public_key }).unwrap(),
+        };
+
+        let result = MessagingExecutor::execute(
+            view,
+            &params,
+            &not_the_sender,
+            &tx_data,
+            &proposer,
+            1000,
+            100,
+            1_000_000,
+            0,
+            Hash::default(),
+        )
+        .unwrap();
+        assert!(!result.success);
+        assert!(
+            !MessagingExecutor::v_has_public_key(view, &not_the_sender).unwrap(),
+            "a refused registration stages nothing"
+        );
     }
 }

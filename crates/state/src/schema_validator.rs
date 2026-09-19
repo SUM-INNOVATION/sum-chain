@@ -571,11 +571,16 @@ impl SchemaValidator {
             "course_list",
             "grades",
             "grade_list",
-            "gpa", // Exact GPA (use gpa_bracket instead)
+            // Exact GPA. `gpa_bracket` is NOT the alternative any more -- it was
+            // removed from the allowlist as a de-anonymization vector. Carry
+            // grade information as `grades_commitment`.
+            "gpa",
             "exact_gpa",
             "cumulative_gpa",
             "term_gpa",
-            "credits", // Exact credit count (use credit_range instead)
+            // Exact credit count. `credit_range` was removed from the allowlist
+            // for the same reason as `gpa_bracket`.
+            "credits",
             "exact_credits",
             "total_credits",
             "instructor_name",
@@ -640,16 +645,32 @@ mod tests {
     use super::*;
     use sumchain_primitives::DocSubcode;
 
+    /// Every test below asserts about credentials at block height 100.
+    /// `SchemaValidator::new()` carries the SHIPPED activation height (385_000),
+    /// so a validator built that way returns `Valid` for everything at height
+    /// 100 without looking at the credential — which made the "should be
+    /// rejected" tests fail and, worse, made the "should be accepted" tests
+    /// pass without validating anything. Pin the activation height at 0 so the
+    /// assertions are about the schema rules and not about the height.
+    /// `test_backward_compatibility_before_activation` builds its own validator
+    /// on purpose and is deliberately NOT routed through this.
+    fn enforcing_validator() -> SchemaValidator {
+        SchemaValidator::with_config(SchemaValidatorConfig {
+            activation_height: 0,
+            enabled: true,
+        })
+    }
+
     fn make_test_credential(
         subcode: DocSubcode,
         metadata: CredentialMetadata,
     ) -> AcademicCredential {
         AcademicCredential {
             credential_id: [0u8; 32],
-            subject_address: sumchain_primitives::Address::from_bytes(&[1u8; 20]),
+            subject_address: sumchain_primitives::Address::new([1u8; 20]),
             subcode,
             subject_commitment: [0u8; 32],
-            issuer: sumchain_primitives::Address::from_bytes(&[2u8; 20]),
+            issuer: sumchain_primitives::Address::new([2u8; 20]),
             institution_id: "TEST_INST".to_string(),
             jurisdiction: "US".to_string(),
             schema_hash: [0u8; 32],
@@ -670,7 +691,7 @@ mod tests {
 
     #[test]
     fn test_valid_transcript_minimal() {
-        let validator = SchemaValidator::new();
+        let validator = enforcing_validator();
 
         let metadata = CredentialMetadata {
             title: "Academic Transcript".to_string(),
@@ -689,7 +710,7 @@ mod tests {
 
     #[test]
     fn test_valid_transcript_with_allowed_attributes() {
-        let validator = SchemaValidator::new();
+        let validator = enforcing_validator();
 
         let metadata = CredentialMetadata {
             title: "Academic Transcript".to_string(),
@@ -710,9 +731,13 @@ mod tests {
                     name: "environment".to_string(),
                     value: "production".to_string(),
                 },
+                // NOT `gpa_bracket`: that key was removed from the transcript
+                // allowlist because a bracket can de-anonymize a small cohort.
+                // The allowlisted way to carry grade information is a
+                // domain-separated commitment.
                 CredentialAttribute {
-                    name: "gpa_bracket".to_string(),
-                    value: "3.5-3.75".to_string(),
+                    name: "grades_commitment".to_string(),
+                    value: format!("blake3:{}", "0".repeat(64)),
                 },
             ],
         };
@@ -728,7 +753,7 @@ mod tests {
 
     #[test]
     fn test_invalid_transcript_with_student_name() {
-        let validator = SchemaValidator::new();
+        let validator = enforcing_validator();
 
         let metadata = CredentialMetadata {
             title: "Academic Transcript".to_string(),
@@ -760,7 +785,7 @@ mod tests {
 
     #[test]
     fn test_invalid_transcript_with_exact_gpa() {
-        let validator = SchemaValidator::new();
+        let validator = enforcing_validator();
 
         let metadata = CredentialMetadata {
             title: "Academic Transcript".to_string(),
@@ -785,7 +810,7 @@ mod tests {
 
     #[test]
     fn test_invalid_transcript_with_courses() {
-        let validator = SchemaValidator::new();
+        let validator = enforcing_validator();
 
         let metadata = CredentialMetadata {
             title: "Academic Transcript".to_string(),
@@ -848,7 +873,7 @@ mod tests {
 
     #[test]
     fn test_diploma_with_allowed_keys() {
-        let validator = SchemaValidator::new();
+        let validator = enforcing_validator();
 
         let metadata = CredentialMetadata {
             title: "Doctor of Philosophy".to_string(),
@@ -880,7 +905,7 @@ mod tests {
 
     #[test]
     fn test_excessive_title_length() {
-        let validator = SchemaValidator::new();
+        let validator = enforcing_validator();
 
         let metadata = CredentialMetadata {
             title: "A".repeat(300), // Exceeds MAX_TITLE_LENGTH (200)
@@ -934,7 +959,7 @@ mod tests {
     fn test_valid_encrypted_credential() {
         use sumchain_primitives::agreement::{EncryptionAlgorithm, EncryptionMeta};
 
-        let validator = SchemaValidator::new();
+        let validator = enforcing_validator();
 
         let metadata = CredentialMetadata {
             title: "Academic Transcript".to_string(),
@@ -981,11 +1006,11 @@ mod tests {
             EmploymentCredential, EmploymentIssuerClass, EmploymentStatus, EmploymentType,
         };
 
-        let validator = SchemaValidator::new();
+        let validator = enforcing_validator();
 
         let credential = EmploymentCredential {
             employment_id: [1u8; 32],
-            employee_address: sumchain_primitives::Address::from_bytes(&[1u8; 20]),
+            employee_address: sumchain_primitives::Address::new([1u8; 20]),
             employee_ref: [2u8; 32],
             employer_ref: [3u8; 32],
             status: EmploymentStatus::Active,
@@ -996,9 +1021,9 @@ mod tests {
             expiry: 0,
             policy_id: [6u8; 32],
             revocation_ref: None,
-            issuer_address: sumchain_primitives::Address::from_bytes(&[7u8; 20]),
+            issuer_address: sumchain_primitives::Address::new([7u8; 20]),
             issuer_name: "SUM INNOVATION INC".to_string(), // Valid institutional name
-            issuer_class: EmploymentIssuerClass::Corporation,
+            issuer_class: EmploymentIssuerClass::Employer,
             created_at: 1000,
             updated_at: 1000,
         };
@@ -1016,11 +1041,11 @@ mod tests {
             EmploymentCredential, EmploymentIssuerClass, EmploymentStatus, EmploymentType,
         };
 
-        let validator = SchemaValidator::new();
+        let validator = enforcing_validator();
 
         let credential = EmploymentCredential {
             employment_id: [1u8; 32],
-            employee_address: sumchain_primitives::Address::from_bytes(&[1u8; 20]),
+            employee_address: sumchain_primitives::Address::new([1u8; 20]),
             employee_ref: [2u8; 32],
             employer_ref: [3u8; 32],
             status: EmploymentStatus::Active,
@@ -1031,9 +1056,9 @@ mod tests {
             expiry: 0,
             policy_id: [6u8; 32],
             revocation_ref: None,
-            issuer_address: sumchain_primitives::Address::from_bytes(&[7u8; 20]),
+            issuer_address: sumchain_primitives::Address::new([7u8; 20]),
             issuer_name: "hr@company.com".to_string(), // Invalid: email address
-            issuer_class: EmploymentIssuerClass::Corporation,
+            issuer_class: EmploymentIssuerClass::Employer,
             created_at: 1000,
             updated_at: 1000,
         };
@@ -1051,11 +1076,11 @@ mod tests {
             EmploymentCredential, EmploymentIssuerClass, EmploymentStatus, EmploymentType,
         };
 
-        let validator = SchemaValidator::new();
+        let validator = enforcing_validator();
 
         let credential = EmploymentCredential {
             employment_id: [1u8; 32],
-            employee_address: sumchain_primitives::Address::from_bytes(&[1u8; 20]),
+            employee_address: sumchain_primitives::Address::new([1u8; 20]),
             employee_ref: [2u8; 32],
             employer_ref: [3u8; 32],
             status: EmploymentStatus::Active,
@@ -1066,9 +1091,9 @@ mod tests {
             expiry: 0,
             policy_id: [6u8; 32],
             revocation_ref: None,
-            issuer_address: sumchain_primitives::Address::from_bytes(&[7u8; 20]),
+            issuer_address: sumchain_primitives::Address::new([7u8; 20]),
             issuer_name: "1-800-555-1234".to_string(), // Invalid: phone number
-            issuer_class: EmploymentIssuerClass::Corporation,
+            issuer_class: EmploymentIssuerClass::Employer,
             created_at: 1000,
             updated_at: 1000,
         };
@@ -1088,7 +1113,7 @@ mod tests {
     fn test_valid_tax_disclosure() {
         use sumchain_primitives::tax::{DisclosureContentType, TaxDisclosureEnvelope};
 
-        let validator = SchemaValidator::new();
+        let validator = enforcing_validator();
 
         let envelope = TaxDisclosureEnvelope {
             payload_hash: [1u8; 32],
@@ -1109,7 +1134,7 @@ mod tests {
     fn test_invalid_tax_disclosure_with_pii_in_uri() {
         use sumchain_primitives::tax::{DisclosureContentType, TaxDisclosureEnvelope};
 
-        let validator = SchemaValidator::new();
+        let validator = enforcing_validator();
 
         let envelope = TaxDisclosureEnvelope {
             payload_hash: [1u8; 32],
@@ -1135,16 +1160,16 @@ mod tests {
 
     #[test]
     fn test_valid_healthcare_membership() {
+        use sumchain_primitives::agreement::PartyRef;
         use sumchain_primitives::healthcare::{
-            CoverageTier, HealthcareIssuerClass, MembershipRecord, MembershipStatus,
-            MembershipType, PartyRef,
+            CoverageTier, HealthcareIssuerClass, MembershipRecord, MembershipStatus, MembershipType,
         };
 
-        let validator = SchemaValidator::new();
+        let validator = enforcing_validator();
 
         let membership = MembershipRecord {
             membership_id: [1u8; 32],
-            member_address: sumchain_primitives::Address::from_bytes(&[1u8; 20]),
+            member_address: sumchain_primitives::Address::new([1u8; 20]),
             provider_id: [2u8; 32],
             membership_type: MembershipType::IndividualHealth,
             membership_commitment: [3u8; 32],
@@ -1154,7 +1179,7 @@ mod tests {
             group_commitment: None,
             effective_from: 1000,
             expiry: Some(2000),
-            issuer_address: sumchain_primitives::Address::from_bytes(&[6u8; 20]),
+            issuer_address: sumchain_primitives::Address::new([6u8; 20]),
             issuer_class: HealthcareIssuerClass::InsuranceCompany,
             policy_id: [7u8; 32],
             revocation_ref: None,

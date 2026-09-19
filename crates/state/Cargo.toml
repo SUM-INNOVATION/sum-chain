@@ -40,6 +40,10 @@ serde_json = { workspace = true }
 sumchain-beacon-crypto = { path = "../beacon-crypto" }
 
 [features]
-# Enable test modules that reference primitives schemas removed during migration.
-# Run `cargo test --features legacy_tests` to compile them; expect failures until they are updated.
+# Test modules that were written against pre-migration primitives schemas and
+# were gated off while they did not compile. They compile and pass now:
+# `cargo test -p sumchain-state --all-targets --features legacy_tests` is
+# 1053 passed / 0 failed / 1 ignored. They stay behind a feature because they
+# are per-executor unit tests that overlap the `tests/` suites, not because
+# they are expected to fail. Anything that breaks them is a real break.
 legacy_tests = []

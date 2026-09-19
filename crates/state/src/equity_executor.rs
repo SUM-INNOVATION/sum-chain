@@ -574,6 +574,7 @@ mod tests {
         let tx_data = EquityTxData {
             operation: EquityOperation::CreateEntity,
             data: bincode::serialize(&entity).unwrap(),
+            recipient: Address::ZERO,
         };
 
         let result = EquityExecutor::execute(

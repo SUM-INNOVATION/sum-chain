@@ -514,7 +514,7 @@ async fn archival_writes_only_the_branch_safe_families_and_never_the_height_inde
          branch in the key at all"
     );
     assert!(
-        changed.contains(&cf::BLOCKS.to_string()),
+        changed.iter().any(|c| *c == cf::BLOCKS),
         "the losing block must actually have been archived, or this proves nothing"
     );
 
