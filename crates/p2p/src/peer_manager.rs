@@ -68,6 +68,20 @@ pub enum PeerState {
     Banned,
 }
 
+/// What [`PeerManager::ban_peer`] had to do for the ban to bind.
+///
+/// Returned rather than discarded so that "I banned a peer I already knew" and
+/// "I banned a peer I have never seen" stay distinguishable at the call site.
+/// The ban itself binds in both cases; see [`PeerManager::ban_peer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BanOutcome {
+    /// The peer already had an entry, which the ban was written into. Every
+    /// production ban is this one: a ban follows a connection.
+    Existing,
+    /// The peer had no entry and one was created to hold the ban.
+    Registered,
+}
+
 /// Direction of the connection
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionDirection {
@@ -439,7 +453,16 @@ impl PeerManager {
                     }
                 }
             }
-            entry.state = PeerState::Disconnected;
+            // A peer hung up on BECAUSE it is banned must not read back as
+            // merely `Disconnected`: closing the connection is the enforcement
+            // of the ban, not the end of it. `ban_until` survived this already,
+            // so `is_banned` was right and only `state` lied — and `state` is
+            // what `PeerInfo` exposes to everything above.
+            entry.state = if entry.is_banned() {
+                PeerState::Banned
+            } else {
+                PeerState::Disconnected
+            };
             entry.direction = None;
 
             info!(
@@ -527,14 +550,79 @@ impl PeerManager {
         self.adjust_score(peer_id, score_adjustments::PROTOCOL_VIOLATION, reason);
     }
 
-    /// Manually ban a peer
-    pub fn ban_peer(&self, peer_id: &PeerId, duration: Duration) {
+    /// Ban a peer for `duration`, creating its entry if it has none.
+    ///
+    /// # Why a ban on an unknown peer REGISTERS rather than failing
+    ///
+    /// This used to be `if let Some(entry) = peers.get_mut(peer_id)`, which on a
+    /// peer with no entry wrote nothing and returned `()` — indistinguishable at
+    /// the call site from a ban that took. Three behaviours were available and
+    /// only one of them fails in the safe direction:
+    ///
+    /// * **Write nothing** (what it did). Fails OPEN. The caller believes the
+    ///   peer is refused; `can_accept_inbound` and `can_connect_outbound` read
+    ///   an absent entry as "nothing known against it" and let the peer in. The
+    ///   one call site that mattered was correct only by an accident of
+    ///   ordering — `SwarmEvent::ConnectionEstablished` inserts the entry before
+    ///   any `ProtocolIdResponse` can arrive — which is a property of the
+    ///   network stack, not a guarantee this function offers.
+    /// * **Return an error.** Every caller's correct handling of "that peer is
+    ///   not registered" is to make the refusal bind anyway, because a ban is a
+    ///   statement about the future and the future is exactly when an unknown
+    ///   peer shows up. An error with one correct treatment is a way of spelling
+    ///   that treatment, and it fails open by default: `let _ = ban_peer(..)`
+    ///   restores the silent no-op.
+    /// * **Register, then ban** (what it does now). Fails CLOSED. The ban binds
+    ///   whether or not the peer has ever been seen, so a ban sourced from a
+    ///   config file, an RPC, or a report about a peer that has not dialled yet
+    ///   is a refusal rather than a wish.
+    ///
+    /// The usual objection to creating entries on demand — an attacker mints map
+    /// entries — does not apply: nothing reaches `ban_peer` without an
+    /// established connection today, so [`BanOutcome::Registered`] is a safety
+    /// net rather than a new allocation path, and [`Self::cleanup`] already
+    /// keeps a banned entry exactly until its ban expires and then drops it.
+    ///
+    /// The return value keeps the distinction the no-op destroyed, so a caller
+    /// that wants to know it just banned a stranger still can.
+    ///
+    /// Banning does not by itself hang up: this type has no swarm. The live
+    /// session is closed by [`crate::NetworkCommand::DisconnectPeer`], which
+    /// [`crate::NetworkService::ban_peer`] sends for every ban.
+    pub fn ban_peer(&self, peer_id: &PeerId, duration: Duration) -> BanOutcome {
         let mut peers = self.peers.write();
-        if let Some(entry) = peers.get_mut(peer_id) {
-            entry.ban_until = Some(Instant::now() + duration);
-            entry.state = PeerState::Banned;
-            warn!("Manually banned peer {} for {:?}", peer_id, duration);
+        let outcome = if peers.contains_key(peer_id) {
+            BanOutcome::Existing
+        } else {
+            BanOutcome::Registered
+        };
+        let entry = peers
+            .entry(*peer_id)
+            .or_insert_with(|| PeerEntry::new(*peer_id));
+        entry.ban_until = Some(Instant::now() + duration);
+        entry.state = PeerState::Banned;
+        match outcome {
+            BanOutcome::Existing => warn!("Banned peer {} for {:?}", peer_id, duration),
+            BanOutcome::Registered => warn!(
+                "Banned peer {} for {:?}; it had no entry, so one was created to \
+                 hold the ban rather than letting the ban evaporate",
+                peer_id, duration
+            ),
         }
+        outcome
+    }
+
+    /// Whether `peer_id` is under an unexpired ban.
+    ///
+    /// The connection handler asks this before registering an inbound or
+    /// outbound connection, which is what makes a ban survive the peer dialling
+    /// back. An absent entry is not banned — that is the reason
+    /// [`Self::ban_peer`] creates one.
+    pub fn is_banned(&self, peer_id: &PeerId) -> bool {
+        self.peers
+            .read()
+            .get(peer_id)
+            .is_some_and(|e| e.is_banned())
     }
 
     /// Unban a peer

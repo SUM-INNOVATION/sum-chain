@@ -310,6 +310,23 @@ impl BlockSyncer {
         self.pending_requests
             .write()
             .retain(|_, req| req.peer != peer_id);
+
+        // And hang up. Eviction removes the peer from the set this syncer will
+        // ASK for blocks; it does nothing about the connection the peer is
+        // still on, over which it can keep pushing gossip and answering
+        // requests already in flight. `try_send` rather than `await` because
+        // this is the synchronous response handler; a full command channel
+        // costs the disconnect, not the eviction, and says so.
+        if let Err(e) = self.command_tx.try_send(NetworkCommand::DisconnectPeer {
+            peer: peer_id,
+            reason: "declared a different protocol digest".to_string(),
+        }) {
+            warn!(
+                "Refused peer {} but could not queue the disconnect ({}); it stays \
+                 evicted and refused, on a connection that survives",
+                peer_id, e
+            );
+        }
         false
     }
 

@@ -893,30 +893,33 @@ impl Node {
                                     peer, digest, self.protocol_digest
                                 );
                                 metrics.p2p.record_message_received();
-                                // Ban rather than merely ignore: `PeerManager`
-                                // refuses a banned peer's reconnection, so the
-                                // refusal survives the peer dialling back.
+                                // Three refusals, because no one of them is
+                                // enough on its own:
                                 //
-                                // Two properties of `PeerManager::ban_peer`
-                                // (`crates/p2p/src/peer_manager.rs:531`) that
-                                // this line depends on and does not state:
+                                // * `on_declaration` above made the peer
+                                //   permanently `Incompatible`, which is what
+                                //   every route into consensus consults. That
+                                //   refuses its BLOCKS.
+                                // * `ban_peer` refuses its next CONNECTION —
+                                //   `NetworkService::run` drops a banned peer's
+                                //   reconnection before registering it, so
+                                //   dialling back does not get it in again. It
+                                //   no longer depends on the peer already having
+                                //   an entry: `PeerManager::ban_peer` creates
+                                //   one rather than evaporating.
+                                // * and the `DisconnectPeer` command that
+                                //   `ban_peer` sends closes the connection it is
+                                //   on RIGHT NOW. Without it the peer kept
+                                //   gossiping at this node indefinitely and only
+                                //   the first bullet stood between it and the
+                                //   engine.
                                 //
-                                // * It is a NO-OP on a peer with no entry in the
-                                //   map. It works here only because
-                                //   `SwarmEvent::ConnectionEstablished`
-                                //   (`crates/p2p/src/network.rs:763`) called
-                                //   `peer_connected`, which inserts one, before
-                                //   any `ProtocolIdResponse` could arrive.
-                                // * It does NOT close the live connection —
-                                //   there is no disconnect command in
-                                //   `NetworkCommand` at all. The ban refuses the
-                                //   NEXT connection; what refuses this one is
-                                //   the permanence of `PeerCompat::Incompatible`
-                                //   at every consensus route.
-                                //
-                                // Both are asserted in
+                                // All three are asserted in
                                 // `crates/p2p/tests/protocol_enforcement.rs`.
-                                network.ban_peer(&peer, std::time::Duration::from_secs(24 * 60 * 60));
+                                let ban = network
+                                    .ban_peer(&peer, std::time::Duration::from_secs(24 * 60 * 60))
+                                    .await;
+                                debug!("Ban on {} took effect: {:?}", peer, ban);
                             }
                         }
                         // Handle sync status requests from peers

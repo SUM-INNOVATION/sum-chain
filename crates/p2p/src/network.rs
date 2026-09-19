@@ -27,7 +27,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::behaviour::{SumChainBehaviour, SumChainBehaviourEvent, SyncEvent};
 use crate::config::NetworkConfig;
-use crate::peer_manager::{ConnectionDirection, ConnectionLimits, ConnectionStats, PeerInfo, PeerManager};
+use crate::peer_manager::{
+    BanOutcome, ConnectionDirection, ConnectionLimits, ConnectionStats, PeerInfo, PeerManager,
+};
 use crate::sync::{SyncRequest, SyncResponse, SyncState};
 use crate::topics;
 use crate::{P2pError, Result};
@@ -278,6 +280,15 @@ pub enum NetworkCommand {
         request_id: SyncRequestId,
         digest: sumchain_primitives::Hash,
     },
+    /// Close every connection to a peer, now.
+    ///
+    /// The outbound counterpart of the inbound
+    /// [`NetworkEvent::PeerDisconnected`], and until it existed there was no
+    /// way for anything above this crate to hang up on anyone: a refusal could
+    /// ban a peer's NEXT connection and had to leave its current one open,
+    /// gossiping. `reason` is carried so the log at the swarm says why, at the
+    /// place where the connection actually dies.
+    DisconnectPeer { peer: PeerId, reason: String },
 }
 
 
@@ -514,9 +525,38 @@ impl NetworkService {
         self.peer_manager.report_sync_failure(peer_id);
     }
 
-    /// Ban a peer manually
-    pub fn ban_peer(&self, peer_id: &PeerId, duration: Duration) {
-        self.peer_manager.ban_peer(peer_id, duration);
+    /// Ban a peer and hang up on it.
+    ///
+    /// Two halves, and the ban is only the second one. `PeerManager::ban_peer`
+    /// refuses the peer's NEXT connection; it has no swarm and cannot touch the
+    /// session the peer is on right now. Sending
+    /// [`NetworkCommand::DisconnectPeer`] is what ends that session, so a
+    /// refused peer stops being able to gossip or serve sync at this node
+    /// instead of merely being marked.
+    ///
+    /// Returns what the ban had to do to bind — see
+    /// [`BanOutcome`](crate::peer_manager::BanOutcome).
+    ///
+    /// `async` because the disconnect goes through the command channel the
+    /// swarm loop owns, and dropping it on a full channel would put the silent
+    /// failure back in a different place.
+    pub async fn ban_peer(&self, peer_id: &PeerId, duration: Duration) -> BanOutcome {
+        let outcome = self.peer_manager.ban_peer(peer_id, duration);
+        if let Err(e) = self
+            .command_tx
+            .send(NetworkCommand::DisconnectPeer {
+                peer: *peer_id,
+                reason: format!("banned for {duration:?}"),
+            })
+            .await
+        {
+            warn!(
+                "Banned peer {} but could not queue the disconnect ({}); its live \
+                 session survives until the connection drops on its own",
+                peer_id, e
+            );
+        }
+        outcome
     }
 
     /// Unban a peer
@@ -713,6 +753,22 @@ impl NetworkService {
                                 warn!("No pending response channel for request_id {}", request_id);
                             }
                         }
+                        Some(NetworkCommand::DisconnectPeer { peer, reason }) => {
+                            // `Swarm::disconnect_peer_id` (libp2p-swarm 0.44.2,
+                            // `src/lib.rs:646`) closes EVERY connection to the
+                            // peer and returns `Err(())` when there were none.
+                            // The close is asynchronous: gossipsub drops the
+                            // peer from its mesh, and `peer_manager` decrements
+                            // its counts, when the resulting `ConnectionClosed`
+                            // arrives — not here.
+                            match swarm.disconnect_peer_id(peer) {
+                                Ok(()) => info!("Disconnecting from {}: {}", peer, reason),
+                                Err(()) => debug!(
+                                    "Disconnect requested for {} ({}) but no connection was open",
+                                    peer, reason
+                                ),
+                            }
+                        }
                         Some(NetworkCommand::SendSyncErrorResponse { request_id, error }) => {
                             if let Some(channel) = pending_sync_responses.remove(&request_id) {
                                 let response = SyncResponse::Error(error);
@@ -739,9 +795,11 @@ impl NetworkService {
     /// Handle swarm events with sync support
     fn handle_swarm_event_with_sync(
         &self,
-        // Unused since mDNS removal (#202): swarm-mutating responses go through the
-        // NetworkCommand handler; this event handler only emits NetworkEvents.
-        _swarm: &mut Swarm<SumChainBehaviour>,
+        // Used again since the ban gate below (#202 had left it unused): a
+        // banned peer's reconnection has to be closed from inside the event that
+        // reports it, before this node registers the peer or tells anything
+        // above that it is connected.
+        swarm: &mut Swarm<SumChainBehaviour>,
         event: SwarmEvent<SumChainBehaviourEvent>,
         pending_sync_responses: &mut HashMap<SyncRequestId, libp2p_request_response::ResponseChannel<SyncResponse>>,
         next_request_id: &AtomicU64,
@@ -761,6 +819,20 @@ impl NetworkService {
             // bootnodes (dialed at startup) + identify + gossipsub.
 
             SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                // A ban that only refuses the peer through `can_accept_inbound`
+                // refuses nothing: nothing in this loop consulted that. The ban
+                // is enforced HERE, before `peer_connected` registers the peer
+                // and before `PeerConnected` tells the node about it, so a
+                // refused peer cannot get back in by dialling again.
+                if self.peer_manager.is_banned(&peer_id) {
+                    warn!(
+                        "Refusing connection from banned peer {}; closing it again",
+                        peer_id
+                    );
+                    let _ = swarm.disconnect_peer_id(peer_id);
+                    return;
+                }
+
                 // Determine connection direction from endpoint
                 let direction = if endpoint.is_dialer() {
                     ConnectionDirection::Outbound

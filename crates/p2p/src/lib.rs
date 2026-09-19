@@ -24,7 +24,8 @@ pub use network::{NetworkCommand, NetworkEvent, NetworkService, RateLimitConfig,
 pub use peer_compat::{PeerCompat, PeerCompatRegistry};
 pub use node_key::load_or_generate_keypair;
 pub use peer_manager::{
-    ConnectionDirection, ConnectionLimits, ConnectionStats, PeerInfo, PeerManager, PeerState,
+    BanOutcome, ConnectionDirection, ConnectionLimits, ConnectionStats, PeerInfo, PeerManager,
+    PeerState,
 };
 pub use sync::{SyncRequest, SyncResponse, SyncState, MAX_BLOCKS_PER_REQUEST};
 
