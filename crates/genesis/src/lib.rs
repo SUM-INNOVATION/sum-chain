@@ -1274,6 +1274,245 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub subsystem_no_op_receipt_enabled_from_height: Option<u64>,
+
+    /// A DocClass issuer stops being the author of its own authority.
+    ///
+    /// One rule, stated once (ACTIVATION-AUDIT row AU-34): `UpdateIssuer`
+    /// deserializes a whole `DocClassIssuer` from the sender's payload and
+    /// writes it over the registry row, so the registered issuer grants itself
+    /// any subcode, declares any jurisdiction, and — the sharpest of the three
+    /// — a SUSPENDED issuer restores itself to `Active` with one transaction.
+    /// The stake half of the same wholesale write is already closed under
+    /// [`Self::docclass_stake_escrow_enabled_from_height`]; this is the rest of
+    /// it.
+    ///
+    /// At and above the gate `UpdateIssuer` keeps the recorded values of the
+    /// five fields that decide what an issuer may do — `status`,
+    /// `authorized_subcodes`, `jurisdictions`, `issuer_type` and
+    /// `registered_at` — and writes only the descriptive ones the registry does
+    /// not consult (`name`, `keys`, `metadata`, `updated_at`).
+    ///
+    /// ONE field for all five, because `v_can_issue_subcode` asks them as one
+    /// question and so does the revocation-standing check: freezing `status`
+    /// while leaving `authorized_subcodes` writable stops a suspended issuer
+    /// reactivating itself and still lets an active one grant itself every
+    /// subcode in the standard, and freezing the subcodes while leaving
+    /// `jurisdictions` writable stops nothing at all, because an empty
+    /// `jurisdictions` list already means "everywhere". An operator who
+    /// activated a subset would be running a registry that is authoritative
+    /// about some of an issuer's authority and stenographic about the rest,
+    /// which is a state this tree has never been in and nobody has reasoned
+    /// about.
+    ///
+    /// **What this gate deliberately does not add:** a path that legitimately
+    /// changes an issuer's authority. There is none in this tree — the only
+    /// writes to those fields are registration and this arm — so above the gate
+    /// an issuer's authority is fixed at registration and can be ended by the
+    /// admin's `DeactivateIssuer` and in no other way. Narrowing was considered
+    /// and left out: a one-way narrow with no granting counterpart is a
+    /// trapdoor, and offering it would be a new governance surface rather than
+    /// a repair.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub docclass_issuer_authority_enabled_from_height: Option<u64>,
+
+    /// A DocClass credential's revocation history is a history.
+    ///
+    /// Two defects that are one invariant, and therefore one height
+    /// (ACTIVATION-AUDIT rows OV-23 and OV-24):
+    ///
+    ///   * `suspend_credential` has no current-status guard, so revoke, then
+    ///     suspend, then reactivate returns a REVOKED credential to `Active`,
+    ///     and the mirrored `revocation_status` on the credential row follows
+    ///     it back;
+    ///   * revocation records are keyed by `credential_id || revoked_at_height`,
+    ///     so two records for one credential at one height are one row and the
+    ///     later write silently replaces the earlier.
+    ///
+    /// At and above the gate `Revoked` and `Superseded` are terminal — suspend
+    /// refuses them, and `reactivate` already refuses anything that is not
+    /// `Suspended` — and each record is keyed by its transaction as well as its
+    /// height, so a block that writes two records for one credential leaves
+    /// two rows.
+    ///
+    /// They share a height because the guard the first half adds reads its
+    /// answer out of the record series the second half repairs. Below the key
+    /// widening the series is not a series: at any one height only the last
+    /// write survives, so "the credential's current status" is a function of
+    /// which transaction in the block wrote last rather than of what the block
+    /// did, and a terminal-state guard fed by that is a guard nobody can reason
+    /// about. The converse subset is no better: widening the key without the
+    /// guard produces a faithful, complete, permanent record of a transition
+    /// that should not have been possible.
+    ///
+    /// The widened key is a NEW key, 44 bytes against the legacy 40, so records
+    /// written before activation keep their keys and their bytes; both readers
+    /// accept either width and order by the key, under which a legacy record at
+    /// a height sorts before a sequenced one at the same height — which is the
+    /// order they were written in.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub docclass_revocation_record_enabled_from_height: Option<u64>,
+
+    /// The subcode a DocClass credential is issued under decides what it is
+    /// and what it is checked against.
+    ///
+    /// Two defects that are one question — what tells the chain which kind of
+    /// credential this is — and therefore one height (ACTIVATION-AUDIT rows
+    /// OV-27 and D-19b):
+    ///
+    ///   * `IssueCredential` selects its family by TRIAL DECODE: it tries
+    ///     `AcademicCredential`, falls through to `EligibilityAttestation` on
+    ///     failure, discards the first error, and never consults the
+    ///     `DocSubcode` the transaction envelope declares;
+    ///   * the schema validator dispatches on the credential's own `subcode`
+    ///     field and covers three of them (810, 811, 812), returning `Valid`
+    ///     for every other academic subcode and for every non-academic one, and
+    ///     eligibility attestations are never schema-checked on any path at any
+    ///     height.
+    ///
+    /// At and above the gate the envelope's subcode selects the family — an
+    /// academic-class subcode decodes as an `AcademicCredential` or fails, 807
+    /// decodes as an `EligibilityAttestation` or fails, and any other subcode is
+    /// refused — the credential's own `subcode` field must agree with the
+    /// envelope's, and the two subcodes the validator had no arm for (813, 814,
+    /// 815) and the eligibility family are checked against the same core-field
+    /// bounds the covered three are.
+    ///
+    /// They share a height because activating either alone leaves the
+    /// subsystem inconsistent in a way it is not today. Widening the validator
+    /// while the family is still chosen by trial decode means the wider
+    /// validator is handed whichever shape happened to decode first, so a
+    /// payload that decodes as both is validated as the family the sender did
+    /// not declare — "the two schemas do not currently cross-decode, and
+    /// nothing enforces that they never will" is the whole of OV-27's finding,
+    /// and a validator is exactly the thing that makes cross-decoding matter.
+    /// Making the envelope authoritative while the validator still returns
+    /// `Valid` for everything outside 810–812 means the chain now insists on a
+    /// declared type it does not then check, which is a stronger claim about
+    /// the credential than it can back.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared. In particular the
+    /// validator's own `activation_height` of 385,000 is untouched: below this
+    /// gate the three covered subcodes are validated at that height exactly as
+    /// before, and nothing else is validated at all.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub docclass_credential_schema_enabled_from_height: Option<u64>,
+
+    /// A DocClass identity root records what the chain decided, not only what
+    /// the sender asserted.
+    ///
+    /// ACTIVATION-AUDIT row AU-35, in part. `create_identity_root` checks one
+    /// thing -- that `controller == sender` -- and then stores the deserialized
+    /// struct verbatim, so any funded account anchors a root claiming any
+    /// `subject_commitment`, with any `status`, timestamps and schema hash, all
+    /// from the payload. Two halves of that are closed here:
+    ///
+    ///   * a `subject_commitment` that some OTHER controller has already
+    ///     anchored is refused, so a commitment is bound to its first
+    ///     controller and a second account cannot anchor a root claiming a
+    ///     subject that is already spoken for;
+    ///   * `status` is written as `Active` by the executor rather than taken
+    ///     from the payload, so a root cannot be created into a lifecycle state
+    ///     that only `DeactivateIdentity` and `ReactivateIdentity` are supposed
+    ///     to reach.
+    ///
+    /// They share a height because they are one sentence -- the row is the
+    /// registry's, not the payload's -- and because the first-anchor rule is
+    /// only worth anything if the row it finds is a row the chain wrote: a
+    /// binding check that consults rows whose lifecycle state the sender chose
+    /// is a check standing on the thing it is trying to fix.
+    ///
+    /// **What this does NOT close, and the row stays open on:** nothing binds
+    /// the commitment to a PERSON. There is no signature, no external identity
+    /// registry and no attestation in this tree to bind it to, so first-anchor
+    /// is the strongest rule the available state supports, and it is squatting
+    /// resistance rather than authentication. The timestamps
+    /// (`created_at`, `updated_at`) are also left from the payload: the
+    /// executor's own clock is zero until
+    /// `subsystem_block_timestamp_enabled_from_height` opens, so writing them
+    /// here would make this gate's repair depend silently on another gate's
+    /// height -- which is the failure mode of a gate that ships looking
+    /// activated and is not.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub docclass_identity_binding_enabled_from_height: Option<u64>,
+
+    /// The DocClass issuer-stake rule the chain declares is the rule it
+    /// applies.
+    ///
+    /// ACTIVATION-AUDIT row AU-37, in part. `DocClassParams::require_issuer_stake`
+    /// is declared, defaulted to `true`, reported by `docclass_getConfig`, and
+    /// read by no execution path: `register_issuer` consults `min_issuer_stake`
+    /// alone and enforces it whenever it is non-zero, so an operator who set
+    /// `require_issuer_stake: false` is running a chain that still demands the
+    /// stake, and one who set it `true` alongside `min_issuer_stake: 0` is told
+    /// a stake is required when none is.
+    ///
+    /// At and above the gate the minimum-stake check at registration runs only
+    /// when `require_issuer_stake` is true, which is what the field says.
+    ///
+    /// **Two of AU-37's three fields are deliberately NOT closed here**, and
+    /// the row stays open on them:
+    ///
+    ///   * `max_credential_validity` is documented "in seconds", while the
+    ///     chain's own `Timestamp` is milliseconds and a credential's
+    ///     `valid_from` and `expires_at` are payload values bound to no clock
+    ///     at all. Comparing their difference against this field would bake in
+    ///     a unit contract the tree does not state, and a wrong guess is a
+    ///     consensus rule that refuses lawful credentials. It needs the unit
+    ///     settled first, which is a specification decision and not a
+    ///     remediation.
+    ///   * `initial_issuers` is genesis STATE, not a rule an executor can
+    ///     apply: honouring it means writing issuer rows into the genesis
+    ///     state, which is a path this tree does not have.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub docclass_issuer_stake_requirement_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -1625,6 +1864,16 @@ impl Default for ChainParams {
             nft_update_path_parity_enabled_from_height: None,
             // Production-safe default: an operation that writes nothing stops reporting success — dormant.
             subsystem_no_op_receipt_enabled_from_height: None,
+            // Production-safe default: a docclass issuer stops rewriting its own authority — dormant.
+            docclass_issuer_authority_enabled_from_height: None,
+            // Production-safe default: a credential's revocation history is a history — dormant.
+            docclass_revocation_record_enabled_from_height: None,
+            // Production-safe default: the declared subcode decides the family and the check — dormant.
+            docclass_credential_schema_enabled_from_height: None,
+            // Production-safe default: an identity root records what the chain decided — dormant.
+            docclass_identity_binding_enabled_from_height: None,
+            // Production-safe default: the declared issuer-stake rule is the rule applied — dormant.
+            docclass_issuer_stake_requirement_enabled_from_height: None,
         }
     }
 }
@@ -1978,6 +2227,26 @@ impl ChainParams {
             (
                 "subsystem_no_op_receipt_enabled_from_height",
                 self.subsystem_no_op_receipt_enabled_from_height,
+            ),
+            (
+                "docclass_issuer_authority_enabled_from_height",
+                self.docclass_issuer_authority_enabled_from_height,
+            ),
+            (
+                "docclass_revocation_record_enabled_from_height",
+                self.docclass_revocation_record_enabled_from_height,
+            ),
+            (
+                "docclass_credential_schema_enabled_from_height",
+                self.docclass_credential_schema_enabled_from_height,
+            ),
+            (
+                "docclass_identity_binding_enabled_from_height",
+                self.docclass_identity_binding_enabled_from_height,
+            ),
+            (
+                "docclass_issuer_stake_requirement_enabled_from_height",
+                self.docclass_issuer_stake_requirement_enabled_from_height,
             ),
         ]
     }

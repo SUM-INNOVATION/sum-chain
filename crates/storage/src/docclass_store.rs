@@ -125,6 +125,48 @@ pub fn revocation_key(credential_id: &CredentialId, revoked_at_height: BlockHeig
     key
 }
 
+/// The revocation key a node at or above
+/// `docclass_revocation_record_enabled_from_height` writes:
+/// `credential_id || revoked_at_height || sequence`, both numbers big-endian.
+/// 44 bytes exactly, and no 40-byte legacy key can equal one.
+///
+/// ACTIVATION-AUDIT row OV-24. The height alone does not distinguish two
+/// records for one credential in one block, so the later write replaces the
+/// earlier and a revoke followed by a reactivation leaves one record. The
+/// sequence does distinguish them, and it orders them: a 40-byte legacy key is
+/// a strict prefix of any 44-byte key at the same height, so under a plain key
+/// comparison every record written before activation sorts BEFORE every record
+/// written after it at that height -- which is the order they happened in.
+///
+/// `sequence` counts records at THIS height for THIS credential, and is read
+/// out of state by the writer rather than taken from the transaction's index;
+/// see `DocClassExecutor::v_next_revocation_sequence` for why the transaction
+/// index is the wrong source.
+pub fn revocation_key_sequenced(
+    credential_id: &CredentialId,
+    revoked_at_height: BlockHeight,
+    sequence: u32,
+) -> Vec<u8> {
+    let mut key = Vec::with_capacity(44);
+    key.extend_from_slice(credential_id);
+    key.extend_from_slice(&revoked_at_height.to_be_bytes());
+    key.extend_from_slice(&sequence.to_be_bytes());
+    key
+}
+
+/// Whether `key` is a revocation key of either width belonging to
+/// `credential_id`.
+///
+/// Both widths, because a chain that activates the sequenced key keeps every
+/// record it wrote before. Anything else -- a prefix-scan overrun into a
+/// neighbouring credential's row, or a hand-written row of some third width --
+/// is skipped before it is decoded, which is what
+/// `a_revocation_key_of_the_wrong_width_is_skipped_by_the_candidate_reader`
+/// pins.
+pub fn is_revocation_key_for(key: &[u8], credential_id: &CredentialId) -> bool {
+    (key.len() == 40 || key.len() == 44) && &key[..32] == credential_id
+}
+
 /// Events are keyed by `block_height || tx_index || event_index`, all
 /// big-endian: 8 + 4 + 2 = 14 bytes.
 pub fn docclass_event_key(block_height: BlockHeight, tx_index: u32, event_index: u16) -> Vec<u8> {
@@ -661,15 +703,20 @@ impl<'a> RevocationStore<'a> {
         let mut records = Vec::new();
 
         for (key, value) in self.db.prefix_iter(cf::DOCCLASS_REVOCATIONS, credential_id)? {
-            if key.len() == 40 && &key[..32] == credential_id {
-                records.push(decode_revocation_record(&value)?);
+            if is_revocation_key_for(&key, credential_id) {
+                records.push((key, decode_revocation_record(&value)?));
             }
         }
 
-        // Sort by revoked_at_height descending (most recent first)
-        records.sort_by(|a, b| b.revoked_at_height.cmp(&a.revoked_at_height));
+        // Most recent FIRST, ordered by the KEY rather than by the height it
+        // contains: the key is `credential_id || height || [tx_index]`, so a
+        // descending key comparison is a descending height comparison that also
+        // breaks a tie within one block by transaction order. Identical to the
+        // height-only sort for as long as every key is 40 bytes wide, which is
+        // every chain below `docclass_revocation_record_enabled_from_height`.
+        records.sort_by(|a, b| b.0.cmp(&a.0));
 
-        Ok(records)
+        Ok(records.into_iter().map(|(_, r)| r).collect())
     }
 
     /// Get the latest revocation record for a credential

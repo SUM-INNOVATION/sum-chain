@@ -1540,3 +1540,249 @@ fn revocation_resolves_the_subject_and_clears_its_index_only_above_the_gate() {
         );
     }
 }
+
+// ── AL-1: the Tax subject index, and the bound that ends its growth ──────────
+//
+// `docs/lane-a/ACTIVATION-AUDIT.md` row AL-1. `v_add_to_subject_index` decodes
+// an accumulating `Vec<ProofId>` out of one key, linear-searches it, appends
+// and reserializes -- once per `IssueClaim`, with the entry count chosen by an
+// attacker who repeats the transaction against a `subject_nullifier` it also
+// chooses. `a_640_kib_subject_index_is_refused_by_the_ceiling_without_canonical_
+// change` above pins ONE size at a ceiling that is not the release ceiling, and
+// says so; at the release ceiling of 1 GiB the same transaction is not refused
+// at all, it is admitted and it commits.
+//
+// The remedy is the rule `subsystem_allocation_bound_enabled_from_height`
+// already states for DocClass, NFT and Property: bound the input BEFORE the
+// value it sizes is built. Two bounds, the same two AL-10 needed -- a payload
+// past `MAX_SUBSYSTEM_PAYLOAD_BYTES` is refused before it is decoded, and a
+// stored index row past `MAX_ACCUMULATING_ROW_BYTES` is refused before it is
+// decoded, appended to and re-encoded.
+//
+// No new height: AL-1 is the same defect at the same seam as AL-7, AL-10 and
+// AL-11, and a partial activation would leave the cheapest vector open, which
+// is the argument that row AL-7 records for joining rather than forking.
+
+/// The unremediated binary with THIS gate and no other open.
+///
+/// `..TaxGates::CLOSED` rather than field by field: `TaxGates::OPEN` also opens
+/// the authority check, the proof lifecycle and the presence check, three
+/// changes that each decide whether these transactions succeed, and a pair that
+/// differs in four ways cannot attribute a difference to one of them.
+const TAX_BOUND: TaxGates = TaxGates {
+    allocation_bound: true,
+    ..TaxGates::CLOSED
+};
+
+/// An index row already past the limit is extended below the gate and refused
+/// above it -- and the refusal costs the sender nothing.
+#[test]
+fn an_oversized_subject_index_is_extended_below_the_gate_and_refused_above_it() {
+    let subject = [0x5A; 32];
+    // One id past the limit, so the fixture is the size the test claims and not
+    // merely "big". 32,769 * 32 + 8 bytes of bincode length prefix.
+    let seeded: Vec<[u8; 32]> = (0..32_769u32)
+        .map(|i| {
+            let mut id = [0u8; 32];
+            id[..4].copy_from_slice(&i.to_be_bytes());
+            id
+        })
+        .collect();
+    let encoded = bincode::serialize(&seeded).unwrap();
+    assert!(
+        encoded.len() > sumchain_state::MAX_ACCUMULATING_ROW_BYTES,
+        "the fixture must exceed the bound: {} B against {}",
+        encoded.len(),
+        sumchain_state::MAX_ACCUMULATING_ROW_BYTES
+    );
+
+    let mut outcomes = Vec::new();
+    for gates in [TaxGates::CLOSED, TAX_BOUND] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        TaxStore::new(&db)
+            .issuers()
+            .put(&issuer_of(&issuer))
+            .unwrap();
+        db.put(cf::TAX_SUBJECT_INDEX, &subject, &encoded).unwrap();
+
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+        let before = StateManager::v_get_balance(&view, &issuer.address()).unwrap();
+
+        let r = tax_at(
+            &mut view,
+            &issuer.address(),
+            TaxOperation::IssueClaim,
+            &proof(0xFE, subject),
+            gates,
+        );
+        let after = StateManager::v_get_balance(&view, &issuer.address()).unwrap();
+        let ids = TaxExecutor::v_get_subject_proof_ids(&view, &subject).unwrap();
+        let proof_row = view.get(cf::TAX_PROOFS, &[0xFEu8; 32]).unwrap().is_some();
+        outcomes.push((
+            r.success,
+            r.error.clone(),
+            before - after,
+            ids.len(),
+            proof_row,
+        ));
+    }
+
+    let (closed_ok, _, closed_paid, closed_len, closed_row) = outcomes[0].clone();
+    let (open_ok, open_err, open_paid, open_len, open_row) = outcomes[1].clone();
+
+    assert!(
+        closed_ok,
+        "below the gate a 1 MiB index is decoded, appended to and re-encoded, \
+         and the transaction SUCCEEDS at the release ceiling"
+    );
+    assert_eq!(closed_len, 32_770, "appended, so the row grew again");
+    assert!(closed_row, "and the proof row was written");
+    assert_eq!(closed_paid, 100, "the sender paid the fee");
+
+    assert!(!open_ok, "above the gate the same transaction is refused");
+    assert!(
+        open_err
+            .as_deref()
+            .unwrap()
+            .contains("Subject index too large to extend"),
+        "refused by the bound, not by something else: {open_err:?}"
+    );
+    assert_eq!(
+        open_len, 32_769,
+        "and the index is untouched -- the refusal lands before the read-modify-write"
+    );
+    assert!(
+        !open_row,
+        "and before the proof row, so nothing at all was staged"
+    );
+    assert_eq!(
+        open_paid, 0,
+        "and before the fee, like every other pre-deduction guard in this file"
+    );
+}
+
+/// The same index at one id UNDER the limit is admitted on both sides.
+///
+/// A test that only shows the refusal cannot tell a bound from a subsystem that
+/// stopped working, and cannot tell `>` from `>=`.
+#[test]
+fn an_index_just_under_the_limit_is_admitted_on_both_sides_of_the_gate() {
+    let subject = [0x5B; 32];
+    let mut n = 32_768u32;
+    let encoded = loop {
+        let seeded: Vec<[u8; 32]> = (0..n)
+            .map(|i| {
+                let mut id = [0u8; 32];
+                id[..4].copy_from_slice(&i.to_be_bytes());
+                id
+            })
+            .collect();
+        let e = bincode::serialize(&seeded).unwrap();
+        if e.len() <= sumchain_state::MAX_ACCUMULATING_ROW_BYTES {
+            break e;
+        }
+        n -= 1;
+    };
+
+    let mut rows = Vec::new();
+    for gates in [TaxGates::CLOSED, TAX_BOUND] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        TaxStore::new(&db)
+            .issuers()
+            .put(&issuer_of(&issuer))
+            .unwrap();
+        db.put(cf::TAX_SUBJECT_INDEX, &subject, &encoded).unwrap();
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+        let r = tax_at(
+            &mut view,
+            &issuer.address(),
+            TaxOperation::IssueClaim,
+            &proof(0xFD, subject),
+            gates,
+        );
+        assert!(r.success, "{gates:?}: {:?}", r.error);
+        rows.push(view.get(cf::TAX_SUBJECT_INDEX, &subject).unwrap());
+    }
+    assert_eq!(
+        rows[0], rows[1],
+        "an in-limit IssueClaim writes the identical index row on both sides of \
+         the activation -- the gate refuses oversized input and touches nothing else"
+    );
+}
+
+/// A payload past `MAX_SUBSYSTEM_PAYLOAD_BYTES` is decoded below the gate and
+/// refused before the decode above it.
+#[test]
+fn an_oversized_tax_payload_is_decoded_below_the_gate_and_refused_above_it() {
+    // A `TaxProofEnvelope` whose `proof_data` alone is past the payload bound.
+    let mut big = proof(0xFC, [0x5C; 32]);
+    big.proof_data = vec![7u8; sumchain_state::MAX_SUBSYSTEM_PAYLOAD_BYTES + 1];
+    let encoded_len = bincode::serialize(&big).unwrap().len();
+    assert!(encoded_len > sumchain_state::MAX_SUBSYSTEM_PAYLOAD_BYTES);
+
+    let mut outcomes = Vec::new();
+    for gates in [TaxGates::CLOSED, TAX_BOUND] {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        TaxStore::new(&db)
+            .issuers()
+            .put(&issuer_of(&issuer))
+            .unwrap();
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+        let r = tax_at(
+            &mut view,
+            &issuer.address(),
+            TaxOperation::IssueClaim,
+            &big,
+            gates,
+        );
+        let stored = view.get(cf::TAX_PROOFS, &[0xFCu8; 32]).unwrap();
+        outcomes.push((r.success, r.error.clone(), stored.is_some()));
+    }
+
+    assert!(
+        outcomes[0].0 && outcomes[0].2,
+        "below the gate a {encoded_len}-byte payload is decoded and committed to \
+         the candidate: {:?}",
+        outcomes[0].1
+    );
+    assert!(!outcomes[1].0, "above the gate it is refused");
+    assert!(
+        outcomes[1]
+            .1
+            .as_deref()
+            .unwrap()
+            .contains("Tax payload too large"),
+        "{:?}",
+        outcomes[1].1
+    );
+    assert!(!outcomes[1].2, "and no proof row was written");
+}
+
+/// Dormant in every shipped configuration.
+#[test]
+fn the_tax_allocation_bound_is_dormant_by_default() {
+    for h in [0u64, 1, 1_000, 385_000, u64::MAX] {
+        assert!(
+            !TaxGates::from_params(&ChainParams::default(), h).allocation_bound,
+            "dormant at height {h} under ChainParams::default()"
+        );
+        assert!(
+            !TaxGates::from_params(&ChainParams::with_v2_enabled(), h).allocation_bound,
+            "dormant at height {h} under ChainParams::with_v2_enabled()"
+        );
+    }
+    assert_eq!(TaxGates::CLOSED.row_limit(), None);
+    assert_eq!(
+        TAX_BOUND.row_limit(),
+        Some(sumchain_state::MAX_ACCUMULATING_ROW_BYTES)
+    );
+}

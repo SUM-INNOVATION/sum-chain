@@ -63,8 +63,9 @@ use sumchain_storage::docclass_store::{
     docclass_issuer_key, eligibility_key, encode_credential, encode_docclass_event,
     encode_docclass_issuer, encode_eligibility, encode_identity_root,
     encode_issuer_credential_index, encode_revocation_record, encode_subject_credential_index,
-    encode_subject_identity_index, identity_root_key, issuer_index_key, revocation_key,
-    subject_identity_index_key, subject_index_key, SubjectCommitment,
+    encode_subject_identity_index, identity_root_key, is_revocation_key_for, issuer_index_key,
+    revocation_key, revocation_key_sequenced, subject_identity_index_key, subject_index_key,
+    SubjectCommitment,
 };
 use sumchain_storage::exec_view::ExecutionView;
 
@@ -492,27 +493,95 @@ impl DocClassExecutor {
 
     // ── Revocation records ──────────────────────────────────────────────────
 
-    /// Keyed by `credential_id || revoked_at_height`. Two records for one
-    /// credential at the SAME height are ONE row: the second overwrites the
-    /// first. Reproduced, not fixed.
+    /// Keyed by `credential_id || revoked_at_height`, and -- at or above
+    /// `docclass_revocation_record_enabled_from_height` -- by `tx_index` as
+    /// well.
+    ///
+    /// Below the gate two records for one credential at the SAME height are ONE
+    /// row: the second overwrites the first, so a revoke and a reactivation in
+    /// one block leave a single record saying `Active`. Reproduced exactly,
+    /// because `sequenced` is false for every node below the height. Above it
+    /// the key is 44 bytes and the two records are two rows.
+    /// ACTIVATION-AUDIT row OV-24.
     pub fn v_put_revocation_record(
         view: &mut ExecutionView<'_, '_>,
         record: &RevocationRecord,
+        sequenced: bool,
     ) -> Result<()> {
-        let key = revocation_key(&record.credential_id, record.revoked_at_height);
+        let key = if sequenced {
+            let seq = Self::v_next_revocation_sequence(
+                view,
+                &record.credential_id,
+                record.revoked_at_height,
+            )?;
+            revocation_key_sequenced(&record.credential_id, record.revoked_at_height, seq)
+        } else {
+            revocation_key(&record.credential_id, record.revoked_at_height)
+        };
         let bytes = encode_revocation_record(record).map_err(StateError::Storage)?;
         view.put(cf::DOCCLASS_REVOCATIONS, &key, &bytes)
             .map_err(StateError::Storage)
     }
 
-    /// Every record for a credential, most recent height FIRST.
+    /// The next free sequence number for a record at `height`.
+    ///
+    /// Read out of STATE -- one more than the highest sequence already at that
+    /// height for that credential, or zero -- and not out of the transaction's
+    /// index. `tx_index` would have been the obvious source and is the wrong
+    /// one: it reaches a subsystem arm already reduced to the literal `0` by
+    /// [`crate::effective_tx_index`] whenever
+    /// `subsystem_tx_index_enabled_from_height` is closed, so a key built from
+    /// it would collide exactly as the legacy key does unless a SECOND,
+    /// unrelated gate happened to be open too. A gate whose repair silently
+    /// depends on another gate's height is the kind of thing that ships looking
+    /// activated and is not.
+    ///
+    /// The candidate's prefix scan merges staged writes with committed state,
+    /// so a record this block already staged is counted. Legacy 40-byte records
+    /// at the same height are ignored: they cannot collide with a 44-byte key,
+    /// and sequence zero beside a legacy record is the correct ordering anyway.
+    fn v_next_revocation_sequence(
+        view: &ExecutionView<'_, '_>,
+        credential_id: &CredentialId,
+        height: BlockHeight,
+    ) -> Result<u32> {
+        let mut next = 0u32;
+        for entry in view
+            .prefix_iter(cf::DOCCLASS_REVOCATIONS, credential_id)
+            .map_err(StateError::Storage)?
+        {
+            let (key, _) = entry.map_err(StateError::Storage)?;
+            if key.len() != 44 || &key[..32] != credential_id {
+                continue;
+            }
+            let mut h = [0u8; 8];
+            h.copy_from_slice(&key[32..40]);
+            if BlockHeight::from_be_bytes(h) != height {
+                continue;
+            }
+            let mut i = [0u8; 4];
+            i.copy_from_slice(&key[40..44]);
+            next = next.max(u32::from_be_bytes(i).saturating_add(1));
+        }
+        Ok(next)
+    }
+
+    /// Every record for a credential, most recent FIRST.
     ///
     /// A prefix scan on the view is MERGED with committed state, so a record
     /// this block staged and one an earlier block published are both here. The
-    /// width and prefix filter is the committed twin's: a key that is not
-    /// exactly 40 bytes, or whose first 32 do not match, is skipped rather than
+    /// width and prefix filter is the committed twin's: a key that is neither
+    /// 40 nor 44 bytes, or whose first 32 do not match, is skipped rather than
     /// decoded -- which is what keeps RocksDB's prefix overrun from turning a
     /// neighbouring credential's record into this one's.
+    ///
+    /// The order is the KEY's, descending, not the decoded height's. For a
+    /// chain below `docclass_revocation_record_enabled_from_height` every key
+    /// is 40 bytes and the two orders are the same value computed two ways.
+    /// Above it the key carries the transaction index, so two records written
+    /// in one block come back in the order the block wrote them -- and a legacy
+    /// 40-byte record at a height, being a strict prefix, sorts before a
+    /// sequenced one at that height, which is also the order they happened in.
     pub fn v_get_revocations_for_credential(
         view: &ExecutionView<'_, '_>,
         credential_id: &CredentialId,
@@ -523,12 +592,15 @@ impl DocClassExecutor {
             .map_err(StateError::Storage)?
         {
             let (key, value) = entry.map_err(StateError::Storage)?;
-            if key.len() == 40 && &key[..32] == credential_id {
-                records.push(decode_revocation_record(&value).map_err(StateError::Storage)?);
+            if is_revocation_key_for(&key, credential_id) {
+                records.push((
+                    key,
+                    decode_revocation_record(&value).map_err(StateError::Storage)?,
+                ));
             }
         }
-        records.sort_by(|a, b| b.revoked_at_height.cmp(&a.revoked_at_height));
-        Ok(records)
+        records.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(records.into_iter().map(|(_, r)| r).collect())
     }
 
     pub fn v_get_latest_revocation(

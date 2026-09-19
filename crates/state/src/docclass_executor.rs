@@ -66,6 +66,27 @@ pub struct DocClassGates {
     /// An operation that writes nothing reports a failed receipt rather
     /// than a success one. ACTIVATION-AUDIT row OV-25.
     pub no_op_receipt: bool,
+    /// `UpdateIssuer` stops rewriting the registry's record of what the issuer
+    /// is allowed to do -- including its `status`, so a suspended issuer can no
+    /// longer restore itself. ACTIVATION-AUDIT row AU-34.
+    pub issuer_authority: bool,
+    /// `Revoked` and `Superseded` are terminal, and a revocation record is
+    /// keyed by its transaction as well as its height, so two records at one
+    /// height are two rows. ACTIVATION-AUDIT rows OV-23 and OV-24.
+    pub revocation_record: bool,
+    /// The envelope's `DocSubcode` selects the credential family instead of a
+    /// trial decode, and the schema validator covers the families it selects.
+    /// ACTIVATION-AUDIT rows OV-27 and D-19b.
+    pub credential_schema: bool,
+    /// A subject commitment is bound to the controller that anchored it first,
+    /// and an identity root is created `Active` rather than into whatever
+    /// lifecycle state the payload asked for. ACTIVATION-AUDIT row AU-35, in
+    /// part.
+    pub identity_binding: bool,
+    /// `RegisterIssuer` applies the minimum-stake check only when
+    /// `DocClassParams::require_issuer_stake` says to. ACTIVATION-AUDIT row
+    /// AU-37, in part.
+    pub issuer_stake_requirement: bool,
 }
 
 impl DocClassGates {
@@ -89,6 +110,11 @@ impl DocClassGates {
         real_block_timestamp: false,
         allocation_bound: false,
         no_op_receipt: false,
+        issuer_authority: false,
+        revocation_record: false,
+        credential_schema: false,
+        identity_binding: false,
+        issuer_stake_requirement: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -99,6 +125,11 @@ impl DocClassGates {
         real_block_timestamp: true,
         allocation_bound: true,
         no_op_receipt: true,
+        issuer_authority: true,
+        revocation_record: true,
+        credential_schema: true,
+        identity_binding: true,
+        issuer_stake_requirement: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -116,6 +147,14 @@ impl DocClassGates {
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
             allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
             no_op_receipt: crate::subsystem_no_op_receipt_gate_open(params, block_height),
+            issuer_authority: DocClassExecutor::issuer_authority_gate_open(params, block_height),
+            revocation_record: DocClassExecutor::revocation_record_gate_open(params, block_height),
+            credential_schema: DocClassExecutor::credential_schema_gate_open(params, block_height),
+            identity_binding: DocClassExecutor::identity_binding_gate_open(params, block_height),
+            issuer_stake_requirement: DocClassExecutor::issuer_stake_requirement_gate_open(
+                params,
+                block_height,
+            ),
         }
     }
 }
@@ -258,6 +297,134 @@ impl DocClassExecutor {
     #[inline]
     pub fn revocation_standing_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
         matches!(Self::revocation_standing_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the DocClass issuer-authority rule.
+    ///
+    /// Reads `params.docclass_issuer_authority_enabled_from_height`, and
+    /// nothing else. `None` -- the default, and what a genesis written before
+    /// the field existed resolves to -- closes the gate, so a node executes
+    /// exactly what it executed before the field was declared.
+    ///
+    /// Below the gate `UpdateIssuer` writes the whole payload struct over the
+    /// registry row, so a registered issuer grants itself any subcode, declares
+    /// any jurisdiction, and a SUSPENDED issuer restores itself to `Active`
+    /// with one transaction. At and above it the five fields the registry is
+    /// authoritative about -- `status`, `authorized_subcodes`, `jurisdictions`,
+    /// `issuer_type` and `registered_at` -- keep their recorded values.
+    /// ACTIVATION-AUDIT row AU-34.
+    #[inline]
+    fn issuer_authority_activation(params: &ChainParams) -> Option<u64> {
+        params.docclass_issuer_authority_enabled_from_height
+    }
+
+    /// Whether the issuer-authority rule is active at `block_height`.
+    #[inline]
+    pub fn issuer_authority_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::issuer_authority_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the DocClass revocation-record rules.
+    ///
+    /// Reads `params.docclass_revocation_record_enabled_from_height`, and
+    /// nothing else. `None` -- the default, and what a genesis written before
+    /// the field existed resolves to -- closes the gate, so a node executes
+    /// exactly what it executed before the field was declared.
+    ///
+    /// Below the gate `suspend_credential` has no current-status guard, so a
+    /// REVOKED credential is suspended and then reactivated back to `Active`
+    /// (row OV-23); and a revocation record is keyed by
+    /// `credential_id || revoked_at_height` alone, so two records for one
+    /// credential at one height are one row and the later write silently
+    /// replaces the earlier (row OV-24). At and above it `Revoked` and
+    /// `Superseded` are terminal and the key carries the transaction index as
+    /// well.
+    #[inline]
+    fn revocation_record_activation(params: &ChainParams) -> Option<u64> {
+        params.docclass_revocation_record_enabled_from_height
+    }
+
+    /// Whether the revocation-record rules are active at `block_height`.
+    #[inline]
+    pub fn revocation_record_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::revocation_record_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the DocClass credential-schema rules.
+    ///
+    /// Reads `params.docclass_credential_schema_enabled_from_height`, and
+    /// nothing else. `None` -- the default, and what a genesis written before
+    /// the field existed resolves to -- closes the gate, so a node executes
+    /// exactly what it executed before the field was declared.
+    ///
+    /// Below the gate `IssueCredential` picks its family by trying to decode an
+    /// `AcademicCredential`, falling through to `EligibilityAttestation`, and
+    /// discarding the first error, without ever reading the `DocSubcode` the
+    /// envelope declares (row OV-27); and the schema validator has arms for
+    /// three subcodes and returns `Valid` for every other one and for every
+    /// eligibility attestation (row D-19b). At and above it the envelope's
+    /// subcode selects the family, the credential's own subcode must agree with
+    /// it, and every family the gate selects is checked.
+    #[inline]
+    fn credential_schema_activation(params: &ChainParams) -> Option<u64> {
+        params.docclass_credential_schema_enabled_from_height
+    }
+
+    /// Whether the credential-schema rules are active at `block_height`.
+    #[inline]
+    pub fn credential_schema_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::credential_schema_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the DocClass identity-binding rules.
+    ///
+    /// Reads `params.docclass_identity_binding_enabled_from_height`, and
+    /// nothing else. `None` -- the default, and what a genesis written before
+    /// the field existed resolves to -- closes the gate, so a node executes
+    /// exactly what it executed before the field was declared.
+    ///
+    /// Below the gate `create_identity_root` checks `controller == sender` and
+    /// then stores the payload struct verbatim, so any funded account anchors a
+    /// root claiming any `subject_commitment`, in any `status`. At and above it
+    /// a commitment another controller already anchored is refused and the
+    /// status is the executor's `Active`. ACTIVATION-AUDIT row AU-35, in part:
+    /// nothing here binds the commitment to a PERSON, because this tree records
+    /// nothing to bind it to.
+    #[inline]
+    fn identity_binding_activation(params: &ChainParams) -> Option<u64> {
+        params.docclass_identity_binding_enabled_from_height
+    }
+
+    /// Whether the identity-binding rules are active at `block_height`.
+    #[inline]
+    pub fn identity_binding_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::identity_binding_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for reading `DocClassParams::require_issuer_stake`.
+    ///
+    /// Reads `params.docclass_issuer_stake_requirement_enabled_from_height`,
+    /// and nothing else. `None` -- the default, and what a genesis written
+    /// before the field existed resolves to -- closes the gate, so a node
+    /// executes exactly what it executed before the field was declared.
+    ///
+    /// Below the gate `require_issuer_stake` is declared, defaulted, reported
+    /// by `docclass_getConfig` and read by no execution path: registration
+    /// enforces `min_issuer_stake` whenever it is non-zero, whatever the flag
+    /// says. At and above it the check runs only when the flag is true.
+    /// ACTIVATION-AUDIT row AU-37, in part.
+    #[inline]
+    fn issuer_stake_requirement_activation(params: &ChainParams) -> Option<u64> {
+        params.docclass_issuer_stake_requirement_enabled_from_height
+    }
+
+    /// Whether the declared issuer-stake requirement is read at `block_height`.
+    #[inline]
+    pub fn issuer_stake_requirement_gate_open(
+        params: &ChainParams,
+        block_height: BlockHeight,
+    ) -> bool {
+        matches!(Self::issuer_stake_requirement_activation(params), Some(h) if block_height >= h)
     }
 
     /// Execute a DocClass transaction.
@@ -458,11 +625,13 @@ impl DocClassExecutor {
             DocClassOperation::IssueCredential => Self::issue_credential(
                 view,
                 sender,
+                data.subcode,
                 &data.data,
                 proposer,
                 fee,
                 block_height,
                 tx_index,
+                gates,
             ),
             DocClassOperation::UpdateCredential => {
                 Self::update_credential(view, sender, &data.data, proposer, fee, gates)
@@ -587,9 +756,47 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Identity already exists"));
         }
 
+        // At or above the identity-binding activation a subject commitment
+        // belongs to the controller that anchored it FIRST. Below it the only
+        // check on this path is `controller == sender`, which says who sent the
+        // transaction and nothing at all about whose subject is being claimed,
+        // so any funded account anchors a root over a commitment somebody else
+        // already anchored. ACTIVATION-AUDIT row AU-35.
+        //
+        // This is squatting resistance, not authentication: the commitment is
+        // bound to an ADDRESS, because an address is the only thing this
+        // subsystem records that could hold it. Refused before the fee, like
+        // the duplicate guard above it.
+        if gates.identity_binding {
+            let limit = gates.row_limit();
+            for (existing_id, _) in
+                Self::v_get_subject_identity_entries(view, &identity.subject_commitment)?
+            {
+                let row = Self::v_get_identity_root_bounded(view, &existing_id, limit)?;
+                let controller = match row {
+                    BoundedRow::Row(r) => r.controller,
+                    BoundedRow::Missing => continue,
+                    BoundedRow::TooLarge(n) => return Ok(Self::row_too_large("Identity root", n)),
+                };
+                if controller != *sender {
+                    return Ok(DocClassExecutionResult::failure(
+                        "Subject commitment is already anchored by another controller",
+                    ));
+                }
+            }
+        }
+
         StateManager::v_deduct(view, sender, fee)?;
         StateManager::v_credit(view, proposer, fee)?;
         StateManager::v_increment_nonce(view, sender)?;
+
+        let mut identity = identity;
+        // The lifecycle state is the executor's. `DeactivateIdentity` and
+        // `ReactivateIdentity` are the arms that move it; a creation that could
+        // choose it makes those two optional. ACTIVATION-AUDIT row AU-35.
+        if gates.identity_binding {
+            identity.status = IdentityStatus::Active;
+        }
 
         Self::v_put_identity_root(view, &identity, gates.subject_index_split)?;
 
@@ -1047,15 +1254,90 @@ impl DocClassExecutor {
     // ========================================================================
 
     #[allow(clippy::too_many_arguments)]
+    /// Which credential family an `IssueCredential` transaction is.
+    ///
+    /// Below `docclass_credential_schema_enabled_from_height` this is a TRIAL
+    /// DECODE: try `AcademicCredential`, fall through to
+    /// `EligibilityAttestation` on failure, discard the first error, and never
+    /// look at the `DocSubcode` the envelope declares. It works only because
+    /// the two schemas do not currently cross-decode, and nothing in this tree
+    /// enforces that they never will -- add one optional field to either and a
+    /// transaction the sender declared as one family is executed, stored and
+    /// indexed as the other. ACTIVATION-AUDIT row OV-27.
+    ///
+    /// At and above the gate the envelope's subcode chooses, the payload must
+    /// decode as that family or the transaction is a failed receipt, and the
+    /// credential's OWN `subcode` field must agree with the envelope's -- the
+    /// agreement matters because it is `credential.subcode`, not the envelope's,
+    /// that the schema validator dispatches on and that the issuer-authority
+    /// check `v_can_issue_subcode` is asked about, so two subcodes that
+    /// disagree are two different questions answered about one row.
+    #[allow(clippy::too_many_arguments)]
     fn issue_credential(
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
+        subcode: DocSubcode,
         data: &[u8],
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
+        if gates.credential_schema {
+            return match subcode {
+                DocSubcode::EligibilityAttestation => {
+                    match bincode::deserialize::<EligibilityAttestation>(data) {
+                        Ok(att) if att.subcode != subcode => {
+                            Ok(DocClassExecutionResult::failure(format!(
+                                "Attestation subcode {:?} disagrees with the transaction's {:?}",
+                                att.subcode, subcode
+                            )))
+                        }
+                        Ok(att) => Self::issue_eligibility(
+                            view,
+                            sender,
+                            att,
+                            proposer,
+                            fee,
+                            block_height,
+                            tx_index,
+                            gates,
+                        ),
+                        Err(e) => Ok(DocClassExecutionResult::failure(format!(
+                            "Not an eligibility attestation: {e}"
+                        ))),
+                    }
+                }
+                s if s.is_academic_class() => {
+                    match bincode::deserialize::<AcademicCredential>(data) {
+                        Ok(cred) if cred.subcode != subcode => {
+                            Ok(DocClassExecutionResult::failure(format!(
+                                "Credential subcode {:?} disagrees with the transaction's {:?}",
+                                cred.subcode, subcode
+                            )))
+                        }
+                        Ok(cred) => Self::issue_academic_credential(
+                            view,
+                            sender,
+                            cred,
+                            proposer,
+                            fee,
+                            block_height,
+                            tx_index,
+                            gates,
+                        ),
+                        Err(e) => Ok(DocClassExecutionResult::failure(format!(
+                            "Not an academic credential: {e}"
+                        ))),
+                    }
+                }
+                other => Ok(DocClassExecutionResult::failure(format!(
+                    "IssueCredential does not carry subcode {other:?}"
+                ))),
+            };
+        }
+
         // Try academic credential first
         if let Ok(cred) = bincode::deserialize::<AcademicCredential>(data) {
             return Self::issue_academic_credential(
@@ -1066,6 +1348,7 @@ impl DocClassExecutor {
                 fee,
                 block_height,
                 tx_index,
+                gates,
             );
         }
         // Try eligibility attestation
@@ -1078,6 +1361,7 @@ impl DocClassExecutor {
                 fee,
                 block_height,
                 tx_index,
+                gates,
             );
         }
         Ok(DocClassExecutionResult::failure("Invalid credential data"))
@@ -1092,6 +1376,7 @@ impl DocClassExecutor {
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         if credential.issuer != *sender {
             return Ok(DocClassExecutionResult::failure("Issuer must be sender"));
@@ -1109,8 +1394,14 @@ impl DocClassExecutor {
 
         // PRIVACY ENFORCEMENT: Validate schema to prevent PII on-chain
         // Hard rejection at consensus level for SRC-81X credentials (810/811/812)
-        let validation_result =
-            SchemaValidator::new().validate_academic_credential(&credential, block_height);
+        // At or above the credential-schema activation the validator covers
+        // every academic subcode rather than the three that have an allowlist.
+        // ACTIVATION-AUDIT row D-19b.
+        let validation_result = if gates.credential_schema {
+            SchemaValidator::new().validate_academic_credential_wide(&credential, block_height)
+        } else {
+            SchemaValidator::new().validate_academic_credential(&credential, block_height)
+        };
         if !validation_result.is_valid() {
             if let crate::ValidationResult::Invalid { reason } = validation_result {
                 warn!(
@@ -1154,6 +1445,7 @@ impl DocClassExecutor {
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         if attestation.issuer != *sender {
             return Ok(DocClassExecutionResult::failure("Issuer must be sender"));
@@ -1170,6 +1462,23 @@ impl DocClassExecutor {
 
         if Self::v_eligibility_exists(view, &attestation.credential_id)? {
             return Ok(DocClassExecutionResult::failure("Credential exists"));
+        }
+
+        // No validator has ever run on this family, on any path, at any height.
+        // ACTIVATION-AUDIT row D-19b, the "nothing in SRC-80X" half.
+        if gates.credential_schema {
+            if let crate::ValidationResult::Invalid { reason } =
+                SchemaValidator::new().validate_eligibility_attestation(&attestation, block_height)
+            {
+                warn!(
+                    "Schema validation failed for attestation {:?}: {}",
+                    attestation.credential_id, reason
+                );
+                return Ok(DocClassExecutionResult::failure(format!(
+                    "Schema validation failed: {}",
+                    reason
+                )));
+            }
         }
 
         StateManager::v_deduct(view, sender, fee)?;
@@ -1291,7 +1600,7 @@ impl DocClassExecutor {
             superseded_by: None,
             signature: [0u8; 64],
         };
-        Self::v_put_revocation_record(view, &record)?;
+        Self::v_put_revocation_record(view, &record, gates.revocation_record)?;
 
         if Self::v_eligibility_exists(view, &revoke.credential_id)? {
             Self::v_update_eligibility_revocation(
@@ -1345,6 +1654,28 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
+        // At or above the revocation-record activation, revocation is not
+        // reversible. `reactivate_credential` already refuses anything that is
+        // not `Suspended`; below this gate that is no protection at all,
+        // because suspension has no current-status guard of its own, so revoke
+        // -> suspend -> reactivate walks a REVOKED credential back to `Active`
+        // and the mirrored `revocation_status` on the credential row follows
+        // it. `Superseded` is terminal for the same reason: the credential it
+        // was superseded by is the live one, and reviving the old one would
+        // leave two. `Expired` is left alone -- it is not a status any arm in
+        // this file writes. ACTIVATION-AUDIT row OV-23.
+        if gates.revocation_record {
+            let current = Self::v_get_revocation_status(view, &suspend.credential_id)?;
+            if matches!(
+                current,
+                RevocationStatus::Revoked | RevocationStatus::Superseded
+            ) {
+                return Ok(DocClassExecutionResult::failure(format!(
+                    "Cannot suspend a credential that is {current:?}"
+                )));
+            }
+        }
+
         StateManager::v_deduct(view, sender, fee)?;
         StateManager::v_credit(view, proposer, fee)?;
         StateManager::v_increment_nonce(view, sender)?;
@@ -1360,7 +1691,7 @@ impl DocClassExecutor {
             superseded_by: None,
             signature: [0u8; 64],
         };
-        Self::v_put_revocation_record(view, &record)?;
+        Self::v_put_revocation_record(view, &record, gates.revocation_record)?;
 
         if Self::v_eligibility_exists(view, &suspend.credential_id)? {
             Self::v_update_eligibility_revocation(
@@ -1433,7 +1764,7 @@ impl DocClassExecutor {
             superseded_by: None,
             signature: [0u8; 64],
         };
-        Self::v_put_revocation_record(view, &record)?;
+        Self::v_put_revocation_record(view, &record, gates.revocation_record)?;
 
         if Self::v_eligibility_exists(view, &reactivate.credential_id)? {
             Self::v_update_eligibility_revocation(
@@ -1501,7 +1832,7 @@ impl DocClassExecutor {
             superseded_by: Some(supersede.new_credential_id),
             signature: [0u8; 64],
         };
-        Self::v_put_revocation_record(view, &record)?;
+        Self::v_put_revocation_record(view, &record, gates.revocation_record)?;
 
         if Self::v_eligibility_exists(view, &supersede.old_credential_id)? {
             Self::v_update_eligibility_revocation(
@@ -1595,7 +1926,12 @@ impl DocClassExecutor {
         }
 
         if let Some(ref p) = params.docclass {
-            if p.min_issuer_stake > 0 && issuer.stake_amount < p.min_issuer_stake {
+            // `require_issuer_stake` is declared, defaulted to true, reported by
+            // `docclass_getConfig` and -- below the gate -- read by nothing: the
+            // minimum is enforced whenever it is non-zero, whatever the flag
+            // says. ACTIVATION-AUDIT row AU-37.
+            let required = !gates.issuer_stake_requirement || p.require_issuer_stake;
+            if required && p.min_issuer_stake > 0 && issuer.stake_amount < p.min_issuer_stake {
                 return Ok(DocClassExecutionResult::failure("Insufficient stake"));
             }
         }
@@ -1663,6 +1999,24 @@ impl DocClassExecutor {
         // and AU-34.
         if gates.stake_escrow {
             updated.stake_amount = recorded.stake_amount;
+        }
+        // At or above the issuer-authority activation the registry is the
+        // author of the issuer's authority and the payload is not. Below it the
+        // payload struct is written over the row wholesale, so the issuer
+        // grants itself any subcode, declares any jurisdiction, and -- the
+        // sharpest of the three -- a SUSPENDED issuer restores itself to
+        // `Active` with this one transaction. The five fields restored here are
+        // exactly the ones `v_can_issue_subcode` and `check_revoke_auth`
+        // consult, plus `registered_at`, which is the registry's own record of
+        // when it decided. What the sender may still change is what the
+        // registry never reads: `name`, `keys`, `metadata`, `updated_at`.
+        // ACTIVATION-AUDIT row AU-34.
+        if gates.issuer_authority {
+            updated.status = recorded.status;
+            updated.authorized_subcodes = recorded.authorized_subcodes.clone();
+            updated.jurisdictions = recorded.jurisdictions.clone();
+            updated.issuer_type = recorded.issuer_type;
+            updated.registered_at = recorded.registered_at;
         }
 
         Self::v_put_docclass_issuer(view, &updated)?;

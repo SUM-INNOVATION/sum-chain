@@ -66,15 +66,31 @@ pub struct TaxGates {
     /// `VerifyProof` refuses a payload that does not name a proof this
     /// subsystem holds. ACTIVATION-AUDIT row AU-20 (= PR-1).
     pub proof_presence: bool,
+    /// A transaction's sizing inputs are checked against a limit BEFORE the
+    /// value they size is built: an oversized payload is refused before it is
+    /// decoded, and a `TAX_SUBJECT_INDEX` row past the limit is refused before
+    /// it is decoded, appended to and re-encoded. ACTIVATION-AUDIT row AL-1.
+    pub allocation_bound: bool,
 }
 
 impl TaxGates {
+    /// The stored-row length limit this gate imposes, or `None` when closed.
+    ///
+    /// `None` is what the unbounded reader means, so a closed gate reads
+    /// byte-for-byte what it read before the bound existed.
+    #[inline]
+    pub fn row_limit(self) -> Option<usize> {
+        self.allocation_bound
+            .then_some(crate::MAX_ACCUMULATING_ROW_BYTES)
+    }
+
     /// Every gate closed -- the release configuration today.
     pub const CLOSED: Self = Self {
         authorization: false,
         real_block_timestamp: false,
         proof_lifecycle: false,
         proof_presence: false,
+        allocation_bound: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -83,6 +99,7 @@ impl TaxGates {
         real_block_timestamp: true,
         proof_lifecycle: true,
         proof_presence: true,
+        allocation_bound: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -92,6 +109,7 @@ impl TaxGates {
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
             proof_lifecycle: TaxExecutor::proof_lifecycle_gate_open(params, block_height),
             proof_presence: crate::subsystem_proof_presence_gate_open(params, block_height),
+            allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
         }
     }
 }
@@ -213,6 +231,25 @@ impl TaxExecutor {
     ) -> Result<TaxExecutionResult> {
         let block_timestamp =
             crate::effective_block_timestamp(block_timestamp, gates.real_block_timestamp);
+
+        // ACTIVATION-AUDIT row AL-1, and the Tax half of AL-12. Every arm below
+        // opens with `bincode::deserialize(&data.data)` and no length check
+        // ahead of it, so the only thing bounding a Tax payload today is
+        // `max_block_bytes`. One check here rather than one per arm, for the
+        // reason the DocClass executor gives at the same seam: the arms are
+        // many and the rule is one.
+        //
+        // A refusal, not an error, and it charges nothing: every arm below
+        // deducts the fee itself, and every pre-existing `failure()` that fires
+        // before that deduction is already free.
+        if gates.allocation_bound && data.data.len() > crate::MAX_SUBSYSTEM_PAYLOAD_BYTES {
+            return Ok(TaxExecutionResult::failure(format!(
+                "Tax payload too large: {} bytes, limit {}",
+                data.data.len(),
+                crate::MAX_SUBSYSTEM_PAYLOAD_BYTES
+            )));
+        }
+
         // AU-19: claim-type registration, update and deprecation have no
         // authority check at all below the gate -- all three guard only on row
         // presence or absence, so any funded account writes the chain's
@@ -414,6 +451,30 @@ impl TaxExecutor {
                 // other duplicate guard in this file.
                 if gates.proof_lifecycle && Self::v_get_proof(view, &proof.proof_id)?.is_some() {
                     return Ok(TaxExecutionResult::failure("Proof already exists"));
+                }
+
+                // ACTIVATION-AUDIT row AL-1. `v_put_proof` appends to the
+                // subject index, which is an accumulating `Vec<ProofId>` under
+                // one key: it decodes the whole stored list into owned values,
+                // linear-searches it, pushes and re-encodes it, once per
+                // `IssueClaim`, and the attacker chooses the entry count by
+                // repeating the transaction against one nullifier it also
+                // chooses. Below the gate the only ceiling is the write-set
+                // ceiling, which is charged AFTER the replacement value has
+                // been built. At and above it the STORED length is compared
+                // before anything is decoded, so the refusal costs one
+                // comparison. The length is read here rather than inside
+                // `v_add_to_subject_index` so the refusal lands before the fee,
+                // beside the duplicate guard above it.
+                if let Some(max) = gates.row_limit() {
+                    if let Some(n) = Self::v_subject_index_row_len(view, &proof.subject_nullifier)?
+                    {
+                        if n > max {
+                            return Ok(TaxExecutionResult::failure(format!(
+                                "Subject index too large to extend: {n} bytes, limit {max}"
+                            )));
+                        }
+                    }
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
