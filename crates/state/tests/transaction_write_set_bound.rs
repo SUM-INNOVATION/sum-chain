@@ -608,16 +608,84 @@ fn a_refusal_leaves_canonical_state_exactly_as_it_found_it() {
 
 // ── 6. The closed gate is the unremediated binary ───────────────────────────
 
-/// With the gate closed, the SAME block is unexecutable — which is today's
-/// behaviour, reproduced exactly.
+/// With the gate CLOSED the very transaction the bound refuses SUCCEEDS, and
+/// commits.
 ///
-/// This is the half that makes the gate honest. A dormant gate must be
-/// indistinguishable from the binary that existed before it, and "the block
-/// dies" is what that binary does. It is also the defect statement: one
-/// transaction, for one `min_fee`, makes a block of five other valid
-/// transactions unexecutable.
+/// This is the test that makes the gate honest, and it is the one that has to
+/// FAIL if the gate is ever wired to read open. It was added because a mutation
+/// that made `subsystem_tx_write_set_bound_gate_open` return `true`
+/// unconditionally — a dormant gate that is not dormant, which is the single
+/// most damaging thing that can go wrong with an activation height — survived
+/// the block-ceiling test below: that fixture crosses the BLOCK ceiling, which
+/// it does on both sides of the gate, so it never told the two apart.
+///
+/// The distinguishing fixture is one transaction that crosses the
+/// PER-TRANSACTION bound and nothing else. Below the gate nothing is measuring
+/// it, so it is admitted, it commits, and the row grows — byte-for-byte the
+/// binary that existed before this field was declared.
 #[test]
-fn with_the_gate_closed_one_oversized_transaction_still_kills_the_whole_block() {
+fn with_the_gate_closed_the_transaction_the_bound_refuses_succeeds_instead() {
+    let (state, db, _dir, executor) = setup_with_params(params_closed());
+    let actor = KeyPair::generate();
+    fund(&db, &actor, 1_000_000_000_000_000);
+    let seeded = seed_row(&db, 0, actor.address(), OVERSIZED_ROW);
+
+    let mut block = block_of(1, vec![add_key_tx(&actor, 0, 0)]);
+    let exec = executor
+        .execute_block(&block, state.state_root(), &[])
+        .expect("below the gate this is an ordinary transaction");
+    block.header.state_root = exec.computed_root();
+    let (executed, _sd, _cd) = exec.into_parts();
+    let receipt = executed.receipts()[0].clone();
+    let charged = executed.logical_bytes();
+    println!(
+        "GATE CLOSED: an AddKey against a {seeded} B row charges {charged} B — \
+         {:.1}x the {MAX_TX_WRITE_SET_BYTES} B bound the OPEN gate would hold it \
+         to — and is ADMITTED, status {:?}",
+        charged as f64 / MAX_TX_WRITE_SET_BYTES as f64,
+        receipt.status
+    );
+    assert_eq!(
+        receipt.status,
+        TxStatus::Success,
+        "below the gate NOTHING bounds one transaction's write set, so this \
+         must succeed. If it fails here, the gate is open when the genesis says \
+         it is closed, and every node built from this commit computes a \
+         different state root from every node built before it"
+    );
+    assert!(
+        charged > MAX_TX_WRITE_SET_BYTES,
+        "and the fixture must actually be one the open gate would refuse, or \
+         this test distinguishes nothing: it charged {charged} B against a \
+         {MAX_TX_WRITE_SET_BYTES} B bound"
+    );
+
+    executed
+        .accept_produced(&block)
+        .expect("accept")
+        .publish()
+        .expect("publish");
+    let after = db
+        .get(cf::DOCCLASS_IDENTITY_ROOTS, &ident(0))
+        .unwrap()
+        .expect("the row is still there")
+        .len();
+    assert!(
+        after > seeded,
+        "and it COMMITTED: the row grew from {seeded} B to {after} B, which is \
+         the write the open gate rolls back"
+    );
+}
+
+/// The block ceiling still refuses a block — and now names the transaction that
+/// crossed it.
+///
+/// True on BOTH sides of the gate, which is the point: a per-transaction bound
+/// does not replace the block ceiling, and a thousand transactions each inside
+/// their own bound can still cross the block's. What changed is that the
+/// refusal carries an INDEX, which is the only thing a proposer can act on.
+#[test]
+fn the_block_ceiling_refusal_names_the_transaction_that_crossed_it() {
     let (state, db, _dir, executor) = setup_with_params(params_closed());
     let actor = KeyPair::generate();
     fund(&db, &actor, 1_000_000_000_000_000);
