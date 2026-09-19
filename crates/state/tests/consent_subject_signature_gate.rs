@@ -389,3 +389,114 @@ fn the_issuer_must_still_be_the_sender_at_the_gate() {
     assert_eq!(r.2.as_deref(), Some("Issuer must be sender"));
     assert!(!r.1);
 }
+
+/// This gate alone narrows the door; it does not shut it.
+///
+/// `SupersedeConsent` carries a replacement `ConsentEnvelope` and is not gated
+/// here. With `authorization` still closed it checks NOTHING about the sender
+/// (ACTIVATION-AUDIT row AU-1), so a stranger supersedes any consent that
+/// exists with a replacement naming any subject they like — which mints exactly
+/// the record `GrantConsent` has just been stopped from minting.
+///
+/// Asserted rather than left as a caveat in a doc comment, because the
+/// guarantee this gate makes is conditional on another gate being open, and a
+/// conditional guarantee that is only written down is one an operator can
+/// activate half of. Both halves are run here: `consent_subject_signature`
+/// alone, and the two together.
+#[test]
+fn the_grant_gate_alone_does_not_close_supersession() {
+    #[derive(serde::Serialize)]
+    struct Supersede {
+        old_consent_id: [u8; 32],
+        new_consent: ConsentEnvelope,
+    }
+
+    for authorization in [false, true] {
+        let gates = HealthcareGates {
+            consent_subject_signature: true,
+            authorization,
+            ..HealthcareGates::CLOSED
+        };
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let issuer = KeyPair::generate();
+        let subject = KeyPair::generate();
+        let stranger = KeyPair::generate();
+        fund(&db, &issuer, 100_000_000);
+        fund(&db, &stranger, 100_000_000);
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        // A consent the subject really did agree to, granted through the gate.
+        let original = consent(
+            0x44,
+            issuer.address(),
+            subject.address(),
+            DisclosureScope::TreatmentOnly,
+        );
+        assert!(
+            grant(
+                &mut view,
+                &issuer.address(),
+                bincode::serialize(&signed_by(&subject, &original)).unwrap(),
+                gates,
+            )
+            .0
+        );
+
+        // The stranger's replacement: their own issuer address, a subject who
+        // has signed nothing, and the widest scope there is.
+        let victim = Address::new([0xFE; 20]);
+        let replacement = consent(
+            0x45,
+            stranger.address(),
+            victim,
+            DisclosureScope::AllRecords,
+        );
+        let r = HealthcareExecutor::execute_with_gates(
+            &mut view,
+            &stranger.address(),
+            &HealthcareTxData {
+                operation: HealthcareOperation::SupersedeConsent,
+                data: bincode::serialize(&Supersede {
+                    old_consent_id: original.consent_id,
+                    new_consent: replacement.clone(),
+                })
+                .unwrap(),
+                recipient: Address::ZERO,
+            },
+            &Address::new([9; 20]),
+            100,
+            1,
+            NOW,
+            0,
+            Hash::ZERO,
+            gates,
+        )
+        .unwrap();
+
+        let minted = HealthcareExecutor::v_get_consent(&view, &replacement.consent_id).unwrap();
+        if authorization {
+            assert!(
+                !r.success,
+                "with BOTH gates open a stranger cannot supersede, so there is \
+                 no second way to record a consent about somebody who never \
+                 agreed"
+            );
+            assert!(minted.is_none(), "and nothing was written about them");
+        } else {
+            assert!(
+                r.success,
+                "with only this gate open, supersession is still the unguarded \
+                 arm AU-1 describes -- this is the residual, asserted rather \
+                 than hoped about"
+            );
+            assert_eq!(
+                minted.unwrap().subject_address,
+                victim,
+                "and it records a disclosure about a subject who signed nothing, \
+                 which is what `healthcare_authorization_enabled_from_height` \
+                 has to be open to prevent"
+            );
+        }
+    }
+}

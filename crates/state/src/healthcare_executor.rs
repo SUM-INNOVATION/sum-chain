@@ -336,6 +336,16 @@ impl HealthcareExecutor {
     /// subject did agree to, without a fresh signature. That is AU-1's arm and
     /// AU-1's row; it is recorded here rather than left for a reader to
     /// discover, and it is not closed by this height.
+    ///
+    /// **So this height DEPENDS on the other one, and an operator has to open
+    /// both.** With `authorization` still closed, `SupersedeConsent` checks
+    /// nothing about the sender at all, so a stranger supersedes any consent
+    /// that exists with a replacement naming any subject they like -- which
+    /// mints exactly the record this gate refuses to let `GrantConsent` mint.
+    /// Opening this one alone narrows the door rather than shutting it. That is
+    /// stated here, and pinned by
+    /// `the_grant_gate_alone_does_not_close_supersession`, because a gate whose
+    /// guarantee holds only in combination with another must say which one.
     #[inline]
     fn consent_subject_signature_activation(params: &ChainParams) -> Option<u64> {
         params.healthcare_consent_subject_signature_enabled_from_height
