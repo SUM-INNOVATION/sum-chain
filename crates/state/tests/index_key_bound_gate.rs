@@ -260,7 +260,12 @@ fn legal_stops_keying_its_jurisdiction_index_by_an_unbounded_payload_string() {
             LegalOperation::DetermineBenefit,
             bincode::serialize(&benefit(0x44, &over_bound())).unwrap(),
         );
-        assert_the_pair_disagrees("legal/DetermineBenefit", gates.allocation_bound, at_b, over_b);
+        assert_the_pair_disagrees(
+            "legal/DetermineBenefit",
+            gates.allocation_bound,
+            at_b,
+            over_b,
+        );
     }
 }
 
@@ -318,8 +323,7 @@ fn finance_stops_keying_its_jurisdiction_index_by_an_unbounded_payload_string() 
                 );
             } else {
                 assert_eq!(
-                    ok,
-                    !gates.allocation_bound,
+                    ok, !gates.allocation_bound,
                     "finance: a code one byte past the bound registers below the gate and is \
                      refused at it (allocation_bound={})",
                     gates.allocation_bound

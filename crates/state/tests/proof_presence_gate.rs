@@ -290,7 +290,13 @@ fn agreement_verify_proof_stops_succeeding_for_a_proof_that_does_not_exist() {
         let present = run(AgreementOperation::VerifyProof, vec![PRESENT; 32]);
         let absent = run(AgreementOperation::VerifyProof, ABSENT.to_vec());
         let malformed = run(AgreementOperation::VerifyProof, NOT_AN_ID.to_vec());
-        assert_the_pair_disagrees("agreement", gates.proof_presence, present, absent, malformed);
+        assert_the_pair_disagrees(
+            "agreement",
+            gates.proof_presence,
+            present,
+            absent,
+            malformed,
+        );
     }
 }
 

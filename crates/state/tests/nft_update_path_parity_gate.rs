@@ -216,8 +216,7 @@ fn update_metadata_starts_applying_the_mints_size_limit_and_storage_fee() {
             gates,
         );
         assert_eq!(
-            oversized,
-            !gates.update_path_parity,
+            oversized, !gates.update_path_parity,
             "OV-10: a rewrite one byte past max_metadata_bytes is ADMITTED below \
              the gate, although the mint arm refuses the same bytes \
              (update_path_parity={})",
@@ -236,8 +235,7 @@ fn update_metadata_starts_applying_the_mints_size_limit_and_storage_fee() {
             gates,
         );
         assert_eq!(
-            underpaid,
-            !gates.update_path_parity,
+            underpaid, !gates.update_path_parity,
             "OV-10: 100 bytes of storage for min_fee alone is ADMITTED below the \
              gate, although the mint arm charges storage_fee_per_byte for the \
              same bytes (update_path_parity={})",
@@ -302,8 +300,7 @@ fn batch_mint_starts_applying_the_mints_size_limit_and_storage_fee() {
             gates,
         );
         assert_eq!(
-            oversized,
-            !gates.update_path_parity,
+            oversized, !gates.update_path_parity,
             "OV-10: one request past max_metadata_bytes carries the whole batch \
              below the gate (update_path_parity={})",
             gates.update_path_parity
@@ -320,8 +317,7 @@ fn batch_mint_starts_applying_the_mints_size_limit_and_storage_fee() {
             gates,
         );
         assert_eq!(
-            underpaid,
-            !gates.update_path_parity,
+            underpaid, !gates.update_path_parity,
             "OV-10: 200 bytes of storage across a batch for min_fee alone is \
              ADMITTED below the gate (update_path_parity={})",
             gates.update_path_parity
@@ -380,8 +376,7 @@ fn a_royalty_recipient_stops_being_settable_on_a_collection_that_pays_none() {
             gates,
         );
         assert_eq!(
-            on_free,
-            !gates.update_path_parity,
+            on_free, !gates.update_path_parity,
             "RY-2: creation zeroes the recipient when royalty_bps is zero and the \
              update arm sets one anyway, until the gate (update_path_parity={})",
             gates.update_path_parity

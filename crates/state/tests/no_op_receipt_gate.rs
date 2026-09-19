@@ -136,7 +136,10 @@ fn a_repeated_consolidation_stops_being_a_paid_no_op() {
             )
             .unwrap()
             .success;
-            (ok, StateManager::v_get_nonce(view, &sender).unwrap() > before)
+            (
+                ok,
+                StateManager::v_get_nonce(view, &sender).unwrap() > before,
+            )
         };
 
         for id in [0x41u8, 0x42] {
@@ -171,15 +174,13 @@ fn a_repeated_consolidation_stops_being_a_paid_no_op() {
 
         let repeat = run(&mut view, LegalOperation::ConsolidateCase, payload);
         assert_eq!(
-            repeat.0,
-            !gates.no_op_receipt,
+            repeat.0, !gates.no_op_receipt,
             "OV-6: a repeated consolidation reports SUCCESS below the gate and is \
              refused at it (no_op_receipt={})",
             gates.no_op_receipt
         );
         assert_eq!(
-            repeat.1,
-            !gates.no_op_receipt,
+            repeat.1, !gates.no_op_receipt,
             "OV-6: and it is PAID for below the gate; at the gate the refusal \
              returns before the deduct (no_op_receipt={})",
             gates.no_op_receipt
@@ -275,15 +276,13 @@ fn update_credential_stops_reporting_success_for_a_write_it_does_not_do() {
         let charged = StateManager::v_get_nonce(&view, &sender).unwrap() > before;
 
         assert_eq!(
-            ok,
-            !gates.no_op_receipt,
+            ok, !gates.no_op_receipt,
             "OV-25: UpdateCredential reports success for the credential's own \
              issuer while writing nothing, until the gate (no_op_receipt={})",
             gates.no_op_receipt
         );
         assert_eq!(
-            charged,
-            !gates.no_op_receipt,
+            charged, !gates.no_op_receipt,
             "OV-25: and charges for it below the gate (no_op_receipt={})",
             gates.no_op_receipt
         );
@@ -300,7 +299,10 @@ fn add_party_and_remove_party_stop_reporting_success_for_doing_nothing() {
     }
 
     for gates in pair!(AgreementGates) {
-        for op in [AgreementOperation::AddParty, AgreementOperation::RemoveParty] {
+        for op in [
+            AgreementOperation::AddParty,
+            AgreementOperation::RemoveParty,
+        ] {
             let (_state, db, _dir, _executor) = setup_with_params(params());
             let actor = KeyPair::generate();
             fund(&db, &actor, 100_000_000);
@@ -334,15 +336,13 @@ fn add_party_and_remove_party_stop_reporting_success_for_doing_nothing() {
             let charged = StateManager::v_get_nonce(&view, &sender).unwrap() > before;
 
             assert_eq!(
-                ok,
-                !gates.no_op_receipt,
+                ok, !gates.no_op_receipt,
                 "OV-30: {op:?} reports success for an agreement that does not even \
                  exist, until the gate (no_op_receipt={})",
                 gates.no_op_receipt
             );
             assert_eq!(
-                charged,
-                !gates.no_op_receipt,
+                charged, !gates.no_op_receipt,
                 "OV-30: and charges for it below the gate (no_op_receipt={})",
                 gates.no_op_receipt
             );

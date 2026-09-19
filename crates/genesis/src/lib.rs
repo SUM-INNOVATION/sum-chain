@@ -1015,6 +1015,32 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub subsystem_allocation_bound_enabled_from_height: Option<u64>,
+
+    /// The Tax proof store and `TAX_SUBJECT_INDEX` stop disagreeing.
+    ///
+    /// ACTIVATION-AUDIT rows OV-1, OV-2 and OV-3; the full statement of the
+    /// rule is on `TaxExecutor::proof_lifecycle_activation`, which is the one
+    /// accessor that reads this field.
+    ///
+    /// This declaration carried neither a doc comment nor its `#[serde(default)]`
+    /// when it was found, alone among the gates: the merge that added it landed
+    /// the field line and lost the block above it. `Option<u64>` is defaulted by
+    /// serde whether the attribute is present or not — which is why
+    /// `state/a_genesis_written_before_these_fields_still_parses_dormant` passed
+    /// over it and why nothing had caught this — so the loss was documentation
+    /// and consistency and not behaviour. Restored rather than left, because
+    /// the next reader has no way to tell a deliberate omission from a scar.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
     pub tax_proof_lifecycle_enabled_from_height: Option<u64>,
 
     /// An NFT approval or metadata rewrite answers to the same authority a
