@@ -145,6 +145,16 @@ pub fn consensus_limits() -> Vec<(&'static str, LimitValue)> {
             "MAX_NFT_BATCH_MINT_REQUESTS",
             LimitValue::Num(crate::nft_executor::MAX_NFT_BATCH_MINT_REQUESTS as u128),
         ),
+        // Arrived from a different track than the three above, and the census
+        // test is how it got here: it refused to pass until this constant was
+        // classified in one direction or the other. It decides validity --
+        // `index_key_text_within_bound` refuses an oversized jurisdiction code
+        // above its gate in Legal, Finance and Property, before the text becomes
+        // a raw column-family key -- so it is folded rather than excluded.
+        (
+            "MAX_INDEX_KEY_TEXT_BYTES",
+            LimitValue::Num(crate::MAX_INDEX_KEY_TEXT_BYTES as u128),
+        ),
         // ── Block applicability. `CANDIDATE_LIMIT_SCAFFOLD` is the one the
         //    census found that nobody was looking for: a LIVE 1 GiB ceiling on a
         //    block's logical write set, read on the production `execute_block`

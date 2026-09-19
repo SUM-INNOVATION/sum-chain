@@ -1017,6 +1017,10 @@ pub struct ChainParams {
     /// the keying fix cleans the wrong subject, and the keying fix without index
     /// cleanup makes the dangling entries accumulate faster.
     ///
+    /// The full statement of the rule is on
+    /// `TaxExecutor::proof_lifecycle_activation`, the one accessor that reads
+    /// this field.
+    ///
     /// Production-safe default `None`, which is what an absent field resolves
     /// to and what every genesis written before this gate existed carries.
     /// `None` closes the gate, and a closed gate means a node executes exactly

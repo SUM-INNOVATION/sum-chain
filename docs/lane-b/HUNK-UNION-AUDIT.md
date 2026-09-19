@@ -45,7 +45,24 @@ commits the tracks were actually branched from.
 | 4 | `crates/state/src/lib.rs`, `allocation_bound_gate.rs`, `nft_routing.rs` | SUPERSEDED | the NFT export became a superset (adding `MAX_NFT_BATCH_MINT_REQUESTS`); two gate fixtures moved from field-by-field to `..CLOSED`, which is what stops them breaking each time a gate is added. |
 | 12 | `legal_routing.rs`, `docclass_routing.rs`, `healthcare_routing.rs` | PRESENT (reflowed) | the assertions survive; rustfmt reflowed them when the twenty-nine authored formatting offences were corrected. Present as behaviour, not as byte-identical lines. |
 
+| 4 | `crates/genesis/src/lib.rs` (Track A) | SUPERSEDED | two tracks independently found and repaired the same damaged gate declaration. The resolution kept the fuller three-bullet description from one and the scar note from the other, so four lines of the shorter description are absent as TEXT while their substance — the rows named, the subject-index behaviour, and a pointer to the accessor that reads the field — is present in the merged block. |
+
 **DROPPED: 0.**
+
+## Second run, after tracks A, B and C
+
+Re-run against the three new parents: 1671 / 1089 / 2227 lines checked, **4 not
+found, all from Track A and all the doc substitution above.** Zero from B and C.
+
+The run also surfaced something the audit itself did not catch and did not need
+to: `protocol_digest_census`, a test Track B wrote, FAILED at the merged head
+because Track A had added `MAX_INDEX_KEY_TEXT_BYTES` and the census refuses to
+pass until a limit-shaped constant is classified in one direction or the other.
+It decides validity — it refuses an oversized jurisdiction code in Legal,
+Finance and Property before the text becomes a raw column-family key — so it is
+folded into the digest rather than excluded. One track's guard catching another
+track's constant is the cross-track check working; neither track could have run
+it, because neither had the other's code.
 
 ## What this audit does not cover
 
