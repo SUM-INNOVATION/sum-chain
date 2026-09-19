@@ -115,23 +115,63 @@ deployed node runs a binary that predates this work. `chain_getActivationStatus`
 answers the same way. No other method on the surface exposes a state-size or
 account-count statistic.
 
-### 1.5 Verdict
+### 1.5 Verdict, and the external dependency stated as a contract
 
 > **UNPROVEN. The stored `cf::STATE` row count is `≥ 18`. The upper bound is
 > unknown, and no path from this machine can establish it.**
 
-**What would settle it, exactly:** run a binary built from this tree against the
-production data directory and read either
+**`≥ 18` is a LOWER BOUND carried over from the value-holding count, and it is
+not a row count.** §1.2 gives the two code-grounded reasons it cannot be an upper
+bound. Nothing in this document, and nothing in the record this table asks for,
+may substitute one for the other. The node's own source says it in the same
+words (`crates/node/src/node.rs:606-611`): "this number is the stored-row count,
+not the count of accounts holding value. The two are different: a row whose
+balance and nonce are both zero is invisible to every balance query and costs
+exactly as much to fold as any other."
 
-- the startup line `crates/node/src/node.rs:564-590` emits — `Account rows: N
-  (warn at 250000, act at 500000)` — or
-- `curl -s https://<that node>/ -H 'content-type: application/json' -d
-  '{"jsonrpc":"2.0","id":1,"method":"chain_getSyncCapability","params":[]}'`,
-  taking `.result.account_rows`,
+This is an **external dependency**: it can only be discharged by someone with
+access to a production data directory. Stated as a contract so that whoever
+discharges it does not have to reconstruct what was wanted.
 
-recording the number **with** the chain height, the wall-clock time and the node
-identity and data directory it came from. A row count without a height is not a
-measurement of anything, because the count moves.
+| | requirement |
+|---|---|
+| **What is being measured** | the number of rows in `cf::STATE` carrying `ACCOUNT_KEY_PREFIX` — the record set `AccountDigest::fold` walks once per block. **Not** the number of accounts holding value, **not** the number of addresses any RPC or index can enumerate, **not** the number of transaction senders. Zero-balance and nonce-only rows are in `cf::STATE` and are folded by the digest (§1.1), so any figure derived from balances is a lower bound and is not an answer |
+| **The instrument** | `account_row_count` (`crates/state/src/account_root.rs:499`). It applies no balance or nonce filter, and it skips exactly the keys `AccountDigest::fold` skips, so the count and the digest see the same record set. Pinned by `crates/state/tests/account_state_root.rs:1235 the_row_count_is_not_the_count_of_accounts_holding_value` and `:1270 the_row_count_agrees_with_the_fold_it_predicts` |
+| **Endpoint requirement** | **The public mainnet RPC cannot serve this and will not be able to until the rollout.** `https://rpc.sumchain.io` answers `chain_getSyncCapability` with `{"code":-32601,"message":"Method not found"}` (§1.4, re-verified). The reading must come from **a node running a binary built from this tree, opened against the production data directory** — either a production validator after the upgrade, or a node restored from a production snapshot. A reading from a dev, test or synthetic database answers a different question and must not be recorded here |
+| **Exact command — form A (preferred, no RPC needed)** | start the node and read the startup line it emits at `crates/node/src/node.rs:619-643`: <br>`Account rows: N (warn at 250000, act at 500000)` <br>or, at or above a threshold, `Account rows: N — at or above the warning threshold 250000 …` / `… the action threshold 500000 …` |
+| **Exact command — form B (a running node)** | `curl -s http://<that node>:<rpc port>/ -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"chain_getSyncCapability","params":[]}'` and take `.result.account_rows` |
+| **Expected output** | a single non-negative integer `N`. Form A prints it in the log line above; form B returns it as `result.account_rows` (`crates/rpc/src/server.rs:1608`, `SyncCapabilityInfo.account_rows`, `crates/rpc/src/types.rs:809`). **`N` must be `≥ 18`**; a smaller value means the instrument was pointed at the wrong database |
+| **Recorded alongside — all four, or the number means nothing** | **(1) chain height** at which the count was taken (`chain_getBlockHeight`, or the node's own head) — a row count without a height is not a measurement of anything, because the count moves; **(2) wall-clock UTC timestamp**; **(3) node identity** — hostname or validator key, and the binary's commit SHA; **(4) data-directory identity** — the absolute `data_dir` path and whether the database was executed from genesis or restored from a snapshot, and if restored, the snapshot's height |
+| **Measurement validity** | the reading is valid only if the node's head is within `finality_depth` (6) of the public head at the recorded timestamp — otherwise it describes a lagging database. **Two independent nodes should be read**, and their counts must agree once adjusted for any height difference; a disagreement is a finding in its own right and blocks the activation rather than being averaged away |
+
+**Acceptance threshold — what the number has to be for the activation to be
+schedulable.** The thresholds are the repository's own constants
+(`ACCOUNT_ROW_WARN_THRESHOLD = 250_000` at `account_root.rs:471`,
+`ACCOUNT_ROW_ACT_THRESHOLD = 500_000` at `:484`) read against the measured
+1,502 ms inter-block interval and the measured ~0.16 µs/row scan cost (§2):
+
+| measured `N` | scan cost | share of 1,502 ms | verdict |
+|---:|---:|---:|---|
+| `N < 250,000` | < 40 ms | < 2.7 % | **ACCEPT.** The activation may be scheduled on cost grounds |
+| `250,000 ≤ N < 500,000` | 40–80 ms | 2.7–5.3 % | **ACCEPT WITH A TRACKING OBLIGATION.** Schedulable, and the count must be re-read on a stated cadence and the trie replacement designed in parallel |
+| `500,000 ≤ N < 2,000,000` | 80–320 ms | 5.3–21 % | **DO NOT SCHEDULE on this evidence alone.** The repository's own escalation table puts the replacement's design at this count; committing more to the O(n) fold here is a decision, not a default |
+| `N ≥ 2,000,000` | ≥ 320 ms | ≥ 21 % | **REFUSE.** The replacement must be SCHEDULED at 2M and ACTIVE at 4M. Opening the v1 fold above 2M schedules work that must be undone |
+| `N ≥ 9,400,000` | ≥ 1,502 ms | ≥ 100 % | **REFUSE.** The scan no longer fits inside a block interval; measured at 10M it is 117 % (§2.1) |
+
+Two riders on the acceptance thresholds, because they are inferences and should
+not be read as measurements:
+
+1. **Every timing behind them is a dev Mac** (§2, and gap 2 in *What remains
+   UNPROVEN*). A validator on slower storage pays more, so the row counts at
+   which each band begins are optimistic. The verdict bands are stated in rows,
+   not milliseconds, precisely so the owner can re-derive them from a
+   validator-host measurement without re-reading this document.
+2. **The thresholds themselves are pinned by nothing.** §8.4 records that
+   `ACCOUNT_ROW_WARN_THRESHOLD` and `ACCOUNT_ROW_ACT_THRESHOLD` have zero test
+   references, and that `SyncCapabilityInfo.account_rows` — the field form B
+   reads — is untested at the RPC surface. **The one number this activation is
+   blocked on is served by an untested field**, which is an argument for
+   preferring form A, or for taking both and comparing them.
 
 `docs/operations/ACCOUNT-ROOT-ACTIVATION.md` already makes this Sequence step 0
 and says the activation "should not be scheduled until it has been" measured.
@@ -196,10 +236,16 @@ test result: ok. 1 passed; 0 failed; finished in 18.65s
 
 | rows | on disk | warm | cold block cache | cold page cache | µs/row | doc's warm / cold-page | share of 1,506 ms |
 |---:|---:|---:|---:|---:|---:|---|---:|
-| 18 | <1 KiB | 2.58 µs | — | — | 0.144 | 4.6 µs / — | 0.00017 % |
+| 18 † | <1 KiB | 2.58 µs | — | — | 0.144 | 4.6 µs / — | 0.00017 % |
 | 100k | 3.34 MB | 13.4 ms | 28.6 ms | not run | 0.134 / 0.286 | 12.0 ms / 15.3 ms | 1.9 % |
 | 1M | 23.6 MB | 159 ms | 166 ms | 162 ms | ~0.16 | 147 ms / 152 ms | 10.8 % |
 | 10M | 223 MB | 1.586 s | 1.576 s | **1.765 s** | ~0.17 | 1.45 s / 1.62 s | **117 %** |
+
+† **The `18` row is a BENCHMARK SIZE, not the production row count.** It is
+the mainnet *value-holding account* count, which §1.2 shows is a lower bound on
+stored rows and nothing more. The production `cf::STATE` row count is UNPROVEN
+(§1.5). Read this row as "what the fold costs at eighteen rows", never as "what
+the fold costs on mainnet".
 
 On-disk sizes reproduce the code's table to three figures. Timings run 8–10%
 above it at 1M and 10M — same order, same shape, same verdict.
@@ -601,7 +647,7 @@ height.
 
 | mechanism | location | status |
 |---|---|---|
-| startup log + threshold evaluation | `crates/node/src/node.rs:564-590` — `warn!` at ≥ ACT, `warn!` at ≥ WARN, else `info!("Account rows: N (warn at 250000, act at 500000)")` | **exists**, fires **once per start** |
+| startup log + threshold evaluation | `crates/node/src/node.rs:619-643` — `warn!` at ≥ ACT, `warn!` at ≥ WARN, else `info!("Account rows: N (warn at 250000, act at 500000)")` | **exists**, fires **once per start** |
 | on-demand RPC | `chain_getSyncCapability.account_rows`, `crates/rpc/src/server.rs:1608` | **exists in this tree**; **absent from the deployed binary** (§1.4) |
 | Prometheus metric | `crates/rpc/src/metrics.rs` | **NONE.** No `sumchain_account_rows` or equivalent gauge exists |
 | alert rule | `deploy/monitoring/prometheus.yml` | **NONE.** `rule_files: []`, `alertmanagers: []` |
@@ -661,7 +707,7 @@ isolated `CARGO_TARGET_DIR`.
 
 | # | gap | what would settle it |
 |---|---|---|
-| 1 | **The production stored-row count.** `≥ 18`, upper bound unknown. No database on this machine; no docker; the public mainnet RPC answers -32601 for `chain_getSyncCapability`, reproduced live today | Run a binary from this tree against the production data directory; read the startup "Account rows: N" line or `chain_getSyncCapability.account_rows`; record it with height, timestamp and node/data-dir identity |
+| 1 | **The production stored-row count.** `≥ 18` — and that `18` is the *value-holding account* count, a LOWER BOUND, **not a row count** (§1.2). Upper bound unknown. No database on this machine; no docker; the public mainnet RPC answers -32601 for `chain_getSyncCapability`, reproduced live today | **§1.5 states this as a contract**: the instrument, the endpoint requirement, both command forms, the expected output, the four things recorded alongside it (height, UTC timestamp, node identity + commit SHA, data-directory identity), the measurement-validity rule, and the acceptance threshold that decides whether the activation is schedulable at all |
 | 2 | **Production hardware cost.** Every timing is a dev Mac, not a validator | Re-run `the_cost_of_the_account_commitment_with_a_cold_cache` at the measured production row count on a validator host |
 | 3 | **Truly-cold device reads.** Eviction is 24 GiB of ballast pressure, not a proven page drop; the cold-page figures are lower bounds | No portable fix on macOS; measure on the Linux validator host, where the page cache can be dropped |
 | 4 | **Key distribution.** All benchmark rows are synthetic addresses; SST layout and compression under production keys is unmeasured | Re-run against a copy of the production account family |
