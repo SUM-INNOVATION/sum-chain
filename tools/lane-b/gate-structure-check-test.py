@@ -39,6 +39,7 @@ in a temp directory, which is removed on the way out.
 from __future__ import annotations
 
 import importlib.util
+import re
 import shutil
 import subprocess
 import sys
@@ -242,13 +243,33 @@ def m_file_missing(root: Path) -> None:
 
 
 def m_count_mismatch(root: Path) -> None:
-    """The list keeps all thirty entries; the number pinning it says 29.
+    """The list keeps every entry; the number pinning it says one fewer.
 
     Nothing in the list is malformed and no gate is missing, so every
     shape check passes. Only the registry's `count` relation notices that the
     assertion and the thing it asserts about no longer agree.
+
+    The count is READ from the tree rather than written here. An earlier
+    version spelled it `30`, and the wave that took the list to 37 left this
+    case anchored to a string the file no longer contained -- so `edit`'s
+    occurs-0x guard fired and the case tested nothing. A mutation battery whose
+    anchors carry the numbers they mutate rots at exactly the moment the thing
+    it guards changes, which is the moment it is needed.
     """
-    edit(root, WIRING, "assert_eq!(WIRING.len(), 30,", "assert_eq!(WIRING.len(), 29,")
+    src = (root / WIRING).read_text()
+    m = re.search(r"assert_eq!\(WIRING\.len\(\), (\d+),", src)
+    if m is None:
+        raise AssertionError(
+            f"no `assert_eq!(WIRING.len(), N,` pin in {WIRING} -- the count "
+            "structure this case mutates is gone, and the case would prove nothing"
+        )
+    n = int(m.group(1))
+    edit(
+        root,
+        WIRING,
+        f"assert_eq!(WIRING.len(), {n},",
+        f"assert_eq!(WIRING.len(), {n - 1},",
+    )
 
 
 def m_unguarded_mirror_drift(root: Path) -> None:
