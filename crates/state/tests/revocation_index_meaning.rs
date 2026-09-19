@@ -945,3 +945,591 @@ fn the_issuer_sender_check_fires_only_on_a_row_no_transaction_can_write() {
         );
     }
 }
+
+// ── AU-24 and AU-28: the STRUCTURAL guard behind the behavioural one ────────
+//
+// The test above drives today's transactions and finds that the row reachable
+// at the sender's key always names the sender. That is a statement about the
+// paths that exist TODAY: add one write to either issuer family tomorrow and
+// the test still passes, because it never asks what writes the family.
+//
+// This one does. It is the guard the audit's UNREACHABLE verdict for AU-24 and
+// AU-28 rests on, and it fails if a future route makes the comparison able to
+// fire. Four properties, and all four are needed:
+//
+//   1. **The writer census.** Every use of `FINANCE_ISSUERS` and
+//      `EMPLOYMENT_ISSUERS` anywhere under `crates/*/src` is enumerated and
+//      must match [`ISSUER_FAMILY_USES`] exactly -- file, enclosing function,
+//      the call it is an argument to, and the KEY EXPRESSION beside it. The
+//      names are matched BARE, so importing the constant does not hide a use.
+//      A new writer is a new row; a writer that changes which key it writes at
+//      is a changed row; either fails. Reads are enumerated too, so a mutator
+//      spelled with a new method name cannot pass as one. On top of the census
+//      every `put` is CHECKED, not just listed, to key by one of exactly two
+//      expressions.
+//
+//   2. **Nothing rewrites `issuer_address`.** The two read-modify-write
+//      updaters key by their `issuer_address` PARAMETER rather than by the
+//      value, so they preserve whatever pairing the row already had -- but only
+//      while they do not touch the field. No code under `crates/state/src` or
+//      `crates/storage/src` assigns to an `issuer_address` field at all.
+//
+//   3. **Every executor read is at the sender's key.** Properties 1 and 2 say
+//      each stored row sits at its own address. That kills the comparison only
+//      if the read is at the SENDER's key -- a read keyed by a payload field
+//      would reach a well-formed row belonging to someone else and the
+//      comparison would fire on it, correctly. This one is a property rather
+//      than a census: EVERY `v_get_issuer` call in either executor must take
+//      `sender`, so a new call keyed by the sender passes and a new call keyed
+//      by anything else fails.
+//
+//   4. **`issuer_key` is injective.** Properties 1 to 3 are about which address
+//      each side NAMES. They carry only while distinct addresses keep distinct
+//      keys; a builder that truncated or collided would let one issuer's row be
+//      read at another's key with every source-level property still holding.
+//      Checked by running it, not by reading it.
+//
+// Together: every creating write keys by the value's own `issuer_address`, so
+// key == value.issuer_address holds at creation; every updating write keys at
+// the row it just read and changes no address, so it is preserved; the key
+// builder is injective, so no other address reaches that row; and the read in
+// `UpdateIssuer` is at the SENDER's key, so the value it decodes names the
+// sender, and `issuer.issuer_address != *sender` cannot be true. The branch
+// body is unreachable -- which is why the audit classifies it UNREACHABLE and
+// keeps the comparison rather than deleting it.
+
+/// `(crate-relative file, enclosing fn, call, key expression)`.
+///
+/// `MENTION` is an occurrence that is not an argument to a call -- the two
+/// constant DEFINITIONS and the two column-family lists in `db.rs`, the
+/// operator wipe list in the node, and one doc comment naming the family.
+/// `<none>` as a key is a call that takes no key after the family, i.e. a
+/// full-family scan. The `enclosing fn` of a `MENTION` is the nearest `fn`
+/// above it and is a LABEL, not a claim about scope.
+const ISSUER_FAMILY_USES: &[(&str, &str, &str, &str)] = &[
+    ("node/src/main.rs", "main", "MENTION", "MENTION"),
+    (
+        "state/src/employment_view.rs",
+        "v_get_issuer",
+        "get",
+        "issuer_key(issuer_address)",
+    ),
+    (
+        "state/src/employment_view.rs",
+        "v_issuer_exists",
+        "contains",
+        "issuer_key(issuer_address)",
+    ),
+    (
+        "state/src/employment_view.rs",
+        "v_put_issuer",
+        "MENTION",
+        "MENTION",
+    ),
+    (
+        "state/src/employment_view.rs",
+        "v_write_issuer_row",
+        "put",
+        "issuer_key(issuer_address)",
+    ),
+    (
+        "state/src/finance_view.rs",
+        "v_get_issuer",
+        "get",
+        "issuer_key(issuer_address)",
+    ),
+    (
+        "state/src/finance_view.rs",
+        "v_issuer_exists",
+        "contains",
+        "issuer_key(issuer_address)",
+    ),
+    (
+        "state/src/finance_view.rs",
+        "v_put_issuer",
+        "put",
+        "issuer_key(&issuer.issuer_address)",
+    ),
+    (
+        "state/src/finance_view.rs",
+        "v_update_issuer_status",
+        "put",
+        "issuer_key(issuer_address)",
+    ),
+    ("storage/src/db.rs", "size_human", "MENTION", "MENTION"),
+    ("storage/src/db.rs", "size_human", "MENTION", "MENTION"),
+    ("storage/src/db.rs", "size_human", "MENTION", "MENTION"),
+    ("storage/src/db.rs", "size_human", "MENTION", "MENTION"),
+    (
+        "storage/src/employment_store.rs",
+        "exists",
+        "contains",
+        "issuer_key(issuer_address)",
+    ),
+    (
+        "storage/src/employment_store.rs",
+        "get",
+        "get",
+        "issuer_key(issuer_address)",
+    ),
+    (
+        "storage/src/employment_store.rs",
+        "list_active",
+        "iter",
+        "<none>",
+    ),
+    (
+        "storage/src/employment_store.rs",
+        "list_active_paged",
+        "paged_scan",
+        "page",
+    ),
+    (
+        "storage/src/employment_store.rs",
+        "put",
+        "put",
+        "issuer_key(&issuer.issuer_address)",
+    ),
+    (
+        "storage/src/employment_store.rs",
+        "update_status",
+        "put",
+        "issuer_key(issuer_address)",
+    ),
+    (
+        "storage/src/finance_store.rs",
+        "exists",
+        "contains",
+        "issuer_key(issuer_address)",
+    ),
+    (
+        "storage/src/finance_store.rs",
+        "get",
+        "get",
+        "issuer_key(issuer_address)",
+    ),
+    (
+        "storage/src/finance_store.rs",
+        "list_active",
+        "iter",
+        "<none>",
+    ),
+    (
+        "storage/src/finance_store.rs",
+        "list_active_paged",
+        "paged_scan",
+        "page",
+    ),
+    (
+        "storage/src/finance_store.rs",
+        "put",
+        "put",
+        "issuer_key(&issuer.issuer_address)",
+    ),
+    (
+        "storage/src/finance_store.rs",
+        "update_status",
+        "put",
+        "issuer_key(issuer_address)",
+    ),
+];
+
+/// Employment writes through one private helper, so the helper's key parameter
+/// is only as good as its callers. `(caller, key argument)`.
+const EMPLOYMENT_WRITE_ROW_CALLERS: &[(&str, &str)] = &[
+    ("v_put_issuer", "&issuer.issuer_address"),
+    ("v_update_issuer_status", "issuer_address"),
+];
+
+fn crates_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .canonicalize()
+        .expect("crates/ must resolve")
+}
+
+/// Every `<crate>/src/**/*.rs` under `crates/`, crate-relative path and text.
+fn crate_sources() -> Vec<(String, String)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let root = crates_dir();
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&root).expect("read crates/").flatten() {
+        let src = entry.path().join("src");
+        if src.is_dir() {
+            walk(&src, &mut files);
+        }
+    }
+    files.sort();
+    files
+        .into_iter()
+        .map(|p| {
+            let rel = p
+                .strip_prefix(&root)
+                .expect("under crates/")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let text = std::fs::read_to_string(&p).expect("read source");
+            (rel, text)
+        })
+        .collect()
+}
+
+fn is_ident(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// The name in the last `fn <name>` before `off`.
+fn enclosing_fn(src: &str, off: usize) -> String {
+    let mut name = String::from("<none>");
+    let bytes = src.as_bytes();
+    let mut i = 0usize;
+    while i + 3 <= off {
+        if bytes[i..].starts_with(b"fn ") && (i == 0 || !is_ident(bytes[i - 1] as char)) {
+            let mut j = i + 3;
+            while j < src.len() && (bytes[j] as char).is_whitespace() {
+                j += 1;
+            }
+            let start = j;
+            while j < src.len() && is_ident(bytes[j] as char) {
+                j += 1;
+            }
+            if j > start {
+                name = src[start..j].to_string();
+            }
+        }
+        i += 1;
+    }
+    name
+}
+
+/// The function name whose argument list encloses `off`, or `MENTION`.
+fn enclosing_call(src: &str, off: usize) -> String {
+    let bytes = src.as_bytes();
+    let mut depth = 0i32;
+    let mut i = off;
+    while i > 0 {
+        i -= 1;
+        match bytes[i] as char {
+            ')' | ']' | '}' => depth += 1,
+            '(' | '[' | '{' => {
+                if depth == 0 {
+                    if bytes[i] as char != '(' {
+                        return "MENTION".into();
+                    }
+                    let mut j = i;
+                    while j > 0 && (bytes[j - 1] as char).is_whitespace() {
+                        j -= 1;
+                    }
+                    let end = j;
+                    while j > 0 && is_ident(bytes[j - 1] as char) {
+                        j -= 1;
+                    }
+                    return if j == end {
+                        "MENTION".into()
+                    } else {
+                        src[j..end].to_string()
+                    };
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    "MENTION".into()
+}
+
+/// The argument text following `end`, whitespace collapsed.
+fn following_argument(src: &str, end: usize) -> String {
+    let rest = &src[end..];
+    let trimmed = rest.trim_start();
+    let Some(after) = trimmed.strip_prefix(',') else {
+        return "<none>".into();
+    };
+    let mut depth = 0i32;
+    let mut out = String::new();
+    for ch in after.chars() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 => break,
+            _ => {}
+        }
+        out.push(ch);
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Every occurrence of `needle` in `src` that is not inside an identifier.
+///
+/// BOTH ends are checked, so the family names below are matched bare: `cf::X`
+/// and a plain `X` brought in by `use` are the same occurrence to this scan,
+/// and a new writer cannot fall out of the census by importing the constant.
+fn occurrences(src: &str, needle: &str) -> Vec<usize> {
+    let first = needle.chars().next().expect("non-empty needle");
+    let last = needle.chars().next_back().expect("non-empty needle");
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(rel) = src[from..].find(needle) {
+        let at = from + rel;
+        let end = at + needle.len();
+        // A boundary is only demanded on an end the needle itself spells with
+        // an identifier character. `.issuer_address` begins with a `.` and must
+        // still match in `issuer.issuer_address`.
+        let before_ok =
+            !is_ident(first) || src[..at].chars().next_back().is_none_or(|c| !is_ident(c));
+        let after_ok = !is_ident(last) || src[end..].chars().next().is_none_or(|c| !is_ident(c));
+        if before_ok && after_ok {
+            out.push(at);
+        }
+        from = end;
+    }
+    out
+}
+
+/// The comma-separated arguments of the call whose `(` is at `open`, each with
+/// its whitespace collapsed.
+fn call_arguments(src: &str, open: usize) -> Vec<String> {
+    let mut depth = 0i32;
+    let mut args: Vec<String> = vec![String::new()];
+    for ch in src[open + 1..].chars() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 => {
+                args.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        args.last_mut().expect("at least one argument").push(ch);
+    }
+    args.into_iter()
+        .map(|a| a.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
+/// Every `name(` CALL in `src`, as `(enclosing fn, arguments)`.
+///
+/// The `fn name(` that defines it is not a call and is excluded; a definition
+/// would otherwise report its own parameter list as arguments.
+fn calls_of(src: &str, name: &str) -> Vec<(String, Vec<String>)> {
+    occurrences(src, name)
+        .into_iter()
+        .filter(|at| src[at + name.len()..].starts_with('('))
+        .filter(|at| {
+            let head = src[..*at].trim_end();
+            !(head.ends_with("fn")
+                && head[..head.len() - 2]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !is_ident(c)))
+        })
+        .map(|at| (enclosing_fn(src, at), call_arguments(src, at + name.len())))
+        .collect()
+}
+
+/// **The structural guard.** A future write path that could produce a row whose
+/// key and whose value's `issuer_address` differ fails this test.
+#[test]
+fn no_write_path_can_make_an_issuer_row_whose_key_is_not_its_own_address() {
+    let sources = crate_sources();
+
+    // ── 1. The writer census.
+    let mut found: Vec<(String, String, String, String)> = Vec::new();
+    for (rel, src) in &sources {
+        for family in ["FINANCE_ISSUERS", "EMPLOYMENT_ISSUERS"] {
+            for at in occurrences(src, family) {
+                let call = enclosing_call(src, at);
+                let key = if call == "MENTION" {
+                    "MENTION".to_string()
+                } else {
+                    following_argument(src, at + family.len())
+                };
+                found.push((rel.clone(), enclosing_fn(src, at), call, key));
+            }
+        }
+    }
+    found.sort();
+    let mut expected: Vec<(String, String, String, String)> = ISSUER_FAMILY_USES
+        .iter()
+        .map(|(f, g, c, k)| {
+            (
+                (*f).to_string(),
+                (*g).to_string(),
+                (*c).to_string(),
+                (*k).to_string(),
+            )
+        })
+        .collect();
+    expected.sort();
+    assert_eq!(
+        found, expected,
+        "the uses of the two issuer column families changed. Every write must \
+         key by the value's own `issuer_address` (a creating write) or at the \
+         key it just read without touching that field (an updating write). A \
+         write that does neither makes AU-24's and AU-28's \
+         `issuer.issuer_address != *sender` comparison reachable, and the \
+         audit's UNREACHABLE verdict for both rows is then wrong"
+    );
+
+    // Each writing entry is one of exactly two shapes, checked rather than
+    // declared: keyed by the value, or keyed by a bare `issuer_address`
+    // parameter (which property 2 below makes preserving).
+    for (file, func, call, key) in &found {
+        if call != "put" {
+            continue;
+        }
+        assert!(
+            key == "issuer_key(&issuer.issuer_address)" || key == "issuer_key(issuer_address)",
+            "{file}::{func} writes an issuer row at key `{key}`, which is \
+             neither the value's own address nor the address it read at"
+        );
+    }
+
+    // ── 1b. Employment's single `put` is behind a helper; pin its callers.
+    let employment_view = sources
+        .iter()
+        .find(|(rel, _)| rel == "state/src/employment_view.rs")
+        .map(|(_, src)| src.as_str())
+        .expect("employment_view.rs must exist");
+    let mut callers: Vec<(String, String)> = calls_of(employment_view, "v_write_issuer_row")
+        .into_iter()
+        .map(|(caller, args)| {
+            (
+                caller,
+                args.get(1).cloned().unwrap_or_else(|| "<none>".into()),
+            )
+        })
+        .collect();
+    callers.sort();
+    let mut expected_callers: Vec<(String, String)> = EMPLOYMENT_WRITE_ROW_CALLERS
+        .iter()
+        .map(|(c, k)| ((*c).to_string(), (*k).to_string()))
+        .collect();
+    expected_callers.sort();
+    assert_eq!(
+        callers, expected_callers,
+        "`v_write_issuer_row` keys by its parameter, so its callers are what \
+         decide the key. A new caller, or a changed key argument, is a new \
+         write path into `EMPLOYMENT_ISSUERS`"
+    );
+
+    // ── 2. Nothing rewrites `issuer_address`.
+    let mut assignments: Vec<String> = Vec::new();
+    for (rel, src) in &sources {
+        if !(rel.starts_with("state/src/") || rel.starts_with("storage/src/")) {
+            continue;
+        }
+        for at in occurrences(src, ".issuer_address") {
+            let rest = src[at + ".issuer_address".len()..].trim_start();
+            if rest.starts_with('=') && !rest.starts_with("==") {
+                assignments.push(format!("{rel}::{}", enclosing_fn(src, at)));
+            }
+        }
+    }
+    assert!(
+        assignments.is_empty(),
+        "an `issuer_address` field is assigned at {assignments:?}. The updating \
+         writers key at the row they read, so they preserve the key/address \
+         pairing ONLY while nothing rewrites the address. One assignment inside \
+         a read-modify-write makes a mismatched row constructible"
+    );
+
+    // ── 3. The READ side. Properties 1 and 2 say every row in either family
+    // sits at the key equal to its own `issuer_address`. That only makes the
+    // comparison dead if the read is at the SENDER's key: a read keyed by
+    // anything the payload supplies would reach a well-formed row belonging to
+    // somebody else, and the comparison would fire on it. This is not a census
+    // -- no list of accepted call sites -- it is a property every call must
+    // satisfy, so a NEW `v_get_issuer` call keyed by the sender passes and a
+    // new one keyed by anything else fails.
+    let mut reads = 0usize;
+    for (rel, src) in &sources {
+        if !(rel == "state/src/finance_executor.rs" || rel == "state/src/employment_executor.rs") {
+            continue;
+        }
+        for (func, args) in calls_of(src, "v_get_issuer") {
+            let key = args.get(1).cloned().unwrap_or_else(|| "<none>".into());
+            assert!(
+                key == "sender" || key == "&sender",
+                "{rel}::{func} reads an issuer row at key `{key}` rather than at \
+                 the sender's. A read keyed by anything else reaches a row that \
+                 names a different address, and AU-24's and AU-28's \
+                 `issuer.issuer_address != *sender` comparison becomes reachable"
+            );
+            reads += 1;
+        }
+    }
+    assert!(
+        reads >= 2,
+        "found {reads} `v_get_issuer` calls across the two executors; the \
+         `UpdateIssuer` arm of each is one apiece, so a scan finding fewer than \
+         two has stopped looking rather than found nothing to object to"
+    );
+
+    // ── 4. `issuer_key` is injective. Properties 1 to 3 are about which
+    // ADDRESS each side names; they carry only while distinct addresses keep
+    // distinct keys. A key builder that truncated or hashed into a collision
+    // would let the row written under one address be read under another, with
+    // every source-level property above still holding.
+    let addresses = [
+        Address::new([0x00; 20]),
+        Address::new([0x01; 20]),
+        Address::new([0xFF; 20]),
+        Address::new([0x5A; 20]),
+        {
+            let mut b = [0x5A; 20];
+            b[19] = 0x5B;
+            Address::new(b)
+        },
+    ];
+    for a in &addresses {
+        assert_eq!(
+            sumchain_storage::finance_store::issuer_key(a),
+            a.as_bytes(),
+            "the Finance issuer key must be the address itself"
+        );
+        assert_eq!(
+            sumchain_storage::employment_store::issuer_key(a),
+            a.as_bytes(),
+            "the Employment issuer key must be the address itself"
+        );
+    }
+    for (i, a) in addresses.iter().enumerate() {
+        for b in &addresses[i + 1..] {
+            assert_ne!(
+                sumchain_storage::finance_store::issuer_key(a),
+                sumchain_storage::finance_store::issuer_key(b),
+                "two distinct addresses share one Finance issuer key, so one \
+                 issuer's row is reachable at another's -- the comparison fires"
+            );
+            assert_ne!(
+                sumchain_storage::employment_store::issuer_key(a),
+                sumchain_storage::employment_store::issuer_key(b),
+                "two distinct addresses share one Employment issuer key"
+            );
+        }
+    }
+}
