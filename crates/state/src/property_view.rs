@@ -120,6 +120,28 @@ impl PropertyExecutor {
         }
     }
 
+    /// The STORED length of a jurisdiction-index row, without decoding it.
+    ///
+    /// ACTIVATION-AUDIT row AL-6. Each `v_add_to_*_index` here decodes the
+    /// whole row, pushes one 32-byte id and re-encodes the whole row, and
+    /// `view.put` only then accounts for a byte. The caller that wants to
+    /// refuse an oversized row therefore has to know its size WITHOUT paying
+    /// for the decode, and a length is the only thing it needs: `None` for an
+    /// absent row, `Some(n)` for one of `n` bytes. The same shape and the same
+    /// reasoning as `AgreementView::v_party_index_row_len`.
+    pub fn v_jurisdiction_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        jurisdiction: &str,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::PROPERTY_JURISDICTION_INDEX,
+                jurisdiction_index_key(jurisdiction),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
+    }
+
     fn v_add_to_jurisdiction_index(
         view: &mut ExecutionView<'_, '_>,
         jurisdiction: &str,
@@ -211,6 +233,22 @@ impl PropertyExecutor {
             Some(bytes) => decode_asset_title_event_ids(&bytes).map_err(StateError::Storage),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// The STORED length of the asset-title-index row, without decoding it.
+    /// ACTIVATION-AUDIT row AL-6; same reasoning as
+    /// [`Self::v_jurisdiction_index_row_len`].
+    pub fn v_asset_title_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        asset_id: &AssetId,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::PROPERTY_ASSET_TITLE_INDEX,
+                asset_title_index_key(asset_id),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
     }
 
     fn v_add_to_asset_title_index(
@@ -313,6 +351,22 @@ impl PropertyExecutor {
         }
     }
 
+    /// The STORED length of the asset-encumbrance-index row, without decoding it.
+    /// ACTIVATION-AUDIT row AL-6; same reasoning as
+    /// [`Self::v_jurisdiction_index_row_len`].
+    pub fn v_asset_encumbrance_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        asset_id: &AssetId,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::PROPERTY_ASSET_ENCUMBRANCE_INDEX,
+                asset_encumbrance_index_key(asset_id),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
+    }
+
     fn v_add_to_asset_encumbrance_index(
         view: &mut ExecutionView<'_, '_>,
         asset_id: &AssetId,
@@ -406,6 +460,22 @@ impl PropertyExecutor {
             Some(bytes) => decode_asset_coverage_ids(&bytes).map_err(StateError::Storage),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// The STORED length of the asset-coverage-index row, without decoding it.
+    /// ACTIVATION-AUDIT row AL-6; same reasoning as
+    /// [`Self::v_jurisdiction_index_row_len`].
+    pub fn v_asset_coverage_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        asset_id: &AssetId,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::PROPERTY_ASSET_COVERAGE_INDEX,
+                asset_coverage_index_key(asset_id),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
     }
 
     fn v_add_to_asset_coverage_index(
@@ -509,6 +579,22 @@ impl PropertyExecutor {
             Some(bytes) => decode_coverage_claim_ids(&bytes).map_err(StateError::Storage),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// The STORED length of the coverage-claim-index row, without decoding it.
+    /// ACTIVATION-AUDIT row AL-6; same reasoning as
+    /// [`Self::v_jurisdiction_index_row_len`].
+    pub fn v_coverage_claim_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        coverage_id: &CoverageId,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::PROPERTY_COVERAGE_CLAIM_INDEX,
+                coverage_claim_index_key(coverage_id),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
     }
 
     fn v_add_to_coverage_claim_index(

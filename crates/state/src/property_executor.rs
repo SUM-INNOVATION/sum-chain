@@ -162,8 +162,10 @@ pub struct PropertyGates {
     /// Executor-written timestamps are the block's, not a literal zero.
     /// ACTIVATION-AUDIT class 2.
     pub real_block_timestamp: bool,
-    /// A payload-chosen index key is bounded before it becomes a key.
-    /// ACTIVATION-AUDIT row AL-7.
+    /// A payload-chosen index key is bounded before it becomes a key, the
+    /// accumulating row under it is bounded before it is decoded, and the
+    /// transaction payload is bounded before it is deserialized.
+    /// ACTIVATION-AUDIT rows AL-6, AL-7 and the Property third of AL-12.
     pub allocation_bound: bool,
     /// `VerifyProof` refuses as UNSUPPORTED, for every payload.
     ///
@@ -202,6 +204,18 @@ impl PropertyGates {
             proof_unsupported: crate::subsystem_proof_unsupported_gate_open(params, block_height),
         }
     }
+
+    /// The stored-row length limit this gate imposes, or `None` when closed.
+    ///
+    /// `None` is what the bounded callers below treat as "no limit", so a
+    /// closed gate reads byte-for-byte what the unbounded binary read. The
+    /// same spelling `AgreementGates::row_limit` and `DocClassGates::row_limit`
+    /// use, reading the same constant, because it is the same rule.
+    #[inline]
+    pub fn row_limit(self) -> Option<usize> {
+        self.allocation_bound
+            .then_some(crate::MAX_ACCUMULATING_ROW_BYTES)
+    }
 }
 
 impl PropertyExecutor {
@@ -237,6 +251,127 @@ impl PropertyExecutor {
     #[inline]
     pub fn authorization_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
         matches!(Self::authorization_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// A stored index row longer than the bound, refused without being decoded.
+    ///
+    /// The Agreement and DocClass wording verbatim, and for the same reason
+    /// they give: one phrasing across every family so the refusal is greppable,
+    /// with the LENGTH in it, because the remedy for a row over the limit is
+    /// not "retry".
+    fn row_too_large(what: &str, bytes: usize) -> PropertyExecutionResult {
+        PropertyExecutionResult::failure(format!(
+            "{what} too large to modify: {bytes} bytes, limit {}",
+            crate::MAX_ACCUMULATING_ROW_BYTES
+        ))
+    }
+
+    /// The jurisdiction-index row this anchor would append to, checked against
+    /// the bound before it is decoded.
+    ///
+    /// ACTIVATION-AUDIT row AL-6, and the family AL-7 already bounds the KEY
+    /// of. The two halves are independent and both are needed:
+    /// `MAX_INDEX_KEY_TEXT_BYTES` bounds how wide one key may be,
+    /// `MAX_ACCUMULATING_ROW_BYTES` bounds how large the value under it may
+    /// grow -- an attacker refused by the first still reaches the second by
+    /// reusing one short, lawful code. Exactly the pairing Finance's
+    /// jurisdiction index already carries.
+    fn jurisdiction_index_within_bound(
+        view: &ExecutionView<'_, '_>,
+        jurisdiction: &str,
+        max_bytes: Option<usize>,
+    ) -> Result<Option<PropertyExecutionResult>> {
+        // No read AT ALL while the gate is closed, not merely no refusal: a
+        // read here would touch a family the unremediated binary does not
+        // touch until later in the arm, and this subsystem's corrupt-row
+        // behaviour is pinned per family.
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        match Self::v_jurisdiction_index_row_len(view, jurisdiction)? {
+            Some(bytes) if bytes > max => Ok(Some(Self::row_too_large(
+                "Property jurisdiction index",
+                bytes,
+            ))),
+            _ => Ok(None),
+        }
+    }
+
+    /// The asset-title-index row this event would append to, checked against
+    /// the bound before it is decoded. ACTIVATION-AUDIT row AL-6.
+    fn asset_title_index_within_bound(
+        view: &ExecutionView<'_, '_>,
+        asset_id: &[u8; 32],
+        max_bytes: Option<usize>,
+    ) -> Result<Option<PropertyExecutionResult>> {
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        match Self::v_asset_title_index_row_len(view, asset_id)? {
+            Some(bytes) if bytes > max => Ok(Some(Self::row_too_large(
+                "Property asset title index",
+                bytes,
+            ))),
+            _ => Ok(None),
+        }
+    }
+
+    /// The asset-encumbrance-index row this encumbrance would append to,
+    /// checked against the bound before it is decoded. ACTIVATION-AUDIT row
+    /// AL-6.
+    fn asset_encumbrance_index_within_bound(
+        view: &ExecutionView<'_, '_>,
+        asset_id: &[u8; 32],
+        max_bytes: Option<usize>,
+    ) -> Result<Option<PropertyExecutionResult>> {
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        match Self::v_asset_encumbrance_index_row_len(view, asset_id)? {
+            Some(bytes) if bytes > max => Ok(Some(Self::row_too_large(
+                "Property asset encumbrance index",
+                bytes,
+            ))),
+            _ => Ok(None),
+        }
+    }
+
+    /// The asset-coverage-index row this coverage would append to, checked
+    /// against the bound before it is decoded. ACTIVATION-AUDIT row AL-6.
+    fn asset_coverage_index_within_bound(
+        view: &ExecutionView<'_, '_>,
+        asset_id: &[u8; 32],
+        max_bytes: Option<usize>,
+    ) -> Result<Option<PropertyExecutionResult>> {
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        match Self::v_asset_coverage_index_row_len(view, asset_id)? {
+            Some(bytes) if bytes > max => Ok(Some(Self::row_too_large(
+                "Property asset coverage index",
+                bytes,
+            ))),
+            _ => Ok(None),
+        }
+    }
+
+    /// The coverage-claim-index row this claim would append to, checked
+    /// against the bound before it is decoded. ACTIVATION-AUDIT row AL-6.
+    fn coverage_claim_index_within_bound(
+        view: &ExecutionView<'_, '_>,
+        coverage_id: &[u8; 32],
+        max_bytes: Option<usize>,
+    ) -> Result<Option<PropertyExecutionResult>> {
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        match Self::v_coverage_claim_index_row_len(view, coverage_id)? {
+            Some(bytes) if bytes > max => Ok(Some(Self::row_too_large(
+                "Property coverage claim index",
+                bytes,
+            ))),
+            _ => Ok(None),
+        }
     }
 
     /// Execute a Property transaction.
@@ -284,6 +419,30 @@ impl PropertyExecutor {
     ) -> Result<PropertyExecutionResult> {
         let block_timestamp =
             crate::effective_block_timestamp(block_timestamp, gates.real_block_timestamp);
+
+        // ACTIVATION-AUDIT row AL-12, the Property third. Every arm below
+        // `bincode::deserialize`s `data.data` with no size or shape limit ahead
+        // of it, and `AssetAnchor`, `TitleEvent`, `Encumbrance`,
+        // `InsuranceCoverage` and `InsuranceClaim` are all stored VERBATIM, so
+        // the row a later operation must decode, modify and re-encode is
+        // whatever one payload bounded only by `max_block_bytes` declared.
+        //
+        // This is a refusal, not an error, and the DocClass arm's reasoning
+        // applies unchanged: below the gate an undecodable payload is `Err(..)`
+        // and takes the whole block with it, and an oversized one that happens
+        // to decode is admitted; above the gate an oversized payload is a
+        // failed receipt in a valid block whether or not it would have decoded.
+        // The refusal charges nothing and does not advance the nonce, because
+        // every arm below deducts the fee itself and every pre-existing
+        // `failure()` that fires before that deduction is already free.
+        if gates.allocation_bound && data.data.len() > crate::MAX_SUBSYSTEM_PAYLOAD_BYTES {
+            return Ok(PropertyExecutionResult::failure(format!(
+                "Property payload too large: {} bytes, limit {}",
+                data.data.len(),
+                crate::MAX_SUBSYSTEM_PAYLOAD_BYTES
+            )));
+        }
+
         match data.operation {
             // =================================================================
             // SRC-861: Asset Anchor Operations
@@ -316,6 +475,19 @@ impl PropertyExecutor {
                         asset.jurisdiction_code.len(),
                         crate::MAX_INDEX_KEY_TEXT_BYTES
                     )));
+                }
+
+                // ACTIVATION-AUDIT row AL-6, the jurisdiction family. The KEY
+                // bound directly above and this VALUE bound are independent: a
+                // short, lawful code still names a row that grows by one
+                // 32-byte id per anchor forever, and every later anchor under
+                // that code decodes, appends to and re-encodes the whole of it.
+                if let Some(refusal) = Self::jurisdiction_index_within_bound(
+                    view,
+                    &asset.jurisdiction_code,
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -511,6 +683,13 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Title event already exists"));
                 }
 
+                // ACTIVATION-AUDIT row AL-6, the asset-title family.
+                if let Some(refusal) =
+                    Self::asset_title_index_within_bound(view, &event.asset_id, gates.row_limit())?
+                {
+                    return Ok(refusal);
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -574,6 +753,17 @@ impl PropertyExecutor {
                             "The replacement event must be issued by the sender",
                         ));
                     }
+                }
+
+                // ACTIVATION-AUDIT row AL-6, the asset-title family: a
+                // supersession appends the replacement's id to the index of
+                // the asset the REPLACEMENT names.
+                if let Some(refusal) = Self::asset_title_index_within_bound(
+                    view,
+                    &d.new_event.asset_id,
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -643,6 +833,15 @@ impl PropertyExecutor {
 
                 if Self::v_encumbrance_exists(view, &encumbrance.encumbrance_id)? {
                     return Ok(PropertyExecutionResult::failure("Encumbrance already exists"));
+                }
+
+                // ACTIVATION-AUDIT row AL-6, the asset-encumbrance family.
+                if let Some(refusal) = Self::asset_encumbrance_index_within_bound(
+                    view,
+                    &encumbrance.asset_id,
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -792,6 +991,15 @@ impl PropertyExecutor {
 
                 if Self::v_coverage_exists(view, &coverage.coverage_id)? {
                     return Ok(PropertyExecutionResult::failure("Coverage already exists"));
+                }
+
+                // ACTIVATION-AUDIT row AL-6, the asset-coverage family.
+                if let Some(refusal) = Self::asset_coverage_index_within_bound(
+                    view,
+                    &coverage.asset_id,
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -964,6 +1172,15 @@ impl PropertyExecutor {
 
                 if Self::v_claim_exists(view, &claim.claim_id)? {
                     return Ok(PropertyExecutionResult::failure("Claim already exists"));
+                }
+
+                // ACTIVATION-AUDIT row AL-6, the coverage-claim family.
+                if let Some(refusal) = Self::coverage_claim_index_within_bound(
+                    view,
+                    &claim.coverage_id,
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
