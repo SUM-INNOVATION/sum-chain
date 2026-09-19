@@ -59,6 +59,17 @@
 //! RPC surface. A peer that declares a different one is refused; a peer too old
 //! to declare one at all is not. See `crates/p2p/src/block_syncer.rs`.
 //!
+//! That last sentence is true UNCONDITIONALLY only below
+//! `ChainParams::peer_protocol_declaration_required_from_height`. Admitting a
+//! peer that declares nothing is correct while every node enforces the same
+//! rules, and stops being correct at the first remediation activation, where an
+//! undeclared peer becomes indistinguishable from one enforcing the rules this
+//! binary just stopped enforcing. From that height an undeclared peer may not
+//! propose, vote, or move fork choice. The height defaults to `None` — phase
+//! one forever, which is what every genesis written before it existed resolves
+//! to — so nothing here fires on a node that predates the mechanism. See
+//! `crates/p2p/src/peer_compat.rs`.
+//!
 //! Folding it into a block header instead would be the other candidate design,
 //! and it is rejected here: a header field that today's validators do not write
 //! is a consensus change, and gating it behind a new activation height makes the

@@ -12,6 +12,7 @@ use sumchain_primitives::{Block, BlockHeight, Hash};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn, error};
 
+use crate::peer_compat::PeerCompatRegistry;
 use crate::{NetworkCommand, SyncState, MAX_BLOCKS_PER_REQUEST};
 
 /// Configuration for block syncer
@@ -100,17 +101,15 @@ pub struct BlockSyncer {
     config: BlockSyncerConfig,
     /// Our expected chain ID
     chain_id: u64,
-    /// The protocol digest THIS binary enforces
-    /// (`sumchain_state::protocol_digest::protocol_digest`): every activation
-    /// height plus every consensus-relevant compiled-in constant.
-    protocol_digest: Hash,
-    /// Peers that DECLARED a different protocol digest.
+    /// The digest THIS binary enforces, the height at which an UNDECLARED peer
+    /// stops being admitted, and what every peer has declared so far.
     ///
-    /// Distinct from "not in `peers`", which is also the state of a peer that
-    /// has simply not answered yet. A peer lands here only by affirmatively
-    /// saying it enforces different rules, and once here it is never admitted to
-    /// the sync peer set regardless of what it says afterwards.
-    incompatible: RwLock<HashSet<PeerId>>,
+    /// One object rather than a digest plus a `HashSet<PeerId>`, because the
+    /// three peer states are not two: "declared a different digest", "declared
+    /// nothing yet" and "declared ours" are distinguished, and above the
+    /// enforcement height the middle one is refused without ever being called
+    /// incompatible. See [`crate::peer_compat`].
+    compat: PeerCompatRegistry,
     /// Current local height
     local_height: RwLock<BlockHeight>,
     /// Best known network height
@@ -134,18 +133,24 @@ pub struct BlockSyncer {
 
 impl BlockSyncer {
     /// Create a new block syncer
+    ///
+    /// `enforce_from` is
+    /// `ChainParams::peer_protocol_declaration_required_from_height`: the height
+    /// from which a peer that has declared NOTHING stops being a usable block
+    /// source. `None` — which is what every genesis written before that field
+    /// existed resolves to — means silence is never a refusal, exactly as today.
     pub fn new(
         config: BlockSyncerConfig,
         chain_id: u64,
         protocol_digest: Hash,
+        enforce_from: Option<BlockHeight>,
         local_height: BlockHeight,
         command_tx: mpsc::Sender<NetworkCommand>,
     ) -> Self {
         Self {
             config,
             chain_id,
-            protocol_digest,
-            incompatible: RwLock::new(HashSet::new()),
+            compat: PeerCompatRegistry::new(protocol_digest, enforce_from),
             local_height: RwLock::new(local_height),
             network_height: RwLock::new(local_height),
             peers: RwLock::new(HashMap::new()),
@@ -235,12 +240,41 @@ impl BlockSyncer {
 
     /// The protocol digest this binary enforces.
     pub fn protocol_digest(&self) -> Hash {
-        self.protocol_digest
+        self.compat.protocol_digest()
     }
 
     /// Whether `peer_id` declared a protocol digest different from ours.
     pub fn is_incompatible(&self, peer_id: &PeerId) -> bool {
-        self.incompatible.read().contains(peer_id)
+        self.compat.is_incompatible(peer_id)
+    }
+
+    /// The height from which an undeclared peer stops being admitted, or `None`
+    /// for "never" — which is the production default and today's behaviour.
+    pub fn enforcement_height(&self) -> Option<BlockHeight> {
+        self.compat.enforcement_height()
+    }
+
+    /// Whether a declaration is required for a block at `height`.
+    pub fn enforcing_at(&self, height: BlockHeight) -> bool {
+        self.compat.enforcing_at(height)
+    }
+
+    /// What this node has PROVEN about `peer_id`'s rules.
+    ///
+    /// Three states, and the difference between the middle one and the last is
+    /// load-bearing above the enforcement height: both are refused, but only
+    /// one of them said anything.
+    pub fn compat_status(&self, peer_id: &PeerId) -> crate::peer_compat::PeerCompat {
+        self.compat.status(peer_id)
+    }
+
+    /// Whether `peer_id` may supply blocks this node will act on at `height`.
+    ///
+    /// The two-phase policy, as the syncer sees it. Below the enforcement
+    /// height an undeclared peer is as usable as it is today; at or above it
+    /// only a peer that declared OUR digest is.
+    pub fn may_supply_blocks(&self, peer_id: &PeerId, height: BlockHeight) -> bool {
+        self.compat.may_participate_in_consensus(peer_id, height)
     }
 
     /// Handle a peer's declared protocol digest. Returns `true` if the peer is
@@ -265,16 +299,11 @@ impl BlockSyncer {
     /// today's validators would be worse than the defect it closes, so the
     /// absence of an answer is deliberately not evidence of anything.
     pub fn on_protocol_id_response(&self, peer_id: PeerId, digest: Hash) -> bool {
-        if digest == self.protocol_digest {
+        if self.compat.on_declaration(peer_id, digest) {
             debug!("Peer {} declared a matching protocol digest", peer_id);
             return true;
         }
 
-        warn!(
-            "Peer {} enforces a DIFFERENT protocol digest ({} vs ours {}); refusing it.              The two binaries disagree about an activation height or a consensus              constant, so blocks one produces the other cannot reproduce.",
-            peer_id, digest, self.protocol_digest
-        );
-        self.incompatible.write().insert(peer_id);
         // Evict anything already learned from it: a status that arrived before
         // the digest did must not survive the refusal.
         self.peers.write().remove(&peer_id);
@@ -289,10 +318,21 @@ impl BlockSyncer {
         // A peer that declared different rules is not a source of blocks, no
         // matter how good its chain looks. Checked first, and checked here as
         // well as at arrival, because the two responses race.
-        if self.is_incompatible(&peer_id) {
+        //
+        // The height asked about is `local + 1`: the first block this node
+        // would request from it. Below the enforcement height that admits an
+        // undeclared peer exactly as today; at or above it, a peer that has
+        // declared nothing is refused here rather than after its blocks have
+        // already moved this node's view of the network.
+        let next = *self.local_height.read() + 1;
+        if !self.may_supply_blocks(&peer_id, next) {
             warn!(
-                "Ignoring sync status from {}: it declared an incompatible protocol digest",
-                peer_id
+                "Ignoring sync status from {}: it has not declared a matching protocol \
+                 digest, and from height {:?} this node requires one before a peer may \
+                 supply blocks it acts on (next block would be {})",
+                peer_id,
+                self.enforcement_height(),
+                next
             );
             return;
         }
@@ -355,6 +395,27 @@ impl BlockSyncer {
             return Vec::new();
         }
 
+        // A batch can STRADDLE the enforcement height: the peer was a legal
+        // source for the blocks below it and is not for the blocks at or above
+        // it. Refusing the whole batch would be the wrong shape — the low
+        // blocks are fine — so the boundary is applied per block, here, where
+        // the heights are known.
+        let refused = blocks
+            .iter()
+            .filter(|b| !self.may_supply_blocks(&peer_id, b.height()))
+            .count();
+        if refused > 0 {
+            warn!(
+                "Discarding {} of {} blocks from {}: at or above the protocol-declaration \
+                 enforcement height {:?}, a peer must have declared a matching digest before \
+                 its blocks may be imported",
+                refused,
+                blocks.len(),
+                peer_id,
+                self.enforcement_height()
+            );
+        }
+
         let first_height = blocks.first().map(|b| b.height()).unwrap_or(0);
         let last_height = blocks.last().map(|b| b.height()).unwrap_or(0);
 
@@ -388,6 +449,7 @@ impl BlockSyncer {
         let local = *self.local_height.read();
         let mut to_import: Vec<Block> = blocks.into_iter()
             .filter(|b| b.height() > local)
+            .filter(|b| self.may_supply_blocks(&peer_id, b.height()))
             .collect();
 
         // Sort by height to ensure proper order
@@ -553,8 +615,14 @@ impl BlockSyncer {
         let peers = self.peers.read();
         let local = *self.local_height.read();
 
-        // Filter peers that have blocks we need and have good reliability
+        // Filter peers that have blocks we need and have good reliability.
+        //
+        // The compatibility filter is re-applied rather than trusted from
+        // admission time: a peer admitted while this node was below the
+        // enforcement height must stop being selected once the node crosses it,
+        // and nothing else in this file runs at the crossing.
         peers.values()
+            .filter(|p| self.may_supply_blocks(&p.peer_id, local + 1))
             .filter(|p| p.height > local)
             .filter(|p| p.last_seen.elapsed() < Duration::from_secs(60))
             .max_by(|a, b| {
@@ -672,6 +740,7 @@ mod tests {
             BlockSyncerConfig::default(),
             1337,
             Hash::default(),
+            None,
             0,
             tx,
         );
@@ -688,6 +757,7 @@ mod tests {
             BlockSyncerConfig::default(),
             1337,
             Hash::default(),
+            None,
             0,
             tx,
         );
@@ -705,6 +775,7 @@ mod tests {
             BlockSyncerConfig::default(),
             1337,
             Hash::default(),
+            None,
             0,
             tx,
         );
@@ -724,6 +795,7 @@ mod tests {
             BlockSyncerConfig::default(),
             1337,
             Hash::default(),
+            None,
             0,
             tx,
         );
@@ -746,6 +818,7 @@ mod tests {
             BlockSyncerConfig::default(),
             1337,
             Hash::default(),
+            None,
             100, // Already at height 100
             tx,
         );

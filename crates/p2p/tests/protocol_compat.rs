@@ -58,7 +58,7 @@ fn theirs() -> Hash {
 fn syncer() -> (BlockSyncer, mpsc::Receiver<sumchain_p2p::NetworkCommand>) {
     let (tx, rx) = mpsc::channel(100);
     (
-        BlockSyncer::new(BlockSyncerConfig::default(), CHAIN_ID, ours(), 0, tx),
+        BlockSyncer::new(BlockSyncerConfig::default(), CHAIN_ID, ours(), None, 0, tx),
         rx,
     )
 }

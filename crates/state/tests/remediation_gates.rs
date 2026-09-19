@@ -397,3 +397,48 @@ fn a_genesis_written_before_these_fields_still_parses_dormant() {
     assert_eq!(back.nft_update_path_parity_enabled_from_height, None);
     assert_eq!(back.subsystem_no_op_receipt_enabled_from_height, None);
 }
+
+/// `sumchain_genesis::REMEDIATION_GATES` names exactly these twenty fields.
+///
+/// A second list of the same twenty gates now exists in
+/// `crates/genesis/src/lib.rs`, because
+/// `ChainParams::peer_protocol_declaration_required_from_height` has to be at
+/// or below the FIRST of them and no other list in that file can answer which
+/// one that is — `activation_heights()` also covers gates a live chain may
+/// legitimately have passed long ago.
+///
+/// Two lists is one more than is safe, so they are pinned to each other. The
+/// direction that matters is a gate added HERE and not there: the remediation
+/// pass adds a gate, an executor starts changing behaviour at a height, and the
+/// enforcement deadline does not see it — which is the whole defect this
+/// mechanism exists to close, reintroduced through the list that configures it.
+///
+/// It is also the third place the merge hazard in this file's header can bite.
+/// A resolution that splices two entries together leaves a list that still
+/// parses and is one gate short; the set comparison names the missing one
+/// rather than reporting a count.
+#[test]
+fn the_genesis_gate_list_matches_the_accessor_table() {
+    let wired: BTreeSet<&str> = WIRING.iter().map(|(_, _, f)| *f).collect();
+    let in_genesis: BTreeSet<&str> = sumchain_genesis::REMEDIATION_GATES
+        .iter()
+        .copied()
+        .collect();
+
+    let missing: Vec<_> = wired.difference(&in_genesis).collect();
+    assert!(
+        missing.is_empty(),
+        "these gates are read by an executor and are NOT in \
+         sumchain_genesis::REMEDIATION_GATES, so opening one would not oblige an \
+         operator to set peer_protocol_declaration_required_from_height and the \
+         rules would diverge while undeclared peers were still admitted: {missing:?}"
+    );
+    let stale: Vec<_> = in_genesis.difference(&wired).collect();
+    assert!(
+        stale.is_empty(),
+        "these names are in sumchain_genesis::REMEDIATION_GATES and no accessor \
+         reads them; either a gate was renamed on one side only, or the \
+         enforcement deadline is being set by a gate that does nothing: {stale:?}"
+    );
+    assert_eq!(in_genesis.len(), 20);
+}

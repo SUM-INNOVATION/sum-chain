@@ -404,6 +404,15 @@ fn genesis_with_auth_gate(
 ) -> Genesis {
     let mut params = ChainParams::with_v2_enabled();
     params.healthcare_authorization_enabled_from_height = auth_from;
+    // Opening a remediation gate obliges the genesis to say from when an
+    // undeclared peer stops being admitted to consensus, and `Genesis::validate`
+    // refuses the pair otherwise: above the gate the rules have diverged, so
+    // silence no longer distinguishes a peer running this binary from one
+    // running the unremediated one. Set to the gate itself — enforcement
+    // beginning exactly where the rules do. It changes nothing this file
+    // measures: these validators exchange blocks through `import_block`
+    // directly, never over a network, so no peer is ever judged.
+    params.peer_protocol_declaration_required_from_height = auth_from;
     // Finality is put out of reach so that nothing in this file is measuring
     // finality's refusal by accident. Nothing here reorgs, but the fixture is
     // shared with the mixed-version test, which imports competing history.
