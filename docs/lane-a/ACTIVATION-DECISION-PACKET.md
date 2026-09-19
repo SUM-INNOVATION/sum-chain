@@ -1,1216 +1,1778 @@
-# Owner decision packet: the seventeen remediation activation heights
+# Owner decision packet: the forty-nine activation heights
 
-**This document sets no height.** Every height in the set below is the owner's
+**This document sets no height.** No `genesis.json` in this branch is modified
+by it, and neither release template (`genesis/mainnet_genesis.json`,
+`genesis/testnet_genesis.json`) is touched. Every height below is the owner's
 decision. What this document does is put, in one place, the facts each decision
-needs: what the gate turns on, whether it needs a data migration, what happens
-if validators disagree about it, what happens on a rollback, which other gates
-it depends on, which tests cover it, and what is risked by activating it and by
-leaving it dormant.
+needs.
 
-The seventeen are the `WIRING` table in `crates/state/tests/remediation_gates.rs:52`.
-They are the remedies the activation audit produced
-(`docs/lane-a/ACTIVATION-AUDIT.md`), each implemented, each dormant, none set
-anywhere.
+It replaces an earlier packet that covered seventeen gates. `ChainParams` now
+declares **forty-nine**. The set below is regenerated from the field
+declarations in `crates/genesis/src/lib.rs`, which are the authority —
+`ChainParams::activation_heights()` is generated from them and pinned to them by
+test — and **not** from the previous document.
+
+For every one of the forty-nine, Part 1 states the six things the owner asked
+for:
+
+1. **affected behaviour** — what changes at the height;
+2. **dependency ordering** — what `ChainParams::validate` actually constrains,
+   read from the function rather than assumed;
+3. **persistent data impact** — what is written differently, and forever;
+4. **rollback in effect** — a passed height is FROZEN, so this is what an
+   operator can actually do, not "move the height back";
+5. **monitoring signal** — the instrument that would show it working, and the
+   instrument that would show it misbehaving, named where it exists and named
+   as absent where it does not;
+6. **recommended wave**.
 
 ---
 
-## Part 0 — The facts that apply to all seventeen
+## Part 0 — The facts that apply to all forty-nine
 
-### 0.1 The live chain, measured rather than assumed
+### 0.1 How the authoritative list was established
 
-Queried from this machine against the endpoint
-`docs/operations/production-checklist.md:145` documents:
+Not by reading the old packet, and not by reading prose. The field declarations
+are parsed out of the source and set-compared against the two closed lists:
+
+```bash
+cd <worktree>
+python3 - <<'EOF'
+import re
+src = open('crates/genesis/src/lib.rs').read()
+gates = re.findall(r'^\s+pub ([a-z_0-9]+): Option<u64>,', src, re.M)
+def const(name):
+    m = re.search(r'pub const ' + name + r': &\[&str\] = &\[(.*?)\];', src, re.S)
+    return re.findall(r'"([a-z_0-9]+)"', m.group(1))
+rem = const('REMEDIATION_GATES')
+pre = const('GATES_PREDATING_ACTIVATION_RECORDING')
+print("total", len(gates), "remediation", len(rem), "predating", len(pre))
+print("overlap", set(rem) & set(pre))
+print("neither:", [g for g in gates if g not in rem and g not in pre])
+print("named but not declared:", [g for g in rem + pre if g not in gates])
+EOF
+```
+
+Output, reproduced on this tree:
 
 ```
+total 49 remediation 28 predating 18
+overlap set()
+neither: ['account_root_enabled_from_height', 'application_journal_enabled_from_height', 'peer_protocol_declaration_required_from_height']
+named but not declared: []
+```
+
+**49 = 28 + 18 + 3, with no overlap and no orphan.** That is the partition Part 1
+uses, and every gate is placed in exactly one of the three classes:
+
+| class | count | what it means | source of truth |
+|---|---:|---|---|
+| **REMEDIATION** | 28 | produced by the activation audit; each closes a defect; every one dormant | `crates/genesis/src/lib.rs:2631 REMEDIATION_GATES`, cross-pinned to the 28-row `WIRING` table in `crates/state/tests/remediation_gates.rs:52` |
+| **PREDATING** | 18 | shipped in binaries that produced existing blocks; grandfathered, may legally sit below the head | `crates/genesis/src/lib.rs:2783 GATES_PREDATING_ACTIVATION_RECORDING` |
+| **NEITHER** | 3 | introduced by this work, but not remediation: they add or constrain machinery rather than repair a defect | the complement, computed above |
+
+The `WIRING` table was independently extracted and compared:
+
+```bash
+python3 -c "
+import re
+s = open('crates/state/tests/remediation_gates.rs').read()
+m = re.search(r'const WIRING: &\[\(&str, &str, &str\)\] = &\[(.*?)\n\];', s, re.S)
+rows = re.findall(r'\(\s*\"([^\"]+)\",\s*\"([^\"]+)\",\s*\"([^\"]+)\",?\s*\)', m.group(1))
+print(len(rows))"
+# 28
+```
+
+28 rows, matching `REMEDIATION_GATES` element for element. The accessor each
+names is cited per gate in Part 1.
+
+### 0.2 The live chain, re-derived today
+
+The endpoint is reachable from this machine and was queried rather than
+remembered.
+
+```
+$ date -u +"%Y-%m-%dT%H:%M:%SZ"
+2026-09-19T05:35:38Z
+
 $ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
     -d '{"jsonrpc":"2.0","id":1,"method":"sum_blockNumber","params":[]}'
-{"jsonrpc":"2.0","result":12970055,"id":1}
+{"jsonrpc":"2.0","result":12977656,"id":1}
 
 $ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
     -d '{"jsonrpc":"2.0","id":1,"method":"chain_getBlockHeight","params":[]}'
-{"jsonrpc":"2.0","result":{"height":12970099,"finality":"latest"},"id":1}
+{"jsonrpc":"2.0","result":{"height":12977656,"finality":"latest"},"id":1}
 ```
 
-**VERIFIED: mainnet (`chain_id: 1`) is at height ≈12,970,100 as of 2026-09-18.**
+**HEAD = 12,977,656 at 2026-09-19T05:35:38Z (mainnet, `chain_id: 1`).**
+Every height in Part 3 is anchored to that number and that instant.
 
-`chain_getChainParams` returns the deployed configuration:
-
-```json
-{ "chain_id": 1, "block_time_ms": 3000, "max_block_bytes": 2000000,
-  "max_txs_per_block": 1000, "min_fee": 1000, "finality_depth": 6,
-  "storage_fee_per_byte": 100, "max_metadata_bytes": 16384,
-  "max_access_list_bytes": 16384, "activation_grace_blocks": 50,
-  "abandonment_fee_percent": 10, "max_chunk_count_per_file": 1048576,
-  "max_chunk_indices_per_tx": 65536, "assignment_replication_factor": 3,
-  "v2_enabled_from_height": 5200000,
-  "omninode_enabled_from_height": 6000000,
-  "education_enabled_from_height": 8900000,
-  "governance_enabled_from_height": 8900000,
-  "monetary_policy_enabled_from_height": null,
-  "service_grants_enabled_from_height": null,
-  "governance": { … } }
-```
-
-Two things follow immediately, and both matter to this decision.
-
-**(a) The deployed binary is OLDER than this tree.** Two RPC methods this tree
-ships do not exist on mainnet:
+**The deployed binary is older than this tree.** Two methods this tree ships
+answer `Method not found` on mainnet, re-verified today:
 
 ```
 chain_getSyncCapability   → {"code":-32601,"message":"Method not found"}
 chain_getActivationStatus → {"code":-32601,"message":"Method not found"}
 ```
 
-So activating any of the seventeen is not a genesis edit alone; it requires a
-**binary rollout first**, because the code behind every one of the seventeen
-gates is not on mainnet yet. The genesis edit without the binary would be a
-height nothing reads.
+So every activation below is a **binary rollout first, genesis edit second**. A
+height set in a genesis that no deployed binary reads is a number nothing does.
 
-**(b) None of the seventeen is visible over RPC, even once set.**
-`chain_getChainParams` serializes a fixed subset, and none of the seventeen is
-in it. An operator cannot today confirm from outside a node that a validator has
-the height they agreed on. The genesis activation digest
-(`ChainParams::activation_heights()`, covering all 37 gate fields including all
-seventeen — verified below) is the comparison mechanism, and it is compared by
-eye from the file, not over the wire. **This is a gap worth closing before the
-first coordinated activation**, and it is named here rather than discovered
-during one.
+**`chain_getChainParams` serialises 6 of the 49.** The live response carries
+`v2`, `omninode`, `education`, `governance`, `monetary_policy` and
+`service_grants` heights and no others. The remaining 43 — including all 28
+remediation gates and all 3 of the "neither" class — are invisible from outside
+a node on the deployed binary. `chain_getActivationStatus`
+(`crates/rpc/src/server.rs:1567`) is this tree's answer to that and is the
+single most important thing in the rollout, because it is what lets an operator
+confirm before the height arrives that every validator holds the same
+configuration. It is not deployed yet.
 
-### 0.2 The hard floor on every height: strictly above the head
+### 0.3 The block interval, measured three ways
 
-`GATES_PREDATING_ACTIVATION_RECORDING` (`crates/genesis/src/lib.rs:1929`) is a
-closed list of eighteen gates that shipped in binaries which produced existing
-blocks. A gate on that list may legally sit below the head. Everything else may
-not.
+`block_time_ms` is **3000** in the committed `genesis.json` and in the live
+`chain_getChainParams`. **Using it as the block interval is wrong by a factor of
+two.** It is the interval a proposer waits for its own slot; PoA is round-robin
+and mainnet has two validators, so blocks arrive at half that.
 
-Verified mechanically rather than by reading:
+Three independent derivations today:
 
-```
-$ python3 - (parse GATES_PREDATING_ACTIVATION_RECORDING and activation_heights() out of genesis/src/lib.rs)
-grandfathered count: 18
-of the 17, grandfathered: NONE
-of the 17, missing from activation_heights(): NONE
-activation_heights() total entries: 37
-```
-
-So for each of the seventeen, on the **first start** of an upgraded node
-(`retroactive_gates_on_a_first_start`, `crates/genesis/src/lib.rs:2025`):
-
-- a height **at or below** the head → `RetroactivelyOpened` → the node REFUSES
-  TO START, naming the gate;
-- a height **above** the head → startable.
-
-The boundary is exact and pinned: at the head is still retroactive (that block
-already exists), head + 1 is a scheduled activation —
-`crates/genesis/tests/activation_digest.rs:525
-a_newly_introduced_gate_below_the_head_refuses_a_first_start`.
-
-**With mainnet at ≈12,970,100 and a coordinated restart, every one of the
-seventeen must be scheduled above the head at the moment the restart happens,
-with enough margin that the chain does not cross the chosen height while the
-rollout is in progress.**
-
-### 0.3 A height, once passed, is frozen
-
-On a subsequent restart, `activation_changes` (`crates/genesis/src/lib.rs:1962`)
-classifies each moved gate:
-
-| classification | meaning | startable? |
+| method | window | result |
 |---|---|---|
-| `Retuned` | both the old and the new height are still in the future | **yes** — "a coordinated activation being scheduled, rescheduled or cancelled … noisy, and legitimate" |
-| `AlreadyActive` | the old height had already fired | **no** |
-| `RetroactivelyOpened` | dormant (or scheduled ahead) and now set at or below the head | **no** |
+| chain timestamps, `sum_getBlockByHeight` 12,877,656 → 12,977,656 | 100,000 blocks | 150,000.000 s → **1.5000 s/block**, 57,600 blocks/day |
+| chain timestamps, 12,377,656 → 12,977,656 | 600,000 blocks | 905,691.433 s → **1.5095 s/block**, 57,236 blocks/day |
+| wall-clock sampling, `sum_blockNumber` 240 s apart | 161 blocks | **1.4920 s/block**, 57,910 blocks/day (±1 block ⇒ ±0.6 %) |
 
-`ActivationChange::is_permitted` (`:1853`) returns true for `Retuned` only:
-"The other two describe a rule being changed underneath blocks that already
-exist, which is not a configuration change — it is a different chain wearing
-this one's database."
+```
+$ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"sum_getBlockByHeight","params":[12877656]}'
+  … "timestamp":1789646137430 …
+$ curl -s … '{"…","method":"sum_getBlockByHeight","params":[12977656]}'
+  … "timestamp":1789796137430 …
+(1789796137430 - 1789646137430) / 100000 = 1500.0 ms
+```
 
-Practical consequence for the owner: **a height may be moved freely right up
-until the chain reaches it, and not at all afterwards.** Scheduling
-conservatively far ahead costs nothing but delay; scheduling too close costs a
-refused start.
+All three bracket **1.502 s/block and 57,524 blocks/day**, which is the figure
+this document converts with and the figure the repository already carries
+(`docs/operations/ACCOUNT-ROOT-ACTIVATION.md:39-43`, `crates/state/src/account_root.rs:93`,
+both at 1,506 ms). **57,524 blocks/day, not 28,800.** Any UTC estimate taken
+from `block_time_ms` — including the one at
+`docs/operations/production-checklist.md:136-140` — is roughly twice as long as
+it should be.
 
-### 0.4 Rollback behaviour, identical for all seventeen
+**The interval is a function of the validator count, not a constant.** A third
+validator changes it and every UTC estimate here moves; the heights do not. The
+safe form of the decision is *head at rollout + N blocks*, converted to UTC only
+for communication, with the interval re-measured immediately before the
+coordinated restart.
 
-Every one of the seventeen is a pure function of `(params, block_height)` —
-`matches!(activation(params), Some(h) if block_height >= h)`. There is no
-per-gate rollback machinery; `crates/state/src/reorg_undo.rs` contains no gate
-references.
+### 0.4 The hard floor: strictly above the head, for 31 of the 49
 
-- A reorg or `sumchain rollback` **below** `h` re-executes those blocks with the
-  gate closed, which is how they were produced. Consistent.
-- A reorg **across** `h` re-executes each block under the rule for its own
-  height. Consistent.
-- Rolling the chain below `h` does **not** make `h` re-editable. A restart with
-  a changed height is `AlreadyActive` and refused (§0.3). The recorded height is
-  what was already passed, not what the current tip is.
+On the **first start** of an upgraded node there is no recorded activation
+history to compare against — `ACTIVATION_META_KEY` (`crates/node/src/node.rs:432`)
+does not exist in the deployed binary, so every upgrading node takes this branch
+exactly once. `ChainParams::retroactive_gates_on_a_first_start`
+(`crates/genesis/src/lib.rs:2879`) then asks the only question still answerable:
 
-### 0.5 Dependencies: there are none among the seventeen
+- a gate on `GATES_PREDATING_ACTIVATION_RECORDING` (the 18) **may** sit at or
+  below the head — it shipped in the binary that produced those blocks;
+- any of the other **31** at or below the head is `RetroactivelyOpened` and the
+  node **refuses to start**, naming the gate
+  (`crates/node/src/node.rs:486-503`).
 
-`ChainParams::validate()` (`crates/genesis/src/lib.rs:1515`) constrains exactly
-two things: `compute_pool`/`beacon` must stay dormant (fail-closed), and
+The boundary is exact: at the head is still retroactive (that block exists);
+head + 1 is a scheduled activation. Pinned by
+`crates/genesis/tests/activation_digest.rs:525 a_newly_introduced_gate_below_the_head_refuses_a_first_start`.
+
+**With the head at 12,977,656 and rising 57,524/day, every height chosen for the
+28 remediation gates and the 3 "neither" gates must still be above the head at
+the moment the coordinated restart happens** — with margin enough that the chain
+does not cross it while the rollout is in progress.
+
+### 0.5 A height, once passed, is frozen — and exactly when it unfreezes
+
+On a subsequent restart `ChainParams::activation_changes`
+(`crates/genesis/src/lib.rs:2816`) classifies each moved gate against the
+recorded value and **the database's current head**:
+
+| classification | condition | startable? |
+|---|---|---|
+| `Retuned` | neither the old nor the new height is at or below the head | **yes** — "noisy, and legitimate" |
+| `AlreadyActive` | the recorded height is at or below the head | **no** |
+| `RetroactivelyOpened` | the recorded height was ahead (or absent) and the new one is at or below the head | **no** |
+
+`ActivationChange::is_permitted` returns true for `Retuned` only.
+
+**A correction to the previous packet.** It stated that rolling the chain below
+`h` "does not make `h` re-editable" and that such a restart is `AlreadyActive`.
+That is not what the code does. The test is
+
+```rust
+if matches!(before, Some(h) if h <= current_height) { AlreadyActive }
+```
+
+— `current_height` is the database's present head. If the head is rolled back
+below `h`, the condition is false, and a genesis carrying a different height for
+that gate classifies as `Retuned` and **is permitted**, provided the new height
+is also above the rolled-back head.
+
+That does not make rollback an operational lever, and §0.6 says why. It makes
+the frozen-height property precise: **a height is frozen while the chain's head
+is at or above it, and unfreezes only if every validator's database is rolled
+back below it** — which is a reorg past `finality_depth: 6`, i.e. a decision to
+abandon finalised blocks, not an operation.
+
+### 0.6 What "rollback" can actually mean, per cost shape
+
+No gate has rollback machinery. Every one is a pure function of
+`(params, block_height)` — `matches!(activation(params), Some(h) if block_height >= h)`
+— and `crates/state/src/reorg_undo.rs` contains no gate references. A reorg
+below `h` re-executes those blocks with the gate closed, which is how they were
+produced; a reorg across `h` re-executes each block under the rule for its own
+height. Both are consistent. None of that is a rollback of the *decision*.
+
+So "rollback in effect" in Part 1 means one of exactly five things, and each
+gate's entry says which apply:
+
+| code | what an operator can actually do | costs |
+|---|---|---|
+| **A** | stop submitting the affected transaction shape | nothing written is undone; only stops adding to it |
+| **B** | ship a **superseding gate at a later height** — a second, forward activation that narrows or replaces the rule | another coordinated rollout; history above `h` keeps the rule it was produced under |
+| **C** | keep the **dual-read path** alive permanently, because rows written under the old shape are still there and are not rewritten | a permanent maintenance obligation, not a repair |
+| **D** | a **governance transaction** to move value that the gate moved | validator quorum at 6667 bps — on the current two-validator net, both must sign |
+| **E** | a **chain-wide rollback below `h` on every validator**, which unfreezes the height (§0.5) | abandons finalised blocks; a social decision, not an operational one |
+
+**B is the realistic one for almost every gate.** A is available for the refusal
+shapes. C is an obligation rather than an action. D is available only where the
+gate moved balances. E exists and should be understood as the thing it is.
+
+### 0.7 Dependency ordering — read from `ChainParams::validate`, not assumed
+
+`ChainParams::validate` (`crates/genesis/src/lib.rs:2190`) constrains exactly
+four things. There are no others; every other gate is independent of every other
+gate at load time.
+
+**(1) `compute_pool_enabled_from_height` must be `None`.** Any `Some(_)` is
+`GenesisError::IncompleteSubsystemActivation`. Not schedulable.
+
+**(2) `beacon_enabled_from_height` must be `None`.** Same. Declaring
+`beacon_params` or `beacon_schedule` does **not** open it; those are validated
+for internal consistency and the gate stays refused.
+
+**(3) The undo-before-commitment ordering:**
 
 ```
 application_journal_enabled_from_height <= account_root_enabled_from_height
 ```
 
-**Neither of those two is one of the seventeen.** No gate in this set is
-ordered, coupled or validated against any other. Each `…Gates::from_params`
-constructor reads its fields independently. Gates 11 and 12 are deliberately
-separate fields with an argument in the source for why they must be
-independently sequenceable (`crates/state/src/lib.rs:117-131`: "Two different
-blast radii; an operator must be able to take one without the other").
+with `(None, Some(account_root))` refused as `AccountRootWithoutJournalGate` and
+`(Some(journal), Some(account_root)) if journal > account_root` refused as
+`JournalGateAfterAccountRoot`. Both `None` is legal and is the production
+default. The argument, from the source: above the account-root gate a node that
+cannot RESTORE account rows during a reorg cannot agree about the root either,
+and `None` on the journal gate means "observed from chain" — each node's own
+first journalled height — which is fine for node-local undo and not fine once
+consensus output depends on it, because two validators would hold different
+boundaries and find out at a reorg.
 
-That is a design property, not an accident, and it means **the owner may
-sequence the seventeen in any order, including all at one height or seventeen
-different heights.**
-
-### 0.6 Dormancy today, and the tests that hold it
-
-All seventeen default to `None` — `crates/genesis/src/lib.rs:1431-1461`, pinned
-by `crates/state/tests/remediation_gates.rs:250
-every_remediation_gate_is_dormant_by_default`, which asserts all seventeen are
-`None` and that the list length matches the seventeen-row `WIRING` table.
-
-Three more guards run in the default gate:
-
-- `remediation_gates.rs:179 every_remediation_gate_reads_the_field_it_names` —
-  source-level accessor/field pairing, which kills the realistic bug in
-  seventeen near-identical three-line functions: two of them reading each
-  other's field;
-- `remediation_gates.rs:232 the_seventeen_gates_are_seventeen_distinct_fields`;
-- `remediation_gates.rs:305 a_genesis_written_before_these_fields_still_parses_dormant`.
-
-And `crates/genesis/tests/activation_digest.rs:47
-every_activation_height_is_covered_by_the_digest` scans the source for every
-`pub *_from_height: Option<u64>` declaration and asserts set-equality with
-`activation_heights()` in both directions — a gate missing from the digest would
-let "two validators disagree while their digests agreed".
-
-### 0.7 Two source defects the owner should see before signing anything
-
-**`tax_proof_lifecycle_enabled_from_height` (gate 14) was declared differently
-from the other sixteen — FOUND AND FIXED while assembling this packet.**
-
-As found, at `crates/genesis/src/lib.rs:1018`, it was the **only one of the
-seventeen without `#[serde(default)]`**, and it had **no doc comment of its
-own**: the text describing it was spliced into the middle of gate 13's comment,
-immediately after gate 13's last line with no separator, leaving gate 13's
-`#[serde(default)]` and declaration stranded below BOTH comments and gate 14
-following it bare:
-
-```rust
-    /// … One field for both subsystems because it is one rule at one seam …
-    /// There is no configuration in which an operator wants one and not the
-    /// other.
-    /// The Tax proof store and its subject index stop disagreeing.      ← gate 14's doc
-    /// …
-    #[serde(default)]
-    pub subsystem_allocation_bound_enabled_from_height: Option<u64>,     ← gate 13
-    pub tax_proof_lifecycle_enabled_from_height: Option<u64>,            ← gate 14, bare
-```
-
-That is exactly the "gate lost in a merge" splice the `remediation_gates.rs`
-module doc warns about, caught one step short of losing a gate.
-
-It was not a behavioural defect: serde's derive treats a missing field of type
-`Option<T>` as `None` regardless, which is why
-`a_genesis_written_before_these_fields_still_parses_dormant` passed throughout.
-It was worse than that in one specific way — **the documentation an operator
-would read before setting gate 14's height was attached to gate 13's field.**
-Setting a consensus activation height from a doc comment describing a different
-rule is the kind of mistake this packet exists to prevent, so it is repaired
-rather than reported: gate 13 now carries its own closing paragraphs and its own
-attribute and declaration, and gate 14 carries its own doc comment and its own
-`#[serde(default)]`, making all seventeen uniform.
+**(4) The enforcement-before-divergence ordering:**
 
 ```
-cargo test -p sumchain-genesis                       34 + 17 passed; 0 failed
-cargo test -p sumchain-state --test remediation_gates 4 passed; 0 failed
+peer_protocol_declaration_required_from_height <= min(height of any open REMEDIATION_GATES)
 ```
 
-**No RPC surfaces any of the seventeen** (§0.1b).
+with `(None, Some((gate, height)))` refused as
+`RemediationGateWithoutPeerProtocolEnforcement` and enforcement later than the
+floor refused as `PeerProtocolEnforcementAfterRemediationGate`. Both `None` is
+legal and is the production default. The floor is computed by
+`ChainParams::remediation_activation_floor()` (`:2593`), which iterates
+`REMEDIATION_GATES`. The argument, from the source: below the first remediation
+activation every node executes the same rules, so admitting a peer that declared
+nothing costs nothing; at that height the rules diverge and an undeclared peer
+becomes indistinguishable from one running the unremediated binary.
 
-### 0.8 How an activation is actually deployed
+**Both are LOAD-time checks**, so an inconsistent pair is refused before a block
+executes rather than at the boundary a hundred thousand blocks later.
+
+**Consequence for the owner.** Among the 28 remediation gates there is no
+ordering constraint whatever: any order, including all at one height, is legal,
+and the deliberately-separate fields (e.g. `subsystem_block_timestamp` vs
+`subsystem_tx_index`; `nft_receipt_failure` vs `nft_charged_receipt`) exist so
+they can be sequenced independently. The only two orderings in the whole system
+are (3) and (4), and (4) binds the remediation set as a block: **setting any one
+of the 28 forces `peer_protocol_declaration_required_from_height` to be set, at
+or below the earliest of them.** That is why Part 3 has a Wave 0.
+
+### 0.8 What can actually be monitored, and what cannot
+
+Named once here, referenced per gate in Part 1.
+
+| id | instrument | where | status |
+|---|---|---|---|
+| **M1** | `chain_getActivationStatus` → `digest`, `protocol_digest`, `current_height`, `gates[] = {gate, height, active}` | `crates/rpc/src/server.rs:1567`, `crates/rpc/src/types.rs:743` | **in this tree; `Method not found` on mainnet today.** The only per-gate fired/not-fired signal, and the only cross-node agreement check |
+| **M2** | `sumchain_block_height`, `sumchain_blocks_produced_total` | `crates/rpc/src/metrics.rs` | exists — liveness; flat means blocks stopped |
+| **M3** | `sumchain_block_errors_total` | `metrics.rs`, incremented at `crates/node/src/node.rs:795,801,924,937` | exists and is live |
+| **M4** | `sum_getReceipt` (per transaction hash) | `crates/rpc/src/api.rs:202` | exists. **There is no per-block receipts method and no failed-receipt counter**, so watching a refusal-shape gate means walking transactions |
+| **M5** | `chain_getSyncCapability.account_rows` | `crates/rpc/src/server.rs:1608` | in this tree; absent from the deployed binary. The row-count signal |
+| **M6** | subsystem read RPCs — `docclass_getCredentialsBySubject`, `docclass_getIdentity`, `nft_getTokensInCollection`, `nft_getTokensByOwner`, `tax_listClaimTypes`, `legal_getCase`, `agreement_getExecutorLinksByAgreement`, … | `crates/rpc/src/api.rs` | exist and are deployed. The way to check a known row still reads after a shape change |
+| **M7** | `chain_getSupplyInfo.accounted_account_supply` | deployed | the money-supply signal |
+| **M8** | `sumchain_peer_count`, `get_peers` | deployed | peer admission |
+| **M9** | node log: `warn!("Activation parameter changed (permitted): …")` and `info!("Genesis activation digest … N gates set: …")` | `crates/node/src/node.rs:514,545` | exists; fires once per start |
+
+**Two counters an operator would reach for first are dead.**
+`sumchain_tx_execution_errors_total` has **no call site anywhere outside its own
+definition**; `sumchain_tx_validation_errors_total` has exactly one, inside a
+`#[test]` in `metrics.rs:479`. Verified by grep across `crates/`. So the natural
+metric for "did this gate start refusing traffic" does not increment, and M4 —
+one RPC call per transaction hash — is what is left. **This is the single
+largest monitoring gap in the rollout, and it applies to the thirteen
+refusal-only gates as a class.**
+
+There is also no `sumchain_account_rows` gauge, no alert rule
+(`deploy/monitoring/prometheus.yml` has `rule_files: []`), and no Grafana panel
+for any of this.
+
+### 0.9 How an activation is actually deployed
 
 From `docs/operations/production-checklist.md:27-40` and `RELEASE.md`:
 
 - Production validators boot from the **root runtime `genesis.json`**, not from
-  `genesis/mainnet_genesis.json`, whose own first key says "TEMPLATE ONLY".
-- Activation heights are "edited into each validator's runtime genesis
-  identically, never into the template."
-- Consistency check: "confirm the `genesis.json` on every validator hashes
-  identically before starting or restarting the network."
-- Restart coordination (`:152-165`): PoA round-robin has **no proposer-skip**,
-  so restarting a validator stalls that validator's slots until it rejoins.
-  Rolling restarts are one validator at a time.
-- Governance authority is validator-quorum at 6667 bps — on the current
-  2-validator net, **both** validators must sign.
+  `genesis/mainnet_genesis.json`, whose first key says "TEMPLATE ONLY".
+- Heights are "edited into each validator's runtime genesis identically, never
+  into the template".
+- "Confirm the `genesis.json` on every validator hashes identically before
+  starting or restarting the network." M1's `digest` is the machine-checkable
+  form of that sentence and is not deployed yet.
+- PoA round-robin has **no proposer-skip**, so restarting a validator stalls its
+  slots until it rejoins. Rolling restarts are one validator at a time.
+- Governance authority is validator-quorum at 6667 bps: on the current
+  two-validator net, **both** validators must sign.
 
-The committed `genesis.json` in this tree carries **no** activation fields at
-all (`block_time_ms`, `max_block_bytes`, `max_txs_per_block`, `min_fee`,
-`finality_depth`, `max_metadata_bytes`, `storage_fee_per_byte` only). The
-deployed file is the base plus edits, and the edited file is not in this tree.
+The committed `genesis.json` in this tree carries no activation fields at all.
+The deployed file is that base plus edits, and the edited file is not in this
+tree.
 
-### 0.9 Converting a height to a UTC estimate — MEASURED
+### 0.10 Dormancy today
 
-`block_time_ms` is **3000** in both the committed `genesis.json` and the live
-`chain_getChainParams`. **Using 3000 ms as the block interval is wrong, and the
-error is a factor of two.**
+All 28 remediation gates and all 3 "neither" gates default to `None`
+(`crates/genesis/src/lib.rs:2082-2136`), pinned by
+`crates/state/tests/remediation_gates.rs:316 every_remediation_gate_is_dormant_by_default`,
+which asserts the list length matches the 28-row `WIRING` table. Three further
+guards run in the default gate: `every_remediation_gate_reads_the_field_it_names` (`:235`)
+(source-level accessor/field pairing — the realistic bug in 28 near-identical
+three-line functions is two of them reading each other's field),
+`the_twenty_eight_gates_are_twenty_eight_distinct_fields` (`:298`), and
+`a_genesis_written_before_these_fields_still_parses_dormant` (`:450`). And
+`crates/genesis/tests/activation_digest.rs:47 every_activation_height_is_covered_by_the_digest`
+scans the source for every `pub *_from_height: Option<u64>` declaration and
+asserts set-equality with `activation_heights()` in both directions.
 
-Measured directly against the live endpoint, two samples 120 seconds apart:
+### 0.11 Source defects found while regenerating this packet
 
+Reported, not repaired: this branch is documentation-only and does not modify
+`crates/`.
+
+**(a) Four gate doc comments in `crates/genesis/src/lib.rs` are attached to the
+wrong field, and two gates carry only another gate's documentation.**
+
+The previous packet recorded one instance of this (`tax_proof_lifecycle`, §0.7
+of that document, since repaired). It has recurred, larger. Verified by parsing
+each field's contiguous preceding doc block:
+
+| field | line | topic sentence of the doc block above it | whose body that is |
+|---|---:|---|---|
+| `docclass_issuer_authority_enabled_from_height` | 1442 | "A DocClass issuer stops being the author of its own authority." (1374) | its own — **followed by a stray second body**, the NFT charged-receipt text at 1411-1441 |
+| `nft_charged_receipt_enabled_from_height` | 1509 | "A DocClass credential's revocation history is a history." (1444) | **belongs to `docclass_revocation_record`**; its own body follows at 1478-1508 |
+| `docclass_revocation_record_enabled_from_height` | 1538 | "The two NFT token indexes empty the same way." (1511) | **belongs to `nft_index_symmetry`. This field has no documentation of its own anywhere above it.** |
+| `nft_index_symmetry_enabled_from_height` | 1655 | "A DocClass identity root records what the chain decided…" (1593) | **belongs to `docclass_identity_binding`**; its own body follows at 1628-1654 |
+| `docclass_identity_binding_enabled_from_height` | 1691 | "An NFT collection id stops being a function of the block clock alone." (1657) | **belongs to `nft_collection_id_nonce`. This field has no documentation of its own anywhere above it.** |
+| `nft_collection_id_nonce_enabled_from_height` | 1767 | "An NFT collection id stops being a function of the block clock alone." (1733) | its own — but byte-for-byte identical to the block above line 1691 |
+
+Reproduce:
+
+```bash
+grep -n "An NFT receipt reports the fee\|revocation history is a history\|\
+two NFT token indexes empty\|identity root records what the chain\|\
+collection id stops being a function\|author of its own authority" \
+  crates/genesis/src/lib.rs
 ```
-sample A: height=12970111
-sample B: height=12970191   (+80 blocks in 120.2 s)
-observed block interval = 1.502 s/block
-observed rate = 57,524 blocks/day
-```
 
-That is not a surprise and it is not a defect. `block_time_ms` is the interval a
-proposer waits for **its own slot**; PoA is round-robin and mainnet has two
-validators (`sum_getValidators` → 2), so blocks arrive at half the slot time.
-The repository already states this, in the one place that had to get it right:
+Three bodies (NFT charged receipt, NFT index symmetry, NFT collection-id nonce)
+appear **twice each**; two bodies (DocClass revocation record, DocClass identity
+binding) appear once and on the wrong field. The pattern is a merge that spliced
+two branches' additions in the middle of a run of doc blocks.
 
-> "The 1,506 ms figure matters and is easy to get wrong. `block_time_ms` is what
-> a proposer waits for its own slot; with two validators alternating, blocks
-> arrive at half that. Every node executes every block, so the interval is the
-> budget."
-> — `docs/operations/ACCOUNT-ROOT-ACTIVATION.md:39-43`
+**This is not a behavioural defect.** `#[serde(default)]` is present on all of
+them, the field names are correct, the digest order is correct, and
+`REMEDIATION_GATES` names all of them. It is worse than that in one specific
+way, which is the same way the previous instance was worse: **the documentation
+an operator reads before setting a consensus activation height describes a
+different rule.** For `docclass_revocation_record_enabled_from_height` and
+`docclass_identity_binding_enabled_from_height` there is no correct text at the
+field at all.
 
-and `crates/state/src/account_root.rs:93` carries the same figure in the cost
-model. **The live measurement above (1.502 s) independently confirms the
-repository's 1,506 ms at a fresh time, from a fresh sample.**
+**The accessor doc comments in `crates/state/` are correct** — verified for all
+six — so Part 1 sources those gates' behaviour from the accessors
+(`crates/state/src/nft_executor.rs:337,360,383` and
+`crates/state/src/docclass_executor.rs:317,343,394`) rather than from
+`genesis/src/lib.rs`. That is the authoritative text for those six until the
+splice is repaired.
 
-| interval | blocks / hour | blocks / day |
-|---|---|---|
-| **1.506 s (measured, 2 validators)** | **~2,390** | **~57,400** |
-| 3.000 s (`block_time_ms`, one proposer slot) | 1,200 | 28,800 |
+**(b) Three stale counts in comments.**
+`crates/state/tests/remediation_gates.rs:1` says "twenty-five remediation gates";
+`:487` says "exactly these twenty fields"; `crates/genesis/src/lib.rs:1363` and
+`:2579` say "the twenty `REMEDIATION_GATES`". The slice holds **28** and every
+enforcement iterates the slice, so behaviour is correct and only the prose is
+wrong. Named because §0.7's ordering rule (4) is stated in one of those
+comments, and a reader counting twenty would under-state what the rule binds.
 
-**So: height → UTC uses 57,400 blocks/day, not 28,800.**
-
-Two consequences for this decision:
-
-**(a) One published estimate is built on the wrong number.**
-`docs/operations/production-checklist.md:136-140` records the head at 8,716,604
-on 2026-07-06 and estimates 8,900,000 at "≈2026-07-12" — that is 183,396 blocks
-in ~6 days, i.e. ~2.83 s/block, the nominal rate rather than the measured one.
-At 57,400 blocks/day those 183,396 blocks are **~3.2 days**, so the gate would
-have activated around 2026-07-09, not 2026-07-12. The same 8,716,604 →
-12,970,191 over 74 days works out to 1.50 s/block, matching the measurement
-exactly. **Any UTC schedule taken from the production checklist's conversion is
-roughly 2x too long.**
-
-**(b) The interval is a function of the validator count, not a constant.**
-`ACCOUNT-ROOT-ACTIVATION.md:305` says it plainly: "A third validator changes the
-interval, and with it both the day-counts and every 'share of a block' figure."
-If the validator set changes between this decision and the activation, every UTC
-estimate derived here moves. The height does not.
-
-**The safe form of the decision, which does not depend on the rate at all:**
-choose the height as *head at rollout time + N*, where N is a block margin
-generous enough to cover the rollout at the FASTER plausible rate. Then convert
-to UTC only for communication, and re-measure the interval immediately before
-the coordinated restart.
-
-### 0.10 What is UNPROVEN in this packet
+### 0.12 What remains UNPROVEN in this packet
 
 | gap | what would settle it |
 |---|---|
-| height→UTC conversion **after the validator set changes** | §0.9 is measured and settled for the CURRENT 2-validator set (1.502 s/block). A third validator halves the rate again; re-measure if the set changes |
 | whether the deployed validators can run this tree's binary at all | a testnet rollout of this binary against a copy of mainnet state |
-| whether any of the seventeen has an operational consumer (tooling, indexers) that would break | not answerable from this repository; it is a question for whoever runs the indexers |
-| gate 2's migration decision (see gate 2) | an owner decision; the repository contains no answer |
-| gate 13's effect on rows that are **already** oversized | no test covers it; see gate 13 |
+| whether any gate has an operational consumer (tooling, indexers) that would break | not answerable from this repository |
+| `docclass_stake_escrow`'s migration decision | an owner decision about existing value; see Part 3 |
+| `subsystem_allocation_bound`'s effect on rows that are **already** oversized | no test covers it; `allocation_bound_gate.rs` seeds its own rows |
+| the production `cf::STATE` row count, which gates `account_root_enabled_from_height` | `docs/lane-a/ACCOUNT-ROOT-RELEASE-EVIDENCE.md §1.5` — external dependency, with an acceptance threshold |
+| height→UTC after the validator set changes | §0.3 is settled for the current two-validator set; re-measure if it changes |
+| the refusal-rate signal for the 13 refusal-only gates | §0.8 — the two obvious counters are dead; either wire them or accept M4 |
+
+---
+## Part 1A — The 28 REMEDIATION gates
+
+Every one is dormant (`None`) today. Every one is absent from `chain_getChainParams`, so its height is invisible from outside a node until `chain_getActivationStatus` is deployed (§0.2). Every one is subject to the §0.4 floor: **strictly above the head**.
+
+**None of the 28 is ordered against another of the 28.** The only constraint that touches them is §0.7 rule (4): opening ANY of them forces `peer_protocol_declaration_required_from_height` to be set at or below the earliest. Two soft orderings are noted in gates 17 and 24 — arguments from the source, not load-time refusals.
 
 ---
 
-## Part 1 — The seventeen
+### R1 — `nft_receipt_failure_enabled_from_height`
+*accessor `NftExecutor::receipt_failure_activation, crates/state/src/nft_executor.rs:252`* — cost shape **BLOCK EXISTENCE**
 
-Each section states, in the order the brief asks for: behaviour enabled, data
-migration required, mixed-version effect, rollback behaviour, proposed height,
-UTC estimate, dependencies, tests, risk if activated, risk if deferred.
+**1. Affected behaviour.** Below the gate an NFT operation that violates a block-level rule — a bad royalty, a sender drained inside the block — returns `StateError::BlockValidation` and makes the WHOLE BLOCK unexecutable. At and above it the same conditions produce a `Failed` receipt that charges the sender and leaves the block valid. The conversion is deliberately narrow: storage and encoding errors are node-local faults and still abort the block; only conditions an ordinary sender chooses from its own payload are converted (`as_receipt_failure`, `crates/state/src/nft_executor.rs:398`).
 
-**Proposed height** is deliberately left as `— owner decision —` in every
-section. **UTC estimate** likewise: §0.9 shows the conversion is not currently
-trustworthy, and a UTC estimate derived from an untrustworthy rate is worse than
-no estimate.
+**2. Dependency ordering.** None. Deliberately NOT shared with `nft_charged_receipt_enabled_from_height`: that gate changes a number in a receipt of a block that exists either way, this one decides whether the block exists. The source says an operator must be able to sequence them.
 
----
+**3. Persistent data impact.** A failed receipt row and a fee debit exist where previously no block existed at all. The receipt is folded into the receipts root, so the block hash differs.
 
-### Gate 1 — `nft_receipt_failure_enabled_from_height`
-*accessor `NftExecutor::receipt_failure_activation`, `crates/state/src/nft_executor.rs:205`*
+**4. Rollback in effect.** **B and E only.** A is useless — the sender choosing the payload is the adversary. If the gate misbehaves the symptom is a proposer that cannot produce; the only forward fix is a superseding gate (B) that re-narrows `as_receipt_failure`, and the only backward one is E.
 
-**Behaviour enabled.** Block-level denial becomes a charged failed receipt. From
-the field's doc (`crates/genesis/src/lib.rs:715`): "Below the gate, an NFT
-operation that violates a block-level rule … returns `StateError::BlockValidation`
-and makes the whole block unexecutable. At and above it the same conditions
-produce a `Failed` receipt that charges the sender and leaves the block valid."
-The conversion set is deliberately narrow — `as_receipt_failure`
-(`nft_executor.rs:248`) excludes storage and encoding faults, which still abort.
+**5. Monitoring signal.** **M2 is the signal: `sumchain_block_height` stops advancing and `sumchain_blocks_produced_total` goes flat.** M3 (`sumchain_block_errors_total`) rising while M2 is flat is the unambiguous form. Working looks like M2 unchanged and M4 showing charged failed receipts on NFT transactions that previously killed blocks. **This is the only gate in the 28 whose misbehaviour is a liveness failure**, which is why it must not share a height with anything else.
 
-**Data migration required.** No. Receipt semantics only; no key or row shape
-changes.
-
-**Mixed-version effect.** The most severe of the seventeen. The doc states it
-directly: "Two nodes that disagree about this height disagree about whether a
-block EXISTS, not merely about its root." Pinned by `nft_routing.rs:3139
-an_ungated_node_cannot_execute_the_block_a_gated_node_roots`.
-
-**Rollback behaviour.** Per §0.4. Receipts fold into the state root
-(`nft_routing.rs:3195`), so a reorg across `h` re-derives the correct receipts
-per height.
-
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
-
-**Dependencies.** None. `NftGates::from_params` (`nft_executor.rs:146`) reads
-receipt_failure, token_authority and allocation_bound independently.
-
-**Tests.** Open/closed pairs: `nft_routing.rs:2857`, `:2935`, `:3044`, `:3139`.
-Closed-side pins: `:1899 a_transaction_naming_an_absent_collection_aborts_the_whole_block`,
-`:2002 an_invalid_collection_config_aborts_the_whole_block`.
-
-**Risk if activated.** Senders begin paying for operations that previously cost
-them nothing, because the block died instead; nonces advance where they did not.
-
-**Risk if deferred.** Any funded sender can make arbitrary blocks unexecutable
-with one malformed NFT transaction, for `min_fee`. A liveness weapon, cheap, and
-reachable today.
+**6. Recommended wave.** Wave 3. **Proposed height:** — owner decision —
 
 ---
 
-### Gate 2 — `docclass_stake_escrow_enabled_from_height`
-*accessor `DocClassExecutor::stake_escrow_activation`, `crates/state/src/docclass_executor.rs:186`*
+### R2 — `docclass_stake_escrow_enabled_from_height`
+*accessor `DocClassExecutor::stake_escrow_activation, crates/state/src/docclass_executor.rs:231`* — cost shape **VALUE MOVEMENT**
 
-**Behaviour enabled.** Doc (`genesis/src/lib.rs:739`): "Below the gate the stake
-debited at registration is credited to nobody and leaves the money supply. At
-and above it the stake is held by a keyless escrow address and refunded exactly
-once on deactivation." The escrow address is
-`blake3("sumchain/docclass/issuer-stake-escrow/v1")` (`docclass_executor.rs:37,118`).
-Three call sites: credit on register (`:1586`), `UpdateIssuer` may no longer
-restate `stake_amount` (`:1640`), refund-and-zero on deactivate (`:1753-1766`).
+**1. Affected behaviour.** Below the gate the stake debited at registration is credited to nobody and leaves the money supply. At and above it the stake is held by a keyless escrow address — `blake3("sumchain/docclass/issuer-stake-escrow/v1")`, `DOCCLASS_STAKE_ESCROW_DOMAIN`, `crates/state/src/docclass_executor.rs:37` — and refunded exactly once on deactivation. Three call sites: credit on register, `UpdateIssuer` may no longer restate `stake_amount`, refund-and-zero on deactivate.
 
-**Data migration required. YES IN SUBSTANCE, AND NO MIGRATION EXISTS. This is
-the one gate of the seventeen that needs an explicit owner decision beyond a
-height.**
+**2. Dependency ordering.** None at load. It has a **data** dependency on a decision that does not exist in this repository — see Part 3. Note `docclass_issuer_authority_enabled_from_height`'s source calls this gate "the stake half of the same wholesale write", so the two are conceptually paired even though neither constrains the other.
 
-Stakes posted below the gate were destroyed — the escrow account holds nothing
-for them. Above the gate, `deactivate_issuer` refunds any issuer row with
-`stake_amount > 0` via `StateManager::v_deduct(escrow, refund)`
-(`docclass_executor.rs:1761`), and `v_deduct` (`crates/state/src/state.rs:214`)
-returns `InsufficientBalance` when the escrow is short. So a pre-gate issuer
-deactivating after activation attempts to withdraw money that was never
-escrowed. Nothing in the repository pre-funds the escrow, zeroes legacy
-`stake_amount` fields, or special-cases pre-gate rows: `docclass_stake_escrow_address`
-has exactly two non-test references (`crates/state/src/lib.rs:238` re-export and
-`docclass_executor.rs`), and `supply.rs` does not know about it.
+**3. Persistent data impact.** An escrow account balance row is written and later drawn down. The total money supply stops shrinking at each registration. This is ordinary account state and is folded by the account digest if `account_root_enabled_from_height` is ever opened.
 
-The owner's options, none of which this document chooses between:
-1. pre-fund the escrow with the sum of all live pre-gate `stake_amount` values
-   in the same coordinated genesis (requires knowing that sum from production
-   state — see §0.10);
-2. zero legacy `stake_amount` fields as part of the activation (loses the
-   issuers' claim, which was already lost in substance);
-3. add a pre-gate carve-out to `deactivate_issuer` before activating;
-4. defer the gate.
+**4. Rollback in effect.** **D, and only D.** Value that moved cannot be moved back by a gate; a governance transaction at validator quorum is the only instrument. B cannot help — a superseding gate stops future escrow, it does not restore a refund that failed.
 
-**Mixed-version effect.** Balances diverge from the registration transaction
-onward, so every subsequent root differs. `docclass_routing.rs:4062
-a_registration_stake_is_destroyed_below_the_gate_and_escrowed_above_it` asserts
-escrow balance 1000 vs 0 across the same transaction.
+**5. Monitoring signal.** **M7 (`chain_getSupplyInfo.accounted_account_supply`) is the signal**: below the gate it falls at every DocClass issuer registration; at and above it stops falling. Misbehaving looks like `DeactivateIssuer` transactions failing on `InsufficientBalance` against the escrow address (`v_deduct`, `crates/state/src/state.rs:208`) — visible only through M4, one receipt at a time, because no counter exists.
 
-**Rollback behaviour.** Per §0.4; balances are ordinary account state reverted by
-the normal undo path.
-
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
-
-**Dependencies.** None on the other sixteen. It has a **data** dependency on a
-decision that does not exist yet.
-
-**Tests.** `docclass_routing.rs:4062`, `:4128 deactivation_refunds_the_escrowed_stake_once_and_only_at_the_gate`,
-`:4223 an_update_cannot_inflate_the_recorded_stake_at_the_gate`. Closed-side
-pins: `:3175`, `:3055`.
-
-**Risk if activated without a migration.** Legacy issuers' deactivations fail on
-escrow underflow; or, if the arithmetic ever succeeds, they drain escrow funded
-by newer issuers.
-
-**Risk if deferred.** The money supply keeps shrinking by a sender-chosen amount
-at every DocClass issuer registration.
+**6. Recommended wave.** **NONE — DEFERRED INDEFINITELY.** This gate is not in
+a wave and deliberately has no proposed height: it is blocked on an owner
+decision about value that has already been destroyed, not on a schedule. See
+Part 3.1, which carries the reasoning forward in full.
 
 ---
 
-### Gate 3 — `docclass_subject_index_split_enabled_from_height`
-*accessor `DocClassExecutor::subject_index_split_activation`, `crates/state/src/docclass_executor.rs:217`*
+### R3 — `docclass_subject_index_split_enabled_from_height`
+*accessor `DocClassExecutor::subject_index_split_activation, crates/state/src/docclass_executor.rs:262`* — cost shape **KEY SPACE**
 
-**Behaviour enabled.** Doc (`genesis/src/lib.rs:757`): "Below the gate the
-identity index shares a 32-byte key space in which two different subjects can
-collide. At and above it writes use a tagged 33-byte key no legacy key can
-equal; reads still fall back to the legacy key, so a collision committed BEFORE
-activation stays." Below the gate the collision is fatal — a credential list
-overwrites an identity row and the next identity operation is a hard `Err` that
-kills the block (`docclass_routing.rs:3475`).
+**1. Affected behaviour.** Below the gate the DocClass identity index shares a 32-byte key space in which two different subjects can collide. At and above it writes use a tagged 33-byte key no legacy key can equal. **Reads still fall back to the legacy key**, so a collision committed before activation stays collided.
 
-**Data migration required. No, by construction.** The reader is deliberately
-gate-free and tries tagged-then-legacy — `crates/state/src/docclass_view.rs:206
-v_get_subject_identity_entries`: "No gate parameter, deliberately: the reader
-has to answer correctly on both sides of the activation and for rows written on
-either side." Writes are split, driven by `gates.subject_index_split` at seven
-`v_put_identity_root` call sites (`docclass_executor.rs:588-914`).
+**2. Dependency ordering.** None.
 
-What does **not** migrate: a collision already committed below the gate stays
-corrupt forever (`docclass_routing.rs:4495-4504`: "an upgraded node still sees
-what a pre-activation block indexed"). Key shape changes for new writes only.
-**Any external tooling reading `DOCCLASS_SUBJECT_INDEX` by bare 32-byte key must
-learn the 33-byte form.**
+**3. Persistent data impact.** New rows land at 33-byte keys; old rows keep their 32-byte keys and their bytes. The index permanently holds two key widths. Row count grows where a collision previously merged two subjects into one row.
 
-**Mixed-version effect.** Rows land at different keys from the first
-post-activation identity write, so roots diverge; and below the gate a colliding
-pair makes the block unexecutable while above it the same block commits.
-`docclass_routing.rs:4325 a_colliding_subject_commitment_ends_the_block_below_the_gate_and_is_harmless_above_it`.
+**4. Rollback in effect.** **C is mandatory and permanent** — the dual-read path is the design, not a transitional measure, and removing it later would orphan every pre-gate row. B could add a third width; nothing removes the second.
 
-**Rollback behaviour.** Per §0.4. A rollback below `h` re-executes writes to the
-legacy key; the tagged-first reader stays correct in both directions, which is
-exactly why it has no gate parameter.
+**5. Monitoring signal.** **M5 (`chain_getSyncCapability.account_rows`) does not cover this family**, so the signal is M6: `docclass_getIdentity` / `docclass_getIdentityByController` must keep answering for identities anchored before the height, and must start distinguishing two subjects that previously returned the same row. Misbehaving looks like a pre-gate identity becoming unreadable — which is the dual-read path failing, and is silent in every metric.
 
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
-
-**Dependencies.** None.
-
-**Tests.** `docclass_routing.rs:4325`; closed-side pin `:3475
-an_identity_and_a_credential_sharing_a_subject_commitment_break_the_block`.
-
-**Risk if activated.** New identity index rows move key space; downstream
-readers keyed on the legacy shape must be updated in step.
-
-**Risk if deferred.** Two cheap transactions arm it and a third detonates it:
-any sender can make a block permanently unexecutable for every node. The arming
-sequence is pinned at `:3475`.
+**6. Recommended wave.** Wave 2a. **Proposed height:** — owner decision —
 
 ---
 
-### Gate 4 — `docclass_revocation_standing_enabled_from_height`
-*accessor `DocClassExecutor::revocation_standing_activation`, `crates/state/src/docclass_executor.rs:247`*
+### R4 — `docclass_revocation_standing_enabled_from_height`
+*accessor `DocclassExecutor::authorization_activation, crates/state/src/docclass_executor.rs:292`* — cost shape **REFUSAL ONLY**
 
-**Behaviour enabled.** Doc (`genesis/src/lib.rs:777`): "Only the issuer may
-revoke a DocClass credential. Below the gate revocation standing is unchecked."
-The whole revocation family (revoke, suspend, reactivate, supersede) authorizes
-through `check_revoke_auth`, which reads only the `issuer` field on the
-credential row and never the issuer registry — while the issue paths do consult
-it via `v_can_issue_subcode`. Above the gate revocation asks the registry the
-same status question, and **status only**, not subcode or jurisdiction:
-narrowing an issuer's authorization must not strand credentials nobody can
-withdraw (`docclass_routing.rs:4513-4515`).
+**1. Affected behaviour.** Below the gate revocation standing is unchecked: any sender can revoke any DocClass credential. At and above it only the issuer may.
 
-**Data migration required.** No. Authority check only.
+**2. Dependency ordering.** None.
 
-**Mixed-version effect.** A suspended issuer's revocation succeeds on one side
-and fails on the other; receipts and rows diverge.
-`docclass_routing.rs:4517 a_suspended_issuer_keeps_the_revocation_family_only_below_the_gate`.
+**3. Persistent data impact.** **None.** No row changes shape, key or location. A transaction that used to succeed produces a failed receipt instead; the state it would have written is simply not written.
 
-**Rollback behaviour.** Per §0.4.
+**4. Rollback in effect.** **A and B.** Stop submitting the refused shape, or ship a superseding gate at a later height that narrows the authority rule. Nothing written under the gate needs undoing, because the gate's whole effect is that less is written.
 
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
+**5. Monitoring signal.** M4 on the subsystem's transactions — a failed receipt naming the subsystem is the working signal and the misbehaving signal, distinguished only by whether the refused sender had legitimate standing. **No counter exists** (§0.8: `sumchain_tx_execution_errors_total` is dead), so this is per-transaction inspection. M1 `gates[].active` confirms the gate fired at all. M6 confirms the rows it protects still read.
 
-**Dependencies.** None.
-
-**Tests.** `docclass_routing.rs:4517`; closed-side pins `:3596
-a_suspended_issuer_can_still_revoke_and_update_itself`, `:3549
-a_third_party_cannot_revoke_someone_elses_credential`.
-
-**Risk if activated.** A suspended issuer can no longer withdraw credentials it
-validly issued while active.
-
-**Risk if deferred.** Suspension is cosmetic on the withdraw side: a revoked
-issuer keeps control of everything it ever issued.
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
 
 ---
 
-### Gate 5 — `healthcare_authorization_enabled_from_height`
-*accessor `HealthcareExecutor::authorization_activation`, `crates/state/src/healthcare_executor.rs:213`*
+### R5 — `healthcare_authorization_enabled_from_height`
+*accessor `HealthcareExecutor::authorization_activation, crates/state/src/healthcare_executor.rs:219`* — cost shape **REFUSAL ONLY**
 
-**Behaviour enabled.** Seven distinct defects, one height — the largest
-behavioural surface of the six authorization gates. Doc
-(`genesis/src/lib.rs:791`, accessor `:195`): below the gate `SupersedeConsent`,
-`FillPrescription` and `PartialFillPrescription` check **nothing** about the
-sender; `Add/RemoveNetworkAffiliation` check no issuer; `IssuePrescription`
-never relates the sender to the named prescriber; a consent's subject cannot
-revoke it; and a prescription with zero refills is fillable once more because
-its guard is a conjunction. Above the gate each is enforced and the refusal is a
-`Failed` receipt. The fill-authority set is deliberately three addresses — the
-pharmacy is a `PartyRef`, not an address, so it cannot be authorized from the
-row (`healthcare_executor.rs:253+`, recorded rather than papered over).
+**1. Affected behaviour.** Below the gate the authorization rules in the Healthcare specification are not enforced, so an operation can be performed by a party with no standing to perform it — any funded account can fill any prescription. At and above it the operation checks the authority it was specified with.
 
-**Data migration required.** No.
+**2. Dependency ordering.** None.
 
-**Mixed-version effect.** Transactions succeed on one side and receipt-fail on
-the other; receipts fold into the root. Each named test drives `CLOSED` and
-`OPEN` over identical fixtures in one process.
+**3. Persistent data impact.** **None.** No row changes shape, key or location. A transaction that used to succeed produces a failed receipt instead; the state it would have written is simply not written.
 
-**Rollback behaviour.** Per §0.4.
+**4. Rollback in effect.** **A and B.** Stop submitting the refused shape, or ship a superseding gate at a later height that narrows the authority rule. Nothing written under the gate needs undoing, because the gate's whole effect is that less is written.
 
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
+**5. Monitoring signal.** M4 on the subsystem's transactions — a failed receipt naming the subsystem is the working signal and the misbehaving signal, distinguished only by whether the refused sender had legitimate standing. **No counter exists** (§0.8: `sumchain_tx_execution_errors_total` is dead), so this is per-transaction inspection. M1 `gates[].active` confirms the gate fired at all. M6 confirms the rows it protects still read.
 
-**Dependencies.** None. `HealthcareGates::from_params` (`healthcare_executor.rs:172`)
-reads authorization, `subsystem_block_timestamp` and state_precondition
-independently.
-
-**Tests.** `healthcare_routing.rs:3902`, `:3986`, `:4054`, `:4099`, `:4175`,
-`:4233`, `:4280`. Closed-side pins: `:2727`, `:2821`, `:2904`, `:2996`, `:3267`.
-
-**Risk if activated.** Previously-valid fill and supersede flows performed by
-third parties start failing. Seven behaviours change at once; this is the gate
-most likely to break an existing integration.
-
-**Risk if deferred.** Any funded account can fill any prescription and rewrite
-any provider's network affiliations.
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
 
 ---
 
-### Gate 6 — `legal_authorization_enabled_from_height`
-*accessor `LegalExecutor::authorization_activation`, `crates/state/src/legal_executor.rs:198`*
+### R6 — `legal_authorization_enabled_from_height`
+*accessor `LegalExecutor::authorization_activation, crates/state/src/legal_executor.rs:216`* — cost shape **REFUSAL ONLY**
 
-**Behaviour enabled.** Doc (`genesis/src/lib.rs:818`): "Legal consolidate,
-transfer and supersession check authority. Below the gate these four operations
-accept any sender. Supersession in particular is three conditions and not one:
-the sender must hold the old record, the replacement must be issued by the
-sender, and it must concern the same subject — otherwise supersession is a way
-to overwrite someone else's record." The accessor adds two more: `SupersedeOrder`
-has no duplicate guard, so a stranger overwrites an existing order by reusing
-its id; and `SupersedeEvent` does not verify the replacement's case exists,
-leaving a dangling case-to-event index entry the attacker chose.
+**1. Affected behaviour.** Below the gate Legal consolidate, transfer and supersession accept any sender. At and above it supersession is three conditions and not one: the sender must hold the old record, the replacement must be issued by the sender, and it must concern the same subject — otherwise supersession is a way to overwrite someone else's court order.
 
-**Data migration required.** No — but the dangling index entries created below
-the gate are **not** cleaned up by activation.
+**2. Dependency ordering.** None.
 
-**Mixed-version effect.** Same-shape divergence; the tests drive both sides.
+**3. Persistent data impact.** **None.** No row changes shape, key or location. A transaction that used to succeed produces a failed receipt instead; the state it would have written is simply not written.
 
-**Rollback behaviour.** Per §0.4.
+**4. Rollback in effect.** **A and B.** Stop submitting the refused shape, or ship a superseding gate at a later height that narrows the authority rule. Nothing written under the gate needs undoing, because the gate's whole effect is that less is written.
 
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
+**5. Monitoring signal.** M4 on the subsystem's transactions — a failed receipt naming the subsystem is the working signal and the misbehaving signal, distinguished only by whether the refused sender had legitimate standing. **No counter exists** (§0.8: `sumchain_tx_execution_errors_total` is dead), so this is per-transaction inspection. M1 `gates[].active` confirms the gate fired at all. M6 confirms the rows it protects still read.
 
-**Dependencies.** None.
-
-**Tests.** `legal_routing.rs:3543`, `:3633`, `:3723`. Closed-side pins: `:2751`,
-`:2845`, `:2928`, `:3039`.
-
-**Risk if activated.** Supersession workflows that relied on there being no
-sender check break.
-
-**Risk if deferred.** Any account can overwrite any court order by reusing its
-id.
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
 
 ---
 
-### Gate 7 — `finance_authorization_enabled_from_height`
-*accessor `FinanceExecutor::authorization_activation`, `crates/state/src/finance_executor.rs:193`*
+### R7 — `finance_authorization_enabled_from_height`
+*accessor `FinanceExecutor::authorization_activation, crates/state/src/finance_executor.rs:205`* — cost shape **REFUSAL ONLY**
 
-**Behaviour enabled.** Doc (`genesis/src/lib.rs:827`): "A revoked finance issuer
-stops being an issuer. Below the gate revocation is recorded and then ignored by
-the operations that should consult it." Every update/revoke path checks only the
-address on the row and never rereads the registry, while the creation paths do —
-"the asymmetry is exact". `UpdateIssuer` accepts any status the sender asks for,
-including `Active` from `Revoked`, walking around the Suspended-only guard in
-`ReactivateIssuer`. `SubmitProof` has no authority check at all. Above the gate
-all three go through `issuer_in_good_standing` (`finance_executor.rs:207`).
+**1. Affected behaviour.** Below the gate a finance issuer's revocation is recorded and then ignored by the operations that should consult it. At and above it a revoked finance issuer stops being an issuer.
 
-**Data migration required.** No.
+**2. Dependency ordering.** None.
 
-**Mixed-version effect.** Both sides driven over the same fixture in each test.
+**3. Persistent data impact.** **None.** No row changes shape, key or location. A transaction that used to succeed produces a failed receipt instead; the state it would have written is simply not written.
 
-**Rollback behaviour.** Per §0.4.
+**4. Rollback in effect.** **A and B.** Stop submitting the refused shape, or ship a superseding gate at a later height that narrows the authority rule. Nothing written under the gate needs undoing, because the gate's whole effect is that less is written.
 
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
+**5. Monitoring signal.** M4 on the subsystem's transactions — a failed receipt naming the subsystem is the working signal and the misbehaving signal, distinguished only by whether the refused sender had legitimate standing. **No counter exists** (§0.8: `sumchain_tx_execution_errors_total` is dead), so this is per-transaction inspection. M1 `gates[].active` confirms the gate fired at all. M6 confirms the rows it protects still read.
 
-**Dependencies.** None.
-
-**Tests.** `finance_routing.rs:3352`, `:3457 update_issuer_cannot_walk_around_reactivate_at_the_gate`,
-`:3523 submit_proof_requires_a_registered_active_issuer_at_the_gate`.
-
-**Risk if activated.** Suspended and revoked issuers lose mutation rights
-immediately, including over rows they created while active.
-
-**Risk if deferred.** Revoking a finance issuer is decorative, and a revoked
-issuer can self-reactivate.
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
 
 ---
 
-### Gate 8 — `employment_authorization_enabled_from_height`
-*accessor `EmploymentExecutor::authorization_activation`, `crates/state/src/employment_executor.rs:176`*
+### R8 — `employment_authorization_enabled_from_height`
+*accessor `EmploymentExecutor::authorization_activation, crates/state/src/employment_executor.rs:182`* — cost shape **REFUSAL ONLY**
 
-**Behaviour enabled.** Doc (`genesis/src/lib.rs:844`): "A revoked employment
-issuer stops being an issuer. Below the gate revocation is recorded and then
-ignored." Only `CreateEmployment` and `CreateIncomeAttestation` require an
-active issuer; every mutation checks only the address on the row. Above the gate
-every mutation asks the same question via `issuer_in_good_standing`
-(`employment_executor.rs:189`). Narrower surface than finance; same shape.
+**1. Affected behaviour.** Below the gate an employment issuer's revocation is recorded and then ignored. At and above it a revoked employment issuer stops being an issuer, and suspended issuers stop holding full mutation rights.
 
-**Data migration required.** No.
+**2. Dependency ordering.** None.
 
-**Mixed-version effect.** Both sides driven in the test below.
+**3. Persistent data impact.** **None.** No row changes shape, key or location. A transaction that used to succeed produces a failed receipt instead; the state it would have written is simply not written.
 
-**Rollback behaviour.** Per §0.4.
+**4. Rollback in effect.** **A and B.** Stop submitting the refused shape, or ship a superseding gate at a later height that narrows the authority rule. Nothing written under the gate needs undoing, because the gate's whole effect is that less is written.
 
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
+**5. Monitoring signal.** M4 on the subsystem's transactions — a failed receipt naming the subsystem is the working signal and the misbehaving signal, distinguished only by whether the refused sender had legitimate standing. **No counter exists** (§0.8: `sumchain_tx_execution_errors_total` is dead), so this is per-transaction inspection. M1 `gates[].active` confirms the gate fired at all. M6 confirms the rows it protects still read.
 
-**Dependencies.** None.
-
-**Tests.** `employment_routing.rs:2606 a_suspended_employment_issuer_loses_its_mutations_only_at_the_gate`.
-Closed-side pin named in the accessor doc:
-`a_suspended_issuer_can_still_revoke_but_not_create`.
-
-**Risk if activated.** As finance, narrower.
-
-**Risk if deferred.** Suspended employment issuers keep full mutation rights
-over everything they issued.
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
 
 ---
 
-### Gate 9 — `property_authorization_enabled_from_height`
-*accessor `PropertyExecutor::authorization_activation`, `crates/state/src/property_executor.rs:214`*
+### R9 — `property_authorization_enabled_from_height`
+*accessor `PropertyExecutor::authorization_activation, crates/state/src/property_executor.rs:220`* — cost shape **REFUSAL ONLY**
 
-**Behaviour enabled.** Doc (`genesis/src/lib.rs:861`): "Property operations bind
-to the row and the registry. Below the gate an operation need not be performed
-by a party the row or the registry gives standing to." Two arms: `MergeAssets`
-checks nothing, so any account merges two assets it did not issue and marks the
-secondary `Merged`; and `SupersedeTitleEvent` checks nothing, so any account
-supersedes any title event, recording a replacement naming itself. Above the
-gate each binds to the issuer on the row it changes.
+**1. Affected behaviour.** Below the gate a Property operation need not be performed by a party the row or the registry gives standing to — any funded account can rewrite a property title history. At and above it the operation binds to the row and the registry.
 
-**Data migration required.** No.
+**2. Dependency ordering.** None.
 
-**Mixed-version effect.** Both sides driven in the tests below.
+**3. Persistent data impact.** **None.** No row changes shape, key or location. A transaction that used to succeed produces a failed receipt instead; the state it would have written is simply not written.
 
-**Rollback behaviour.** Per §0.4.
+**4. Rollback in effect.** **A and B.** Stop submitting the refused shape, or ship a superseding gate at a later height that narrows the authority rule. Nothing written under the gate needs undoing, because the gate's whole effect is that less is written.
 
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
+**5. Monitoring signal.** M4 on the subsystem's transactions — a failed receipt naming the subsystem is the working signal and the misbehaving signal, distinguished only by whether the refused sender had legitimate standing. **No counter exists** (§0.8: `sumchain_tx_execution_errors_total` is dead), so this is per-transaction inspection. M1 `gates[].active` confirms the gate fired at all. M6 confirms the rows it protects still read.
 
-**Dependencies.** None.
-
-**Tests.** `property_routing.rs:3045`, `:3115`. Closed-side pin named in the
-accessor doc: `three_operations_check_no_authority_at_all`.
-
-**Risk if activated.** Two arms that accepted any sender start refusing.
-
-**Risk if deferred.** Any funded account can rewrite a property title history.
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
 
 ---
 
-### Gate 10 — `tax_authorization_enabled_from_height`
-*accessor `TaxExecutor::authorization_activation`, `crates/state/src/tax_executor.rs:117`*
+### R10 — `tax_authorization_enabled_from_height`
+*accessor `TaxExecutor::authorization_activation, crates/state/src/tax_executor.rs:141`* — cost shape **REFUSAL ONLY**
 
-**Behaviour enabled.** Doc (`genesis/src/lib.rs:878`): claim-type registration,
-update and deprecation have **no authority check at all** — all three guard only
-on row presence or absence, "so any funded account writes the chain's claim-type
-registry." Above the gate the sender must be a registered tax issuer whose
-status is `Active` (`issuer_in_good_standing`, `tax_executor.rs:158`).
+**1. Affected behaviour.** Below the gate a Tax operation need not be performed by a party the row or the registry gives standing to; the chain-wide claim-type registry is world-writable. At and above it the operation binds to the row and the registry.
 
-**Data migration required.** No. Claim-type rows written by strangers below the
-gate are **not** removed by activation.
+**2. Dependency ordering.** None.
 
-**Mixed-version effect.** Both sides driven in the test below.
+**3. Persistent data impact.** **None.** No row changes shape, key or location. A transaction that used to succeed produces a failed receipt instead; the state it would have written is simply not written.
 
-**Rollback behaviour.** Per §0.4. Named explicitly in
-`crates/genesis/tests/activation_digest.rs:547` as a first-start refusal case.
+**4. Rollback in effect.** **A and B.** Stop submitting the refused shape, or ship a superseding gate at a later height that narrows the authority rule. Nothing written under the gate needs undoing, because the gate's whole effect is that less is written.
 
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
+**5. Monitoring signal.** M4 on the subsystem's transactions — a failed receipt naming the subsystem is the working signal and the misbehaving signal, distinguished only by whether the refused sender had legitimate standing. **No counter exists** (§0.8: `sumchain_tx_execution_errors_total` is dead), so this is per-transaction inspection. M1 `gates[].active` confirms the gate fired at all. M6 confirms the rows it protects still read.
 
-**Dependencies.** None. `TaxGates::from_params` (`tax_executor.rs:85`) reads
-authorization, block_timestamp and proof_lifecycle independently.
-
-**Tests.** `tax_routing.rs:1257 the_claim_type_registry_is_writable_by_anyone_only_below_the_gate`.
-
-**Risk if activated.** Any tooling registering claim types from an unregistered
-key stops working.
-
-**Risk if deferred.** The chain-wide claim-type registry is world-writable.
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
 
 ---
 
-### Gate 11 — `subsystem_block_timestamp_enabled_from_height`  *(cross-cutting)*
-*accessor `subsystem_block_timestamp_activation`, `crates/state/src/lib.rs:90`*
+### R11 — `subsystem_block_timestamp_enabled_from_height`
+*accessor `subsystem_block_timestamp_activation, crates/state/src/lib.rs:91`* — cost shape **ROW CONTENT**
 
-**Behaviour enabled.** Doc (`genesis/src/lib.rs:897`): "Eight subsystems see the
-block's timestamp instead of a literal zero. Below the gate eight subsystems are
-handed `0` where the block's timestamp belongs, so every time-dependent rule in
-them evaluates at the epoch — a prescription validity window, for instance, is
-checked at time zero." Switched in one place, `effective_block_timestamp`
-(`crates/state/src/lib.rs:105`), reached by eight call sites: messaging
-(`messaging_executor.rs:95`), docclass (`:323`), finance (`:258`), tax (`:209`),
-healthcare (`:322`), agreement (`:262`), property (`:268`), employment (`:241`).
+**1. Affected behaviour.** Below the gate eight subsystems are handed a literal `0` where the block's timestamp belongs, so every time-dependent rule in them evaluates at the epoch — a prescription validity window is checked at time zero. At and above it they receive the real block timestamp.
 
-It moves real validity logic, not only stamps. Messaging's `current_day` buckets
-the daily send quota on this value, so at the epoch every message a chain ever
-sends counts against day zero (`messaging_routing.rs:1064-1069`).
+**2. Dependency ordering.** None at load. But `docclass_identity_binding_enabled_from_height`'s source names this gate explicitly as a reason it does NOT write `created_at`/`updated_at`: "the executor's own clock is zero until `subsystem_block_timestamp_enabled_from_height` opens, so writing them here would make this gate's repair depend silently on another gate's height". **That is a soft ordering the owner should honour: open this gate at or before the identity-binding gate**, or the identity-binding repair lands with a zero clock.
 
-**Data migration required.** No, but **it re-dates nothing already written**:
-existing rows keep their zero stamps, and anything comparing a stored zero
-against a real block time changes meaning at `h`. The source's own reason for
-one field rather than eight (`crates/state/src/lib.rs:82-85`): "Splitting it per
-subsystem would let a chain hold half its rows at zero and half at a real time,
-which is worse than either end."
+**3. Persistent data impact.** **Changes the contents of rows written across eight subsystems** (stored `created_at` / `updated_at` / validity fields), and flips the outcome of every time-dependent comparison. Rows written below the gate keep their zeros forever; nothing rewrites them.
 
-**Mixed-version effect.** Rows differ in content from the first post-activation
-write in any of the eight, and time-window decisions flip.
+**4. Rollback in effect.** **C.** Every reader must forever handle a row whose timestamp is 0 and a row whose timestamp is real, and must not infer "unset" from either. B can change which clock is used going forward; nothing repairs the zeros.
 
-**Rollback behaviour.** Per §0.4. Named in `activation_digest.rs:490` and `:541`
-as a first-start refusal case.
+**5. Monitoring signal.** M6 across the eight subsystems: a validity window queried just after the height should start answering on real time. **The misbehaviour to watch for is the opposite of the defect** — a credential that was valid below the gate (because everything compared against zero) becoming expired at the height. Visible only as failed receipts through M4, or as a read-side status flip through M6. No counter.
 
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
-
-**Dependencies.** None enforced, and none intended. It is read by seven
-executors' `Gates::from_params` plus messaging, always as an independent field.
-The per-subsystem authorization gates do not depend on it, and nothing orders it
-against gates 12 or 13.
-
-**Tests.** `healthcare_routing.rs:4357`, `:4448`, `messaging_routing.rs:1074`.
-Closed-side pins: `docclass_routing.rs:2590`, `healthcare_routing.rs:3171`,
-`legal_routing.rs:3207`.
-
-**Risk if activated.** The broadest blast radius of the seventeen: time-dependent
-rules across eight subsystems fire for the first time. Prescriptions that were
-effectively fillable forever begin expiring; messaging quotas begin bucketing
-per day. Anything that has been operating inside a window that never closed will
-find it closing.
-
-**Risk if deferred.** Every time window in eight subsystems evaluates at the
-epoch, so validity and quota rules are inert.
+**6. Recommended wave.** Wave 2b. **Proposed height:** — owner decision —
 
 ---
 
-### Gate 12 — `subsystem_tx_index_enabled_from_height`  *(cross-cutting)*
-*accessor `subsystem_tx_index_activation`, `crates/state/src/lib.rs:133`*
+### R12 — `subsystem_tx_index_enabled_from_height`
+*accessor `subsystem_tx_index_activation, crates/state/src/lib.rs:134`* — cost shape **KEY SPACE**
 
-**Behaviour enabled.** Doc (`genesis/src/lib.rs:917`): "Below the gate every
-dispatch arm hands the subsystem executors a literal `0` where the transaction's
-index within its block belongs. DocClass events are keyed
-`height || tx_index || event_index` and messaging events
-`recipient || height || tx_index`, so every event a block produces lands at one
-key and only the LAST survives … At and above the gate each arm passes the
-transaction's real index and the rows stop colliding." Switched in
-`effective_tx_index` (`crates/state/src/lib.rs:152`), called from exactly two
-dispatch arms (`executor.rs:450`, `:2124`).
+**1. Affected behaviour.** Below the gate every dispatch arm hands the subsystem executors a literal `0` where the transaction's index within its block belongs. DocClass events are keyed `height || tx_index || event_index` and messaging events `recipient || height || tx_index`, so every event a block produces lands at one key and **only the LAST survives**: the family holds one row per block and every earlier event is silently overwritten. At and above it each arm passes the real index and the rows stop colliding.
 
-**Data migration required.** No backfill, and **it is not recoverable**: events
-overwritten below the gate are gone. Activation changes key shape and **row
-count** for new blocks only.
+**2. Dependency ordering.** None. Deliberately distinct from `subsystem_block_timestamp_enabled_from_height`: that gate changes row CONTENTS across eight subsystems, this one changes KEYS and COUNT in two families. Different blast radii; the source says an operator must be able to sequence them.
 
-**Mixed-version effect.** Row counts and therefore the block write set differ.
-The source flags the consensus-visible consequence explicitly
-(`crates/state/src/lib.rs:127-130`): "Opening it grows the candidate write set,
-which has a ceiling that refuses a block rather than truncating it, so this is
-consensus-visible even though nothing reads these rows back."
+**3. Persistent data impact.** **Changes both the keys and the COUNT of rows in two families** — the DocClass event family and the messaging event family. One row per block becomes one row per event. **Disk growth changes at this height**, and so does the size of a block's write set, which the candidate ceiling can refuse.
 
-**This is the only one of the seventeen that can change whether a block is
-admissible by VOLUME.**
+**4. Rollback in effect.** **C, and it is the expensive one.** Events lost below the gate are lost — there is no record of them to recover. Readers must handle both the one-row-per-block region and the one-row-per-event region forever. B can change the key again; nothing back-fills the overwritten events.
 
-**Rollback behaviour.** Per §0.4. Named in `activation_digest.rs:491`, `:544`.
+**5. Monitoring signal.** **The one number to watch is disk growth rate**, per node, across the height. No metric exposes per-family row counts (M5 covers `cf::STATE` account rows only), so this is node-level disk usage plus M6: `messaging_getMessages` / `messaging_getMessagesInBlock` should start returning every message in a multi-message block rather than one. Misbehaving looks like block write-sets hitting the candidate ceiling — which surfaces as refused transactions through M4, not as a counter.
 
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
-
-**Dependencies.** None, deliberately. The accessor doc at
-`crates/state/src/lib.rs:117-131` is an argument that 11 and 12 are *not* one
-rule: "Two different blast radii; an operator must be able to take one without
-the other."
-
-**Tests.** `docclass_routing.rs:2799`, `:2853`, `:2898
-execute_block_keys_each_docclass_event_by_its_own_transaction_index` (drives
-real `ChainParams`), `messaging_routing.rs:1030`, `:1053`.
-
-**Risk if activated.** Blocks near the candidate ceiling grow their write set and
-may be refused where they previously fit.
-
-**Risk if deferred.** The DocClass and messaging event families hold one row per
-block and silently lose every earlier event in that block.
+**6. Recommended wave.** Wave 2a. **Proposed height:** — owner decision —
 
 ---
 
-### Gate 13 — `subsystem_allocation_bound_enabled_from_height`  *(cross-cutting)*
-*accessor `subsystem_allocation_bound_activation`, `crates/state/src/lib.rs:189`*
+### R13 — `subsystem_allocation_bound_enabled_from_height`
+*accessor `subsystem_allocation_bound_activation, crates/state/src/lib.rs:190`* — cost shape **REFUSAL ONLY**
 
-**Behaviour enabled.** Three pre-allocation checks fire
-(`genesis/src/lib.rs:946`, accessor `crates/state/src/lib.rs:166-188`):
+**1. Affected behaviour.** Three pre-allocation checks fire: a subsystem payload longer than `MAX_SUBSYSTEM_PAYLOAD_BYTES` (65,536) is refused BEFORE decode; a stored row whose encoding exceeds `MAX_ACCUMULATING_ROW_BYTES` (1,048,576) is refused before decode; an NFT `BatchMint` naming more than `MAX_NFT_BATCH_MINT_REQUESTS` tokens is refused before the owner-index rebuild loop. Below the gate the release ceiling bounds what a block may COMMIT and nothing about what one refused transaction may ALLOCATE: measured, one `AddKey` peaks at 4.00x the row size, churns 5.00x, and grows the row by 1,899,873 bytes for one `min_fee`. Readers: the DocClass bound, the NFT owner index, and Agreement's party and executor indexes.
 
-- a subsystem payload longer than `MAX_SUBSYSTEM_PAYLOAD_BYTES` (65,536,
-  `lib.rs:212`) is refused **before decode**;
-- a stored row whose encoding exceeds `MAX_ACCUMULATING_ROW_BYTES` (1,048,576,
-  `lib.rs:232`) is refused **before decode**;
-- an NFT `BatchMint` naming more than `MAX_NFT_BATCH_MINT_REQUESTS` tokens is
-  refused before the owner-index rebuild loop.
+**2. Dependency ordering.** None. One field for both DocClass and NFT deliberately, because a partial activation leaves the cheapest vector open. The limits are binary constants, not `ChainParams` fields, because the genesis digest covers only `Option<u64>` gates.
 
-Below the gate the release ceiling (`MAX_BLOCK_WRITE_SET_BYTES`, `1<<28`) bounds
-what a block may *commit* and nothing about what one refused transaction may
-*allocate*. Measured: one `AddKey` peaks at 4.00x the row size, churns 5.00x,
-and grows the row by 1,899,873 bytes for one `min_fee`.
+**3. Persistent data impact.** No row changes shape. **There is a state-shape consequence on existing rows**: a row already past the limit when the gate opens — which can only exist by having been written below the gate — becomes UNMODIFIABLE rather than unreadable. Mutating operations refuse it with a failed receipt; reads are untouched. A row may also overshoot by at most one payload, because the check refuses the NEXT operation rather than the one that crossed. **No test exercises a pre-existing over-limit row**; `allocation_bound_gate.rs` seeds its own.
 
-The limits are binary constants, not `ChainParams` fields, deliberately — the
-genesis digest covers only `Option<u64>` gates.
+**4. Rollback in effect.** **A and B**, plus an unusual obligation: a row made unmodifiable can only be freed by a superseding gate that raises the limit or adds a shrink path. Nothing in this tree has one.
 
-**Data migration required.** No rewriting, but there is a **state-shape
-consequence on existing rows**, documented at `crates/state/src/lib.rs:227-231`:
-"A row already past this limit when the gate opens — there is no way to have one
-except by writing it below the gate — becomes **unmodifiable** rather than
-unreadable: the mutating operations refuse it with a failed receipt, reads are
-untouched. A row may also overshoot by at most one payload, because the check
-refuses the NEXT operation rather than the one that crossed."
+**5. Monitoring signal.** M4 on DocClass, NFT and Agreement transactions. The working signal is an oversized payload receipt-failing; the misbehaving signal is a legitimate payload above 64 KiB doing the same, and **the two are indistinguishable in the receipt** — which is why this gate's risk is concentrated in whether any real traffic is above the limit. That is not answerable from this repository. Node memory (RSS) across the height is the secondary signal: it should stop spiking.
 
-**This specific case is the one thing in the seventeen with no dedicated test.**
-`allocation_bound_gate.rs` seeds rows itself rather than exercising a
-pre-existing over-limit row. Stated rather than implied.
-
-**Mixed-version effect.** A previously-admitted oversized transaction becomes a
-failed one. The blast radius is identical on the DocClass and NFT sides, which
-is why it is one field.
-
-**Rollback behaviour.** Per §0.4.
-
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
-
-**Dependencies.** None. Read by `DocClassGates::from_params`
-(`docclass_executor.rs:112`) and `NftGates` (`nft_executor.rs:150,173`) from the
-same field, precisely so the two subsystems cannot be split.
-
-**Tests.** `allocation_bound_gate.rs:369 the_allocation_bound_gate_refuses_oversized_input_before_it_is_built`
-— one `#[test]` by design, because a counting global allocator cannot share a
-process. It covers the closed-vs-open pairs and asserts the open side refuses
-having allocated at least 4x less and leaves the row byte-for-byte unchanged.
-Measurement counterpart: `release_ceiling_allocation.rs`.
-
-**Risk if activated.** Legitimate payloads above 64 KiB and any already-oversized
-rows start receipt-failing; a handful of rows become permanently unmodifiable,
-and nothing tests that path.
-
-**Risk if deferred.** One `min_fee` transaction peaks above two gibibytes on its
-way to being refused, and the row grows toward that in a few hundred blocks.
-The clearest node-crash vector of the seventeen.
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
 
 ---
 
-### Gate 14 — `tax_proof_lifecycle_enabled_from_height`
-*accessor `TaxExecutor::proof_lifecycle_activation`, `crates/state/src/tax_executor.rs:147`*
+### R14 — `tax_proof_lifecycle_enabled_from_height`
+*accessor `TaxExecutor::proof_lifecycle_activation, crates/state/src/tax_executor.rs:171`* — cost shape **ROW CONTENT/EXISTENCE**
 
-> **See §0.7.** This is the gate whose field declaration was missing
-> `#[serde(default)]` and whose documentation was spliced into gate 13's
-> comment. Both were repaired while assembling this packet; the height decision
-> below is unaffected, but anyone who read this field's documentation before
-> that repair read gate 13's rule, not this one.
+**1. Affected behaviour.** Rows OV-1, OV-2, OV-3. At and above the gate `IssueClaim` refuses a proof id already present; `RevokeClaim` resolves its payload through the subject index and revokes EVERY proof recorded for that subject; each deletion removes the matching index entry. Below the gate deletion removes the proof row and leaves the subject-index entry, so the index grows without bound, and any active issuer can overwrite any proof.
 
-**Behaviour enabled.** Three defects, one height (OV-1/2/3), per
-`genesis/src/lib.rs:983` and the accessor at `tax_executor.rs:127-146`:
-`IssueClaim` is a blind overwrite — the proof id is sender-chosen, nothing checks
-it is taken, so the replaced proof's subject-index entry points at a row whose
-subject is now somebody else's; `RevokeClaim` reads its 32-byte payload as a
-**proof id** while calling it a subject nullifier; and deleting a proof leaves
-the `TAX_SUBJECT_INDEX` entry behind. Above the gate: a duplicate proof id is
-refused, `RevokeClaim` resolves through the subject index and revokes every
-proof for that subject, and deletions remove the matching index entry.
+**2. Dependency ordering.** None externally. The three halves are welded to one height: index cleanup without the keying fix cleans the wrong subject, and the keying fix without index cleanup makes the dangling entries accumulate faster.
 
-**Data migration required.** No backfill. Dangling `TAX_SUBJECT_INDEX` entries
-and cross-subject index entries written below the gate persist
-(`tax_routing.rs:1425-1434`: "the victim's index entry survives under either
-gate"). Activation stops new ones; it does not repair old ones.
+**3. Persistent data impact.** **Both.** Index entries are now deleted where before they accumulated; one revocation now deletes multiple proof rows where before it deleted one. Dangling index entries written below the gate are not collected by activation — they stay.
 
-**Mixed-version effect.** Both sides driven over the same fixture; the index
-contents differ (`vec![]` vs `vec![[1;32]]`).
+**4. Rollback in effect.** **A, B and C.** The dangling pre-gate index entries are permanent unless a superseding gate adds a sweep. Proof rows deleted above the gate are gone.
 
-**Rollback behaviour.** Per §0.4.
+**5. Monitoring signal.** M6: `tax_listClaimTypes`, `tax_getPolicy` and the proof read paths should stop returning entries whose proof row is absent. **The working signal is the subject index ceasing to grow faster than the proof store.** No metric measures either; this is a read-side comparison an operator must run deliberately. Misbehaving looks like a `RevokeClaim` deleting more proofs than intended — visible in M4 only as a success.
 
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
-
-**Dependencies.** None.
-
-**Tests.** `tax_routing.rs:1354`, `:1440`. Closed-side pins named at `:1349-1350`:
-`deleting_a_proof_leaves_the_subject_index_entry_behind`,
-`revoke_claim_keys_the_proof_store_by_nullifier`.
-
-**Risk if activated.** `RevokeClaim` **changes meaning**: a caller that passed a
-proof id now gets a subject lookup. Existing revocation tooling would silently
-target something different rather than error. Of the seventeen, this is the one
-most likely to break a caller *quietly*.
-
-**Risk if deferred.** Any active issuer can overwrite any proof, and the subject
-index grows without bound pointing at rows that are gone.
+**6. Recommended wave.** Wave 2b. **Proposed height:** — owner decision —
 
 ---
 
-### Gate 15 — `nft_token_authority_enabled_from_height`
-*accessor `NftExecutor::token_authority_activation`, `crates/state/src/nft_executor.rs:235`*
+### R15 — `nft_token_authority_enabled_from_height`
+*accessor `NftExecutor::token_authority_activation, crates/state/src/nft_executor.rs:282`* — cost shape **REFUSAL ONLY**
 
-**Behaviour enabled.** Three defects, one height (OV-12/13/14), per
-`genesis/src/lib.rs:1020` and the accessor at `nft_executor.rs:215-234`:
-`UpdateMetadata` accepts the token's **creator**, which never changes, so the
-minter rewrites the metadata of a token it sold for the life of the token;
-`locked` is read by transfer and burn only, so a locked token is still
-approvable and rewritable; and `Approve` never reads the collection, so an
-approval is recorded on a token in a collection that forbids transfers. Above
-the gate: metadata rewrite requires the current owner, both `Approve` and
-`UpdateMetadata` refuse a locked token, and `Approve` refuses a
-non-transferable collection. Call sites `nft_executor.rs:906`, `:1011`.
+**1. Affected behaviour.** Rows OV-12, OV-13, OV-14. At and above the gate `UpdateMetadata` requires the current OWNER rather than the immutable creator; both `Approve` and `UpdateMetadata` refuse a locked token; and `Approve` refuses a non-transferable collection. Below it a minter can rewrite the metadata of any token it ever sold, indefinitely.
 
-**Data migration required.** No. Existing approvals recorded on soulbound tokens
-below the gate are not swept.
+**2. Dependency ordering.** None. Subset activation is rejected in the source: a lock check on approval is worth nothing while the collection that forbids transfers is never read.
 
-**Mixed-version effect.** Both sides driven over identical fixtures in each test.
+**3. Persistent data impact.** **None.** It changes which writes are allowed, not what a permitted write records.
 
-**Rollback behaviour.** Per §0.4.
+**4. Rollback in effect.** **A and B.**
 
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
+**5. Monitoring signal.** M4 on NFT transactions, plus M6 (`nft_getToken`, `nft_ownerOf`) to confirm a token's metadata stops changing under a creator who no longer owns it. The misbehaving signal is a legitimate owner's `UpdateMetadata` failing — indistinguishable from the working signal except by knowing who sent it. No counter.
 
-**Dependencies.** None.
-
-**Tests.** `nft_routing.rs:3282`, `:3354`, `:3436`. Closed-side pins: `:2205`,
-`:2257`, `:2682 approve_never_reads_the_collection`.
-
-**Risk if activated.** Minters lose a rewrite capability they have been
-exercising; approvals on locked or soulbound tokens stop being creatable.
-
-**Risk if deferred.** A minter can rewrite the metadata of any token it ever
-sold, indefinitely.
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
 
 ---
 
-### Gate 16 — `agreement_signature_integrity_enabled_from_height`
-*accessor `AgreementExecutor::signature_integrity_activation`, `crates/state/src/agreement_executor.rs:207`*
+### R16 — `agreement_signature_integrity_enabled_from_height`
+*accessor `AgreementExecutor::signature_integrity_activation, crates/state/src/agreement_executor.rs:237`* — cost shape **ROW CONTENT**
 
-**Behaviour enabled.** Two halves of one invariant (OV-28/29), per
-`genesis/src/lib.rs:1054` and the accessor at `agreement_executor.rs:192-206`: a
-signature naming a party the agreement does not bind is stored anyway and
-rewrites the agreement row while flipping no flag; and `RevokeSignature` deletes
-the signature row and leaves the party's `signed` flag set, so an agreement
-stays `Executed` with the signature that executed it gone. Above the gate a
-signature must name a bound party, and revoking one clears that party's flag and
-walks an `Executed` agreement back to `PendingSignatures`.
+**1. Affected behaviour.** Rows OV-28, OV-29. At and above the gate a signature must name a bound party, and revoking one clears that party's `signed` flag and returns an agreement that was `Executed` only because it was fully signed to `PendingSignatures`. Below it `Executed` is not evidence of signature, and termination and cancellation are reversible by anyone who can add a signature row.
 
-**Data migration required.** No. Agreements already stranded in `Executed` with
-missing signatures are **not** repaired — the gate changes future revocations
-only.
+**2. Dependency ordering.** None. The halves cannot be split: flag-clearing without the party check can clear a flag some other signature set.
 
-**Mixed-version effect.** Both sides driven over identical fixtures.
+**3. Persistent data impact.** **Both.** The reject half stops an unbound-party signature being stored and stops it rewriting the agreement row while flipping no flag. The write half newly mutates the party's `signed` flag and the agreement's status field. Agreements that reached `Executed` below the gate keep that status; nothing recomputes them.
 
-**Rollback behaviour.** Per §0.4.
+**4. Rollback in effect.** **B and C.** Agreements that are `Executed` on the strength of an unbound signature stay `Executed` — a superseding gate could add a re-evaluation path; none exists.
 
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
+**5. Monitoring signal.** M6: `agreement_getExecutorLinksByAgreement` and the agreement read paths — a revocation should now move status back to `PendingSignatures`. **The working signal is a status transition that previously never happened.** Misbehaving looks like a legitimate signature being refused as unbound, visible only through M4.
 
-**Dependencies.** None. `AgreementGates::from_params`
-(`agreement_executor.rs:181`) reads signature_integrity and block_timestamp
-independently.
-
-**Tests.** `agreement_routing.rs:2735`, `:2824`.
-
-**Risk if activated.** An agreement's status can now move **backwards**
-(`Executed` → `PendingSignatures`). Any downstream consumer treating `Executed`
-as terminal will not expect that.
-
-**Risk if deferred.** `Executed` is not evidence of signature: the signature that
-executed an agreement can be deleted and the status stays.
+**6. Recommended wave.** Wave 2b. **Proposed height:** — owner decision —
 
 ---
 
-### Gate 17 — `healthcare_state_precondition_enabled_from_height`
-*accessor `HealthcareExecutor::state_precondition_activation`, `crates/state/src/healthcare_executor.rs:239`*
+### R17 — `healthcare_state_precondition_enabled_from_height`
+*accessor `HealthcareExecutor::state_precondition_activation, crates/state/src/healthcare_executor.rs:245`* — cost shape **ROW EXISTENCE**
 
-**Behaviour enabled.** Two write arms that never read the row (OV-17/20), per
-`genesis/src/lib.rs:1086` and the accessor at `healthcare_executor.rs:227-238`:
-`RenewMembership` sets `status = Active` whatever the status was — reviving a
-membership that was suspended, terminated or cancelled, and **bypassing
-`ReinstateMembership`, which is the operation with a status guard on it**; and
-`RemoveNetworkAffiliation`/`RemoveDependent` write the row and the index whether
-or not the thing being removed was ever there, so removing an affiliation a
-provider never had **creates an empty index row** and bumps `updated_at` on a
-row nothing changed. Above the gate renewal refuses
-`Cancelled`/`Terminated`/`Expired`, and both removals become no-ops. Call sites
-`healthcare_view.rs:241`, `:427`.
+**1. Affected behaviour.** Rows OV-17, OV-20. At and above the gate `RenewMembership` refuses a membership that is `Cancelled`, `Terminated` or `Expired`, and `RemoveNetworkAffiliation` / `RemoveDependent` are no-ops when there is nothing to remove. Below the gate suspension is cosmetic on the withdraw side.
 
-**Data migration required.** No, but the empty index rows written below the gate
-remain.
+**2. Dependency ordering.** None. One height because a write arm must read the row before it decides.
 
-**Mixed-version effect.** One side writes a row and reports success, the other
-writes nothing — `healthcare_routing.rs:3865` states it as exactly that.
+**3. Persistent data impact.** **Both.** The renewal half is accept/reject. The removal half stops CREATING an empty index row and stops bumping `updated_at` on a row nothing changed. Empty index rows written below the gate are not collected.
 
-**Rollback behaviour.** Per §0.4.
+**4. Rollback in effect.** **A, B and C.** The empty index rows are permanent.
 
-**Proposed height.** — owner decision — **UTC estimate.** convert at 57,400 blocks/day (§0.9); the owner sets the height first
+**5. Monitoring signal.** M6 (`healthcare_getInstitutionalProvider`, `healthcare_getActiveInstitutionalProviders`): the working signal is that a removal of something absent stops producing a row. The misbehaving signal is a legitimate renewal of a membership the chain believes expired — which depends on gate 11, because below `subsystem_block_timestamp` every expiry is evaluated at time zero. **If this gate opens before gate 11, expiry is still being judged at the epoch.** Owner should not sequence this one earlier than gate 11.
 
-**Dependencies.** None.
-
-**Tests.** `healthcare_routing.rs:4542`, `:4647 an_active_membership_renews_under_either_gate`
-(the must-not-break case), `:4707`. Closed-side pins: `:3088`, `:1723`.
-
-**Risk if activated.** Renewal on a terminated membership starts failing, so any
-flow that used renewal as an undo of termination must move to
-`ReinstateMembership`.
-
-**Risk if deferred.** Termination and cancellation are reversible by anyone who
-can renew, and the removal arms write garbage index rows on every no-op.
+**6. Recommended wave.** Wave 2b. **Proposed height:** — owner decision —
 
 ---
 
-## Part 2 — What the owner is actually being asked to decide
+### R18 — `subsystem_proof_presence_enabled_from_height`
+*accessor `subsystem_proof_presence_activation, crates/state/src/lib.rs:271`* — cost shape **REFUSAL ONLY**
 
-Restating, so the seventeen sections above are not mistaken for seventeen equal
-decisions:
+**1. Affected behaviour.** Rows AU-6, AU-12, AU-17, AU-20, AU-26, AU-29. Below the gate the `VerifyProof` arms deduct, credit, increment and return SUCCESS without reading the payload at all. At and above it the payload must be the 32 bytes of a proof id and that proof must be present in the subsystem's proof family, or the operation is a failed receipt. **The source is emphatic that this does not make anything verify a proof** — presence is not verification, and those audit rows stay open.
 
-1. **One binary decision comes first.** Mainnet runs an older binary (§0.1a).
-   None of the seventeen exists there. The rollout is binary-then-genesis, or
-   the genesis edit is inert.
+**2. Dependency ordering.** None — the source says "there is nothing to sequence". One field for six subsystems, on the same argument as gate 11.
 
-2. **One gate needs a data decision, not a height.** Gate 2 (docclass stake
-   escrow): pre-gate stakes were burned, the escrow holds nothing for them, and
-   post-activation `DeactivateIssuer` will try to withdraw from it. Four options
-   are laid out in that section; the repository contains no answer.
+**3. Persistent data impact.** **None.** A success receipt becomes a failed one; the subsystem's proof family is read, never written.
 
-3. **Three gates have a consequence beyond "the rule changes".**
-   - Gate 12 can change block **admissibility** by write-set volume.
-   - Gate 13 **freezes** any already-oversized accumulating row, and that path
-     has no test.
-   - Gate 14 **changes what an existing RPC argument means**, silently.
+**4. Rollback in effect.** **A and B.**
 
-4. **Two gates are the big behavioural ones.** Gate 11 (eight subsystems start
-   seeing real time) and gate 5 (seven healthcare authorization defects at
-   once). Both are the kind that break integrations rather than attackers.
+**5. Monitoring signal.** M4 on `VerifyProof` transactions across the six subsystems. **The working signal is that `VerifyProof` starts failing at all** — below the gate it cannot fail, so any failure above it is the gate working. The misbehaving signal is a `VerifyProof` failing for a proof that genuinely exists, which would be a proof-family read fault. No counter.
 
-5. **The ordering is free.** No gate depends on any other (§0.5). The seventeen
-   can be staged in any grouping the owner prefers — including one at a time,
-   which the source explicitly argues for.
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
 
-6. **Every height must be above the head at rollout, and is frozen once passed**
-   (§0.2, §0.3). The safe form of the decision is "head at rollout + N", not an
-   absolute number chosen today.
+---
 
-7. **Use 57,400 blocks/day, not 28,800** (§0.9). `block_time_ms: 3000` is a
-   proposer slot, halved by two validators in round-robin; the measured interval
-   is 1.502 s/block, confirming the 1,506 ms the account-root work already uses.
-   `docs/operations/production-checklist.md` converts with the nominal 3 s and is
-   therefore roughly 2x too long wherever it gives a date. A UTC schedule built
-   on that conversion is a coordinated restart that misses.
+### R19 — `nft_update_path_parity_enabled_from_height`
+*accessor `NftExecutor::update_path_parity_activation, crates/state/src/nft_executor.rs:314`* — cost shape **VALUE MOVEMENT**
 
-## Part 2b — Three gates arrived after this packet was written
+**1. Affected behaviour.** Row OV-10 and the first half of RY-2. At and above the gate `UpdateMetadata` and `BatchMint` enforce the metadata size limit and the per-byte storage fee, and `UpdateCollectionConfig` refuses a recipient for a royalty of zero. **The source is explicit that this does not make a royalty payable** — RY-1 is untouched.
 
-The packet covers seventeen. Twenty now exist: a later pass added the proof
-presence, index-key bound, NFT update-path parity and no-op receipt gates, and
-folded one constant into the protocol digest.
+**2. Dependency ordering.** None — the source says neither half can abort a block, so there is nothing to sequence. Subset activation is rejected: metadata-only and royalty-only each leave an asymmetry.
 
-They are NOT scheduled below, and the omission is deliberate rather than an
-oversight. Each needs the same treatment Part 1 gives the seventeen — behaviour
-enabled, migration, mixed-version effect, rollback, risk if activated and risk
-if deferred — and writing a wave for a gate that has not had that treatment is
-exactly the shortcut this packet exists to prevent. By cost shape they belong in
-Wave 1, which is where the next pass should propose them once each has its
-section.
+**3. Persistent data impact.** Mostly refusal, **but the metadata half newly CHARGES `storage_fee_per_byte` (100) on two arms**, so balances move differently on transactions that still succeed. The relevant `ChainParams` values are set in the release `genesis.json`: `max_metadata_bytes: 16384`, `storage_fee_per_byte: 100`.
 
-## Part 3 — The recommendation: three waves, one deferral
+**4. Rollback in effect.** **A, B and D.** Fees charged are fees charged; a superseding gate stops future charging and D is the only way to return anything.
 
-Part 1 gives the owner seventeen independent decisions. Part 2 says what is
-being decided. This part is the answer a reviewer asked for: **the fewest waves
+**5. Monitoring signal.** **M7 plus per-sender balances**: the working signal is NFT metadata updates becoming more expensive by exactly `100 × bytes`. Misbehaving looks like a legitimate metadata update failing on insufficient balance where it previously succeeded free — visible through M4. This gate is in its own wave with gate 26 precisely because fee accounting surprises must not be attributed to a row-shape change.
+
+**6. Recommended wave.** Wave 2c. **Proposed height:** — owner decision —
+
+---
+
+### R20 — `subsystem_no_op_receipt_enabled_from_height`
+*accessor `subsystem_no_op_receipt_activation, crates/state/src/lib.rs:228`* — cost shape **REFUSAL ONLY**
+
+**1. Affected behaviour.** Rows OV-6, OV-25, OV-30. Legal `ConsolidateCase` on an already-consolidated pair, DocClass `UpdateCredential` (which writes nothing at all — no `v_put_*` of any kind and no event), and Agreement `AddParty`/`RemoveParty`. At and above the gate each returns a failed receipt instead of a success. **A failed receipt, not an implementation**: it does not make `AddParty` add a party or `UpdateCredential` update a credential.
+
+**2. Dependency ordering.** None. One height for three subsystems on gate 11's argument rather than the per-subsystem one.
+
+**3. Persistent data impact.** **None.** A success receipt becomes a failed one, and no block can abort.
+
+**4. Rollback in effect.** **A and B.** The forward fix for the underlying defect is an implementation, not a gate.
+
+**5. Monitoring signal.** M4 on the three subsystems. **The working signal is an operation that always reported success starting to report failure** — which is exactly what an integrator's tooling will notice first, and is the most likely source of a false alarm in Wave 1. M1 confirms the gate fired, which is how an operator distinguishes this from a regression.
+
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
+
+---
+
+### R21 — `docclass_issuer_authority_enabled_from_height`
+*accessor `DocClassExecutor::issuer_authority_activation, crates/state/src/docclass_executor.rs:317`* — cost shape **ROW CONTENT**
+
+**1. Affected behaviour.** Row AU-34. Below the gate `UpdateIssuer` deserializes a whole `DocClassIssuer` from the sender's payload and writes it over the registry row, so an issuer grants itself any subcode, any jurisdiction, and **a SUSPENDED issuer restores itself to `Active` with one transaction**. At and above it `UpdateIssuer` keeps the recorded values of the five fields that decide what an issuer may do — `status`, `authorized_subcodes`, `jurisdictions`, `issuer_type`, `registered_at` — and writes only the descriptive ones the registry does not consult. **No legitimate authority-change path is added**: above the gate an issuer's authority is fixed at registration and can be ended by the admin's `DeactivateIssuer` and in no other way, because a one-way narrow with no granting counterpart would be a trapdoor.
+
+**2. Dependency ordering.** None at load. The source notes the stake half of the same wholesale write is closed under `docclass_stake_escrow_enabled_from_height`, which is deferred (Part 3), so this gate closes the authority half alone.
+
+**3. Persistent data impact.** The same write still happens to the DocClass issuer registry row; five fields are now preserved from the stored row instead of taken from the payload. Registry rows already self-elevated below the gate keep their elevated values — **activation does not demote anyone**.
+
+**4. Rollback in effect.** **B and C.** An issuer that granted itself subcodes below the gate keeps them; only `DeactivateIssuer` ends it. A superseding gate would be needed to add a legitimate authority-change path, and the source argues deliberately against one.
+
+**5. Monitoring signal.** M6: `docclass_getIssuer`, `docclass_getIssuers`, `docclass_canIssue`. **The working signal is a suspended issuer staying suspended across an `UpdateIssuer`.** The misbehaving signal is an issuer unable to update its own name or keys, which is a failed receipt through M4. **Before activating, the owner should enumerate current issuers via `docclass_getIssuers` and check whether any holds authority it granted itself** — activation freezes whatever is there.
+
+**6. Recommended wave.** Wave 2b. **Proposed height:** — owner decision —
+
+---
+
+### R22 — `docclass_revocation_record_enabled_from_height`
+*accessor `DocClassExecutor::revocation_record_activation, crates/state/src/docclass_executor.rs:343`* — cost shape **KEY SPACE**
+
+**1. Affected behaviour.** **Sourced from the accessor doc, not from `genesis/src/lib.rs` — see §0.11(a); the field there carries another gate's text.** Below the gate a revocation record is keyed by the legacy 40-byte `credential_id || revoked_at_height`, so a block that writes two records for one credential silently replaces the earlier with the later, and `Revoked`/`Superseded` are not terminal. At and above it the key is widened to 44 bytes by including the transaction, so two records in one block leave two rows, and `Revoked`/`Superseded` become terminal — suspend refuses them.
+
+**2. Dependency ordering.** None.
+
+**3. Persistent data impact.** **A new key width.** 44-byte keys are new keys: records written before activation keep their 40-byte keys and their bytes, and both readers accept either width and order by the key. Row count rises where a block previously collapsed two records to one. Revocation history lost below the gate is not recoverable.
+
+**4. Rollback in effect.** **C, permanently** — two key widths coexist forever. B can widen again.
+
+**5. Monitoring signal.** M6 on the DocClass revocation read paths: the working signal is two revocation records surviving a block that would previously have kept one, and a suspend of an already-`Revoked` credential starting to fail. Failures surface through M4 only. No counter, no row-count metric for this family.
+
+**6. Recommended wave.** Wave 2a. **Proposed height:** — owner decision —
+
+---
+
+### R23 — `docclass_credential_schema_enabled_from_height`
+*accessor `DocClassExecutor::credential_schema_activation, crates/state/src/docclass_executor.rs:369`* — cost shape **REFUSAL ONLY**
+
+**1. Affected behaviour.** Rows OV-27 and D-19b, welded to one height. Below the gate `IssueCredential` selects its family by TRIAL DECODE — it tries `AcademicCredential`, falls through to `EligibilityAttestation`, discards the first error, and never consults the `DocSubcode` the envelope declares — and the schema validator has arms for subcodes 810/811/812 and returns `Valid` for everything else, so eligibility attestations are never schema-checked on any path at any height. At and above it the envelope's subcode selects the family, the credential's own `subcode` field must agree with the envelope's, and 813/814/815 plus the eligibility family get the same core-field bounds checks.
+
+**2. Dependency ordering.** None between gates. One non-gate interaction: the validator's own `activation_height` of 385,000 is untouched — below this gate the three covered subcodes are validated at that height exactly as before. Activating either half alone would leave the subsystem inconsistent in a way it is not today.
+
+**3. Persistent data impact.** **None.** It changes which `IssueCredential` transactions are refused and which decoder shape is used.
+
+**4. Rollback in effect.** **A and B.**
+
+**5. Monitoring signal.** M4 on `IssueCredential`. **The working signal is a credential whose declared subcode disagrees with its body starting to fail.** The misbehaving signal is a credential that decoded fine by trial-and-error now failing because its envelope subcode was always wrong and nobody noticed — which is the most likely real-traffic surprise in Wave 1. M6 (`docclass_getCredential`, `docclass_isCredentialValid`) confirms existing credentials still read; the gate does not re-validate them.
+
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
+
+---
+
+### R24 — `docclass_identity_binding_enabled_from_height`
+*accessor `DocClassExecutor::identity_binding_activation, crates/state/src/docclass_executor.rs:394`* — cost shape **ROW CONTENT**
+
+**1. Affected behaviour.** **Sourced from the accessor doc — see §0.11(a).** Row AU-35, in part. Below the gate `create_identity_root` checks only that `controller == sender` and then stores the deserialized payload struct verbatim, so any funded account anchors a root claiming any `subject_commitment`, in any `status`. At and above it a commitment another controller already anchored is refused, and `status` is written as `Active` by the executor rather than taken from the payload. **Nothing binds the commitment to a PERSON** — this is squatting resistance, not authentication, and row AU-35 stays open.
+
+**2. Dependency ordering.** **A soft ordering the source names explicitly**: `created_at`/`updated_at` are left from the payload specifically so this gate's repair does not depend silently on `subsystem_block_timestamp_enabled_from_height`. That is an argument for opening gate 11 first, not a load-time constraint.
+
+**3. Persistent data impact.** Both a written field (`status` forced to `Active` on the identity-root row) and a read against existing rows (duplicate `subject_commitment` refused). `created_at`/`updated_at` are deliberately still taken from the payload, because the executor's clock is zero until gate 11 opens. Identity roots anchored below the gate keep whatever `status` their payload claimed.
+
+**4. Rollback in effect.** **B and C.** Squatted commitments anchored below the gate keep their rows and their claimed status; the gate only stops new ones. No sweep exists.
+
+**5. Monitoring signal.** M6: `docclass_getIdentity`, `docclass_getIdentityByController`. **The working signal is a second `CreateIdentityRoot` for an already-anchored commitment failing.** Before activating, the owner should enumerate existing identity roots and accept that whatever is anchored is frozen as anchored. Failures surface through M4.
+
+**6. Recommended wave.** Wave 2b. **Proposed height:** — owner decision —
+
+---
+
+### R25 — `docclass_issuer_stake_requirement_enabled_from_height`
+*accessor `DocClassExecutor::issuer_stake_requirement_activation, crates/state/src/docclass_executor.rs:417`* — cost shape **REFUSAL ONLY**
+
+**1. Affected behaviour.** Row AU-37, in part. Below the gate `DocClassParams::require_issuer_stake` is declared, defaulted to `true`, reported by `docclass_getConfig`, and read by no execution path: `register_issuer` enforces `min_issuer_stake` whenever it is non-zero, whatever the flag says. At and above it the minimum-stake check runs only when `require_issuer_stake` is true, which is what the field says. **Note the direction: this gate can make registration EASIER**, if the deployed config has the flag false and a non-zero minimum.
+
+**2. Dependency ordering.** None between gates. Two AU-37 fields are deliberately left open: `max_credential_validity` (documented "in seconds" while the chain's `Timestamp` is milliseconds — a wrong guess would be a consensus rule refusing lawful credentials, and it needs the unit settled first, which is a specification decision) and `initial_issuers` (genesis STATE rather than a rule an executor can apply — honouring it means writing issuer rows into the genesis state, a path this tree does not have).
+
+**3. Persistent data impact.** **None.** It changes whether `register_issuer` refuses an under-staked registration.
+
+**4. Rollback in effect.** **A and B.**
+
+**5. Monitoring signal.** **Read `docclass_getConfig` BEFORE activating**: it reports `require_issuer_stake` and `min_issuer_stake`, and those two values determine whether this gate tightens or loosens registration. M4 on `RegisterIssuer` afterwards. This is the one gate in Wave 1 whose direction of effect depends on deployed configuration rather than on code.
+
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
+
+---
+
+### R26 — `nft_charged_receipt_enabled_from_height`
+*accessor `NftExecutor::charged_receipt_activation, crates/state/src/nft_executor.rs:337`* — cost shape **VALUE MOVEMENT**
+
+**1. Affected behaviour.** Row OV-9. `NftExecutor::execute_ungated` calls `deduct_fee` before the dispatch match, so a refused NFT transaction has its fee spent and its nonce advanced while the receipt says `fee_paid: 0` — the balance moved, the proposer was credited, and the receipt denies it. At and above the gate a failed NFT receipt carries the fee actually taken; it is still `0` for insufficient balance, because there the receipt's zero is true.
+
+**2. Dependency ordering.** None. Explicitly NOT shared with `nft_receipt_failure_enabled_from_height`: that gate decides whether a block EXISTS, this one changes a number in a receipt of a block that exists either way.
+
+**3. Persistent data impact.** **Changes a written value — `fee_paid` in receipt rows — and the receipts root is in the header, so this is a consensus change.** No new rows, no new family; state rows are unchanged. Receipts written below the gate keep their false zeros.
+
+**4. Rollback in effect.** **B only.** The receipts are in the chain; nothing rewrites a receipts root. D is not applicable — the fees were correctly taken, only mis-reported.
+
+**5. Monitoring signal.** M4 on refused NFT transactions: **the working signal is `fee_paid` on a failed NFT receipt becoming non-zero.** That is a one-call check and is the cleanest confirmation of any gate in the 28. Misbehaving would be a mismatch between `fee_paid` and the sender's actual balance delta — which requires comparing `sum_getBalance` across the block and has no instrument. Paired with gate 19 in Wave 2c because both move fee accounting.
+
+**6. Recommended wave.** Wave 2c. **Proposed height:** — owner decision —
+
+---
+
+### R27 — `nft_index_symmetry_enabled_from_height`
+*accessor `NftExecutor::index_symmetry_activation, crates/state/src/nft_executor.rs:360`* — cost shape **ROW EXISTENCE**
+
+**1. Affected behaviour.** **Sourced from the accessor doc — see §0.11(a).** Row OV-15. Below the gate emptying an owner's token list DELETES the row while emptying a collection's token list WRITES an empty list, so two families that hold the same kind of value disagree about what "no entries" looks like, a node reasoning about state by row presence gets a different answer from each, and the empty rows accumulate one per collection ever emptied and are never collected. At and above it both delete.
+
+**2. Dependency ordering.** None; its own height rather than the receipt gates'.
+
+**3. Persistent data impact.** **Changes which ROWS exist**, so it moves the state root for a transaction whose receipt is unchanged. The source says this is the only one of the NFT gates that does. Empty collection rows written below the gate stay.
+
+**4. Rollback in effect.** **B and C.** The accumulated empty rows are permanent unless a superseding gate adds a sweep.
+
+**5. Monitoring signal.** M6: `nft_getTokensInCollection` on a collection emptied after the height should behave the same as `nft_getTokensByOwner` on an emptied owner. **This gate is the one whose misbehaviour is most likely to be silent** — a pruner or archive comparison that relied on the empty row being present would change answers without any transaction failing. If any such consumer exists, it is outside this repository (§0.12).
+
+**6. Recommended wave.** Wave 2b. **Proposed height:** — owner decision —
+
+---
+
+### R28 — `nft_collection_id_nonce_enabled_from_height`
+*accessor `NftExecutor::collection_id_nonce_activation, crates/state/src/nft_executor.rs:383`* — cost shape **KEY SPACE**
+
+**1. Affected behaviour.** Row CI-1. Below the gate `CollectionId::new(sender, name, nonce)` takes the BLOCK TIMESTAMP as its whole nonce, so two blocks sharing a timestamp yield one sender the same id for the same name and the second creation is refused as `Collection already exists` — naming a collection the sender does not have. At and above it the sender's account nonce joins the preimage, already incremented by `deduct_fee` before the creation arm runs.
+
+**2. Dependency ordering.** None. Note it depends on the block timestamp today, and gate 11 changes what that timestamp is — below gate 11 the nonce is literally zero for the eight gated subsystems. NFT is not among them, so there is no coupling, but the owner should confirm that before sequencing this one before gate 11.
+
+**3. Persistent data impact.** **This changes collection IDs.** Every id minted at or above the height is a different 32 bytes from what the same transaction would have produced below it — a new address space for collections created after the height. **Existing collections are untouched: nothing recomputes an id.**
+
+**4. Rollback in effect.** **C, permanently.** Two id derivations coexist forever, and any off-chain tool that recomputes a `CollectionId` must know the height to know which formula applies. **That is the most likely integration break in the whole set**, and it is invisible on-chain.
+
+**5. Monitoring signal.** M6: `nft_getCollection` for a collection created just after the height, compared against an off-chain recomputation. **Before activating, the owner should establish whether any tooling recomputes collection ids** — the answer is not in this repository (§0.12). The working signal is two collections with the same name from the same sender in adjacent blocks both succeeding.
+
+**6. Recommended wave.** Wave 2a. **Proposed height:** — owner decision —
+
+---
+
+## Part 1B — The 18 PREDATING gates
+
+`GATES_PREDATING_ACTIVATION_RECORDING` (`crates/genesis/src/lib.rs:2783`) is a **closed** list: it names the gates that shipped in binaries which produced existing blocks, which is a historical fact and cannot grow. A gate on it **may legally sit at or below the head**; every other gate may not (§0.4).
+
+Eight of the eighteen have a passed height. Two are confirmed dormant over RPC. **Eight are neither RPC-visible nor named in the production checklist's genesis**, so their deployed value cannot be established from outside a node today. That is a consequence of `chain_getChainParams` serialising only six of the forty-nine, and it is exactly what `chain_getActivationStatus` exists to fix.
+
+For the eight that have passed, fields 1-3 are history rather than a decision, and field 6 is "nothing to schedule". They are stated anyway, because an owner reading a 49-gate table needs to know which rows are already spent.
+
+---
+
+### P1 — `v2_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:342`* — deployed value: 5,200,000 — **PASSED** (RPC-confirmed)
+
+**1. Affected behaviour.** SNIP V2 storage transactions (`NodeRegistryV2`, `StorageMetadataV2`) are valid. Below it every V2 transaction receipts as `TxStatus::Failed(40)` without consuming the sender's fee.
+
+**2. Dependency ordering.** None.
+
+**3. Persistent data impact.** V2-shaped storage metadata has been written since height 5,200,000.
+
+**4. Rollback in effect.** **Frozen. Nothing to roll back and nothing to schedule.** The height is at or below the head, so `activation_changes` classifies any change to it as `AlreadyActive` and the node refuses to start (§0.5). The only levers are **B** — a superseding gate at a later height — and **E**.
+
+**5. Monitoring signal.** M1 `gates[].active` once deployed; today `chain_getChainParams.v2_enabled_from_height` is the only external confirmation, and it reads `5200000`. Operationally settled.
+
+**6. Recommended wave.** **Nothing to schedule** — the height has passed and is frozen.
+
+---
+
+### P2 — `omninode_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:355`* — deployed value: 6,000,000 — **PASSED** (RPC-confirmed)
+
+**1. Affected behaviour.** The OmniNode `InferenceAttestation` subprotocol is active; v1 attestation (`sender == verifier`) is governed by this gate exclusively.
+
+**2. Dependency ordering.** None. The sponsored-attestation gate below is independent of it.
+
+**3. Persistent data impact.** Attestation rows have been written since height 6,000,000.
+
+**4. Rollback in effect.** **Frozen. Nothing to roll back and nothing to schedule.** The height is at or below the head, so `activation_changes` classifies any change to it as `AlreadyActive` and the node refuses to start (§0.5). The only levers are **B** — a superseding gate at a later height — and **E**.
+
+**5. Monitoring signal.** `chain_getChainParams` reads `6000000`; `sum_listInferenceAttestations` / `sum_getInferenceAttestation` are the read-side confirmation.
+
+**6. Recommended wave.** **Nothing to schedule** — the height has passed and is frozen.
+
+---
+
+### P3 — `omninode_sponsored_attestation_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:365`* — deployed value: **not serialised by RPC; absent from the production checklist's genesis → presumed `None`, unverifiable from outside**
+
+**1. Affected behaviour.** Sponsored / relayed v2-envelope attestation submission (issue #79). Dormant, `TxPayload::InferenceAttestationV2` is rejected free (`Failed(54)`, no fee).
+
+**2. Dependency ordering.** None. Explicitly independent of `omninode_enabled_from_height`: v1 attestation is unaffected either way.
+
+**3. Persistent data impact.** Changes who PAYS to submit, not who made the attestation. No new attestation data shape.
+
+**4. Rollback in effect.** **Not applicable while dormant.** If the owner ever opens it, the §0.4 floor applies from that moment (it is grandfathered against a height BELOW the head, not against a retroactive one), and **B** becomes the only forward lever once it fires.
+
+**5. Monitoring signal.** M1 is the only instrument that would report its height, and it is not deployed. **Its current value cannot be established from outside a node today** — that is a gap, not a finding.
+
+**6. Recommended wave.** **Out of band.** Not a member of any wave below: the waves group the remediation set by cost shape, and this gate is a subsystem activation with its own readiness question. **Proposed height:** — owner decision —
+
+---
+
+### P4 — `education_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:379`* — deployed value: 8,900,000 — **PASSED** (RPC-confirmed)
+
+**1. Affected behaviour.** The SRC-817/818 Education-LMS suite is executable.
+
+**2. Dependency ordering.** None.
+
+**3. Persistent data impact.** Education subsystem rows have been written since height 8,900,000.
+
+**4. Rollback in effect.** **Frozen. Nothing to roll back and nothing to schedule.** The height is at or below the head, so `activation_changes` classifies any change to it as `AlreadyActive` and the node refuses to start (§0.5). The only levers are **B** — a superseding gate at a later height — and **E**.
+
+**5. Monitoring signal.** `chain_getChainParams` reads `8900000`; `src817_*` / `src818_*` read methods confirm.
+
+**6. Recommended wave.** **Nothing to schedule** — the height has passed and is frozen.
+
+---
+
+### P5 — `contracts_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:395`* — deployed value: 8,900,000 per `docs/operations/production-checklist.md:115` — **PASSED**, but **not serialised by RPC**, so unconfirmable from outside
+
+**1. Affected behaviour.** Production-capable smart contracts: persistent storage, reorg-reversible contract state, root-committed. `ContractDeploy`/`ContractCall` execute; below the gate they are rejected free.
+
+**2. Dependency ordering.** None at load. **Note the interaction with the account-root gate**: `contract_executor.rs` credits the CONTRACT address on a value-carrying deployment, an address no transaction index reaches — which is one of the two reasons the production `cf::STATE` row count is unknown (`docs/lane-a/ACCOUNT-ROOT-RELEASE-EVIDENCE.md §1.2`).
+
+**3. Persistent data impact.** **Activation changed the block state-root formula.** Contract state has been written and root-committed since 8,900,000.
+
+**4. Rollback in effect.** **Frozen. Nothing to roll back and nothing to schedule.** The height is at or below the head, so `activation_changes` classifies any change to it as `AlreadyActive` and the node refuses to start (§0.5). The only levers are **B** — a superseding gate at a later height — and **E**.
+
+**5. Monitoring signal.** `contract_isContract` / `contract_getCodeHash` confirm the subsystem is live. **The height itself is not RPC-visible**, so the checklist is the only record of it; M1 would settle it.
+
+**6. Recommended wave.** **Nothing to schedule** — the height has passed and is frozen.
+
+---
+
+### P6 — `governance_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:449`* — deployed value: 8,900,000 — **PASSED** (RPC-confirmed)
+
+**1. Affected behaviour.** On-chain governance v1: `TxPayload::Governance` operations execute.
+
+**2. Dependency ordering.** Not a gate ordering, but a hard companion dependency: the separate `governance: Option<GovernanceParams>` field must be present or governance operations are rejected even above the height. It is present on mainnet (`validator_authority_threshold_bps: 6667`, quorum 2000 bps, pass 5000 bps, voting period 201,600 blocks).
+
+**3. Persistent data impact.** Proposal and vote state has been written since 8,900,000.
+
+**4. Rollback in effect.** **Frozen. Nothing to roll back and nothing to schedule.** The height is at or below the head, so `activation_changes` classifies any change to it as `AlreadyActive` and the node refuses to start (§0.5). The only levers are **B** — a superseding gate at a later height — and **E**.
+
+**5. Monitoring signal.** `gov_listActiveProposals`, `gov_getTally`, `gov_getVotingPower`. **This is the gate that makes rollback lever D possible at all** — a governance transaction at validator quorum, which on the two-validator net needs both signatures.
+
+**6. Recommended wave.** **Nothing to schedule** — the height has passed and is frozen.
+
+---
+
+### P7 — `archive_unbonding_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:474`* — deployed value: 8,900,000 per the production checklist — **PASSED**, not RPC-visible
+
+**1. Affected behaviour.** Archive-node stake withdrawal (issue #20): `BeginUnstake` / `WithdrawUnbonded` execute.
+
+**2. Dependency ordering.** None between gates. `archive_unbonding_period_blocks` is consulted only once this gate is set; it is distinct from validator staking's `unbonding_period`.
+
+**3. Persistent data impact.** Unbonding and stake rows have been written since 8,900,000.
+
+**4. Rollback in effect.** **Frozen. Nothing to roll back and nothing to schedule.** The height is at or below the head, so `activation_changes` classifies any change to it as `AlreadyActive` and the node refuses to start (§0.5). The only levers are **B** — a superseding gate at a later height — and **E**.
+
+**5. Monitoring signal.** `storage_getArchiveUnbonding`.
+
+**6. Recommended wave.** **Nothing to schedule** — the height has passed and is frozen.
+
+---
+
+### P8 — `archive_reassignment_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:489`* — deployed value: 8,900,000 per the production checklist — **PASSED**, not RPC-visible
+
+**1. Affected behaviour.** Archive-node chunk reassignment (issue #62): `ReassignChunksV2` and post-activation `AcceptAssignmentV2` re-attestation execute.
+
+**2. Dependency ordering.** None. Distinct from the two PoR targeting gates below.
+
+**3. Persistent data impact.** Assignment and epoch rows have been written since 8,900,000.
+
+**4. Rollback in effect.** **Frozen. Nothing to roll back and nothing to schedule.** The height is at or below the head, so `activation_changes` classifies any change to it as `AlreadyActive` and the node refuses to start (§0.5). The only levers are **B** — a superseding gate at a later height — and **E**.
+
+**5. Monitoring signal.** `storage_getAssignmentCoverageV2`, `storage_buildReassignChunksV2`.
+
+**6. Recommended wave.** **Nothing to schedule** — the height has passed and is frozen.
+
+---
+
+### P9 — `por_assignment_targeting_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:504`* — deployed value: **not serialised by RPC; absent from the checklist genesis → presumed `None`**
+
+**1. Affected behaviour.** Assignment-aware PoR challenge targeting (issue #97, Phase 1). Legacy behaviour draws `target_node` from ALL globally-active archives, which can challenge and slash a bystander not assigned to the challenged `(file, chunk)`. Gated, the target is drawn only from archives assigned to that chunk under the file's latest assignment epoch and currently Active; if none, the challenge is skipped for that interval.
+
+**2. Dependency ordering.** None. Distinct from `archive_reassignment_enabled_from_height` (#62) and from the Phase 2 scheduler gate (#100).
+
+**3. Persistent data impact.** No new data shape. It changes WHICH node is targeted and whether a challenge is emitted at all — hence which challenge and slashing rows come into existence.
+
+**4. Rollback in effect.** **Not applicable while dormant.** If the owner ever opens it, the §0.4 floor applies from that moment (it is grandfathered against a height BELOW the head, not against a retroactive one), and **B** becomes the only forward lever once it fires. Slashing records written under the legacy targeting are not revisited.
+
+**5. Monitoring signal.** `storage_getActiveChallenges`, `slashing_getRecentRecords`, `slashing_getSummary`. **The working signal is slashing records stopping for nodes not assigned to the challenged chunk.** Its current value is unverifiable from outside (M1 not deployed).
+
+**6. Recommended wave.** **Out of band.** Not a member of any wave below: the waves group the remediation set by cost shape, and this gate is a subsystem activation with its own readiness question. **Proposed height:** — owner decision —
+
+---
+
+### P10 — `service_grants_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:513`* — deployed value: `null` — **DORMANT** (RPC-confirmed)
+
+**1. Affected behaviour.** Service-grant claiming (the 800B supply correction). Dormant, all `Supply` transactions (grant claim / unlock) are rejected free (`Failed(380)`, no fee, no state).
+
+**2. Dependency ordering.** None. **Important scope note from the source**: the one-time supply correction and earned-credit/milestone ACCRUAL are INDEPENDENT of this gate — they key off the persisted correction marker — so accrual writes happen whether or not the gate is open.
+
+**3. Persistent data impact.** Claiming only. Accrual is already writing.
+
+**4. Rollback in effect.** **Not applicable while dormant.** If the owner ever opens it, the §0.4 floor applies from that moment (it is grandfathered against a height BELOW the head, not against a retroactive one), and **B** becomes the only forward lever once it fires. Once claims are paid, **D** is the only instrument.
+
+**5. Monitoring signal.** `chain_getServiceGrant`, `chain_getServiceGrantEligibility`, and **M7** — claimed grants move the accounted supply. The source says to set it "once final pool/cohort numbers are ratified", which is an owner decision this document does not make.
+
+**6. Recommended wave.** **Out of band.** Not a member of any wave below: the waves group the remediation set by cost shape, and this gate is a subsystem activation with its own readiness question. **Proposed height:** — owner decision —
+
+---
+
+### P11 — `monetary_policy_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:522`* — deployed value: `null` — **DORMANT** (RPC-confirmed)
+
+**1. Affected behaviour.** Dormant, `ReserveRelease*` and `MonetaryPolicyMint` governance proposals cannot be created or executed (fail-closed). Set, those classes remain executable ONLY through NativeEligibility (native Koppa consensus) governance at the hardcoded 6667 bps threshold — never validator-quorum, never SRC-20/equity governance.
+
+**2. Dependency ordering.** None between gates. It presupposes `governance_enabled_from_height` in substance (there are no proposals without governance), and that gate is passed.
+
+**3. Persistent data impact.** Accept/reject of proposal creation and execution. Once executed, a mint moves the supply permanently.
+
+**4. Rollback in effect.** **Not applicable while dormant.** If the owner ever opens it, the §0.4 floor applies from that moment (it is grandfathered against a height BELOW the head, not against a retroactive one), and **B** becomes the only forward lever once it fires. An executed mint is undone only by **D**.
+
+**5. Monitoring signal.** `gov_getNativeEligibility`, `gov_listProposals`, `chain_getProtocolReserve`, and **M7**. **This is the highest-value dormant gate in the 18** — it is the one whose activation can change the money supply — and it is fail-closed today, which is the right default.
+
+**6. Recommended wave.** **Out of band.** Not a member of any wave below: the waves group the remediation set by cost shape, and this gate is a subsystem activation with its own readiness question. **Proposed height:** — owner decision —
+
+---
+
+### P12 — `assignment_aware_por_scheduler_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:555`* — deployed value: **not serialised by RPC; presumed `None`**
+
+**1. Affected behaviour.** Bounded assignment-aware PoR scheduler (issue #100, Phase 2). Dormant, challenge generation is exactly the post-#101 single-challenge path. Open, each challenge interval emits a bounded deterministic SET of assignment-aware challenges instead of one.
+
+**2. Dependency ordering.** None. Explicitly never shared with `por_assignment_targeting_enabled_from_height` (#97 Phase 1). Its three cap parameters (`max_assignment_aware_challenges_per_block`, `max_files_sampled_per_interval`, `max_chunks_sampled_per_file`) are consulted only when the gate is open.
+
+**3. Persistent data impact.** **Changes the NUMBER of challenge records produced per interval** — more rows per block, bounded by the cap parameters. Not an accept/reject of user transactions.
+
+**4. Rollback in effect.** **Not applicable while dormant.** If the owner ever opens it, the §0.4 floor applies from that moment (it is grandfathered against a height BELOW the head, not against a retroactive one), and **B** becomes the only forward lever once it fires. **C** applies: the extra challenge rows are permanent.
+
+**5. Monitoring signal.** `storage_getActiveChallenges` row count per interval, and node disk growth. **The caps are the thing to set before the height**, because an unbounded increase in challenges per block is a write-set growth the candidate ceiling can refuse.
+
+**6. Recommended wave.** **Out of band.** Not a member of any wave below: the waves group the remediation set by cost shape, and this gate is a subsystem activation with its own readiness question. **Proposed height:** — owner decision —
+
+---
+
+### P13 — `inference_settlement_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:579`* — deployed value: 8,900,000 per the production checklist — **PASSED**, not RPC-visible
+
+**1. Affected behaviour.** OmniNode Inference Settlement (issue #61). Dormant, all settlement operations reject free (`Failed(350)`, no fee).
+
+**2. Dependency ordering.** Separate from `omninode_enabled_from_height` — attestation recording is unaffected either way. Its bound parameters are consulted only once settlement is enabled. **Disputes additionally require `inference_settlement_dispute_threshold_bps` to be `Some(bps)`** or `OpenDispute`/`ResolveDispute` are rejected; mainnet has it at 6667.
+
+**3. Persistent data impact.** Session and escrow state has been written since 8,900,000.
+
+**4. Rollback in effect.** **Frozen. Nothing to roll back and nothing to schedule.** The height is at or below the head, so `activation_changes` classifies any change to it as `AlreadyActive` and the node refuses to start (§0.5). The only levers are **B** — a superseding gate at a later height — and **E**.
+
+**5. Monitoring signal.** `omninode_getInferenceSession`, `omninode_getInferenceClaims`, `omninode_getInferenceDisputes`.
+
+**6. Recommended wave.** **Nothing to schedule** — the height has passed and is frozen.
+
+---
+
+### P14 — `inference_settlement_consistency_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:610`* — deployed value: **not serialised by RPC; presumed `None`**
+
+**1. Affected behaviour.** Consistency / plurality settlement mode (issue #77). Dormant, an `OpenSession` requesting a consistency config is rejected `Failed(361)` and existing single-verifier v1 claims are unaffected. Open, sessions may opt into a consistency rule and matured claims are evaluated against it.
+
+**2. Dependency ordering.** Independent of `inference_settlement_enabled_from_height`, though layered on it: it is a stricter claim rule on top of enabled settlement, not a new family.
+
+**3. Persistent data impact.** Accept/reject of consistency-config sessions plus a stricter claim-evaluation rule. Claims settled below the gate are not re-evaluated.
+
+**4. Rollback in effect.** **Not applicable while dormant.** If the owner ever opens it, the §0.4 floor applies from that moment (it is grandfathered against a height BELOW the head, not against a retroactive one), and **B** becomes the only forward lever once it fires.
+
+**5. Monitoring signal.** `omninode_getInferenceConsistency`, `omninode_getClaimableReward`. The working signal is a consistency-config `OpenSession` ceasing to fail `361`.
+
+**6. Recommended wave.** **Out of band.** Not a member of any wave below: the waves group the remediation set by cost shape, and this gate is a subsystem activation with its own readiness question. **Proposed height:** — owner decision —
+
+---
+
+### P15 — `inference_verifier_bonding_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:621`* — deployed value: **not serialised by RPC; presumed `None`**
+
+**1. Affected behaviour.** Verifier bonding and slashing (issue #78). Dormant, bond-registry operations reject free (`Failed(364)`) and a session requesting a `bond_requirement` fails `364`; sessions without a bond requirement are unaffected. Open, verifiers may register bonds and bond-required sessions enforce and slash.
+
+**2. Dependency ordering.** Independent of `inference_settlement_enabled_from_height` (it layers on enabled settlement). `inference_verifier_unbonding_period_blocks` is consulted only once bonding is enabled.
+
+**3. Persistent data impact.** **Both**: refusal below, and above it a bond registry is written and **slashing moves balances**.
+
+**4. Rollback in effect.** **Not applicable while dormant.** If the owner ever opens it, the §0.4 floor applies from that moment (it is grandfathered against a height BELOW the head, not against a retroactive one), and **B** becomes the only forward lever once it fires. Slashed bonds are recovered only by **D**.
+
+**5. Monitoring signal.** `omninode_getVerifier`, `omninode_buildAddVerifierBond`, and **M7** for the balance movement. Set the unbonding period before the height, not after.
+
+**6. Recommended wave.** **Out of band.** Not a member of any wave below: the waves group the remediation set by cost shape, and this gate is a subsystem activation with its own readiness question. **Proposed height:** — owner decision —
+
+---
+
+### P16 — `compute_pool_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:642`* — deployed value: `None` — **REFUSED AT LOAD; NOT SCHEDULABLE**
+
+**1. Affected behaviour.** Compute-pool subprotocol. `ChainParams::validate` returns `GenesisError::IncompleteSubsystemActivation` for any `Some(_)` (§0.7 rule 1). Blocked on the `ComputePoolParams` surface existing (B0 #123 + C1 #130).
+
+**2. Dependency ordering.** **It is itself the constraint.** Any height refuses the genesis at load.
+
+**3. Persistent data impact.** None — nothing is activatable.
+
+**4. Rollback in effect.** Not applicable. A genesis carrying a height here never starts a node.
+
+**5. Monitoring signal.** None needed. The working signal is that `Genesis::validate()` refuses the configuration, which is the point.
+
+**6. Recommended wave.** **Not schedulable** — refused at load (§0.7).
+
+---
+
+### P17 — `beacon_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:706`* — deployed value: `None` — **REFUSED AT LOAD; NOT SCHEDULABLE**
+
+**1. Affected behaviour.** Threshold-BLS beacon. Same hard refusal (§0.7 rule 2). Blocked on the BR1 #127 parameter surface.
+
+**2. Dependency ordering.** **Declaring `beacon_params` or `beacon_schedule` does NOT open it.** Both MAY be declared while the gate stays dormant, and `validate()` checks each for internal consistency (§7.4 inequalities; `epoch_length >= 1`, strictly-ordered phase offsets) and still refuses any `Some(_)` on the gate.
+
+**3. Persistent data impact.** None.
+
+**4. Rollback in effect.** Not applicable.
+
+**5. Monitoring signal.** None needed. A declared-but-dormant parameter surface that passes `validate()` is the intended state.
+
+**6. Recommended wave.** **Not schedulable** — refused at load (§0.7).
+
+---
+
+### P18 — `messaging_sponsored_registration_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:750`* — deployed value: **not serialised by RPC; presumed `None`**
+
+**1. Affected behaviour.** SRC-201 sponsored public-key registration (issue #145). Dormant, `RegisterPublicKeySponsoredV1` rejects free (`Failed(390)`, no fee, no state). **The source is explicit that this is a fully-implemented ACTIVATION gate, not a dormant-until-built one** — unlike compute-pool and beacon.
+
+**2. Dependency ordering.** Explicitly excluded from the reject-all arm of `ChainParams::validate`, which guards only subsystems whose typed parameter surface does not exist. Enforcement is in the state executor's gate check, mirroring `omninode_sponsored_attestation_enabled_from_height`.
+
+**3. Persistent data impact.** Accept/reject below; above it, keys registered via the sponsored path. The source adds: "Never set to `Some(_)` in a committed genesis in this branch."
+
+**4. Rollback in effect.** **Not applicable while dormant.** If the owner ever opens it, the §0.4 floor applies from that moment (it is grandfathered against a height BELOW the head, not against a retroactive one), and **B** becomes the only forward lever once it fires.
+
+**5. Monitoring signal.** `account_getPublicKey`, `messaging_registerSponsored`, `messaging_getConfig`. It is the one gate in the 18 that is ready to schedule and simply has not been.
+
+**6. Recommended wave.** **Out of band.** Not a member of any wave below: the waves group the remediation set by cost shape, and this gate is a subsystem activation with its own readiness question. **Proposed height:** — owner decision —
+
+---
+
+## Part 1C — The 3 gates that are NEITHER
+
+These three are introduced by this work, so §0.4's floor applies to them in
+full, but none is a remediation gate: they add or constrain machinery rather
+than repair a subsystem defect. **All three of the system's load-time ordering
+constraints (§0.7 rules 3 and 4) live in this group**, and two of the three are
+coupled to each other. They are therefore scheduled out of band from the
+cost-shape waves, not inside them.
+
+---
+
+### N1 — `peer_protocol_declaration_required_from_height`
+*declared `crates/genesis/src/lib.rs:1373`; default `None`* — cost shape **PEER ADMISSION**
+
+**1. Affected behaviour.** From this height, a peer must have DECLARED a
+protocol digest equal to ours before it may take part in consensus. Today
+`sumchain_state::protocol_digest` (`crates/state/src/protocol_digest.rs:346`)
+refuses a peer that declares a DIFFERENT digest and admits a peer that declares
+NOTHING. Below the height, or unset, an undeclared peer may participate exactly
+as today; at or above it, it **may not propose, vote, or move fork choice**.
+Matching-digest peers participate in both phases; different-digest peers in
+neither. `None` does not mean "always enforce" — it means **phase one forever**:
+no peer is ever refused for silence.
+
+**2. Dependency ordering.** **This is one half of §0.7 rule (4), and it is the
+only gate in the 49 whose height is constrained by the heights of other gates:**
+
+```
+peer_protocol_declaration_required_from_height <= min(height of any open REMEDIATION_GATES)
+```
+
+Both directions are refused at load, because both produce the same band of
+heights in which the guarantee is absent: enforcement set LATER than the first
+remediation gate leaves an explicit window; enforcement left `None` leaves an
+unbounded one. `remediation_activation_floor()` (`:2593`) computes the right
+hand side. **Setting any one of the 28 forces this field to be set.** Both
+`None` is legal and is the production default.
+
+**3. Persistent data impact.** **None.** It changes peer admission and consensus
+participation, not transaction acceptance and not written state. It is folded
+into the activation digest and therefore into the protocol digest, so changing
+it changes the value peers compare.
+
+**4. Rollback in effect.** **B and E.** A mis-set enforcement height that
+excludes a validator cannot be lowered once passed. The practical mitigation is
+not rollback but preparation: every validator must be running a binary that
+declares a matching digest *before* the height, and that is checkable in advance
+through M1's `protocol_digest`.
+
+**5. Monitoring signal.** **M1 is the pre-flight instrument and M8 is the
+post-flight one.** `chain_getActivationStatus.protocol_digest` answers "do our
+nodes enforce the same rules" — two binaries from different commits can report
+the same `digest` and a different `protocol_digest`, and it is the same value
+peers compare at the sync handshake, so a monitor scraping it sees exactly what
+the nodes see. After the height, `sumchain_peer_count` dropping and `get_peers`
+shrinking is the gate working if the dropped peers are undeclared, and the gate
+misfiring if they are not. **With PoA round-robin and no proposer-skip
+(§0.9), excluding one of two validators stops half the slots**, so M2 is the
+failure signal.
+
+**6. Recommended wave.** **Wave 0 — a prerequisite, not an activation.** See
+Part 2. **Proposed height:** — owner decision —, subject to `<=` the earliest
+remediation height chosen.
+
+---
+
+### N2 — `application_journal_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:698`; default `None`* — cost shape **NODE-LOCAL UNDO AUTHORITY**
+
+**1. Affected behaviour.** Unusual, and the inversion matters: **it does not gate
+WRITING.** `AcceptedCandidate::publish` writes a journal record for every block
+it publishes, with no gate to leave unset — pinned by
+`crates/storage/tests/application_journal.rs:761 the_write_side_is_ungated_so_no_configuration_can_leave_it_unwritten`.
+What it gates is the height from and above which a REVERT must find a record,
+and above which the generic journal — not the four legacy per-subsystem diffs —
+is the authoritative undo record for a block.
+
+`None` is **not "off"; there is no off.** It means the boundary is OBSERVED FROM
+CHAIN: the lowest height for which this database holds a record, which is
+per-node. `Some(h)` pins a uniform, operator-visible, genesis-defined boundary.
+
+**2. Dependency ordering.** **This is one half of §0.7 rule (3):**
+
+```
+application_journal_enabled_from_height <= account_root_enabled_from_height
+```
+
+`(None, Some(account_root))` is refused as `AccountRootWithoutJournalGate`;
+`journal > account_root` is refused as `JournalGateAfterAccountRoot`. Both `None`
+is legal and is the production default. It deliberately does NOT reuse the
+compute-pool or beacon gates, and unlike those two, `Genesis::validate` **admits**
+`Some(_)` here.
+
+**3. Persistent data impact.** **None to what is written** — the write side is
+unconditional. It changes revert authority and whether a reorg is REFUSED.
+**Explicitly not consensus:** journal records are node-local, never hashed into a
+block, never folded into a state root, never sent over the wire. Two nodes that
+disagree about this height cannot fork; one of them simply refuses a reorg the
+other would perform.
+
+**4. Rollback in effect.** **B**, and uniquely among the 49, a genuine operational
+option: because the value is not consensus, a node that refuses a reorg can be
+restarted under a corrected genesis without the chain caring — subject to §0.5's
+freeze, which still applies because the field is in the activation digest.
+
+**5. Monitoring signal.** There is **no direct instrument.** The failure is a
+node that declines a reorg it should have performed, which surfaces as that node
+falling behind: **M2 (`sumchain_block_height` for that node diverging from the
+network's) and M3 (`sumchain_block_errors_total`)**, plus the node log. M1 would
+report the height once deployed. **The absence of a journal-coverage RPC is worth
+noting before this is set**, because `Some(h)` is a promise that every node holds
+records from `h`, and nothing verifies that claim from outside.
+
+**6. Recommended wave.** **Out of band, and only as the lower half of the
+account-root pair.** Setting it alone buys a uniform boundary and nothing else;
+its reason to exist is rule (3). **Proposed height:** — owner decision —, subject
+to `<=` the account-root height.
+
+---
+
+### N3 — `account_root_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:433`; default `None`* — cost shape **ROOT FORMULA**
+
+**1. Affected behaviour.** Folds the ACCOUNT-STATE COMMITMENT — balances and
+nonces — into the block state root. This **closes a consensus hole rather than
+enabling a subprotocol**: below the gate `compute_block_state_root` never reads
+the account rows, so two nodes can disagree about every balance on the chain and
+still publish identical block hashes.
+
+**2. Dependency ordering.** The upper half of §0.7 rule (3): it requires
+`application_journal_enabled_from_height` to be `Some(_)` and at or below it.
+The argument, from the source: above this gate a node that cannot RESTORE
+account rows during a reorg cannot agree about the root either — it is stuck
+with a state it can neither revert nor justify — and the generic journal is the
+only record that restores every family a block wrote. A node-local observed
+boundary is not something a consensus commitment may rest on: two validators
+would hold different boundaries and find out at a reorg.
+
+**3. Persistent data impact.** It changes **what is COMMITTED**, not which rows
+are written; the account rows already exist. Consequently an un-upgraded node
+above the height computes a different root for the same block and rejects it.
+
+**4. Rollback in effect.** **B and E only, and B is expensive.** The domain
+separator is versioned (`b"sumchain/account-state/v1"`,
+`crates/state/src/account_root.rs:234`), so a `v2` domain can replace the fold at
+a second, later height — that is the intended forward path, and it is also how
+the eventual trie replacement would land. Nothing un-commits a root.
+
+**5. Monitoring signal.** This gate has **the best-instrumented cost model in the
+repository and the worst-established precondition.**
+
+- Cost: the fold is an O(n) scan of `cf::STATE` account rows. Measured on a dev
+  Mac: 100k rows → 13.4 ms, 1M → 159 ms, 10M → 1.586 s warm / 1.765 s cold-page,
+  against a **1,502 ms** inter-block interval (§0.3). **At ten million rows it
+  does not fit inside a block interval.**
+- Thresholds: `ACCOUNT_ROW_WARN_THRESHOLD = 250_000`
+  (`account_root.rs:471`) and `ACCOUNT_ROW_ACT_THRESHOLD = 500_000` (`:484`).
+- Instruments: **M5** (`chain_getSyncCapability.account_rows`, backed by
+  `account_row_count` at `account_root.rs:499`) and the node's startup log line
+  `Account rows: N (warn at 250000, act at 500000)`. **There is no Prometheus
+  gauge, and that absence is deliberate** — `account_rows` IS the O(n) scan, so
+  polling it at a 15 s scrape interval would add a full account scan to every
+  node every 15 seconds. The runbook prescribes once at startup, then at most
+  every 15 minutes from one node.
+- Post-activation, the signal that it is working is that block production time
+  rises by the scan cost and no more; the signal that it is not is nodes
+  rejecting each other's blocks, i.e. M2 flat and M3 rising.
+
+**The precondition is not met.** The production `cf::STATE` row count is
+**UNPROVEN** — see `docs/lane-a/ACCOUNT-ROOT-RELEASE-EVIDENCE.md §1`, which
+carries the exact command, the endpoint requirement, the expected output, what
+must be recorded alongside it, and an acceptance threshold.
+`docs/operations/ACCOUNT-ROOT-ACTIVATION.md` makes that measurement Sequence
+step 0 and says the activation "should not be scheduled until it has been"
+measured. **This document does not weaken that, and does not propose a height.**
+
+**6. Recommended wave.** **Out of band, blocked on an external measurement.**
+Not a member of any wave below. **Proposed height:** — owner decision —, and not
+before the row count is measured.
+
+---
+## Part 2 — The recommendation: one prerequisite, five waves, one deferral, two out of band
+
+Part 1 gives the owner 49 rows. This part is the schedule: **the fewest waves
 that are still safe, with heights.** It is a recommendation, not a setting — no
 height is written anywhere in this branch.
 
-### What actually constrains the grouping
+### 2.1 What the previous packet argued, and why it is kept
 
-§0.5 establishes there are **no dependencies among the gates**: any order is
-legal, including all at one height. So the constraint is not correctness, it is
-what happens when a wave turns out to be wrong. Two facts decide it:
+The earlier packet grouped seventeen gates into three waves **by cost shape** —
+refusal-only, data-shape, block-existence — and argued that grouping against the
+frozen-height property: since a passed height cannot be moved (§0.5), "reversible"
+means *reversible in effect*, and gates differ in what an error costs. A gate
+that only REFUSES more transactions costs availability, is visible in the next
+block as failed receipts, and writes nothing new. A gate that changes WHERE A ROW
+LANDS writes rows that persist and cannot be unwritten. A gate that changes
+WHETHER A BLOCK EXISTS costs liveness.
 
-1. **§0.3 — a height, once passed, is frozen.** Rollback is NOT "move the height
-   back". A gate that has fired has fired, and the blocks produced under it are
-   the chain. So "reversible" here means *reversible in effect*, not in
-   configuration.
-2. **Gates differ in what an error costs.** A gate that only REFUSES more
-   transactions costs availability, is visible in the next block as failed
-   receipts, and writes nothing new. A gate that changes WHERE A ROW LANDS
-   writes rows that persist and cannot be unwritten. A gate that changes WHETHER
-   A BLOCK EXISTS costs liveness.
-
-Those three cost shapes are the waves. Grouping by subsystem would have been
+**That argument is correct and is kept.** Grouping by subsystem would have been
 tidier and would have mixed all three shapes into every wave.
 
-### Wave 0 — compatibility enforcement (a prerequisite, not an activation)
+### 2.2 Why three waves do not survive the set growing to 28
 
-The peer-compatibility enforcement height must be **at or below the first
-behavioural activation below**, because from the moment any gate fires, an
-undeclared peer is indistinguishable from an incompatible one. This is a
-precondition on the schedule rather than a member of it.
+The argument for bundling twelve gates into one wave was explicitly conditional:
+"they share a failure shape and a diagnosis. If legitimate traffic starts
+failing, the failed receipt names the subsystem, so a twelve-gate wave is still
+diagnosable. **That is the argument for bundling, and it holds only because of
+the receipt.**"
 
-### Wave 1 — refusal-only. Recommended height 13,775,436 (head + ~14 days)
+Sorting the current 28 by cost shape gives **13 refusal-only, 14 data-shape, 1
+block-existence**. Applied unchanged, the old scheme puts fourteen irreversible
+gates at one height — and the diagnosability argument does not transfer, because
+a data-shape gate's symptom is not a receipt. It is a row that landed somewhere
+else, a disk-growth rate that changed, or a state root that moved for a
+transaction whose receipt is unchanged (R27 says exactly that). **Fourteen
+simultaneous shape changes share no single symptom, so a surprise cannot be
+attributed to one of them.**
 
-Gates 4, 5, 6, 7, 8, 9, 10, 13, 14, 15, 16, 17.
+So the extension is: **keep the three cost shapes, and split the data-shape wave
+by which persistent artefact moves** — because that is the axis along which a
+surprise is actually attributed.
 
-Twelve gates whose entire effect is that some transactions which used to succeed
-now produce a failed receipt: the six authorization gates, revocation standing,
-the allocation bound, the tax proof lifecycle, NFT token authority, agreement
-signature integrity, and the healthcare state preconditions.
+| sub-shape | what moves | the one symptom to watch |
+|---|---|---|
+| **2a — key space** | a row lands at a different key, or an id is computed differently | **row count and disk growth rate**, plus reads by an old key |
+| **2b — row content / existence** | same keys, different contents or presence | **state root moves for a transaction whose receipt is unchanged**; subsystem read paths change answers |
+| **2c — value and fee** | balances, fees, or the receipts root | **fee accounting and the money supply** (M7) |
 
-  * **Data migration:** none. No existing row changes shape or location.
-  * **Mixed-version:** prevented by Wave 0. Absent it, the two sides disagree
-    about receipts, and receipts are folded into the state root, so they fork.
-  * **Rollback:** none available (§0.3). The mitigation is that the failure mode
-    is a refusal — an operation stops working, loudly, and the operator sees
-    failed receipts in the next block rather than silent divergence.
-  * **Why one wave and not twelve:** they share a failure shape and a diagnosis.
-    If legitimate traffic starts failing, the failed receipt names the
-    subsystem, so a twelve-gate wave is still diagnosable. That is the argument
-    for bundling, and it holds only because of the receipt.
+Each sub-wave has one signal that attributes a surprise to it. That is the
+property the original three-wave scheme had at seventeen gates and loses at 28,
+and recovering it is the reason for the split.
 
-### Wave 2 — data shape. Recommended height 14,580,772 (head + ~28 days)
+**What the split costs:** two more coordinated restarts. On a two-validator PoA
+net with no proposer-skip (§0.9) each restart stalls half the slots for the
+duration of a rolling restart. That is the trade, stated rather than buried: two
+extra restarts against the ability to name which gate caused an irreversible
+surprise.
 
-Gates 3, 11, 12.
+### 2.3 The waves
 
-The DocClass subject-index split, the block timestamp reaching eight
-subsystems, and the transaction index in event keys.
+Heights are derived from **head 12,977,656 at 2026-09-19T05:35:38Z** and
+**57,524 blocks/day** (§0.3). Every one must be re-derived against the head at
+the moment of decision.
 
-  * **Data migration:** none required, and none possible. Rows written before
-    the height keep their old shape; a collision committed before gate 3 fires
-    stays collided. Gate 12 changes the number of rows a block writes — one per
-    event rather than one per block — so **disk growth changes at this height**
-    and that is the one number to watch.
-  * **Mixed-version:** as Wave 1.
-  * **Rollback:** none, and here it matters more: rows written under the new
-    shape persist. This is the irreversible wave.
-  * **Why separate from Wave 1:** Wave 1 writes nothing new. This one does, and
-    permanently. Bundling them would make a disk-growth surprise indistinguishable
-    from an authorization surprise.
-  * **Why fourteen days after Wave 1:** long enough that Wave 1's refusal
-    behaviour is observed across a full traffic cycle before anything
-    irreversible is written.
+#### Wave 0 — compatibility enforcement. A prerequisite, not an activation.
 
-### Wave 3 — block existence. Recommended height 14,983,440 (head + ~35 days)
+`peer_protocol_declaration_required_from_height` (N1).
 
-Gate 1, `nft_receipt_failure_enabled_from_height`.
+**This is not a choice.** §0.7 rule (4) refuses the genesis at load unless this
+field is set at or below the earliest open remediation gate. It must therefore
+be decided *with* Wave 1 and not after it.
+
+Recommended: **the same height as Wave 1**, or earlier. Equal satisfies `<=`.
+
+Wave 0 also contains the thing that is not a height at all: **the binary
+rollout.** Every one of the 28 is code that is not on mainnet (§0.2). A genesis
+edit without the binary is a number nothing reads.
+
+#### Wave 1 — refusal-only. 13 gates. Recommended height **13,782,992** (head + 14 days, ≈2026-10-03)
+
+R4, R5, R6, R7, R8, R9, R10, R13, R15, R18, R20, R23, R25.
+
+The six subsystem authorization gates, DocClass revocation standing, the
+allocation bound, NFT token authority, subsystem proof presence, the no-op
+receipt gate, the credential-schema gate, and the issuer-stake-requirement gate.
+
+- **Data migration:** none. No existing row changes shape or location.
+- **Mixed-version:** prevented by Wave 0. Absent it, the two sides disagree about
+  receipts, and receipts are folded into the state root, so they fork.
+- **Rollback:** A and B (§0.6). The mitigation is that the failure mode is a
+  refusal — an operation stops working, loudly.
+- **Why one wave and not thirteen:** they share a failure shape and a diagnosis,
+  and the failed receipt names the subsystem. **That argument now carries a
+  caveat it did not carry before:** §0.8 establishes that
+  `sumchain_tx_execution_errors_total` is dead, so "visible in the next block as
+  failed receipts" means one `sum_getReceipt` call per transaction hash, not a
+  metric. **If the owner wants the thirteen-gate bundle, wiring that counter
+  first is the cheapest thing in this document.**
+- **The two to watch:** R20 (`subsystem_no_op_receipt`) turns operations that
+  ALWAYS reported success into failures, which is what integrators notice first;
+  and R25 (`docclass_issuer_stake_requirement`) is the one gate whose direction
+  of effect depends on deployed configuration — read `docclass_getConfig` first.
+
+#### Wave 2a — key space. 4 gates. Recommended height **14,588,328** (head + 28 days, ≈2026-10-17)
+
+R3, R12, R22, R28.
+
+DocClass subject-index split, the subsystem transaction index, the DocClass
+revocation-record key widening, and the NFT collection-id nonce.
+
+- **Data migration:** none required, and none possible. Rows written before the
+  height keep their old keys; a collision committed before R3 stays collided;
+  revocation records lost under R22's 40-byte key are not recoverable.
+- **Rollback:** C, permanently. Every one of the four leaves two key shapes in
+  the database forever.
+- **The one number to watch:** **disk growth rate.** R12 changes one row per
+  block into one row per event in two families; R3 and R22 add rows where
+  collisions previously merged them. No metric exposes per-family row counts, so
+  this is node-level disk usage.
+- **The one integration risk:** R28 changes how a `CollectionId` is derived.
+  Anything off-chain that recomputes one must know the height. That is invisible
+  on-chain and is the single most likely silent break in the whole schedule.
+- **Why 14 days after Wave 1:** long enough that Wave 1's refusal behaviour is
+  observed across a full traffic cycle before anything irreversible is written.
+
+#### Wave 2b — row content and existence. 7 gates. Recommended height **15,393,664** (head + 42 days, ≈2026-10-31)
+
+R11, R14, R16, R17, R21, R24, R27.
+
+The block timestamp reaching eight subsystems, the tax proof lifecycle, agreement
+signature integrity, healthcare state preconditions, DocClass issuer authority,
+DocClass identity binding, and NFT index symmetry.
+
+- **Two soft orderings are satisfied by putting these at ONE height.** R17 should
+  not precede R11 (expiry judged at the epoch otherwise) and R24's source names
+  R11 explicitly. A shared height satisfies "at or before": at block `h` both
+  gates are open, so the executor's clock is real when the identity-binding and
+  precondition checks run.
+- **Data migration:** none possible. Rows written below the height keep their
+  zeros (R11), their dangling index entries (R14), their `Executed` status
+  (R16), their empty index rows (R17), their self-granted authority (R21), their
+  squatted commitments (R24), their empty collection rows (R27). **Activation
+  repairs nothing that already exists.**
+- **Rollback:** B and C. This is the wave with the most permanent residue.
+- **The signal:** the state root moves for transactions whose receipts are
+  unchanged. The practical check is M6 across the seven subsystems — a known row
+  read before and after the height.
+- **What the owner should do before it:** enumerate `docclass_getIssuers` (R21 —
+  activation freezes whatever authority is there) and the identity roots (R24 —
+  activation freezes whatever is anchored).
+
+#### Wave 2c — value and fee. 2 gates. Recommended height **16,199,000** (head + 56 days, ≈2026-11-14)
+
+R19, R26.
+
+NFT update-path parity (which newly charges `storage_fee_per_byte`) and the NFT
+charged receipt (which puts the real fee in `fee_paid` and therefore moves the
+receipts root).
+
+- **Why separate from 2b:** fee-accounting surprises must not be attributable to
+  a row-shape change. These two move money and the money's record; 2b moves rows.
+  Bundling them makes a supply anomaly indistinguishable from an index anomaly.
+- **Why only two and not alone each:** they share a signal — M7 plus a
+  balance-delta comparison across the height — and R26's check is a one-call
+  confirmation (`fee_paid` on a failed NFT receipt becoming non-zero), which is
+  the cleanest working signal of any gate in the 28. It makes 2c self-diagnosing
+  in a way 2b is not.
+- **Rollback:** B for R26 (the receipts are in the chain), A/B/D for R19.
+
+#### Wave 3 — block existence. 1 gate. Recommended height **17,004,336** (head + 70 days, ≈2026-11-28)
+
+R1, `nft_receipt_failure_enabled_from_height`.
 
 Alone, because it is the only gate whose disagreement means a node produces **no
 block at all** rather than a different one. Below it, an NFT operation naming an
 absent collection makes the whole block unexecutable; at and above, it is a
 charged failed receipt.
 
-  * **Data migration:** none. **Rollback:** none.
-  * **Why last and alone:** it is the only gate that converts a liveness failure
-    into a receipt. If it misbehaves the symptom is a proposer that cannot
-    produce, which is the one symptom that must not be confused with anything
-    else.
+- **Data migration:** none. **Rollback:** B and E only.
+- **Why last and alone:** it is the only gate that converts a liveness failure
+  into a receipt. If it misbehaves the symptom is a proposer that cannot produce
+  — the one symptom that must not be confused with anything else. It is also the
+  only gate in the 28 whose monitoring signal is a metric that actually works
+  (M2 / M3), which is a reason to put it where an operator is watching for
+  exactly that and nothing else.
 
-### Deferred — Gate 2, indefinitely, pending a decision this repository cannot make
+### 2.4 The schedule
 
-`docclass_stake_escrow_enabled_from_height`. Part 1 records that it needs a data
-decision the repo has no answer to: what happens to stake already destroyed
-under the old rule. Activating it starts holding stake correctly and does
-nothing about the stake already gone. **That is an owner decision about existing
-value, not an engineering one, and it should not be bundled into a wave to make
-a schedule look complete.**
+| wave | gates | height | ≈ elapsed | ≈ UTC | cost shape |
+|---|---:|---:|---:|---|---|
+| **0** | N1 + the binary rollout | ≤ Wave 1 | — | — | prerequisite (load-enforced) |
+| **1** | 13 | **13,782,992** | 14 days | 2026-10-03 | refusal only |
+| **2a** | 4 | **14,588,328** | 28 days | 2026-10-17 | key space |
+| **2b** | 7 | **15,393,664** | 42 days | 2026-10-31 | row content / existence |
+| **2c** | 2 | **16,199,000** | 56 days | 2026-11-14 | value and fee |
+| **3** | 1 | **17,004,336** | 70 days | 2026-11-28 | block existence |
+| **deferred** | 1 | — | — | — | see Part 3 |
+| **out of band** | N2 + N3 | — | — | — | blocked on a measurement |
+| **not schedulable** | P16, P17 | — | — | — | refused at load |
+| **already passed** | 8 of the 18 | — | — | — | frozen |
 
-### UTC estimates
-
-At the **measured** 1.502 s/block and 57,524 blocks/day (§0.9 — not the nominal
-3,000 ms, which is wrong by a factor of two and would double every estimate
-here), from head ≈12,970,100 on 2026-09-18:
-
-| wave | height | ≈ elapsed | ≈ UTC |
-|---|---|---|---|
-| 1 | 13,775,436 | 14 days | 2026-10-02 |
-| 2 | 14,580,772 | 28 days | 2026-10-16 |
-| 3 | 14,983,440 | 35 days | 2026-10-23 |
+13 + 4 + 7 + 2 + 1 + 1 = **28**. Plus N1 in Wave 0, N2 and N3 out of band, and
+the 18 predating = **49**.
 
 **Every height must be re-derived against the head at the moment of decision.**
-These are anchored to a head measured on 2026-09-18 and drift by roughly 57,524
-blocks per day of delay. A height that has already passed when the genesis is
-written is refused at startup (§0.2), which is the safe direction.
+These are anchored to head 12,977,656 measured at 2026-09-19T05:35:38Z and drift
+by roughly 57,524 blocks per day of delay. A height that has already passed when
+the genesis is written is refused at startup (§0.4), which is the safe
+direction.
+
+---
+
+## Part 3 — The deferrals, carried forward with their reasoning
+
+A deferral in this document is a positive decision not to schedule, with a
+reason. It is not an omission, and it is not a row waiting to be filled in to
+make a table look complete.
+
+### 3.1 `docclass_stake_escrow_enabled_from_height` — deferred INDEFINITELY
+
+**Carried forward from the previous packet with its reasoning intact.**
+
+The gate needs a data decision this repository has no answer to: **what happens
+to stake already destroyed under the old rule.**
+
+Stakes posted below the gate were destroyed — the escrow address holds nothing
+for them. Above the gate, `deactivate_issuer` refunds any issuer row with
+`stake_amount > 0` via `StateManager::v_deduct(escrow, refund)`
+(`crates/state/src/docclass_executor.rs`), and `v_deduct`
+(`crates/state/src/state.rs:208`) returns `InsufficientBalance` when the escrow
+is short. So a pre-gate issuer deactivating after activation attempts to
+withdraw money that was never escrowed. Nothing in the repository pre-funds the
+escrow, zeroes legacy `stake_amount` fields, or special-cases pre-gate rows.
+
+The owner's options, none of which this document chooses between:
+
+1. pre-fund the escrow with the sum of all live pre-gate `stake_amount` values
+   in the same coordinated genesis — which requires knowing that sum from
+   production state, and nothing in this tree can read it;
+2. zero legacy `stake_amount` fields as part of the activation, losing the
+   issuers' claim, which was already lost in substance;
+3. add a pre-gate carve-out to `deactivate_issuer` before activating;
+4. defer the gate.
+
+**That is an owner decision about existing value, not an engineering one, and it
+should not be bundled into a wave to make a schedule look complete.** The cost of
+deferring is stated and not minimised: the money supply keeps shrinking by a
+sender-chosen amount at every DocClass issuer registration, and M7
+(`chain_getSupplyInfo.accounted_account_supply`) will keep recording it.
+
+A related consequence, now visible because R21 exists: `docclass_issuer_authority`
+closes the authority half of the same wholesale `UpdateIssuer` write, while this
+gate — the stake half — stays open. **Wave 2b therefore ships half of that
+repair.** That is a consequence of the deferral, not an argument against it.
+
+### 3.2 The deferral the previous packet recorded in Part 2b — RESOLVED, not carried
+
+The previous packet deferred scheduling for gates that "arrived after this packet
+was written", on the explicit ground that "writing a wave for a gate that has not
+had that treatment is exactly the shortcut this packet exists to prevent."
+
+**That deferral is discharged rather than carried forward.** Every gate that
+arrived since — and every other one of the 49 — now has the six-field treatment
+in Part 1, which is the condition the previous packet set for lifting it. Where
+the previous packet guessed that those gates "by cost shape belong in Wave 1",
+the per-gate analysis puts three of them elsewhere: R19 and R26 in Wave 2c
+(they move money), and R27 in Wave 2b (it moves the state root). **The guess was
+wrong for three of them, which is the reason the previous packet declined to
+make it.**
+
+### 3.3 `account_root_enabled_from_height` — deferred pending an external measurement
+
+Not a new deferral; recorded here because it is a height the owner might
+otherwise expect to find in Part 2.
+
+`docs/operations/ACCOUNT-ROOT-ACTIVATION.md` makes measuring the production
+`cf::STATE` row count Sequence step 0 and says the activation "should not be
+scheduled until it has been" measured. That count is **UNPROVEN**:
+`docs/lane-a/ACCOUNT-ROOT-RELEASE-EVIDENCE.md §1` records the exact command, the
+endpoint requirement, the expected output, what must be recorded alongside it,
+and the acceptance threshold. **This packet proposes no height for it and does
+not weaken that precondition.**
+
+Its partner `application_journal_enabled_from_height` is deferred with it, for
+the arithmetic reason that §0.7 rule (3) makes a journal height meaningful only
+in relation to an account-root height.
+
+### 3.4 `compute_pool_enabled_from_height` and `beacon_enabled_from_height` — not deferrals
+
+They are **refused at load** (§0.7 rules 1 and 2). There is no height for the
+owner to decline to set; a genesis carrying one does not start a node. Recorded
+here only so that a reader counting the 49 does not mistake their absence from
+the schedule for an oversight.
+
+---
+
+## Appendix — the 49, in one table
+
+Order is `activation_heights()` order, which is the digest's order and must never
+be permuted.
+
+| # | gate | class | today | wave |
+|---:|---|---|---|---|
+| 1 | `v2_enabled_from_height` | PREDATING | 5,200,000 (passed) | frozen |
+| 2 | `omninode_enabled_from_height` | PREDATING | 6,000,000 (passed) | frozen |
+| 3 | `omninode_sponsored_attestation_enabled_from_height` | PREDATING | presumed `None` | out of band |
+| 4 | `education_enabled_from_height` | PREDATING | 8,900,000 (passed) | frozen |
+| 5 | `contracts_enabled_from_height` | PREDATING | 8,900,000 (passed) | frozen |
+| 6 | `account_root_enabled_from_height` | **NEITHER** | `None` | out of band — blocked on a measurement |
+| 7 | `governance_enabled_from_height` | PREDATING | 8,900,000 (passed) | frozen |
+| 8 | `archive_unbonding_enabled_from_height` | PREDATING | 8,900,000 (passed) | frozen |
+| 9 | `archive_reassignment_enabled_from_height` | PREDATING | 8,900,000 (passed) | frozen |
+| 10 | `por_assignment_targeting_enabled_from_height` | PREDATING | presumed `None` | out of band |
+| 11 | `service_grants_enabled_from_height` | PREDATING | `None` (confirmed) | out of band |
+| 12 | `monetary_policy_enabled_from_height` | PREDATING | `None` (confirmed) | out of band |
+| 13 | `assignment_aware_por_scheduler_enabled_from_height` | PREDATING | presumed `None` | out of band |
+| 14 | `inference_settlement_enabled_from_height` | PREDATING | 8,900,000 (passed) | frozen |
+| 15 | `inference_settlement_consistency_enabled_from_height` | PREDATING | presumed `None` | out of band |
+| 16 | `inference_verifier_bonding_enabled_from_height` | PREDATING | presumed `None` | out of band |
+| 17 | `compute_pool_enabled_from_height` | PREDATING | `None` | **not schedulable** |
+| 18 | `application_journal_enabled_from_height` | **NEITHER** | `None` | out of band — pairs with #6 |
+| 19 | `beacon_enabled_from_height` | PREDATING | `None` | **not schedulable** |
+| 20 | `messaging_sponsored_registration_enabled_from_height` | PREDATING | presumed `None` | out of band |
+| 21 | `nft_receipt_failure_enabled_from_height` | REMEDIATION | `None` | **Wave 3** |
+| 22 | `docclass_stake_escrow_enabled_from_height` | REMEDIATION | `None` | **DEFERRED** |
+| 23 | `docclass_subject_index_split_enabled_from_height` | REMEDIATION | `None` | **Wave 2a** |
+| 24 | `docclass_revocation_standing_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 25 | `healthcare_authorization_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 26 | `legal_authorization_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 27 | `finance_authorization_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 28 | `employment_authorization_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 29 | `property_authorization_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 30 | `tax_authorization_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 31 | `subsystem_block_timestamp_enabled_from_height` | REMEDIATION | `None` | **Wave 2b** |
+| 32 | `subsystem_tx_index_enabled_from_height` | REMEDIATION | `None` | **Wave 2a** |
+| 33 | `subsystem_allocation_bound_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 34 | `tax_proof_lifecycle_enabled_from_height` | REMEDIATION | `None` | **Wave 2b** |
+| 35 | `nft_token_authority_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 36 | `agreement_signature_integrity_enabled_from_height` | REMEDIATION | `None` | **Wave 2b** |
+| 37 | `healthcare_state_precondition_enabled_from_height` | REMEDIATION | `None` | **Wave 2b** |
+| 38 | `subsystem_proof_presence_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 39 | `nft_update_path_parity_enabled_from_height` | REMEDIATION | `None` | **Wave 2c** |
+| 40 | `subsystem_no_op_receipt_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 41 | `peer_protocol_declaration_required_from_height` | **NEITHER** | `None` | **Wave 0** (load-enforced) |
+| 42 | `docclass_issuer_authority_enabled_from_height` | REMEDIATION | `None` | **Wave 2b** |
+| 43 | `nft_charged_receipt_enabled_from_height` | REMEDIATION | `None` | **Wave 2c** |
+| 44 | `docclass_revocation_record_enabled_from_height` | REMEDIATION | `None` | **Wave 2a** |
+| 45 | `docclass_credential_schema_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 46 | `nft_index_symmetry_enabled_from_height` | REMEDIATION | `None` | **Wave 2b** |
+| 47 | `docclass_identity_binding_enabled_from_height` | REMEDIATION | `None` | **Wave 2b** |
+| 48 | `docclass_issuer_stake_requirement_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 49 | `nft_collection_id_nonce_enabled_from_height` | REMEDIATION | `None` | **Wave 2a** |
+
+**28 REMEDIATION + 18 PREDATING + 3 NEITHER = 49**, matching §0.1.
