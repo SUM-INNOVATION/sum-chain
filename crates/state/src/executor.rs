@@ -266,7 +266,7 @@ pub struct BlockExecutor {
 /// block is applicable, which makes it consensus-relevant and not a number a
 /// storage or executor module may invent. This exists only so the migration can
 /// proceed locally, and must be replaced before publication.
-const CANDIDATE_LIMIT_SCAFFOLD: u64 = 1 << 30;
+pub const CANDIDATE_LIMIT_SCAFFOLD: u64 = 1 << 30;
 
 /// Everything one block's execution produced, INCLUDING the unpublished
 /// candidate that holds its buffered writes.

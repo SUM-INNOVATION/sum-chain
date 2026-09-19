@@ -604,15 +604,39 @@ async fn three_validators_crossing_one_activation_height_agree_at_every_height()
 /// |---|---|
 /// | `Genesis::from_json` / `ChainParams::validate` | ACCEPTS both |
 /// | `validate_runtime_activation` | ACCEPTS both |
-/// | `Genesis::activation_digest` | DIFFERS — the only pre-flight signal, and it is operator-facing |
+/// | `Genesis::activation_digest` | DIFFERS — operator-facing, compared by eye |
+/// | `protocol_digest` | DIFFERS — and is now compared BY THE NODE, at the peer handshake |
+/// | the peer handshake (`SyncRequest::GetProtocolId`) | REFUSES the odd node — see below |
 /// | block execution | the odd node computes a DIFFERENT root |
 /// | `accept_imported`, at these heights | ADOPTS the header root — no refusal |
 ///
 /// So below `LEGACY_ROOT_COMPATIBILITY_HEIGHT` the answer to "refuse to start,
-/// refuse the block, or produce a different root" is the third one, and the
-/// difference is then absorbed: the nodes agree on the accumulator and disagree
-/// about what it commits to. The receipt and the balance prove the divergence is
-/// real; the equal state roots prove nothing on the chain can see it.
+/// refuse the block, or produce a different root" is STILL the third one, and
+/// the difference is still absorbed at this layer: the nodes agree on the
+/// accumulator and disagree about what it commits to. The receipt and the
+/// balance prove the divergence is real; the equal state roots prove nothing on
+/// the chain can see it.
+///
+/// # What changed, and what deliberately did not
+///
+/// This file drives the CONSENSUS ENGINE directly. There is no network here, so
+/// the rows below the handshake are exactly as they were, and they are left
+/// asserted as they were: the absorption is a real property of
+/// `accept_imported` below the legacy window and it would be dishonest to stop
+/// testing it because a layer above now usually prevents the situation.
+///
+/// What changed is that the situation is now usually prevented. The refusal was
+/// added ABOVE this file rather than inside it, for a reason worth stating: a
+/// refusal at `accept_imported` — or an activation commitment in the block
+/// header — would be a CONSENSUS CHANGE, refusing blocks that today's
+/// validators produce and accept. Gating that behind a new activation height
+/// would make the fix depend on the very coordination it exists to verify. So
+/// the enforcement went where it costs the current chain nothing: the peer
+/// handshake, where a node that DECLARES different rules is disconnected before
+/// it can contribute a block, and a node too old to declare anything is left
+/// alone. `crates/p2p/tests/protocol_compat.rs` holds that argument and its
+/// tests; `crates/state/tests/protocol_digest_mismatched_binaries.rs` holds the
+/// digest's coverage of the binary constants the activation digest never saw.
 ///
 /// `above_the_legacy_window_the_same_disagreement_is_refused` is the other half.
 #[tokio::test]
@@ -662,6 +686,20 @@ async fn a_validator_with_a_different_activation_height_forks_silently_below_the
         majority_digest, odd_digest,
         "the digest is the one value two operators can compare by eye, so a \
          one-digit difference must change it"
+    );
+
+    // ── layer 3b: the protocol digest, which is the value the NODE compares ──
+    //
+    // The same difference, in the value that now crosses the wire at the peer
+    // handshake. A peer declaring the odd node's digest is refused by
+    // `BlockSyncer::on_protocol_id_response` before it can offer a block, which
+    // is what turns the operator-facing signal above into a control.
+    assert_ne!(
+        sumchain_state::protocol_digest::protocol_digest(&majority).expect("digest"),
+        sumchain_state::protocol_digest::protocol_digest(&odd).expect("digest"),
+        "the protocol digest must move for the same one-digit difference; it is \
+         what the handshake compares, so if it did not move the refusal would \
+         never fire"
     );
 
     // ── the chain ───────────────────────────────────────────────────────────

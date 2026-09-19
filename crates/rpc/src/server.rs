@@ -173,6 +173,8 @@ impl RpcTimeoutConfig {
 #[derive(Debug, Clone, Copy)]
 struct GenesisIdentity {
     digest: sumchain_primitives::Hash,
+    /// The activation heights AND this binary's consensus constants.
+    protocol_digest: Option<sumchain_primitives::Hash>,
     chain_id: u64,
 }
 
@@ -364,6 +366,10 @@ impl RpcServer {
             .ok()
             .map(|digest| GenesisIdentity {
                 digest,
+                // Computed from the same genesis, so the two values cannot
+                // describe different configurations. `None` if it cannot be
+                // computed, reported as unavailable rather than fabricated.
+                protocol_digest: sumchain_state::protocol_digest::protocol_digest(genesis).ok(),
                 chain_id: genesis.chain_id,
             });
         self
@@ -1578,13 +1584,20 @@ impl SumChainApiServer for RpcServer {
         // The digest covers chain identity as well as the heights, so it is
         // computed from the genesis this node holds rather than from
         // `chain_params` alone.
-        let (digest, chain_id) = match &self.genesis_identity {
-            Some(id) => (id.digest.to_string(), id.chain_id),
+        let (digest, protocol_digest, chain_id) = match &self.genesis_identity {
+            Some(id) => (
+                id.digest.to_string(),
+                id.protocol_digest
+                    .map(|d| d.to_string())
+                    .unwrap_or_else(|| "unavailable".to_string()),
+                id.chain_id,
+            ),
             // An RPC server constructed without a genesis cannot produce the
             // comparable value. Saying so is better than returning a digest over
             // defaults, which would compare equal between two nodes that share
             // nothing — the exact false agreement this value exists to prevent.
             None => (
+                "unavailable: this RPC server was not given a genesis".to_string(),
                 "unavailable: this RPC server was not given a genesis".to_string(),
                 0,
             ),
@@ -1592,6 +1605,7 @@ impl SumChainApiServer for RpcServer {
 
         Ok(crate::types::ActivationStatusInfo {
             digest,
+            protocol_digest,
             chain_id,
             current_height,
             gates,

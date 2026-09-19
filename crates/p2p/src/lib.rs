@@ -16,6 +16,9 @@ pub mod sync;
 pub use behaviour::{NetworkSecurityConfig, SumChainBehaviour};
 pub use block_syncer::{BlockSyncer, BlockSyncerConfig, SyncPeerInfo, SyncStats, SyncerState};
 pub use config::NetworkConfig;
+/// Re-exported so crates above this one can name a peer without taking their own
+/// direct dependency on the libp2p identity crate.
+pub use libp2p_identity::PeerId;
 pub use network::{NetworkCommand, NetworkEvent, NetworkService, RateLimitConfig, SyncRequestId};
 pub use node_key::load_or_generate_keypair;
 pub use peer_manager::{

@@ -187,6 +187,22 @@ pub enum NetworkEvent {
         peer: PeerId,
         error: String,
     },
+    /// A peer asked which protocol digest this binary enforces; the node
+    /// answers via `NetworkCommand::SendProtocolIdResponse`.
+    ProtocolIdRequest {
+        request_id: SyncRequestId,
+        peer: PeerId,
+    },
+    /// A peer declared the protocol digest ITS binary enforces.
+    ///
+    /// Only peers new enough to understand `SyncRequest::GetProtocolId` ever
+    /// produce this. An older peer produces an inbound failure instead, which
+    /// arrives as `SyncRequestFailed` and leaves the peer UNVERIFIED rather than
+    /// refused — see `BlockSyncer::on_protocol_id_response`.
+    ProtocolIdResponse {
+        peer: PeerId,
+        digest: sumchain_primitives::Hash,
+    },
 }
 
 /// Commands to send to the network
@@ -228,6 +244,13 @@ pub enum NetworkCommand {
     SendSyncErrorResponse {
         request_id: SyncRequestId,
         error: String,
+    },
+    /// Ask a peer which protocol digest its binary enforces.
+    RequestProtocolId(PeerId),
+    /// Answer a peer's protocol-digest request.
+    SendProtocolIdResponse {
+        request_id: SyncRequestId,
+        digest: sumchain_primitives::Hash,
     },
 }
 
@@ -650,6 +673,20 @@ impl NetworkService {
                                 warn!("No pending response channel for request_id {}", request_id);
                             }
                         }
+                        Some(NetworkCommand::RequestProtocolId(peer)) => {
+                            debug!("Requesting protocol digest from {}", peer);
+                            swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetProtocolId);
+                        }
+                        Some(NetworkCommand::SendProtocolIdResponse { request_id, digest }) => {
+                            if let Some(channel) = pending_sync_responses.remove(&request_id) {
+                                let response = SyncResponse::ProtocolId { digest };
+                                if swarm.behaviour_mut().sync.send_response(channel, response).is_err() {
+                                    warn!("Failed to send protocol digest response");
+                                }
+                            } else {
+                                warn!("No pending response channel for request_id {}", request_id);
+                            }
+                        }
                         Some(NetworkCommand::SendSyncErrorResponse { request_id, error }) => {
                             if let Some(channel) = pending_sync_responses.remove(&request_id) {
                                 let response = SyncResponse::Error(error);
@@ -780,6 +817,13 @@ impl NetworkService {
                                 to_height,
                             });
                         }
+                        SyncRequest::GetProtocolId => {
+                            let request_id = next_request_id.fetch_add(1, Ordering::SeqCst);
+                            pending_sync_responses.insert(request_id, channel);
+                            let _ = self
+                                .event_tx
+                                .send(NetworkEvent::ProtocolIdRequest { request_id, peer });
+                        }
                         SyncRequest::GetBlockByHash(_hash) => {
                             // Not implemented yet - respond with error
                             warn!("GetBlockByHash not implemented, ignoring");
@@ -815,6 +859,11 @@ impl NetworkService {
                                     blocks: vec![block],
                                 });
                             }
+                        }
+                        SyncResponse::ProtocolId { digest } => {
+                            let _ = self
+                                .event_tx
+                                .send(NetworkEvent::ProtocolIdResponse { peer, digest });
                         }
                         SyncResponse::Error(error) => {
                             warn!("Sync error from {}: {}", peer, error);

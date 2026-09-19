@@ -33,6 +33,15 @@ pub enum SyncRequest {
     },
     /// Request a specific block by hash
     GetBlockByHash(Hash),
+    /// Ask the peer which protocol digest its BINARY enforces.
+    ///
+    /// APPENDED, never inserted. bincode encodes the variant as its declared
+    /// index, so a new variant at the end is one a peer built before this change
+    /// simply fails to decode: it answers with an inbound failure rather than
+    /// with a wrong answer. That is the whole backward-compatibility story — see
+    /// `SyncResponse::ProtocolId`. Reordering these variants would silently
+    /// reinterpret every other request on the wire.
+    GetProtocolId,
 }
 
 /// Sync response messages
@@ -53,6 +62,15 @@ pub enum SyncResponse {
     Block(Option<Block>),
     /// Error response
     Error(String),
+    /// The digest of the activation heights AND consensus constants the
+    /// responder's binary enforces (`sumchain_state::protocol_digest`).
+    ///
+    /// Appended for the same reason as `SyncRequest::GetProtocolId`.
+    ProtocolId {
+        /// `sumchain_state::protocol_digest::protocol_digest`, as computed by
+        /// the responder from ITS genesis and ITS compiled-in constants.
+        digest: Hash,
+    },
 }
 
 /// Codec for sync protocol messages

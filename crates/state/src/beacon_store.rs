@@ -77,20 +77,20 @@ pub const BEACON_DECODE_BYTE_LIMIT: u64 = 1 << 20;
 pub const BEACON_RECORD_VERSION: u8 = 1;
 
 /// Canonical compressed G1 width (bytes) — encryption keys, carriers, commitments.
-const G1_LEN: usize = 48;
+pub const G1_LEN: usize = 48;
 /// Canonical compressed G2 width (bytes) — combined round signature `Σ_r`.
-const G2_LEN: usize = 96;
+pub const G2_LEN: usize = 96;
 /// ECIES body width (bytes) — `ct_{ij}`.
-const CT_LEN: usize = 48;
+pub const CT_LEN: usize = 48;
 /// Beacon output width (bytes).
-const OUT_LEN: usize = 32;
+pub const OUT_LEN: usize = 32;
 
 /// Domain tag for [`BeaconStore::state_digest`]. **Explicitly versioned**
 /// (`…state.v1`) — a FROZEN consensus value once the beacon gate can open (it is
 /// committed into the block state root), so any change requires a deliberate,
 /// activation-coordinated `…state.v2` bump, never an incidental edit. Pinned by the
 /// golden test `beacon_state_digest_domain_is_frozen`.
-const BEACON_STATE_DIGEST_DOMAIN: &[u8] = b"sumchain.beacon.state.v1";
+pub const BEACON_STATE_DIGEST_DOMAIN: &[u8] = b"sumchain.beacon.state.v1";
 
 /// Checked 4-byte little-endian frame prefix (rejects `> u32::MAX`, which would make
 /// the digest concatenation ambiguous — a consensus hazard). Byte-identical to a

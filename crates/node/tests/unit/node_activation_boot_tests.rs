@@ -876,9 +876,22 @@ async fn a_database_holding_a_newer_record_format_refuses_to_start() {
 /// nothing on the wire carries them.
 ///
 /// What the boot does produce is the activation DIGEST, logged on every start,
-/// and the two digests differ. That is the whole detection surface for this
-/// class of misconfiguration, and it is operator-facing: two people comparing
-/// one value, not two files field by field.
+/// and the two digests differ. That was, until the protocol digest existed, the
+/// whole detection surface for this class of misconfiguration, and it is
+/// operator-facing: two people comparing one value, not two files field by
+/// field.
+///
+/// Both nodes STILL start, and that is deliberate. Boot is the wrong place to
+/// refuse: a node that cannot start has no peers to compare itself against, and
+/// a boot-time refusal derived from a database's own history can never see a
+/// disagreement between two nodes. The refusal moved to the first moment a
+/// second node is actually present — the peer handshake — where
+/// `Node::run` compares the peer's declared `protocol_digest` against its own
+/// and bans a mismatch (`crates/p2p/tests/protocol_compat.rs`).
+///
+/// So the verdict this test records is unchanged and still correct: boot accepts
+/// both. What it now also records is that each node computes a DIFFERENT
+/// protocol digest, which is the value the handshake will refuse on.
 #[test]
 fn two_validators_with_different_activation_heights_both_start() {
     let validator = KeyPair::generate();
@@ -922,6 +935,17 @@ fn two_validators_with_different_activation_heights_both_start() {
         "the activation digest is the only thing that distinguishes these two \
          configurations before a block is produced; if it did not move, a \
          one-digit difference would be invisible to every operator surface"
+    );
+
+    // The value the peer handshake compares, which is the same difference in a
+    // form a NODE can act on rather than an operator. `Node::with_rpc_config`
+    // computes exactly this and declares it to every peer that asks; a peer
+    // declaring the other one is banned before it can offer a block.
+    assert_ne!(
+        sumchain_state::protocol_digest::protocol_digest(&a).expect("digest"),
+        sumchain_state::protocol_digest::protocol_digest(&b).expect("digest"),
+        "the protocol digest must distinguish these two configurations, or the \
+         handshake refusal has nothing to fire on"
     );
 
     // And each node is happy to restart under its own configuration — the
