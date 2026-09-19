@@ -10642,6 +10642,113 @@ mod policy_rpc_tests {
         assert_eq!(resp.action_hash, Some(format!("0x{}", hex::encode(ah.as_bytes()))));
     }
 
+    /// ACTIVATION-AUDIT row PA-1: the proposal id this helper returns is
+    /// ADVISORY, and goes stale the moment the account's policy nonce moves.
+    ///
+    /// The helper derives the id from the account's COMMITTED nonce while
+    /// building the transaction. The executor recomputes it at execution time
+    /// against the nonce the CANDIDATE holds. Between the two, any proposal
+    /// accepted against the same account advances that nonce, so a client that
+    /// built at nonce N and was included after another proposal landed holds an
+    /// id the chain never assigned.
+    ///
+    /// The audit classifies this REACHABLE and **not consensus-relevant**, and
+    /// the second assertion below is what that rests on: the id is not in the
+    /// transaction. The unsigned payload this helper returns is an `ExecSubmit`
+    /// carrying the account id, the action bytes, the approvals and the expiry,
+    /// and nothing else -- so no signature covers the id, execution consumes
+    /// none, and the whole consequence is a client-side mismatch. The blocker
+    /// document declines to call it a defect; this test fixes the behaviour in
+    /// place so that judgement can be re-made against something checkable
+    /// rather than re-read.
+    #[tokio::test]
+    async fn the_built_proposal_id_is_advisory_and_stale_once_the_nonce_moves() {
+        let (srv, db, _state, _dir) = server();
+        let m = KeyPair::generate();
+        let account = single_member_account(&db, &m);
+        let action = TxPayload::Transfer {
+            to: KeyPair::generate().address(),
+            amount: 5,
+        };
+        let action_payload = bincode::serialize(&action).unwrap();
+        let build = |from: &KeyPair| BuildSubmitProposalRequest {
+            from: from.address().to_base58(),
+            policy_account_id: format!("0x{}", hex::encode(account.id)),
+            action_data: format!("0x{}", hex::encode(&action_payload)),
+            approvals: vec![ApprovalInfo {
+                approver_address: from.address().to_base58(),
+                approver_pubkey: format!("0x{}", hex::encode(from.public_key().as_bytes())),
+                signature: format!("0x{}", hex::encode([0u8; 64])),
+            }],
+            expires_at: 9_000_000_000_000,
+            fee: Some(2_500),
+        };
+
+        let at_zero = srv.policy_build_submit_proposal(build(&m)).await.unwrap();
+        let ah = Hash::hash(&action_payload);
+        let id_at_zero = Proposal::compute_id(&account.id, 0, &ah);
+        assert_eq!(
+            at_zero.proposal_id,
+            Some(format!("0x{}", hex::encode(id_at_zero))),
+            "PA-1: the advisory id is derived against the COMMITTED nonce"
+        );
+
+        // The id is not in the transaction. This is the whole of "not
+        // consensus-relevant": nothing signs it and execution consumes none.
+        let tx = decode_tx(&at_zero);
+        let data = policy_payload(&tx);
+        let inner: ExecSubmit = bincode::deserialize(&data.data).unwrap();
+        assert_eq!(inner.policy_account_id, account.id);
+        assert_eq!(inner.action_payload, action_payload);
+        assert_eq!(inner.expires_at, 9_000_000_000_000);
+        assert!(
+            !bincode::serialize(&inner)
+                .unwrap()
+                .windows(32)
+                .any(|w| w == id_at_zero),
+            "PA-1: the derived id appears nowhere in the payload the sender \
+             signs, so it binds nothing and the mismatch is client-side only"
+        );
+
+        // Another proposal lands against the same account and advances the
+        // policy nonce. Nothing about the transaction built above changes.
+        let mut advanced = account.clone();
+        advanced.nonce = 1;
+        PolicyAccountStorage::new(&db)
+            .policy_accounts()
+            .put(&advanced)
+            .unwrap();
+
+        let at_one = srv.policy_build_submit_proposal(build(&m)).await.unwrap();
+        let id_at_one = Proposal::compute_id(&account.id, 1, &ah);
+        assert_eq!(
+            at_one.proposal_id,
+            Some(format!("0x{}", hex::encode(id_at_one)))
+        );
+        assert_ne!(
+            id_at_zero, id_at_one,
+            "PA-1: the SAME action against the SAME account derives a different \
+             id once the nonce has moved -- so the id returned to a client \
+             whose transaction is included after another proposal lands is not \
+             the id the executor assigns"
+        );
+        assert_ne!(
+            at_zero.proposal_id, at_one.proposal_id,
+            "PA-1: and that difference is what the helper hands back"
+        );
+
+        // The rest of the built transaction is unchanged by the nonce move,
+        // which is what makes the mismatch an ID mismatch and not a different
+        // transaction.
+        let tx_after = decode_tx(&at_one);
+        assert_eq!(
+            bincode::deserialize::<ExecSubmit>(&policy_payload(&tx_after).data)
+                .unwrap()
+                .action_payload,
+            action_payload
+        );
+    }
+
     #[tokio::test]
     async fn build_execute_proposal_encodes_request_wrapper() {
         let (srv, _db, _state, _dir) = server();
