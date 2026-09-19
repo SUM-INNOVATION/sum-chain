@@ -1331,8 +1331,29 @@ pub enum EquityOperation {
     TakeSnapshot = 65,
 
     // Proof operations (70-79)
-    /// Verify ownership proof
-    VerifyOwnershipProof = 70,
+    /// Accept an [`OwnershipProofEnvelope`] and STORE it. Nothing is verified.
+    ///
+    /// Renamed from `VerifyOwnershipProof`, which is what the discriminant was
+    /// called while the arm behind it deducted a fee, wrote the envelope and
+    /// logged "Ownership proof verified" having checked nothing -- not the
+    /// `proof_data`, not the `public_inputs`, and neither against the other.
+    /// This chain implements no verifier for subsystem proofs (see
+    /// `sumchain_state::VERIFY_PROOF_UNSUPPORTED` for the four independent
+    /// grounds), so an operation named "verify" here could only ever have been
+    /// a false name for a write.
+    ///
+    /// The **discriminant is unchanged at 70** and the variant is still last,
+    /// so neither the wire byte nor the bincode variant index moves: this
+    /// corrects what the chain SAYS it did, not what it does. A caller still
+    /// sends 70 and still gets a success receipt -- and that receipt now
+    /// truthfully means "the envelope was stored", which is the only thing
+    /// that ever happened.
+    ///
+    /// Equity therefore has NO verification operation. That is the true state
+    /// of this tree, and it agrees with the seven sibling `VerifyProof` arms
+    /// that refuse as UNSUPPORTED above
+    /// `subsystem_proof_unsupported_enabled_from_height`.
+    SubmitOwnershipProof = 70,
 }
 
 impl EquityOperation {
@@ -1365,7 +1386,7 @@ impl EquityOperation {
             63 => Some(EquityOperation::DistributeDividend),
             64 => Some(EquityOperation::ExecuteConversion),
             65 => Some(EquityOperation::TakeSnapshot),
-            70 => Some(EquityOperation::VerifyOwnershipProof),
+            70 => Some(EquityOperation::SubmitOwnershipProof),
             _ => None,
         }
     }

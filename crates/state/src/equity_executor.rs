@@ -132,8 +132,8 @@ impl EquityExecutor {
             }
 
             // Proof operations (SRC-835)
-            EquityOperation::VerifyOwnershipProof => {
-                Self::verify_ownership_proof(view, sender, &data.data, proposer, fee, block_height, tx_index)
+            EquityOperation::SubmitOwnershipProof => {
+                Self::submit_ownership_proof(view, sender, &data.data, proposer, fee, block_height, tx_index)
             }
         }
     }
@@ -496,8 +496,24 @@ impl EquityExecutor {
         Ok(EquityExecutionResult::success_with_token(burn.class_id))
     }
 
+    /// Store an ownership proof envelope. Verify nothing, and say so.
+    ///
+    /// The body is unchanged from the `verify_ownership_proof` it replaces --
+    /// deserialize, charge, store -- because the body was never the defect.
+    /// The defect was that this function, reached through an opcode named
+    /// `VerifyOwnershipProof`, announced `"Ownership proof verified"` for a
+    /// `proof_data` it had not looked at, and left a success receipt behind an
+    /// operation whose name a downstream reader decodes as "this proof
+    /// checked out". Both claims are now gone: the opcode is
+    /// [`EquityOperation::SubmitOwnershipProof`] (discriminant still 70) and
+    /// the log is [`crate::EQUITY_OWNERSHIP_PROOF_SUBMITTED`], which states the
+    /// negative rather than leaving it to be inferred.
+    ///
+    /// The envelope's `proof_data`, `public_inputs` and `proof_type` are
+    /// stored verbatim and are never read on any execution path. A reader of
+    /// `EQUITY_PROOFS` is holding bytes a fee-payer chose, nothing more.
     #[allow(clippy::too_many_arguments)]
-    fn verify_ownership_proof(
+    fn submit_ownership_proof(
         view: &mut ExecutionView<'_, '_>, sender: &Address, data: &[u8], proposer: &Address,
         fee: Balance, _block_height: BlockHeight, _tx_index: u32,
     ) -> Result<EquityExecutionResult> {
@@ -510,7 +526,11 @@ impl EquityExecutor {
 
         Self::v_put_ownership_proof(view, &proof)?;
 
-        debug!("Ownership proof verified: {:?}", proof.proof_id);
+        debug!(
+            "{}: {:?}",
+            crate::EQUITY_OWNERSHIP_PROOF_SUBMITTED,
+            proof.proof_id
+        );
         Ok(EquityExecutionResult::success())
     }
 }
