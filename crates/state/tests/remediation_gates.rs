@@ -191,6 +191,11 @@ const WIRING: &[(&str, &str, &str)] = &[
         "collection_id_nonce_activation",
         "nft_collection_id_nonce_enabled_from_height",
     ),
+    (
+        "lib.rs",
+        "subsystem_tx_write_set_bound_activation",
+        "subsystem_tx_write_set_bound_enabled_from_height",
+    ),
 ];
 
 fn source(file: &str) -> String {
@@ -299,10 +304,10 @@ fn the_twenty_eight_gates_are_twenty_eight_distinct_fields() {
     let fields: BTreeSet<&str> = WIRING.iter().map(|(_, _, f)| *f).collect();
     assert_eq!(
         fields.len(),
-        28,
-        "expected twenty-eight distinct fields: {fields:?}"
+        29,
+        "expected twenty-nine distinct fields: {fields:?}"
     );
-    assert_eq!(WIRING.len(), 28, "expected twenty-eight accessors");
+    assert_eq!(WIRING.len(), 29, "expected twenty-nine accessors");
 }
 
 /// Wiring a gate is not opening it: the release configuration is unchanged.
@@ -428,6 +433,10 @@ fn every_remediation_gate_is_dormant_by_default() {
             "nft_collection_id_nonce_enabled_from_height",
             p.nft_collection_id_nonce_enabled_from_height,
         ),
+        (
+            "subsystem_tx_write_set_bound_enabled_from_height",
+            p.subsystem_tx_write_set_bound_enabled_from_height,
+        ),
     
     ];
     assert_eq!(dormant.len(), WIRING.len());
@@ -532,5 +541,5 @@ fn the_genesis_gate_list_matches_the_accessor_table() {
     // such branches lost three attributes, three doc blocks and two
     // activation_heights entries, and left this list at 20 against a table of
     // 28, all of which compiled.
-    assert_eq!(in_genesis.len(), 28);
+    assert_eq!(in_genesis.len(), 29);
 }

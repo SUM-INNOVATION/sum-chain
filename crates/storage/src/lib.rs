@@ -101,6 +101,39 @@ pub enum StorageError {
 
     #[error("Invalid data: {0}")]
     InvalidData(String),
+
+    /// One transaction's own logical write set crossed the per-transaction
+    /// bound its overlay scope was opened with.
+    ///
+    /// A distinct variant rather than an `InvalidData` string because the
+    /// caller has to TELL THE TWO CEILINGS APART and act differently on each.
+    /// Crossing the BLOCK ceiling means this block cannot be evaluated at all;
+    /// crossing the per-transaction bound means this TRANSACTION cannot, and
+    /// the block survives it as a failed receipt. Distinguishing them by
+    /// matching on the message text would make the refusal semantics depend on
+    /// a format string, which is the sort of coupling that survives review and
+    /// then breaks silently when somebody rewords an error.
+    #[error(
+        "transaction exceeded its {limit} logical byte write-set bound \
+         (would reach {would_reach}); one transaction's charge is bounded \
+         independently of the block's"
+    )]
+    TransactionWriteSetExceeded { limit: u64, would_reach: u64 },
+
+    /// The BLOCK's logical write set crossed the candidate ceiling.
+    ///
+    /// The message is word-for-word the `InvalidData` string this used to be
+    /// formatted into, because `crates/state/tests/block_write_set_ceiling.rs`
+    /// asserts on that text as the proof that a refusal came from the ceiling
+    /// and not from something else that happens to fail at this size. What the
+    /// variant adds is a TYPE, so the block executor can recognise this refusal
+    /// without reading a format string — it needs to, because it has to tell
+    /// the proposer WHICH transaction crossed it.
+    #[error(
+        "overlay exceeded its {limit} logical byte limit (would reach {would_reach}); \
+         the candidate branch is too large to evaluate in memory"
+    )]
+    OverlayLimitExceeded { limit: u64, would_reach: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;

@@ -181,6 +181,20 @@ pub fn consensus_limits() -> Vec<(&'static str, LimitValue)> {
             "MAX_BLOCK_WRITE_SET_BYTES",
             LimitValue::Num(crate::MAX_BLOCK_WRITE_SET_BYTES as u128),
         ),
+        // The other half of the same rule, and folded for the same reason with
+        // one difference worth naming: this one is GATED, and a gate does not
+        // excuse it. Above `subsystem_tx_write_set_bound_enabled_from_height`
+        // two binaries holding different per-transaction bounds disagree about
+        // whether a transaction SUCCEEDS or takes a `Failed(400)` receipt, and
+        // a failed receipt is hashed into the block's accumulator — so they
+        // compute different roots for the same block. The activation digest
+        // makes the HEIGHT comparable; only this makes the LIMIT comparable,
+        // and a coordinated activation onto two different limits is exactly the
+        // upgrade this pair exists to stop.
+        (
+            "MAX_TX_WRITE_SET_BYTES",
+            LimitValue::Num(crate::MAX_TX_WRITE_SET_BYTES as u128),
+        ),
         // `candidate.rs` calls this "a consensus rule" in as many words: at or
         // below it a root mismatch is force-adopted, above it the same mismatch
         // is refused. Two binaries with different windows disagree about whether

@@ -200,6 +200,54 @@ pub fn subsystem_allocation_bound_gate_open(
     matches!(subsystem_allocation_bound_activation(params), Some(h) if block_height >= h)
 }
 
+/// The activation height for bounding what ONE TRANSACTION may charge against
+/// the candidate's logical write-set accounting.
+///
+/// Reads `params.subsystem_tx_write_set_bound_enabled_from_height`.
+///
+/// Below the gate the only write-set bound is [`MAX_BLOCK_WRITE_SET_BYTES`],
+/// which bounds a BLOCK. A single transaction that crosses it leaves
+/// `ApplicationOverlay::stage` as an `Err`, `execute_tx` propagates it,
+/// `execute_block`'s transaction loop propagates it with `?`, and the WHOLE
+/// BLOCK is unexecutable. For an importing node that is a correct refusal. For
+/// a PROPOSER it is a liveness failure with no floor: `PoAEngine::create_block`
+/// returns the error before signing, so no block is produced; `select_for_block`
+/// is non-destructive and orders by fee, so the same transaction is selected
+/// FIRST on the next tick and every tick after it. One transaction, for one
+/// `min_fee`, halts that validator's block production permanently.
+///
+/// At and above the gate the transaction is executed inside an overlay scope
+/// bounded by [`MAX_TX_WRITE_SET_BYTES`]. Crossing it rolls the transaction's
+/// writes back — the overlay is left exactly as the transaction found it — and
+/// the transaction takes a failed receipt at `Failed(400)`, having paid its fee
+/// and advanced its nonce. The block survives.
+///
+/// Its own field rather than a reuse of
+/// `subsystem_allocation_bound_enabled_from_height`, even though both are
+/// "bound the input": that gate refuses a transaction BEFORE decoding, on a
+/// length it can see in the payload, and its blast radius is confined to the
+/// DocClass, NFT and Agreement arms it is read in. This one changes what
+/// EVERY arm's failure means, it can only refuse AFTER the writes are staged
+/// (a charge is not visible until it is charged), and it changes the block's
+/// state root wherever it fires. Those are different blast radii and there is
+/// an operator who wants the first without yet having audited the second, so
+/// there is something to sequence — which is the
+/// `subsystem_tx_index_enabled_from_height` argument rather than the
+/// `subsystem_block_timestamp_enabled_from_height` one.
+#[inline]
+fn subsystem_tx_write_set_bound_activation(params: &sumchain_genesis::ChainParams) -> Option<u64> {
+    params.subsystem_tx_write_set_bound_enabled_from_height
+}
+
+/// Whether one transaction's write set is bounded at `block_height`.
+#[inline]
+pub fn subsystem_tx_write_set_bound_gate_open(
+    params: &sumchain_genesis::ChainParams,
+    block_height: u64,
+) -> bool {
+    matches!(subsystem_tx_write_set_bound_activation(params), Some(h) if block_height >= h)
+}
+
 /// The activation height for the no-op receipt rule.
 ///
 /// Reads `params.subsystem_no_op_receipt_enabled_from_height`, and nothing
@@ -546,14 +594,94 @@ pub const MAX_ACCUMULATING_ROW_BYTES: usize = 1_048_576;
 /// validator with less memory is OOM-killed while the one with more follows the
 /// chain, which is a split decided by hardware rather than by rules.
 ///
-/// What is missing is a bound on the write set ONE TRANSACTION may charge, so
-/// that `max_block_bytes` actually bounds a block's write set. That is not this
-/// constant's to fix and cannot be measured into existence: it is a rule that
-/// does not exist yet, and it belongs to whoever owns
-/// `subsystem_allocation_bound_enabled_from_height` and the block producer in
-/// `crates/consensus/src/poa.rs`, which builds blocks without simulating what
-/// they will charge.
+/// What this constant does NOT do — and what no value of it could do — is
+/// certify that a block of valid transactions fits underneath it. A block's
+/// write set is not bounded by the block's size, because a read-modify-write
+/// charges the PRE-IMAGE of a row the block does not carry: a hundred-byte
+/// `AddKey` against a one-megabyte row charges two megabytes, and a
+/// 2,000,000-byte block holds a thousand of them, so a block of ENTIRELY VALID
+/// transactions can charge about two gigabytes. No survivable ceiling admits
+/// that. This is therefore a SAFETY bound derived from the deployment memory
+/// limit, and it must never be restated as a statement of sufficient capacity.
+///
+/// The missing half — a bound on what ONE TRANSACTION may charge — is
+/// [`MAX_TX_WRITE_SET_BYTES`], behind
+/// `subsystem_tx_write_set_bound_enabled_from_height`. It does not make this
+/// ceiling a sufficiency bound and is not meant to: a thousand transactions at
+/// that bound are two orders of magnitude past this ceiling, deliberately, so
+/// that the per-transaction bound can admit the largest HONEST transaction.
+/// What it does is make the refusal ATTRIBUTABLE — one transaction fails
+/// instead of the whole block — and, as a by-product, halve the worst-case
+/// transient this ceiling has to cover, because the largest single row any one
+/// transaction can commit falls from `C / 2` to `MAX_TX_WRITE_SET_BYTES / 2`.
+/// Closing the gap the rest of the way is the PROPOSER's job, in
+/// `crates/consensus/src/poa.rs`: it declines to INCLUDE the transaction that
+/// would cross this ceiling rather than signing a block every validator then
+/// refuses.
 pub const MAX_BLOCK_WRITE_SET_BYTES: u64 = 1 << 28;
+
+/// The largest logical write set ONE TRANSACTION may charge, in bytes.
+///
+/// Read only where [`subsystem_tx_write_set_bound_gate_open`] said yes.
+///
+/// # What it bounds, and why that is the right quantity
+///
+/// The same deterministic logical accounting
+/// [`MAX_BLOCK_WRITE_SET_BYTES`] is measured in — key and value bytes of
+/// buffered writes plus captured pre-images, and nothing else — measured from
+/// where the transaction's own scope opened. It is a pure function of the bytes
+/// the transaction stages: no allocator behaviour, no wall time, no dependence
+/// on how full the block already was. Two validators executing the same
+/// transaction against the same parent state compute the same number, which is
+/// the property a consensus rule needs and which a residency or RSS reading
+/// could never have.
+///
+/// Bounding the CHARGE bounds the PEAK, by arithmetic on figures
+/// `crates/state/tests/release_ceiling_allocation.rs` measures rather than by
+/// assertion. Section M2 there measures, at four row sizes spanning six
+/// doublings, that one read-modify-write against a committed row of R bytes
+/// peaks at 4.00 x R live while charging 2.00 x R. Peak is therefore at most
+/// twice the charge, so a transaction held to this bound peaks at most
+/// `2 x MAX_TX_WRITE_SET_BYTES` live — 32 MiB — on top of whatever the block
+/// already holds. That is the "peak amplification attributable to ONE
+/// transaction", and it is bounded here because the charge is.
+///
+/// # The value
+///
+/// 16 MiB. It has to admit the largest HONEST transaction and refuse the class
+/// of transaction that makes a block unevaluable, and those two are three
+/// orders of magnitude apart, so the value is not delicate.
+///
+/// The largest honest transaction is bounded above by three things the chain
+/// already declares: `max_block_bytes` (2,000,000 in this repository's
+/// `genesis.json`) bounds the payload, [`MAX_ACCUMULATING_ROW_BYTES`]
+/// (1,048,576) bounds the pre-image of any row a gated operation may rewrite,
+/// and the event row a subsystem writes alongside carries at most a second copy
+/// of the payload. `crates/state/tests/transaction_write_set_bound.rs` MEASURES
+/// the worst transaction those limits admit, on the production path, and fails
+/// if this bound does not clear it with margin — so the sufficiency side of
+/// this number is a measurement and not a paragraph.
+///
+/// # Why a versioned binary constant and not a `ChainParams` field
+///
+/// Exactly the argument [`MAX_BLOCK_WRITE_SET_BYTES`] makes, and for the same
+/// reason: `Genesis::activation_digest` folds every `Option<u64>` gate and
+/// nothing else, so a plain `ChainParams` field for a number that decides
+/// whether a transaction succeeds would be consensus-relevant and uncompared.
+/// The HEIGHT is coordinated through `ChainParams`; the LIMIT ships in the
+/// reviewed binary and is folded into [`protocol_digest::consensus_limits`].
+pub const MAX_TX_WRITE_SET_BYTES: u64 = 1 << 24;
+
+/// The receipt code a transaction refused by [`MAX_TX_WRITE_SET_BYTES`] takes.
+///
+/// `400`, the first code in a free block —
+/// `sumchain_primitives::TxStatus::description` allocates up to 394 and this
+/// opens the 400 range. Named rather than written inline at the one site that
+/// produces it so the tests that assert on it cannot drift from the executor
+/// that emits it; the surrounding arms use literals, and that is exactly how a
+/// test and an executor come to disagree about a number neither of them can
+/// name.
+pub const TX_WRITE_SET_BOUND_RECEIPT_CODE: u32 = 400;
 
 pub use agreement_executor::{AgreementExecutionResult, AgreementExecutor, AgreementGates};
 pub use cache::{CacheStats, CachedAccount, StateCache};
@@ -622,6 +750,51 @@ pub enum StateError {
 
     #[error("Mempool full")]
     MempoolFull,
+
+    /// The BLOCK's logical write set crossed
+    /// [`MAX_BLOCK_WRITE_SET_BYTES`] while executing the transaction at
+    /// `tx_index`, and this block cannot be evaluated.
+    ///
+    /// The index is the whole reason this is not just the storage error. An
+    /// importing node only needs to know the block is inapplicable; a PROPOSER
+    /// needs to know WHICH transaction it must decline to include, because the
+    /// alternative — the behaviour below
+    /// `subsystem_tx_write_set_bound_enabled_from_height` — is that it produces
+    /// no block at all and keeps selecting the same transaction on every
+    /// subsequent tick.
+    ///
+    /// `detail` carries the storage error's own message verbatim, so the
+    /// ceiling that refused and the total it would have reached are still named
+    /// in the text a node logs.
+    #[error("block write set exceeded while executing transaction {tx_index}: {detail}")]
+    BlockWriteSetExceeded { tx_index: usize, detail: String },
+
+    /// A block EXECUTED inside [`MAX_BLOCK_WRITE_SET_BYTES`] but left no room
+    /// underneath it to PUBLISH.
+    ///
+    /// The ceiling is shared. `publish` stages the block record, a second copy
+    /// of every transaction, the receipts, the sender and recipient indexes,
+    /// the legacy diffs and the application journal through the SAME overlay,
+    /// so a block that executes at 99% of the ceiling cannot be committed.
+    ///
+    /// And the publication cost is NOT bounded by the block's size, for the
+    /// same reason the execution charge is not: the application journal records
+    /// a PRE-IMAGE per key the block wrote, so a block of read-modify-writes
+    /// pays for those rows a second time at publication. Measured on the
+    /// proposer path, a 268 MB execution charge reached about 400 MB at
+    /// publish — half as much again, not the few megabytes an allowance sized
+    /// by `max_block_bytes` would predict.
+    ///
+    /// Raised by the PROPOSER, before signing. An importing node never sees it:
+    /// it is handed a block and either applies it or does not, and a proposer
+    /// is the only party that can choose to carry fewer transactions.
+    #[error(
+        "block executed inside the write-set ceiling at {charged} bytes but left no \
+         room to publish: a proposal must stay under {budget} bytes so that the \
+         block record, the transaction copies, the receipts, the indexes and the \
+         pre-image journal still fit beneath the same ceiling"
+    )]
+    BlockWriteSetPublicationHeadroom { charged: u64, budget: u64 },
 
     /// OmniNode `InferenceAttestation` subprotocol is not yet active at the
     /// current block height — `omninode_enabled_from_height` is either

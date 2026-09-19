@@ -133,6 +133,31 @@ impl<'db> CandidateExecution<'db> {
         self.overlay.is_empty()
     }
 
+    // ── Per-transaction scopes ──────────────────────────────────────────────
+    //
+    // Drawn HERE rather than inside `ExecutionView`, and the difference is the
+    // point: the view is what an executor arm holds, and an arm that could
+    // close its own scope could hide its own charge from the bound measuring
+    // it. A transaction boundary is the block executor's to draw, and the block
+    // executor is what holds a `CandidateExecution`.
+
+    /// Open a scope bounding what the next transaction may charge.
+    /// See [`ApplicationOverlay::begin_transaction`].
+    pub fn begin_transaction(&mut self, limit: u64) -> Result<()> {
+        self.overlay.begin_transaction(limit)
+    }
+
+    /// Close the open scope, keeping what it staged. Returns what it charged.
+    pub fn commit_transaction(&mut self) -> Option<u64> {
+        self.overlay.commit_transaction()
+    }
+
+    /// Close the open scope, undoing everything it staged. Returns what it had
+    /// charged before being undone.
+    pub fn rollback_transaction(&mut self) -> Option<u64> {
+        self.overlay.rollback_transaction()
+    }
+
     /// Conclude execution, binding everything it produced to the candidate.
     ///
     /// This is the only way to leave `CandidateExecution`, and the subject, the

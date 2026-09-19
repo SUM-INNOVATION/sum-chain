@@ -440,8 +440,149 @@ impl PoAEngine {
         height <= *self.last_finalized_height.read()
     }
 
-    /// Create a new block
+    /// How many times a proposal may shrink itself and retry before it gives
+    /// up and proposes whatever it has left.
+    ///
+    /// Each attempt re-executes the block, so this bounds the proposer's own
+    /// work in the worst case and is not merely a loop guard. Every attempt
+    /// strictly shortens the proposal, so the loop terminates on its own; eight
+    /// is enough for the shapes observed (one attempt to drop a crossing
+    /// transaction, then two or three proportional truncations to open
+    /// publication headroom) with room to spare.
+    ///
+    /// Local to the proposer. Nothing about this number decides whether a block
+    /// is VALID — an importing node never reads it — so two proposers holding
+    /// different values build different blocks and both are applicable, which
+    /// is why it is not a consensus limit and is not folded into the protocol
+    /// digest.
+    const MAX_BLOCK_FIT_ATTEMPTS: usize = 8;
+
+    /// The share of `MAX_BLOCK_WRITE_SET_BYTES` a proposal's EXECUTION may
+    /// claim, leaving the rest for PUBLICATION.
+    ///
+    /// Half. The ceiling is shared between the two: `publish` stages the block
+    /// record, a second copy of every transaction, the receipts, the two index
+    /// families, the legacy diffs and the application journal through the same
+    /// overlay, and the journal records a PRE-IMAGE per key the block wrote. So
+    /// publication is not bounded by the block's size — it grows with the write
+    /// set, exactly as execution does.
+    ///
+    /// An allowance sized by `max_block_bytes` would be wrong by two orders of
+    /// magnitude for a block of read-modify-writes, which is why this is a
+    /// FRACTION of the ceiling rather than a constant number of bytes.
+    /// Measured on this path, an execution charge of about 268 MB reached about
+    /// 400 MB at publish — a factor of 1.5 — so reserving half is conservative
+    /// against what was observed and is not close to binding on honest traffic:
+    /// `crates/state/tests/block_write_set_ceiling.rs` measures a block at the
+    /// chain's declared limits charging single-digit megabytes.
+    const PROPOSAL_EXECUTION_SHARE_DIVISOR: u64 = 2;
+
+    /// Create a new block.
+    ///
+    /// # Fitting the block under the write-set ceiling
+    ///
+    /// `execute_block` gives its candidate `MAX_BLOCK_WRITE_SET_BYTES`, and a
+    /// block whose transactions charge past it is refused. That refusal used to
+    /// land here as a plain `Err` — before signing, which is correct, and
+    /// INSTEAD OF A BLOCK, which is not.
+    ///
+    /// It is not enough to refuse to sign. `select_for_block` is
+    /// non-destructive and orders by fee, so the transaction that made the
+    /// block unexecutable is still in the mempool on the next tick and is
+    /// selected FIRST, and `mempool.remove_batch` is only reached on the
+    /// success path. One transaction, for one `min_fee`, therefore halted this
+    /// validator's block production permanently — not for a slot, but for every
+    /// slot after it.
+    ///
+    /// So the refusal is acted on rather than propagated, in two shapes:
+    ///
+    ///   * ONE transaction crossed the ceiling. `execute_block` reports which;
+    ///     it is evicted from the mempool so the next tick does not select it
+    ///     again, and the proposal is truncated at it — which always fits,
+    ///     because the prefix before it executed.
+    ///   * The block executed but left no room to PUBLISH. Nobody is at fault
+    ///     and nothing is evicted; the proposal is truncated in proportion to
+    ///     how far over it was.
+    ///
+    /// Both shrink the proposal strictly, so the loop terminates whatever the
+    /// input.
+    ///
+    /// This is the half of the problem the per-transaction bound cannot solve
+    /// and is not meant to. `MAX_TX_WRITE_SET_BYTES x max_txs_per_block` is two
+    /// orders of magnitude past any survivable block ceiling — deliberately,
+    /// because the per-transaction bound has to admit the largest HONEST
+    /// transaction — so a block of transactions every one of which is inside
+    /// its own bound can still cross the block's. Only the proposer can decide
+    /// which of them not to include.
     fn create_block(&self, transactions: Vec<SignedTransaction>) -> Result<Block> {
+        let mut candidate_txs = transactions;
+        for attempt in 0..Self::MAX_BLOCK_FIT_ATTEMPTS {
+            match self.create_block_once(candidate_txs.clone()) {
+                Err(ConsensusError::State(sumchain_state::StateError::BlockWriteSetExceeded {
+                    tx_index,
+                    detail,
+                })) if tx_index < candidate_txs.len() => {
+                    let offender = candidate_txs[tx_index].hash();
+                    warn!(
+                        attempt,
+                        tx = %offender,
+                        index = tx_index,
+                        "a selected transaction takes this block past the write-set \
+                         ceiling; dropping it from the proposal and evicting it from \
+                         the mempool, so the next tick does not select it again: {detail}"
+                    );
+                    // Evicted, not merely skipped. Skipping it would build one
+                    // block and then select the same transaction first on the
+                    // next tick, which is the permanent halt this whole path
+                    // exists to end.
+                    self.mempool.remove_batch(&[offender]);
+                    // Truncated AT it, not spliced around it: the prefix is
+                    // known to execute, because it did. The transactions after
+                    // it are not lost, they are the next block's.
+                    candidate_txs.truncate(tx_index);
+                }
+                Err(ConsensusError::State(
+                    sumchain_state::StateError::BlockWriteSetPublicationHeadroom {
+                        charged,
+                        budget,
+                    },
+                )) if !candidate_txs.is_empty() => {
+                    // Proportional, not one-at-a-time. A block 145 transactions
+                    // over its budget would need 145 full re-executions to walk
+                    // down by one, which is a block time spent executing.
+                    //
+                    // `min(len - 1)` is what guarantees progress, and therefore
+                    // termination, when the proportion rounds to no change at
+                    // all.
+                    let len = candidate_txs.len();
+                    let proportional = (len as u64)
+                        .saturating_mul(budget)
+                        .checked_div(charged.max(1))
+                        .unwrap_or(0) as usize;
+                    let keep = proportional.min(len - 1);
+                    warn!(
+                        attempt,
+                        charged,
+                        budget,
+                        from = len,
+                        to = keep,
+                        "this block executes inside the write-set ceiling but leaves no \
+                         room to publish beneath it; carrying fewer transactions. \
+                         Nothing is evicted: no single transaction is at fault"
+                    );
+                    candidate_txs.truncate(keep);
+                }
+                other => return other,
+            }
+        }
+
+        // Out of attempts. Propose whatever survived the shrinking, which is
+        // strictly shorter than what came in.
+        self.create_block_once(candidate_txs)
+    }
+
+    /// One proposal attempt: build, execute, sign, accept, publish, announce.
+    fn create_block_once(&self, transactions: Vec<SignedTransaction>) -> Result<Block> {
         let validator_key = self
             .validator_key
             .as_ref()
@@ -537,6 +678,30 @@ impl PoAEngine {
         // bound to the candidate at execution completion and are written by the
         // publisher, in the same batch as the state they invert.
         let (executed, _state_diff, _contract_diff) = execution.into_parts();
+
+        // ── publication headroom, BEFORE signing ────────────────────────────
+        //
+        // Executing inside the ceiling is not enough to commit inside it. The
+        // ceiling is SHARED with `publish`, which afterwards stages the block
+        // record, a second copy of every transaction, the receipts, the sender
+        // and recipient indexes, the legacy diffs and the application journal
+        // through the same overlay — and the journal records a PRE-IMAGE per
+        // key, so for a block of read-modify-writes publication costs a second
+        // helping of the same rows.
+        //
+        // Discovered rather than assumed: a proposal that executed at 268 MB
+        // was refused at publish having reached 400 MB. Without this check the
+        // failure lands AFTER `sign`, which is the one place a proposer must
+        // not fail — the block is signed, nothing is published, and the slot is
+        // lost for a reason the proposer could have seen a moment earlier.
+        let charged = executed.logical_bytes();
+        let budget =
+            sumchain_state::MAX_BLOCK_WRITE_SET_BYTES / Self::PROPOSAL_EXECUTION_SHARE_DIVISOR;
+        if charged > budget {
+            return Err(ConsensusError::State(
+                sumchain_state::StateError::BlockWriteSetPublicationHeadroom { charged, budget },
+            ));
+        }
 
         // Update state root in header
         block.header.state_root = state_root;

@@ -1037,6 +1037,53 @@ pub struct ChainParams {
     #[serde(default)]
     pub subsystem_allocation_bound_enabled_from_height: Option<u64>,
 
+    /// One transaction's own logical write set is bounded, independently of
+    /// the block's.
+    ///
+    /// `sumchain_state::MAX_BLOCK_WRITE_SET_BYTES` bounds a BLOCK's write set,
+    /// and it cannot bound a transaction. A block's write set is not bounded by
+    /// the block's size, because a read-modify-write charges the PRE-IMAGE of a
+    /// row the block does not carry: a hundred-byte `AddKey` against a
+    /// one-megabyte row charges two megabytes, and a `max_block_bytes` block
+    /// holds a thousand of them.
+    ///
+    /// Below this gate the consequence lands on the whole block. The overlay
+    /// refuses the write, the error leaves `execute_tx`, and
+    /// `execute_block`'s loop propagates it — so ONE transaction makes the
+    /// block unexecutable. On an importing node that is a correct refusal; on a
+    /// PROPOSER it is a permanent halt, because `create_block` returns before
+    /// signing, the mempool's selection is non-destructive and ordered by fee,
+    /// and the same transaction is therefore selected first on every subsequent
+    /// tick.
+    ///
+    /// At and above it, the transaction executes inside an overlay scope
+    /// bounded by `sumchain_state::MAX_TX_WRITE_SET_BYTES`. Crossing the bound
+    /// rolls that transaction's writes back — leaving the candidate exactly as
+    /// the transaction found it — and yields a failed receipt that still pays
+    /// the fee and advances the nonce, so the work is charged for. The block
+    /// survives.
+    ///
+    /// The LIMIT is a binary constant and only the HEIGHT is configured, for
+    /// the reason `sumchain_state::MAX_BLOCK_WRITE_SET_BYTES` gives at length:
+    /// [`ChainParams::activation_heights`] and the activation digest cover
+    /// `Option<u64>` gates and nothing else, so a configurable limit would be a
+    /// consensus-relevant number that nothing in this tree compares between two
+    /// validators.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared — including the halt
+    /// above, which is a defect this gate schedules the repair of rather than
+    /// one it repairs by existing.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub subsystem_tx_write_set_bound_enabled_from_height: Option<u64>,
+
     /// The Tax proof store and its subject index stop disagreeing.
     ///
     /// Three defects that share one invariant, and therefore one height
@@ -2102,6 +2149,7 @@ impl Default for ChainParams {
             subsystem_block_timestamp_enabled_from_height: None,
             subsystem_tx_index_enabled_from_height: None,
             subsystem_allocation_bound_enabled_from_height: None,
+            subsystem_tx_write_set_bound_enabled_from_height: None,
             // Production-safe default: the tax proof store and its subject index stop disagreeing — dormant.
             tax_proof_lifecycle_enabled_from_height: None,
             // Production-safe default: an nft approval or metadata rewrite answers to the owner, the lock and the collection — dormant.
@@ -2510,6 +2558,10 @@ impl ChainParams {
                 self.subsystem_allocation_bound_enabled_from_height,
             ),
             (
+                "subsystem_tx_write_set_bound_enabled_from_height",
+                self.subsystem_tx_write_set_bound_enabled_from_height,
+            ),
+            (
                 "tax_proof_lifecycle_enabled_from_height",
                 self.tax_proof_lifecycle_enabled_from_height,
             ),
@@ -2657,6 +2709,7 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "nft_charged_receipt_enabled_from_height",
     "nft_index_symmetry_enabled_from_height",
     "nft_collection_id_nonce_enabled_from_height",
+    "subsystem_tx_write_set_bound_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started
