@@ -145,6 +145,15 @@ pub struct LegalGates {
     /// Executor-written timestamps are the block's, not a literal zero.
     /// ACTIVATION-AUDIT class 2.
     pub real_block_timestamp: bool,
+    /// `VerifyProof` refuses a payload that does not name a proof this
+    /// subsystem holds. ACTIVATION-AUDIT row AU-17 (= PR-3).
+    pub proof_presence: bool,
+    /// A payload-chosen index key is bounded before it becomes a key.
+    /// ACTIVATION-AUDIT row the Legal instance of AL-7.
+    pub allocation_bound: bool,
+    /// An operation that writes nothing reports a failed receipt rather
+    /// than a success one. ACTIVATION-AUDIT row OV-6.
+    pub no_op_receipt: bool,
 }
 
 impl LegalGates {
@@ -152,12 +161,18 @@ impl LegalGates {
     pub const CLOSED: Self = Self {
         authorization: false,
         real_block_timestamp: false,
+        proof_presence: false,
+        allocation_bound: false,
+        no_op_receipt: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
     pub const OPEN: Self = Self {
         authorization: true,
         real_block_timestamp: true,
+        proof_presence: true,
+        allocation_bound: true,
+        no_op_receipt: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -165,6 +180,9 @@ impl LegalGates {
         Self {
             authorization: LegalExecutor::authorization_gate_open(params, block_height),
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
+            proof_presence: crate::subsystem_proof_presence_gate_open(params, block_height),
+            allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
+            no_op_receipt: crate::subsystem_no_op_receipt_gate_open(params, block_height),
         }
     }
 }
@@ -262,6 +280,24 @@ impl LegalExecutor {
 
                 if Self::v_case_exists(view, &case.case_id)? {
                     return Ok(LegalExecutionResult::failure("Case already exists"));
+                }
+
+                // ACTIVATION-AUDIT AL-7, the Legal instance. `CaseAnchor.jurisdiction_code` is free text from the
+                // sender's own payload and becomes the raw KEY of
+                // `cf::LEGAL_JURISDICTION_INDEX`, with no width check anywhere ahead of
+                // the `put`. Below the gate one transaction writes a key of
+                // most of `max_block_bytes`. At and above it the key is
+                // bounded. Refused before the fee, like the duplicate guard
+                // above it.
+                if !crate::index_key_text_within_bound(
+                    &case.jurisdiction_code,
+                    gates.allocation_bound,
+                ) {
+                    return Ok(LegalExecutionResult::failure(format!(
+                        "Jurisdiction code too long: {} bytes, limit {}",
+                        case.jurisdiction_code.len(),
+                        crate::MAX_INDEX_KEY_TEXT_BYTES
+                    )));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -404,6 +440,21 @@ impl LegalExecutor {
                 {
                     return Ok(LegalExecutionResult::failure(
                         "Only the issuer of both cases can consolidate them",
+                    ));
+                }
+
+                // ACTIVATION-AUDIT row OV-6. `v_add_related_case` is
+                // `contains`-gated: when the relation is already recorded it
+                // skips the append AND the `updated_at` write, which lives
+                // inside the same branch, so a repeated consolidation leaves
+                // the primary case row byte-for-byte unchanged and still
+                // reports success. At and above the gate it says so instead.
+                //
+                // Refused before the deduct, where this arm's existence guards
+                // return.
+                if gates.no_op_receipt && case.related_cases.contains(&d.related_case_id) {
+                    return Ok(LegalExecutionResult::failure(
+                        "Cases are already consolidated",
                     ));
                 }
 
@@ -788,6 +839,24 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Benefit already exists"));
                 }
 
+                // ACTIVATION-AUDIT AL-7, the Legal benefit instance. `BenefitDetermination.jurisdiction_code` is free text from the
+                // sender's own payload and becomes the raw KEY of
+                // `cf::LEGAL_JURISDICTION_INDEX`, with no width check anywhere ahead of
+                // the `put`. Below the gate one transaction writes a key of
+                // most of `max_block_bytes`. At and above it the key is
+                // bounded. Refused before the fee, like the duplicate guard
+                // above it.
+                if !crate::index_key_text_within_bound(
+                    &benefit.jurisdiction_code,
+                    gates.allocation_bound,
+                ) {
+                    return Ok(LegalExecutionResult::failure(format!(
+                        "Jurisdiction code too long: {} bytes, limit {}",
+                        benefit.jurisdiction_code.len(),
+                        crate::MAX_INDEX_KEY_TEXT_BYTES
+                    )));
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -933,6 +1002,29 @@ impl LegalExecutor {
             }
 
             LegalOperation::VerifyProof => {
+                // ACTIVATION-AUDIT AU-17 (= PR-3). Below the gate this arm reads no
+                // payload and no proof, and reports success for a proof the chain
+                // has never held. At and above it the payload must be the 32 bytes
+                // of a proof id and that proof must be present. Presence is NOT
+                // verification and this does not claim to be: nothing in this tree
+                // checks `proof_data` against `public_inputs`. What it removes is
+                // the false positive.
+                //
+                // Refused BEFORE the deduct, which is where the sibling
+                // `SubmitProof` arm's duplicate-id refusal returns, so a refused
+                // proof operation costs the same in both.
+                if gates.proof_presence {
+                    let Some(proof_id) = crate::verify_proof_target(&data.data) else {
+                        return Ok(LegalExecutionResult::failure(format!(
+                            "VerifyProof payload must be a {}-byte proof id, got {} bytes",
+                            crate::PROOF_ID_BYTES,
+                            data.data.len()
+                        )));
+                    };
+                    if !Self::v_proof_exists(view, &proof_id)? {
+                        return Ok(LegalExecutionResult::failure("Proof not found"));
+                    }
+                }
                 // Verification is read-only - just record the request
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;

@@ -1015,6 +1015,32 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub subsystem_allocation_bound_enabled_from_height: Option<u64>,
+
+    /// The Tax proof store and `TAX_SUBJECT_INDEX` stop disagreeing.
+    ///
+    /// ACTIVATION-AUDIT rows OV-1, OV-2 and OV-3; the full statement of the
+    /// rule is on `TaxExecutor::proof_lifecycle_activation`, which is the one
+    /// accessor that reads this field.
+    ///
+    /// This declaration carried neither a doc comment nor its `#[serde(default)]`
+    /// when it was found, alone among the gates: the merge that added it landed
+    /// the field line and lost the block above it. `Option<u64>` is defaulted by
+    /// serde whether the attribute is present or not — which is why
+    /// `state/a_genesis_written_before_these_fields_still_parses_dormant` passed
+    /// over it and why nothing had caught this — so the loss was documentation
+    /// and consistency and not behaviour. Restored rather than left, because
+    /// the next reader has no way to tell a deliberate omission from a scar.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
     pub tax_proof_lifecycle_enabled_from_height: Option<u64>,
 
     /// An NFT approval or metadata rewrite answers to the same authority a
@@ -1114,6 +1140,141 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub healthcare_state_precondition_enabled_from_height: Option<u64>,
+
+    /// A `VerifyProof` transaction stops reporting success for a proof that
+    /// does not exist.
+    ///
+    /// **This gate does not make anything verify a proof.** No proof verifier
+    /// exists in this tree: nothing consumes `proof_data` against
+    /// `public_inputs`, in any subsystem. What the six arms do below the gate
+    /// (ACTIVATION-AUDIT rows AU-6, AU-12, AU-17, AU-20, AU-26 and AU-29, the
+    /// same defects as PR-1 to PR-6) is deduct, credit, increment and return
+    /// SUCCESS, without reading the payload at all — so a receipt says a proof
+    /// verified when the chain holds no such proof, and a relying party reading
+    /// receipts cannot tell the two apart. At and above the gate the payload
+    /// must be the 32 bytes of a proof id and that proof must be present in the
+    /// subsystem's proof family, or the operation is a failed receipt. What
+    /// remains true above the gate is that presence is not verification, and
+    /// the rows stay open on that half.
+    ///
+    /// Defining the payload as the proof id is a choice, and it is recorded as
+    /// one: `crates/sumchain-wire` declares no request type for a `VerifyProof`
+    /// payload, so `data` is free bytes today and the only reading under which
+    /// the operation names anything at all is that it names the proof. The same
+    /// choice was made, and recorded, for the `RevokeClaim` payload of
+    /// `tax_proof_lifecycle_enabled_from_height`.
+    ///
+    /// ONE field for six subsystems, for the reason
+    /// `subsystem_block_timestamp_enabled_from_height` is one field for eight:
+    /// it is one rule, the six arms are character-for-character identical, and
+    /// the blast radius is identical on both sides — a transaction that was a
+    /// success receipt becomes a failed one. There is nothing to sequence, and
+    /// an operator who closed five of the six would be shipping a chain in
+    /// which the meaning of `VerifyProof` depended on which subsystem was
+    /// asked.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub subsystem_proof_presence_enabled_from_height: Option<u64>,
+
+    /// An NFT arm that writes metadata or a collection config applies the rules
+    /// the CREATION arm applies.
+    ///
+    /// Two defects that are one question — does an update path enforce what the
+    /// creation path enforces — and therefore one height (ACTIVATION-AUDIT rows
+    /// OV-10 and the first half of RY-2):
+    ///
+    ///   * `execute_mint` checks `max_metadata_bytes` and charges
+    ///     `storage_fee_per_byte`; `UpdateMetadata` takes the payload verbatim
+    ///     as the new metadata with neither check, and `BatchMint` clones
+    ///     per-request metadata with neither check, for any number of requests.
+    ///     Both of those `ChainParams` values are SET in the release
+    ///     `genesis.json` — `max_metadata_bytes: 16384`,
+    ///     `storage_fee_per_byte: 100` — and bypassed on two of the three arms
+    ///     that write metadata, so the chain's own stated limits apply to one
+    ///     third of the paths that reach them.
+    ///   * collection creation zeroes `royalty_recipient` when `royalty_bps` is
+    ///     zero; `UpdateCollectionConfig` has no such rule and sets a recipient
+    ///     on a collection that pays no royalty anyway.
+    ///
+    /// At and above the gate `UpdateMetadata` and `BatchMint` enforce the size
+    /// limit and the per-byte storage fee, and `UpdateCollectionConfig` refuses
+    /// a recipient for a royalty of zero. One height because they are one
+    /// asymmetry: activating the metadata half alone would leave a collection
+    /// whose config still accepts a field creation rejects, and activating the
+    /// royalty half alone would leave the two metadata arms writing rows the
+    /// chain says are too large. Both sides change a success receipt into a
+    /// failed one and neither can abort a block, so there is nothing to
+    /// sequence.
+    ///
+    /// **This does not make a royalty payable.** RY-1 — a royalty recorded and
+    /// never paid by any transfer — is untouched, and so is the half of RY-2
+    /// that observes `NftUpdateCollectionConfigData` carries no
+    /// `new_royalty_bps` at all: that is a wire change, not an executor change.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub nft_update_path_parity_enabled_from_height: Option<u64>,
+
+    /// An operation that writes nothing stops reporting success.
+    ///
+    /// Three arms in three subsystems that charge the fee, advance the nonce
+    /// and return a SUCCESS receipt having changed no row the operation names
+    /// (ACTIVATION-AUDIT rows OV-6, OV-25 and OV-30):
+    ///
+    ///   * Legal `ConsolidateCase` repeated on a pair already consolidated:
+    ///     `v_add_related_case` is `contains`-gated, so the append is skipped
+    ///     and the primary case's `updated_at` — written only inside that
+    ///     branch — is not written either;
+    ///   * DocClass `UpdateCredential` writes nothing at all: after its
+    ///     authorization check it deducts, credits, increments and returns,
+    ///     with no `v_put_*` of any kind and no event;
+    ///   * Agreement `AddParty` and `RemoveParty`, whose whole body is the
+    ///     deduct, the credit, the increment and `success()`, under a comment
+    ///     saying they "would require updating agreement parties".
+    ///
+    /// At and above the gate each returns a failed receipt instead. ONE height
+    /// for the three, on the `subsystem_block_timestamp_enabled_from_height`
+    /// argument rather than the per-subsystem one: it is a single rule about
+    /// what a receipt MEANS, the blast radius is identical on all three sides
+    /// (a success receipt becomes a failed one and no block can abort), and an
+    /// operator who activated one of the three would be shipping a chain where
+    /// a success receipt means "the operation happened" in Legal and "the fee
+    /// was taken" in Agreement.
+    ///
+    /// **A failed receipt, not an implementation.** This does not make
+    /// `AddParty` add a party or `UpdateCredential` update a credential: those
+    /// need an operation semantics the subsystems do not define, and inventing
+    /// one inside an executor would be a rule nobody set. What it removes is
+    /// the receipt that says an absent effect happened.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub subsystem_no_op_receipt_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -1459,6 +1620,12 @@ impl Default for ChainParams {
             agreement_signature_integrity_enabled_from_height: None,
             // Production-safe default: a healthcare write consults the row it is about to change — dormant.
             healthcare_state_precondition_enabled_from_height: None,
+            // Production-safe default: VerifyProof stops succeeding for a proof that does not exist — dormant.
+            subsystem_proof_presence_enabled_from_height: None,
+            // Production-safe default: the nft update arms apply the creation arm's rules — dormant.
+            nft_update_path_parity_enabled_from_height: None,
+            // Production-safe default: an operation that writes nothing stops reporting success — dormant.
+            subsystem_no_op_receipt_enabled_from_height: None,
         }
     }
 }
@@ -1800,6 +1967,18 @@ impl ChainParams {
             (
                 "healthcare_state_precondition_enabled_from_height",
                 self.healthcare_state_precondition_enabled_from_height,
+            ),
+            (
+                "subsystem_proof_presence_enabled_from_height",
+                self.subsystem_proof_presence_enabled_from_height,
+            ),
+            (
+                "nft_update_path_parity_enabled_from_height",
+                self.nft_update_path_parity_enabled_from_height,
+            ),
+            (
+                "subsystem_no_op_receipt_enabled_from_height",
+                self.subsystem_no_op_receipt_enabled_from_height,
             ),
         ]
     }

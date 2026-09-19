@@ -162,6 +162,9 @@ pub struct PropertyGates {
     /// Executor-written timestamps are the block's, not a literal zero.
     /// ACTIVATION-AUDIT class 2.
     pub real_block_timestamp: bool,
+    /// A payload-chosen index key is bounded before it becomes a key.
+    /// ACTIVATION-AUDIT row AL-7.
+    pub allocation_bound: bool,
 }
 
 impl PropertyGates {
@@ -169,12 +172,14 @@ impl PropertyGates {
     pub const CLOSED: Self = Self {
         authorization: false,
         real_block_timestamp: false,
+        allocation_bound: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
     pub const OPEN: Self = Self {
         authorization: true,
         real_block_timestamp: true,
+        allocation_bound: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -182,6 +187,7 @@ impl PropertyGates {
         Self {
             authorization: PropertyExecutor::authorization_gate_open(params, block_height),
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
+            allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
         }
     }
 }
@@ -280,6 +286,24 @@ impl PropertyExecutor {
 
                 if Self::v_asset_exists(view, &asset.asset_id)? {
                     return Ok(PropertyExecutionResult::failure("Asset already exists"));
+                }
+
+                // ACTIVATION-AUDIT AL-7. `AssetAnchor.jurisdiction_code` is free text from the
+                // sender's own payload and becomes the raw KEY of
+                // `cf::PROPERTY_JURISDICTION_INDEX`, with no width check anywhere ahead of
+                // the `put`. Below the gate one transaction writes a key of
+                // most of `max_block_bytes`. At and above it the key is
+                // bounded. Refused before the fee, like the duplicate guard
+                // above it.
+                if !crate::index_key_text_within_bound(
+                    &asset.jurisdiction_code,
+                    gates.allocation_bound,
+                ) {
+                    return Ok(PropertyExecutionResult::failure(format!(
+                        "Jurisdiction code too long: {} bytes, limit {}",
+                        asset.jurisdiction_code.len(),
+                        crate::MAX_INDEX_KEY_TEXT_BYTES
+                    )));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;

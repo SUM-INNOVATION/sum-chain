@@ -200,6 +200,104 @@ pub fn subsystem_allocation_bound_gate_open(
     matches!(subsystem_allocation_bound_activation(params), Some(h) if block_height >= h)
 }
 
+/// The activation height for the no-op receipt rule.
+///
+/// Reads `params.subsystem_no_op_receipt_enabled_from_height`, and nothing
+/// else. `None` -- the default, and what a genesis written before the field
+/// existed resolves to -- closes the gate, so a node executes exactly what it
+/// executed before the field was declared.
+///
+/// ACTIVATION-AUDIT rows OV-6, OV-25 and OV-30. Below the gate three arms in
+/// three subsystems charge the fee, advance the nonce and return a SUCCESS
+/// receipt having changed no row the operation names: Legal `ConsolidateCase`
+/// repeated on a pair already consolidated, DocClass `UpdateCredential` (which
+/// writes nothing at all, on any input), and Agreement `AddParty` /
+/// `RemoveParty` (whose body is the fee and `success()`). At and above the gate
+/// each returns a failed receipt.
+///
+/// **This is a failed receipt, not an implementation.** It does not make
+/// `AddParty` add a party or `UpdateCredential` update a credential: those need
+/// an operation semantics the subsystems do not define. What it removes is the
+/// receipt that claims an absent effect happened.
+///
+/// ONE field for three subsystems, on the
+/// `subsystem_block_timestamp_enabled_from_height` argument: one rule about
+/// what a receipt means, the same blast radius on all three sides, and nothing
+/// to sequence.
+#[inline]
+fn subsystem_no_op_receipt_activation(params: &sumchain_genesis::ChainParams) -> Option<u64> {
+    params.subsystem_no_op_receipt_enabled_from_height
+}
+
+/// Whether the no-op receipt rule is active at `block_height`.
+#[inline]
+pub fn subsystem_no_op_receipt_gate_open(
+    params: &sumchain_genesis::ChainParams,
+    block_height: u64,
+) -> bool {
+    matches!(subsystem_no_op_receipt_activation(params), Some(h) if block_height >= h)
+}
+
+/// The activation height for the `VerifyProof` presence check.
+///
+/// Reads `params.subsystem_proof_presence_enabled_from_height`, and nothing
+/// else. `None` -- the default, and what a genesis written before the field
+/// existed resolves to -- closes the gate, so a node executes exactly what it
+/// executed before the field was declared.
+///
+/// ACTIVATION-AUDIT rows AU-6, AU-12, AU-17, AU-20, AU-26 and AU-29 (= PR-1 to
+/// PR-6). Below the gate all six `VerifyProof` arms are the same three
+/// statements -- deduct, credit, increment -- followed by `success()`, with the
+/// payload never read, so the operation reports a verified proof for a proof id
+/// the chain has never seen and for a payload that is not an id at all. At and
+/// above the gate the payload must be exactly [`PROOF_ID_BYTES`] bytes and name
+/// a proof present in that subsystem's proof family, or the arm returns a
+/// failed receipt before the deduct -- which is where the sibling `SubmitProof`
+/// arm's "Proof already exists" refusal returns too, so the fee treatment of a
+/// refused proof operation stays uniform within each subsystem.
+///
+/// **Presence is not verification, and this gate does not claim otherwise.** It
+/// removes the false positives; the rows stay open on the half that needs a
+/// request payload type and an actual verifier.
+///
+/// ONE field for six subsystems, on the
+/// `subsystem_block_timestamp_enabled_from_height` argument rather than the
+/// per-subsystem authorization one: the six bodies are character-for-character
+/// identical, the rule is one sentence, and the blast radius is the same on
+/// both sides (a success receipt becomes a failed one). There is no
+/// configuration in which an operator wants `VerifyProof` to mean one thing in
+/// Legal and another in Finance.
+#[inline]
+fn subsystem_proof_presence_activation(params: &sumchain_genesis::ChainParams) -> Option<u64> {
+    params.subsystem_proof_presence_enabled_from_height
+}
+
+/// Whether the `VerifyProof` presence check is active at `block_height`.
+#[inline]
+pub fn subsystem_proof_presence_gate_open(
+    params: &sumchain_genesis::ChainParams,
+    block_height: u64,
+) -> bool {
+    matches!(subsystem_proof_presence_activation(params), Some(h) if block_height >= h)
+}
+
+/// The width of a subsystem proof id, in bytes.
+///
+/// Read only where [`subsystem_proof_presence_gate_open`] said yes. Every
+/// subsystem's `ProofId` is `[u8; 32]`, and a `VerifyProof` payload that is not
+/// exactly this long cannot name one.
+pub const PROOF_ID_BYTES: usize = 32;
+
+/// The proof id a gated `VerifyProof` payload names, if it names one.
+///
+/// `None` for any payload that is not exactly [`PROOF_ID_BYTES`] bytes. Written
+/// once, here, so six subsystems cannot drift apart on what a `VerifyProof`
+/// payload is the way they would if each parsed it itself.
+#[inline]
+pub fn verify_proof_target(payload: &[u8]) -> Option<[u8; PROOF_ID_BYTES]> {
+    <[u8; PROOF_ID_BYTES]>::try_from(payload).ok()
+}
+
 /// The longest subsystem transaction payload that may be decoded, in bytes.
 ///
 /// Read only where [`subsystem_allocation_bound_gate_open`] said yes. Four times
@@ -211,6 +309,53 @@ pub fn subsystem_allocation_bound_gate_open(
 /// values of with nothing to compare. The height is coordinated; the limit ships
 /// in the reviewed binary.
 pub const MAX_SUBSYSTEM_PAYLOAD_BYTES: usize = 65_536;
+
+/// The longest payload-supplied text that may become a column-family KEY, in
+/// bytes.
+///
+/// Read only where [`subsystem_allocation_bound_gate_open`] said yes.
+///
+/// ACTIVATION-AUDIT row AL-7, and the same shape in two subsystems the audit
+/// does not name. Three column families are keyed by the raw UTF-8 of a
+/// `jurisdiction_code` the sender writes into its own payload, with no length
+/// or character validation anywhere ahead of the `put`:
+///
+///   * `cf::PROPERTY_JURISDICTION_INDEX` from `AssetAnchor.jurisdiction_code`
+///     (`crates/state/src/property_view.rs`, key builder
+///     `crates/storage/src/property_store.rs::jurisdiction_index_key`) — AL-7;
+///   * `cf::LEGAL_JURISDICTION_INDEX` from `CaseAnchor.jurisdiction_code` and
+///     `BenefitDetermination.jurisdiction_code`;
+///   * `cf::FINANCE_JURISDICTION_INDEX` from
+///     `FinanceIssuerProfile.jurisdiction_code`.
+///
+/// AL-7 is the one row in its class where attacker control reaches the KEY
+/// SPACE rather than a value: one transaction bounded only by
+/// `max_block_bytes` writes a key of most of two megabytes, and every read of
+/// that family then carries it. The Legal and Finance instances are the same
+/// defect at the same seam and were found while closing AL-7; they are bounded
+/// here rather than left, because activating the Property bound alone would
+/// close the cheapest vector and leave two identical ones open, which is the
+/// argument this gate's doc comment already makes for DocClass and NFT.
+///
+/// 64 bytes. An ISO 3166-2 subdivision code is at most six characters and the
+/// tree's own fixtures use `"US-NY"` and `"US"`, so this is an order of
+/// magnitude of headroom over any real value and still a bound. A binary
+/// constant rather than a `ChainParams` field for the reason
+/// [`MAX_SUBSYSTEM_PAYLOAD_BYTES`] gives: the activation digest covers
+/// `Option<u64>` gates and nothing else.
+///
+/// A row already keyed past this bound when the gate opens — there is no way
+/// to have one except by writing it below the gate — is untouched: reads still
+/// find it, and only a NEW anchor naming an over-long code is refused.
+pub const MAX_INDEX_KEY_TEXT_BYTES: usize = 64;
+
+/// Whether `text` may be used as a column-family key at this gate setting.
+///
+/// Always true below the gate, which is byte-for-byte the unremediated binary.
+#[inline]
+pub fn index_key_text_within_bound(text: &str, gate_open: bool) -> bool {
+    !gate_open || text.len() <= MAX_INDEX_KEY_TEXT_BYTES
+}
 
 /// The longest STORED encoding of an accumulating row that may be decoded, in
 /// bytes.
