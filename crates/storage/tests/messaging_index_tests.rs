@@ -219,3 +219,66 @@ fn a_malformed_pending_payment_row_keeps_the_parent_backfill_message() {
     );
     assert_eq!(text.matches("Serialization error:").count(), 1);
 }
+
+/// ACTIVATION-AUDIT row OC-1: neither backfill scan may drop a read error.
+///
+/// This is asserted against the SOURCE rather than against behaviour, and the
+/// reason is the failure it guards: `Database::full_iter` ends in
+/// `.filter_map(|r| r.ok())`, so a mid-scan RocksDB read error ends the
+/// iteration silently and the loop exits exactly as it does on an exhausted
+/// column family. Every observable thing then looks like success — the stats
+/// are simply smaller, and nothing in the tree knows how many rows there
+/// should have been — so the marker write at the end of `backfill_indexes`
+/// runs and stamps a PARTIAL index complete. `INDEX_BACKFILL_V1` is one-time
+/// and has no reset path, so that stamp is permanent and the unwritten index
+/// rows are never written by any later boot.
+///
+/// The two tests above (`backfill_fails_on_malformed_primary_…` and its
+/// payment sibling) cover the decode half of the same invariant, because a
+/// malformed row is something a test can put in the database. A RocksDB
+/// *read* error is not: producing one means corrupting an SST under a live
+/// handle, which tests nothing about this file. So the property under test is
+/// the one that is actually checkable — that the scan used is the error-
+/// propagating one — and reverting either loop to `full_iter` fails it.
+#[test]
+fn neither_backfill_scan_drops_a_read_error() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/messaging_store.rs"
+    ))
+    .expect("reading crates/storage/src/messaging_store.rs");
+
+    let start = src
+        .find("pub fn backfill_indexes(")
+        .expect("backfill_indexes is declared");
+    // The next item at method indentation ends the body. Every method in this
+    // file carries a doc comment, so `\n    ///` is the terminator; taking the
+    // rest of the file would sweep in unrelated scans such as
+    // `get_messages_by_recipient`, which is a read path and may use `full_iter`.
+    let end = src[start..]
+        .find("\n    ///")
+        .map(|o| start + o)
+        .expect("a documented method follows backfill_indexes");
+    // Comments are stripped before counting: the body carries a comment that
+    // NAMES both scans to explain why one of them is wrong, and a test that
+    // counted those mentions would be measuring the prose and not the code.
+    let body: String = src[start..end]
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_eq!(
+        body.matches("iter_checked_from").count(),
+        2,
+        "both backfill scans -- MESSAGING_EVENTS and MESSAGING_PENDING_PAYMENTS \
+         -- must iterate with the error-PROPAGATING scan, because the marker \
+         write below them cannot tell a truncated scan from a finished one"
+    );
+    assert!(
+        !body.contains("full_iter"),
+        "the backfill must not use the error-DROPPING scan: `full_iter` turns a \
+         mid-scan read failure into a short, silent, successful-looking pass, \
+         and the marker it then writes is permanent"
+    );
+}

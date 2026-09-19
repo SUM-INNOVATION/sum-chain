@@ -723,7 +723,23 @@ impl<'a> MessagingStore<'a> {
         // Fail fast on any malformed row: a partial index must not be marked
         // complete. A failed run leaves the marker unset, so the next boot
         // retries (index writes are overwrites, so the retry is idempotent).
-        for (key, value) in self.db.full_iter(cf::MESSAGING_EVENTS)? {
+        //
+        // ACTIVATION-AUDIT row OC-1. The scan is `iter_checked_from`, not
+        // `full_iter`, and that is the whole of the difference between this
+        // loop and the one the audit read: `full_iter` ends in
+        // `.filter_map(|r| r.ok())`, so a mid-scan RocksDB read error ends the
+        // iteration SILENTLY and this loop falls out of its body the way it
+        // does on a genuinely exhausted family. The marker is then written by
+        // the line after the second loop, and "a partial index must not be
+        // marked complete" -- the sentence three lines above -- is broken by
+        // the single failure mode it was written against. `INDEX_BACKFILL_V1`
+        // is one-time and has no reset path, so that truncation is PERMANENT:
+        // every later boot short-circuits on the marker and the index rows the
+        // truncated scan never reached are never written. A read error has to
+        // reach the caller, which fails startup with the marker still unset,
+        // which is the retry the comment above promises.
+        for entry in self.db.iter_checked_from(cf::MESSAGING_EVENTS, None)? {
+            let (key, value) = entry?;
             if key.len() < 44 {
                 return Err(StorageError::InvalidData(format!(
                     "backfill: MESSAGING_EVENTS key too short ({} bytes)",
@@ -753,7 +769,13 @@ impl<'a> MessagingStore<'a> {
         }
 
         // Recipient-payment index from MESSAGING_PENDING_PAYMENTS (message_id(32)).
-        for (key, value) in self.db.full_iter(cf::MESSAGING_PENDING_PAYMENTS)? {
+        // Checked for the same reason, and it is the same marker: a truncated
+        // payment pass is marked complete by the same write below.
+        for entry in self
+            .db
+            .iter_checked_from(cf::MESSAGING_PENDING_PAYMENTS, None)?
+        {
+            let (key, value) = entry?;
             if key.len() != 32 {
                 return Err(StorageError::InvalidData(format!(
                     "backfill: MESSAGING_PENDING_PAYMENTS key not 32 bytes ({} bytes)",
