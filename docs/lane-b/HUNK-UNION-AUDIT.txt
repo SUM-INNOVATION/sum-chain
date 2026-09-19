@@ -1,0 +1,310 @@
+head: HEAD = dafb5e029309b98c98fccc0102a4de93ff232192
+
+=== lane-b/trk-account = e548468b2fe7d17a7b17683f1f41187c080388df
+    base 4c105d80b9cd  files 7  lines checked 899 (+422 trivial)  NOT FOUND 4
+    --- crates/rpc/tests/operator_visible_activation_and_history.rs  (4)
+        /// nonzero. The key and encoding belong to `sumchain_storage::snapshot_meta`;
+        /// this reaches for the public recorder rather than writing the row, so a change
+        /// to that representation breaks the build here rather than silently producing a
+        sumchain_storage::snapshot_meta::record_snapshot_import(db, height).unwrap();
+
+=== lane-b/trk-journal = 77cec14652066455606e5ace7ea61686cb16dfa2
+    base 4c105d80b9cd  files 13  lines checked 999 (+438 trivial)  NOT FOUND 106
+    --- crates/state/tests/execution_closure.rs  (19)
+        // record was a `db.put` of its own; 1 again now. CHANGED DELIBERATELY,
+        // and the direction is the point.
+        // The vanished site was `snapshot_meta::record_snapshot_import`'s own
+        // `db.put(cf::META, …)`. That module recorded the SAME FACT as
+        // diverge, and they merge cleanly while being wrong together. They are
+        // collapsed onto the journal's key, and `snapshot_meta` is now three
+        // re-exports with no write of its own, which is why this scan — which
+        // follows resolvable calls and does not resolve a `pub use` rename —
+        // no longer finds a second site here.
+        // The write still happens, and it is pinned where it now lives:
+        // `storage/one_row_records_the_history_floor_under_every_name_that_reaches_it`
+        // and `storage/the_restore_floor_and_the_restored_state_commit_or_fail_together`.
+        // And 1 is the END state, not a temporary dip. The production form is
+        // `journal::stage_undo_history_floor`, which stages the floor into the
+        // restore's OWN batch instead of committing a second one — because a
+        // restore that imports rows and then records the floor separately can
+        // crash between the two and leave restored state that does not know its
+        // own floor. When `snapshot.rs` adopts it, this class has exactly one
+        // committed write site: the import batch, carrying both facts.
+    --- crates/storage/src/snapshot_meta.rs  (54)
+        //! The one row that says what history this node holds — reached by the names a
+        //! snapshot restore still calls it by.
+        //! # What this module used to be, and why it is no longer that
+        //! It used to own a second `META` row, `snapshot/imported_at`, with its own
+        //! encoding, its own decode failure and its own last-write-wins rule. The
+        //! journal owned a first one, `application_journal/undo_history_floor`, with a
+        //! different encoding path and a monotone rule. **Both recorded the same fact**:
+        //! the earliest height for which this node has usable generic undo history, and
+        //! therefore the floor below which it can neither unwind nor serve state.
+        //! Two rows for one fact do not conflict — they diverge. A restore path that
+        //! writes one and forgets the other, or writes them in two steps and crashes
+        //! between, leaves a node whose journal boundary and whose advertised history
+        //! depth describe different databases, and neither module can detect it because
+        //! neither knows the other exists. A `git merge` cannot detect it either: the
+        //! two keys are in two files and merge cleanly while being wrong together.
+        //! So the row is now exactly one:
+        //! [`crate::journal::UNDO_HISTORY_FLOOR_META_KEY`], written through
+        //! [`crate::journal::stage_undo_history_floor`] (inside the restore's own
+        //! batch) or [`crate::journal::record_undo_history_floor`] (standalone), and
+        //! read through [`crate::journal::undo_history_floor`]. There is no dual write,
+        //! no read fallback and no migration: neither prototype shipped, so
+        //! `snapshot/imported_at` is not a legacy format, it is a key this binary has
+        //! never written and does not read.
+        //! # Why the old names still resolve
+        //! The call sites are in `crates/state/src/snapshot.rs`, which belongs to
+        //! another track and is not edited from here. These three re-exports are the
+        //! bridge until it moves, and they are re-exports and not wrappers on purpose:
+        //! there is no second key, no second encoding and no second write rule behind
+        //! them, so a caller reaching the row by either name reaches the same row with
+        //! the same semantics. `crates/storage/tests/application_journal.rs`'s
+        //! `one_row_records_the_history_floor_under_every_name_that_reaches_it` pins
+        //! that, so the bridge cannot quietly become a second implementation again.
+        //! The required follow-up, stated so it can be checked: `snapshot.rs` should
+        //! call `journal::stage_undo_history_floor` inside the batch that makes the
+        //! restored account rows durable, drop its `SNAPSHOT_IMPORT_META_KEY`
+        //! re-export, and read the floor through `journal::undo_history_floor`. At that
+        //! point this module has no callers and should be deleted outright.
+        /// The single `META` key recording this node's undo-history floor.
+        /// Identical to [`crate::journal::UNDO_HISTORY_FLOOR_META_KEY`] — the same
+        /// constant, not a copy of its bytes.
+        ... and 14 more
+    --- crates/storage/tests/application_journal.rs  (33)
+        // `application_journal/undo_history_floor` and `snapshot_meta`'s
+        // These tests pin the collapse, and the six things the surviving row has to do.
+        /// There is ONE key, and every name that still reaches the fact reaches that
+        /// key — not a second row that happens to agree today.
+        /// The bridge names in `snapshot_meta` are re-exports, so this is a tautology at
+        /// the type level and the test says so deliberately: the assertion that matters
+        /// is the one on the database, that writing through either name leaves exactly
+        /// one row in `META` and that the retired `snapshot/imported_at` key is never
+        /// written at all.
+        fn one_row_records_the_history_floor_under_every_name_that_reaches_it() {
+        use sumchain_storage::snapshot_meta::{
+        record_snapshot_import, snapshot_import_height, SNAPSHOT_IMPORT_META_KEY,
+        /// The key the retired prototype used. Named here and nowhere else in the
+        /// tree: if it reappears in production code this test starts failing for
+        /// the right reason.
+        SNAPSHOT_IMPORT_META_KEY, UNDO_HISTORY_FLOOR_META_KEY,
+        "the two names must denote one key"
+        // Written through the snapshot-side name, read through the journal-side one.
+        record_snapshot_import(&d, 700).expect("record");
+        assert_eq!(snapshot_import_height(&d).unwrap(), Some(700));
+        // Written through the journal-side name, read through the snapshot-side one.
+        assert_eq!(snapshot_import_height(&d).unwrap(), Some(900));
+        // And the retired row was never touched by either. A dual write is exactly
+        // what this collapse removes, so its absence is the claim.
+        // One write rule too: monotone, under BOTH names. The snapshot-side row used
+        // to be last-write-wins, which would have let a later import lower the floor
+        // and claim undo history no snapshot can carry.
+        record_snapshot_import(&d, 100).expect("record");
+        "the surviving rule is monotone under every name that reaches it"
+        // And one decode failure, whose text says what follows from it. The state
+        for err in [
+        undo_history_floor(&d).expect_err("malformed").to_string(),
+        snapshot_import_height(&d)
+
+=== lane-b/trk-audit = 104b2964236f3c263ec31cedc478ce2bf35d2723
+    base 4c105d80b9cd  files 22  lines checked 3510 (+1899 trivial)  NOT FOUND 132
+    --- crates/state/src/docclass_executor.rs  (8)
+        // Replace this body with `params.docclass_stake_escrow_enabled_from_height`.
+        let _ = params;
+        // Replace with `params.docclass_subject_index_split_enabled_from_height`.
+        let _ = params;
+        // Replace with `params.docclass_revocation_standing_enabled_from_height`.
+        let _ = params;
+        let Some(recorded) = Self::v_get_docclass_issuer(view, sender)? else {
+        if let Some(mut issuer) = Self::v_get_docclass_issuer(view, &deactivate.issuer_address)?
+    --- crates/state/src/employment_executor.rs  (2)
+        // Replace with `params.employment_authorization_enabled_from_height`.
+        let _ = params;
+    --- crates/state/src/finance_executor.rs  (2)
+        // Replace with `params.finance_authorization_enabled_from_height`.
+        let _ = params;
+    --- crates/state/src/healthcare_executor.rs  (2)
+        // Replace with `params.healthcare_authorization_enabled_from_height`.
+        let _ = params;
+    --- crates/state/src/legal_executor.rs  (2)
+        // Replace with `params.legal_authorization_enabled_from_height`.
+        let _ = params;
+    --- crates/state/src/lib.rs  (3)
+        // Replace with `params.subsystem_block_timestamp_enabled_from_height`.
+        let _ = params;
+        EmploymentExecutionResult, EmploymentExecutor, EmploymentGates,
+    --- crates/state/src/nft_executor.rs  (4)
+        // Replace this body with `params.nft_receipt_failure_enabled_from_height`.
+        let _ = params;
+        Self::execute_with_gate(
+        Self::receipt_failure_gate_open(params, block_height),
+    --- crates/state/src/property_executor.rs  (2)
+        // Replace with `params.property_authorization_enabled_from_height`.
+        let _ = params;
+    --- crates/state/src/tax_executor.rs  (2)
+        // Replace with `params.tax_authorization_enabled_from_height`.
+        let _ = params;
+    --- crates/state/tests/docclass_routing.rs  (1)
+        assert!(r.success, "both arming transactions succeed under either gate");
+    --- crates/state/tests/healthcare_routing.rs  (1)
+        assert!(own.success, "the issuer keeps the operation under either gate");
+    --- crates/state/tests/legal_routing.rs  (8)
+        assert!(legal_at(&mut view, &owner.address(), LegalOperation::AnchorCase, &a, gates).success);
+        assert!(legal_at(&mut view, &other.address(), LegalOperation::AnchorCase, &b, gates).success);
+        assert!(legal_at(&mut view, &court.address(), LegalOperation::AnchorCase, &case, gates).success);
+        legal_at(&mut view, &court.address(), LegalOperation::IssueOrder, o, gates).success
+        assert!(!r.success, "at the gate neither half of the defect is reachable");
+        assert!(r.success, "below the gate the stranger's supersession lands");
+        assert!(legal_at(&mut view, &firm.address(), LegalOperation::AnchorCase, &case, gates).success);
+        assert!(legal_at(&mut view, &firm.address(), LegalOperation::RecordEvent, &ev, gates).success);
+    --- docs/lane-a/ACTIVATION-AUDIT.md  (95)
+        This document has been worked since it was written. Thirty-three rows now have a
+        remedy implemented and tested in the tree, and three more are half-remedied. **None of it changes a single
+        verdict, and the blocking count is exactly what it was.** That is not a
+        formality; it is the finding of the remediation pass.
+        Every one of the thirty-three is a CONSENSUS CHANGE — it changes which
+        Each is implemented behind an activation height, exactly as the eighteen
+        `*_enabled_from_height` gates in `ChainParams` are. **But `crates/genesis` is
+        another track's, and none of the eight fields these gates read exists yet.** So
+        every gate reads `None`, every gate is closed, and a release-configured node
+        behaves precisely as it did before — which is what the pinning tests, all of
+        which still pass unchanged, prove.
+        **A gate that cannot be opened is not a gate.** This document's own decision rule
+        says so: "A gate that cannot be pointed at is not a gate and is not this
+        verdict," and a GATED OFF row must name "the gate, where it is set". These name
+        the gate. None of them is set, and none can be set from the track that wrote
+        them. So the verdict stays REACHABLE, and the blocking count stays 121.
+        * **REMEDIED, PENDING FIELD** — the corrected behaviour exists, is reachable
+        sets it. Thirty-three rows fully; AU-3, AU-34 and TS-10 in part, and the
+        Eleven. None could be added from the track that implemented the behaviour behind
+        Eleven fields: seven per-subsystem authorization heights, three per-defect, and one
+        shared rule. They are separate rather than one because activating
+        | BD-1 | NFT `Collection not found` aborts the block — mint, batch mint, transfer, burn, metadata update, collection-ownership transfer, config update
+        | BD-2 | NFT `Token not found` aborts the block — transfer, approve, burn, metadata update, lock, unlock | NFT §block-level denial | **REACHABLE** | n
+        | BD-3 | NFT `Invalid config` (royalty above 2500bps in the payload) aborts the block | NFT §block-level denial | **REACHABLE** | none today. **REMEDI
+        | BD-4 | NFT undecodable payloads abort the block — collection, mint, transfer, approve, batch, config data | NFT §block-level denial | **REACHABLE** 
+        | BD-5 | NFT `deduct_fee` insufficient balance is an `Err`, not a failed receipt | found while auditing BD-1..4; not separately listed in the blocker 
+        | BD-6 | DocClass subject-index shape collision makes the next identity operation a block-level error | DocClass §one column family, two incompatible 
+        | TS-1 | Employment: every `updated_at` a status update writes is zero | Employment 1 | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `subs
+        | TS-2 | Legal: every status transition stamps `updated_at = 0`, `tx_index = 0` | Legal 6 | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `
+        | TS-3 | Finance: every routed update, suspension, revocation, reactivation stamps `updated_at = 0` | Finance 10 | **REACHABLE** | none today. **REMED
+        | TS-4 | Tax: both paths pass timestamp 0, so status changes persist an incorrect `updated_at` | Tax 8 | **REACHABLE** | none today. **REMEDIED, PENDI
+        | TS-5 | Agreement: timestamp 0 and tx index 0 on every executor-written timestamp | Agreement §untrusted payload metadata | **REACHABLE** | none toda
+        | TS-6 | Property: timestamp 0 and tx index 0 | Property §untrusted payload metadata | **REACHABLE** | none today. **REMEDIED, PENDING FIELD:** `subsy
+        | TS-7 | Property: `TitleEvent` has no `updated_at`, so a transition writes the (zero) timestamp into `created_at`, destroying the creation time | Pro
+        | TS-8 | Healthcare: timestamp 0 and tx index 0 — **and `Prescription::is_valid` is therefore evaluated at time zero**, so an expired prescription is 
+        | TS-9 | DocClass: timestamp 0 on `IdentityRoot.updated_at`, `DocClassIssuer.updated_at`, `RevocationRecord.revoked_at` | DocClass §untrusted payload 
+        | TS-10 | DocClass: because `tx_index` is also 0, every event in a block lands at key `height ‖ 0 ‖ 0` and the family holds one row per block — the la
+        | TS-11 | Messaging: timestamp/tx-index placeholders on the messaging arm | not listed as a defect in the blocker document (messaging carries no defer
+        | AU-1 | `SupersedeConsent` checks **nothing** about the sender: any account marks any consent `Superseded` and stores a replacement whose subject, re
+        | AU-2 | `FillPrescription` and `PartialFillPrescription` check no sender at all — not patient, prescriber, pharmacy or issuer | Healthcare §missing a
+        ... and 55 more
+
+=== lane-b/trk-oc2 = fdc077e1a89ade73607e809224e9b15e55117950
+    base 6e64dd59309b  files 12  lines checked 865 (+380 trivial)  NOT FOUND 0
+
+=== lane-b/trk-multinode = cb0fc8bdbd7e392048115852db4f2f84ca08a9bc
+    base 6e64dd59309b  files 3  lines checked 1288 (+622 trivial)  NOT FOUND 0
+
+=== lane-b/trk-txindex = db2b8bbe83070437884fee4e71db84de069ec3cc
+    base 6e64dd59309b  files 25  lines checked 442 (+217 trivial)  NOT FOUND 27
+    --- crates/state/tests/remediation_gates.rs  (16)
+        //! The twelve remediation gates read the twelve fields they name.
+        //! Twelve accessors, twelve fields, and the pairing between them is the claim:
+        //! the realistic bug in twelve near-identical three-line functions is not a
+        //! correct. `ChainParams::default()` leaves all twelve dormant, which is pinned
+        /// The parameter type is matched loosely because two of the twelve write it
+        two of twelve near-identical accessors swapping fields is the \
+        /// The twelve fields are distinct, and there are twelve of them.
+        /// It was eleven. The twelfth is `subsystem_tx_index_enabled_from_height`, and
+        /// its neighbour `subsystem_block_timestamp_enabled_from_height` is exactly the
+        /// field a copy-paste would have left it reading — which is why the count and
+        /// the distinctness are both asserted rather than either alone.
+        fn the_twelve_gates_are_twelve_distinct_fields() {
+        "expected twelve distinct fields: {fields:?}"
+        assert_eq!(WIRING.len(), 12, "expected twelve accessors");
+        /// `#[serde(default)]` is what makes adding twelve consensus-relevant fields a
+        "a genesis with none of the twelve fields must still parse — this is what \
+    --- docs/lane-a/ACTIVATION-AUDIT.md  (11)
+        Every one of the thirty-five is a CONSENSUS CHANGE — it changes which
+        stating plainly rather than burying in an unchanged number. Before, thirty-five
+        **Unchanged, and the reason is the whole point.** Thirty-five rows now carry a
+        The arithmetic that WOULD move, stated so the next pass can check it: the twelve
+        to a height in the deployed runtime `genesis.json`. When they are, thirty-five
+        behaviour — and the blocking count falls from 121 to 86.
+        The thirty-five were re-derived from this table rather than carried forward:
+        BD-1..BD-6, TS-1..TS-9, TS-10, TS-11, AU-1, AU-2, AU-4, AU-5, AU-13..AU-16, AU-19, AU-22,
+        AU-23, AU-25, AU-27, AU-30, AU-31, AU-36, OV-18 and OV-26. That is thirty-five
+        rows, and neither of them is one of the two partial ones. AU-3 and AU-34 do NOT move, because only part of
+        121, and reporting 86 before then would be the exact failure this document was
+
+=== lane-b/trk-class4 = 262428838051d8ea72414232e3b3a7db1caeeb21
+    base 232ff2740c15  files 10  lines checked 1220 (+530 trivial)  NOT FOUND 24
+    --- crates/state/src/nft_executor.rs  (9)
+        /// One value per chain-defined activation height this executor is gated on.
+        /// An operation naming an absent collection or token, or carrying an
+        /// undecodable payload, produces a `Failed` receipt instead of making the
+        /// whole block unexecutable. ACTIVATION-AUDIT row OV-?? / the receipt-failure
+        receipt_failure: Self::receipt_failure_gate_open(params, block_height),
+        allocation_bound: Self::allocation_bound_gate_open(params, block_height),
+        /// [`Self::execute_with_gate`] is the one-gate spelling this replaced, kept
+        /// so that every mixed-version test written against the receipt-failure gate
+        /// still drives the seam it was written for. It supplies
+    --- crates/state/tests/allocation_bound_gate.rs  (2)
+        /// receipt-failure rule, which changes an `Err` into a `Failed` receipt.
+        receipt_failure: false,
+    --- crates/state/tests/remediation_gates.rs  (13)
+        //! The thirteen remediation gates read the thirteen fields they name.
+        //! Thirteen accessors, thirteen fields, and the pairing between them is the
+        //! claim: the realistic bug in thirteen near-identical three-line functions is
+        //! correct. `ChainParams::default()` leaves all thirteen dormant, which is pinned
+        /// The parameter type is matched loosely because three of the thirteen write it
+        two of thirteen near-identical accessors swapping fields is the \
+        /// The thirteen fields are distinct, and there are thirteen of them.
+        /// the distinctness are both asserted rather than either alone. The thirteenth,
+        fn the_thirteen_gates_are_thirteen_distinct_fields() {
+        "expected thirteen distinct fields: {fields:?}"
+        assert_eq!(WIRING.len(), 13, "expected thirteen accessors");
+        /// `#[serde(default)]` is what makes adding thirteen consensus-relevant fields a
+        "a genesis with none of the thirteen fields must still parse — this is what \
+
+=== lane-b/trk-class8 = 96f80e68d0190745e23b1e219c4ba6c7371fbad5
+    base 232ff2740c15  files 16  lines checked 1085 (+710 trivial)  NOT FOUND 30
+    --- crates/state/src/lib.rs  (1)
+        pub use nft_executor::{NftExecutionResult, NftExecutor, NftGates};
+    --- crates/state/src/nft_executor.rs  (4)
+        /// receipt-failure decision because it was the only one. The token-authority
+        /// rules (rows OV-12, OV-13 and OV-14) are the second, and they are a
+        /// separate height: receipt-failure changes whether a block EXISTS, while
+        /// token authority changes which transactions inside a valid block succeed.
+    --- crates/state/tests/nft_routing.rs  (2)
+        receipt_failure: false,
+        receipt_failure: false,
+    --- crates/state/tests/remediation_gates.rs  (23)
+        //! The sixteen remediation gates read the sixteen fields they name.
+        //! Sixteen accessors, sixteen fields, and the pairing between them is the claim:
+        //! the realistic bug in sixteen near-identical three-line functions is not a
+        //! missing one, it is two of them reading each other's field. Four subsystems
+        //! now declare TWO accessors apiece in one file -- `tax_executor.rs` has
+        //! `authorization_activation` and `proof_lifecycle_activation`,
+        //! `healthcare_executor.rs` has `authorization_activation` and
+        //! `state_precondition_activation` -- which is exactly the neighbourhood the
+        //! swap happens in.
+        //! correct. `ChainParams::default()` leaves all sixteen dormant, which is pinned
+        two of sixteen near-identical accessors swapping fields is the \
+        /// The sixteen fields are distinct, and there are sixteen of them.
+        /// It was eleven, then twelve. The twelfth was
+        /// `subsystem_tx_index_enabled_from_height`, and its neighbour
+        /// distinctness are both asserted rather than either alone. Class 8 brought
+        /// four more, two of them a SECOND accessor in a file that already had one
+        /// (`tax_executor.rs`, `healthcare_executor.rs`), which is the same hazard one
+        /// step closer.
+        fn the_sixteen_gates_are_sixteen_distinct_fields() {
+        "expected sixteen distinct fields: {fields:?}"
+        assert_eq!(WIRING.len(), 16, "expected sixteen accessors");
+        /// `#[serde(default)]` is what makes adding sixteen consensus-relevant fields a
+        "a genesis with none of the sixteen fields must still parse — this is what \
+
+TOTAL lines added by a parent and not present in HEAD: 323
+Every one needs a classification. Only DROPPED is a failure.

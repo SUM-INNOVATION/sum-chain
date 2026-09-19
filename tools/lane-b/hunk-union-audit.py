@@ -66,6 +66,28 @@ def added_lines(base: str, parent: str) -> dict:
     return out
 
 
+def fork_point(head: str, parent: str) -> str:
+    """Where `parent` branched from the mainline it was later merged into.
+
+    NOT `git merge-base head parent`. Once a parent has been merged it is an
+    ancestor of head, so that call returns the parent itself and the audit
+    diffs it against itself -- zero files, zero lines, and a clean report that
+    proves nothing. The first version of this tool did exactly that across all
+    eight parents and reported a perfect zero.
+
+    The merge commit knows the answer. Find the merge that brought `parent` in,
+    take its FIRST parent (the mainline as it stood), and the fork point is the
+    merge base of that with `parent`.
+    """
+    merges = sh("git", "rev-list", "--merges", "--parents", f"{parent}..{head}").splitlines()
+    for line in merges:
+        ids = line.split()
+        if len(ids) >= 3 and parent in ids[2:]:
+            return sh("git", "merge-base", ids[1], parent).strip()
+    # Never merged (auditing an unmerged branch): fall back to the mainline base.
+    return sh("git", "merge-base", head, parent).strip()
+
+
 def main() -> int:
     if len(sys.argv) < 3:
         sys.exit("usage: hunk-union-audit.py <head> <parent> [<parent> ...]")
@@ -89,7 +111,14 @@ def main() -> int:
         psha = sh("git", "rev-parse", parent).strip()
         if not psha:
             sys.exit(f"unresolvable parent: {parent}")
-        base = sh("git", "merge-base", head_sha, psha).strip()
+        base = fork_point(head_sha, psha)
+        if base == psha:
+            sys.exit(
+                f"refusing to audit {parent}: its fork point resolved to itself, "
+                "which would diff the parent against itself and report a "
+                "meaningless zero. This is what `git merge-base HEAD <parent>` "
+                "returns once the parent is an ancestor of HEAD."
+            )
         adds = added_lines(base, psha)
 
         checked = trivial = missing = 0
