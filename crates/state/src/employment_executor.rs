@@ -719,6 +719,7 @@ mod tests {
         // out of sight.
         let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
         let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
+        let params = ChainParams::default();
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
@@ -733,6 +734,7 @@ mod tests {
 
         let result = EmploymentExecutor::execute(
             view,
+            &params,
             &sender,
             &tx_data,
             &proposer,
@@ -759,6 +761,7 @@ mod tests {
         let (db, _dir, _state) = setup();
         let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
         let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
+        let params = ChainParams::default();
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
@@ -772,6 +775,7 @@ mod tests {
         };
         EmploymentExecutor::execute(
             view,
+            &params,
             &sender,
             &tx_data,
             &proposer,
@@ -812,6 +816,7 @@ mod tests {
 
         let result = EmploymentExecutor::execute(
             view,
+            &params,
             &sender,
             &tx_data,
             &proposer,

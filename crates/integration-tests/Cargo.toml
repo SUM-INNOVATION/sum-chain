@@ -25,9 +25,10 @@ bincode = { workspace = true }
 serde = { workspace = true }
 
 [features]
-# Enable test modules that reference primitives schemas removed during
-# migration (e.g. stress_tests.rs uses an older NftExecutor::execute signature).
-# Run `cargo test -p sumchain-integration-tests --features legacy_tests` to
-# compile them; expect failures until they are updated. Mirrors the same
-# pattern in `crates/state/Cargo.toml`.
+# `stress_tests.rs`, gated off while it was written against an older
+# `NftExecutor::execute` signature. It compiles and passes now:
+# `cargo test -p sumchain-integration-tests --features legacy_tests` is
+# 56 passed / 0 failed. It stays behind a feature because it is a throughput
+# stress module whose runtime does not belong in the default gate, not because
+# it is expected to fail. Mirrors `crates/state/Cargo.toml`.
 legacy_tests = []

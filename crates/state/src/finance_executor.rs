@@ -787,6 +787,7 @@ mod tests {
         // out of sight.
         let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
         let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
+        let params = ChainParams::default();
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
@@ -795,6 +796,7 @@ mod tests {
         let issuer = sample_issuer(sender);
         let result = FinanceExecutor::execute(
             view,
+            &params,
             &sender,
             &tx(FinanceOperation::RegisterIssuer, &issuer),
             &proposer,
@@ -821,6 +823,7 @@ mod tests {
         let (db, _dir, _state) = setup();
         let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
         let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
+        let params = ChainParams::default();
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
@@ -828,6 +831,7 @@ mod tests {
 
         FinanceExecutor::execute(
             view,
+            &params,
             &sender,
             &tx(FinanceOperation::RegisterIssuer, &sample_issuer(sender)),
             &proposer,
@@ -862,6 +866,7 @@ mod tests {
 
         let result = FinanceExecutor::execute(
             view,
+            &params,
             &sender,
             &tx(FinanceOperation::CreateBankStanding, &credential),
             &proposer,

@@ -1849,6 +1849,7 @@ mod tests {
             operation,
             subcode,
             data: bincode::serialize(op_data).unwrap(),
+            recipient: Address::ZERO,
         }
     }
 
@@ -2055,6 +2056,7 @@ mod tests {
 
         let eligibility = EligibilityAttestation {
             credential_id,
+            subject_address: Address::ZERO,
             subcode: DocSubcode::EligibilityAttestation,
             subject_commitment,
             issuer: issuer_addr,
@@ -2067,6 +2069,7 @@ mod tests {
             expires_at: 0,
             payload_hash: None,
             payload_hint: None,
+            encryption_meta: None,
             issuer_signature: [0u8; 64],
             issuer_key_id: "key1".to_string(),
             revocation_status: RevocationStatus::Active,
@@ -2157,6 +2160,7 @@ mod tests {
         let credential_id = [200u8; 32];
         let eligibility = EligibilityAttestation {
             credential_id,
+            subject_address: Address::ZERO,
             subcode: DocSubcode::EligibilityAttestation,
             subject_commitment: [42u8; 32],
             issuer: issuer_addr,
@@ -2169,6 +2173,7 @@ mod tests {
             expires_at: 0,
             payload_hash: None,
             payload_hint: None,
+            encryption_meta: None,
             issuer_signature: [0u8; 64],
             issuer_key_id: "key1".to_string(),
             revocation_status: RevocationStatus::Active,
@@ -2283,6 +2288,7 @@ mod tests {
         // Try to issue with unregistered address (should fail)
         let eligibility = EligibilityAttestation {
             credential_id: [200u8; 32],
+            subject_address: Address::ZERO,
             subcode: DocSubcode::EligibilityAttestation,
             subject_commitment: [42u8; 32],
             issuer: unauthorized_addr, // Wrong issuer
@@ -2295,6 +2301,7 @@ mod tests {
             expires_at: 0,
             payload_hash: None,
             payload_hint: None,
+            encryption_meta: None,
             issuer_signature: [0u8; 64],
             issuer_key_id: "key1".to_string(),
             revocation_status: RevocationStatus::Active,
