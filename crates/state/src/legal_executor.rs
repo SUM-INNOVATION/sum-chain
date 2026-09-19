@@ -151,6 +151,9 @@ pub struct LegalGates {
     /// A payload-chosen index key is bounded before it becomes a key.
     /// ACTIVATION-AUDIT row the Legal instance of AL-7.
     pub allocation_bound: bool,
+    /// An operation that writes nothing reports a failed receipt rather
+    /// than a success one. ACTIVATION-AUDIT row OV-6.
+    pub no_op_receipt: bool,
 }
 
 impl LegalGates {
@@ -160,6 +163,7 @@ impl LegalGates {
         real_block_timestamp: false,
         proof_presence: false,
         allocation_bound: false,
+        no_op_receipt: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -168,6 +172,7 @@ impl LegalGates {
         real_block_timestamp: true,
         proof_presence: true,
         allocation_bound: true,
+        no_op_receipt: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -177,6 +182,7 @@ impl LegalGates {
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
             proof_presence: crate::subsystem_proof_presence_gate_open(params, block_height),
             allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
+            no_op_receipt: crate::subsystem_no_op_receipt_gate_open(params, block_height),
         }
     }
 }
@@ -434,6 +440,21 @@ impl LegalExecutor {
                 {
                     return Ok(LegalExecutionResult::failure(
                         "Only the issuer of both cases can consolidate them",
+                    ));
+                }
+
+                // ACTIVATION-AUDIT row OV-6. `v_add_related_case` is
+                // `contains`-gated: when the relation is already recorded it
+                // skips the append AND the `updated_at` write, which lives
+                // inside the same branch, so a repeated consolidation leaves
+                // the primary case row byte-for-byte unchanged and still
+                // reports success. At and above the gate it says so instead.
+                //
+                // Refused before the deduct, where this arm's existence guards
+                // return.
+                if gates.no_op_receipt && case.related_cases.contains(&d.related_case_id) {
+                    return Ok(LegalExecutionResult::failure(
+                        "Cases are already consolidated",
                     ));
                 }
 

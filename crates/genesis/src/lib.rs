@@ -1205,6 +1205,50 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub nft_update_path_parity_enabled_from_height: Option<u64>,
+
+    /// An operation that writes nothing stops reporting success.
+    ///
+    /// Three arms in three subsystems that charge the fee, advance the nonce
+    /// and return a SUCCESS receipt having changed no row the operation names
+    /// (ACTIVATION-AUDIT rows OV-6, OV-25 and OV-30):
+    ///
+    ///   * Legal `ConsolidateCase` repeated on a pair already consolidated:
+    ///     `v_add_related_case` is `contains`-gated, so the append is skipped
+    ///     and the primary case's `updated_at` — written only inside that
+    ///     branch — is not written either;
+    ///   * DocClass `UpdateCredential` writes nothing at all: after its
+    ///     authorization check it deducts, credits, increments and returns,
+    ///     with no `v_put_*` of any kind and no event;
+    ///   * Agreement `AddParty` and `RemoveParty`, whose whole body is the
+    ///     deduct, the credit, the increment and `success()`, under a comment
+    ///     saying they "would require updating agreement parties".
+    ///
+    /// At and above the gate each returns a failed receipt instead. ONE height
+    /// for the three, on the `subsystem_block_timestamp_enabled_from_height`
+    /// argument rather than the per-subsystem one: it is a single rule about
+    /// what a receipt MEANS, the blast radius is identical on all three sides
+    /// (a success receipt becomes a failed one and no block can abort), and an
+    /// operator who activated one of the three would be shipping a chain where
+    /// a success receipt means "the operation happened" in Legal and "the fee
+    /// was taken" in Agreement.
+    ///
+    /// **A failed receipt, not an implementation.** This does not make
+    /// `AddParty` add a party or `UpdateCredential` update a credential: those
+    /// need an operation semantics the subsystems do not define, and inventing
+    /// one inside an executor would be a rule nobody set. What it removes is
+    /// the receipt that says an absent effect happened.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub subsystem_no_op_receipt_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -1554,6 +1598,8 @@ impl Default for ChainParams {
             subsystem_proof_presence_enabled_from_height: None,
             // Production-safe default: the nft update arms apply the creation arm's rules — dormant.
             nft_update_path_parity_enabled_from_height: None,
+            // Production-safe default: an operation that writes nothing stops reporting success — dormant.
+            subsystem_no_op_receipt_enabled_from_height: None,
         }
     }
 }
@@ -1903,6 +1949,10 @@ impl ChainParams {
             (
                 "nft_update_path_parity_enabled_from_height",
                 self.nft_update_path_parity_enabled_from_height,
+            ),
+            (
+                "subsystem_no_op_receipt_enabled_from_height",
+                self.subsystem_no_op_receipt_enabled_from_height,
             ),
         ]
     }

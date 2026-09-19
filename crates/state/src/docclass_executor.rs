@@ -63,6 +63,9 @@ pub struct DocClassGates {
     /// decoded, and a stored row past the limit is refused before it is decoded
     /// and re-encoded. ACTIVATION-AUDIT rows AL-10 and AL-11.
     pub allocation_bound: bool,
+    /// An operation that writes nothing reports a failed receipt rather
+    /// than a success one. ACTIVATION-AUDIT row OV-25.
+    pub no_op_receipt: bool,
 }
 
 impl DocClassGates {
@@ -85,6 +88,7 @@ impl DocClassGates {
         revocation_standing: false,
         real_block_timestamp: false,
         allocation_bound: false,
+        no_op_receipt: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -94,6 +98,7 @@ impl DocClassGates {
         revocation_standing: true,
         real_block_timestamp: true,
         allocation_bound: true,
+        no_op_receipt: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -110,6 +115,7 @@ impl DocClassGates {
             ),
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
             allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
+            no_op_receipt: crate::subsystem_no_op_receipt_gate_open(params, block_height),
         }
     }
 }
@@ -459,7 +465,7 @@ impl DocClassExecutor {
                 tx_index,
             ),
             DocClassOperation::UpdateCredential => {
-                Self::update_credential(view, sender, &data.data, proposer, fee)
+                Self::update_credential(view, sender, &data.data, proposer, fee, gates)
             }
 
             // Revocation operations (SRC-805)
@@ -1194,6 +1200,7 @@ impl DocClassExecutor {
         data: &[u8],
         proposer: &Address,
         fee: Balance,
+        gates: DocClassGates,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct UpdateData {
@@ -1214,6 +1221,23 @@ impl DocClassExecutor {
 
         if !is_authorized {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
+        }
+
+        // ACTIVATION-AUDIT row OV-25. "Just check authorization for now" is the
+        // whole implementation: below the gate this arm deducts, credits,
+        // increments and returns SUCCESS naming the credential, having written
+        // neither the credential nor an event -- on any input, for the
+        // credential's own issuer. At and above the gate it says so.
+        //
+        // A failed receipt, not an implementation: the payload carries nothing
+        // but a credential id, so there is no field for an update to apply.
+        // Refused after the authorization checks so that "Credential not found"
+        // and "Not authorized" stay the more specific answer, and before the
+        // deduct, where both of those return.
+        if gates.no_op_receipt {
+            return Ok(DocClassExecutionResult::failure(
+                "UpdateCredential is not implemented and writes no credential",
+            ));
         }
 
         StateManager::v_deduct(view, sender, fee)?;

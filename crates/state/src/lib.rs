@@ -199,6 +199,44 @@ pub fn subsystem_allocation_bound_gate_open(
     matches!(subsystem_allocation_bound_activation(params), Some(h) if block_height >= h)
 }
 
+/// The activation height for the no-op receipt rule.
+///
+/// Reads `params.subsystem_no_op_receipt_enabled_from_height`, and nothing
+/// else. `None` -- the default, and what a genesis written before the field
+/// existed resolves to -- closes the gate, so a node executes exactly what it
+/// executed before the field was declared.
+///
+/// ACTIVATION-AUDIT rows OV-6, OV-25 and OV-30. Below the gate three arms in
+/// three subsystems charge the fee, advance the nonce and return a SUCCESS
+/// receipt having changed no row the operation names: Legal `ConsolidateCase`
+/// repeated on a pair already consolidated, DocClass `UpdateCredential` (which
+/// writes nothing at all, on any input), and Agreement `AddParty` /
+/// `RemoveParty` (whose body is the fee and `success()`). At and above the gate
+/// each returns a failed receipt.
+///
+/// **This is a failed receipt, not an implementation.** It does not make
+/// `AddParty` add a party or `UpdateCredential` update a credential: those need
+/// an operation semantics the subsystems do not define. What it removes is the
+/// receipt that claims an absent effect happened.
+///
+/// ONE field for three subsystems, on the
+/// `subsystem_block_timestamp_enabled_from_height` argument: one rule about
+/// what a receipt means, the same blast radius on all three sides, and nothing
+/// to sequence.
+#[inline]
+fn subsystem_no_op_receipt_activation(params: &sumchain_genesis::ChainParams) -> Option<u64> {
+    params.subsystem_no_op_receipt_enabled_from_height
+}
+
+/// Whether the no-op receipt rule is active at `block_height`.
+#[inline]
+pub fn subsystem_no_op_receipt_gate_open(
+    params: &sumchain_genesis::ChainParams,
+    block_height: u64,
+) -> bool {
+    matches!(subsystem_no_op_receipt_activation(params), Some(h) if block_height >= h)
+}
+
 /// The activation height for the `VerifyProof` presence check.
 ///
 /// Reads `params.subsystem_proof_presence_enabled_from_height`, and nothing

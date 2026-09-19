@@ -164,6 +164,9 @@ pub struct AgreementGates {
     /// `VerifyProof` refuses a payload that does not name a proof this
     /// subsystem holds. ACTIVATION-AUDIT row AU-12 (= PR-5).
     pub proof_presence: bool,
+    /// An operation that writes nothing reports a failed receipt rather
+    /// than a success one. ACTIVATION-AUDIT row OV-30.
+    pub no_op_receipt: bool,
 }
 
 impl AgreementGates {
@@ -172,6 +175,7 @@ impl AgreementGates {
         real_block_timestamp: false,
         signature_integrity: false,
         proof_presence: false,
+        no_op_receipt: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -179,6 +183,7 @@ impl AgreementGates {
         real_block_timestamp: true,
         signature_integrity: true,
         proof_presence: true,
+        no_op_receipt: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -190,6 +195,7 @@ impl AgreementGates {
                 block_height,
             ),
             proof_presence: crate::subsystem_proof_presence_gate_open(params, block_height),
+            no_op_receipt: crate::subsystem_no_op_receipt_gate_open(params, block_height),
         }
     }
 }
@@ -459,6 +465,21 @@ impl AgreementExecutor {
 
             AgreementOperation::AddParty | AgreementOperation::RemoveParty => {
                 // These would require updating agreement parties
+                //
+                // ACTIVATION-AUDIT row OV-30. That comment is the whole
+                // implementation: below the gate this arm charges the fee,
+                // advances the nonce and returns SUCCESS, having touched no
+                // agreement and no party. At and above the gate it says so.
+                //
+                // A failed receipt, not an implementation: `AgreementCommitment`
+                // defines no add-party or remove-party semantics, and inventing
+                // one inside an executor would be a rule nobody set. Refused
+                // before the deduct, where this file's other refusals return.
+                if gates.no_op_receipt {
+                    return Ok(AgreementExecutionResult::failure(
+                        "AddParty and RemoveParty are not implemented and change no party",
+                    ));
+                }
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
