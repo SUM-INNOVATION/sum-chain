@@ -1,4 +1,4 @@
-//! The twenty remediation gates read the twenty fields they name.
+//! The twenty-five remediation gates read the twenty-five fields they name.
 //!
 //! The activation audit produced a set of remedies, and it is still growing.
 //! Each is a consensus change, so each sits behind an activation height, and
@@ -18,8 +18,9 @@
 //! as the unremediated binary — and every existing test passes.
 //!
 //! So the wiring is asserted against the source rather than against behaviour.
-//! Twenty accessors, twenty fields, and the PAIRING between them is the
-//! claim: the realistic bug in twenty near-identical three-line functions is
+//! Twenty-five accessors, twenty-five fields, and the PAIRING between them
+//! is the claim: the realistic bug in twenty-five near-identical three-line
+//! functions is
 //! not a missing one, it is two of them reading each other's field.
 //!
 //! That is not hypothetical. Making one accessor read its neighbour's field was
@@ -38,7 +39,7 @@
 //! exactly that.
 //!
 //! What this does NOT claim: that any gate is open, or that opening one is
-//! correct. `ChainParams::default()` leaves all twenty dormant, which is
+//! correct. `ChainParams::default()` leaves all twenty-five dormant, which is
 //! pinned below, and the mixed-version tests in the routing suites are what show
 //! the two sides disagreeing once a height is set.
 
@@ -150,6 +151,31 @@ const WIRING: &[(&str, &str, &str)] = &[
         "subsystem_no_op_receipt_activation",
         "subsystem_no_op_receipt_enabled_from_height",
     ),
+    (
+        "docclass_executor.rs",
+        "issuer_authority_activation",
+        "docclass_issuer_authority_enabled_from_height",
+    ),
+    (
+        "docclass_executor.rs",
+        "revocation_record_activation",
+        "docclass_revocation_record_enabled_from_height",
+    ),
+    (
+        "docclass_executor.rs",
+        "credential_schema_activation",
+        "docclass_credential_schema_enabled_from_height",
+    ),
+    (
+        "docclass_executor.rs",
+        "identity_binding_activation",
+        "docclass_identity_binding_enabled_from_height",
+    ),
+    (
+        "docclass_executor.rs",
+        "issuer_stake_requirement_activation",
+        "docclass_issuer_stake_requirement_enabled_from_height",
+    ),
 ];
 
 fn source(file: &str) -> String {
@@ -159,7 +185,7 @@ fn source(file: &str) -> String {
 
 /// The body of `fn <name>(params: &…ChainParams) -> Option<u64>`, by brace match.
 ///
-/// The parameter type is matched loosely because some of the twenty write it
+/// The parameter type is matched loosely because some of the twenty-five write it
 /// fully qualified. The RETURN type is matched exactly: an accessor that stopped
 /// returning `Option<u64>` is not the thing this file is about, and should fail
 /// here rather than be silently skipped.
@@ -216,19 +242,19 @@ fn every_remediation_gate_reads_the_field_it_names() {
             read,
             BTreeSet::from([*field]),
             "{file}::{accessor} reads {read:?}, and must read only `{field}` — \
-             two of twenty near-identical accessors swapping fields is the \
+             two of twenty-five near-identical accessors swapping fields is the \
              failure this pairing exists to catch"
         );
     }
 }
 
-/// The twenty fields are distinct, and there are twenty of them.
+/// The twenty-five fields are distinct, and there are twenty-five of them.
 ///
 /// A copy-paste that left two accessors pointing at one field would satisfy the
 /// pairing test above for one of them and be caught here.
 ///
 /// It was eleven, then twelve, then thirteen, then seventeen, then eighteen,
-/// then nineteen, and now twenty.
+/// then nineteen, then twenty, then twenty-three, and now twenty-five.
 ///
 /// The twelfth was `subsystem_tx_index_enabled_from_height`, whose neighbour
 /// `subsystem_block_timestamp_enabled_from_height` is exactly the field a
@@ -243,21 +269,25 @@ fn every_remediation_gate_reads_the_field_it_names() {
 /// accessor sitting beside three others whose names all begin `subsystem_`, and
 /// the nineteenth, `update_path_parity_activation`, is a THIRD accessor in
 /// `nft_executor.rs`. The twentieth, `subsystem_no_op_receipt_activation`, is a
-/// FIFTH `lib.rs` accessor.
+/// FIFTH `lib.rs` accessor. The twenty-first, twenty-second and twenty-third
+/// arrived together and are all three in `docclass_executor.rs`, and the
+/// twenty-fourth and twenty-fifth are in that file too, taking it from three
+/// accessors to EIGHT — the densest the hazard has ever been, and the reason
+/// the pairing is asserted per accessor rather than per file.
 ///
 /// That hazard is not hypothetical here. Making one accessor read its
 /// neighbour's field was killed by `every_remediation_gate_reads_the_field_it_names`
 /// while the behavioural suite for that subsystem still reported every test
 /// passing.
 #[test]
-fn the_twenty_gates_are_twenty_distinct_fields() {
+fn the_twenty_five_gates_are_twenty_five_distinct_fields() {
     let fields: BTreeSet<&str> = WIRING.iter().map(|(_, _, f)| *f).collect();
     assert_eq!(
         fields.len(),
-        20,
-        "expected twenty distinct fields: {fields:?}"
+        25,
+        "expected twenty-five distinct fields: {fields:?}"
     );
-    assert_eq!(WIRING.len(), 20, "expected twenty accessors");
+    assert_eq!(WIRING.len(), 25, "expected twenty-five accessors");
 }
 
 /// Wiring a gate is not opening it: the release configuration is unchanged.
@@ -351,6 +381,26 @@ fn every_remediation_gate_is_dormant_by_default() {
             "subsystem_no_op_receipt_enabled_from_height",
             p.subsystem_no_op_receipt_enabled_from_height,
         ),
+        (
+            "docclass_issuer_authority_enabled_from_height",
+            p.docclass_issuer_authority_enabled_from_height,
+        ),
+        (
+            "docclass_revocation_record_enabled_from_height",
+            p.docclass_revocation_record_enabled_from_height,
+        ),
+        (
+            "docclass_credential_schema_enabled_from_height",
+            p.docclass_credential_schema_enabled_from_height,
+        ),
+        (
+            "docclass_identity_binding_enabled_from_height",
+            p.docclass_identity_binding_enabled_from_height,
+        ),
+        (
+            "docclass_issuer_stake_requirement_enabled_from_height",
+            p.docclass_issuer_stake_requirement_enabled_from_height,
+        ),
     ];
     assert_eq!(dormant.len(), WIRING.len());
     for (name, value) in dormant {
@@ -364,7 +414,7 @@ fn every_remediation_gate_is_dormant_by_default() {
 
 /// A genesis written before these fields existed still parses, and reads dormant.
 ///
-/// `#[serde(default)]` is what makes adding twenty consensus-relevant fields a
+/// `#[serde(default)]` is what makes adding twenty-five consensus-relevant fields a
 /// non-event for every `genesis.json` already distributed. If one of them lost
 /// the attribute, every existing file would fail to load — and it would fail at
 /// node start, on the operator's machine, not here.
@@ -380,7 +430,7 @@ fn a_genesis_written_before_these_fields_still_parses_dormant() {
         );
     }
     let back: ChainParams = serde_json::from_value(stripped).expect(
-        "a genesis with none of the twenty fields must still parse — this is what \
+        "a genesis with none of the twenty-five fields must still parse — this is what \
          #[serde(default)] buys, and it is checked here rather than discovered at \
          a validator's node start",
     );
@@ -396,6 +446,14 @@ fn a_genesis_written_before_these_fields_still_parses_dormant() {
     assert_eq!(back.subsystem_proof_presence_enabled_from_height, None);
     assert_eq!(back.nft_update_path_parity_enabled_from_height, None);
     assert_eq!(back.subsystem_no_op_receipt_enabled_from_height, None);
+    assert_eq!(back.docclass_issuer_authority_enabled_from_height, None);
+    assert_eq!(back.docclass_revocation_record_enabled_from_height, None);
+    assert_eq!(back.docclass_credential_schema_enabled_from_height, None);
+    assert_eq!(back.docclass_identity_binding_enabled_from_height, None);
+    assert_eq!(
+        back.docclass_issuer_stake_requirement_enabled_from_height,
+        None
+    );
 }
 
 /// `sumchain_genesis::REMEDIATION_GATES` names exactly these twenty fields.

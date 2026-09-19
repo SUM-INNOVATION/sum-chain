@@ -183,6 +183,25 @@ impl TaxExecutor {
         Ok(ids.len())
     }
 
+    /// The STORED length of the subject index row, without decoding it.
+    ///
+    /// ACTIVATION-AUDIT row AL-1. The whole point is that no `Vec<ProofId>` is
+    /// built: the caller compares this against
+    /// [`crate::MAX_ACCUMULATING_ROW_BYTES`] and refuses, so a row that has
+    /// been grown past the limit costs one comparison to reject rather than a
+    /// decode, an append and a re-encode. `None` means there is no row, which
+    /// is not a refusal -- the first proof for a subject has to be able to
+    /// land.
+    pub fn v_subject_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        subject_nullifier: &[u8; 32],
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(cf::TAX_SUBJECT_INDEX, subject_index_key(subject_nullifier))
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
+    }
+
     pub fn v_get_subject_proof_ids(
         view: &ExecutionView<'_, '_>,
         subject_nullifier: &[u8; 32],

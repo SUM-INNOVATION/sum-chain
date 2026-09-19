@@ -16,6 +16,7 @@ use std::collections::HashSet;
 
 use sumchain_primitives::{
     AcademicCredential, BlockHeight, CredentialAttribute, CredentialMetadata, DocSubcode,
+    EligibilityAttestation,
 };
 use sumchain_primitives::employment::EmploymentCredential;
 use sumchain_primitives::healthcare::MembershipRecord;
@@ -132,6 +133,119 @@ impl SchemaValidator {
             // Non-academic subcodes - no validation in this module
             _ => ValidationResult::Valid,
         }
+    }
+
+    /// Every academic subcode, not only the three that have an allowlist.
+    ///
+    /// The gated counterpart of [`Self::validate_academic_credential`], reached
+    /// only when `docclass_credential_schema_enabled_from_height` is open.
+    /// ACTIVATION-AUDIT row D-19b: the ungated validator dispatches on
+    /// `credential.subcode`, has arms for 810, 811 and 812, and returns `Valid`
+    /// for every other academic subcode -- so an SRC-813 professional licence,
+    /// an SRC-814 government id and an SRC-815 employment verification are
+    /// admitted with a megabyte of free text in `metadata.title` and an
+    /// arbitrary number of arbitrarily named attributes.
+    ///
+    /// What the uncovered subcodes get here is the checks that do NOT need an
+    /// allowlist: the core field length bounds every covered subcode already
+    /// applies, the per-attribute value cap, and a bound on the attribute NAME.
+    /// An allowlist is a policy decision about which public attributes a
+    /// credential type may carry, and inventing three of them in a remediation
+    /// pass would be writing standard rather than closing a defect -- so the
+    /// keys stay unrestricted for the subcodes whose standard does not list
+    /// them, and that is recorded rather than hidden. The covered three are
+    /// dispatched to their existing arms unchanged, so a credential valid below
+    /// the gate under 810, 811 or 812 is valid above it.
+    ///
+    /// `payload_hint` is checked for every academic subcode, covered or not: it
+    /// is free text in the payload, it is stored verbatim, and
+    /// [`Self::validate_storage_hint`] is the check the Tax disclosure family
+    /// already applies to exactly the same kind of field.
+    pub fn validate_academic_credential_wide(
+        &self,
+        credential: &AcademicCredential,
+        block_height: BlockHeight,
+    ) -> ValidationResult {
+        if !self.config.enabled || block_height < self.config.activation_height {
+            return ValidationResult::Valid;
+        }
+
+        if let Some(ref hint) = credential.payload_hint {
+            if let Err(reason) = self.validate_storage_hint(hint, "payload_hint") {
+                return ValidationResult::invalid(reason);
+            }
+        }
+
+        match credential.subcode {
+            DocSubcode::AcademicTranscript
+            | DocSubcode::Diploma
+            | DocSubcode::EnrollmentVerification => {
+                self.validate_academic_credential(credential, block_height)
+            }
+            _ => {
+                if let Err(reason) = self.validate_metadata_fields(&credential.metadata) {
+                    return ValidationResult::invalid(reason);
+                }
+                for attr in &credential.metadata.attributes {
+                    if attr.name.len() > MAX_CREDENTIAL_TYPE_LENGTH {
+                        return ValidationResult::invalid(format!(
+                            "Attribute name exceeds max length {} (got {})",
+                            MAX_CREDENTIAL_TYPE_LENGTH,
+                            attr.name.len()
+                        ));
+                    }
+                    if attr.value.len() > MAX_ATTRIBUTE_VALUE_LENGTH {
+                        return ValidationResult::invalid(format!(
+                            "Attribute '{}' value exceeds max length {} (got {})",
+                            attr.name,
+                            MAX_ATTRIBUTE_VALUE_LENGTH,
+                            attr.value.len()
+                        ));
+                    }
+                }
+                ValidationResult::Valid
+            }
+        }
+    }
+
+    /// SRC-807 eligibility attestations, which no path validates at any height.
+    ///
+    /// The other half of ACTIVATION-AUDIT row D-19b, and the half the row calls
+    /// "nothing in SRC-80X": `issue_eligibility` has never called a validator
+    /// at all, so the two free-text fields an attestation carries --
+    /// `jurisdiction` and `payload_hint` -- reach storage unexamined, and
+    /// `payload_hint` is the one a URL with `?name=` in it arrives through.
+    ///
+    /// Reached only when `docclass_credential_schema_enabled_from_height` is
+    /// open. There is no metadata block on this family and therefore no
+    /// allowlist to apply: the checks are the two free-text fields, and the
+    /// jurisdiction bound is the one `MAX_INDEX_KEY_TEXT_BYTES` already imposes
+    /// on the same field in Property and Legal, restated here as a length so
+    /// this family's rule does not depend on a different subsystem's gate.
+    pub fn validate_eligibility_attestation(
+        &self,
+        attestation: &EligibilityAttestation,
+        block_height: BlockHeight,
+    ) -> ValidationResult {
+        if !self.config.enabled || block_height < self.config.activation_height {
+            return ValidationResult::Valid;
+        }
+
+        if attestation.jurisdiction.len() > MAX_DATE_LENGTH {
+            return ValidationResult::invalid(format!(
+                "jurisdiction exceeds max length {} (got {})",
+                MAX_DATE_LENGTH,
+                attestation.jurisdiction.len()
+            ));
+        }
+
+        if let Some(ref hint) = attestation.payload_hint {
+            if let Err(reason) = self.validate_storage_hint(hint, "payload_hint") {
+                return ValidationResult::invalid(reason);
+            }
+        }
+
+        ValidationResult::Valid
     }
 
     /// Validate transcript metadata (SRC-810)

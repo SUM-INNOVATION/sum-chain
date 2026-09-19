@@ -4210,13 +4210,28 @@ impl SumChainApiServer for RpcServer {
     async fn docclass_get_config(
         &self,
     ) -> std::result::Result<DocClassConfigInfo, jsonrpsee::types::ErrorObjectOwned> {
-        // Return DocClass configuration from genesis params
-        // This is a simplified implementation - in production would read from chain state
+        // Read from the live `ChainParams` plumbed into `RpcServer` at
+        // construction, the way `chain_getChainParams` does.
+        //
+        // ACTIVATION-AUDIT row AU-37: these four values were HARDCODED here --
+        // a 1000 SUM minimum, `require_issuer_stake: true` and a ten-year
+        // validity -- while `DocClassParams` declared all four and execution
+        // read one of them. An operator querying the node was told about rules
+        // that were neither the ones configured nor the ones applied. Reporting
+        // the configuration is not a consensus change and is not gated; what IS
+        // gated is whether execution reads `require_issuer_stake`
+        // (`docclass_issuer_stake_requirement_enabled_from_height`).
+        //
+        // `max_credential_validity` and `initial_issuers` are still read by no
+        // execution path, so this endpoint now reports the operator's own
+        // configured values rather than a literal, and the row stays open on
+        // them.
+        let p = self.chain_params.docclass.clone().unwrap_or_default();
         Ok(DocClassConfigInfo {
-            min_issuer_stake: "1000000000000".to_string(), // 1000 SUM
-            require_issuer_stake: true,
-            max_credential_validity: 315360000, // 10 years in seconds
-            admin: None,
+            min_issuer_stake: p.min_issuer_stake.to_string(),
+            require_issuer_stake: p.require_issuer_stake,
+            max_credential_validity: p.max_credential_validity,
+            admin: p.admin,
         })
     }
 
