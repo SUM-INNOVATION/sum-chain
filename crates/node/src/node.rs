@@ -16,6 +16,7 @@ use sumchain_p2p::{
     NetworkCommand, NetworkConfig, NetworkEvent, NetworkService, PeerCompat, PeerCompatRegistry,
     PeerId, SyncState, MAX_BLOCKS_PER_REQUEST,
 };
+use sumchain_primitives::Block;
 use sumchain_primitives::Hash;
 use sumchain_primitives::SignedTransaction;
 use sumchain_rpc::{
@@ -31,6 +32,28 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::consensus_wrapper::ConsensusWrapper;
+
+/// What the consensus boundary did with a block a peer supplied.
+///
+/// Three outcomes and not a `bool`, because the caller has to tell a REFUSAL
+/// from a failed import: the first means the engine never saw the block and the
+/// peer is the reason, the second means the engine saw it and rejected it on its
+/// own merits. Logged differently, metered differently, and in the sync loop the
+/// refusal ends the batch for a reason that is about the peer rather than about
+/// the chain.
+#[derive(Debug)]
+pub(crate) enum PeerBlockOutcome {
+    /// The peer may not take part in consensus at this block's height. The
+    /// engine was never called. Carries what this node has PROVEN about the
+    /// peer, so the log can say whether it declared other rules or declared
+    /// nothing at all — above the enforcement height both are refused and only
+    /// one of them is an accusation.
+    Refused(PeerCompat),
+    /// The engine accepted the block.
+    Imported,
+    /// The peer was entitled to supply the block and the engine rejected it.
+    ImportFailed(String),
+}
 
 /// Full node
 pub struct Node {
@@ -266,9 +289,7 @@ impl Node {
         // OmniNode admission gate reads this; cold start without on-disk
         // blocks resolves to 0, which keeps every gate closed unless
         // `omninode_enabled_from_height: Some(0)` is set in genesis.
-        let initial_height = BlockStore::new(&db)
-            .get_latest_height()?
-            .unwrap_or(0);
+        let initial_height = BlockStore::new(&db).get_latest_height()?.unwrap_or(0);
         let chain_height = Arc::new(AtomicU64::new(initial_height));
 
         // ── the activation-parameter gate, before consensus exists ──────────
@@ -334,15 +355,13 @@ impl Node {
         // Create consensus engine based on config
         use crate::config::ConsensusEngine as ConsensusEngineType;
         let consensus = match consensus_config.engine {
-            ConsensusEngineType::Poa => {
-                ConsensusWrapper::new_poa(
-                    db.clone(),
-                    state.clone(),
-                    mempool.clone(),
-                    &genesis,
-                    validator_key,
-                )?
-            }
+            ConsensusEngineType::Poa => ConsensusWrapper::new_poa(
+                db.clone(),
+                state.clone(),
+                mempool.clone(),
+                &genesis,
+                validator_key,
+            )?,
             ConsensusEngineType::Bft => {
                 if validator_key.is_none() {
                     return Err(anyhow::anyhow!("BFT consensus requires validator key"));
@@ -379,7 +398,9 @@ impl Node {
 
         // Phase one until this height; `None` is phase one forever, and is what
         // every genesis written before the field existed resolves to.
-        let enforce_from = genesis.params.peer_protocol_declaration_required_from_height;
+        let enforce_from = genesis
+            .params
+            .peer_protocol_declaration_required_from_height;
         match enforce_from {
             Some(h) => info!(
                 "From height {}, a peer must declare a MATCHING protocol digest before it \
@@ -414,11 +435,54 @@ impl Node {
             shutdown: Arc::new(AtomicBool::new(false)),
             chain_height,
             protocol_digest,
-            peer_compat: Arc::new(PeerCompatRegistry::new(
-                protocol_digest,
-                enforce_from,
-            )),
+            peer_compat: Arc::new(PeerCompatRegistry::new(protocol_digest, enforce_from)),
         })
+    }
+
+    /// The consensus boundary for a block a PEER supplied, as one function.
+    ///
+    /// # Why the decision and the import are the same call
+    ///
+    /// Blocks reach `PoAEngine::do_import_block` (`crates/consensus/src/poa.rs:603`)
+    /// by two routes — gossip (`NetworkEvent::BlockReceived`) and sync
+    /// (`NetworkEvent::SyncBlocksReceived`) — and `do_import_block` IS proposal
+    /// acceptance, fork choice and reorg: it validates the block, classifies it
+    /// against `LongestChainForkChoice::should_switch`
+    /// (`crates/consensus/src/engine.rs:113`) and publishes or reorgs onto it.
+    /// A block that gets past this line has already influenced consensus.
+    ///
+    /// The engine cannot make the decision itself: `ConsensusEngine::import_block`
+    /// (`crates/consensus/src/engine.rs:50`) is handed a `Block` and nothing
+    /// else — there is no `PeerId` anywhere in the trait — so the refusal has to
+    /// sit at the network boundary, which is this event loop.
+    ///
+    /// Written as ONE function taking the peer and the block together, rather
+    /// than as a check each arm is asked to remember, because the failure this
+    /// closes was exactly an arm that did not remember: gossip carried no peer
+    /// at all and went straight into the engine while the sync route was gated.
+    /// With the call fused, `crates/node/src/node.rs` contains a single
+    /// `consensus.import_block(` and it is the one below, so a new arm cannot
+    /// import a peer's block without passing its `PeerId` through this
+    /// predicate. `crates/node/tests/consensus_participation_guard.rs` pins that
+    /// count; `crates/node/tests/unit/peer_block_admission_tests.rs` drives this
+    /// function against a real engine and a real database and asserts what does
+    /// and does not reach the block store.
+    ///
+    /// Judged at the BLOCK's height, not the chain's: the question is which
+    /// rules decide this block.
+    pub(crate) async fn admit_peer_block(
+        compat: &PeerCompatRegistry,
+        consensus: &ConsensusWrapper,
+        source: &PeerId,
+        block: Block,
+    ) -> PeerBlockOutcome {
+        if !compat.may_participate_in_consensus(source, block.height()) {
+            return PeerBlockOutcome::Refused(compat.status(source));
+        }
+        match consensus.import_block(block).await {
+            Ok(()) => PeerBlockOutcome::Imported,
+            Err(e) => PeerBlockOutcome::ImportFailed(e.to_string()),
+        }
     }
 
     /// Run the node
@@ -676,10 +740,8 @@ impl Node {
 
         // Spawn network task
         let network_clone = network.clone();
-        let network_command_rx = std::mem::replace(
-            &mut self.network_command_rx,
-            mpsc::channel(1).1,
-        );
+        let network_command_rx =
+            std::mem::replace(&mut self.network_command_rx, mpsc::channel(1).1);
         let network_task = tokio::spawn(async move {
             if let Err(e) = network_clone.run(network_command_rx).await {
                 error!("Network error: {}", e);
@@ -764,41 +826,42 @@ impl Node {
                             }
                         }
                         NetworkEvent::BlockReceived { block, source } => {
-                            debug!("Received block: {} (height {})", block.hash(), block.height());
+                            let (hash, height) = (block.hash(), block.height());
+                            debug!("Received block: {} (height {})", hash, height);
                             metrics.p2p.record_message_received();
                             // ── the consensus boundary ──────────────────────
                             //
-                            // `import_block` IS proposal acceptance, fork
-                            // choice and reorg: `PoAEngine::do_import_block`
-                            // classifies the block against
-                            // `LongestChainForkChoice::should_switch` and, if it
-                            // wins, publishes or reorgs onto it. A block that
-                            // gets past this line has already influenced
-                            // consensus, so the check has to be here and not
-                            // inside the engine, which is handed a `Block` with
-                            // no peer attached.
-                            //
-                            // Judged at the BLOCK's height, not the chain's: the
-                            // question is which rules decide this block.
-                            if !self.peer_compat.may_participate_in_consensus(&source, block.height()) {
-                                warn!(
-                                    "Refusing gossiped block {} at height {} from {}: {:?}, and \
-                                     from height {:?} a peer must have declared a matching \
-                                     protocol digest before it may propose a block this node \
-                                     acts on",
-                                    block.hash(),
-                                    block.height(),
-                                    source,
-                                    self.peer_compat.status(&source),
-                                    self.peer_compat.enforcement_height(),
-                                );
-                                metrics.blocks.record_block_error();
-                                continue;
-                            }
-                            // Import block
-                            if let Err(e) = consensus.import_block(block).await {
-                                warn!("Failed to import block: {}", e);
-                                metrics.blocks.record_block_error();
+                            // `Node::admit_peer_block` is the decision and the
+                            // import in one call; its doc comment carries the
+                            // argument for why they are not separable here.
+                            match Self::admit_peer_block(
+                                &self.peer_compat,
+                                &consensus,
+                                &source,
+                                block,
+                            )
+                            .await
+                            {
+                                PeerBlockOutcome::Refused(status) => {
+                                    warn!(
+                                        "Refusing gossiped block {} at height {} from {}: {:?}, and \
+                                         from height {:?} a peer must have declared a matching \
+                                         protocol digest before it may propose a block this node \
+                                         acts on",
+                                        hash,
+                                        height,
+                                        source,
+                                        status,
+                                        self.peer_compat.enforcement_height(),
+                                    );
+                                    metrics.blocks.record_block_error();
+                                    continue;
+                                }
+                                PeerBlockOutcome::Imported => {}
+                                PeerBlockOutcome::ImportFailed(e) => {
+                                    warn!("Failed to import block: {}", e);
+                                    metrics.blocks.record_block_error();
+                                }
                             }
                         }
                         // Declare the rules this binary enforces.
@@ -821,13 +884,38 @@ impl Node {
                                 debug!("Peer {} enforces our protocol digest", peer);
                             } else {
                                 warn!(
-                                    "REFUSING peer {}: it enforces protocol digest {} but this                                      node enforces {}. The two binaries disagree about an                                      activation height or a consensus constant, so blocks one                                      produces the other cannot reproduce. Disconnecting.",
+                                    "REFUSING peer {}: it enforces protocol digest {} but this \
+                                     node enforces {}. The two binaries disagree about an \
+                                     activation height or a consensus constant, so blocks one \
+                                     produces the other cannot reproduce. Banning it for 24h; \
+                                     it is permanently `Incompatible` from here whatever it \
+                                     declares later, so every route into consensus refuses it.",
                                     peer, digest, self.protocol_digest
                                 );
                                 metrics.p2p.record_message_received();
                                 // Ban rather than merely ignore: `PeerManager`
                                 // refuses a banned peer's reconnection, so the
                                 // refusal survives the peer dialling back.
+                                //
+                                // Two properties of `PeerManager::ban_peer`
+                                // (`crates/p2p/src/peer_manager.rs:531`) that
+                                // this line depends on and does not state:
+                                //
+                                // * It is a NO-OP on a peer with no entry in the
+                                //   map. It works here only because
+                                //   `SwarmEvent::ConnectionEstablished`
+                                //   (`crates/p2p/src/network.rs:763`) called
+                                //   `peer_connected`, which inserts one, before
+                                //   any `ProtocolIdResponse` could arrive.
+                                // * It does NOT close the live connection —
+                                //   there is no disconnect command in
+                                //   `NetworkCommand` at all. The ban refuses the
+                                //   NEXT connection; what refuses this one is
+                                //   the permanence of `PeerCompat::Incompatible`
+                                //   at every consensus route.
+                                //
+                                // Both are asserted in
+                                // `crates/p2p/tests/protocol_enforcement.rs`.
                                 network.ban_peer(&peer, std::time::Duration::from_secs(24 * 60 * 60));
                             }
                         }
@@ -911,29 +999,40 @@ impl Node {
                                 // Per block, not per batch: a batch can straddle
                                 // the enforcement height, and the blocks below
                                 // it are ones this peer was entitled to supply.
-                                if !self.peer_compat.may_participate_in_consensus(&peer, block.height()) {
-                                    warn!(
-                                        "Refusing synced block {} at height {} from {}: {:?} \
-                                         (enforcement from {:?})",
-                                        block.hash(),
-                                        block.height(),
-                                        peer,
-                                        self.peer_compat.status(&peer),
-                                        self.peer_compat.enforcement_height(),
-                                    );
-                                    metrics.blocks.record_block_error();
-                                    break;
-                                }
-                                match consensus.import_block(block.clone()).await {
-                                    Ok(()) => {
-                                        last_imported_height = block.height();
+                                // The same seam as the gossip route, so the two
+                                // cannot drift apart.
+                                let (hash, height, timestamp) =
+                                    (block.hash(), block.height(), block.header.timestamp);
+                                match Self::admit_peer_block(
+                                    &self.peer_compat,
+                                    &consensus,
+                                    &peer,
+                                    block,
+                                )
+                                .await
+                                {
+                                    PeerBlockOutcome::Refused(status) => {
+                                        warn!(
+                                            "Refusing synced block {} at height {} from {}: {:?} \
+                                             (enforcement from {:?})",
+                                            hash,
+                                            height,
+                                            peer,
+                                            status,
+                                            self.peer_compat.enforcement_height(),
+                                        );
+                                        metrics.blocks.record_block_error();
+                                        break;
+                                    }
+                                    PeerBlockOutcome::Imported => {
+                                        last_imported_height = height;
                                         metrics.blocks.record_block_imported();
                                         metrics.blocks.record_block_processed();
-                                        metrics.blocks.set_height(block.height());
-                                        metrics.blocks.set_last_block_time(block.header.timestamp);
+                                        metrics.blocks.set_height(height);
+                                        metrics.blocks.set_last_block_time(timestamp);
                                     }
-                                    Err(e) => {
-                                        warn!("Failed to import synced block {}: {}", block.hash(), e);
+                                    PeerBlockOutcome::ImportFailed(e) => {
+                                        warn!("Failed to import synced block {}: {}", hash, e);
                                         metrics.blocks.record_block_error();
                                         break;
                                     }
@@ -1538,7 +1637,14 @@ mod rpc_wiring_tests {
             ChainParams::default(),
         );
         let engine: Arc<dyn ConsensusEngine> = Arc::new(
-            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
+            PoAEngine::new(
+                db.clone(),
+                state.clone(),
+                mempool.clone(),
+                &genesis,
+                Some(validator),
+            )
+            .unwrap(),
         );
         let (tx_sender, _rx) = mpsc::channel(8);
 
@@ -1587,3 +1693,18 @@ mod rpc_wiring_tests {
 #[cfg(test)]
 #[path = "../tests/unit/node_activation_boot_tests.rs"]
 mod activation_boot_tests;
+
+/// Behavioural evidence for the consensus boundary this file owns: what a peer
+/// can and cannot get into `PoAEngine::do_import_block`, asserted against a real
+/// engine and a real block store rather than against the source text.
+///
+/// A unit-test module for the same reason as `activation_boot_tests` above:
+/// `sumchain-node` has no library target, so `Node::admit_peer_block`,
+/// `Node::with_rpc_config` and the private `peer_compat` field are unreachable
+/// from an ordinary integration test in `tests/`. Its source lives in
+/// `tests/unit/` and is compiled solely by this `#[cfg(test)]` declaration, so
+/// it can never reach a production build; `tests/unit/` is not auto-discovered
+/// by Cargo, so it produces no separate test target.
+#[cfg(test)]
+#[path = "../tests/unit/peer_block_admission_tests.rs"]
+mod peer_block_admission_tests;

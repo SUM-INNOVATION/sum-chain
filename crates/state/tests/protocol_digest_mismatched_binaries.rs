@@ -244,3 +244,186 @@ fn the_protocol_digest_is_not_the_activation_digest() {
          digest it contains"
     );
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// `MAX_BLOCK_WRITE_SET_BYTES` — the 256 MiB constant, by NAME and by VALUE
+//
+// The condition for accepting a 256 MiB compiled-in ceiling this release is that
+// its value is covered by MANDATORY compatibility enforcement — that two
+// binaries built with different ceilings cannot handshake and conclude they
+// agree. "It is in the registry" is not that claim; the registry is a list, and
+// a list can hold an entry folded from the wrong source, under a name nothing
+// checks, at a value nothing reads.
+//
+// So the three halves are separated below: the entry is the constant the
+// executor enforces, a DIFFERENT VALUE moves the digest, and a DIFFERENT NAME
+// moves it too.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// The ceiling this release ships, named here so the assertions below are about
+/// a number and not about an expression that changes with it.
+const RELEASE_CEILING: u128 = 1 << 28;
+
+/// The registry entry IS the constant the executor enforces, at the value this
+/// release ships, exactly once.
+///
+/// `sumchain_state::MAX_BLOCK_WRITE_SET_BYTES` is what
+/// `BlockExecutor::compute_block_state_root` hands `CandidateExecution::new`
+/// (`crates/state/src/executor.rs:3122`) on the production `execute_block` path,
+/// ungated, today. Two binaries with different ceilings disagree about whether a
+/// large block is applicable at the current height — not at some future one —
+/// which is why this entry exists at all.
+///
+/// Asserted as an identity against the constant rather than against a literal
+/// alone, so that editing the ceiling cannot leave the digest folding the old
+/// number; and against the literal as well, so that editing the ceiling is a
+/// decision someone has to come here and make.
+#[test]
+fn the_block_write_set_ceiling_is_in_the_registry_as_the_constant_the_executor_enforces() {
+    let hits: Vec<LimitValue> = consensus_limits()
+        .into_iter()
+        .filter(|(n, _)| *n == "MAX_BLOCK_WRITE_SET_BYTES")
+        .map(|(_, v)| v)
+        .collect();
+
+    assert_eq!(
+        hits.len(),
+        1,
+        "the ceiling must appear under exactly that name exactly once; {} \
+         occurrences means either it is unnamed in the digest or it is folded \
+         twice and one of the copies is free to drift",
+        hits.len()
+    );
+    assert_eq!(
+        hits[0],
+        LimitValue::Num(sumchain_state::MAX_BLOCK_WRITE_SET_BYTES as u128),
+        "the entry does not fold `sumchain_state::MAX_BLOCK_WRITE_SET_BYTES`, so \
+         it folds something that can differ from the number the executor \
+         enforces — which is the whole hazard, moved one level in"
+    );
+    assert_eq!(
+        hits[0],
+        LimitValue::Num(RELEASE_CEILING),
+        "the ceiling is no longer the {RELEASE_CEILING}-byte (256 MiB) value this \
+         test was written against. That is allowed, and it is a consensus change: \
+         update this literal deliberately, and expect every peer on the old value \
+         to be refused by the mechanism below"
+    );
+}
+
+/// Two binaries differing ONLY in the block write-set ceiling report different
+/// protocol digests — constructed, not asserted.
+///
+/// This is the comparison the two binaries would actually make at handshake.
+/// `protocol_digest_with_limits` is the same function `protocol_digest` is, so
+/// "the digest the other binary computed" is this function applied to the limit
+/// set that binary was built with. Four neighbouring ceilings are used rather
+/// than one: 128 MiB and 512 MiB are the values a halving or doubling produces,
+/// 1 GiB is the value the `CANDIDATE_LIMIT_SCAFFOLD` this entry replaced
+/// actually held, and one byte either side is the edit a careless patch makes.
+///
+/// The genesis file is byte-identical across all of them, and its activation
+/// digest is asserted unchanged — so this difference is invisible to the
+/// comparison operators were told to perform before this digest existed.
+#[test]
+fn two_binaries_disagreeing_only_about_the_block_write_set_ceiling_cannot_handshake() {
+    let g = genesis(ChainParams::default());
+    let ours = protocol_digest(&g).expect("our digest");
+    let activation = g.activation_digest().expect("activation digest");
+
+    let mut seen = vec![ours];
+    for other in [
+        RELEASE_CEILING - 1,
+        RELEASE_CEILING + 1,
+        RELEASE_CEILING / 2, // 128 MiB
+        RELEASE_CEILING * 2, // 512 MiB
+        1 << 30,             // the 1 GiB scaffold this entry replaced
+    ] {
+        assert_ne!(other, RELEASE_CEILING);
+        let limits: Vec<(&'static str, LimitValue)> = consensus_limits()
+            .into_iter()
+            .map(|(n, v)| {
+                if n == "MAX_BLOCK_WRITE_SET_BYTES" {
+                    (n, LimitValue::Num(other))
+                } else {
+                    (n, v)
+                }
+            })
+            .collect();
+
+        let theirs = protocol_digest_with_limits(&g, &limits).expect("their digest");
+        assert_ne!(
+            ours, theirs,
+            "a binary built with a {other}-byte block write-set ceiling reports \
+             the SAME protocol digest as this one. Its handshake with us would \
+             succeed, and the two would then disagree about whether a large block \
+             is applicable — a fork with no configuration difference anywhere for \
+             an operator to find"
+        );
+        assert!(
+            !seen.contains(&theirs),
+            "two different ceilings folded to the same digest, so the fold is \
+             lossy in exactly the range it has to be injective over"
+        );
+        seen.push(theirs);
+
+        // The value operators were told to compare cannot see any of this.
+        assert_eq!(
+            activation,
+            g.activation_digest().expect("activation digest"),
+            "the genesis file is identical across these binaries; if the \
+             activation digest moved, this test is changing the wrong thing"
+        );
+    }
+}
+
+/// The NAME is folded too: renaming the ceiling moves the digest even though
+/// every value stays the same.
+///
+/// Without this, a binary that moved the 256 MiB number from
+/// `MAX_BLOCK_WRITE_SET_BYTES` to some other entry — or that kept the name and
+/// silently pointed it at a different constant of equal value — would report a
+/// digest identical to ours while enforcing a different rule under it. The name
+/// is what ties the folded number to the thing the executor reads, and
+/// `protocol_digest_with_limits` folds `name_len ‖ name` before the value
+/// precisely so that tie is part of the commitment.
+#[test]
+fn renaming_the_block_write_set_ceiling_moves_the_digest_with_its_value_unchanged() {
+    let g = genesis(ChainParams::default());
+    let ours = protocol_digest(&g).expect("our digest");
+
+    for renamed in [
+        "MAX_BLOCK_WRITE_SET_BYTES_V2",
+        "MAX_BLOCK_WRITE_SET_BYTE", // one character shorter
+        "MAX_BLOCK_WRITESET_BYTES",
+    ] {
+        let limits: Vec<(&'static str, LimitValue)> = consensus_limits()
+            .into_iter()
+            .map(|(n, v)| {
+                if n == "MAX_BLOCK_WRITE_SET_BYTES" {
+                    (renamed, v)
+                } else {
+                    (n, v)
+                }
+            })
+            .collect();
+
+        // Every VALUE is identical to ours — only the label moved.
+        assert_eq!(
+            limits.iter().find(|(n, _)| *n == renamed).map(|(_, v)| *v),
+            Some(LimitValue::Num(
+                sumchain_state::MAX_BLOCK_WRITE_SET_BYTES as u128
+            )),
+            "this test must change the name and nothing else"
+        );
+
+        let theirs = protocol_digest_with_limits(&g, &limits).expect("their digest");
+        assert_ne!(
+            ours, theirs,
+            "renaming the ceiling to `{renamed}` left the digest unchanged, so \
+             the digest commits to a bag of numbers and not to which rule each \
+             number is. A binary that reused this slot for a different constant \
+             of the same magnitude would be indistinguishable from us"
+        );
+    }
+}
