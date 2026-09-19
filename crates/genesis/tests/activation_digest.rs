@@ -508,10 +508,12 @@ fn a_gate_this_binary_introduced_is_not_grandfathered() {
 /// chain, which is the failure mode worth guarding against explicitly.
 #[test]
 fn a_gate_the_deployed_binary_already_had_may_sit_below_the_head() {
-    let mut p = ChainParams::default();
-    p.v2_enabled_from_height = Some(0);
-    p.education_enabled_from_height = Some(1);
-    p.contracts_enabled_from_height = Some(400_000);
+    let p = ChainParams {
+        v2_enabled_from_height: Some(0),
+        education_enabled_from_height: Some(1),
+        contracts_enabled_from_height: Some(400_000),
+        ..ChainParams::default()
+    };
     assert!(
         p.retroactive_gates_on_a_first_start(496_720).is_empty(),
         "a chain running the gates it was produced under must start"
@@ -522,7 +524,9 @@ fn a_gate_the_deployed_binary_already_had_may_sit_below_the_head() {
 #[test]
 fn a_newly_introduced_gate_below_the_head_refuses_a_first_start() {
     let head = 496_720;
-    let cases: &[(&str, &dyn Fn(&mut ChainParams, u64))] = &[
+    /// One gate's name and the closure that opens it at a given height.
+    type GateCase<'a> = (&'a str, &'a dyn Fn(&mut ChainParams, u64));
+    let cases: &[GateCase<'_>] = &[
         ("application_journal_enabled_from_height", &|p, h| {
             p.application_journal_enabled_from_height = Some(h)
         }),
@@ -587,10 +591,12 @@ fn a_newly_introduced_gate_below_the_head_refuses_a_first_start() {
 /// height at or below the head is unambiguously fine.
 #[test]
 fn a_chain_with_no_blocks_may_open_any_gate_at_zero() {
-    let mut p = ChainParams::default();
-    p.application_journal_enabled_from_height = Some(0);
-    p.account_root_enabled_from_height = Some(0);
-    p.nft_receipt_failure_enabled_from_height = Some(0);
+    let p = ChainParams {
+        application_journal_enabled_from_height: Some(0),
+        account_root_enabled_from_height: Some(0),
+        nft_receipt_failure_enabled_from_height: Some(0),
+        ..ChainParams::default()
+    };
     assert!(
         p.retroactive_gates_on_a_first_start(0).is_empty(),
         "a chain at height 0 has produced nothing to be retroactive about"
