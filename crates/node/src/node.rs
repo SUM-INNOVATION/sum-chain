@@ -346,6 +346,12 @@ impl Node {
         let mempool = Arc::new(
             Mempool::new(MempoolConfig {
                 min_fee: genesis.params.min_fee,
+                // A transaction larger than a whole block can never be in one:
+                // `validate_block` refuses the block on its serialized size.
+                // Knowable from the transaction's bytes, so it is refused at
+                // submission rather than discovered by a proposer that has
+                // already paid to execute a speculative block.
+                max_tx_bytes: genesis.params.max_block_bytes,
                 ..Default::default()
             })
             .with_inference_admission(inference_admission)

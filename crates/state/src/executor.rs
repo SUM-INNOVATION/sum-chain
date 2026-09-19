@@ -3321,7 +3321,37 @@ impl BlockExecutor {
                     });
                 }
 
-                Err(e) => return Err(e),
+                // ── the transaction could not be EXECUTED ───────────────────
+                //
+                // Not recoverable here: the arms that reach this point staged
+                // an unknown amount into the candidate before failing, and this
+                // loop has no scope to undo it with below the per-transaction
+                // gate. The block is abandoned, which is what has always
+                // happened.
+                //
+                // What is added is WHICH transaction and WHETHER IT CAN EVER
+                // SUCCEED. An importing node needs neither — it is handed a
+                // block and either applies it or does not. A PROPOSER needs
+                // both: the index, because that is the only thing it can
+                // decline to include, and the class, because declining is not
+                // the same decision as destroying. Without them the proposer
+                // returned the error, kept the transaction, and selected it
+                // first again on the next tick, forever. See
+                // `PoAEngine::create_block`.
+                Err(e) => {
+                    let class = crate::classify_block_tx_failure(&e);
+                    warn!(
+                        tx = %tx.hash(),
+                        index = idx,
+                        %class,
+                        "a transaction in this block could not be executed: {e}"
+                    );
+                    return Err(StateError::BlockTransactionAborted {
+                        tx_index: idx,
+                        class,
+                        detail: e.to_string(),
+                    });
+                }
             };
 
             // Record post-execution state for diff, from the candidate the

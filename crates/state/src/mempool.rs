@@ -40,6 +40,7 @@ use crate::education_executor::{
     education_in_flight_key, parse_education, EducationExecutor, EduParsed,
 };
 use crate::inference_attestation_executor::InferenceAttestationExecutor;
+use crate::policy_account_executor::policy_account_operation_is_submittable;
 use crate::{Result, StateError, StateManager};
 
 /// Mempool configuration
@@ -53,6 +54,24 @@ pub struct MempoolConfig {
     pub min_fee: Balance,
     /// Transaction expiration time in seconds (0 = no expiration)
     pub tx_expiration_secs: u64,
+    /// The largest ENCODED transaction this mempool will hold, in bytes
+    /// (0 = no bound).
+    ///
+    /// Not a policy preference: a necessary condition for the transaction ever
+    /// being includable at all. `BlockExecutor::validate_block` refuses any
+    /// block whose serialized bytes exceed `ChainParams::max_block_bytes`, and
+    /// a block containing this transaction is at least this many bytes. So a
+    /// transaction above the limit cannot appear in ANY valid block, at any
+    /// height, behind any other transaction — and that is knowable at
+    /// submission, from the transaction alone, without executing anything.
+    ///
+    /// Set to `max_block_bytes` by the node. Deliberately the block limit and
+    /// not something smaller: admission may reject only what is
+    /// DETERMINISTICALLY impossible. A tighter figure would be this mempool's
+    /// opinion about what a proposer ought to carry, and a transaction refused
+    /// for an opinion is a transaction refused for a reason the next node
+    /// disagrees with.
+    pub max_tx_bytes: u64,
 }
 
 impl Default for MempoolConfig {
@@ -62,6 +81,10 @@ impl Default for MempoolConfig {
             max_per_sender: 100,
             min_fee: 1,
             tx_expiration_secs: 3600, // 1 hour default
+            // `ChainParams::default().max_block_bytes`, named through the
+            // parameter rather than repeated as a literal, so the two cannot
+            // drift apart. A node overrides it with its own genesis figure.
+            max_tx_bytes: ChainParams::default().max_block_bytes,
         }
     }
 }
@@ -206,6 +229,9 @@ impl Mempool {
         // payloads while the subprotocol is gate-closed (the default; fail-closed
         // pending #130). No-op for any non-ComputePool payload.
         self.check_compute_pool_admission(&tx)?;
+        // Permanently unincludable and permanently unexecutable shapes, refused
+        // here rather than discovered at proposal. No-op for everything else.
+        self.check_permanently_invalid_admission(&tx)?;
 
         // Check mempool size
         if self.txs.read().len() >= self.config.max_size {
@@ -658,6 +684,72 @@ impl Mempool {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Refuse, at submission, what no block could ever carry or execute.
+    ///
+    /// # Why admission and not the proposer
+    ///
+    /// The proposer can now survive both of these — it identifies the offending
+    /// transaction, drops it and produces a block anyway. But surviving is not
+    /// free. Each refusal costs a whole speculative block execution, and the
+    /// transaction is still in every peer's mempool, still gossiped, still at
+    /// the front of every fee-ordered selection until some proposer pays to
+    /// discover it again. Both of these facts are knowable from the
+    /// transaction's own bytes, with no state read and no execution, so the
+    /// cheap seam is the right one and the proposer's handling is the
+    /// backstop.
+    ///
+    /// # The two shapes
+    ///
+    /// PERMANENTLY OVERSIZED. `validate_block` refuses any block whose
+    /// serialized bytes exceed `max_block_bytes`, and a block carrying this
+    /// transaction is at least as large as the transaction. So above
+    /// [`MempoolConfig::max_tx_bytes`] there is no valid block, at any height,
+    /// in any order, that could ever include it.
+    ///
+    /// PERMANENTLY UNEXECUTABLE. `PolicyAccountExecutor::execute` matches on
+    /// the operation code and returns `StateError::InvalidOperation` for
+    /// `ModifyMembership` and `ModifyPolicy` before reading any state: both are
+    /// reachable only as the EFFECT of an `ExecuteProposal`, never as a
+    /// submission. Directly submitted, they do not merely fail — they
+    /// propagate out of `execute_block` and make the whole block unexecutable,
+    /// which is how one of them, at one `min_fee`, used to halt a validator
+    /// permanently.
+    ///
+    /// Nothing here rejects anything a state or a height could change its mind
+    /// about. A gate that is closed today opens at a height; a row that is
+    /// missing today is created by the next block; a balance that is short
+    /// today is topped up. None of those are refused here, and refusing them
+    /// here would be the mempool destroying transactions on a guess.
+    fn check_permanently_invalid_admission(&self, tx: &SignedTransaction) -> Result<()> {
+        if self.config.max_tx_bytes > 0 {
+            let encoded = tx.to_bytes().len() as u64;
+            if encoded > self.config.max_tx_bytes {
+                return Err(StateError::TransactionPermanentlyUnincludable(format!(
+                    "the transaction encodes to {encoded} bytes, and no block may \
+                     exceed {} bytes, so no block can ever carry it",
+                    self.config.max_tx_bytes
+                )));
+            }
+        }
+
+        let TxInner::V2(v2_tx) = &tx.inner else {
+            return Ok(());
+        };
+        if let TxPayload::PolicyAccount(data) = &v2_tx.payload {
+            // The executor's own list, read rather than restated — see
+            // `policy_account_operation_is_submittable`.
+            if !policy_account_operation_is_submittable(data.operation) {
+                return Err(StateError::TransactionPermanentlyUnincludable(format!(
+                    "PolicyAccount operation {:?} is reachable only as the effect of \
+                     an ExecuteProposal and is refused on the operation code alone, \
+                     before any state is read, so it can never succeed at any height",
+                    data.operation
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// C1/ComputePool (#130) admission. `Ok(())` for any non-ComputePool payload.

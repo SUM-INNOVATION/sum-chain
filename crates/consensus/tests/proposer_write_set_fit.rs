@@ -18,9 +18,23 @@
 //! `min_fee`, stopped that validator producing blocks for good.
 //!
 //! What this file asserts is the remedy: the crossing transaction is identified
-//! by index, dropped from the proposal, EVICTED from the mempool so the next
-//! tick does not select it again, and the proposal is retried — so a block is
-//! produced out of the transactions that do fit.
+//! by index, dropped from the proposal, and the proposal is retried — so a
+//! block is produced out of the transactions that do fit.
+//!
+//! Whether the dropped transaction is also EVICTED from the mempool depends on
+//! which of two things happened, and the distinction is the difference between
+//! ending the halt and ending it by destroying honest traffic:
+//!
+//!   * it crossed at an index ABOVE ZERO, meaning the transactions ahead of it
+//!     had spent the budget. It did nothing an emptier block would refuse, and
+//!     `select_for_block` is fee-ordered, so leaving it in the mempool puts it
+//!     EARLIER in the next selection — which is exactly where it fits. Nothing
+//!     is evicted, and the test below proves the next block carries it.
+//!   * it crossed at index ZERO, or it alone left no room to publish. No
+//!     emptier block exists, so no block can carry it. That one is evicted —
+//!     not to end a halt in block production, which nothing here threatens, but
+//!     to end the starvation of every smaller transaction behind it in the fee
+//!     order.
 //!
 //! # And why the per-transaction bound does not subsume this
 //!
@@ -60,6 +74,18 @@ const ROW_BYTES: usize = 1 << 20;
 /// A row whose single rewrite crosses `MAX_TX_WRITE_SET_BYTES`, for the
 /// composed test at the end.
 const OVERSIZED_ROW: usize = 9 << 20;
+
+/// A row whose single rewrite executes inside `MAX_BLOCK_WRITE_SET_BYTES` and
+/// then leaves no room to PUBLISH beneath it.
+///
+/// The publication budget is `MAX_BLOCK_WRITE_SET_BYTES /
+/// PROPOSAL_EXECUTION_SHARE_DIVISOR` = 128 MiB, and a rewrite charges twice the
+/// row (the new value and the captured pre-image), so 68 MiB charges about
+/// 136 MiB: over the publication budget, comfortably under the 256 MiB
+/// execution ceiling. Sized from that arithmetic rather than picked, so that a
+/// change to either constant fails this loudly instead of quietly making the
+/// test measure nothing.
+const UNPUBLISHABLE_ROW: usize = 68 << 20;
 
 fn params(tx_bound_from: Option<u64>) -> ChainParams {
     let mut p = ChainParams::with_v2_enabled();
@@ -272,18 +298,29 @@ async fn a_proposal_past_the_block_ceiling_yields_a_shorter_block_rather_than_no
     );
 }
 
-// ── 2. The offender is evicted, so the next tick is not poisoned ────────────
+// ── 2. The offender is quarantined, not destroyed ───────────────────────────
 
-/// The transaction that crossed the ceiling is removed from the MEMPOOL, not
-/// merely skipped in one proposal.
+/// A transaction that crosses the ceiling BECAUSE OF THE PREFIX is not evicted.
 ///
-/// Skipping alone changes nothing: `select_for_block` is non-destructive and
-/// orders by fee, so a skipped transaction with a high fee is selected FIRST on
-/// the next tick and the halt resumes. The fee is set high here precisely so
-/// that a non-evicting implementation would be caught — the offender sorts to
-/// the front of the very next selection.
+/// This assertion is the inverse of the one that stood here before, and the
+/// inversion is the point. The transaction at index k crossed
+/// `MAX_BLOCK_WRITE_SET_BYTES` because the k transactions ahead of it had
+/// already spent the budget — it did nothing a smaller block would refuse, and
+/// at the head of an emptier block it fits. Evicting it ends the halt by
+/// destroying a transaction whose only fault is the company it was selected
+/// with, which is the second half of the property this whole track is about:
+/// "a temporarily ineligible transaction is not incorrectly destroyed".
+///
+/// The halt argument that justified eviction does not apply to this class.
+/// `select_for_block` is fee-ordered, so a transaction left in the mempool is
+/// selected EARLIER next time, not later — and earlier is exactly where it
+/// fits. The test proves that rather than asserting it: the second proposal
+/// carries the transaction the first one shed.
+///
+/// The transaction that IS evicted for crossing the ceiling is the one at index
+/// ZERO, where no emptier block exists. That case has its own test below.
 #[tokio::test]
-async fn the_transaction_that_crossed_the_ceiling_is_evicted_from_the_mempool() {
+async fn a_transaction_that_only_overflows_a_full_block_stays_eligible_for_the_next_one() {
     let f = fixture(None);
     let deep = MempoolConfig {
         max_per_sender: 10_000,
@@ -294,8 +331,8 @@ async fn the_transaction_that_crossed_the_ceiling_is_evicted_from_the_mempool() 
     for n in 0..rows {
         seed_row(&node.db, n, f.actor.address(), ROW_BYTES);
     }
-    // A high fee on every transaction, so whichever one is dropped would be at
-    // the front of the next selection if it were merely skipped.
+    // A high fee on every transaction, so the shed ones are at the front of the
+    // next fee-ordered selection — which is where they fit.
     let txs: Vec<SignedTransaction> = (0..rows)
         .map(|n| add_key_tx(&f.actor, n as u64, n, 1_000_000))
         .collect();
@@ -323,46 +360,107 @@ async fn the_transaction_that_crossed_the_ceiling_is_evicted_from_the_mempool() 
         .into_iter()
         .map(|t| t.hash())
         .collect();
-    // Neither carried by the block nor still waiting: the fitting loop
-    // identified it, dropped it, and threw it away.
-    let evicted: Vec<usize> = (0..rows)
+    let destroyed: Vec<usize> = (0..rows)
         .filter(|&n| !included.contains(&txs[n].hash()) && !pending.contains(&txs[n].hash()))
         .collect();
 
     println!(
-        "EVICTION: {rows} in the mempool, {} included, {} still pending, \
-         evicted at indexes {evicted:?}",
+        "QUARANTINE: {rows} in the mempool, {} included, {} still pending, \
+         destroyed {destroyed:?}",
         block.tx_count(),
         pending.len()
     );
 
-    assert_eq!(
-        evicted.len(),
-        1,
-        "exactly one transaction must be evicted — the one `execute_block` \
-         named as crossing the ceiling. Zero means it was merely skipped, and a \
-         skipped transaction with this fee is selected FIRST on the next tick, \
-         which is the permanent halt. More than one means the proposer is \
-         throwing away transactions nothing accused"
+    assert!(
+        destroyed.is_empty(),
+        "NOTHING may be destroyed. Every transaction the proposal shed — the \
+         one that crossed the ceiling and the ones truncated behind it alike — \
+         did so because of the block it was selected into, not because of \
+         anything it contains. Evicting any of them throws away honest traffic"
     );
     assert_eq!(
-        included.len() + pending.len() + evicted.len(),
+        included.len() + pending.len(),
         rows,
-        "every transaction is accounted for: carried, still waiting, or evicted"
-    );
-    // The transactions merely TRUNCATED to open publication headroom are a
-    // different population: nothing accused them, so they must all still be
-    // pending and be carried by a later block.
-    assert_eq!(
-        pending.len(),
-        rows - block.tx_count() - 1,
-        "every transaction the proposal shed WITHOUT accusing it must still be \
-         waiting. Evicting those too would throw away honest traffic to fix a \
-         headroom problem no one of them caused"
+        "every transaction is accounted for: carried, or still waiting"
     );
     assert!(
-        evicted[0] >= block.tx_count(),
-        "the evicted transaction must be one the block did not carry"
+        block.tx_count() > 0 && block.tx_count() < rows,
+        "and it fit"
+    );
+
+    // The proof that quarantine is enough: the transaction the first block shed
+    // is carried by the second. Handed over in NONCE order, which is what the
+    // sender's own sequence requires and what a fee-ordered selection of
+    // equal-fee transactions does not guarantee.
+    let consumed = block.tx_count();
+    let shed = txs[consumed].hash();
+    assert!(
+        pending.contains(&shed),
+        "the crossing transaction is waiting"
+    );
+    let second = node
+        .consensus
+        .propose_block(txs[consumed..].to_vec())
+        .await
+        .expect("second proposal");
+    println!(
+        "CARRIED LATER: height {} carried {} transactions, including the one \
+         height {} could not fit",
+        second.height(),
+        second.tx_count(),
+        block.height()
+    );
+    assert!(
+        second.transactions.iter().any(|t| t.hash() == shed),
+        "and the next block CARRIES it. This is what makes quarantine the right \
+         answer rather than eviction: the transaction was never at fault, and \
+         at the head of an emptier block it fits"
+    );
+}
+
+/// The one crossing that IS permanent: the FIRST transaction in the proposal.
+///
+/// Nothing preceded it, so no emptier block exists. A transaction that cannot
+/// be carried by an empty block cannot be carried at all, and leaving it costs
+/// more than a slot: it sits at the top of the fee order and empties every
+/// future block while the smaller transactions behind it never confirm.
+///
+/// Reached here through the PUBLICATION headroom rather than the execution
+/// ceiling, because that budget is half the size and so the fixture is half the
+/// size: one rewrite charging about `2 x UNPUBLISHABLE_ROW` executes inside
+/// `MAX_BLOCK_WRITE_SET_BYTES` and then leaves nothing underneath it to publish
+/// with. Same verdict, same code path for the eviction.
+#[tokio::test]
+async fn a_transaction_no_block_could_ever_publish_is_evicted() {
+    let f = fixture(None);
+    let node = Node::new(&f.genesis, f.key);
+    seed_row(&node.db, 0, f.actor.address(), UNPUBLISHABLE_ROW);
+
+    let poison = add_key_tx(&f.actor, 0, 0, 1_000_000);
+    node.mempool.add(poison.clone()).expect("admitted");
+
+    let block = node
+        .consensus
+        .propose_block(vec![poison.clone()])
+        .await
+        .expect(
+            "a block is still produced — an empty one, because the only \
+             transaction offered could not be published",
+        );
+    println!(
+        "UNPUBLISHABLE: block {} at height {} carried {} tx; still pending: {}",
+        block.hash(),
+        block.height(),
+        block.tx_count(),
+        node.mempool.contains(&poison.hash())
+    );
+    assert_eq!(block.tx_count(), 0, "it could not be carried");
+    assert!(
+        !node.mempool.contains(&poison.hash()),
+        "and it must be EVICTED. Left in the mempool at this fee it is selected \
+         first on every subsequent tick, and every one of those blocks comes \
+         out empty: the chain advances while no transaction ever confirms, \
+         which is the starvation half of the halt"
     );
 }
 
