@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jsonrpsee::server::{Server, ServerHandle};
-use sumchain_consensus::ConsensusEngine;
+use sumchain_consensus::ConsensusQuery;
 use sumchain_primitives::{Address, Block, Hash, SignedTransaction, MessagingTxData, MessagingOperation, SponsoredMessage, TxPayload};
 use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
 use sumchain_state::education_executor::{
@@ -183,7 +183,21 @@ pub struct RpcServer {
     db: Arc<Database>,
     state: Arc<StateManager>,
     mempool: Arc<Mempool>,
-    consensus: Arc<dyn ConsensusEngine>,
+    /// The consensus handle, narrowed to reads.
+    ///
+    /// `ConsensusQuery` (`crates/consensus/src/engine.rs`) is the trait; it
+    /// carries no `import_block`, `propose_block`, `start`, `stop` or
+    /// `init_genesis`. This is the same `Arc<PoAEngine>` the node event loop
+    /// holds — what changed is that the RPC server's VIEW of it cannot drive
+    /// consensus. A handler that reaches for proposal acceptance or fork choice
+    /// from an HTTP request, with no `PeerId` for
+    /// `Node::admit_peer_block`'s participation check to judge, now fails to
+    /// compile rather than merely failing a source scan.
+    ///
+    /// The type is pinned by `consensus_handle_is_query_only` below and the
+    /// absence of the capability from the type by
+    /// `crates/rpc/tests/consensus_capability_probe.rs`.
+    consensus: Arc<dyn ConsensusQuery>,
     tx_sender: mpsc::Sender<SignedTransaction>,
     peer_count: Arc<dyn Fn() -> usize + Send + Sync>,
     peer_id: Arc<dyn Fn() -> Option<String> + Send + Sync>,
@@ -214,6 +228,28 @@ pub struct RpcServer {
     contract_executor: Option<Arc<sumchain_state::ContractExecutorState>>,
 }
 
+/// The consensus handle this server holds is the READ view, and nothing wider.
+///
+/// This is a compile-time assertion, not a runtime one: the body binds
+/// `&RpcServer.consensus` at type `&Arc<dyn ConsensusQuery>`. An unsizing
+/// coercion cannot reach inside a `&Arc<_>`, so if the field is ever widened
+/// back to `Arc<dyn ConsensusEngine>` — or to a concrete `Arc<PoAEngine>` — this
+/// stops compiling and the whole crate's tests stop building with it.
+///
+/// What it establishes: the type of the handle. What it does NOT establish: that
+/// the type is incapable. That half is
+/// `crates/rpc/tests/consensus_capability_probe.rs`, which compiles
+/// `import_block` against `dyn ConsensusQuery` and asserts rustc rejects it. The
+/// two together are the chain — this handle has that type, and that type cannot
+/// do it.
+#[test]
+fn consensus_handle_is_query_only() {
+    fn anchor(server: &RpcServer) -> &Arc<dyn ConsensusQuery> {
+        &server.consensus
+    }
+    let _: fn(&RpcServer) -> &Arc<dyn ConsensusQuery> = anchor;
+}
+
 impl RpcServer {
     /// Create a new RPC server
     #[allow(dead_code)]
@@ -221,7 +257,7 @@ impl RpcServer {
         db: Arc<Database>,
         state: Arc<StateManager>,
         mempool: Arc<Mempool>,
-        consensus: Arc<dyn ConsensusEngine>,
+        consensus: Arc<dyn ConsensusQuery>,
         tx_sender: mpsc::Sender<SignedTransaction>,
         peer_count: Arc<dyn Fn() -> usize + Send + Sync>,
     ) -> Self {
@@ -246,7 +282,7 @@ impl RpcServer {
         db: Arc<Database>,
         state: Arc<StateManager>,
         mempool: Arc<Mempool>,
-        consensus: Arc<dyn ConsensusEngine>,
+        consensus: Arc<dyn ConsensusQuery>,
         tx_sender: mpsc::Sender<SignedTransaction>,
         peer_count: Arc<dyn Fn() -> usize + Send + Sync>,
         auth_config: RpcAuthConfig,
@@ -273,7 +309,7 @@ impl RpcServer {
         db: Arc<Database>,
         state: Arc<StateManager>,
         mempool: Arc<Mempool>,
-        consensus: Arc<dyn ConsensusEngine>,
+        consensus: Arc<dyn ConsensusQuery>,
         tx_sender: mpsc::Sender<SignedTransaction>,
         peer_count: Arc<dyn Fn() -> usize + Send + Sync>,
         auth_config: RpcAuthConfig,
@@ -300,7 +336,7 @@ impl RpcServer {
         db: Arc<Database>,
         state: Arc<StateManager>,
         mempool: Arc<Mempool>,
-        consensus: Arc<dyn ConsensusEngine>,
+        consensus: Arc<dyn ConsensusQuery>,
         tx_sender: mpsc::Sender<SignedTransaction>,
         peer_count: Arc<dyn Fn() -> usize + Send + Sync>,
         peer_id: Arc<dyn Fn() -> Option<String> + Send + Sync>,

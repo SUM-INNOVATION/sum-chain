@@ -29,7 +29,9 @@ use tokio::sync::broadcast;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-use crate::engine::{ConsensusEngine, ConsensusEvent, ForkChoice, LongestChainForkChoice};
+use crate::engine::{
+    ConsensusEngine, ConsensusEvent, ConsensusQuery, ForkChoice, LongestChainForkChoice,
+};
 use crate::reorg::{execute_reorg, plan_reorg_within_undo_history};
 use crate::{ConsensusError, Result};
 
@@ -1203,6 +1205,44 @@ impl PoAEngine {
     }
 }
 
+impl ConsensusQuery for PoAEngine {
+    fn is_validator(&self) -> bool {
+        self.validator_key.is_some()
+    }
+
+    fn current_height(&self) -> BlockHeight {
+        self.best_block
+            .read()
+            .as_ref()
+            .map(|b| b.height())
+            .unwrap_or(0)
+    }
+
+    fn validators(&self) -> Vec<[u8; 32]> {
+        self.get_active_validator_set()
+    }
+
+    fn get_proposer(&self, height: BlockHeight) -> [u8; 32] {
+        self.compute_proposer(height)
+    }
+
+    fn finalized_height(&self) -> BlockHeight {
+        PoAEngine::finalized_height(self)
+    }
+
+    fn finalized_hash(&self) -> Hash {
+        PoAEngine::finalized_hash(self)
+    }
+
+    fn is_finalized(&self, height: BlockHeight) -> bool {
+        PoAEngine::is_finalized(self, height)
+    }
+
+    fn finality_depth(&self) -> u64 {
+        self.params.finality_depth
+    }
+}
+
 #[async_trait]
 impl ConsensusEngine for PoAEngine {
     async fn start(&self) -> Result<()> {
@@ -1217,28 +1257,12 @@ impl ConsensusEngine for PoAEngine {
         Ok(())
     }
 
-    fn is_validator(&self) -> bool {
-        self.validator_key.is_some()
-    }
-
-    fn current_height(&self) -> BlockHeight {
-        self.best_block
-            .read()
-            .as_ref()
-            .map(|b| b.height())
-            .unwrap_or(0)
-    }
-
     fn best_block_hash(&self) -> Hash {
         self.best_block
             .read()
             .as_ref()
             .map(|b| b.hash())
             .unwrap_or(Hash::ZERO)
-    }
-
-    fn validators(&self) -> Vec<[u8; 32]> {
-        self.get_active_validator_set()
     }
 
     async fn import_block(&self, block: Block) -> Result<()> {
@@ -1258,10 +1282,6 @@ impl ConsensusEngine for PoAEngine {
         *key.public_key().as_bytes() == expected_proposer
     }
 
-    fn get_proposer(&self, height: BlockHeight) -> [u8; 32] {
-        self.compute_proposer(height)
-    }
-
     fn subscribe(&self) -> broadcast::Receiver<ConsensusEvent> {
         self.event_tx.subscribe()
     }
@@ -1278,22 +1298,6 @@ impl ConsensusEngine for PoAEngine {
     fn init_genesis(&self, genesis: &Genesis) -> Result<()> {
         PoAEngine::init_genesis(self, genesis)?;
         Ok(())
-    }
-
-    fn finalized_height(&self) -> BlockHeight {
-        PoAEngine::finalized_height(self)
-    }
-
-    fn finalized_hash(&self) -> Hash {
-        PoAEngine::finalized_hash(self)
-    }
-
-    fn is_finalized(&self, height: BlockHeight) -> bool {
-        PoAEngine::is_finalized(self, height)
-    }
-
-    fn finality_depth(&self) -> u64 {
-        self.params.finality_depth
     }
 }
 

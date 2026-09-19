@@ -49,7 +49,7 @@ pub mod engine;
 pub mod poa;
 
 pub use bft::BftEngine;
-pub use engine::{ConsensusEngine, ConsensusEvent};
+pub use engine::{ConsensusEngine, ConsensusEvent, ConsensusQuery};
 pub use poa::PoAEngine;
 
 use thiserror::Error;

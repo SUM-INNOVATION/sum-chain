@@ -11,18 +11,18 @@
 //!   "EXPERIMENTAL - NOT PRODUCTION READY" with `propose_block()` returning
 //!   `NotImplemented`.
 //! * **Proposal acceptance, fork choice and reorg are one function**:
-//!   `PoAEngine::do_import_block`, `crates/consensus/src/poa.rs:603`. It
+//!   `PoAEngine::do_import_block`, `crates/consensus/src/poa.rs:770`. It
 //!   validates the block, classifies it against
 //!   `LongestChainForkChoice::should_switch`
-//!   (`crates/consensus/src/engine.rs:113`) into `DirectExtension`,
+//!   (`crates/consensus/src/engine.rs:162`) into `DirectExtension`,
 //!   `SideBranch` or `Reorg`, and publishes or reorgs. A block that reaches it
 //!   has already influenced this node.
-//! * **There are no PoA votes.** `crates/consensus/src/engine.rs:28` — the
+//! * **There are no PoA votes.** `crates/consensus/src/engine.rs:100` — the
 //!   `ConsensusEngine` trait — has `import_block` and `propose_block` and no
 //!   vote method at all. Votes exist only in the experimental BFT engine
 //!   (`crates/consensus/src/bft/vote.rs`).
 //! * **The engine cannot make this decision itself.** `import_block(&self,
-//!   block: Block)` (`crates/consensus/src/engine.rs:50`) is handed a block and
+//!   block: Block)` (`crates/consensus/src/engine.rs:111`) is handed a block and
 //!   nothing else; there is no `PeerId` anywhere in the trait. So the refusal
 //!   has to sit at the network boundary, which is `Node::run`'s event loop in
 //!   `crates/node/src/node.rs`.
@@ -52,29 +52,43 @@
 //! # Every route into `do_import_block`, enumerated from source
 //!
 //! ```text
-//! do_import_block            crates/consensus/src/poa.rs:603   (private)
-//!   <- PoAEngine::import_block            crates/consensus/src/poa.rs:1080
+//! do_import_block            crates/consensus/src/poa.rs:770   (private)
+//!   <- PoAEngine::import_block            crates/consensus/src/poa.rs:1268
 //!        the ONLY caller; it is the `ConsensusEngine` trait impl
 //!      <- ConsensusWrapper::import_block  crates/node/src/consensus_wrapper.rs:195
 //!           <- Node::admit_peer_block     crates/node/src/node.rs   (the seam)
 //!                <- NetworkEvent::BlockReceived        (gossip)
 //!                <- NetworkEvent::SyncBlocksReceived   (sync)
-//!      <- Arc<dyn ConsensusEngine> handed to the RPC server
-//!           ConsensusWrapper::as_consensus_engine, consensus_wrapper.rs:265
-//!           -> Node::start_servers, node.rs; RpcServer, crates/rpc/src/server.rs:186
-//!           NOT CALLED TODAY. Asserted below, because it is callable.
+//!      <- (WAS) Arc<dyn ConsensusEngine> handed to the RPC server
+//!           ConsensusWrapper::as_consensus_engine
+//!           CLOSED BY TYPE. The RPC server is now handed
+//!           Arc<dyn ConsensusQuery> by ConsensusWrapper::as_consensus_query,
+//!           and that trait has no import_block to call.
 //! ```
 //!
-//! The last edge is the one worth writing down. `as_consensus_engine` hands the
-//! RPC server the SAME `Arc<PoAEngine>` the event loop holds, upcast to
-//! `Arc<dyn ConsensusEngine>` — and `import_block` is a method on that trait
-//! (`crates/consensus/src/engine.rs:50`). The RPC server therefore holds a live,
-//! callable handle into proposal acceptance and fork choice, reachable from an
-//! unauthenticated JSON-RPC method, with no `PeerId` anywhere near it and so
-//! nothing for the participation predicate to judge. No RPC method calls it
-//! today. Nothing in the type system stops the next one, and it would not be a
-//! sixth route through the boundary — it would be a route AROUND it. It is
-//! pinned by `the_rpc_surface_never_reaches_into_the_consensus_engine` below.
+//! The last edge used to be the one worth writing down. `as_consensus_engine`
+//! handed the RPC server the SAME `Arc<PoAEngine>` the event loop holds, upcast
+//! to `Arc<dyn ConsensusEngine>` — and `import_block` is a method on that
+//! trait. The RPC server therefore held a live, callable handle into proposal
+//! acceptance and fork choice, reachable from an unauthenticated JSON-RPC
+//! method, with no `PeerId` anywhere near it and so nothing for the
+//! participation predicate to judge. No RPC method called it, but that was the
+//! result of a text search, not a property of the design, and it would not have
+//! been a sixth route through the boundary — it would have been a route AROUND
+//! it.
+//!
+//! It is now closed by TYPE rather than by this file. `as_consensus_query`
+//! (`crates/node/src/consensus_wrapper.rs`) hands out `Arc<dyn ConsensusQuery>`
+//! — the eight reads `crates/rpc/src/server.rs` actually performs, and nothing
+//! else. `crates/rpc/tests/consensus_capability_probe.rs` compiles
+//! `import_block` against that trait and asserts rustc rejects it, with a
+//! control proving the capability still exists on `dyn ConsensusEngine`;
+//! `consensus_handle_is_query_only` in `crates/rpc/src/server.rs` pins the
+//! server's field to that type. Together those two say the handle cannot do it.
+//!
+//! `the_rpc_surface_never_reaches_into_the_consensus_engine` below is KEPT, with
+//! its claim narrowed — see its own doc comment for what it still covers that a
+//! handle's type cannot.
 //!
 //! Block PRODUCTION is deliberately not on this list: `PoAEngine::create_block`
 //! (`crates/consensus/src/poa.rs`) commits through `accept_produced` and never
@@ -308,22 +322,36 @@ fn the_admission_seam_checks_participation_before_it_calls_the_engine() {
     );
 }
 
-/// The RPC surface never reaches into the consensus engine.
+/// The RPC surface never reaches into ANY consensus engine, by any route.
 ///
-/// `ConsensusWrapper::as_consensus_engine`
-/// (`crates/node/src/consensus_wrapper.rs:265`) hands `RpcServer` the same
-/// `Arc<PoAEngine>` the event loop holds, as `Arc<dyn ConsensusEngine>`. That
-/// trait carries `import_block` and `propose_block`
-/// (`crates/consensus/src/engine.rs:50`), so the RPC server can call
-/// `do_import_block` — with no `PeerId`, from an HTTP request, past every check
-/// in this file. It does not today. This test is what keeps that true, because
-/// the type system does not: the handle is given out precisely so the RPC can
-/// read heights and finality, and `.import_block(` is one line away from every
-/// place that reads them.
+/// # Why this is no longer the primary control
 ///
-/// Scanned as text for the same reason the rest of this file is: the hazard is a
-/// call that does not exist yet, and no behavioural test can fail on code nobody
-/// has written.
+/// It used to be the only one. The RPC server was handed
+/// `Arc<dyn ConsensusEngine>`, `import_block` was a method on it, and nothing
+/// but this scan stood between a future handler and `do_import_block`. The
+/// handle is now `Arc<dyn ConsensusQuery>`, which has no such method;
+/// `crates/rpc/tests/consensus_capability_probe.rs` proves that by compiling
+/// the call and reading rustc's rejection, and
+/// `consensus_handle_is_query_only` (`crates/rpc/src/server.rs`) proves the
+/// server's field is that type. A handler that writes `self.consensus.
+/// import_block(b)` now fails to build; this scan can no longer be the thing
+/// that catches it, because the code never gets far enough to be scanned.
+///
+/// # Why it is kept rather than retired
+///
+/// Narrowing a handle's type says nothing about engines reached by some OTHER
+/// route. An RPC handler holds `Arc<Database>`, `Arc<StateManager>` and
+/// `Arc<Mempool>` — everything `PoAEngine::new` needs — so it could construct
+/// its own engine and call `import_block` on THAT, feeding the same
+/// `do_import_block` from the same HTTP request with the same absent `PeerId`.
+/// No type on the RPC server's fields can forbid that; a source scan can see
+/// it. That is the residual hazard this test now owns, and it is the reason
+/// its needles are bare method names rather than `self.consensus.`-qualified
+/// ones.
+///
+/// Scanned as text for the same reason the rest of this file is: the hazard is
+/// a call that does not exist yet, and no behavioural test can fail on code
+/// nobody has written.
 #[test]
 fn the_rpc_surface_never_reaches_into_the_consensus_engine() {
     let rpc_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rpc/src");
@@ -341,9 +369,11 @@ fn the_rpc_surface_never_reaches_into_the_consensus_engine() {
         for forbidden in [".import_block(", ".propose_block("] {
             assert!(
                 !text.contains(forbidden),
-                "{} calls `{forbidden}` on the consensus engine. The RPC server \
-                 holds the engine as `Arc<dyn ConsensusEngine>` for its read-only \
-                 methods; calling `{forbidden}` from there feeds consensus from an \
+                "{} calls `{forbidden}`. The RPC server's own handle is \
+                 `Arc<dyn ConsensusQuery>` and has no such method, so this call \
+                 must be on an engine obtained by another route — most likely one \
+                 the handler built itself from the db/state/mempool it holds. \
+                 Either way it feeds proposal acceptance and fork choice from an \
                  HTTP request with no peer identity attached, which is not a sixth \
                  route through the participation boundary but a route around it",
                 path.display()

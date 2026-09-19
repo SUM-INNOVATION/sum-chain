@@ -30,7 +30,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use sumchain_consensus::{ConsensusEngine, PoAEngine};
+use sumchain_consensus::{ConsensusQuery, PoAEngine};
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::{ChainParams, Genesis};
 use sumchain_rpc::api::SumChainApiServer;
@@ -70,7 +70,7 @@ fn serve(genesis: &Genesis) -> Served {
     let state = Arc::new(StateManager::new(db.clone(), genesis.chain_id));
     let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
     let validator = KeyPair::from_bytes([7u8; 32]);
-    let engine: Arc<dyn ConsensusEngine> = Arc::new(
+    let engine: Arc<dyn ConsensusQuery> = Arc::new(
         PoAEngine::new(
             db.clone(),
             state.clone(),
@@ -111,7 +111,7 @@ fn serve_without_genesis(genesis: &Genesis) -> Served {
     let state = Arc::new(StateManager::new(db.clone(), genesis.chain_id));
     let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
     let validator = KeyPair::from_bytes([7u8; 32]);
-    let engine: Arc<dyn ConsensusEngine> = Arc::new(
+    let engine: Arc<dyn ConsensusQuery> = Arc::new(
         PoAEngine::new(
             db.clone(),
             state.clone(),

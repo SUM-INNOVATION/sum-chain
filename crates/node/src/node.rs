@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use sumchain_consensus::{
     bft::{Proposal, Vote, VoteType},
-    ConsensusEngine, ConsensusEvent,
+    ConsensusEvent, ConsensusQuery,
 };
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::Genesis;
@@ -1243,7 +1243,7 @@ impl Node {
             self.db.clone(),
             self.state.clone(),
             self.mempool.clone(),
-            self.consensus.as_consensus_engine(),
+            self.consensus.as_consensus_query(),
             self.tx_sender.clone(),
             peer_count,
             peer_id,
@@ -1412,7 +1412,11 @@ fn build_rpc_server(
     db: Arc<Database>,
     state: Arc<StateManager>,
     mempool: Arc<Mempool>,
-    consensus: Arc<dyn ConsensusEngine>,
+    // READ-ONLY by type (`ConsensusQuery`, not `ConsensusEngine`): the RPC
+    // server is handed a handle that has no `import_block`, so proposal
+    // acceptance and fork choice are not reachable from an HTTP request.
+    // `ConsensusWrapper::as_consensus_query` is where the narrowing happens.
+    consensus: Arc<dyn ConsensusQuery>,
     tx_sender: mpsc::Sender<SignedTransaction>,
     peer_count: Arc<dyn Fn() -> usize + Send + Sync>,
     peer_id: Arc<dyn Fn() -> Option<String> + Send + Sync>,
@@ -1639,7 +1643,7 @@ mod rpc_wiring_tests {
             HashMap::from([(validator.address().to_base58(), 1u128)]),
             ChainParams::default(),
         );
-        let engine: Arc<dyn ConsensusEngine> = Arc::new(
+        let engine: Arc<dyn ConsensusQuery> = Arc::new(
             PoAEngine::new(
                 db.clone(),
                 state.clone(),

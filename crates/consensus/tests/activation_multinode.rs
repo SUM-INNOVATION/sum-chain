@@ -52,7 +52,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use sumchain_consensus::{ConsensusEngine, PoAEngine};
+use sumchain_consensus::{ConsensusEngine, ConsensusQuery, PoAEngine};
 use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::{ChainParams, Genesis};
 use sumchain_primitives::agreement::PartyRef;

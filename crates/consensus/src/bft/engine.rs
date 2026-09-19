@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 
 use super::types::{ConsensusState, Step, TimeoutConfig, View, VoteType};
 use super::vote::{Vote, VoteSet};
-use crate::engine::{ConsensusEngine, ConsensusEvent};
+use crate::engine::{ConsensusEngine, ConsensusEvent, ConsensusQuery};
 use crate::{ConsensusError, Result};
 
 /// BFT consensus engine
@@ -328,6 +328,42 @@ impl BftEngine {
     }
 }
 
+impl ConsensusQuery for BftEngine {
+    fn is_validator(&self) -> bool {
+        self.validator_key.is_some()
+    }
+
+    fn current_height(&self) -> BlockHeight {
+        self.consensus_state.read().view.height
+    }
+
+    fn validators(&self) -> Vec<[u8; 32]> {
+        self.validators.iter().map(|pk| *pk.as_bytes()).collect()
+    }
+
+    fn get_proposer(&self, height: BlockHeight) -> [u8; 32] {
+        let view = View::new(height, 0);
+        *self.get_leader(&view).as_bytes()
+    }
+
+    fn finalized_height(&self) -> BlockHeight {
+        // In BFT, finalized height = current height (immediate finality)
+        self.current_height().saturating_sub(1)
+    }
+
+    fn finalized_hash(&self) -> Hash {
+        self.best_block_hash()
+    }
+
+    fn is_finalized(&self, height: BlockHeight) -> bool {
+        height <= self.finalized_height()
+    }
+
+    fn finality_depth(&self) -> u64 {
+        0 // Immediate finality in BFT
+    }
+}
+
 #[async_trait]
 impl ConsensusEngine for BftEngine {
     async fn start(&self) -> Result<()> {
@@ -346,24 +382,12 @@ impl ConsensusEngine for BftEngine {
         Ok(())
     }
 
-    fn is_validator(&self) -> bool {
-        self.validator_key.is_some()
-    }
-
-    fn current_height(&self) -> BlockHeight {
-        self.consensus_state.read().view.height
-    }
-
     fn best_block_hash(&self) -> Hash {
         self.best_block
             .read()
             .as_ref()
             .map(|b| b.hash())
             .unwrap_or(Hash::ZERO)
-    }
-
-    fn validators(&self) -> Vec<[u8; 32]> {
-        self.validators.iter().map(|pk| *pk.as_bytes()).collect()
     }
 
     async fn import_block(&self, block: Block) -> Result<()> {
@@ -381,11 +405,6 @@ impl ConsensusEngine for BftEngine {
     fn is_proposer(&self, height: BlockHeight) -> bool {
         let view = View::new(height, 0);
         self.is_leader(&view)
-    }
-
-    fn get_proposer(&self, height: BlockHeight) -> [u8; 32] {
-        let view = View::new(height, 0);
-        *self.get_leader(&view).as_bytes()
     }
 
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ConsensusEvent> {
@@ -430,22 +449,5 @@ impl ConsensusEngine for BftEngine {
         *self.best_block.write() = Some(genesis_block);
 
         Ok(())
-    }
-
-    fn finalized_height(&self) -> BlockHeight {
-        // In BFT, finalized height = current height (immediate finality)
-        self.current_height().saturating_sub(1)
-    }
-
-    fn finalized_hash(&self) -> Hash {
-        self.best_block_hash()
-    }
-
-    fn is_finalized(&self, height: BlockHeight) -> bool {
-        height <= self.finalized_height()
-    }
-
-    fn finality_depth(&self) -> u64 {
-        0 // Immediate finality in BFT
     }
 }
