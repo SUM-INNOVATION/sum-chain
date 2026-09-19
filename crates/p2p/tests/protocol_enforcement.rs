@@ -52,8 +52,8 @@
 
 use sumchain_p2p::peer_compat::PeerCompat;
 use sumchain_p2p::{
-    BlockSyncer, BlockSyncerConfig, ConnectionDirection, ConnectionLimits, PeerCompatRegistry,
-    PeerId, PeerManager, PeerState,
+    BanOutcome, BlockSyncer, BlockSyncerConfig, ConnectionDirection, ConnectionLimits,
+    NetworkConfig, NetworkService, PeerCompatRegistry, PeerId, PeerManager, PeerState,
 };
 use sumchain_primitives::{Block, BlockHeader, BlockHeight, Hash};
 use tokio::sync::mpsc;
@@ -567,51 +567,71 @@ async fn row5_a_mismatched_peer_is_evicted_along_with_the_requests_in_flight_to_
     drop(rx.try_recv());
 }
 
-/// The ban `node.rs` applies binds only because the connection registered the
-/// peer first — and that precondition is worth an assertion, not a comment.
+/// A ban binds on a peer this node has never seen, and says which it did.
 ///
-/// `PeerManager::ban_peer` (`crates/p2p/src/peer_manager.rs:531`) is
-/// `if let Some(entry) = peers.get_mut(peer_id)`. On a peer with no entry it
-/// writes nothing and returns `()`, indistinguishable at the call site from a
-/// ban that took. The production call is safe because
-/// `SwarmEvent::ConnectionEstablished` (`crates/p2p/src/network.rs:763`) calls
-/// `peer_connected`, which inserts the entry, and a `ProtocolIdResponse` can
-/// only arrive on an established connection. That ordering is the whole
-/// argument, so the no-op is pinned here: if `ban_peer` is ever called on a peer
-/// this node has not connected to — from a config file, an RPC, a gossip
-/// report — it will do nothing and say nothing.
+/// `PeerManager::ban_peer` used to be `if let Some(entry) = peers.get_mut(..)`:
+/// on a peer with no entry it wrote nothing and returned `()`, which at the call
+/// site is indistinguishable from a ban that took. The one production caller was
+/// safe only because `SwarmEvent::ConnectionEstablished` calls `peer_connected`
+/// first and a `ProtocolIdResponse` cannot arrive before a connection — a
+/// property of the network stack, not a guarantee the function offered.
+///
+/// It now registers the peer to hold the ban and reports which case it was. Both
+/// halves are asserted: the stranger is refused, and `BanOutcome` still tells a
+/// caller that it banned someone it had never met.
 #[test]
-fn the_ban_on_a_mismatched_peer_binds_only_because_the_connection_registered_it_first() {
+fn a_ban_binds_on_a_peer_this_node_has_never_seen() {
     let pm = PeerManager::new(ConnectionLimits::default());
     let stranger = PeerId::random();
 
-    // The no-op. Banning a peer with no entry.
-    pm.ban_peer(&stranger, std::time::Duration::from_secs(24 * 60 * 60));
     assert!(
-        pm.get_peer_info(&stranger).is_none(),
-        "banning an unknown peer must not even create an entry for it"
-    );
-    assert!(
-        pm.can_connect_outbound(&stranger),
-        "the ban on an unregistered peer is a NO-OP: nothing was written, so \
-         nothing refuses it. Any call site that bans a peer it has not connected \
-         to is writing a refusal that does not exist"
-    );
-    assert_eq!(pm.stats().banned, 0);
-
-    // The production ordering: connected first, then banned. The control is
-    // `can_accept_inbound` and not `can_connect_outbound`, because the latter is
-    // already `false` for a CONNECTED peer —
-    // `PeerEntry::should_attempt_connection` (`peer_manager.rs:217`) refuses any
-    // state but `Disconnected` — so it could not tell a ban from a live session.
-    let peer = PeerId::random();
-    pm.peer_connected(peer, ConnectionDirection::Inbound, None);
-    assert!(
-        pm.can_accept_inbound(&peer, None),
-        "before the ban this peer is welcome, which is what makes the refusal \
+        pm.can_accept_inbound(&stranger, None),
+        "before the ban the stranger is welcome, which is what makes the refusal \
          below attributable to the ban"
     );
-    pm.ban_peer(&peer, std::time::Duration::from_secs(24 * 60 * 60));
+
+    assert_eq!(
+        pm.ban_peer(&stranger, std::time::Duration::from_secs(24 * 60 * 60)),
+        BanOutcome::Registered,
+        "a ban on an unregistered peer must report that it had to create the \
+         entry, not pretend the peer was already known"
+    );
+
+    assert!(
+        pm.is_banned(&stranger),
+        "the ban on an unregistered peer must BIND: a refusal that evaporates \
+         because the peer has not dialled yet is worse than no refusal, because \
+         the caller believes it fired"
+    );
+    assert!(
+        !pm.can_connect_outbound(&stranger),
+        "this node must not dial a peer it has banned, seen before or not"
+    );
+    assert!(
+        !pm.can_accept_inbound(&stranger, None),
+        "and must not accept its connection either"
+    );
+    assert_eq!(pm.stats().banned, 1);
+    assert_eq!(
+        pm.get_peer_info(&stranger)
+            .expect("the ban created an entry")
+            .state,
+        PeerState::Banned
+    );
+
+    // The production ordering — connected first, then banned — is unchanged and
+    // reports the other outcome. The control is `can_accept_inbound` and not
+    // `can_connect_outbound`, because the latter is already `false` for a
+    // CONNECTED peer (`PeerEntry::should_attempt_connection` refuses any state
+    // but `Disconnected`) and so could not tell a ban from a live session.
+    let peer = PeerId::random();
+    pm.peer_connected(peer, ConnectionDirection::Inbound, None);
+    assert!(pm.can_accept_inbound(&peer, None));
+    assert_eq!(
+        pm.ban_peer(&peer, std::time::Duration::from_secs(24 * 60 * 60)),
+        BanOutcome::Existing,
+        "the peer already had an entry, and the caller can still tell"
+    );
 
     let info = pm.get_peer_info(&peer).expect("the peer has an entry");
     assert_eq!(
@@ -621,58 +641,391 @@ fn the_ban_on_a_mismatched_peer_binds_only_because_the_connection_registered_it_
          `Banned`, not merely scored down"
     );
     assert!(info.ban_expires.is_some());
-    assert_eq!(pm.stats().banned, 1);
-    assert!(
-        !pm.can_connect_outbound(&peer),
-        "this node must not dial a peer it has refused"
-    );
-    assert!(
-        !pm.can_accept_inbound(&peer, None),
-        "and must not accept its redial either — that is what makes the refusal \
-         survive the peer reconnecting, which is the claim `node.rs` makes for it"
-    );
+    assert_eq!(pm.stats().banned, 2);
+    assert!(!pm.can_connect_outbound(&peer));
+    assert!(!pm.can_accept_inbound(&peer, None));
 }
 
-/// Banning the peer does NOT hang up on it, and what holds meanwhile is the
-/// permanence of `Incompatible`.
+/// Banning a mismatched peer now CLOSES the session it is already on.
 ///
-/// There is no disconnect anywhere in this crate's command surface —
-/// `NetworkCommand` has no such variant — so `network.ban_peer(&peer, 24h)`
-/// refuses the NEXT connection and leaves the current one open. A mismatching
-/// peer therefore keeps gossiping at this node for as long as it likes.
+/// This crate had no outbound disconnect at all — `NetworkCommand` carried none,
+/// and the only `Disconnect` in it was the inbound `PeerDisconnected` event. A
+/// ban therefore refused the peer's NEXT connection and left the current one
+/// open, so a mismatching peer kept gossiping at this node for as long as it
+/// liked; the only thing standing between it and the engine was the permanence
+/// of `PeerCompat::Incompatible`.
 ///
-/// That is safe, and it is safe for a different reason than the ban: every route
-/// into consensus consults the registry, and `PeerCompat::Incompatible` is
-/// permanent. Both halves are asserted together here because the danger is
-/// believing the first one covers the second.
-#[test]
-fn banning_a_mismatched_peer_does_not_close_the_connection_it_already_has() {
-    let pm = PeerManager::new(ConnectionLimits::default());
+/// `NetworkService::ban_peer` now does both: it writes the ban AND sends
+/// `NetworkCommand::DisconnectPeer`, which the swarm loop turns into
+/// `Swarm::disconnect_peer_id`. Both halves are asserted here together, plus the
+/// permanence that used to be carrying the whole load on its own — because the
+/// danger was believing any one of the three covered the others.
+#[tokio::test]
+async fn banning_a_mismatched_peer_closes_the_connection_it_already_has() {
+    let (network, mut commands) =
+        NetworkService::with_limits(NetworkConfig::default(), ConnectionLimits::default());
     let peer = PeerId::random();
-    pm.peer_connected(peer, ConnectionDirection::Inbound, None);
-    assert_eq!(pm.stats().inbound, 1);
-
-    pm.ban_peer(&peer, std::time::Duration::from_secs(24 * 60 * 60));
-    assert_eq!(
-        pm.stats().inbound,
-        1,
-        "the ban did not decrement the inbound count, because it did not close \
-         the connection: only `peer_disconnected` does that, and nothing calls it \
-         here. The live session survives the ban"
+    network
+        .peer_manager()
+        .peer_connected(peer, ConnectionDirection::Inbound, None);
+    assert_eq!(network.peer_manager().stats().inbound, 1);
+    assert!(
+        commands.try_recv().is_err(),
+        "connecting a peer must not by itself queue any command"
     );
 
-    // So what refuses the blocks still arriving on that live session is the
-    // registry, permanently and at every height.
+    let outcome = network
+        .ban_peer(&peer, std::time::Duration::from_secs(24 * 60 * 60))
+        .await;
+    assert_eq!(outcome, BanOutcome::Existing);
+
+    match commands.try_recv() {
+        Ok(sumchain_p2p::NetworkCommand::DisconnectPeer { peer: p, reason }) => {
+            assert_eq!(p, peer, "the disconnect must name the peer that was banned");
+            assert!(
+                reason.contains("banned"),
+                "the reason travels to the swarm so the connection's death is \
+                 attributable there: got {reason:?}"
+            );
+        }
+        other => panic!(
+            "banning a peer must queue a disconnect for the session it is ALREADY \
+             on; got {other:?}"
+        ),
+    }
+
+    assert!(network.peer_manager().is_banned(&peer));
+
+    // And the third refusal, which is the one that used to be alone: every route
+    // into consensus consults the registry, permanently and at every height.
     let reg = PeerCompatRegistry::new(ours(), Some(ENFORCE_FROM));
     assert!(!reg.on_declaration(peer, theirs()));
     assert_eq!(reg.status(&peer), PeerCompat::Incompatible);
     for h in [0, 1, ENFORCE_FROM - 1, ENFORCE_FROM, u64::MAX] {
         assert!(
             !reg.may_participate_in_consensus(&peer, h),
-            "the still-connected mismatching peer must be refused at height {h}"
+            "the mismatching peer must be refused at height {h}"
         );
     }
     // Including after it tries to take the declaration back.
     assert!(!reg.on_declaration(peer, ours()));
     assert!(!reg.may_participate_in_consensus(&peer, 0));
+}
+
+/// The ban survives the disconnect it caused, so the peer's redial is refused.
+///
+/// The failure mode this pins is a loop: hang up on the banned peer, the
+/// `ConnectionClosed` that follows runs `peer_disconnected`, which used to
+/// overwrite `PeerState::Banned` with `PeerState::Disconnected` — and then the
+/// peer dials back into a node that reads its own state and sees an ordinary
+/// idle peer. `ban_until` survived that overwrite, which is why `is_banned` was
+/// still right; `state` was the half that lied, and `state` is what `PeerInfo`
+/// hands to everything above this crate.
+#[test]
+fn a_banned_peer_stays_banned_through_the_disconnect_and_its_redial_is_refused() {
+    let pm = PeerManager::new(ConnectionLimits::default());
+    let peer = PeerId::random();
+
+    pm.peer_connected(peer, ConnectionDirection::Inbound, None);
+    pm.ban_peer(&peer, std::time::Duration::from_secs(24 * 60 * 60));
+
+    // What `SwarmEvent::ConnectionClosed` does after `disconnect_peer_id` runs.
+    pm.peer_disconnected(&peer);
+    assert_eq!(
+        pm.stats().inbound,
+        0,
+        "closing the connection releases the inbound slot"
+    );
+
+    let info = pm
+        .get_peer_info(&peer)
+        .expect("entry survives the disconnect");
+    assert_eq!(
+        info.state,
+        PeerState::Banned,
+        "the peer is disconnected BECAUSE it is banned; reading back as merely \
+         `Disconnected` is how the refusal gets forgotten"
+    );
+    assert!(info.ban_expires.is_some());
+    assert!(pm.is_banned(&peer));
+    assert_eq!(pm.stats().banned, 1);
+
+    // The redial, from both directions.
+    assert!(
+        !pm.can_accept_inbound(&peer, None),
+        "the banned peer's reconnection must be refused — this is what makes the \
+         refusal survive the peer dialling back"
+    );
+    assert!(
+        !pm.can_connect_outbound(&peer),
+        "and this node must not dial it either"
+    );
+}
+
+/// The syncer hangs up too, and not only on the peers it was about to ask.
+///
+/// `on_protocol_id_response` already evicted a mismatching peer from the set it
+/// would REQUEST blocks from, and from the requests in flight to it. Neither
+/// touches the connection: the peer could still push gossip and answer requests
+/// already outstanding. The eviction and the disconnect are asserted in one
+/// place because the eviction reads like the whole refusal and is not.
+#[tokio::test]
+async fn the_syncer_hangs_up_on_a_peer_that_declares_other_rules() {
+    let (s, mut rx) = syncer(Some(ENFORCE_FROM), 0);
+    let peer = PeerId::random();
+
+    s.on_status_response(peer, 500, Hash::default(), CHAIN_ID);
+    assert_eq!(s.stats().known_peers, 1, "admitted before it declares");
+
+    assert!(!s.on_protocol_id_response(peer, theirs()));
+
+    assert_eq!(
+        s.stats().known_peers,
+        0,
+        "the mismatching peer is evicted from the sync peer set"
+    );
+    let mut disconnects = Vec::new();
+    while let Ok(cmd) = rx.try_recv() {
+        if let sumchain_p2p::NetworkCommand::DisconnectPeer { peer: p, reason } = cmd {
+            disconnects.push((p, reason));
+        }
+    }
+    assert_eq!(
+        disconnects.len(),
+        1,
+        "refusing a peer must queue exactly one disconnect, got {disconnects:?}"
+    );
+    assert_eq!(disconnects[0].0, peer);
+    assert!(
+        disconnects[0].1.contains("protocol digest"),
+        "the reason must name what the peer did: {:?}",
+        disconnects[0].1
+    );
+}
+
+/// An undeclared peer is refused above the height and is NOT hung up on, in
+/// either phase.
+///
+/// The distinction `PeerCompat` draws between `Incompatible` and `Undeclared`
+/// exists so that a refusal can tell an accusation from an absence, and the
+/// disconnect is where that distinction has to pay: every validator running
+/// today is `Undeclared`, because its binary predates `GetProtocolId` and
+/// answers with an inbound failure. A disconnect that fired on silence would
+/// hang up on the entire current validator set the moment the enforcement
+/// height arrived.
+///
+/// So: below the height the legacy peer participates and keeps its connection;
+/// at and above it the peer's BLOCKS are refused and the connection still
+/// stands, because the peer may simply be old rather than wrong.
+#[tokio::test]
+async fn an_undeclared_peer_is_refused_above_the_height_but_never_disconnected() {
+    // Phase one: below the height.
+    let (below, mut rx_below) = syncer(Some(ENFORCE_FROM), ENFORCE_FROM - 2);
+    let legacy = PeerId::random();
+    below.on_status_response(legacy, ENFORCE_FROM - 1, Hash::default(), CHAIN_ID);
+    assert!(
+        below.may_supply_blocks(&legacy, ENFORCE_FROM - 1),
+        "below the height an undeclared peer participates exactly as today"
+    );
+    assert_eq!(below.stats().known_peers, 1);
+
+    // Phase two: at and above it.
+    let (above, mut rx_above) = syncer(Some(ENFORCE_FROM), ENFORCE_FROM);
+    above.on_status_response(legacy, ENFORCE_FROM + 50, Hash::default(), CHAIN_ID);
+    for h in [ENFORCE_FROM, ENFORCE_FROM + 1, u64::MAX] {
+        assert!(
+            !above.may_supply_blocks(&legacy, h),
+            "at or above the height an undeclared peer may not supply block {h}"
+        );
+    }
+    assert_eq!(
+        above.compat_status(&legacy),
+        PeerCompat::Undeclared,
+        "silence is not an accusation, in either phase"
+    );
+
+    // Neither phase hangs up on it.
+    for (label, rx) in [("below", &mut rx_below), ("above", &mut rx_above)] {
+        while let Ok(cmd) = rx.try_recv() {
+            assert!(
+                !matches!(cmd, sumchain_p2p::NetworkCommand::DisconnectPeer { .. }),
+                "{label} the enforcement height, a peer that merely declared \
+                 NOTHING must not be disconnected: that is every validator \
+                 running today, and hanging up on them is worse than the defect \
+                 the handshake closes. Got {cmd:?}"
+            );
+        }
+    }
+
+    // And the peer manager agrees: nothing banned it.
+    let pm = PeerManager::new(ConnectionLimits::default());
+    pm.peer_connected(legacy, ConnectionDirection::Inbound, None);
+    assert!(!pm.is_banned(&legacy));
+    assert!(pm.can_accept_inbound(&legacy, None));
+}
+
+/// A peer that declares OUR digest is untouched by any of this.
+///
+/// The control for every assertion above. A refusal mechanism that also refused
+/// the compatible peers would pass most of this file.
+#[tokio::test]
+async fn a_matching_peer_is_neither_banned_nor_disconnected() {
+    let (s, mut rx) = syncer(Some(ENFORCE_FROM), ENFORCE_FROM);
+    let peer = PeerId::random();
+
+    assert!(s.on_protocol_id_response(peer, ours()));
+    assert_eq!(s.compat_status(&peer), PeerCompat::Verified);
+    s.on_status_response(peer, ENFORCE_FROM + 100, Hash::default(), CHAIN_ID);
+    assert_eq!(s.stats().known_peers, 1, "it stays a source of blocks");
+    for h in [0, ENFORCE_FROM - 1, ENFORCE_FROM, u64::MAX] {
+        assert!(s.may_supply_blocks(&peer, h), "admitted at height {h}");
+    }
+
+    while let Ok(cmd) = rx.try_recv() {
+        assert!(
+            !matches!(cmd, sumchain_p2p::NetworkCommand::DisconnectPeer { .. }),
+            "a peer that declared OUR digest must never be hung up on; got {cmd:?}"
+        );
+    }
+
+    let (network, mut commands) =
+        NetworkService::with_limits(NetworkConfig::default(), ConnectionLimits::default());
+    network
+        .peer_manager()
+        .peer_connected(peer, ConnectionDirection::Inbound, None);
+    assert!(!network.peer_manager().is_banned(&peer));
+    assert!(network.peer_manager().can_accept_inbound(&peer, None));
+    assert!(
+        commands.try_recv().is_err(),
+        "and nothing is queued against it"
+    );
+}
+
+/// A restart forgets every declaration, and the forgetting fails CLOSED above
+/// the enforcement height and open below it.
+///
+/// `PeerCompatRegistry` is a `RwLock<HashMap<..>>` and nothing persists it. That
+/// is stated rather than fixed, because the two sides of the boundary fail in
+/// opposite directions and only one of them is a defect:
+///
+/// * **Above the height.** A restart re-refuses a peer it had VERIFIED, until
+///   the peer answers `GetProtocolId` again. A verified peer is temporarily
+///   treated as undeclared — refusal, which is the safe direction.
+/// * **Below the height.** The same window re-admits a peer it had marked
+///   `Incompatible`. That is the real cost, and it is bounded by exactly what
+///   phase one already means: below the height every node executes the same
+///   rules, so an undeclared peer's blocks are blocks this node would have
+///   produced itself.
+///
+/// The ban is forgotten too, and for the same reason — `PeerManager` is in
+/// memory. Closing that window means persisting the declarations, which is a
+/// separate change; pinning it here is what stops the window from being closed
+/// by accident in the direction that ADMITS an unverified peer.
+#[test]
+fn a_restart_forgets_declarations_and_the_window_fails_closed_above_the_height() {
+    let peer = PeerId::random();
+
+    let before = PeerCompatRegistry::new(ours(), Some(ENFORCE_FROM));
+    assert!(before.on_declaration(peer, ours()));
+    assert_eq!(before.status(&peer), PeerCompat::Verified);
+    let other = PeerId::random();
+    assert!(!before.on_declaration(other, theirs()));
+    assert_eq!(before.status(&other), PeerCompat::Incompatible);
+
+    // The restart: a brand-new registry, which is what the process gets.
+    let after = PeerCompatRegistry::new(ours(), Some(ENFORCE_FROM));
+    assert_eq!(
+        after.status(&peer),
+        PeerCompat::Undeclared,
+        "a restart forgets that the peer was verified"
+    );
+    assert_eq!(
+        after.status(&other),
+        PeerCompat::Undeclared,
+        "and forgets that the other one was refused"
+    );
+
+    // Above the height the window refuses BOTH — including the peer it had
+    // verified. That is the direction this must keep failing in.
+    for h in [ENFORCE_FROM, ENFORCE_FROM + 1, u64::MAX] {
+        assert!(
+            !after.may_participate_in_consensus(&peer, h),
+            "above the height a re-forgotten peer is refused until it declares \
+             again (height {h})"
+        );
+        assert!(!after.may_participate_in_consensus(&other, h));
+    }
+
+    // Re-answering is what ends the window, and only a matching answer does.
+    assert!(after.on_declaration(peer, ours()));
+    assert!(after.may_participate_in_consensus(&peer, ENFORCE_FROM));
+    assert!(!after.on_declaration(other, theirs()));
+    assert!(!after.may_participate_in_consensus(&other, ENFORCE_FROM));
+    assert!(
+        !after.may_participate_in_consensus(&other, 0),
+        "and once it re-declares a mismatch it is refused in phase one too"
+    );
+
+    // Below the height the window ADMITS the previously-refused peer. Stated,
+    // not hidden: this is the cost of holding the policy in memory.
+    let fresh = PeerCompatRegistry::new(ours(), Some(ENFORCE_FROM));
+    assert!(
+        fresh.may_participate_in_consensus(&other, ENFORCE_FROM - 1),
+        "below the height a forgotten refusal re-admits the peer, which is the \
+         same admission phase one already makes for every silent peer"
+    );
+}
+
+/// The two swarm-level halves of the disconnect, pinned at their source.
+///
+/// `Swarm::disconnect_peer_id` and `SwarmEvent::ConnectionEstablished` live
+/// inside `NetworkService::run`, which owns the swarm and cannot be entered
+/// without a live TCP listener and a second node whose listen address this crate
+/// never reports. The wiring is therefore asserted the way
+/// `crates/node/tests/consensus_participation_guard.rs` asserts the node's
+/// routes: against the source, so that deleting either half fails a test instead
+/// of silently restoring the defect.
+///
+/// The two halves are `DisconnectPeer` actually reaching the swarm, and the ban
+/// being consulted BEFORE the connection is registered — a gate placed after
+/// `peer_connected` would announce the banned peer to everything above before
+/// dropping it.
+#[test]
+fn the_disconnect_command_reaches_the_swarm_and_the_ban_gate_precedes_registration() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/network.rs"),
+    )
+    .expect("crates/p2p/src/network.rs is readable");
+
+    let arm = src
+        .find("Some(NetworkCommand::DisconnectPeer {")
+        .expect("the command loop must handle DisconnectPeer");
+    let arm_body = &src[arm..arm + 800];
+    assert!(
+        arm_body.contains("swarm.disconnect_peer_id(peer)"),
+        "the DisconnectPeer arm must actually close the connection through the \
+         swarm, not merely log about it"
+    );
+
+    let established = src
+        .find("SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {")
+        .expect("the swarm handler must have a ConnectionEstablished arm");
+    let body = &src[established..];
+    let gate = body.find("self.peer_manager.is_banned(&peer_id)").expect(
+        "a banned peer's reconnection must be refused where the connection \
+             is reported; without this the ban refuses nothing, because nothing \
+             in the loop consulted `can_accept_inbound`",
+    );
+    let register = body
+        .find("self.peer_manager.peer_connected(peer_id")
+        .expect("the arm registers the peer");
+    assert!(
+        gate < register,
+        "the ban must be checked BEFORE the peer is registered and announced"
+    );
+    assert!(
+        body[gate..register].contains("swarm.disconnect_peer_id(peer_id)"),
+        "the gate must hang up, not just skip registration and leave the banned \
+         peer connected"
+    );
 }
