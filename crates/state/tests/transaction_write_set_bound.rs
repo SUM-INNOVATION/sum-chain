@@ -885,8 +885,7 @@ fn the_bound_narrows_the_transient_the_block_ceiling_has_to_cover() {
     let bounded_row = MAX_TX_WRITE_SET_BYTES / CHARGE_FACTOR;
     let unbounded_peak =
         MAX_BLOCK_WRITE_SET_BYTES + unbounded_row * (PEAK_LIVE_FACTOR - CHARGE_FACTOR);
-    let bounded_peak =
-        MAX_BLOCK_WRITE_SET_BYTES + bounded_row * (PEAK_LIVE_FACTOR - CHARGE_FACTOR);
+    let bounded_peak = MAX_BLOCK_WRITE_SET_BYTES + bounded_row * (PEAK_LIVE_FACTOR - CHARGE_FACTOR);
 
     println!(
         "TRANSIENT: largest single row one transaction may commit falls from \

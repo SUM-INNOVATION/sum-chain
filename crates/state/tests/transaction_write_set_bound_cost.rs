@@ -220,7 +220,11 @@ fn block_of(txs: Vec<SignedTransaction>) -> Block {
 /// Seeding happens OUTSIDE the measurement window: the fixture's own
 /// allocations are not what is being measured, and including them would drown
 /// the difference this file exists to report.
-fn measure_block(activation: Option<u64>, rows: usize, row_bytes: usize) -> (Alloc, f64, Vec<TxStatus>) {
+fn measure_block(
+    activation: Option<u64>,
+    rows: usize,
+    row_bytes: usize,
+) -> (Alloc, f64, Vec<TxStatus>) {
     let (state, db, _dir, executor) = setup_with_params(params_at(activation));
     let actor = KeyPair::generate();
     fund(&db, &actor, 1_000_000_000_000_000);

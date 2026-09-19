@@ -1413,7 +1413,10 @@ mod tests {
         let mut pre: Vec<(String, Vec<u8>, Option<Vec<u8>>)> = ov
             .preimages
             .iter()
-            .flat_map(|(c, m)| m.iter().map(move |(k, v)| (c.clone(), k.clone(), v.clone())))
+            .flat_map(|(c, m)| {
+                m.iter()
+                    .map(move |(k, v)| (c.clone(), k.clone(), v.clone()))
+            })
             .collect();
         pre.sort();
         (ov.logical_bytes(), writes, pre)

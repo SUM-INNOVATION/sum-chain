@@ -234,17 +234,13 @@ async fn a_proposal_past_the_block_ceiling_yields_a_shorter_block_rather_than_no
         .map(|n| add_key_tx(&f.actor, n as u64, n, 1_000))
         .collect();
 
-    let block = node
-        .consensus
-        .propose_block(txs.clone())
-        .await
-        .expect(
-            "a proposal whose transactions together cross the block ceiling must \
+    let block = node.consensus.propose_block(txs.clone()).await.expect(
+        "a proposal whose transactions together cross the block ceiling must \
              still produce a block out of the ones that fit. An Err here is the \
              permanent halt this file is about: no block is produced, the \
              mempool is not cleared, and the next tick selects the same \
              transactions again",
-        );
+    );
 
     println!(
         "PROPOSER: {rows} transactions handed in, {} included, block {} at height {}",
@@ -321,8 +317,12 @@ async fn the_transaction_that_crossed_the_ceiling_is_evicted_from_the_mempool() 
 
     let included: std::collections::HashSet<_> =
         block.transactions.iter().map(|t| t.hash()).collect();
-    let pending: std::collections::HashSet<_> =
-        node.mempool.get_all().into_iter().map(|t| t.hash()).collect();
+    let pending: std::collections::HashSet<_> = node
+        .mempool
+        .get_all()
+        .into_iter()
+        .map(|t| t.hash())
+        .collect();
     // Neither carried by the block nor still waiting: the fitting loop
     // identified it, dropped it, and threw it away.
     let evicted: Vec<usize> = (0..rows)
@@ -395,15 +395,11 @@ async fn a_second_proposal_after_a_crossing_still_produces_a_block() {
 
     // The remainder, at the nonces the first block left the sender on.
     let rest: Vec<SignedTransaction> = txs[consumed..].to_vec();
-    let second = node
-        .consensus
-        .propose_block(rest)
-        .await
-        .expect(
-            "the slot after a crossing must also produce a block. A proposer \
+    let second = node.consensus.propose_block(rest).await.expect(
+        "the slot after a crossing must also produce a block. A proposer \
              that produces one block and then fails forever is still halted, \
              and would pass every other test in this file",
-        );
+    );
 
     println!(
         "LIVENESS: height {} carried {consumed} transactions, height {} carried {}",
