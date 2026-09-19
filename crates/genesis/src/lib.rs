@@ -980,6 +980,19 @@ pub struct ChainParams {
     /// attacker refused by the DocClass bound simply moves to the NFT one.
     /// There is no configuration in which an operator wants one and not the
     /// other.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub subsystem_allocation_bound_enabled_from_height: Option<u64>,
+
     /// The Tax proof store and its subject index stop disagreeing.
     ///
     /// Three defects that share one invariant, and therefore one height
@@ -1014,7 +1027,6 @@ pub struct ChainParams {
     /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
     /// in this branch.
     #[serde(default)]
-    pub subsystem_allocation_bound_enabled_from_height: Option<u64>,
     pub tax_proof_lifecycle_enabled_from_height: Option<u64>,
 
     /// An NFT approval or metadata rewrite answers to the same authority a
