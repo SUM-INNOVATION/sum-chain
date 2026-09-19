@@ -21,6 +21,29 @@ use sumchain_primitives::employment::EmploymentCredential;
 use sumchain_primitives::healthcare::MembershipRecord;
 use sumchain_primitives::tax::TaxDisclosureEnvelope;
 
+/// The credential field length caps, at module scope so the protocol digest can
+/// read them.
+///
+/// Each one decides, above `docclass_schema_validation_enabled_from_height`,
+/// whether a credential-issuing transaction is ACCEPTED or REJECTED, so two
+/// binaries holding different caps write different state from the same block.
+/// They were previously declared inside the function bodies that read them,
+/// which put them out of reach of any comparison — the same hazard as a
+/// `ChainParams` field nobody digests, one level further down. Values unchanged.
+pub const MAX_TITLE_LENGTH: usize = 200;
+/// Cap on `metadata.credential_type`. See [`MAX_TITLE_LENGTH`].
+pub const MAX_CREDENTIAL_TYPE_LENGTH: usize = 100;
+/// Cap on the optional `metadata.program`. See [`MAX_TITLE_LENGTH`].
+pub const MAX_PROGRAM_LENGTH: usize = 200;
+/// Cap on `issue_date` and `completion_date`. See [`MAX_TITLE_LENGTH`].
+pub const MAX_DATE_LENGTH: usize = 50;
+/// Cap on one attribute value. See [`MAX_TITLE_LENGTH`].
+pub const MAX_ATTRIBUTE_VALUE_LENGTH: usize = 500;
+/// Cap on an institutional name. See [`MAX_TITLE_LENGTH`].
+pub const MAX_NAME_LENGTH: usize = 200;
+/// Cap on a storage hint. See [`MAX_TITLE_LENGTH`].
+pub const MAX_HINT_LENGTH: usize = 500;
+
 /// Schema validation result
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationResult {
@@ -149,7 +172,6 @@ impl SchemaValidator {
     /// Ensures fields don't contain excessive data that might be PII in disguise
     fn validate_metadata_fields(&self, metadata: &CredentialMetadata) -> Result<(), String> {
         // Title: reasonable length, describes credential type
-        const MAX_TITLE_LENGTH: usize = 200;
         if metadata.title.len() > MAX_TITLE_LENGTH {
             return Err(format!(
                 "metadata.title exceeds max length {} (got {})",
@@ -159,7 +181,6 @@ impl SchemaValidator {
         }
 
         // Credential type: short identifier
-        const MAX_CREDENTIAL_TYPE_LENGTH: usize = 100;
         if metadata.credential_type.len() > MAX_CREDENTIAL_TYPE_LENGTH {
             return Err(format!(
                 "metadata.credential_type exceeds max length {} (got {})",
@@ -170,7 +191,6 @@ impl SchemaValidator {
 
         // Program: field of study (optional, can be omitted for privacy)
         if let Some(ref program) = metadata.program {
-            const MAX_PROGRAM_LENGTH: usize = 200;
             if program.len() > MAX_PROGRAM_LENGTH {
                 return Err(format!(
                     "metadata.program exceeds max length {} (got {})",
@@ -181,7 +201,6 @@ impl SchemaValidator {
         }
 
         // Issue date: ISO 8601 format (YYYY-MM-DD or YYYY-MM)
-        const MAX_DATE_LENGTH: usize = 50;
         if metadata.issue_date.len() > MAX_DATE_LENGTH {
             return Err(format!(
                 "metadata.issue_date exceeds max length {} (got {})",
@@ -226,7 +245,6 @@ impl SchemaValidator {
             }
 
             // Validate attribute value length
-            const MAX_ATTRIBUTE_VALUE_LENGTH: usize = 500;
             if attr.value.len() > MAX_ATTRIBUTE_VALUE_LENGTH {
                 return ValidationResult::invalid(format!(
                     "Attribute '{}' value exceeds max length {} (got {})",
@@ -449,8 +467,6 @@ impl SchemaValidator {
     /// Must be institutional/company name, NOT personal names.
     /// We don't use heuristics - just check length and basic format.
     pub fn validate_institutional_name(&self, name: &str, field_name: &str) -> Result<(), String> {
-        const MAX_NAME_LENGTH: usize = 200;
-
         if name.is_empty() {
             return Err(format!("{} cannot be empty", field_name));
         }
@@ -488,8 +504,6 @@ impl SchemaValidator {
     ///
     /// Must be a generic storage reference, not contain PII.
     pub fn validate_storage_hint(&self, hint: &str, field_name: &str) -> Result<(), String> {
-        const MAX_HINT_LENGTH: usize = 500;
-
         if hint.len() > MAX_HINT_LENGTH {
             return Err(format!(
                 "{} too long (max {} bytes, got {})",

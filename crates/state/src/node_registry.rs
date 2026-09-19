@@ -35,7 +35,7 @@ use crate::{Result, StateError, StateManager};
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 /// Minimum stake required for an ArchiveNode (1 Koppa = 1_000_000_000 base units)
-const MIN_ARCHIVE_STAKE: u64 = 1_000_000_000;
+pub const MIN_ARCHIVE_STAKE: u64 = 1_000_000_000;
 
 // The column families are named once, in `sumchain_storage::cf`. These aliases
 // exist so the bodies below stay readable; re-declaring the string literals here

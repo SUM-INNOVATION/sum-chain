@@ -93,7 +93,7 @@ pub const C1_DECODE_BYTE_LIMIT: u64 = 1 << 20;
 /// consensus-breaking change that REQUIRES a deliberate protocol version bump
 /// (`…state.v2`) coordinated with activation — never an incidental edit. The
 /// exact bytes are pinned by the golden test `c1_state_digest_domain_is_frozen`.
-const C1_STATE_DIGEST_DOMAIN: &[u8] = b"sumchain.compute_pool.state.v1";
+pub const C1_STATE_DIGEST_DOMAIN: &[u8] = b"sumchain.compute_pool.state.v1";
 
 /// Encode a field byte-length as the canonical 4-byte little-endian frame prefix
 /// used by [`ComputePoolStore::state_digest`], rejecting any length that does not

@@ -12,7 +12,8 @@ use sumchain_consensus::{
 };
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::Genesis;
-use sumchain_p2p::{NetworkCommand, NetworkConfig, NetworkEvent, NetworkService, SyncState, MAX_BLOCKS_PER_REQUEST};
+use sumchain_p2p::{NetworkCommand, NetworkConfig, NetworkEvent, NetworkService, PeerId, SyncState, MAX_BLOCKS_PER_REQUEST};
+use sumchain_primitives::Hash;
 use sumchain_primitives::SignedTransaction;
 use sumchain_rpc::{
     HealthCheck, HealthServer, HealthServerHandle, Metrics, RateLimitConfig, RpcAuthConfig,
@@ -69,6 +70,18 @@ pub struct Node {
     /// BlockImported event so admission decisions track the chain. On
     /// cold start, initialized from `BlockStore::get_latest_height()`.
     chain_height: Arc<AtomicU64>,
+    /// The protocol digest THIS binary enforces: every activation height plus
+    /// every consensus-relevant compiled-in constant
+    /// (`sumchain_state::protocol_digest`). Computed once at construction,
+    /// declared to every peer that asks, and compared against every peer that
+    /// declares one.
+    protocol_digest: Hash,
+    /// Peers that declared a DIFFERENT protocol digest.
+    ///
+    /// Membership is by the peer's own declaration, never by silence: a node
+    /// built before the handshake existed answers nothing and is never entered
+    /// here. See `BlockSyncer::on_protocol_id_response` for the argument.
+    incompatible_peers: Arc<parking_lot::RwLock<std::collections::HashSet<PeerId>>>,
 }
 
 impl Node {
@@ -345,6 +358,16 @@ impl Node {
         // Create transaction channel
         let (tx_sender, tx_receiver) = mpsc::channel(1000);
 
+        // The value this node declares on the wire. Computed here, before
+        // consensus or RPC exist, so it is a property of the binary and its
+        // genesis rather than of anything the chain has done.
+        let protocol_digest = sumchain_state::protocol_digest::protocol_digest(&genesis)
+            .map_err(|e| anyhow::anyhow!("computing this binary's protocol digest: {}", e))?;
+        info!(
+            "Protocol digest (activation heights + consensus constants): {}",
+            protocol_digest
+        );
+
         Ok(Self {
             db,
             state,
@@ -363,6 +386,10 @@ impl Node {
             tx_receiver,
             shutdown: Arc::new(AtomicBool::new(false)),
             chain_height,
+            protocol_digest,
+            incompatible_peers: Arc::new(
+                parking_lot::RwLock::new(std::collections::HashSet::new()),
+            ),
         })
     }
 
@@ -685,6 +712,9 @@ impl Node {
                             info!("Peer connected: {}", peer);
                             metrics.p2p.record_peer_connected();
                             metrics.p2p.set_peer_count(network.peer_count());
+                            // Ask what rules it enforces before using anything it
+                            // says. A peer too old to answer is left alone.
+                            let _ = command_sender.send(NetworkCommand::RequestProtocolId(peer)).await;
                             // Request sync status from new peer to check if we need to sync
                             let _ = command_sender.send(NetworkCommand::RequestSyncStatus(peer)).await;
                         }
@@ -712,6 +742,37 @@ impl Node {
                             if let Err(e) = consensus.import_block(block).await {
                                 warn!("Failed to import block: {}", e);
                                 metrics.blocks.record_block_error();
+                            }
+                        }
+                        // Declare the rules this binary enforces.
+                        NetworkEvent::ProtocolIdRequest { request_id, peer } => {
+                            debug!("Protocol digest request from {} (id={})", peer, request_id);
+                            let _ = command_sender.send(NetworkCommand::SendProtocolIdResponse {
+                                request_id,
+                                digest: self.protocol_digest,
+                            }).await;
+                        }
+                        // Compare a peer's declared rules against ours.
+                        //
+                        // This is the control the activation digest never was.
+                        // `Genesis::activation_digest` is logged and compared BY
+                        // EYE; this is compared by the node, before the peer can
+                        // contribute a block, and a mismatch costs the peer its
+                        // place rather than costing the operator a fork.
+                        NetworkEvent::ProtocolIdResponse { peer, digest } => {
+                            if digest == self.protocol_digest {
+                                debug!("Peer {} enforces our protocol digest", peer);
+                            } else {
+                                warn!(
+                                    "REFUSING peer {}: it enforces protocol digest {} but this                                      node enforces {}. The two binaries disagree about an                                      activation height or a consensus constant, so blocks one                                      produces the other cannot reproduce. Disconnecting.",
+                                    peer, digest, self.protocol_digest
+                                );
+                                self.incompatible_peers.write().insert(peer);
+                                metrics.p2p.record_message_received();
+                                // Ban rather than merely ignore: `PeerManager`
+                                // refuses a banned peer's reconnection, so the
+                                // refusal survives the peer dialling back.
+                                network.ban_peer(&peer, std::time::Duration::from_secs(24 * 60 * 60));
                             }
                         }
                         // Handle sync status requests from peers
@@ -746,7 +807,12 @@ impl Node {
                         // Handle sync status responses - check if we need to sync
                         NetworkEvent::SyncStatusResponse { peer, height, best_hash: _, chain_id } => {
                             debug!("Sync status from {}: height={}, chain_id={}", peer, height, chain_id);
-                            if chain_id != self.genesis.chain_id {
+                            if self.incompatible_peers.read().contains(&peer) {
+                                // Checked here as well as at arrival because the
+                                // two responses race: a status that beat the
+                                // digest must not survive the refusal.
+                                warn!("Ignoring sync status from incompatible peer {}", peer);
+                            } else if chain_id != self.genesis.chain_id {
                                 warn!("Peer {} has different chain_id: {} vs {}", peer, chain_id, self.genesis.chain_id);
                             } else {
                                 let our_height = consensus.current_height();
@@ -771,6 +837,13 @@ impl Node {
                         }
                         // Handle received blocks from sync
                         NetworkEvent::SyncBlocksReceived { peer, blocks } => {
+                            if self.incompatible_peers.read().contains(&peer) {
+                                warn!(
+                                    "Discarding {} blocks from incompatible peer {}",
+                                    blocks.len(), peer
+                                );
+                                continue;
+                            }
                             info!("Received {} blocks from {} via sync", blocks.len(), peer);
                             let mut last_imported_height = 0;
                             for block in blocks {

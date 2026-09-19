@@ -43,6 +43,7 @@ pub mod policy_account_executor;
 pub mod policy_account_view;
 pub mod property_executor;
 pub mod property_view;
+pub mod protocol_digest;
 pub mod reorg_undo;
 pub mod schema_validator;
 pub mod snapshot;

@@ -57,7 +57,7 @@ use sumchain_storage::{equity_merkle_verify, EquityClassRoot, QualifyingAsset};
 
 /// Fixed pass threshold (bps) for `NativeEligibility` 1-address-1-vote proposals
 /// when no explicit config is present (#91). 6667 bps ≈ two-thirds of yes+no.
-const NATIVE_PASS_THRESHOLD_BPS: u128 = 6667;
+pub const NATIVE_PASS_THRESHOLD_BPS: u128 = 6667;
 
 use crate::equity_executor::EquityExecutor;
 use crate::token_executor::TokenExecutor;

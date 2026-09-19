@@ -34,7 +34,7 @@ use crate::{Result, SchemaValidator, StateError, StateManager};
 /// string, truncated to twenty bytes. Nobody holds a key for it, so the balance
 /// it accumulates can only move through the two paths in this file that move
 /// it -- registration in, deactivation out.
-const DOCCLASS_STAKE_ESCROW_DOMAIN: &[u8] = b"sumchain/docclass/issuer-stake-escrow/v1";
+pub const DOCCLASS_STAKE_ESCROW_DOMAIN: &[u8] = b"sumchain/docclass/issuer-stake-escrow/v1";
 
 /// The activation decisions a DocClass transaction executes under.
 ///

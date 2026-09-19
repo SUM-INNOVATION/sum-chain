@@ -100,6 +100,17 @@ pub struct BlockSyncer {
     config: BlockSyncerConfig,
     /// Our expected chain ID
     chain_id: u64,
+    /// The protocol digest THIS binary enforces
+    /// (`sumchain_state::protocol_digest::protocol_digest`): every activation
+    /// height plus every consensus-relevant compiled-in constant.
+    protocol_digest: Hash,
+    /// Peers that DECLARED a different protocol digest.
+    ///
+    /// Distinct from "not in `peers`", which is also the state of a peer that
+    /// has simply not answered yet. A peer lands here only by affirmatively
+    /// saying it enforces different rules, and once here it is never admitted to
+    /// the sync peer set regardless of what it says afterwards.
+    incompatible: RwLock<HashSet<PeerId>>,
     /// Current local height
     local_height: RwLock<BlockHeight>,
     /// Best known network height
@@ -126,12 +137,15 @@ impl BlockSyncer {
     pub fn new(
         config: BlockSyncerConfig,
         chain_id: u64,
+        protocol_digest: Hash,
         local_height: BlockHeight,
         command_tx: mpsc::Sender<NetworkCommand>,
     ) -> Self {
         Self {
             config,
             chain_id,
+            protocol_digest,
+            incompatible: RwLock::new(HashSet::new()),
             local_height: RwLock::new(local_height),
             network_height: RwLock::new(local_height),
             peers: RwLock::new(HashMap::new()),
@@ -192,6 +206,18 @@ impl BlockSyncer {
     pub async fn on_peer_connected(&self, peer_id: PeerId) {
         debug!("Block syncer: new peer connected {}", peer_id);
 
+        // Ask what rules it enforces BEFORE anything it says is used. The two
+        // requests are independent and may answer in either order, which is why
+        // the refusal is recorded in `incompatible` rather than applied only at
+        // the moment a digest arrives.
+        if let Err(e) = self
+            .command_tx
+            .send(NetworkCommand::RequestProtocolId(peer_id))
+            .await
+        {
+            warn!("Failed to request protocol digest: {}", e);
+        }
+
         // Request status from this peer
         if let Err(e) = self.command_tx.send(NetworkCommand::RequestSyncStatus(peer_id)).await {
             warn!("Failed to request sync status: {}", e);
@@ -207,8 +233,70 @@ impl BlockSyncer {
         self.pending_requests.write().retain(|_, req| req.peer != *peer_id);
     }
 
+    /// The protocol digest this binary enforces.
+    pub fn protocol_digest(&self) -> Hash {
+        self.protocol_digest
+    }
+
+    /// Whether `peer_id` declared a protocol digest different from ours.
+    pub fn is_incompatible(&self, peer_id: &PeerId) -> bool {
+        self.incompatible.read().contains(peer_id)
+    }
+
+    /// Handle a peer's declared protocol digest. Returns `true` if the peer is
+    /// compatible and may take part.
+    ///
+    /// # Why a match is required but an ANSWER is not
+    ///
+    /// This is the whole backward-compatibility argument, and it is the reason
+    /// the refusal can ship onto a live chain without being a consensus change.
+    ///
+    /// * The peer declares the SAME digest — verified compatible, admitted.
+    /// * The peer declares a DIFFERENT digest — refused, permanently, and
+    ///   evicted from the sync peer set. It said, in its own words, that it
+    ///   enforces different rules.
+    /// * The peer declares NOTHING — a node built before `GetProtocolId`
+    ///   existed cannot decode the request and answers with an inbound failure.
+    ///   It is NOT refused. It stays exactly as usable as it is today.
+    ///
+    /// Only the second case is new behaviour, and no node that predates this
+    /// change can ever fall into it: producing a mismatching digest requires
+    /// understanding the request in the first place. A refusal that fired on
+    /// today's validators would be worse than the defect it closes, so the
+    /// absence of an answer is deliberately not evidence of anything.
+    pub fn on_protocol_id_response(&self, peer_id: PeerId, digest: Hash) -> bool {
+        if digest == self.protocol_digest {
+            debug!("Peer {} declared a matching protocol digest", peer_id);
+            return true;
+        }
+
+        warn!(
+            "Peer {} enforces a DIFFERENT protocol digest ({} vs ours {}); refusing it.              The two binaries disagree about an activation height or a consensus              constant, so blocks one produces the other cannot reproduce.",
+            peer_id, digest, self.protocol_digest
+        );
+        self.incompatible.write().insert(peer_id);
+        // Evict anything already learned from it: a status that arrived before
+        // the digest did must not survive the refusal.
+        self.peers.write().remove(&peer_id);
+        self.pending_requests
+            .write()
+            .retain(|_, req| req.peer != peer_id);
+        false
+    }
+
     /// Handle sync status response from peer
     pub fn on_status_response(&self, peer_id: PeerId, height: BlockHeight, best_hash: Hash, chain_id: u64) {
+        // A peer that declared different rules is not a source of blocks, no
+        // matter how good its chain looks. Checked first, and checked here as
+        // well as at arrival, because the two responses race.
+        if self.is_incompatible(&peer_id) {
+            warn!(
+                "Ignoring sync status from {}: it declared an incompatible protocol digest",
+                peer_id
+            );
+            return;
+        }
+
         // Verify chain ID matches
         if chain_id != self.chain_id {
             warn!(
@@ -583,6 +671,7 @@ mod tests {
         let syncer = BlockSyncer::new(
             BlockSyncerConfig::default(),
             1337,
+            Hash::default(),
             0,
             tx,
         );
@@ -598,6 +687,7 @@ mod tests {
         let syncer = BlockSyncer::new(
             BlockSyncerConfig::default(),
             1337,
+            Hash::default(),
             0,
             tx,
         );
@@ -614,6 +704,7 @@ mod tests {
         let syncer = BlockSyncer::new(
             BlockSyncerConfig::default(),
             1337,
+            Hash::default(),
             0,
             tx,
         );
@@ -632,6 +723,7 @@ mod tests {
         let syncer = BlockSyncer::new(
             BlockSyncerConfig::default(),
             1337,
+            Hash::default(),
             0,
             tx,
         );
@@ -653,6 +745,7 @@ mod tests {
         let syncer = BlockSyncer::new(
             BlockSyncerConfig::default(),
             1337,
+            Hash::default(),
             100, // Already at height 100
             tx,
         );
