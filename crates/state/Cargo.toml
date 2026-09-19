@@ -38,6 +38,11 @@ serde_json = { workspace = true }
 # Build a REAL beacon carrier (valid EK + PoP) to exercise the gate-open →
 # #127-runtime → fail-closed-pending-stateful path end to end.
 sumchain-beacon-crypto = { path = "../beacon-crypto" }
+# `equity_ownership_proof_claim.rs` hand-rolls a `tracing::Subscriber` to
+# assert what the Equity proof-write path SAYS, not only what it returns.
+# The library's own `tracing` is not reachable from an integration test, and a
+# subscriber crate is not worth pulling in to read one string.
+tracing = { workspace = true }
 
 [features]
 # Test modules that were written against pre-migration primitives schemas and

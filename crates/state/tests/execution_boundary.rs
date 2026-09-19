@@ -1499,7 +1499,7 @@ fn migrated_execution_paths_take_no_self_receiver() {
         ("equity_executor.rs", "fn transfer("),
         ("equity_executor.rs", "fn mint("),
         ("equity_executor.rs", "fn burn("),
-        ("equity_executor.rs", "fn verify_ownership_proof("),
+        ("equity_executor.rs", "fn submit_ownership_proof("),
         ("equity_executor.rs", "fn default_success("),
         ("governance_executor.rs", "fn execute("),
         ("governance_executor.rs", "fn apply("),

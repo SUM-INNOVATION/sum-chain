@@ -412,6 +412,40 @@ pub const VERIFY_PROOF_UNSUPPORTED: &str =
     "VerifyProof is unsupported: this chain implements no verifier for subsystem \
      proofs, and a proof that cannot be checked must not be reported as verified";
 
+/// What Equity's only proof-write path says when it succeeds.
+///
+/// `EquityOperation::SubmitOwnershipProof` (discriminant 70) is the ONLY
+/// operation in the Equity family that touches a proof row: there is no
+/// `SubmitProof`/`VerifyProof` pair here as there is in the other seven
+/// subsystems, one opcode does the writing. It deducts a fee, deserializes an
+/// `OwnershipProofEnvelope` and stores it. Until this constant existed it then
+/// logged **"Ownership proof verified"**, which was false on every input:
+/// nothing reads `proof_data`, nothing reads `public_inputs`, and nothing
+/// checks either against the other. The four grounds on
+/// [`VERIFY_PROOF_UNSUPPORTED`] are why no verifier could have run.
+///
+/// **Why this arm stores rather than refuses, unlike the seven.** The seven
+/// `VerifyProof` arms are refused because verification is the whole of what
+/// they purport to do, so with no verifier there is nothing left for them to
+/// perform. This arm is different in kind: stripped of its name it is a
+/// SUBMIT, and submitting an envelope is a real thing the chain can and does
+/// honestly do -- byte-identically to the six sibling `SubmitProof` arms,
+/// which store and log "... proof submitted". Refusing it would delete Equity's
+/// only proof-write path, stranding the family, to correct a claim that the
+/// rename already removes. So the operation keeps its behaviour exactly and
+/// loses the word it had no right to.
+///
+/// **Why this is behind no activation height.** Nothing about the state
+/// transition changes: the same fee moves, the same nonce advances, the same
+/// bytes land in the same column family, and the same receipt status comes
+/// back. Only a `debug!` string and a Rust identifier differ. An activation
+/// height asserts that nodes below it computed a DIFFERENT state, and here
+/// they did not -- wiring a gate to this would put a false claim into
+/// `activation_heights()` in the course of removing one from a log.
+pub const EQUITY_OWNERSHIP_PROOF_SUBMITTED: &str =
+    "Equity ownership proof submitted: envelope stored, NOT verified -- this \
+     chain implements no verifier for subsystem proofs";
+
 /// The width of a subsystem proof id, in bytes.
 ///
 /// Every subsystem's `ProofId` is `[u8; 32]`. No execution path reads this any
