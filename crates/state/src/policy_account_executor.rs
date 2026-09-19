@@ -24,6 +24,25 @@ use sumchain_crypto::verify_bytes;
 use crate::token_executor::TokenExecutor;
 use crate::{Result, State, StateError};
 
+/// Whether a `PolicyAccount` operation may be SUBMITTED as a transaction.
+///
+/// `ModifyMembership` and `ModifyPolicy` may not: they exist as the effect an
+/// `ExecuteProposal` applies once a policy account's members have approved it,
+/// and `PolicyAccountExecutor::execute` refuses a directly submitted one on the
+/// operation code alone, before reading any state.
+///
+/// Named once and read twice — by the executor, which refuses, and by
+/// `Mempool::add`, which declines to admit what the executor will refuse. Two
+/// hand-maintained lists of the same operations would be one edit away from
+/// disagreeing, and the disagreement that matters is a mempool admitting a
+/// transaction that makes every block it is selected into unexecutable.
+pub fn policy_account_operation_is_submittable(op: PolicyAccountOperation) -> bool {
+    !matches!(
+        op,
+        PolicyAccountOperation::ModifyMembership | PolicyAccountOperation::ModifyPolicy
+    )
+}
+
 // =============================================================================
 // Request/Response Types
 // =============================================================================
@@ -195,17 +214,30 @@ impl PolicyAccountExecutor {
             PolicyAccountOperation::CancelProposal => {
                 Self::cancel_proposal(view, sender, &data.data, state)
             }
-            PolicyAccountOperation::ModifyMembership => {
-                // This should only be called via ExecuteProposal
-                Err(StateError::InvalidOperation(
-                    "ModifyMembership must be executed via proposal".to_string(),
-                ))
-            }
-            PolicyAccountOperation::ModifyPolicy => {
-                // This should only be called via ExecuteProposal
-                Err(StateError::InvalidOperation(
-                    "ModifyPolicy must be executed via proposal".to_string(),
-                ))
+            op @ (PolicyAccountOperation::ModifyMembership
+            | PolicyAccountOperation::ModifyPolicy) => {
+                // Reachable only as the EFFECT of an ExecuteProposal, never as
+                // a submission — decided on the operation code alone, before
+                // any state is read. `policy_account_operation_is_submittable`
+                // above is the same fact, read by the mempool.
+                //
+                // `UnsubmittableOperation` rather than `InvalidOperation`, and
+                // the difference is what a proposer is allowed to do about it.
+                // This error propagates out of `execute_block` and makes the
+                // whole block unexecutable, so the proposer must drop the
+                // transaction or produce nothing at all; and because no later
+                // state reverses the refusal, it may also EVICT it rather than
+                // select it first again on the next tick, forever.
+                // `InvalidOperation` cannot carry that licence:
+                // `StakingView::v_claim_rewards` raises it for a validator that
+                // has not registered YET. See
+                // `sumchain_state::classify_block_tx_failure`.
+                debug_assert!(!policy_account_operation_is_submittable(op));
+                Err(StateError::UnsubmittableOperation {
+                    operation: format!("PolicyAccount::{op:?}"),
+                    reason: "it is reachable only as the effect of an ExecuteProposal"
+                        .to_string(),
+                })
             }
             PolicyAccountOperation::Freeze => {
                 Self::freeze_policy_account(view, sender, &data.data, state)
