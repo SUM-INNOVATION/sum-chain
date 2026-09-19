@@ -16,6 +16,7 @@ use sumchain_primitives::{
 };
 
 use crate::db::{cf, Database};
+use crate::page::{paged_resolve, paged_scan, PageSpec};
 use crate::{Result, StorageError};
 
 // Type aliases for clarity
@@ -231,6 +232,32 @@ impl<'a> FinanceIssuerStore<'a> {
             }
         }
         Ok(issuers)
+    }
+
+    /// One bounded page of active issuers, in key order (SC-3).
+    pub fn list_active_paged(&self, page: PageSpec) -> Result<Vec<FinanceIssuerProfile>> {
+        paged_scan(
+            self.db,
+            cf::FINANCE_ISSUERS,
+            page,
+            |v| decode_issuer(v),
+            |i: &FinanceIssuerProfile| i.status.is_active(),
+        )
+    }
+
+    /// One bounded page of the issuers a jurisdiction indexes, in the order the
+    /// index stores them (SC-3).
+    ///
+    /// The index row is still decoded whole — it is one row, and bounding it is
+    /// OV-7's problem, not this one. What this bounds is the point-reads: at
+    /// most `offset + limit` of them, against one per index entry.
+    pub fn get_by_jurisdiction_paged(
+        &self,
+        jurisdiction_code: &str,
+        page: PageSpec,
+    ) -> Result<Vec<FinanceIssuerProfile>> {
+        let addresses = self.get_jurisdiction_issuer_addresses(jurisdiction_code)?;
+        paged_resolve(&addresses, page, |a| self.get(a), |_| true)
     }
 
     /// Get issuers by jurisdiction

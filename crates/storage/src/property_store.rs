@@ -18,6 +18,7 @@ use sumchain_primitives::{
 };
 
 use crate::db::{cf, Database};
+use crate::page::{paged_resolve, paged_scan, PageSpec};
 use crate::{Result, StorageError};
 
 // Type aliases for clarity
@@ -265,6 +266,28 @@ impl<'a> AssetStore<'a> {
         }
     }
 
+    /// One bounded page of the asset anchors a jurisdiction indexes, in the
+    /// order the index stores them (SC-5).
+    pub fn get_by_jurisdiction_paged(
+        &self,
+        jurisdiction: &str,
+        page: PageSpec,
+    ) -> Result<Vec<AssetAnchor>> {
+        let ids = self.get_jurisdiction_asset_ids(jurisdiction)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
+    }
+
+    /// One bounded page of active asset anchors, in key order (SC-5).
+    pub fn list_active_paged(&self, page: PageSpec) -> Result<Vec<AssetAnchor>> {
+        paged_scan(
+            self.db,
+            cf::PROPERTY_ASSETS,
+            page,
+            |v| decode_asset(v),
+            |a: &AssetAnchor| a.status == AssetStatus::Active,
+        )
+    }
+
     /// Get assets by jurisdiction
     pub fn get_by_jurisdiction(&self, jurisdiction: &str) -> Result<Vec<AssetAnchor>> {
         let ids = self.get_jurisdiction_asset_ids(jurisdiction)?;
@@ -414,6 +437,18 @@ impl<'a> TitleEventStore<'a> {
         }
     }
 
+    /// One bounded page of an asset's title events, in index order (SC-5).
+    /// No RPC method reaches this today (DE-12); the bound is here so that a
+    /// future `#[method]` cannot expose an unbounded one.
+    pub fn get_by_asset_paged(
+        &self,
+        asset_id: &AssetId,
+        page: PageSpec,
+    ) -> Result<Vec<TitleEvent>> {
+        let ids = self.get_asset_event_ids(asset_id)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
+    }
+
     /// Get title events by asset
     pub fn get_by_asset(&self, asset_id: &AssetId) -> Result<Vec<TitleEvent>> {
         let ids = self.get_asset_event_ids(asset_id)?;
@@ -527,6 +562,38 @@ impl<'a> EncumbranceStore<'a> {
                 encumbrance_id
             ))),
         }
+    }
+
+    /// One bounded page of an asset's encumbrances, in index order (SC-5).
+    /// No RPC method reaches this today (DE-12); the bound is here so that a
+    /// future `#[method]` cannot expose an unbounded one.
+    pub fn get_by_asset_paged(
+        &self,
+        asset_id: &AssetId,
+        page: PageSpec,
+    ) -> Result<Vec<Encumbrance>> {
+        let ids = self.get_asset_encumbrance_ids(asset_id)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
+    }
+
+    /// One bounded page of an asset's ACTIVE encumbrances, in index order
+    /// (SC-5). The filter runs inside the walk rather than over a fully built
+    /// `get_by_asset`.
+    /// No RPC method reaches this today (DE-12); the bound is here so that a
+    /// future `#[method]` cannot expose an unbounded one.
+    pub fn get_active_by_asset_paged(
+        &self,
+        asset_id: &AssetId,
+        current_time: Timestamp,
+        page: PageSpec,
+    ) -> Result<Vec<Encumbrance>> {
+        let ids = self.get_asset_encumbrance_ids(asset_id)?;
+        paged_resolve(
+            &ids,
+            page,
+            |id| self.get(id),
+            |e: &Encumbrance| e.is_active(current_time),
+        )
     }
 
     /// Get encumbrances by asset
@@ -668,6 +735,38 @@ impl<'a> CoverageStore<'a> {
                 coverage_id
             ))),
         }
+    }
+
+    /// One bounded page of an asset's insurance coverages, in index order
+    /// (SC-5).
+    /// No RPC method reaches this today (DE-12); the bound is here so that a
+    /// future `#[method]` cannot expose an unbounded one.
+    pub fn get_by_asset_paged(
+        &self,
+        asset_id: &AssetId,
+        page: PageSpec,
+    ) -> Result<Vec<InsuranceCoverage>> {
+        let ids = self.get_asset_coverage_ids(asset_id)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
+    }
+
+    /// One bounded page of an asset's IN-FORCE coverages, in index order
+    /// (SC-5).
+    /// No RPC method reaches this today (DE-12); the bound is here so that a
+    /// future `#[method]` cannot expose an unbounded one.
+    pub fn get_active_by_asset_paged(
+        &self,
+        asset_id: &AssetId,
+        current_time: Timestamp,
+        page: PageSpec,
+    ) -> Result<Vec<InsuranceCoverage>> {
+        let ids = self.get_asset_coverage_ids(asset_id)?;
+        paged_resolve(
+            &ids,
+            page,
+            |id| self.get(id),
+            |c: &InsuranceCoverage| c.is_in_force(current_time),
+        )
     }
 
     /// Get coverages by asset
@@ -825,6 +924,36 @@ impl<'a> ClaimStore<'a> {
                 claim_id
             ))),
         }
+    }
+
+    /// One bounded page of a coverage's insurance claims, in index order
+    /// (SC-5).
+    /// No RPC method reaches this today (DE-12); the bound is here so that a
+    /// future `#[method]` cannot expose an unbounded one.
+    pub fn get_by_coverage_paged(
+        &self,
+        coverage_id: &CoverageId,
+        page: PageSpec,
+    ) -> Result<Vec<InsuranceClaim>> {
+        let ids = self.get_coverage_claim_ids(coverage_id)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
+    }
+
+    /// One bounded page of a coverage's OPEN claims, in index order (SC-5).
+    /// No RPC method reaches this today (DE-12); the bound is here so that a
+    /// future `#[method]` cannot expose an unbounded one.
+    pub fn get_open_by_coverage_paged(
+        &self,
+        coverage_id: &CoverageId,
+        page: PageSpec,
+    ) -> Result<Vec<InsuranceClaim>> {
+        let ids = self.get_coverage_claim_ids(coverage_id)?;
+        paged_resolve(
+            &ids,
+            page,
+            |id| self.get(id),
+            |c: &InsuranceClaim| c.is_open(),
+        )
     }
 
     /// Get claims by coverage

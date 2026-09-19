@@ -1213,10 +1213,17 @@ pub trait SumChainApi {
     ) -> Result<Vec<DocClassIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get issuers by jurisdiction
+    ///
+    /// Paginated (SC-7). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "docclass_getIssuersByJurisdiction")]
     async fn docclass_get_issuers_by_jurisdiction(
         &self,
         jurisdiction: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<DocClassIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     // =========================================================================
@@ -1231,10 +1238,17 @@ pub trait SumChainApi {
         claim_type: String,
     ) -> Result<Option<TaxClaimTypeInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
-    /// List all Tax claim-type registry entries.
+    /// List Tax claim-type registry entries.
+    ///
+    /// Paginated (SC-1). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "tax_listClaimTypes")]
     async fn tax_list_claim_types(
         &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<TaxClaimTypeInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get a Tax issuer by base address.
@@ -1245,16 +1259,30 @@ pub trait SumChainApi {
     ) -> Result<Option<TaxIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// List active Tax issuers.
+    ///
+    /// Paginated (SC-1). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "tax_getActiveIssuers")]
     async fn tax_get_active_issuers(
         &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<TaxIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// List Tax issuers of a given class (e.g. "TaxAuthority", "BankBroker").
+    ///
+    /// Paginated (SC-1). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "tax_getIssuersByClass")]
     async fn tax_get_issuers_by_class(
         &self,
         tax_class: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<TaxIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get a Tax policy by its hex policy id.
@@ -1265,9 +1293,16 @@ pub trait SumChainApi {
     ) -> Result<Option<TaxPolicyInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// List all Tax policies.
+    ///
+    /// Paginated (SC-1). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "tax_listPolicies")]
     async fn tax_list_policies(
         &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<TaxPolicyInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     // =========================================================================
@@ -1343,23 +1378,44 @@ pub trait SumChainApi {
     ) -> Result<Option<ExecutorLinkInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// List executor links bound to an agreement (agreement id, hex).
+    ///
+    /// Paginated (SC-4). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "agreement_getExecutorLinksByAgreement")]
     async fn agreement_get_executor_links_by_agreement(
         &self,
         agreement_id: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<ExecutorLinkInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// List executor links for an executor contract address.
+    ///
+    /// Paginated (SC-4). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "agreement_getExecutorLinksByExecutor")]
     async fn agreement_get_executor_links_by_executor(
         &self,
         executor_address: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<ExecutorLinkInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// List active executor links.
+    ///
+    /// Paginated (SC-4). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "agreement_getActiveExecutorLinks")]
     async fn agreement_get_active_executor_links(
         &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<ExecutorLinkInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     // =========================================================================
@@ -1376,16 +1432,30 @@ pub trait SumChainApi {
     ) -> Result<Option<AssetInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// List active asset anchors.
+    ///
+    /// Paginated (SC-5). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "property_getActiveAssets")]
     async fn property_get_active_assets(
         &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<AssetInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// List asset anchors registered in a jurisdiction (e.g. "US-CA-LA").
+    ///
+    /// Paginated (SC-5). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "property_getAssetsByJurisdiction")]
     async fn property_get_assets_by_jurisdiction(
         &self,
         jurisdiction: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<AssetInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     // =========================================================================
@@ -1402,16 +1472,30 @@ pub trait SumChainApi {
     ) -> Result<Option<FinanceIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// List active finance issuer profiles.
+    ///
+    /// Paginated (SC-3). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "finance_getActiveIssuers")]
     async fn finance_get_active_issuers(
         &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<FinanceIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// List finance issuer profiles registered in a jurisdiction (e.g. "US").
+    ///
+    /// Paginated (SC-3). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "finance_getIssuersByJurisdiction")]
     async fn finance_get_issuers_by_jurisdiction(
         &self,
         jurisdiction: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<FinanceIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     // =========================================================================
@@ -1458,9 +1542,16 @@ pub trait SumChainApi {
     ) -> Result<Option<HealthcareProviderInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// List active institutional providers (allowlisted organizational types).
+    ///
+    /// Paginated (SC-6). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "healthcare_getActiveInstitutionalProviders")]
     async fn healthcare_get_active_institutional_providers(
         &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<HealthcareProviderInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     // =========================================================================
@@ -1664,9 +1755,16 @@ pub trait SumChainApi {
     ) -> Result<Option<EmploymentIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// List all active employment issuers
+    ///
+    /// Paginated (SC-2). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "employment_listIssuers")]
     async fn employment_list_issuers(
         &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<EmploymentIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get employment credential by ID (SRC-882)
@@ -1677,24 +1775,45 @@ pub trait SumChainApi {
     ) -> Result<Option<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get employment credentials by employee reference
+    ///
+    /// Paginated (SC-2). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "employment_getCredentialsByEmployee")]
     async fn employment_get_credentials_by_employee(
         &self,
         employee_ref: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get active employment credentials by employee reference
+    ///
+    /// Paginated (SC-2). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "employment_getActiveCredentialsByEmployee")]
     async fn employment_get_active_credentials_by_employee(
         &self,
         employee_ref: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get employment credentials by employer reference
+    ///
+    /// Paginated (SC-2). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "employment_getCredentialsByEmployer")]
     async fn employment_get_credentials_by_employer(
         &self,
         employer_ref: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Verify if an employee is currently employed by a specific employer
@@ -1706,10 +1825,17 @@ pub trait SumChainApi {
     ) -> Result<EmploymentVerificationResult, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get employment summary for an employee
+    ///
+    /// Paginated (SC-2). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "employment_getSummary")]
     async fn employment_get_summary(
         &self,
         employee_ref: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<EmploymentSummary, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get income attestation by ID (SRC-883)
@@ -1720,10 +1846,17 @@ pub trait SumChainApi {
     ) -> Result<Option<IncomeAttestationInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get income attestations by subject reference
+    ///
+    /// Paginated (SC-2). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "employment_getIncomeAttestationsBySubject")]
     async fn employment_get_income_attestations_by_subject(
         &self,
         subject_ref: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<IncomeAttestationInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     // =========================================================================
@@ -1731,24 +1864,45 @@ pub trait SumChainApi {
     // =========================================================================
 
     /// Get employment credentials by employee wallet address
+    ///
+    /// Paginated (SC-2). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "employment_getCredentialsByEmployeeAddress")]
     async fn employment_get_credentials_by_employee_address(
         &self,
         employee_address: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get active employment credentials by employee wallet address
+    ///
+    /// Paginated (SC-2). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "employment_getActiveCredentialsByEmployeeAddress")]
     async fn employment_get_active_credentials_by_employee_address(
         &self,
         employee_address: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get income attestations by holder wallet address
+    ///
+    /// Paginated (SC-2). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "employment_getIncomeAttestationsByHolderAddress")]
     async fn employment_get_income_attestations_by_holder_address(
         &self,
         holder_address: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<IncomeAttestationInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     // =========================================================================
@@ -1811,10 +1965,17 @@ pub trait SumChainApi {
 
     /// Get academic credentials by holder address
     /// Returns all academic credentials (810/811/812) owned by the given address
+    ///
+    /// Paginated (SC-7). `limit` defaults to 100 and may not exceed 1000;
+    /// `offset` may not exceed 1,000,000. A request above either is REFUSED
+    /// with `-32004` rather than clamped, so a short answer always means there
+    /// is no more to say. Omitting both yields the first 100 rows.
     #[method(name = "docclass_getAcademicCredentialsByHolder")]
     async fn docclass_get_academic_credentials_by_holder(
         &self,
         holder_address: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<DocClassCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     // =========================================================================

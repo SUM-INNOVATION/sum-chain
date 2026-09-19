@@ -16,6 +16,7 @@ use sumchain_primitives::{
 };
 
 use crate::db::{cf, Database};
+use crate::page::{paged_resolve, paged_scan, PageSpec};
 use crate::{Result, StorageError};
 
 // Type aliases for clarity
@@ -301,6 +302,52 @@ impl<'a> ProviderStore<'a> {
         }
     }
 
+    /// One bounded page of the providers a plan's network indexes, in index
+    /// order (SC-6).
+    pub fn get_by_network_paged(
+        &self,
+        plan_id: &ProviderId,
+        page: PageSpec,
+    ) -> Result<Vec<ProviderProfile>> {
+        let ids = self.get_network_provider_ids(plan_id)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
+    }
+
+    /// One bounded page of the ACTIVE providers `keep` accepts, in key order
+    /// (SC-6).
+    ///
+    /// `healthcare_getActiveInstitutionalProviders` applies a second predicate
+    /// on top of `Active`. Taking it as a closure keeps that predicate inside
+    /// the scan, so `limit` counts rows the caller receives rather than rows
+    /// the scan considered.
+    pub fn list_active_filtered_paged<F>(
+        &self,
+        page: PageSpec,
+        keep: F,
+    ) -> Result<Vec<ProviderProfile>>
+    where
+        F: Fn(&ProviderProfile) -> bool,
+    {
+        paged_scan(
+            self.db,
+            cf::HEALTHCARE_PROVIDERS,
+            page,
+            |v| decode_provider(v),
+            |p: &ProviderProfile| p.status == ProviderStatus::Active && keep(p),
+        )
+    }
+
+    /// One bounded page of active providers, in key order (SC-6).
+    pub fn list_active_paged(&self, page: PageSpec) -> Result<Vec<ProviderProfile>> {
+        paged_scan(
+            self.db,
+            cf::HEALTHCARE_PROVIDERS,
+            page,
+            |v| decode_provider(v),
+            |p: &ProviderProfile| p.status == ProviderStatus::Active,
+        )
+    }
+
     /// Get providers in network
     pub fn get_by_network(&self, plan_id: &ProviderId) -> Result<Vec<ProviderProfile>> {
         let ids = self.get_network_provider_ids(plan_id)?;
@@ -513,6 +560,33 @@ impl<'a> MembershipStore<'a> {
         }
     }
 
+    /// One bounded page of a member's memberships, in index order (SC-6).
+    pub fn get_by_member_paged(
+        &self,
+        member_nullifier: &[u8; 32],
+        page: PageSpec,
+    ) -> Result<Vec<MembershipRecord>> {
+        let ids = self.get_member_membership_ids(member_nullifier)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
+    }
+
+    /// One bounded page of a member's ACTIVE memberships, in index order
+    /// (SC-6).
+    pub fn get_active_by_member_paged(
+        &self,
+        member_nullifier: &[u8; 32],
+        current_time: Timestamp,
+        page: PageSpec,
+    ) -> Result<Vec<MembershipRecord>> {
+        let ids = self.get_member_membership_ids(member_nullifier)?;
+        paged_resolve(
+            &ids,
+            page,
+            |id| self.get(id),
+            |m: &MembershipRecord| m.is_active(current_time),
+        )
+    }
+
     /// Get memberships by member nullifier
     pub fn get_by_member(&self, member_nullifier: &[u8; 32]) -> Result<Vec<MembershipRecord>> {
         let ids = self.get_member_membership_ids(member_nullifier)?;
@@ -627,6 +701,17 @@ impl<'a> ConsentStore<'a> {
                 consent_id
             ))),
         }
+    }
+
+    /// One bounded page of a subject's consent envelopes, in index order
+    /// (SC-6).
+    pub fn get_by_subject_paged(
+        &self,
+        subject_nullifier: &[u8; 32],
+        page: PageSpec,
+    ) -> Result<Vec<ConsentEnvelope>> {
+        let ids = self.get_subject_consent_ids(subject_nullifier)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
     }
 
     /// Get consents by subject nullifier
@@ -814,6 +899,26 @@ impl<'a> PrescriptionStore<'a> {
                 prescription_id
             ))),
         }
+    }
+
+    /// One bounded page of a patient's prescriptions, in index order (SC-6).
+    pub fn get_by_patient_paged(
+        &self,
+        patient_nullifier: &[u8; 32],
+        page: PageSpec,
+    ) -> Result<Vec<Prescription>> {
+        let ids = self.get_patient_rx_ids(patient_nullifier)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
+    }
+
+    /// One bounded page of a prescriber's prescriptions, in index order (SC-6).
+    pub fn get_by_prescriber_paged(
+        &self,
+        prescriber_id: &ProviderId,
+        page: PageSpec,
+    ) -> Result<Vec<Prescription>> {
+        let ids = self.get_prescriber_rx_ids(prescriber_id)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
     }
 
     /// Get prescriptions by patient nullifier

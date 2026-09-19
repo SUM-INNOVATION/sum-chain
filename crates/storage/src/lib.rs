@@ -18,6 +18,7 @@ pub mod nft_store;
 pub mod candidate;
 pub mod exec_view;
 pub mod overlay;
+pub mod page;
 pub mod policy_account_store;
 pub mod property_store;
 pub mod pruner;
@@ -25,6 +26,9 @@ pub mod schema;
 pub mod tax_store;
 
 pub use db::{cf, BackupInfo, Database, DatabaseConfig};
+pub use page::{
+    paged_resolve, paged_scan, PageSpec, PAGE_DEFAULT, PAGE_MAX, PAGE_OFFSET_MAX,
+};
 pub use docclass_store::{
     CredentialStore, DocClassEventStore, DocClassIssuerStore, DocClassStore, EligibilityStore,
     IdentityRootStore, RevocationStore,
@@ -68,8 +72,8 @@ pub use healthcare_store::{
     PrescriptionStore, ProviderStore,
 };
 pub use employment_store::{
-    EmploymentCredentialStore, EmploymentEventStore, EmploymentIssuerStore, EmploymentProofStore,
-    EmploymentStore, IncomeAttestationStore,
+    EmploymentCredentialStore, EmploymentEmployeeSummary, EmploymentEventStore,
+    EmploymentIssuerStore, EmploymentProofStore, EmploymentStore, IncomeAttestationStore,
 };
 pub use finance_store::{
     AddressProofStore, BankStandingStore, FinanceEventStore, FinanceIssuerStore, FinanceProofStore,

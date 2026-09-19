@@ -15,6 +15,7 @@ use sumchain_primitives::{
 };
 
 use crate::db::{cf, Database};
+use crate::page::{paged_resolve, paged_scan, PageSpec};
 use crate::{Result, StorageError};
 
 // Type aliases for clarity
@@ -222,6 +223,17 @@ impl<'a> EmploymentIssuerStore<'a> {
         }
     }
 
+    /// One bounded page of active issuers, in key order (SC-2).
+    pub fn list_active_paged(&self, page: PageSpec) -> Result<Vec<EmploymentIssuerProfile>> {
+        paged_scan(
+            self.db,
+            cf::EMPLOYMENT_ISSUERS,
+            page,
+            |v| decode_issuer(v),
+            |i: &EmploymentIssuerProfile| i.status.is_active(),
+        )
+    }
+
     /// List all active issuers
     pub fn list_active(&self) -> Result<Vec<EmploymentIssuerProfile>> {
         let mut issuers = Vec::new();
@@ -238,6 +250,21 @@ impl<'a> EmploymentIssuerStore<'a> {
 // =============================================================================
 // Employment Credential Storage (SRC-882)
 // =============================================================================
+
+/// Counts over an employee's whole credential set, plus one bounded page of
+/// the valid credentials. Produced by
+/// [`EmploymentCredentialStore::summarize_by_employee`].
+#[derive(Debug, Default, Clone)]
+pub struct EmploymentEmployeeSummary {
+    /// Every credential the employee holds.
+    pub total: u32,
+    /// Those valid at the time the summary was taken.
+    pub active: u32,
+    /// Those whose status is `Ended`.
+    pub ended: u32,
+    /// The requested page of the valid ones — never the whole set.
+    pub active_page: Vec<EmploymentCredential>,
+}
 
 /// Storage for Employment Credentials (SRC-882)
 pub struct EmploymentCredentialStore<'a> {
@@ -329,6 +356,136 @@ impl<'a> EmploymentCredentialStore<'a> {
                 employment_id
             ))),
         }
+    }
+
+    /// One bounded page of an employee's credentials, in index order (SC-2).
+    pub fn get_by_employee_paged(
+        &self,
+        employee_ref: &SubjectRef,
+        page: PageSpec,
+    ) -> Result<Vec<EmploymentCredential>> {
+        let ids = self.get_employee_credential_ids(employee_ref)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
+    }
+
+    /// One bounded page of an employee's VALID credentials, in index order
+    /// (SC-2).
+    ///
+    /// The filter runs inside the page walk rather than over a fully built
+    /// list, so the `active` variant no longer materialises every credential
+    /// before discarding most of them — which is the half of the source
+    /// message this row quotes.
+    pub fn get_active_by_employee_paged(
+        &self,
+        employee_ref: &SubjectRef,
+        current_time: Timestamp,
+        page: PageSpec,
+    ) -> Result<Vec<EmploymentCredential>> {
+        let ids = self.get_employee_credential_ids(employee_ref)?;
+        paged_resolve(
+            &ids,
+            page,
+            |id| self.get(id),
+            |c: &EmploymentCredential| c.is_valid(current_time),
+        )
+    }
+
+    /// The first VALID credential binding `employee_ref` to `employer_ref`, or
+    /// `None` (SC-2).
+    ///
+    /// `employment_verifyEmployment` built every active credential the employee
+    /// holds and then ran `.find()` over the list. A page cannot replace that —
+    /// a bounded list would answer "not employed" for an employee whose
+    /// matching credential falls past the page — so the predicate moves into
+    /// the walk instead. The walk stops at the first match and retains one
+    /// credential, and the ANSWER is unchanged for every input.
+    pub fn find_active_by_employee_and_employer(
+        &self,
+        employee_ref: &SubjectRef,
+        employer_ref: &EmployerRef,
+        current_time: Timestamp,
+    ) -> Result<Option<EmploymentCredential>> {
+        for id in self.get_employee_credential_ids(employee_ref)? {
+            if let Some(c) = self.get(&id)? {
+                if c.is_valid(current_time) && c.employer_ref == *employer_ref {
+                    return Ok(Some(c));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Exact counts over an employee's credentials, plus one bounded page of
+    /// the valid ones (SC-2).
+    ///
+    /// `employment_getSummary` returns three counts AND a list. The counts have
+    /// to see every credential or they are wrong, so they are folded one
+    /// credential at a time and nothing is retained for them; only the page is
+    /// collected.
+    pub fn summarize_by_employee(
+        &self,
+        employee_ref: &SubjectRef,
+        current_time: Timestamp,
+        page: PageSpec,
+    ) -> Result<EmploymentEmployeeSummary> {
+        let mut out = EmploymentEmployeeSummary::default();
+        let mut matched = 0usize;
+        let horizon = page.offset().saturating_add(page.limit());
+        for id in self.get_employee_credential_ids(employee_ref)? {
+            let Some(c) = self.get(&id)? else { continue };
+            out.total += 1;
+            if c.status == sumchain_primitives::employment::EmploymentStatus::Ended {
+                out.ended += 1;
+            }
+            if c.is_valid(current_time) {
+                out.active += 1;
+                if matched < horizon {
+                    if matched >= page.offset() {
+                        out.active_page.push(c);
+                    }
+                    matched += 1;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// One bounded page of an employer's credentials, in index order (SC-2).
+    pub fn get_by_employer_paged(
+        &self,
+        employer_ref: &EmployerRef,
+        page: PageSpec,
+    ) -> Result<Vec<EmploymentCredential>> {
+        let ids = self.get_employer_credential_ids(employer_ref)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
+    }
+
+    /// One bounded page of the credentials held by a wallet address, in index
+    /// order (SC-2).
+    pub fn get_by_employee_address_paged(
+        &self,
+        employee_address: &Address,
+        page: PageSpec,
+    ) -> Result<Vec<EmploymentCredential>> {
+        let ids = self.get_employee_address_credential_ids(employee_address)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
+    }
+
+    /// One bounded page of the VALID credentials held by a wallet address, in
+    /// index order (SC-2).
+    pub fn get_active_by_employee_address_paged(
+        &self,
+        employee_address: &Address,
+        current_time: Timestamp,
+        page: PageSpec,
+    ) -> Result<Vec<EmploymentCredential>> {
+        let ids = self.get_employee_address_credential_ids(employee_address)?;
+        paged_resolve(
+            &ids,
+            page,
+            |id| self.get(id),
+            |c: &EmploymentCredential| c.is_valid(current_time),
+        )
     }
 
     /// Get credentials by employee
@@ -528,6 +685,62 @@ impl<'a> IncomeAttestationStore<'a> {
                 attestation_id
             ))),
         }
+    }
+
+    /// One bounded page of a subject's income attestations, in index order
+    /// (SC-2).
+    pub fn get_by_subject_paged(
+        &self,
+        subject_ref: &SubjectRef,
+        page: PageSpec,
+    ) -> Result<Vec<IncomeAttestation>> {
+        let ids = self.get_subject_attestation_ids(subject_ref)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
+    }
+
+    /// One bounded page of a subject's VALID income attestations, in index
+    /// order (SC-2).
+    pub fn get_valid_by_subject_paged(
+        &self,
+        subject_ref: &SubjectRef,
+        current_time: Timestamp,
+        page: PageSpec,
+    ) -> Result<Vec<IncomeAttestation>> {
+        let ids = self.get_subject_attestation_ids(subject_ref)?;
+        paged_resolve(
+            &ids,
+            page,
+            |id| self.get(id),
+            |a: &IncomeAttestation| a.is_valid(current_time),
+        )
+    }
+
+    /// One bounded page of the income attestations held by a wallet address, in
+    /// index order (SC-2).
+    pub fn get_by_holder_address_paged(
+        &self,
+        holder_address: &Address,
+        page: PageSpec,
+    ) -> Result<Vec<IncomeAttestation>> {
+        let ids = self.get_holder_address_attestation_ids(holder_address)?;
+        paged_resolve(&ids, page, |id| self.get(id), |_| true)
+    }
+
+    /// One bounded page of the VALID income attestations held by a wallet
+    /// address, in index order (SC-2).
+    pub fn get_valid_by_holder_address_paged(
+        &self,
+        holder_address: &Address,
+        current_time: Timestamp,
+        page: PageSpec,
+    ) -> Result<Vec<IncomeAttestation>> {
+        let ids = self.get_holder_address_attestation_ids(holder_address)?;
+        paged_resolve(
+            &ids,
+            page,
+            |id| self.get(id),
+            |a: &IncomeAttestation| a.is_valid(current_time),
+        )
     }
 
     /// Get attestations by subject

@@ -13,9 +13,10 @@ use sumchain_state::education_executor::{
     StoredGradeRecord, StoredOffering, StoredSubmissionReceipt, MAX_EDU_LIST_LIMIT,
 };
 use sumchain_state::{Mempool, StateManager};
+use crate::pagination::page_of;
 use sumchain_storage::{BlockStore, Database, DelegationStore, DocClassStore, EmploymentCredentialStore, EmploymentIssuerStore, IncomeAttestationStore, MessagingStore, NftStore, PolicyAccountStorage, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxIndexStore, TxStore, ValidatorSetStore, MESSAGING_LIST_DEFAULT};
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::api::SumChainApiServer;
 use crate::auth::{ApiKeyValidator, RpcAuthConfig};
@@ -4224,12 +4225,14 @@ impl SumChainApiServer for RpcServer {
     ) -> std::result::Result<DocClassSummary, jsonrpsee::types::ErrorObjectOwned> {
         let store = DocClassStore::new(&self.db);
 
-        // Count issuers (has get_all method)
+        // A COUNT, not a page (SC-7). `get_all().len()` built a `Vec` holding
+        // every issuer in the family to produce one `u64`. Bounding the answer
+        // here would make it wrong rather than short, so the reader retains
+        // nothing instead of returning less.
         let total_issuers = store
             .issuers()
-            .get_all()
-            .map_err(|e| RpcError::Internal(e.to_string()))?
-            .len() as u64;
+            .count()
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
 
         // Note: Identity/credential/revocation counts would require full iteration
         // For now, return placeholder values - in production would add count methods to stores
@@ -4268,12 +4271,16 @@ impl SumChainApiServer for RpcServer {
             .map_err(|e| RpcError::InvalidParams(format!("Invalid controller address: {}", e)))?;
 
         let store = DocClassStore::new(&self.db);
+        // This method returns ONE identity and always did — it took `.next()`
+        // off a `Vec` that `get_by_controller` had filled with every matching
+        // root first (SC-7). Asking for a page of one stops the scan at the
+        // first match. No parameter is added and no caller sees a different
+        // answer: the bound is on what the node builds, not on what it says.
         let identities = store
             .identity_roots()
-            .get_by_controller(&addr)
+            .get_by_controller_paged(&addr, sumchain_storage::PageSpec::new(0, 1))
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
-        // Return the first identity found for this controller
         Ok(identities.into_iter().next().map(|i| self.identity_to_rpc_info(&i)))
     }
 
@@ -4320,16 +4327,20 @@ impl SumChainApiServer for RpcServer {
             .try_into()
             .map_err(|_| RpcError::InvalidParams("Subject commitment must be 32 bytes".to_string()))?;
 
+        // Two stores are concatenated, so the page cannot be pushed into
+        // either one alone — but each READ is now bounded by the horizon of
+        // the requested page, so neither store can contribute more rows than
+        // the page could possibly need (SC-7).
+        let page = page_of("docclass_getCredentialsBySubject", limit, offset)?;
         let store = DocClassStore::new(&self.db);
-        let limit = limit.unwrap_or(100) as usize;
-        let offset = offset.unwrap_or(0) as usize;
+        let horizon = sumchain_storage::PageSpec::new(0, page.offset().saturating_add(page.limit()));
 
         let mut results = Vec::new();
 
         // Get eligibility attestations by subject
         let eligibilities = store
             .eligibility()
-            .get_by_subject(&commitment_bytes)
+            .get_by_subject_paged(&commitment_bytes, horizon)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
         for eligibility in eligibilities {
@@ -4339,15 +4350,14 @@ impl SumChainApiServer for RpcServer {
         // Get academic credentials by subject
         let credentials = store
             .credentials()
-            .get_by_subject(&commitment_bytes)
+            .get_by_subject_paged(&commitment_bytes, horizon)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
         for credential in credentials {
             results.push(self.academic_to_rpc_info(&credential));
         }
 
-        // Apply pagination
-        Ok(results.into_iter().skip(offset).take(limit).collect())
+        Ok(results.into_iter().skip(page.offset()).take(page.limit()).collect())
     }
 
     async fn docclass_get_credentials_by_issuer(
@@ -4360,16 +4370,18 @@ impl SumChainApiServer for RpcServer {
             .or_else(|_| Address::from_hex(&issuer))
             .map_err(|e| RpcError::InvalidParams(format!("Invalid issuer address: {}", e)))?;
 
+        // As for `docclass_getCredentialsBySubject`: each of the two reads is
+        // bounded by the page horizon before they are concatenated (SC-7).
+        let page = page_of("docclass_getCredentialsByIssuer", limit, offset)?;
         let store = DocClassStore::new(&self.db);
-        let limit = limit.unwrap_or(100) as usize;
-        let offset = offset.unwrap_or(0) as usize;
+        let horizon = sumchain_storage::PageSpec::new(0, page.offset().saturating_add(page.limit()));
 
         let mut results = Vec::new();
 
         // Get eligibility attestations by issuer
         let eligibilities = store
             .eligibility()
-            .get_by_issuer(&addr)
+            .get_by_issuer_paged(&addr, horizon)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
         for eligibility in eligibilities {
@@ -4379,15 +4391,14 @@ impl SumChainApiServer for RpcServer {
         // Get academic credentials by issuer
         let credentials = store
             .credentials()
-            .get_by_issuer(&addr)
+            .get_by_issuer_paged(&addr, horizon)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
         for credential in credentials {
             results.push(self.academic_to_rpc_info(&credential));
         }
 
-        // Apply pagination
-        Ok(results.into_iter().skip(offset).take(limit).collect())
+        Ok(results.into_iter().skip(page.offset()).take(page.limit()).collect())
     }
 
     async fn docclass_is_credential_valid(
@@ -4475,18 +4486,20 @@ impl SumChainApiServer for RpcServer {
         limit: Option<u32>,
         offset: Option<u32>,
     ) -> std::result::Result<Vec<DocClassIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        // This method has always ADVERTISED `limit`/`offset` — and always
+        // applied them to a `Vec` that `get_all` had already filled with every
+        // issuer in the family (SC-7). The skip and the take now happen inside
+        // the scan, and an over-large `limit` is refused rather than accepted
+        // and quietly honoured against an unbounded read.
+        let page = page_of("docclass_getIssuers", limit, offset)?;
         let store = DocClassStore::new(&self.db);
-        let limit = limit.unwrap_or(100) as usize;
-        let offset = offset.unwrap_or(0) as usize;
 
         let issuers = store
             .issuers()
-            .get_all()
+            .get_all_paged(page)
             .map_err(|e| RpcError::Internal(e.to_string()))?
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .map(|i| self.issuer_to_rpc_info(&i))
+            .iter()
+            .map(|i| self.issuer_to_rpc_info(i))
             .collect();
 
         Ok(issuers)
@@ -4495,15 +4508,18 @@ impl SumChainApiServer for RpcServer {
     async fn docclass_get_issuers_by_jurisdiction(
         &self,
         jurisdiction: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<DocClassIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("docclass_getIssuersByJurisdiction", limit, offset)?;
         let store = DocClassStore::new(&self.db);
 
         let issuers = store
             .issuers()
-            .get_by_jurisdiction(&jurisdiction)
+            .get_by_jurisdiction_paged(&jurisdiction, page)
             .map_err(|e| RpcError::Internal(e.to_string()))?
-            .into_iter()
-            .map(|i| self.issuer_to_rpc_info(&i))
+            .iter()
+            .map(|i| self.issuer_to_rpc_info(i))
             .collect();
 
         Ok(issuers)
@@ -4522,9 +4538,12 @@ impl SumChainApiServer for RpcServer {
 
     async fn tax_list_claim_types(
         &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<TaxClaimTypeInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("tax_listClaimTypes", limit, offset)?;
         let store = sumchain_storage::TaxClaimTypeStore::new(&self.db);
-        let all = store.list_all().map_err(|e| RpcError::Internal(e.to_string()))?;
+        let all = store.list_all_paged(page).map_err(|e| RpcError::Internal(e.to_string()))?;
         Ok(all.iter().map(TaxClaimTypeInfo::from).collect())
     }
 
@@ -4540,20 +4559,28 @@ impl SumChainApiServer for RpcServer {
 
     async fn tax_get_active_issuers(
         &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<TaxIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("tax_getActiveIssuers", limit, offset)?;
         let store = sumchain_storage::TaxIssuerStore::new(&self.db);
-        let issuers = store.list_active().map_err(|e| RpcError::Internal(e.to_string()))?;
+        let issuers = store.list_active_paged(page).map_err(|e| RpcError::Internal(e.to_string()))?;
         Ok(issuers.iter().map(TaxIssuerInfo::from).collect())
     }
 
     async fn tax_get_issuers_by_class(
         &self,
         tax_class: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<TaxIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("tax_getIssuersByClass", limit, offset)?;
         let class = parse_tax_issuer_class(&tax_class)
             .ok_or_else(|| RpcError::InvalidParams(format!("Unknown tax issuer class: {}", tax_class)))?;
         let store = sumchain_storage::TaxIssuerStore::new(&self.db);
-        let issuers = store.list_by_class(class).map_err(|e| RpcError::Internal(e.to_string()))?;
+        let issuers = store
+            .list_by_class_paged(class, page)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
         Ok(issuers.iter().map(TaxIssuerInfo::from).collect())
     }
 
@@ -4569,9 +4596,12 @@ impl SumChainApiServer for RpcServer {
 
     async fn tax_list_policies(
         &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<TaxPolicyInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("tax_listPolicies", limit, offset)?;
         let store = sumchain_storage::TaxPolicyStore::new(&self.db);
-        let all = store.list_all().map_err(|e| RpcError::Internal(e.to_string()))?;
+        let all = store.list_all_paged(page).map_err(|e| RpcError::Internal(e.to_string()))?;
         Ok(all.iter().map(TaxPolicyInfo::from).collect())
     }
 
@@ -4669,28 +4699,41 @@ impl SumChainApiServer for RpcServer {
     async fn agreement_get_executor_links_by_agreement(
         &self,
         agreement_id: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<ExecutorLinkInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("agreement_getExecutorLinksByAgreement", limit, offset)?;
         let id = self.parse_hex32(&agreement_id)?;
         let store = sumchain_storage::ExecutorLinkStore::new(&self.db);
-        let links = store.get_by_agreement(&id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        let links = store
+            .get_by_agreement_paged(&id, page)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
         Ok(links.iter().map(ExecutorLinkInfo::from).collect())
     }
 
     async fn agreement_get_executor_links_by_executor(
         &self,
         executor_address: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<ExecutorLinkInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("agreement_getExecutorLinksByExecutor", limit, offset)?;
         let addr = self.parse_address(&executor_address)?;
         let store = sumchain_storage::ExecutorLinkStore::new(&self.db);
-        let links = store.get_by_executor(&addr).map_err(|e| RpcError::Internal(e.to_string()))?;
+        let links = store
+            .get_by_executor_paged(&addr, page)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
         Ok(links.iter().map(ExecutorLinkInfo::from).collect())
     }
 
     async fn agreement_get_active_executor_links(
         &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<ExecutorLinkInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("agreement_getActiveExecutorLinks", limit, offset)?;
         let store = sumchain_storage::ExecutorLinkStore::new(&self.db);
-        let links = store.list_active().map_err(|e| RpcError::Internal(e.to_string()))?;
+        let links = store.list_active_paged(page).map_err(|e| RpcError::Internal(e.to_string()))?;
         Ok(links.iter().map(ExecutorLinkInfo::from).collect())
     }
 
@@ -4708,19 +4751,25 @@ impl SumChainApiServer for RpcServer {
 
     async fn property_get_active_assets(
         &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<AssetInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("property_getActiveAssets", limit, offset)?;
         let store = sumchain_storage::AssetStore::new(&self.db);
-        let assets = store.list_active().map_err(|e| RpcError::Internal(e.to_string()))?;
+        let assets = store.list_active_paged(page).map_err(|e| RpcError::Internal(e.to_string()))?;
         Ok(assets.iter().map(AssetInfo::from).collect())
     }
 
     async fn property_get_assets_by_jurisdiction(
         &self,
         jurisdiction: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<AssetInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("property_getAssetsByJurisdiction", limit, offset)?;
         let store = sumchain_storage::AssetStore::new(&self.db);
         let assets = store
-            .get_by_jurisdiction(&jurisdiction)
+            .get_by_jurisdiction_paged(&jurisdiction, page)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
         Ok(assets.iter().map(AssetInfo::from).collect())
     }
@@ -4739,19 +4788,25 @@ impl SumChainApiServer for RpcServer {
 
     async fn finance_get_active_issuers(
         &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<FinanceIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("finance_getActiveIssuers", limit, offset)?;
         let store = sumchain_storage::FinanceIssuerStore::new(&self.db);
-        let issuers = store.list_active().map_err(|e| RpcError::Internal(e.to_string()))?;
+        let issuers = store.list_active_paged(page).map_err(|e| RpcError::Internal(e.to_string()))?;
         Ok(issuers.iter().map(FinanceIssuerInfo::from).collect())
     }
 
     async fn finance_get_issuers_by_jurisdiction(
         &self,
         jurisdiction: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<FinanceIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("finance_getIssuersByJurisdiction", limit, offset)?;
         let store = sumchain_storage::FinanceIssuerStore::new(&self.db);
         let issuers = store
-            .get_by_jurisdiction(&jurisdiction)
+            .get_by_jurisdiction_paged(&jurisdiction, page)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
         Ok(issuers.iter().map(FinanceIssuerInfo::from).collect())
     }
@@ -4829,15 +4884,20 @@ impl SumChainApiServer for RpcServer {
 
     async fn healthcare_get_active_institutional_providers(
         &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<HealthcareProviderInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("healthcare_getActiveInstitutionalProviders", limit, offset)?;
         let store = sumchain_storage::ProviderStore::new(&self.db);
-        // list_active() returns Active-only; restrict to the institutional allowlist.
-        let providers = store.list_active().map_err(|e| RpcError::Internal(e.to_string()))?;
-        Ok(providers
-            .iter()
-            .filter(|p| is_institutional_provider(p.provider_type))
-            .map(HealthcareProviderInfo::from)
-            .collect())
+        // The institutional allowlist used to be applied AFTER list_active()
+        // had built every active provider; a page whose filter ran afterwards
+        // would also have been a page of the wrong thing. Both predicates now
+        // run inside one bounded scan, so `limit` counts the rows the caller
+        // actually receives.
+        let providers = store
+            .list_active_filtered_paged(page, |p| is_institutional_provider(p.provider_type))
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(providers.iter().map(HealthcareProviderInfo::from).collect())
     }
 
     // ── On-chain governance v1 (issue #50) — builders + reads ────────────────
@@ -5965,9 +6025,12 @@ impl SumChainApiServer for RpcServer {
 
     async fn employment_list_issuers(
         &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<EmploymentIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("employment_listIssuers", limit, offset)?;
         let store = EmploymentIssuerStore::new(&self.db);
-        match store.list_active() {
+        match store.list_active_paged(page) {
             Ok(issuers) => Ok(issuers.iter().map(|i| self.employment_issuer_to_rpc(i)).collect()),
             Err(e) => Err(RpcError::Internal(e.to_string()).into()),
         }
@@ -6003,7 +6066,10 @@ impl SumChainApiServer for RpcServer {
     async fn employment_get_credentials_by_employee(
         &self,
         employee_ref: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("employment_getCredentialsByEmployee", limit, offset)?;
         let ref_bytes = hex::decode(employee_ref.strip_prefix("0x").unwrap_or(&employee_ref))
             .map_err(|e| RpcError::InvalidParams(format!("Invalid employee ref: {}", e)))?;
 
@@ -6020,7 +6086,7 @@ impl SumChainApiServer for RpcServer {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        match store.get_by_employee(&ref_arr) {
+        match store.get_by_employee_paged(&ref_arr, page) {
             Ok(creds) => Ok(creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect()),
             Err(e) => Err(RpcError::Internal(e.to_string()).into()),
         }
@@ -6029,7 +6095,10 @@ impl SumChainApiServer for RpcServer {
     async fn employment_get_active_credentials_by_employee(
         &self,
         employee_ref: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("employment_getActiveCredentialsByEmployee", limit, offset)?;
         let ref_bytes = hex::decode(employee_ref.strip_prefix("0x").unwrap_or(&employee_ref))
             .map_err(|e| RpcError::InvalidParams(format!("Invalid employee ref: {}", e)))?;
 
@@ -6046,7 +6115,7 @@ impl SumChainApiServer for RpcServer {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        match store.get_active_by_employee(&ref_arr, current_time) {
+        match store.get_active_by_employee_paged(&ref_arr, current_time, page) {
             Ok(creds) => Ok(creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect()),
             Err(e) => Err(RpcError::Internal(e.to_string()).into()),
         }
@@ -6055,7 +6124,10 @@ impl SumChainApiServer for RpcServer {
     async fn employment_get_credentials_by_employer(
         &self,
         employer_ref: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("employment_getCredentialsByEmployer", limit, offset)?;
         let ref_bytes = hex::decode(employer_ref.strip_prefix("0x").unwrap_or(&employer_ref))
             .map_err(|e| RpcError::InvalidParams(format!("Invalid employer ref: {}", e)))?;
 
@@ -6072,7 +6144,7 @@ impl SumChainApiServer for RpcServer {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        match store.get_by_employer(&ref_arr) {
+        match store.get_by_employer_paged(&ref_arr, page) {
             Ok(creds) => Ok(creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect()),
             Err(e) => Err(RpcError::Internal(e.to_string()).into()),
         }
@@ -6103,10 +6175,14 @@ impl SumChainApiServer for RpcServer {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        let creds = store.get_active_by_employee(&employee_arr, current_time)
+        // NOT paginated, deliberately (SC-2). This is a yes/no question, and
+        // a page would answer "not employed" for an employee whose matching
+        // credential fell past the page boundary. The `.find()` moves into the
+        // store walk instead: it stops at the first match and retains one
+        // credential, and the answer is identical for every input.
+        let matching = store
+            .find_active_by_employee_and_employer(&employee_arr, &employer_arr, current_time)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
-
-        let matching = creds.into_iter().find(|c| c.employer_ref == employer_arr);
 
         Ok(EmploymentVerificationResult {
             is_employed: matching.is_some(),
@@ -6118,7 +6194,10 @@ impl SumChainApiServer for RpcServer {
     async fn employment_get_summary(
         &self,
         employee_ref: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<EmploymentSummary, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("employment_getSummary", limit, offset)?;
         let ref_bytes = hex::decode(employee_ref.strip_prefix("0x").unwrap_or(&employee_ref))
             .map_err(|e| RpcError::InvalidParams(format!("Invalid employee ref: {}", e)))?;
 
@@ -6135,23 +6214,25 @@ impl SumChainApiServer for RpcServer {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        let all_creds = store.get_by_employee(&ref_arr)
+        // The three counts are over EVERY credential and stay exact — a page
+        // would make them wrong rather than short. Only `active_employment`,
+        // which is a list, is bounded (SC-2). The store folds the counts one
+        // credential at a time and retains only the page, so the whole set is
+        // never held.
+        let summary = store
+            .summarize_by_employee(&ref_arr, current_time, page)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
-
-        let active_creds: Vec<_> = all_creds.iter()
-            .filter(|c| c.is_valid(current_time))
-            .collect();
-
-        let ended_count = all_creds.iter()
-            .filter(|c| c.status == sumchain_primitives::employment::EmploymentStatus::Ended)
-            .count();
 
         Ok(EmploymentSummary {
             employee_ref: format!("0x{}", hex::encode(&ref_arr)),
-            total_credentials: all_creds.len() as u32,
-            active_credentials: active_creds.len() as u32,
-            ended_credentials: ended_count as u32,
-            active_employment: active_creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect(),
+            total_credentials: summary.total,
+            active_credentials: summary.active,
+            ended_credentials: summary.ended,
+            active_employment: summary
+                .active_page
+                .iter()
+                .map(|c| self.employment_credential_to_rpc(c, current_time))
+                .collect(),
         })
     }
 
@@ -6185,7 +6266,10 @@ impl SumChainApiServer for RpcServer {
     async fn employment_get_income_attestations_by_subject(
         &self,
         subject_ref: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<IncomeAttestationInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("employment_getIncomeAttestationsBySubject", limit, offset)?;
         let ref_bytes = hex::decode(subject_ref.strip_prefix("0x").unwrap_or(&subject_ref))
             .map_err(|e| RpcError::InvalidParams(format!("Invalid subject ref: {}", e)))?;
 
@@ -6202,7 +6286,7 @@ impl SumChainApiServer for RpcServer {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        match store.get_by_subject(&ref_arr) {
+        match store.get_by_subject_paged(&ref_arr, page) {
             Ok(atts) => Ok(atts.iter().map(|a| self.income_attestation_to_rpc(a, current_time)).collect()),
             Err(e) => Err(RpcError::Internal(e.to_string()).into()),
         }
@@ -6215,7 +6299,10 @@ impl SumChainApiServer for RpcServer {
     async fn employment_get_credentials_by_employee_address(
         &self,
         employee_address: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("employment_getCredentialsByEmployeeAddress", limit, offset)?;
         let address = Address::from_base58(&employee_address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
@@ -6225,7 +6312,7 @@ impl SumChainApiServer for RpcServer {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        match store.get_by_employee_address(&address) {
+        match store.get_by_employee_address_paged(&address, page) {
             Ok(creds) => Ok(creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect()),
             Err(e) => Err(RpcError::Internal(e.to_string()).into()),
         }
@@ -6234,7 +6321,10 @@ impl SumChainApiServer for RpcServer {
     async fn employment_get_active_credentials_by_employee_address(
         &self,
         employee_address: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("employment_getActiveCredentialsByEmployeeAddress", limit, offset)?;
         let address = Address::from_base58(&employee_address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
@@ -6244,7 +6334,7 @@ impl SumChainApiServer for RpcServer {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        match store.get_active_by_employee_address(&address, current_time) {
+        match store.get_active_by_employee_address_paged(&address, current_time, page) {
             Ok(creds) => Ok(creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect()),
             Err(e) => Err(RpcError::Internal(e.to_string()).into()),
         }
@@ -6253,7 +6343,10 @@ impl SumChainApiServer for RpcServer {
     async fn employment_get_income_attestations_by_holder_address(
         &self,
         holder_address: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<IncomeAttestationInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let page = page_of("employment_getIncomeAttestationsByHolderAddress", limit, offset)?;
         let address = Address::from_base58(&holder_address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
@@ -6263,7 +6356,7 @@ impl SumChainApiServer for RpcServer {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        match store.get_by_holder_address(&address) {
+        match store.get_by_holder_address_paged(&address, page) {
             Ok(atts) => Ok(atts.iter().map(|a| self.income_attestation_to_rpc(a, current_time)).collect()),
             Err(e) => Err(RpcError::Internal(e.to_string()).into()),
         }
@@ -7593,75 +7686,85 @@ impl SumChainApiServer for RpcServer {
     async fn docclass_get_academic_credentials_by_holder(
         &self,
         holder_address: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<DocClassCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::docclass::DocSubcode;
         use sumchain_storage::DocClassStore;
+
+        let page = page_of("docclass_getAcademicCredentialsByHolder", limit, offset)?;
 
         // Parse holder address
         let holder = Address::from_base58(&holder_address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid holder address: {}", e)))?;
 
         let docclass_store = DocClassStore::new(&self.db);
-        let credential_store = docclass_store.credentials();
 
-        // Get all credentials and filter by subject_address (holder)
-        // Note: This could be optimized with an index in the future
-        let mut results = Vec::new();
+        // One bounded scan, not three unbounded ones (SC-7). This looped over
+        // the three academic subcodes calling `get_by_subcode`, which returns
+        // every credential of that subcode in the family, and filtered each
+        // whole result by holder afterwards: three full family scans per call,
+        // three whole-family `Vec`s, for a result that is normally a handful of
+        // rows. Both predicates are now inside a single scan.
+        //
+        // A read error no longer becomes an empty list. The old loop logged the
+        // failure and carried on with the other subcodes, so a caller could be
+        // told an employee holds no diploma because the read for it failed.
+        let credentials = docclass_store
+            .credentials()
+            .get_by_holder_in_subcodes_paged(
+                &holder,
+                &[
+                    DocSubcode::AcademicTranscript,
+                    DocSubcode::Diploma,
+                    DocSubcode::EnrollmentVerification,
+                ],
+                page,
+            )
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
 
-        // Iterate through all credentials (academic subcodes: 810, 811, 812)
-        use sumchain_primitives::docclass::DocSubcode;
-        for subcode in [DocSubcode::AcademicTranscript, DocSubcode::Diploma, DocSubcode::EnrollmentVerification] {
-            match credential_store.get_by_subcode(subcode) {
-                Ok(credentials) => {
-                    for credential in credentials {
-                        // Filter by holder address
-                        if credential.subject_address == holder {
-                            // Convert to RPC format
-                            let info = DocClassCredentialInfo {
-                                credential_id: format!("0x{}", hex::encode(credential.credential_id)),
-                                subcode: credential.subcode as u16,
-                                subcode_name: match credential.subcode {
-                                    DocSubcode::AcademicTranscript => "AcademicTranscript".to_string(),
-                                    DocSubcode::Diploma => "Diploma".to_string(),
-                                    DocSubcode::EnrollmentVerification => "EnrollmentVerification".to_string(),
-                                    _ => format!("{:?}", credential.subcode),
-                                },
-                                subject_commitment: format!("0x{}", hex::encode(credential.subject_commitment)),
-                                issuer: credential.issuer.to_base58(),
-                                jurisdiction: credential.jurisdiction.clone(),
-                                schema_hash: format!("0x{}", hex::encode(credential.schema_hash)),
-                                content_commitment: format!("0x{}", hex::encode(credential.content_commitment)),
-                                issued_at: credential.issued_at,
-                                valid_from: credential.valid_from,
-                                expires_at: credential.expires_at,
-                                revocation_status: match credential.revocation_status {
-                                    sumchain_primitives::docclass::RevocationStatus::Active => "Active".to_string(),
-                                    sumchain_primitives::docclass::RevocationStatus::Suspended => "Suspended".to_string(),
-                                    sumchain_primitives::docclass::RevocationStatus::Revoked => "Revoked".to_string(),
-                                    sumchain_primitives::docclass::RevocationStatus::Superseded => "Superseded".to_string(),
-                                    sumchain_primitives::docclass::RevocationStatus::Expired => "Expired".to_string(),
-                                },
-                                superseded_by: credential.superseded_by.map(|id| format!("0x{}", hex::encode(id))),
-                                metadata: Some(DocClassCredentialMetadata {
-                                    title: credential.metadata.title,
-                                    credential_type: credential.metadata.credential_type,
-                                    program: credential.metadata.program,
-                                    issue_date: credential.metadata.issue_date,
-                                    completion_date: credential.metadata.completion_date,
-                                }),
-                                payload_hash: credential.payload_hash.map(|h| format!("0x{}", hex::encode(h))),
-                                payload_hint: credential.payload_hint.clone(),
-                            };
-                            results.push(info);
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to get credentials for subcode {:?}: {}", subcode, e);
-                }
-            }
-        }
-
-        Ok(results)
+        // The conversion stays inline rather than moving to
+        // `academic_to_rpc_info`: that helper hex-encodes WITHOUT the `0x`
+        // prefix this method has always emitted, and changing a field's
+        // encoding is a different change from bounding a read.
+        Ok(credentials
+            .into_iter()
+            .map(|credential| DocClassCredentialInfo {
+                credential_id: format!("0x{}", hex::encode(credential.credential_id)),
+                subcode: credential.subcode as u16,
+                subcode_name: match credential.subcode {
+                    DocSubcode::AcademicTranscript => "AcademicTranscript".to_string(),
+                    DocSubcode::Diploma => "Diploma".to_string(),
+                    DocSubcode::EnrollmentVerification => "EnrollmentVerification".to_string(),
+                    other => format!("{:?}", other),
+                },
+                subject_commitment: format!("0x{}", hex::encode(credential.subject_commitment)),
+                issuer: credential.issuer.to_base58(),
+                jurisdiction: credential.jurisdiction.clone(),
+                schema_hash: format!("0x{}", hex::encode(credential.schema_hash)),
+                content_commitment: format!("0x{}", hex::encode(credential.content_commitment)),
+                issued_at: credential.issued_at,
+                valid_from: credential.valid_from,
+                expires_at: credential.expires_at,
+                revocation_status: match credential.revocation_status {
+                    sumchain_primitives::docclass::RevocationStatus::Active => "Active".to_string(),
+                    sumchain_primitives::docclass::RevocationStatus::Suspended => "Suspended".to_string(),
+                    sumchain_primitives::docclass::RevocationStatus::Revoked => "Revoked".to_string(),
+                    sumchain_primitives::docclass::RevocationStatus::Superseded => "Superseded".to_string(),
+                    sumchain_primitives::docclass::RevocationStatus::Expired => "Expired".to_string(),
+                },
+                superseded_by: credential.superseded_by.map(|id| format!("0x{}", hex::encode(id))),
+                metadata: Some(DocClassCredentialMetadata {
+                    title: credential.metadata.title,
+                    credential_type: credential.metadata.credential_type,
+                    program: credential.metadata.program,
+                    issue_date: credential.metadata.issue_date,
+                    completion_date: credential.metadata.completion_date,
+                }),
+                payload_hash: credential.payload_hash.map(|h| format!("0x{}", hex::encode(h))),
+                payload_hint: credential.payload_hint.clone(),
+            })
+            .collect())
     }
 
     async fn policy_build_create_account(
@@ -11468,7 +11571,7 @@ mod tax_rpc_tests {
         assert_eq!(got.required_issuer_classes, vec![vec!["TaxAuthority".to_string()]]);
 
         assert!(srv.tax_get_claim_type("tax.nope".to_string()).await.unwrap().is_none());
-        assert_eq!(srv.tax_list_claim_types().await.unwrap().len(), 2);
+        assert_eq!(srv.tax_list_claim_types(None, None).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -11485,11 +11588,11 @@ mod tax_rpc_tests {
 
         assert!(srv.tax_get_issuer(Address::new([0xCC; 20]).to_base58()).await.unwrap().is_none());
         // Only the Active issuer.
-        assert_eq!(srv.tax_get_active_issuers().await.unwrap().len(), 1);
+        assert_eq!(srv.tax_get_active_issuers(None, None).await.unwrap().len(), 1);
         // Class filter + invalid class error.
-        assert_eq!(srv.tax_get_issuers_by_class("TaxAuthority".to_string()).await.unwrap().len(), 1);
-        assert_eq!(srv.tax_get_issuers_by_class("AuditorCpa".to_string()).await.unwrap().len(), 0);
-        assert!(srv.tax_get_issuers_by_class("Bogus".to_string()).await.is_err());
+        assert_eq!(srv.tax_get_issuers_by_class("TaxAuthority".to_string(), None, None).await.unwrap().len(), 1);
+        assert_eq!(srv.tax_get_issuers_by_class("AuditorCpa".to_string(), None, None).await.unwrap().len(), 0);
+        assert!(srv.tax_get_issuers_by_class("Bogus".to_string(), None, None).await.is_err());
     }
 
     #[tokio::test]
@@ -11505,7 +11608,7 @@ mod tax_rpc_tests {
         assert_eq!(got.creator, Address::new([9u8; 20]).to_base58());
 
         assert!(srv.tax_get_policy(format!("0x{}", hex::encode([0u8; 32]))).await.unwrap().is_none());
-        assert_eq!(srv.tax_list_policies().await.unwrap().len(), 1);
+        assert_eq!(srv.tax_list_policies(None, None).await.unwrap().len(), 1);
     }
 }
 
@@ -11739,9 +11842,9 @@ mod agreement_rpc_tests {
         }
 
         assert!(srv.agreement_get_executor_link(format!("0x{}", hex::encode([0u8; 32]))).await.unwrap().is_none());
-        assert_eq!(srv.agreement_get_executor_links_by_agreement(aid).await.unwrap().len(), 1);
-        assert_eq!(srv.agreement_get_executor_links_by_executor(exec.to_base58()).await.unwrap().len(), 1);
-        assert_eq!(srv.agreement_get_active_executor_links().await.unwrap().len(), 1);
+        assert_eq!(srv.agreement_get_executor_links_by_agreement(aid, None, None).await.unwrap().len(), 1);
+        assert_eq!(srv.agreement_get_executor_links_by_executor(exec.to_base58(), None, None).await.unwrap().len(), 1);
+        assert_eq!(srv.agreement_get_active_executor_links(None, None).await.unwrap().len(), 1);
     }
 }
 
@@ -11833,10 +11936,10 @@ mod property_rpc_tests {
 
         assert!(srv.property_get_asset(format!("0x{}", hex::encode([0u8; 32]))).await.unwrap().is_none());
         // list_active excludes the Deregistered asset
-        assert_eq!(srv.property_get_active_assets().await.unwrap().len(), 2);
-        assert_eq!(srv.property_get_assets_by_jurisdiction("US-CA-LA".to_string()).await.unwrap().len(), 2);
-        assert_eq!(srv.property_get_assets_by_jurisdiction("US-NY-NY".to_string()).await.unwrap().len(), 1);
-        assert_eq!(srv.property_get_assets_by_jurisdiction("US-TX-AU".to_string()).await.unwrap().len(), 0);
+        assert_eq!(srv.property_get_active_assets(None, None).await.unwrap().len(), 2);
+        assert_eq!(srv.property_get_assets_by_jurisdiction("US-CA-LA".to_string(), None, None).await.unwrap().len(), 2);
+        assert_eq!(srv.property_get_assets_by_jurisdiction("US-NY-NY".to_string(), None, None).await.unwrap().len(), 1);
+        assert_eq!(srv.property_get_assets_by_jurisdiction("US-TX-AU".to_string(), None, None).await.unwrap().len(), 0);
     }
 }
 
@@ -11922,10 +12025,10 @@ mod finance_rpc_tests {
         // unknown address -> None
         assert!(srv.finance_get_issuer(Address::new([0u8; 20]).to_base58()).await.unwrap().is_none());
         // list_active excludes the Revoked issuer
-        assert_eq!(srv.finance_get_active_issuers().await.unwrap().len(), 2);
-        assert_eq!(srv.finance_get_issuers_by_jurisdiction("US".to_string()).await.unwrap().len(), 2);
-        assert_eq!(srv.finance_get_issuers_by_jurisdiction("GB".to_string()).await.unwrap().len(), 1);
-        assert_eq!(srv.finance_get_issuers_by_jurisdiction("FR".to_string()).await.unwrap().len(), 0);
+        assert_eq!(srv.finance_get_active_issuers(None, None).await.unwrap().len(), 2);
+        assert_eq!(srv.finance_get_issuers_by_jurisdiction("US".to_string(), None, None).await.unwrap().len(), 2);
+        assert_eq!(srv.finance_get_issuers_by_jurisdiction("GB".to_string(), None, None).await.unwrap().len(), 1);
+        assert_eq!(srv.finance_get_issuers_by_jurisdiction("FR".to_string(), None, None).await.unwrap().len(), 0);
     }
 }
 
@@ -12136,7 +12239,7 @@ mod healthcare_rpc_tests {
             let pid = format!("0x{}", hex::encode([i as u8 + 1; 32]));
             assert!(srv.healthcare_get_institutional_provider(pid).await.unwrap().is_some());
         }
-        assert_eq!(srv.healthcare_get_active_institutional_providers().await.unwrap().len(), 5);
+        assert_eq!(srv.healthcare_get_active_institutional_providers(None, None).await.unwrap().len(), 5);
     }
 
     #[tokio::test]
@@ -12154,7 +12257,7 @@ mod healthcare_rpc_tests {
                 "excluded provider type leaked via get: {:?}", EXCLUDED[i]
             );
         }
-        assert_eq!(srv.healthcare_get_active_institutional_providers().await.unwrap().len(), 0);
+        assert_eq!(srv.healthcare_get_active_institutional_providers(None, None).await.unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -12165,7 +12268,7 @@ mod healthcare_rpc_tests {
         store.put(&provider(1, ProviderType::Hospital, ProviderStatus::Suspended)).unwrap();
         store.put(&provider(2, ProviderType::Pharmacy, ProviderStatus::Active)).unwrap();
 
-        assert_eq!(srv.healthcare_get_active_institutional_providers().await.unwrap().len(), 1);
+        assert_eq!(srv.healthcare_get_active_institutional_providers(None, None).await.unwrap().len(), 1);
 
         let suspended = srv
             .healthcare_get_institutional_provider(format!("0x{}", hex::encode([1u8; 32])))
