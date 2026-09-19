@@ -42,6 +42,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use sumchain_consensus::{ConsensusEngine, PoAEngine};
+// `current_height` moved to the ConsensusQuery supertrait when the RPC server's
+// handle was narrowed; reading a height still needs the trait in scope.
+use sumchain_consensus::ConsensusQuery;
 use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::{ChainParams, Genesis};
 use sumchain_primitives::{
