@@ -105,6 +105,35 @@ impl AgreementExecutor {
         Ok(())
     }
 
+    /// The STORED length of the party-index row, without decoding it.
+    ///
+    /// ACTIVATION-AUDIT row AL-5. `v_add_to_party_index` decodes the whole row,
+    /// pushes one 32-byte id and re-encodes the whole row, and `view.put` only
+    /// then accounts for a byte. So the caller that wants to refuse an
+    /// oversized row has to know its size WITHOUT paying for the decode, and a
+    /// length is the only thing it needs: `None` for an absent row, `Some(n)`
+    /// for one of `n` bytes.
+    ///
+    /// Deliberately not a `BoundedRow`, which is the shape the DocClass bounded
+    /// readers return. Those callers USE the decoded value; this one does not,
+    /// and handing it back a decoded list would mean decoding the row twice on
+    /// every lawful transaction -- paying the cost this bound exists to avoid,
+    /// on the path that was never the problem.
+    ///
+    /// The view read itself still copies the row out of the overlay or the
+    /// database. That copy is one buffer of the row's own size, and the decode
+    /// and re-encode this refuses build three more on top of it; the same
+    /// reasoning the DocClass bounded readers carry applies here unchanged.
+    pub fn v_party_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        party_ref_hash: &[u8; 32],
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(cf::AGREEMENT_PARTY_INDEX, party_index_key(party_ref_hash))
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
+    }
+
     pub fn v_get_party_agreement_ids(
         view: &ExecutionView<'_, '_>,
         party_ref_hash: &[u8; 32],
@@ -440,6 +469,19 @@ impl AgreementExecutor {
         )
         .map_err(StateError::Storage)?;
         Self::v_add_to_executor_index(view, &link.executor_contract, &link.link_id)
+    }
+
+    /// The STORED length of the executor-index row, without decoding it. The
+    /// second half of ACTIVATION-AUDIT row AL-5, and the same shape and the
+    /// same reasoning as [`Self::v_party_index_row_len`].
+    pub fn v_executor_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        executor: &Address,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(cf::AGREEMENT_EXECUTOR_INDEX, executor_index_key(executor))
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
     }
 
     pub fn v_get_executor_link_ids(

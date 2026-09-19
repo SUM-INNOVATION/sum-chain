@@ -1138,6 +1138,127 @@ fn a_burn_after_a_mint_in_one_block_moves_every_mirror_row_together() {
     );
 }
 
+/// `max_supply` bounds how many tokens a collection holds AT ONCE, not how
+/// many it ever issues.
+///
+/// ACTIVATION-AUDIT row OV-16 says `next_token_id` never goes back, "so a
+/// collection with `max_supply` can be permanently exhausted by minting and
+/// burning". The first clause is true and pinned above. The SECOND does not
+/// hold against this source, and this test is what establishes that rather
+/// than leaving it to be argued: both `max_supply` comparisons in
+/// `nft_executor.rs` read `total_supply`, which the burn DECREMENTS
+/// (`nft_view.rs`, `saturating_sub`), and `next_token_id` is compared to
+/// nothing at all. `Collection::can_mint` reads `total_supply` too and is not
+/// called by the executor. So minting and burning exhausts nothing: the slot
+/// comes back every time.
+///
+/// What it does instead is the opposite defect, and the sharper one. A
+/// collection that declares `max_supply: 1` -- the on-chain form of "this is a
+/// one-of-one" -- can issue an unbounded number of distinct tokens over its
+/// life, one at a time, each with its own id and its own metadata, and the
+/// config field a marketplace reads as scarcity never says so. Three tokens are
+/// minted below where the declared maximum is one.
+///
+/// No gate. Changing which of the two numbers `max_supply` bounds is a decision
+/// about what the field MEANS, and the row's own wording shows the two readings
+/// are not agreed; a remedy picked inside an executor would be a rule nobody
+/// set. Recorded as a pin on today's behaviour, with the row updated to say
+/// which half of its sentence survived contact with the source.
+#[test]
+fn max_supply_bounds_live_tokens_and_not_lifetime_issuance() {
+    let (_state, db, _dir, executor) = setup_with_params(params());
+    let creator = KeyPair::generate();
+    fund(&db, &creator, 100_000_000);
+    let proposer = Address::new([9; 20]);
+    let cid = collection_id_of(&creator.address(), "OneOfOne");
+
+    let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+    let mut view = ExecutionView::new(&mut overlay);
+
+    let one_of_one = CollectionConfig {
+        max_supply: 1,
+        ..transferable()
+    };
+    let t = nft_tx(
+        &creator,
+        0,
+        100,
+        cid,
+        0,
+        NftOperation::CreateCollection,
+        create_payload("OneOfOne", one_of_one),
+    );
+    assert_eq!(
+        executor
+            .execute_tx(&mut view, &t, &proposer, 1, TS)
+            .unwrap()
+            .status,
+        TxStatus::Success
+    );
+
+    // Three full mint-and-burn cycles against a declared maximum of one.
+    let mut nonce = 1u64;
+    for expected_token_id in 1..=3u64 {
+        for (token, op) in [
+            (0u64, NftOperation::Mint),
+            (expected_token_id, NftOperation::Burn),
+        ] {
+            let data = if op == NftOperation::Mint {
+                mint_payload(creator.address())
+            } else {
+                Vec::new()
+            };
+            let t = nft_tx(&creator, nonce, 100, cid, token, op, data);
+            assert_eq!(
+                executor
+                    .execute_tx(&mut view, &t, &proposer, 1, TS)
+                    .unwrap()
+                    .status,
+                TxStatus::Success,
+                "cycle {expected_token_id}: {op:?} must be accepted -- a burnt                  slot comes back, so nothing is exhausted"
+            );
+            nonce += 1;
+        }
+    }
+
+    let collection = NftExecutor::v_get_collection(&view, &cid).unwrap().unwrap();
+    assert_eq!(collection.max_supply, 1, "the declared maximum is one");
+    assert_eq!(
+        collection.total_supply, 0,
+        "and no token is live, because the third was burnt too"
+    );
+    assert_eq!(
+        collection.next_token_id, 4,
+        "but THREE distinct tokens were issued under it: next_token_id counts          lifetime issuance and nothing ever compares it to max_supply"
+    );
+
+    // And the slot is still open for a fourth, at the same declared maximum.
+    let t = nft_tx(
+        &creator,
+        nonce,
+        100,
+        cid,
+        0,
+        NftOperation::Mint,
+        mint_payload(creator.address()),
+    );
+    assert_eq!(
+        executor
+            .execute_tx(&mut view, &t, &proposer, 1, TS)
+            .unwrap()
+            .status,
+        TxStatus::Success,
+        "OV-16: minting and burning does not exhaust the collection"
+    );
+    assert_eq!(
+        NftExecutor::v_get_collection(&view, &cid)
+            .unwrap()
+            .unwrap()
+            .next_token_id,
+        5
+    );
+}
+
 /// Burning the last token empties the owner list -- which DELETES its row --
 /// and empties the collection list, which WRITES an empty one.
 #[test]

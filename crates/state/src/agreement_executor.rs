@@ -167,6 +167,9 @@ pub struct AgreementGates {
     /// An operation that writes nothing reports a failed receipt rather
     /// than a success one. ACTIVATION-AUDIT row OV-30.
     pub no_op_receipt: bool,
+    /// An accumulating index row past the limit is refused BEFORE it is
+    /// decoded, appended to and re-encoded. ACTIVATION-AUDIT row AL-5.
+    pub allocation_bound: bool,
 }
 
 impl AgreementGates {
@@ -176,6 +179,7 @@ impl AgreementGates {
         signature_integrity: false,
         proof_presence: false,
         no_op_receipt: false,
+        allocation_bound: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -184,6 +188,7 @@ impl AgreementGates {
         signature_integrity: true,
         proof_presence: true,
         no_op_receipt: true,
+        allocation_bound: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -196,7 +201,20 @@ impl AgreementGates {
             ),
             proof_presence: crate::subsystem_proof_presence_gate_open(params, block_height),
             no_op_receipt: crate::subsystem_no_op_receipt_gate_open(params, block_height),
+            allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
         }
+    }
+
+    /// The stored-row length limit this gate imposes, or `None` when closed.
+    ///
+    /// `None` is what the bounded readers in `agreement_view.rs` treat as "no
+    /// limit", so a closed gate reads byte-for-byte what the unbounded reader
+    /// read. The same spelling `DocClassGates::row_limit` uses, reading the
+    /// same constant, because it is the same rule.
+    #[inline]
+    pub fn row_limit(self) -> Option<usize> {
+        self.allocation_bound
+            .then_some(crate::MAX_ACCUMULATING_ROW_BYTES)
     }
 }
 
@@ -255,6 +273,73 @@ impl AgreementExecutor {
         )
     }
 
+    /// A stored index row longer than the bound, refused without being decoded.
+    ///
+    /// The DocClass wording verbatim, and for the same reason it gives: one
+    /// phrasing across every family so the refusal is greppable, with the
+    /// LENGTH in it, because the remedy for a row over the limit is not
+    /// "retry".
+    fn row_too_large(what: &str, bytes: usize) -> AgreementExecutionResult {
+        AgreementExecutionResult::failure(format!(
+            "{what} too large to modify: {bytes} bytes, limit {}",
+            crate::MAX_ACCUMULATING_ROW_BYTES
+        ))
+    }
+
+    /// Every party-index row this commitment would append to, checked against
+    /// the bound before the first of them is decoded.
+    ///
+    /// ACTIVATION-AUDIT row AL-5. `v_put_agreement` appends the agreement id to
+    /// one accumulating row per party, and each append decodes the whole row,
+    /// pushes one 32-byte id and re-encodes the whole row. So one commitment
+    /// naming `p` parties does that `p` times, and a row grown below the gate
+    /// costs its own size several times over on every later commitment that
+    /// names the same party. Checked here, before `v_deduct`, because every
+    /// other refusal in this arm is checked there too -- an Agreement refusal
+    /// in this subsystem writes nothing at all, and a bound that charged for
+    /// the refusal would be the one exception.
+    fn party_index_within_bound(
+        view: &ExecutionView<'_, '_>,
+        agreement: &AgreementCommitment,
+        max_bytes: Option<usize>,
+    ) -> Result<Option<AgreementExecutionResult>> {
+        // No read AT ALL while the gate is closed, not merely no refusal. A
+        // read here would move the decode of a corrupt row earlier than the
+        // unremediated binary reaches it, and `agreement_routing.rs`'s
+        // `corrupt_rows_error_through_dispatch_with_exactly_this_staged` pins
+        // exactly which families a corrupt row leaves staged -- which is how
+        // that was caught rather than shipped.
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        for party in &agreement.parties {
+            if let Some(bytes) = Self::v_party_index_row_len(view, &party.party_ref.as_hash())? {
+                if bytes > max {
+                    return Ok(Some(Self::row_too_large("Agreement party index", bytes)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// The executor-index row this link would append to, checked against the
+    /// bound before it is decoded. ACTIVATION-AUDIT row AL-5, executor half.
+    fn executor_index_within_bound(
+        view: &ExecutionView<'_, '_>,
+        executor: &Address,
+        max_bytes: Option<usize>,
+    ) -> Result<Option<AgreementExecutionResult>> {
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        match Self::v_executor_index_row_len(view, executor)? {
+            Some(bytes) if bytes > max => {
+                Ok(Some(Self::row_too_large("Agreement executor index", bytes)))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Execute an Agreement transaction with the activation decisions supplied
     /// directly. The seam the mixed-version tests use.
     #[allow(clippy::too_many_arguments)]
@@ -280,6 +365,13 @@ impl AgreementExecutor {
 
                 if Self::v_agreement_exists(view, &agreement.agreement_id)? {
                     return Ok(AgreementExecutionResult::failure("Agreement already exists"));
+                }
+
+                // ACTIVATION-AUDIT row AL-5, the party-index half.
+                if let Some(refusal) =
+                    Self::party_index_within_bound(view, &agreement, gates.row_limit())?
+                {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -357,6 +449,15 @@ impl AgreementExecutor {
 
                 if Self::v_get_agreement(view, &d.old_agreement_id)?.is_none() {
                     return Ok(AgreementExecutionResult::failure("Old agreement not found"));
+                }
+
+                // ACTIVATION-AUDIT row AL-5. The supersede arm writes a SECOND
+                // commitment through the same `v_put_agreement`, so it appends
+                // to the same party-index rows and is bounded by the same rule.
+                if let Some(refusal) =
+                    Self::party_index_within_bound(view, &d.new_agreement, gates.row_limit())?
+                {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -617,6 +718,15 @@ impl AgreementExecutor {
 
                 if Self::v_executor_link_exists(view, &link.link_id)? {
                     return Ok(AgreementExecutionResult::failure("Executor link already exists"));
+                }
+
+                // ACTIVATION-AUDIT row AL-5, the executor-index half.
+                if let Some(refusal) = Self::executor_index_within_bound(
+                    view,
+                    &link.executor_contract,
+                    gates.row_limit(),
+                )? {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;

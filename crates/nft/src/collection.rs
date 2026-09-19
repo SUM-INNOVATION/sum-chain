@@ -22,6 +22,38 @@ impl CollectionId {
         Self(*hash.as_bytes())
     }
 
+    /// A collection ID whose preimage carries the creator's ACCOUNT NONCE as
+    /// well as the block clock.
+    ///
+    /// ACTIVATION-AUDIT row CI-1. [`Self::new`] takes the block timestamp as
+    /// its whole nonce, so two blocks that share a timestamp give one creator
+    /// one id for one name. This adds eight more bytes that a creator cannot
+    /// repeat: an account nonce only ever goes up.
+    ///
+    /// A LONGER preimage, not a different arrangement of the same one. The
+    /// account nonce is appended after the timestamp, so no `(creator, name,
+    /// nonce)` triple can hash to the same bytes as any `(creator, name,
+    /// timestamp, account_nonce)` quadruple with the same creator and name --
+    /// the two preimages differ in length by exactly eight bytes with the same
+    /// prefix. Ids minted under the two rules therefore live in disjoint
+    /// spaces, which is what makes activating the gate a change of ADDRESS
+    /// SPACE for new collections rather than a rule that could collide with
+    /// what the chain already holds.
+    pub fn new_with_account_nonce(
+        creator: &Address,
+        name: &str,
+        nonce: u64,
+        account_nonce: u64,
+    ) -> Self {
+        let mut data = Vec::new();
+        data.extend_from_slice(creator.as_bytes());
+        data.extend_from_slice(name.as_bytes());
+        data.extend_from_slice(&nonce.to_le_bytes());
+        data.extend_from_slice(&account_nonce.to_le_bytes());
+        let hash = Hash::hash(&data);
+        Self(*hash.as_bytes())
+    }
+
     /// Get the underlying bytes
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0

@@ -250,14 +250,36 @@ impl NftExecutor {
         .map_err(StateError::Storage)
     }
 
-    /// Emptying this list WRITES an empty list; it does not delete the row.
+    /// Remove, and -- where `delete_when_empty` -- DELETE the row when the list
+    /// empties.
+    ///
+    /// ACTIVATION-AUDIT row OV-15. Below the gate (`delete_when_empty: false`)
+    /// emptying this list WRITES an empty list and leaves the row, while
+    /// emptying the OWNER list deletes its row. Two families holding the same
+    /// kind of value, disagreeing about what "no entries" looks like: a reader
+    /// that decides by row presence gets one answer from one index and the
+    /// other from the other, and the empty rows accumulate one per collection
+    /// ever emptied with nothing that collects them.
+    ///
+    /// `false` is byte-for-byte the unremediated behaviour, including the write
+    /// of the empty list, because the write is what the state root saw.
     pub fn v_remove_from_collection_index(
         view: &mut ExecutionView<'_, '_>,
         collection_id: &[u8; 32],
         token_id: u64,
+        delete_when_empty: bool,
     ) -> Result<()> {
         let mut tokens = Self::v_get_collection_tokens(view, collection_id)?;
         tokens.retain(|t| *t != token_id);
+
+        if delete_when_empty && tokens.is_empty() {
+            return view
+                .delete(
+                    cf::NFT_COLLECTION_INDEX,
+                    collection_index_key(collection_id),
+                )
+                .map_err(StateError::Storage);
+        }
 
         let bytes = encode_collection_tokens(&tokens).map_err(StateError::Storage)?;
         view.put(
@@ -307,11 +329,12 @@ impl NftExecutor {
         collection_id: &[u8; 32],
         token_id: u64,
         owner: &Address,
+        index_symmetry: bool,
     ) -> Result<()> {
         Self::v_delete_token(view, collection_id, token_id)?;
 
         Self::v_remove_from_owner_index(view, owner, collection_id, token_id)?;
-        Self::v_remove_from_collection_index(view, collection_id, token_id)?;
+        Self::v_remove_from_collection_index(view, collection_id, token_id, index_symmetry)?;
 
         if let Some(mut collection) = Self::v_get_collection(view, collection_id)? {
             collection.total_supply = collection.total_supply.saturating_sub(1);

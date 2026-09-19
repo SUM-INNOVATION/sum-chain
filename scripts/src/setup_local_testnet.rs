@@ -288,6 +288,9 @@ fn run_local() -> Result<()> {
             subsystem_proof_presence_enabled_from_height: None,
             nft_update_path_parity_enabled_from_height: None,
             subsystem_no_op_receipt_enabled_from_height: None,
+            nft_charged_receipt_enabled_from_height: None,
+            nft_index_symmetry_enabled_from_height: None,
+            nft_collection_id_nonce_enabled_from_height: None,
             beacon_params: None, // issue #127: beacon parameter surface absent by default
             beacon_schedule: None, // issue #127: beacon height->epoch schedule absent by default
             messaging_sponsored_registration_enabled_from_height: None, // issue #145: sponsored registration dormant (coordinated activation only)
