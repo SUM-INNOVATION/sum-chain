@@ -1,12 +1,13 @@
 //! `nft_update_path_parity_enabled_from_height`: the NFT arms that write
 //! metadata or a collection config apply the rules the CREATION arms apply.
 //!
-//! ACTIVATION-AUDIT rows OV-10 and the first half of RY-2.
+//! ACTIVATION-AUDIT rows OV-10, the first half of RY-2, and the zero-owner
+//! hazard recorded under RY-3.
 //!
-//! # Why one height for the two
+//! # Why one height for the three
 //!
-//! Both are the same asymmetry: a rule the creation arm enforces and an update
-//! arm does not.
+//! All three are the same asymmetry: a rule the creation arm enforces and a
+//! later-write arm does not.
 //!
 //!   * `execute_mint` checks `max_metadata_bytes` and requires the fee to cover
 //!     `storage_fee_per_byte`. `UpdateMetadata` writes `data.to_vec()` straight
@@ -18,9 +19,12 @@
 //!     `min_fee` is 1 and not the release's 1000.
 //!   * collection creation zeroes `royalty_recipient` when `royalty_bps` is
 //!     zero. `UpdateCollectionConfig` sets one anyway.
+//!   * collection creation writes `owner: *sender`, an address that signed the
+//!     transaction, so no collection is ever created ownerless.
+//!     `TransferCollectionOwnership` accepts `Address::ZERO` from the payload.
 //!
-//! Activating either alone leaves the other open at the same price, and both
-//! turn a success receipt into a failed one — neither can abort a block — so
+//! Activating any one alone leaves the others open at the same price, and all
+//! three turn a success receipt into a failed one — none can abort a block — so
 //! there is nothing to sequence between them.
 //!
 //! # What this does NOT do
@@ -52,7 +56,8 @@ use sumchain_crypto::KeyPair;
 use sumchain_genesis::ChainParams;
 use sumchain_nft::collection::CollectionConfig;
 use sumchain_nft::ops::{
-    NftBatchMintData, NftBatchMintRequest, NftMintData, NftUpdateCollectionConfigData,
+    NftBatchMintData, NftBatchMintRequest, NftMintData, NftTransferCollectionOwnershipData,
+    NftUpdateCollectionConfigData,
 };
 use sumchain_primitives::{Address, NftOperation, NftTxData};
 use sumchain_state::{NftExecutor, NftGates};
@@ -390,6 +395,109 @@ fn a_royalty_recipient_stops_being_settable_on_a_collection_that_pays_none() {
             stored.royalty_recipient != Address::ZERO,
             !gates.update_path_parity,
             "RY-2: the recipient is IN the row below the gate and absent at it"
+        );
+    }
+}
+
+// ── RY-3, the zero-owner hazard: TransferCollectionOwnership ────────────────
+
+/// The third instance of the same asymmetry, and the reason it is the same
+/// height rather than a ninth field.
+///
+/// `execute_create_collection` writes `owner: *sender` — an address that
+/// signed the transaction, so no collection is ever CREATED ownerless.
+/// `TransferCollectionOwnership` takes `new_owner` from the payload and checks
+/// nothing about it, so it accepts `Address::ZERO`: the value the very same
+/// creation arm writes into `royalty_recipient` to mean "no recipient". The
+/// result is a collection that can never be reconfigured — `UpdateCollectionConfig`
+/// requires `collection.owner == sender` and nobody signs for the zero address —
+/// and, while `owner_only_minting` is set, can never be minted in again, by
+/// anybody, at any height. No operation in the subsystem undoes it.
+///
+/// RY-3's own sentence is NOT what this closes: transferring a collection
+/// still moves no token and still hands the new owner minting rights, which is
+/// ordinary Ownable semantics and not a rule this tree states differently.
+/// What is closed is the one destination creation cannot produce.
+#[test]
+fn a_collection_stops_being_transferable_to_the_zero_address() {
+    for gates in PARITY {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let owner = KeyPair::generate();
+        fund(&db, &owner, 100_000_000_000);
+        let sender = owner.address();
+        let burned = [0x31u8; 32];
+        let handed_on = [0x32u8; 32];
+        seed_collection(&db, &sender, &burned, 0);
+        seed_collection(&db, &sender, &handed_on, 0);
+
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let to = |a: Address| {
+            bincode::serialize(&NftTransferCollectionOwnershipData { new_owner: a }).unwrap()
+        };
+
+        // A transfer to a real address: the OPERATION is untouched on both sides.
+        let successor = Address::new([0x55; 20]);
+        let lawful = nft_at(
+            &mut view,
+            &sender,
+            handed_on,
+            0,
+            NftOperation::TransferCollectionOwnership,
+            to(successor),
+            storage_fee(0),
+            gates,
+        );
+        assert!(
+            lawful,
+            "handing a collection to another address is accepted on both sides -- \
+             the gate refuses one destination, not the operation \
+             (update_path_parity={})",
+            gates.update_path_parity
+        );
+        assert_eq!(
+            NftExecutor::v_get_collection(&view, &handed_on)
+                .unwrap()
+                .expect("the collection is there either way")
+                .owner,
+            successor,
+            "and the row moves, on both sides"
+        );
+
+        // The same transaction to the null sentinel.
+        let to_zero = nft_at(
+            &mut view,
+            &sender,
+            burned,
+            0,
+            NftOperation::TransferCollectionOwnership,
+            to(Address::ZERO),
+            storage_fee(0),
+            gates,
+        );
+        assert_eq!(
+            to_zero, !gates.update_path_parity,
+            "RY-3: creation binds `owner` to the signing sender and the transfer \
+             arm accepts the zero address anyway, until the gate \
+             (update_path_parity={})",
+            gates.update_path_parity
+        );
+
+        // And the ROW, not only the receipt: below the gate the collection is
+        // left unreconfigurable, above it the original owner still holds it.
+        let stored = NftExecutor::v_get_collection(&view, &burned)
+            .unwrap()
+            .expect("the collection survives either way");
+        assert_eq!(
+            stored.owner == Address::ZERO,
+            !gates.update_path_parity,
+            "RY-3: the ownerless row EXISTS below the gate and is not written at it"
+        );
+        assert_eq!(
+            stored.owner == sender,
+            gates.update_path_parity,
+            "RY-3: above the gate the refusal leaves the collection where it was"
         );
     }
 }
