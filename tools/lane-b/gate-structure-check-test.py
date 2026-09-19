@@ -56,6 +56,7 @@ RPC_TYPES = "crates/rpc/src/types.rs"
 RPC_SERVER = "crates/rpc/src/server.rs"
 DIGEST_TEST = "crates/genesis/tests/activation_digest.rs"
 PEER_TEST = "crates/genesis/tests/peer_protocol_enforcement.rs"
+PACKET = "docs/lane-a/ACTIVATION-DECISION-PACKET.md"
 
 # Every file any registered structure lives in. If a structure is added to the
 # registry in a file that is not staged here, its case would run against a
@@ -69,6 +70,7 @@ SOURCES = [
     RPC_SERVER,
     DIGEST_TEST,
     PEER_TEST,
+    PACKET,
 ]
 
 
@@ -265,6 +267,52 @@ def m_unguarded_mirror_drift(root: Path) -> None:
     )
 
 
+def m_packet_section_lost(root: Path) -> None:
+    """A declared gate stops having a write-up in the decision packet.
+
+    This is the failure the packet said no tool here could catch: "The count in
+    a sentence is not checkable." Twice a wave outran the document and the
+    deficit was found by a human recounting prose. The gate is still declared,
+    still wired, still dormant -- every other structure passes -- and the owner
+    would be asked to schedule a height for a gate nobody wrote the six fields
+    for.
+    """
+    edit(
+        root,
+        PACKET,
+        "### R7 — `finance_authorization_enabled_from_height`",
+        "### R7 — `finance_authorization_enabled_from_heightX`",
+    )
+
+
+def m_packet_acknowledgement_lost(root: Path) -> None:
+    """A gate the packet admits it has NOT covered stops being admitted.
+
+    The dishonest repair for the case above: rather than write the section,
+    drop the sentence that says it is missing. The gate then appears in neither
+    half, which is what the partition is for -- silence about a gate reads the
+    same as a gate that was never declared, and that is exactly the reading the
+    partition refuses.
+    """
+    edit(
+        root,
+        PACKET,
+        "  * `subsystem_tx_write_set_bound_enabled_from_height` — ",
+        "  * subsystem_tx_write_set_bound_enabled_from_height - ",
+    )
+
+
+def m_packet_part_0a_deleted(root: Path) -> None:
+    """Part 0a itself is renamed away.
+
+    Part 0a is the one registered structure allowed to yield zero entries, so
+    emptiness cannot be the signal that it is gone. The locator is. Without
+    this case a packet that deleted the acknowledgement section wholesale would
+    read as a packet that had caught up.
+    """
+    edit(root, PACKET, "\n## Part 0a — ", "\n## Part 0a-bis — ")
+
+
 CASES = [
     # (case name, mutate, expect_exit_nonzero, structure fragment, failure class)
     ("clean", m_clean, False, None, None),
@@ -287,6 +335,27 @@ CASES = [
         True,
         "ChainParamsInfo construction",
         "set-mismatch",
+    ),
+    (
+        "packet section lost",
+        m_packet_section_lost,
+        True,
+        "decision-packet gate sections",
+        "set-mismatch",
+    ),
+    (
+        "packet acknowledgement lost",
+        m_packet_acknowledgement_lost,
+        True,
+        "decision-packet gate sections",
+        "set-mismatch",
+    ),
+    (
+        "packet Part 0a deleted",
+        m_packet_part_0a_deleted,
+        True,
+        "Part 0a gates deliberately uncovered",
+        "locator-missing",
     ),
 ]
 
