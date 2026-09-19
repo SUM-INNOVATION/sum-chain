@@ -4901,9 +4901,19 @@ fn a_controlled_prescription_is_issued_straight_into_transfer_requested_until_th
             assert!(stored.is_controlled);
         }
     }
+}
 
-    // The discriminator, both sides: the gate refuses ONE (controlled,
-    // TransferRequested) pair, not controlled prescriptions and not the status.
+/// The discriminator for the test above: the gate refuses ONE (controlled,
+/// `TransferRequested`) PAIR, not controlled prescriptions and not the status.
+///
+/// Its own `#[test]` rather than a second loop in that one, because
+/// `execution_boundary.rs`'s `no_test_publishes_a_candidate_by_hand` reads a
+/// function body in order: a candidate read followed by a database write is the
+/// shape of a hand-rolled publisher, and appending this loop after that one
+/// produced exactly that shape out of two independent fixtures. Splitting is
+/// the fix; the guard is right to be name-blind about it.
+#[test]
+fn the_controlled_transfer_guard_refuses_the_pair_and_not_either_half_of_it() {
     for gates in PRECONDITION {
         for (label, controlled, status) in [
             (
