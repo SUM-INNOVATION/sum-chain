@@ -9,6 +9,7 @@ pub mod block_syncer;
 pub mod config;
 pub mod dns;
 pub mod network;
+pub mod peer_compat;
 pub mod node_key;
 pub mod peer_manager;
 pub mod sync;
@@ -20,6 +21,7 @@ pub use config::NetworkConfig;
 /// direct dependency on the libp2p identity crate.
 pub use libp2p_identity::PeerId;
 pub use network::{NetworkCommand, NetworkEvent, NetworkService, RateLimitConfig, SyncRequestId};
+pub use peer_compat::{PeerCompat, PeerCompatRegistry};
 pub use node_key::load_or_generate_keypair;
 pub use peer_manager::{
     ConnectionDirection, ConnectionLimits, ConnectionStats, PeerInfo, PeerManager, PeerState,

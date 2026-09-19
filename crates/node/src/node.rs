@@ -12,7 +12,10 @@ use sumchain_consensus::{
 };
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::Genesis;
-use sumchain_p2p::{NetworkCommand, NetworkConfig, NetworkEvent, NetworkService, PeerId, SyncState, MAX_BLOCKS_PER_REQUEST};
+use sumchain_p2p::{
+    NetworkCommand, NetworkConfig, NetworkEvent, NetworkService, PeerCompat, PeerCompatRegistry,
+    PeerId, SyncState, MAX_BLOCKS_PER_REQUEST,
+};
 use sumchain_primitives::Hash;
 use sumchain_primitives::SignedTransaction;
 use sumchain_rpc::{
@@ -76,12 +79,18 @@ pub struct Node {
     /// declared to every peer that asks, and compared against every peer that
     /// declares one.
     protocol_digest: Hash,
-    /// Peers that declared a DIFFERENT protocol digest.
+    /// What each peer has declared, and the height from which declaring
+    /// becomes mandatory.
     ///
-    /// Membership is by the peer's own declaration, never by silence: a node
-    /// built before the handshake existed answers nothing and is never entered
-    /// here. See `BlockSyncer::on_protocol_id_response` for the argument.
-    incompatible_peers: Arc<parking_lot::RwLock<std::collections::HashSet<PeerId>>>,
+    /// Three states, not two. A peer that declared a DIFFERENT digest is
+    /// refused always; a peer that declared OURS participates always; a peer
+    /// that declared NOTHING participates below
+    /// `ChainParams::peer_protocol_declaration_required_from_height` and is
+    /// refused at or above it. Silence is never called incompatible — a node
+    /// built before the handshake existed answers nothing — it simply stops
+    /// being enough once the rules have diverged. See
+    /// `sumchain_p2p::peer_compat` for the whole argument.
+    peer_compat: Arc<PeerCompatRegistry>,
 }
 
 impl Node {
@@ -368,6 +377,24 @@ impl Node {
             protocol_digest
         );
 
+        // Phase one until this height; `None` is phase one forever, and is what
+        // every genesis written before the field existed resolves to.
+        let enforce_from = genesis.params.peer_protocol_declaration_required_from_height;
+        match enforce_from {
+            Some(h) => info!(
+                "From height {}, a peer must declare a MATCHING protocol digest before it \
+                 may propose blocks, vote, or move this node's fork choice. Below it, a \
+                 peer that declares nothing participates exactly as it does today.",
+                h
+            ),
+            None => info!(
+                "peer_protocol_declaration_required_from_height is unset: a peer that \
+                 declares no protocol digest is admitted at every height, exactly as \
+                 before this mechanism existed. A peer that declares a DIFFERENT one is \
+                 still refused."
+            ),
+        }
+
         Ok(Self {
             db,
             state,
@@ -387,9 +414,10 @@ impl Node {
             shutdown: Arc::new(AtomicBool::new(false)),
             chain_height,
             protocol_digest,
-            incompatible_peers: Arc::new(
-                parking_lot::RwLock::new(std::collections::HashSet::new()),
-            ),
+            peer_compat: Arc::new(PeerCompatRegistry::new(
+                protocol_digest,
+                enforce_from,
+            )),
         })
     }
 
@@ -735,9 +763,38 @@ impl Node {
                                 metrics.mempool.record_tx_added();
                             }
                         }
-                        NetworkEvent::BlockReceived(block) => {
+                        NetworkEvent::BlockReceived { block, source } => {
                             debug!("Received block: {} (height {})", block.hash(), block.height());
                             metrics.p2p.record_message_received();
+                            // ── the consensus boundary ──────────────────────
+                            //
+                            // `import_block` IS proposal acceptance, fork
+                            // choice and reorg: `PoAEngine::do_import_block`
+                            // classifies the block against
+                            // `LongestChainForkChoice::should_switch` and, if it
+                            // wins, publishes or reorgs onto it. A block that
+                            // gets past this line has already influenced
+                            // consensus, so the check has to be here and not
+                            // inside the engine, which is handed a `Block` with
+                            // no peer attached.
+                            //
+                            // Judged at the BLOCK's height, not the chain's: the
+                            // question is which rules decide this block.
+                            if !self.peer_compat.may_participate_in_consensus(&source, block.height()) {
+                                warn!(
+                                    "Refusing gossiped block {} at height {} from {}: {:?}, and \
+                                     from height {:?} a peer must have declared a matching \
+                                     protocol digest before it may propose a block this node \
+                                     acts on",
+                                    block.hash(),
+                                    block.height(),
+                                    source,
+                                    self.peer_compat.status(&source),
+                                    self.peer_compat.enforcement_height(),
+                                );
+                                metrics.blocks.record_block_error();
+                                continue;
+                            }
                             // Import block
                             if let Err(e) = consensus.import_block(block).await {
                                 warn!("Failed to import block: {}", e);
@@ -760,14 +817,13 @@ impl Node {
                         // contribute a block, and a mismatch costs the peer its
                         // place rather than costing the operator a fork.
                         NetworkEvent::ProtocolIdResponse { peer, digest } => {
-                            if digest == self.protocol_digest {
+                            if self.peer_compat.on_declaration(peer, digest) {
                                 debug!("Peer {} enforces our protocol digest", peer);
                             } else {
                                 warn!(
                                     "REFUSING peer {}: it enforces protocol digest {} but this                                      node enforces {}. The two binaries disagree about an                                      activation height or a consensus constant, so blocks one                                      produces the other cannot reproduce. Disconnecting.",
                                     peer, digest, self.protocol_digest
                                 );
-                                self.incompatible_peers.write().insert(peer);
                                 metrics.p2p.record_message_received();
                                 // Ban rather than merely ignore: `PeerManager`
                                 // refuses a banned peer's reconnection, so the
@@ -807,11 +863,23 @@ impl Node {
                         // Handle sync status responses - check if we need to sync
                         NetworkEvent::SyncStatusResponse { peer, height, best_hash: _, chain_id } => {
                             debug!("Sync status from {}: height={}, chain_id={}", peer, height, chain_id);
-                            if self.incompatible_peers.read().contains(&peer) {
+                            let our_next = consensus.current_height() + 1;
+                            if !self.peer_compat.may_participate_in_consensus(&peer, our_next) {
                                 // Checked here as well as at arrival because the
                                 // two responses race: a status that beat the
-                                // digest must not survive the refusal.
-                                warn!("Ignoring sync status from incompatible peer {}", peer);
+                                // digest must not survive the refusal. And
+                                // checked against `our_next` rather than only
+                                // against the declaration, because a peer that
+                                // declared nothing is admissible below the
+                                // enforcement height and not at or above it.
+                                warn!(
+                                    "Ignoring sync status from {}: {:?}, and the next block \
+                                     this node would request is {} (enforcement from {:?})",
+                                    peer,
+                                    self.peer_compat.status(&peer),
+                                    our_next,
+                                    self.peer_compat.enforcement_height(),
+                                );
                             } else if chain_id != self.genesis.chain_id {
                                 warn!("Peer {} has different chain_id: {} vs {}", peer, chain_id, self.genesis.chain_id);
                             } else {
@@ -837,16 +905,25 @@ impl Node {
                         }
                         // Handle received blocks from sync
                         NetworkEvent::SyncBlocksReceived { peer, blocks } => {
-                            if self.incompatible_peers.read().contains(&peer) {
-                                warn!(
-                                    "Discarding {} blocks from incompatible peer {}",
-                                    blocks.len(), peer
-                                );
-                                continue;
-                            }
                             info!("Received {} blocks from {} via sync", blocks.len(), peer);
                             let mut last_imported_height = 0;
                             for block in blocks {
+                                // Per block, not per batch: a batch can straddle
+                                // the enforcement height, and the blocks below
+                                // it are ones this peer was entitled to supply.
+                                if !self.peer_compat.may_participate_in_consensus(&peer, block.height()) {
+                                    warn!(
+                                        "Refusing synced block {} at height {} from {}: {:?} \
+                                         (enforcement from {:?})",
+                                        block.hash(),
+                                        block.height(),
+                                        peer,
+                                        self.peer_compat.status(&peer),
+                                        self.peer_compat.enforcement_height(),
+                                    );
+                                    metrics.blocks.record_block_error();
+                                    break;
+                                }
                                 match consensus.import_block(block.clone()).await {
                                     Ok(()) => {
                                         last_imported_height = block.height();
@@ -890,9 +967,23 @@ impl Node {
                         }
 
                         // BFT consensus messages
-                        NetworkEvent::BftProposalReceived(data) => {
+                        NetworkEvent::BftProposalReceived { data, source } => {
                             if let Ok(proposal) = Proposal::from_bytes(&data) {
                                 info!("Received BFT proposal for height {}", proposal.view.height);
+
+                                // The BFT engine is experimental
+                                // (`crates/consensus/src/bft/mod.rs:3`) and is
+                                // not the production path, but a proposal is a
+                                // proposal: gate it on the same predicate at the
+                                // same boundary, so that enabling the engine
+                                // does not quietly reopen the hole.
+                                if !self.peer_compat.may_participate_in_consensus(&source, proposal.view.height) {
+                                    warn!(
+                                        "Refusing BFT proposal at height {} from {}: {:?}",
+                                        proposal.view.height, source, self.peer_compat.status(&source)
+                                    );
+                                    continue;
+                                }
 
                                 // Handle proposal and create prevote
                                 if let Ok(Some(prevote)) = self.consensus.handle_proposal(proposal) {
@@ -905,10 +996,18 @@ impl Node {
                             }
                         }
 
-                        NetworkEvent::BftPrevoteReceived(data) => {
+                        NetworkEvent::BftPrevoteReceived { data, source } => {
                             if let Ok(vote) = Vote::from_bytes(&data) {
                                 if vote.vote_type == VoteType::Prevote {
                                     debug!("Received BFT prevote for height {}", vote.view.height);
+
+                                    if !self.peer_compat.may_participate_in_consensus(&source, vote.view.height) {
+                                        warn!(
+                                            "Refusing BFT prevote at height {} from {}: {:?}",
+                                            vote.view.height, source, self.peer_compat.status(&source)
+                                        );
+                                        continue;
+                                    }
 
                                     // Handle prevote and create precommit if quorum reached
                                     if let Ok(Some(precommit)) = self.consensus.handle_prevote(vote) {
@@ -922,10 +1021,18 @@ impl Node {
                             }
                         }
 
-                        NetworkEvent::BftPrecommitReceived(data) => {
+                        NetworkEvent::BftPrecommitReceived { data, source } => {
                             if let Ok(vote) = Vote::from_bytes(&data) {
                                 if vote.vote_type == VoteType::Precommit {
                                     debug!("Received BFT precommit for height {}", vote.view.height);
+
+                                    if !self.peer_compat.may_participate_in_consensus(&source, vote.view.height) {
+                                        warn!(
+                                            "Refusing BFT precommit at height {} from {}: {:?}",
+                                            vote.view.height, source, self.peer_compat.status(&source)
+                                        );
+                                        continue;
+                                    }
 
                                     // Handle precommit and commit block if quorum reached
                                     if let Ok(Some(block_hash)) = self.consensus.handle_precommit(vote) {

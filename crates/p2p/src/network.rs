@@ -150,14 +150,40 @@ pub enum NetworkEvent {
     PeerDisconnected(PeerId),
     /// New transaction received
     TransactionReceived(SignedTransaction),
-    /// New block received
-    BlockReceived(Block),
-    /// BFT proposal received
-    BftProposalReceived(Vec<u8>),
-    /// BFT prevote received
-    BftPrevoteReceived(Vec<u8>),
-    /// BFT precommit received
-    BftPrecommitReceived(Vec<u8>),
+    /// New block received by gossip, and the peer it arrived from.
+    ///
+    /// # Why `source` is carried
+    ///
+    /// It was not, and that was the hole. `handle_gossip_message` has the
+    /// propagating peer in hand (`gossipsub::Event::Message.propagation_source`)
+    /// and used it only for rate limiting and scoring before discarding it, so
+    /// a gossiped block reached `PoAEngine::do_import_block` — proposal
+    /// acceptance, fork choice and reorg — with no peer attached to refuse.
+    /// Refusing a peer on the SYNC path while its gossip went straight through
+    /// was a control over the slower of the two routes into consensus.
+    ///
+    /// This is a local Rust enum, not a wire type: adding the field changes no
+    /// byte on the network. The wire types are `crate::sync::SyncRequest` /
+    /// `SyncResponse`, and they are untouched.
+    BlockReceived {
+        block: Block,
+        source: PeerId,
+    },
+    /// BFT proposal received, and the peer it arrived from.
+    BftProposalReceived {
+        data: Vec<u8>,
+        source: PeerId,
+    },
+    /// BFT prevote received, and the peer it arrived from.
+    BftPrevoteReceived {
+        data: Vec<u8>,
+        source: PeerId,
+    },
+    /// BFT precommit received, and the peer it arrived from.
+    BftPrecommitReceived {
+        data: Vec<u8>,
+        source: PeerId,
+    },
     /// Sync status request received (node should respond via SendSyncStatusResponse command)
     SyncStatusRequest {
         request_id: SyncRequestId,
@@ -929,7 +955,9 @@ impl NetworkService {
                         block.height(),
                         source
                     );
-                    let _ = self.event_tx.send(NetworkEvent::BlockReceived(block));
+                    let _ = self
+                        .event_tx
+                        .send(NetworkEvent::BlockReceived { block, source });
                 }
                 Err(e) => {
                     warn!("Failed to decode block from {}: {}", source, e);
@@ -943,21 +971,30 @@ impl NetworkService {
                 return;
             }
             debug!("Received BFT proposal from {}", source);
-            let _ = self.event_tx.send(NetworkEvent::BftProposalReceived(data.to_vec()));
+            let _ = self.event_tx.send(NetworkEvent::BftProposalReceived {
+                data: data.to_vec(),
+                source,
+            });
         } else if topic_str.contains("bft/prevote") {
             if !self.rate_limiter.check_rate_limit(source, MessageType::BftMessage) {
                 debug!("Rate limited BFT prevote from {}", source);
                 return;
             }
             debug!("Received BFT prevote from {}", source);
-            let _ = self.event_tx.send(NetworkEvent::BftPrevoteReceived(data.to_vec()));
+            let _ = self.event_tx.send(NetworkEvent::BftPrevoteReceived {
+                data: data.to_vec(),
+                source,
+            });
         } else if topic_str.contains("bft/precommit") {
             if !self.rate_limiter.check_rate_limit(source, MessageType::BftMessage) {
                 debug!("Rate limited BFT precommit from {}", source);
                 return;
             }
             debug!("Received BFT precommit from {}", source);
-            let _ = self.event_tx.send(NetworkEvent::BftPrecommitReceived(data.to_vec()));
+            let _ = self.event_tx.send(NetworkEvent::BftPrecommitReceived {
+                data: data.to_vec(),
+                source,
+            });
         }
     }
 

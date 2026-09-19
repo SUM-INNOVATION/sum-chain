@@ -91,6 +91,43 @@ pub enum GenesisError {
     /// rejected at genesis load (not an activation height — declared dormant).
     #[error("invalid beacon_schedule: {reason}")]
     InvalidBeaconSchedule { reason: &'static str },
+
+    /// A remediation gate is open while
+    /// `peer_protocol_declaration_required_from_height` is `None`.
+    ///
+    /// `None` on that field is not "off" — it is phase one, in which a peer
+    /// that declares no protocol digest is admitted to consensus. That is the
+    /// correct answer only while every node enforces the same rules. Opening a
+    /// remediation gate ends that, and leaves an undeclared peer
+    /// indistinguishable from one running the pre-remediation binary: it may
+    /// still propose blocks this node must reject, and still move this node's
+    /// fork choice before it does.
+    #[error(
+        "{gate} is Some({height}) while peer_protocol_declaration_required_from_height \
+         is None. That gate changes what a block means from height {height}, and \
+         `None` does not mean 'enforce always' — it means a peer that declares no \
+         protocol digest is admitted to consensus forever. Above {height} such a peer \
+         is indistinguishable from one running the unremediated binary. Set \
+         peer_protocol_declaration_required_from_height to a height at or below {height}"
+    )]
+    RemediationGateWithoutPeerProtocolEnforcement { gate: &'static str, height: u64 },
+
+    /// Enforcement begins LATER than the first remediation activation, leaving
+    /// a band of heights in which the rules have already diverged and an
+    /// undeclared peer is still admitted.
+    #[error(
+        "peer_protocol_declaration_required_from_height is Some({enforcement}), later \
+         than {gate} Some({height}). Heights {height}..{enforcement} would execute the \
+         remediated rules while still admitting peers that have declared nothing about \
+         which rules THEY execute — which is the one band in which an undeclared peer \
+         and an incompatible one cannot be told apart. Enforcement must be at or below \
+         the first remediation activation"
+    )]
+    PeerProtocolEnforcementAfterRemediationGate {
+        enforcement: u64,
+        gate: &'static str,
+        height: u64,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, GenesisError>;
@@ -1274,6 +1311,59 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub subsystem_no_op_receipt_enabled_from_height: Option<u64>,
+
+    /// From this height, a peer must have DECLARED a protocol digest equal to
+    /// ours before it may take part in consensus.
+    ///
+    /// # The gap this closes
+    ///
+    /// `sumchain_state::protocol_digest` refuses a peer that declares a
+    /// DIFFERENT digest and admits a peer that declares NOTHING. Admitting
+    /// silence is what makes the mechanism deployable: every validator running
+    /// today predates the handshake, answers it with an inbound failure, and
+    /// must stay exactly as usable as it is now.
+    ///
+    /// It stops being correct the moment a rule actually changes. Above the
+    /// first remediation activation, an undeclared peer is indistinguishable
+    /// from an incompatible one — both are nodes this binary cannot show it
+    /// agrees with — and the difference between them now decides whether a
+    /// block is valid.
+    ///
+    /// So the policy has two phases and this field is the boundary:
+    ///
+    /// | height | undeclared peer |
+    /// |---|---|
+    /// | below this, or this field unset | may participate, exactly as today |
+    /// | at or above this | may not propose, vote, or move fork choice |
+    ///
+    /// A peer that declared a MATCHING digest participates in both phases; a
+    /// peer that declared a DIFFERENT one participates in neither. Only the
+    /// undeclared peer's treatment depends on this height.
+    ///
+    /// # Why it lives here rather than in the binary
+    ///
+    /// Two nodes holding different values partition the network: the one with
+    /// the lower height refuses peers the other still talks to. That is the
+    /// definition of a value that must be coordinated and comparable, which is
+    /// what `ChainParams` plus [`ChainParams::activation_heights`] is for — the
+    /// field is folded into the activation digest and therefore into the
+    /// protocol digest, so a disagreement about WHEN to enforce is itself
+    /// reported by the mechanism it configures.
+    ///
+    /// # The ordering constraint, enforced at load
+    ///
+    /// It must be at or below the first activation of any of the twenty
+    /// [`REMEDIATION_GATES`], and it must be SET if any of them is:
+    /// enforcement that begins after the rules changed protects nothing, and
+    /// [`Genesis::validate`] refuses both shapes rather than leaving an
+    /// operator to notice.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this field existed carries.
+    /// `None` means phase one forever: no peer is ever refused for silence, so
+    /// a node built from this commit peers exactly as a node built before it.
+    #[serde(default)]
+    pub peer_protocol_declaration_required_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -1625,6 +1715,8 @@ impl Default for ChainParams {
             nft_update_path_parity_enabled_from_height: None,
             // Production-safe default: an operation that writes nothing stops reporting success — dormant.
             subsystem_no_op_receipt_enabled_from_height: None,
+            // Production-safe default: phase one — silence is never a refusal — dormant.
+            peer_protocol_declaration_required_from_height: None,
         }
     }
 }
@@ -1726,6 +1818,52 @@ impl ChainParams {
                 return Err(GenesisError::JournalGateAfterAccountRoot {
                     journal,
                     account_root,
+                })
+            }
+            (Some(_), Some(_)) => {}
+        }
+
+        // ── the enforcement-before-divergence ordering, enforced at load ────
+        //
+        //     peer_protocol_declaration_required_from_height
+        //         <= min(height of any open REMEDIATION_GATES)
+        //
+        // Below the first remediation activation every node — old binary, new
+        // binary, declared, silent — executes the same rules, so admitting a
+        // peer that has declared nothing costs nothing, and that is exactly why
+        // the protocol-digest handshake was deployable in the first place.
+        //
+        // At that height the rules diverge, and silence stops being harmless:
+        // an undeclared peer is now indistinguishable from one running the
+        // unremediated binary, and the only two things this node can say about
+        // it are both false. So enforcement must have begun by then.
+        //
+        // Both directions are refused, because both produce the same band of
+        // heights in which the guarantee is absent: enforcement set LATER than
+        // the gate leaves an explicit window, and enforcement left `None`
+        // leaves an unbounded one. `None` on this field does not mean "always
+        // enforce" — it means phase one forever.
+        //
+        // Both `None` is legal and is the production default: no remediation
+        // gate open, no requirement.
+        //
+        // A LOAD-time check, so the pair is refused before a block executes
+        // rather than at the activation height itself.
+        match (
+            self.peer_protocol_declaration_required_from_height,
+            self.remediation_activation_floor(),
+        ) {
+            (_, None) => {}
+            (None, Some((gate, height))) => {
+                return Err(
+                    GenesisError::RemediationGateWithoutPeerProtocolEnforcement { gate, height },
+                )
+            }
+            (Some(enforcement), Some((gate, height))) if enforcement > height => {
+                return Err(GenesisError::PeerProtocolEnforcementAfterRemediationGate {
+                    enforcement,
+                    gate,
+                    height,
                 })
             }
             (Some(_), Some(_)) => {}
@@ -1979,9 +2117,87 @@ impl ChainParams {
                 "subsystem_no_op_receipt_enabled_from_height",
                 self.subsystem_no_op_receipt_enabled_from_height,
             ),
+            (
+                "peer_protocol_declaration_required_from_height",
+                self.peer_protocol_declaration_required_from_height,
+            ),
         ]
     }
+
+    /// The earliest height at which any of the twenty [`REMEDIATION_GATES`]
+    /// changes behaviour, or `None` if every one of them is dormant.
+    ///
+    /// This is the deadline that
+    /// [`ChainParams::peer_protocol_declaration_required_from_height`] must
+    /// meet. Below it every node — declared, undeclared, old, new — executes
+    /// the same rules, so admitting an undeclared peer costs nothing. At it,
+    /// the rules diverge, and an undeclared peer becomes indistinguishable from
+    /// one enforcing the other set.
+    ///
+    /// Looked up by NAME through [`ChainParams::activation_heights`] rather
+    /// than by reading twenty fields again: the names are already exhaustive by
+    /// test there, so a gate renamed on one side and not the other fails
+    /// loudly here instead of silently dropping out of the floor.
+    pub fn remediation_activation_floor(&self) -> Option<(&'static str, u64)> {
+        let heights = self.activation_heights();
+        let mut floor: Option<(&'static str, u64)> = None;
+        for gate in REMEDIATION_GATES {
+            let (name, height) = heights
+                .iter()
+                .find(|(n, _)| n == gate)
+                .copied()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "remediation gate `{gate}` is not covered by                          activation_heights(); the two lists have drifted and                          the enforcement deadline would silently skip it"
+                    )
+                });
+            if let Some(h) = height {
+                if floor.is_none_or(|(_, best)| h < best) {
+                    floor = Some((name, h));
+                }
+            }
+        }
+        floor
+    }
 }
+
+/// The twenty remediation gates, by field name.
+///
+/// Every one of them is dormant in `ChainParams::default()` and each opens a
+/// rule change that a node built before it cannot reproduce. They are named
+/// here — rather than only in the accessors that read them — because
+/// [`ChainParams::peer_protocol_declaration_required_from_height`] has to be at
+/// or below the first of them, and "the first of them" is not a question any
+/// other list in this file can answer: `activation_heights()` also covers gates
+/// that a live chain may legitimately have passed long ago.
+///
+/// Pinned against the accessor table in
+/// `crates/state/tests/remediation_gates.rs`, which is the list the executors
+/// actually read. A gate added there and not here would be a rule change this
+/// deadline does not see; a merge that dropped one from either side is caught
+/// by the same test.
+pub const REMEDIATION_GATES: &[&str] = &[
+    "nft_receipt_failure_enabled_from_height",
+    "docclass_stake_escrow_enabled_from_height",
+    "docclass_subject_index_split_enabled_from_height",
+    "docclass_revocation_standing_enabled_from_height",
+    "healthcare_authorization_enabled_from_height",
+    "legal_authorization_enabled_from_height",
+    "finance_authorization_enabled_from_height",
+    "employment_authorization_enabled_from_height",
+    "property_authorization_enabled_from_height",
+    "tax_authorization_enabled_from_height",
+    "subsystem_block_timestamp_enabled_from_height",
+    "subsystem_tx_index_enabled_from_height",
+    "subsystem_allocation_bound_enabled_from_height",
+    "tax_proof_lifecycle_enabled_from_height",
+    "nft_token_authority_enabled_from_height",
+    "agreement_signature_integrity_enabled_from_height",
+    "healthcare_state_precondition_enabled_from_height",
+    "subsystem_proof_presence_enabled_from_height",
+    "nft_update_path_parity_enabled_from_height",
+    "subsystem_no_op_receipt_enabled_from_height",
+];
 
 /// What changed between the activation parameters a database was last started
 /// under and the ones it is being started under now.

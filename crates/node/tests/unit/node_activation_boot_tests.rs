@@ -288,6 +288,13 @@ fn stranger_fill(stranger: &KeyPair, n: u64) -> SignedTransaction {
 fn genesis_for(validator: &KeyPair, funded: &[&KeyPair], auth_from: Option<u64>) -> Genesis {
     let mut params = ChainParams::with_v2_enabled();
     params.healthcare_authorization_enabled_from_height = auth_from;
+    // Opening a remediation gate obliges the genesis to say from when an
+    // undeclared peer stops being admitted to consensus: above the gate the
+    // rules have diverged, so silence no longer distinguishes a peer running
+    // this binary from one running the unremediated one. `Genesis::validate`
+    // refuses the pair otherwise. Here enforcement begins exactly where the
+    // rules do, which is the canonical shape of the constraint.
+    params.peer_protocol_declaration_required_from_height = auth_from;
     params.application_journal_enabled_from_height = Some(JOURNAL_BOUNDARY);
     params.finality_depth = 1_000_000;
     let mut alloc = std::collections::HashMap::new();
@@ -562,6 +569,12 @@ async fn a_node_restarting_across_an_activation_boundary_reaches_the_same_state(
     // (b) Opening a gate RETROACTIVELY, below a head that already exists.
     let mut retro_params = genesis.params.clone();
     retro_params.nft_receipt_failure_enabled_from_height = Some(1);
+    // Moved down with the gate so the genesis stays internally consistent and
+    // it is the BOOT guard below that refuses it. `Genesis::validate` would
+    // otherwise refuse this pair first, for the unrelated reason that
+    // enforcement would begin five blocks after the rules diverged — a true
+    // complaint, and not the one this case is about.
+    retro_params.peer_protocol_declaration_required_from_height = Some(1);
     let retro = Genesis::new(
         CHAIN_ID,
         0,
