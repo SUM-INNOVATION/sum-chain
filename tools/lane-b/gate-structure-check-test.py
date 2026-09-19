@@ -38,6 +38,7 @@ in a temp directory, which is removed on the way out.
 """
 from __future__ import annotations
 
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -51,7 +52,24 @@ GENESIS = "crates/genesis/src/lib.rs"
 LITERAL = "scripts/src/setup_local_testnet.rs"
 WIRING = "crates/state/tests/remediation_gates.rs"
 LIMITS = "crates/state/src/protocol_digest.rs"
-SOURCES = [GENESIS, LITERAL, WIRING, LIMITS]
+RPC_TYPES = "crates/rpc/src/types.rs"
+RPC_SERVER = "crates/rpc/src/server.rs"
+DIGEST_TEST = "crates/genesis/tests/activation_digest.rs"
+PEER_TEST = "crates/genesis/tests/peer_protocol_enforcement.rs"
+
+# Every file any registered structure lives in. If a structure is added to the
+# registry in a file that is not staged here, its case would run against a
+# missing file -- so `test_registry_files_are_staged` below refuses that.
+SOURCES = [
+    GENESIS,
+    LITERAL,
+    WIRING,
+    LIMITS,
+    RPC_TYPES,
+    RPC_SERVER,
+    DIGEST_TEST,
+    PEER_TEST,
+]
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +239,32 @@ def m_file_missing(root: Path) -> None:
     (root / LITERAL).unlink()
 
 
+def m_count_mismatch(root: Path) -> None:
+    """The list keeps all thirty entries; the number pinning it says 29.
+
+    Nothing in the list is malformed and no gate is missing, so every
+    shape check passes. Only the registry's `count` relation notices that the
+    assertion and the thing it asserts about no longer agree.
+    """
+    edit(root, WIRING, "assert_eq!(WIRING.len(), 30,", "assert_eq!(WIRING.len(), 29,")
+
+
+def m_unguarded_mirror_drift(root: Path) -> None:
+    """A gate quietly dropped from the RPC wire type.
+
+    Before this registry nothing in the tree related `ChainParamsInfo` to
+    `ChainParams`: no test compared the two field sets, so a gate lost from the
+    wire type in a merge was invisible until an operator noticed the field had
+    stopped appearing. The struct and its construction site must now agree.
+    """
+    edit(
+        root,
+        RPC_TYPES,
+        "    pub governance_enabled_from_height: Option<u64>,\n",
+        "",
+    )
+
+
 CASES = [
     # (case name, mutate, expect_exit_nonzero, structure fragment, failure class)
     ("clean", m_clean, False, None, None),
@@ -236,6 +280,14 @@ CASES = [
     ("empty structure", m_empty_structure, True, "REMEDIATION_GATES", "empty"),
     ("mismatched name", m_mismatched_name, True, "activation_heights", "mismatched-name"),
     ("missing file", m_file_missing, True, "local testnet", "file-missing"),
+    ("count mismatch", m_count_mismatch, True, "WIRING count", "count-mismatch"),
+    (
+        "unguarded wire mirror drift",
+        m_unguarded_mirror_drift,
+        True,
+        "ChainParamsInfo construction",
+        "set-mismatch",
+    ),
 ]
 
 
@@ -251,6 +303,29 @@ def main() -> int:
         if not (tree / rel).is_file():
             print(f"FATAL: {tree / rel} not found; give the tree root as argv[1]")
             return 2
+
+    # The battery's own "no longer checked" guard. Each case copies only
+    # SOURCES into its sandbox, so a structure registered in a file this list
+    # forgot would be checked against a file that is not there -- every case
+    # would fail for `file-missing` and the clean case would fail outright.
+    # Rather than let that be debugged from a confusing failure, say it here.
+    spec = importlib.util.spec_from_file_location("gate_structure_check", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    # Must be in sys.modules before exec: on 3.9 `@dataclass` resolves its
+    # annotations through sys.modules[cls.__module__] and dies otherwise.
+    sys.modules[spec.name] = checker
+    spec.loader.exec_module(checker)
+    unstaged = sorted({s.path for s in checker.REGISTRY} - set(SOURCES))
+    if unstaged:
+        print(
+            "FATAL: these files hold registered structures but are not in "
+            f"SOURCES, so no case would really test them: {unstaged}"
+        )
+        return 2
+    print(
+        f"battery covers {len(checker.REGISTRY)} registered structures "
+        f"across {len(SOURCES)} files\n"
+    )
 
     passed, failed = 0, 0
     with tempfile.TemporaryDirectory(prefix="gate-structure-battery-") as tmp:

@@ -54,13 +54,30 @@ report a verdict, and the engine asserts at the end that it produced exactly
 
 # The structures, and their authority
 
-`ChainParams`'s field declarations are the authority for the gate set;
-`activation_heights` and the local-testnet literal must EQUAL it, and
-`GATES_PREDATING_ACTIVATION_RECORDING` (a closed historical list) must be a
-subset of it. `WIRING` is the authority for the remediation subset; the dormant
-list and `REMEDIATION_GATES` must equal it. `consensus_limits` is not a gate
-list at all -- it is registered because it has the same fused-tuple failure
-mode, and the registry is general enough to hold it.
+`ChainParams`'s field declarations are the AUTHORITY for the gate set.
+`activation_heights`, the `Default` impl and the local-testnet literal must
+EQUAL it. `GATES_PREDATING_ACTIVATION_RECORDING` is a closed historical list
+and must be a SUBSET of it -- never equal, because a new gate must not appear
+on it. `WIRING` is the authority for the remediation subset; the dormant list
+and `REMEDIATION_GATES` must equal it.
+
+`ChainParamsInfo` (the RPC wire type, and its construction site) is a
+deliberate subset: the gates an operator can see over JSON-RPC. Until it was
+registered here NOTHING in the tree related it to `ChainParams` -- no test
+compared the two field sets -- so a gate dropped from the wire type in a merge
+was invisible. Subset is the strongest true statement about it: adding a gate
+is a choice, but every name on it must be a real field, and the struct and its
+construction site must agree with each other exactly.
+
+The `count` structures are hardcoded numbers -- `assert_eq!(WIRING.len(), 30)`
+and friends -- that pin the lists above. They are what stops those lists
+quietly shrinking, but only while the number still matches, and a number is the
+easiest thing in a merge to leave behind. Registering them checks each count
+against the list it counts rather than against memory.
+
+`consensus_limits` is not a gate list at all -- its entries are consensus
+constant names. It is registered because it has the identical fused-tuple
+failure mode, and because the registry should not be a gate-only club.
 
 Usage:  gate-structure-check.py [TREE_ROOT]
 Exit 0 iff every registered structure is present, well formed and in the
@@ -95,14 +112,20 @@ class Structure:
               "scan": the region is a larger block (a struct, a struct literal)
                 in which entries are found by pattern; every occurrence of
                 `token` in it must lie inside a well-formed `entry`.
+              "count": not a list at all -- a HARDCODED COUNT of some other
+                registered structure, written into an assertion. `locator`
+                captures the literal in a group named "count", there is no
+                region, and `expect` must be ("count", other).
     entry     regex for one well-formed entry. Group "name" is the entry's
               gate/limit name. Group "field" is the value it reads, when the
               shape has one; it must agree with "name".
     token     the thing whose every occurrence must be covered by an entry.
               Defaults to GATE; None disables coverage (only sensible in
               "elements" mode, where full-coverage splitting already holds).
-    expect    ("eq", other) | ("subset", other) | ("free",) -- the relation this
-              structure's name set must bear to another registered structure's.
+    expect    ("eq", other) | ("subset", other) | ("count", other) | ("free",)
+              -- the relation this structure must bear to another registered
+              structure: same name set, subset of it, or (for "count") a
+              literal equal to its number of entries.
     minimum   a floor on the entry count. A registered structure that yields
               fewer FAILS: finding nothing is not a pass.
     """
@@ -141,7 +164,26 @@ REGISTRY: list[Structure] = [
             r"Vec<\(&'static str, Option<u64>\)> \{\s*\n\s*vec!\["
         ),
         mode="elements",
-        entry=rf"\(\s*\"(?P<name>{GATE})\",\s*self\.(?P<field>[a-z_0-9]+),?\s*\)",
+        # `self\s*\.` and not `self\.`: rustfmt wraps a long field access
+        # onto the next line as `self\n    .field`, and an entry pattern that
+        # cannot see that reports a real entry as malformed. A registry
+        # pattern that is too strict cries wolf; one that is too loose misses
+        # the splice. It has to match exactly the shapes rustfmt can produce.
+        entry=rf"\(\s*\"(?P<name>{GATE})\",\s*self\s*\.\s*(?P<field>[a-z_0-9]+),?\s*\)",
+        expect=("eq", "genesis::ChainParams gate fields"),
+        minimum=40,
+    ),
+    Structure(
+        name="genesis::impl Default for ChainParams",
+        path="crates/genesis/src/lib.rs",
+        locator=r"impl Default for ChainParams \{\n    fn default\(\) -> Self \{\n        Self \{",
+        mode="scan",
+        entry=rf"(?P<name>{GATE}): (?:None|Some\(\d+\)),",
+        # The compiler already refuses a MISSING field here (E0063), so this
+        # cannot silently lose a gate. It is registered for the other half: a
+        # gate whose default stops being a plain None/Some literal, and to keep
+        # the registry honest about being the whole list rather than the
+        # interesting parts of it.
         expect=("eq", "genesis::ChainParams gate fields"),
         minimum=40,
     ),
@@ -193,7 +235,7 @@ REGISTRY: list[Structure] = [
         path="crates/state/tests/remediation_gates.rs",
         locator=r"let dormant: Vec<\(&str, Option<u64>\)> = vec!\[",
         mode="elements",
-        entry=rf"\(\s*\"(?P<name>{GATE})\",\s*p\.(?P<field>[a-z_0-9]+),?\s*\)",
+        entry=rf"\(\s*\"(?P<name>{GATE})\",\s*p\s*\.\s*(?P<field>[a-z_0-9]+),?\s*\)",
         expect=("eq", "state_tests::WIRING"),
         minimum=15,
     ),
@@ -218,6 +260,79 @@ REGISTRY: list[Structure] = [
         minimum=5,
         token=None,
         note="not gate-derived; registered for the shared fused-tuple failure mode",
+    ),
+    # -- The RPC wire mirror. A DELIBERATE SUBSET of the gate set (the gates an
+    #    operator can see over JSON-RPC), hand-maintained in two places, and
+    #    until now related to `ChainParams` by nothing at all: no test compared
+    #    the two, so a gate dropped from the wire type in a merge was invisible.
+    #    Registered as a subset, which is the strongest true statement: adding a
+    #    gate here is a choice, but every name here must still be a real field,
+    #    and the struct and its construction site must agree.
+    Structure(
+        name="rpc::ChainParamsInfo wire fields",
+        path="crates/rpc/src/types.rs",
+        locator=r"pub struct ChainParamsInfo \{",
+        mode="scan",
+        entry=rf"pub (?P<name>{GATE}): Option<u64>,",
+        expect=("subset", "genesis::ChainParams gate fields"),
+        minimum=5,
+    ),
+    Structure(
+        name="rpc::ChainParamsInfo construction",
+        path="crates/rpc/src/server.rs",
+        locator=r"Ok\(ChainParamsInfo \{",
+        mode="scan",
+        entry=rf"(?P<name>{GATE}): p\s*\.\s*(?P<field>[a-z_0-9]+),",
+        expect=("eq", "rpc::ChainParamsInfo wire fields"),
+        minimum=5,
+    ),
+    # -- Hardcoded counts. Each is an absolute number written into an assertion
+    #    about a list above. They are the reason those lists cannot quietly
+    #    shrink -- but only while the number still matches, and a number is the
+    #    easiest thing in a merge to leave behind. Pinning them to the registry
+    #    means the count is checked against the list rather than against memory.
+    Structure(
+        name="genesis_tests::GATES_PREDATING count",
+        path="crates/genesis/tests/activation_digest.rs",
+        locator=(
+            r"sumchain_genesis::GATES_PREDATING_ACTIVATION_RECORDING\.len\(\),"
+            r"\s*\n\s*(?P<count>\d+),"
+        ),
+        mode="count",
+        entry="",
+        expect=("count", "genesis::GATES_PREDATING_ACTIVATION_RECORDING"),
+        minimum=0,
+        token=None,
+    ),
+    Structure(
+        name="genesis_tests::REMEDIATION_GATES count",
+        path="crates/genesis/tests/peer_protocol_enforcement.rs",
+        locator=r"\n        REMEDIATION_GATES\.len\(\),\s*\n\s*(?P<count>\d+),",
+        mode="count",
+        entry="",
+        expect=("count", "genesis::REMEDIATION_GATES"),
+        minimum=0,
+        token=None,
+    ),
+    Structure(
+        name="state_tests::WIRING count",
+        path="crates/state/tests/remediation_gates.rs",
+        locator=r"assert_eq!\(WIRING\.len\(\), (?P<count>\d+),",
+        mode="count",
+        entry="",
+        expect=("count", "state_tests::WIRING"),
+        minimum=0,
+        token=None,
+    ),
+    Structure(
+        name="state_tests::distinct accessor fields count",
+        path="crates/state/tests/remediation_gates.rs",
+        locator=r"\n        fields\.len\(\),\s*\n\s*(?P<count>\d+),",
+        mode="count",
+        entry="",
+        expect=("count", "state_tests::WIRING"),
+        minimum=0,
+        token=None,
     ),
 ]
 
@@ -332,6 +447,7 @@ def snippet(text: str, limit: int = 90) -> str:
 class Verdict:
     structure: str
     names: list[str] = field(default_factory=list)
+    count: int | None = None  # "count" mode only: the literal found in source
     problems: list[tuple[str, str]] = field(default_factory=list)  # (class, detail)
 
     @property
@@ -370,6 +486,13 @@ def inspect(st: Structure, root: Path) -> Verdict:
         return v
 
     head = hits[0]
+    if st.mode == "count":
+        # No region and no entries: the whole structure is one literal, and the
+        # locator having matched exactly once is already the proof it is still
+        # there. The comparison happens in the relation phase.
+        v.count = int(head.group("count"))
+        return v
+
     open_at = head.end() - 1
     if open_at < head.start() or skeleton[open_at] not in CLOSE:
         v.fail(
@@ -461,7 +584,7 @@ def run(root: Path, out=sys.stdout) -> int:
         print("REGISTRY ERROR: duplicate structure names", file=out)
         return 2
     for st in REGISTRY:
-        if st.expect[0] in ("eq", "subset") and st.expect[1] not in names:
+        if st.expect[0] in ("eq", "subset", "count") and st.expect[1] not in names:
             print(
                 f"REGISTRY ERROR: {st.name} expects {st.expect[0]} against "
                 f"unregistered {st.expect[1]!r}",
@@ -487,6 +610,15 @@ def run(root: Path, out=sys.stdout) -> int:
                 + ("its own shape failed" if not mine.ok else "the reference's shape failed"),
             )
             continue
+        if rel == "count":
+            if mine.count != len(other.names):
+                mine.fail(
+                    "count-mismatch",
+                    f"the source says {mine.count}, but {st.expect[1]!r} has "
+                    f"{len(other.names)} entries -- the list and the number "
+                    "that is supposed to pin it have drifted apart",
+                )
+            continue
         a, b = set(mine.names), set(other.names)
         if rel == "eq" and a != b:
             mine.fail(
@@ -503,10 +635,8 @@ def run(root: Path, out=sys.stdout) -> int:
     for st in REGISTRY:
         v = verdicts[st.name]
         rel = "" if st.expect[0] == "free" else f"  [{st.expect[0]} {st.expect[1]}]"
-        print(
-            f"  {'PASS' if v.ok else 'FAIL'}  {st.name}  ({len(v.names)} entries){rel}",
-            file=out,
-        )
+        body = f"says {v.count}" if st.mode == "count" else f"{len(v.names)} entries"
+        print(f"  {'PASS' if v.ok else 'FAIL'}  {st.name}  ({body}){rel}", file=out)
         for cls, detail in v.problems:
             print(f"          {cls}: {detail}", file=out)
 
@@ -523,7 +653,9 @@ def run(root: Path, out=sys.stdout) -> int:
     print(
         "\n"
         + " | ".join(
-            f"{s.name.split('::')[-1]} {len(verdicts[s.name].names)}" for s in REGISTRY
+f"{s.name.split('::')[-1]} "
+            f"{verdicts[s.name].count if s.mode == 'count' else len(verdicts[s.name].names)}"
+            for s in REGISTRY
         ),
         file=out,
     )
