@@ -176,6 +176,21 @@ const WIRING: &[(&str, &str, &str)] = &[
         "issuer_stake_requirement_activation",
         "docclass_issuer_stake_requirement_enabled_from_height",
     ),
+    (
+        "nft_executor.rs",
+        "charged_receipt_activation",
+        "nft_charged_receipt_enabled_from_height",
+    ),
+    (
+        "nft_executor.rs",
+        "index_symmetry_activation",
+        "nft_index_symmetry_enabled_from_height",
+    ),
+    (
+        "nft_executor.rs",
+        "collection_id_nonce_activation",
+        "nft_collection_id_nonce_enabled_from_height",
+    ),
 ];
 
 fn source(file: &str) -> String {
@@ -280,14 +295,14 @@ fn every_remediation_gate_reads_the_field_it_names() {
 /// while the behavioural suite for that subsystem still reported every test
 /// passing.
 #[test]
-fn the_twenty_five_gates_are_twenty_five_distinct_fields() {
+fn the_twenty_eight_gates_are_twenty_eight_distinct_fields() {
     let fields: BTreeSet<&str> = WIRING.iter().map(|(_, _, f)| *f).collect();
     assert_eq!(
         fields.len(),
-        25,
-        "expected twenty-five distinct fields: {fields:?}"
+        28,
+        "expected twenty-eight distinct fields: {fields:?}"
     );
-    assert_eq!(WIRING.len(), 25, "expected twenty-five accessors");
+    assert_eq!(WIRING.len(), 28, "expected twenty-eight accessors");
 }
 
 /// Wiring a gate is not opening it: the release configuration is unchanged.
@@ -401,6 +416,19 @@ fn every_remediation_gate_is_dormant_by_default() {
             "docclass_issuer_stake_requirement_enabled_from_height",
             p.docclass_issuer_stake_requirement_enabled_from_height,
         ),
+        (
+            "nft_charged_receipt_enabled_from_height",
+            p.nft_charged_receipt_enabled_from_height,
+        ),
+        (
+            "nft_index_symmetry_enabled_from_height",
+            p.nft_index_symmetry_enabled_from_height,
+        ),
+        (
+            "nft_collection_id_nonce_enabled_from_height",
+            p.nft_collection_id_nonce_enabled_from_height,
+        ),
+    
     ];
     assert_eq!(dormant.len(), WIRING.len());
     for (name, value) in dormant {
@@ -498,5 +526,11 @@ fn the_genesis_gate_list_matches_the_accessor_table() {
          reads them; either a gate was renamed on one side only, or the \
          enforcement deadline is being set by a gate that does nothing: {stale:?}"
     );
-    assert_eq!(in_genesis.len(), 20);
+    // Both sides are checked as SETS above; this pins the SIZE so that two
+    // branches each adding gates cannot leave the two lists agreeing on a
+    // smaller union than either intended. That is not hypothetical: merging two
+    // such branches lost three attributes, three doc blocks and two
+    // activation_heights entries, and left this list at 20 against a table of
+    // 28, all of which compiled.
+    assert_eq!(in_genesis.len(), 28);
 }

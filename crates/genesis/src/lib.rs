@@ -1018,6 +1018,13 @@ pub struct ChainParams {
     /// There is no configuration in which an operator wants one and not the
     /// other.
     ///
+    /// Agreement's two accumulating indexes (ACTIVATION-AUDIT row AL-5) are a
+    /// THIRD reader of the same field, added for the same reason: the party
+    /// index and the executor index decode, append to and re-encode a whole
+    /// stored row before `view.put` accounts for a byte, which is the rule
+    /// above word for word, and an attacker refused by the DocClass or NFT
+    /// bound moves to the Agreement one for the price of one `min_fee`.
+    ///
     /// Production-safe default `None`, which is what an absent field resolves
     /// to and what every genesis written before this gate existed carries.
     /// `None` closes the gate, and a closed gate means a node executes exactly
@@ -1401,6 +1408,26 @@ pub struct ChainParams {
     /// and left out: a one-way narrow with no granting counterpart is a
     /// trapdoor, and offering it would be a new governance surface rather than
     /// a repair.
+    /// An NFT receipt reports the fee the NFT executor actually took.
+    ///
+    /// ACTIVATION-AUDIT row OV-9. `NftExecutor::execute_ungated` calls
+    /// `deduct_fee` BEFORE the dispatch match, so every guard below it refuses
+    /// a transaction whose fee is already spent and whose nonce has already
+    /// advanced. The receipt the block executor writes for that refusal says
+    /// `fee_paid: 0`. The state and the receipt therefore disagree on every
+    /// failed NFT transaction: the balance moved, the proposer was credited,
+    /// and the receipt denies it.
+    ///
+    /// At and above the gate a failed NFT receipt carries the fee that was
+    /// taken. It is still `0` for the one refusal that never reached
+    /// `deduct_fee`'s writes -- an insufficient balance -- because there the
+    /// receipt's zero is true.
+    ///
+    /// Its own height, not `nft_receipt_failure_enabled_from_height`'s. That
+    /// gate decides whether a block EXISTS; this one changes a number in a
+    /// receipt of a block that exists either way, and the receipts root is in
+    /// the header, so it is a consensus change with a strictly smaller blast
+    /// radius. An operator must be able to sequence them.
     ///
     /// Production-safe default `None`, which is what an absent field resolves
     /// to and what every genesis written before this gate existed carries.
@@ -1448,6 +1475,55 @@ pub struct ChainParams {
     /// accept either width and order by the key, under which a legacy record at
     /// a height sorts before a sequenced one at the same height — which is the
     /// order they were written in.
+    /// An NFT receipt reports the fee the NFT executor actually took.
+    ///
+    /// ACTIVATION-AUDIT row OV-9. `NftExecutor::execute_ungated` calls
+    /// `deduct_fee` BEFORE the dispatch match, so every guard below it refuses
+    /// a transaction whose fee is already spent and whose nonce has already
+    /// advanced. The receipt the block executor writes for that refusal says
+    /// `fee_paid: 0`. The state and the receipt therefore disagree on every
+    /// failed NFT transaction: the balance moved, the proposer was credited,
+    /// and the receipt denies it.
+    ///
+    /// At and above the gate a failed NFT receipt carries the fee that was
+    /// taken. It is still `0` for the one refusal that never reached
+    /// `deduct_fee`'s writes -- an insufficient balance -- because there the
+    /// receipt's zero is true.
+    ///
+    /// Its own height, not `nft_receipt_failure_enabled_from_height`'s. That
+    /// gate decides whether a block EXISTS; this one changes a number in a
+    /// receipt of a block that exists either way, and the receipts root is in
+    /// the header, so it is a consensus change with a strictly smaller blast
+    /// radius. An operator must be able to sequence them.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub nft_charged_receipt_enabled_from_height: Option<u64>,
+
+    /// The two NFT token indexes empty the same way.
+    ///
+    /// ACTIVATION-AUDIT row OV-15. Emptying an owner's list DELETES the row;
+    /// emptying a collection's list WRITES an empty list. Two families that
+    /// hold the same kind of value disagree about what "no entries" looks like,
+    /// so a node reasoning about state by row presence -- a pruner, a
+    /// diff, an archive comparison -- gets a different answer from each, and
+    /// the empty rows accumulate one per collection ever emptied and are never
+    /// collected.
+    ///
+    /// At and above the gate emptying a collection's list deletes its row, as
+    /// the owner index already does.
+    ///
+    /// Its own height rather than the receipt gates': this changes which ROWS
+    /// exist, so it moves the state root for a transaction whose receipt is
+    /// unchanged, and it is the only one of the NFT gates that does.
     ///
     /// Production-safe default `None`, which is what an absent field resolves
     /// to and what every genesis written before this gate existed carries.
@@ -1549,6 +1625,58 @@ pub struct ChainParams {
     /// here would make this gate's repair depend silently on another gate's
     /// height -- which is the failure mode of a gate that ships looking
     /// activated and is not.
+    /// The two NFT token indexes empty the same way.
+    ///
+    /// ACTIVATION-AUDIT row OV-15. Emptying an owner's list DELETES the row;
+    /// emptying a collection's list WRITES an empty list. Two families that
+    /// hold the same kind of value disagree about what "no entries" looks like,
+    /// so a node reasoning about state by row presence -- a pruner, a
+    /// diff, an archive comparison -- gets a different answer from each, and
+    /// the empty rows accumulate one per collection ever emptied and are never
+    /// collected.
+    ///
+    /// At and above the gate emptying a collection's list deletes its row, as
+    /// the owner index already does.
+    ///
+    /// Its own height rather than the receipt gates': this changes which ROWS
+    /// exist, so it moves the state root for a transaction whose receipt is
+    /// unchanged, and it is the only one of the NFT gates that does.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub nft_index_symmetry_enabled_from_height: Option<u64>,
+
+    /// An NFT collection id stops being a function of the block clock alone.
+    ///
+    /// ACTIVATION-AUDIT row CI-1. `CollectionId::new(sender, name, nonce)`
+    /// takes the BLOCK TIMESTAMP as its whole nonce, and the NFT arm forwards
+    /// the real one. Two blocks that share a timestamp therefore give the same
+    /// sender the same id for the same collection name, and the second
+    /// creation is refused as a duplicate -- by `Collection already exists`,
+    /// which names a collection the sender does not have. A millisecond clock
+    /// makes that unlikely rather than impossible: a proposer chooses the
+    /// timestamp, block times are not guaranteed to advance it, and nothing in
+    /// the executor requires it to.
+    ///
+    /// At and above the gate the sender's ACCOUNT NONCE is mixed into the
+    /// preimage as well. It is consensus state, it is read from the same view
+    /// the transaction executes against, and it is already incremented by
+    /// `deduct_fee` before the creation arm runs, so two creations by one
+    /// sender see two values whatever the clock did.
+    ///
+    /// **This changes collection IDs.** Every id minted at or above the height
+    /// is a different 32 bytes from the one the same transaction would have
+    /// produced below it, so activating this is not a rule that quietly starts
+    /// applying -- it is a new address space for collections created after the
+    /// height. Existing collections are untouched: nothing recomputes an id.
     ///
     /// Production-safe default `None`, which is what an absent field resolves
     /// to and what every genesis written before this gate existed carries.
@@ -1602,6 +1730,41 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub docclass_issuer_stake_requirement_enabled_from_height: Option<u64>,
+    /// An NFT collection id stops being a function of the block clock alone.
+    ///
+    /// ACTIVATION-AUDIT row CI-1. `CollectionId::new(sender, name, nonce)`
+    /// takes the BLOCK TIMESTAMP as its whole nonce, and the NFT arm forwards
+    /// the real one. Two blocks that share a timestamp therefore give the same
+    /// sender the same id for the same collection name, and the second
+    /// creation is refused as a duplicate -- by `Collection already exists`,
+    /// which names a collection the sender does not have. A millisecond clock
+    /// makes that unlikely rather than impossible: a proposer chooses the
+    /// timestamp, block times are not guaranteed to advance it, and nothing in
+    /// the executor requires it to.
+    ///
+    /// At and above the gate the sender's ACCOUNT NONCE is mixed into the
+    /// preimage as well. It is consensus state, it is read from the same view
+    /// the transaction executes against, and it is already incremented by
+    /// `deduct_fee` before the creation arm runs, so two creations by one
+    /// sender see two values whatever the clock did.
+    ///
+    /// **This changes collection IDs.** Every id minted at or above the height
+    /// is a different 32 bytes from the one the same transaction would have
+    /// produced below it, so activating this is not a rule that quietly starts
+    /// applying -- it is a new address space for collections created after the
+    /// height. Existing collections are untouched: nothing recomputes an id.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub nft_collection_id_nonce_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -1965,6 +2128,12 @@ impl Default for ChainParams {
             docclass_identity_binding_enabled_from_height: None,
             // Production-safe default: the declared issuer-stake rule is the rule applied — dormant.
             docclass_issuer_stake_requirement_enabled_from_height: None,
+            // Production-safe default: a failed nft receipt reports the fee that was taken — dormant.
+            nft_charged_receipt_enabled_from_height: None,
+            // Production-safe default: the two nft token indexes empty the same way — dormant.
+            nft_index_symmetry_enabled_from_height: None,
+            // Production-safe default: a collection id stops being a function of the block clock alone — dormant.
+            nft_collection_id_nonce_enabled_from_height: None,
         }
     }
 }
@@ -2208,7 +2377,10 @@ impl ChainParams {
     /// a height that two validators could silently disagree about.
     pub fn activation_heights(&self) -> Vec<(&'static str, Option<u64>)> {
         vec![
-            ("v2_enabled_from_height", self.v2_enabled_from_height),
+            (
+                "v2_enabled_from_height",
+                self.v2_enabled_from_height,
+            ),
             (
                 "omninode_enabled_from_height",
                 self.omninode_enabled_from_height,
@@ -2368,8 +2540,14 @@ impl ChainParams {
             (
                 "peer_protocol_declaration_required_from_height",
                 self.peer_protocol_declaration_required_from_height,
+            ),
+            (
                 "docclass_issuer_authority_enabled_from_height",
                 self.docclass_issuer_authority_enabled_from_height,
+            ),
+            (
+                "nft_charged_receipt_enabled_from_height",
+                self.nft_charged_receipt_enabled_from_height,
             ),
             (
                 "docclass_revocation_record_enabled_from_height",
@@ -2380,6 +2558,10 @@ impl ChainParams {
                 self.docclass_credential_schema_enabled_from_height,
             ),
             (
+                "nft_index_symmetry_enabled_from_height",
+                self.nft_index_symmetry_enabled_from_height,
+            ),
+            (
                 "docclass_identity_binding_enabled_from_height",
                 self.docclass_identity_binding_enabled_from_height,
             ),
@@ -2388,12 +2570,8 @@ impl ChainParams {
                 self.docclass_issuer_stake_requirement_enabled_from_height,
             ),
             (
-                "docclass_issuer_authority_enabled_from_height",
-                self.docclass_issuer_authority_enabled_from_height,
-            ),
-            (
-                "peer_protocol_declaration_required_from_height",
-                self.peer_protocol_declaration_required_from_height,
+                "nft_collection_id_nonce_enabled_from_height",
+                self.nft_collection_id_nonce_enabled_from_height,
             ),
         ]
     }
@@ -2471,6 +2649,14 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "subsystem_proof_presence_enabled_from_height",
     "nft_update_path_parity_enabled_from_height",
     "subsystem_no_op_receipt_enabled_from_height",
+    "docclass_issuer_authority_enabled_from_height",
+    "docclass_revocation_record_enabled_from_height",
+    "docclass_credential_schema_enabled_from_height",
+    "docclass_identity_binding_enabled_from_height",
+    "docclass_issuer_stake_requirement_enabled_from_height",
+    "nft_charged_receipt_enabled_from_height",
+    "nft_index_symmetry_enabled_from_height",
+    "nft_collection_id_nonce_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started

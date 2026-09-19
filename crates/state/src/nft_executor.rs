@@ -52,6 +52,14 @@ pub struct NftExecutionResult {
     pub token_id: Option<u64>,
     /// Error message if failed
     pub error: Option<String>,
+    /// What the executor actually moved out of the sender's balance, as the
+    /// receipt should report it.
+    ///
+    /// ACTIVATION-AUDIT row OV-9. `0` below the charged-receipt gate whatever
+    /// happened, which is the number the block executor has always written;
+    /// at and above it, the fee `deduct_fee` took, or `0` for the one refusal
+    /// that never reached `deduct_fee`'s writes.
+    pub fee_charged: Balance,
 }
 
 impl NftExecutionResult {
@@ -61,6 +69,7 @@ impl NftExecutionResult {
             collection_id: None,
             token_id: None,
             error: None,
+            fee_charged: 0,
         }
     }
 
@@ -70,6 +79,7 @@ impl NftExecutionResult {
             collection_id: Some(collection_id),
             token_id: None,
             error: None,
+            fee_charged: 0,
         }
     }
 
@@ -79,6 +89,7 @@ impl NftExecutionResult {
             collection_id: Some(collection_id),
             token_id: Some(token_id),
             error: None,
+            fee_charged: 0,
         }
     }
 
@@ -88,7 +99,18 @@ impl NftExecutionResult {
             collection_id: None,
             token_id: None,
             error: Some(error),
+            fee_charged: 0,
         }
+    }
+
+    /// Stamp what the fee actually did, once the caller knows.
+    ///
+    /// Every constructor above leaves it `0` deliberately: an arm has no way to
+    /// know whether `deduct_fee` ran, and a default that guessed would be the
+    /// OV-9 defect written the other way round.
+    fn charging(mut self, fee_charged: Balance) -> Self {
+        self.fee_charged = fee_charged;
+        self
     }
 }
 
@@ -129,6 +151,15 @@ pub struct NftGates {
     /// CREATION arms apply. ACTIVATION-AUDIT rows OV-10 and the first half of
     /// RY-2.
     pub update_path_parity: bool,
+    /// A failed NFT receipt reports the fee the executor actually took.
+    /// ACTIVATION-AUDIT row OV-9.
+    pub charged_receipt: bool,
+    /// The two token indexes empty the same way: emptying either DELETES its
+    /// row. ACTIVATION-AUDIT row OV-15.
+    pub index_symmetry: bool,
+    /// A collection id mixes the sender's account nonce into its preimage, so
+    /// the block clock is no longer its only nonce. ACTIVATION-AUDIT row CI-1.
+    pub collection_id_nonce: bool,
 }
 
 impl NftGates {
@@ -138,6 +169,9 @@ impl NftGates {
         token_authority: false,
         allocation_bound: false,
         update_path_parity: false,
+        charged_receipt: false,
+        index_symmetry: false,
+        collection_id_nonce: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -146,6 +180,9 @@ impl NftGates {
         token_authority: true,
         allocation_bound: true,
         update_path_parity: true,
+        charged_receipt: true,
+        index_symmetry: true,
+        collection_id_nonce: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -155,6 +192,9 @@ impl NftGates {
             token_authority: NftExecutor::token_authority_gate_open(params, block_height),
             allocation_bound: NftExecutor::allocation_bound_gate_open(params, block_height),
             update_path_parity: NftExecutor::update_path_parity_gate_open(params, block_height),
+            charged_receipt: NftExecutor::charged_receipt_gate_open(params, block_height),
+            index_symmetry: NftExecutor::index_symmetry_gate_open(params, block_height),
+            collection_id_nonce: NftExecutor::collection_id_nonce_gate_open(params, block_height),
         }
     }
 }
@@ -279,6 +319,75 @@ impl NftExecutor {
     #[inline]
     pub fn update_path_parity_gate_open(params: &ChainParams, block_height: u64) -> bool {
         matches!(Self::update_path_parity_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the NFT charged-receipt rule.
+    ///
+    /// Reads `params.nft_charged_receipt_enabled_from_height`, and nothing
+    /// else. `None` -- the default, and what a genesis written before the field
+    /// existed resolves to -- closes the gate, so a node executes exactly what
+    /// it executed before the field was declared.
+    ///
+    /// Below the gate (ACTIVATION-AUDIT row OV-9) every failed NFT receipt
+    /// reports `fee_paid: 0`, although `deduct_fee` runs before the dispatch
+    /// match and has already debited the sender, credited the proposer and
+    /// advanced the nonce. At and above it the receipt reports the fee that was
+    /// taken -- still zero for an insufficient balance, where the zero is true.
+    #[inline]
+    fn charged_receipt_activation(params: &ChainParams) -> Option<u64> {
+        params.nft_charged_receipt_enabled_from_height
+    }
+
+    /// Whether the NFT charged-receipt rule is active at `block_height`.
+    #[inline]
+    pub fn charged_receipt_gate_open(params: &ChainParams, block_height: u64) -> bool {
+        matches!(Self::charged_receipt_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the NFT index-symmetry rule.
+    ///
+    /// Reads `params.nft_index_symmetry_enabled_from_height`, and nothing else.
+    /// `None` -- the default, and what a genesis written before the field
+    /// existed resolves to -- closes the gate, so a node executes exactly what
+    /// it executed before the field was declared.
+    ///
+    /// Below the gate (ACTIVATION-AUDIT row OV-15) emptying an owner's token
+    /// list DELETES its row and emptying a collection's token list WRITES an
+    /// empty one, so the two families disagree about what "no entries" looks
+    /// like and the empty rows are never collected. At and above it both
+    /// delete.
+    #[inline]
+    fn index_symmetry_activation(params: &ChainParams) -> Option<u64> {
+        params.nft_index_symmetry_enabled_from_height
+    }
+
+    /// Whether the NFT index-symmetry rule is active at `block_height`.
+    #[inline]
+    pub fn index_symmetry_gate_open(params: &ChainParams, block_height: u64) -> bool {
+        matches!(Self::index_symmetry_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the NFT collection-id nonce rule.
+    ///
+    /// Reads `params.nft_collection_id_nonce_enabled_from_height`, and nothing
+    /// else. `None` -- the default, and what a genesis written before the field
+    /// existed resolves to -- closes the gate, so a node executes exactly what
+    /// it executed before the field was declared.
+    ///
+    /// Below the gate (ACTIVATION-AUDIT row CI-1) a collection id is
+    /// `hash(sender || name || block_timestamp)`, so two blocks sharing a
+    /// timestamp give one sender one id for one name and the second creation is
+    /// refused as a duplicate. At and above it the sender's account nonce joins
+    /// the preimage.
+    #[inline]
+    fn collection_id_nonce_activation(params: &ChainParams) -> Option<u64> {
+        params.nft_collection_id_nonce_enabled_from_height
+    }
+
+    /// Whether the NFT collection-id nonce rule is active at `block_height`.
+    #[inline]
+    pub fn collection_id_nonce_gate_open(params: &ChainParams, block_height: u64) -> bool {
+        matches!(Self::collection_id_nonce_activation(params), Some(h) if block_height >= h)
     }
 
     /// The errors the receipt-failure rule converts into a `Failed` receipt.
@@ -420,20 +529,50 @@ impl NftExecutor {
         // so nothing advanced the sender's nonce. Advance it here, or the
         // refused transaction stays replayable at the same nonce while still
         // occupying a receipt slot in the block.
-        if matches!(err, StateError::InsufficientBalance { .. }) {
+        // ACTIVATION-AUDIT row OV-9. An insufficient balance is the ONE refusal
+        // that reaches here without `deduct_fee` having written anything, so it
+        // is the one whose receipt may honestly say zero. Every other error
+        // arrived from an arm BELOW the deduction and its fee is spent.
+        let charged = if matches!(err, StateError::InsufficientBalance { .. }) {
             let mut sender_account = StateManager::v_get_account(view, sender)?;
             sender_account.nonce += 1;
             StateManager::v_put_account(view, sender, &sender_account)?;
-        }
+            0
+        } else {
+            Self::receipt_fee(fee, gates)
+        };
 
         warn!(
             "NFT {:?} refused with a receipt rather than aborting the block: {}",
             nft_data.operation, message
         );
-        Ok(NftExecutionResult::failure(message))
+        Ok(NftExecutionResult::failure(message).charging(charged))
     }
 
-    /// The operation bodies, with no gate applied.
+    /// What a receipt may report for a transaction whose `deduct_fee` ran.
+    ///
+    /// ACTIVATION-AUDIT row OV-9, and the whole of the gate: below it this is
+    /// `0` whatever the sender paid, which is the number the block executor has
+    /// written since the subsystem existed, so a closed gate leaves every
+    /// receipt byte-for-byte as it was.
+    #[inline]
+    fn receipt_fee(fee: Balance, gates: NftGates) -> Balance {
+        if gates.charged_receipt {
+            fee
+        } else {
+            0
+        }
+    }
+
+    /// The fee, then the operation bodies, with no receipt-failure gate
+    /// applied.
+    ///
+    /// The deduction is here and the bodies are in [`Self::execute_after_fee`],
+    /// so "everything below this point has already paid" is a function boundary
+    /// rather than a comment. ACTIVATION-AUDIT row OV-9 is exactly the cost of
+    /// that being a comment: every `Ok` this returns describes a transaction
+    /// whose fee is spent, and the receipt said otherwise for as long as
+    /// nothing carried the number back out.
     #[allow(clippy::too_many_arguments)]
     fn execute_ungated(
         view: &mut ExecutionView<'_, '_>,
@@ -445,18 +584,36 @@ impl NftExecutor {
         block_timestamp: u64,
         gates: NftGates,
     ) -> Result<NftExecutionResult> {
+        Self::deduct_fee(view, sender, fee, proposer)?;
+        let charged = Self::receipt_fee(fee, gates);
+        let result =
+            Self::execute_after_fee(view, params, sender, nft_data, fee, block_timestamp, gates)?;
+        Ok(result.charging(charged))
+    }
+
+    /// The operation bodies. The fee is already taken when this runs, and
+    /// `proposer` is deliberately not a parameter: the only thing this executor
+    /// ever paid a proposer was that fee.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_after_fee(
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
+        sender: &Address,
+        nft_data: &NftTxData,
+        fee: Balance,
+        block_timestamp: u64,
+        gates: NftGates,
+    ) -> Result<NftExecutionResult> {
         // ACTIVATION-AUDIT row AL-9, and the NFT half of AL-12. Every arm below
         // opens with `bincode::deserialize(&nft_data.data)` and no length check
         // ahead of it. One check here rather than one per arm, for the reason
         // the DocClass dispatch gives: the arms are many and the rule is one.
         //
         // AFTER the fee deduction, deliberately. Every pre-existing refusal in
-        // this executor charges the sender -- `deduct_fee` is the first thing
+        // this executor charges the sender -- the deduction is the first thing
         // `execute_ungated` does and every `failure()` below it returns having
         // paid -- and an unpaid refusal would be the cheaper transaction to
         // spam, which is the opposite of the point.
-        Self::deduct_fee(view, sender, fee, proposer)?;
-
         if gates.allocation_bound && nft_data.data.len() > crate::MAX_SUBSYSTEM_PAYLOAD_BYTES {
             return Ok(NftExecutionResult::failure(format!(
                 "NFT payload too large: {} bytes, limit {}",
@@ -466,9 +623,13 @@ impl NftExecutor {
         }
 
         match nft_data.operation {
-            NftOperation::CreateCollection => {
-                Self::execute_create_collection(view, sender, &nft_data.data, block_timestamp)
-            }
+            NftOperation::CreateCollection => Self::execute_create_collection(
+                view,
+                sender,
+                &nft_data.data,
+                block_timestamp,
+                gates.collection_id_nonce,
+            ),
             NftOperation::Mint => Self::execute_mint(
                 view,
                 params,
@@ -520,9 +681,13 @@ impl NftExecutor {
                     "SetApprovalForAll not yet implemented".to_string(),
                 ))
             }
-            NftOperation::Burn => {
-                Self::execute_burn(view, sender, &nft_data.collection_id, nft_data.token_id)
-            }
+            NftOperation::Burn => Self::execute_burn(
+                view,
+                sender,
+                &nft_data.collection_id,
+                nft_data.token_id,
+                gates.index_symmetry,
+            ),
             NftOperation::UpdateMetadata => Self::execute_update_metadata(
                 view,
                 params,
@@ -596,6 +761,7 @@ impl NftExecutor {
         sender: &Address,
         data: &[u8],
         block_timestamp: u64,
+        collection_id_nonce: bool,
     ) -> Result<NftExecutionResult> {
         // Deserialize collection creation data
         // Shared wire struct (issue #89)
@@ -609,8 +775,26 @@ impl NftExecutor {
             .map_err(|e| StateError::BlockValidation(format!("Invalid config: {}", e)))?;
 
         // Generate collection ID
+        //
+        // ACTIVATION-AUDIT row CI-1. Below the gate the block timestamp is the
+        // WHOLE nonce, so the id is a function of (sender, name, clock) and two
+        // blocks that share a timestamp hand one sender one id for one name.
+        // The second creation is then refused as `Collection already exists`,
+        // naming a collection the sender does not have and cannot get.
+        //
+        // At and above the gate the sender's account nonce joins the preimage.
+        // `deduct_fee` has already incremented it, so two creations in one
+        // block see two values; it is consensus state read from the same view
+        // the transaction executes against, so every node computes the same id;
+        // and it is strictly increasing per sender, so the clock no longer has
+        // to advance for the id to.
         let nonce = Self::now_ms(block_timestamp);
-        let collection_id = CollectionId::new(sender, &create_data.name, nonce);
+        let collection_id = if collection_id_nonce {
+            let account_nonce = StateManager::v_get_nonce(view, sender)?;
+            CollectionId::new_with_account_nonce(sender, &create_data.name, nonce, account_nonce)
+        } else {
+            CollectionId::new(sender, &create_data.name, nonce)
+        };
 
         // Check if collection already exists
         if Self::v_collection_exists(view, collection_id.as_bytes())? {
@@ -1019,6 +1203,7 @@ impl NftExecutor {
         sender: &Address,
         collection_id: &[u8; 32],
         token_id: u64,
+        index_symmetry: bool,
     ) -> Result<NftExecutionResult> {
         // Get collection
         let collection = Self::v_get_collection(view, collection_id)?
@@ -1045,7 +1230,7 @@ impl NftExecutor {
         }
 
         // Burn token
-        Self::v_burn_token(view, collection_id, token_id, &token.owner)?;
+        Self::v_burn_token(view, collection_id, token_id, &token.owner, index_symmetry)?;
 
         info!(
             "Burned token {}:{}",

@@ -530,10 +530,18 @@ impl BlockExecutor {
                                 result.error.as_deref().unwrap_or("Unknown error")
                             );
 
+                            // ACTIVATION-AUDIT row OV-9. `deduct_fee` runs
+                            // before the NFT dispatch match, so a refusal from
+                            // any arm below it has already debited the sender,
+                            // credited the proposer and advanced the nonce.
+                            // `result.fee_charged` is what the executor
+                            // actually moved; it is `0` while the
+                            // charged-receipt gate is closed, which is the
+                            // literal this line used to carry.
                             Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::Failed(2), // NFT operation failed
-                                fee_paid: 0,
+                                fee_paid: result.fee_charged,
                             })
                         }
                     }
@@ -2230,10 +2238,13 @@ impl BlockExecutor {
                         result.error.as_deref().unwrap_or("Unknown error")
                     );
 
+                    // ACTIVATION-AUDIT row OV-9, on the legacy path too: the
+                    // fee is spent by the time any arm refuses, and
+                    // `fee_charged` is `0` until the gate opens.
                     Ok(TxExecutionResult {
                         tx_hash,
                         status: TxStatus::Failed(2), // NFT operation failed
-                        fee_paid: 0,
+                        fee_paid: result.fee_charged,
                     })
                 }
             }
