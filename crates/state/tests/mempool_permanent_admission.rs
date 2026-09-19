@@ -184,7 +184,10 @@ fn the_submittable_policy_operations_are_still_admitted() {
             .unwrap_or_else(|e| panic!("{op:?} must still be admitted: {e}"));
         assert!(pool.contains(&tx.hash()));
     }
-    println!("ADMISSION: {} submittable policy operations admitted", ops.len());
+    println!(
+        "ADMISSION: {} submittable policy operations admitted",
+        ops.len()
+    );
     assert_eq!(pool.len(), ops.len());
 }
 
@@ -211,7 +214,11 @@ fn the_oversized_boundary_is_exact() {
         let outcome = pool.add(tx.clone());
         println!(
             "BOUNDARY: {encoded} bytes against a {limit}-byte block limit -> {}",
-            if outcome.is_ok() { "admitted" } else { "refused" }
+            if outcome.is_ok() {
+                "admitted"
+            } else {
+                "refused"
+            }
         );
         if admitted {
             outcome.unwrap_or_else(|e| {
@@ -333,5 +340,8 @@ fn admission_returns_transactions_byte_for_byte() {
         assert_eq!(held.nonce(), tx.nonce(), "nor the nonce");
         assert_eq!(held.to_bytes(), tx.to_bytes(), "nor anything else");
     }
-    println!("UNCHANGED: {} transactions returned byte for byte", txs.len());
+    println!(
+        "UNCHANGED: {} transactions returned byte for byte",
+        txs.len()
+    );
 }

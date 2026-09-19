@@ -58,7 +58,6 @@ fn params() -> ChainParams {
     ChainParams::with_v2_enabled()
 }
 
-
 struct Node {
     dir: TempDir,
     db: Arc<Database>,
@@ -284,7 +283,10 @@ async fn a_permanently_invalid_high_fee_transaction_does_not_halt_the_proposer()
         "LIVENESS: block {} at height {} carried {} of 8 honest transfers",
         block.hash(),
         block.height(),
-        honest.iter().filter(|t| carried.contains(&t.hash())).count()
+        honest
+            .iter()
+            .filter(|t| carried.contains(&t.hash()))
+            .count()
     );
     assert!(
         !carried.contains(&poison.hash()),
@@ -463,7 +465,10 @@ async fn dropping_a_transaction_does_not_destroy_its_senders_later_nonces() {
         .map(|n| transfer_tx(&f.honest, f.sink, n, 1_000))
         .collect();
 
-    for tx in std::iter::once(&early).chain(tail.iter()).chain(honest.iter()) {
+    for tx in std::iter::once(&early)
+        .chain(tail.iter())
+        .chain(honest.iter())
+    {
         node.mempool.add(tx.clone()).expect("admitted");
     }
 

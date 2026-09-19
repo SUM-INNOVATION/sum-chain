@@ -383,7 +383,10 @@ async fn a_transaction_that_only_overflows_a_full_block_stays_eligible_for_the_n
         rows,
         "every transaction is accounted for: carried, or still waiting"
     );
-    assert!(block.tx_count() > 0 && block.tx_count() < rows, "and it fit");
+    assert!(
+        block.tx_count() > 0 && block.tx_count() < rows,
+        "and it fit"
+    );
 
     // The proof that quarantine is enough: the transaction the first block shed
     // is carried by the second. Handed over in NONCE order, which is what the
@@ -391,7 +394,10 @@ async fn a_transaction_that_only_overflows_a_full_block_stays_eligible_for_the_n
     // equal-fee transactions does not guarantee.
     let consumed = block.tx_count();
     let shed = txs[consumed].hash();
-    assert!(pending.contains(&shed), "the crossing transaction is waiting");
+    assert!(
+        pending.contains(&shed),
+        "the crossing transaction is waiting"
+    );
     let second = node
         .consensus
         .propose_block(txs[consumed..].to_vec())

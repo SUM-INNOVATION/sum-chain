@@ -235,8 +235,7 @@ impl PolicyAccountExecutor {
                 debug_assert!(!policy_account_operation_is_submittable(op));
                 Err(StateError::UnsubmittableOperation {
                     operation: format!("PolicyAccount::{op:?}"),
-                    reason: "it is reachable only as the effect of an ExecuteProposal"
-                        .to_string(),
+                    reason: "it is reachable only as the effect of an ExecuteProposal".to_string(),
                 })
             }
             PolicyAccountOperation::Freeze => {

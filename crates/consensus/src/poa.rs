@@ -554,11 +554,13 @@ impl PoAEngine {
         for attempt in 0..Self::MAX_BLOCK_FIT_ATTEMPTS {
             match self.create_block_once(candidate_txs.clone()) {
                 // ── a transaction that could not be executed at all ──────────
-                Err(ConsensusError::State(sumchain_state::StateError::BlockTransactionAborted {
-                    tx_index,
-                    class,
-                    detail,
-                })) if tx_index < candidate_txs.len() => {
+                Err(ConsensusError::State(
+                    sumchain_state::StateError::BlockTransactionAborted {
+                        tx_index,
+                        class,
+                        detail,
+                    },
+                )) if tx_index < candidate_txs.len() => {
                     let offender = candidate_txs[tx_index].hash();
                     match class {
                         sumchain_state::TxFailureClass::Permanent => {
@@ -705,10 +707,7 @@ impl PoAEngine {
     /// transaction is carried by THIS block rather than waiting for the next
     /// one. The dropped tail is untouched in the mempool and is selected again
     /// on the next tick.
-    fn drop_with_sender_tail(
-        txs: &[SignedTransaction],
-        index: usize,
-    ) -> Vec<SignedTransaction> {
+    fn drop_with_sender_tail(txs: &[SignedTransaction], index: usize) -> Vec<SignedTransaction> {
         let sender = txs[index].sender();
         txs.iter()
             .enumerate()
