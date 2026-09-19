@@ -60,7 +60,7 @@ use crate::staking_executor::StakingExecutor;
 use crate::storage_metadata::StorageMetadataExecutor;
 use crate::tax_executor::TaxExecutor;
 use crate::token_executor::TokenExecutor;
-use crate::{Result, StateError, StateManager};
+use crate::{Result, StateError, StateManager, TxFailureClass};
 
 /// Result of executing a transaction
 #[derive(Debug)]
@@ -68,6 +68,130 @@ pub struct TxExecutionResult {
     pub tx_hash: Hash,
     pub status: TxStatus,
     pub fee_paid: Balance,
+}
+
+/// What one PROPOSER-LOCAL screening pass found: every transaction in a
+/// candidate proposal that refused execution, with its class, in one pass.
+///
+/// Produced by [`BlockExecutor::screen_proposal`] and consumed by
+/// `PoAEngine::create_block`. It is not a block, it does not become one, and no
+/// importing node ever sees it — see `screen_proposal` for why that makes it
+/// proposer policy rather than a consensus rule.
+///
+/// Indices are positions in the proposal that was screened. They are only
+/// meaningful against that exact slice, so a caller that reorders or splices
+/// the proposal must apply this verdict FIRST.
+#[derive(Debug, Clone)]
+pub struct ProposalScreening {
+    /// `(index, class)` for each transaction that could not be executed, in
+    /// ascending index order.
+    refused: Vec<(usize, TxFailureClass)>,
+    /// The index at which the block write-set ceiling was crossed, if it was.
+    /// Screening stops there: past it every verdict would be about a budget the
+    /// real execution will not have.
+    ceiling_cut: Option<usize>,
+    /// The number of transactions to keep when the refusal charge ran out, if
+    /// it did. Screening stops there, and the proposer offers only the prefix
+    /// it actually screened.
+    charge_cut: Option<usize>,
+    /// Logical write-set bytes staged and then rolled back by refused
+    /// transactions.
+    ///
+    /// This is the charge that makes a refusal cost something. A rollback
+    /// refunds the block ceiling — that is what a rollback IS — so without a
+    /// separate meter a transaction that stages a megabyte and then fails is
+    /// free to the block and expensive to the proposer, and a flood of them is
+    /// a slot spent executing for the price of the fees. Deterministic: it is
+    /// the overlay's own logical accounting, the same number on any machine
+    /// that executes the same transaction against the same state.
+    refusal_bytes: u64,
+    /// The cap on `refusal_bytes`. Supplied by the proposer, because how much
+    /// of its own slot a validator is willing to spend on transactions that
+    /// refuse is a local policy question, not a property of the chain.
+    refusal_budget: u64,
+    /// How many transactions the pass actually reached.
+    screened: usize,
+}
+
+impl ProposalScreening {
+    fn new(refusal_budget: u64) -> Self {
+        Self {
+            refused: Vec::new(),
+            ceiling_cut: None,
+            charge_cut: None,
+            refusal_bytes: 0,
+            refusal_budget,
+            screened: 0,
+        }
+    }
+
+    /// Record one refusal and charge it.
+    ///
+    /// The charge has a FLOOR of [`Self::REFUSAL_FLOOR_BYTES`]. Most refusals
+    /// roll back nothing at all — `UnsubmittableOperation` is decided on the
+    /// operation code before a byte is staged — and a charge of zero would let
+    /// an unlimited number of them be screened for free. The floor is what
+    /// turns the byte budget into a bound on the NUMBER of refusals as well as
+    /// on their size, so one constant bounds both.
+    fn record_refusal(&mut self, index: usize, class: TxFailureClass, rolled_back: u64) {
+        self.refused.push((index, class));
+        self.refusal_bytes = self
+            .refusal_bytes
+            .saturating_add(rolled_back.max(Self::REFUSAL_FLOOR_BYTES));
+        if self.refusal_bytes > self.refusal_budget && self.charge_cut.is_none() {
+            // The transaction at `index` WAS screened — it is in `refused` —
+            // so the prefix the proposer may keep runs through it inclusive.
+            self.charge_cut = Some(index.saturating_add(1));
+        }
+    }
+
+    /// The minimum a refusal is charged, whatever it managed to stage.
+    ///
+    /// Not measured, and deliberately not presented as measured: it stands for
+    /// the fixed cost of dispatching one transaction — signature already
+    /// verified by `validate_tx`, then the executor walk down to the arm that
+    /// refuses. What it has to be is (a) non-zero, so that free refusals are
+    /// not unlimited, and (b) small enough against the budget that a proposal
+    /// of ordinary traffic with a few bad transactions in it is never cut
+    /// short. At 4 KiB against a budget of a hundred-odd megabytes it allows
+    /// tens of thousands of zero-cost refusals, which is far more than
+    /// `max_txs_per_block` lets a single proposal contain — so in practice the
+    /// count bound binds only through the selection cap, and the byte bound is
+    /// what does the work. Stated here so that a later reader does not mistake
+    /// this for a tuned figure.
+    const REFUSAL_FLOOR_BYTES: u64 = 4_096;
+
+    /// Every transaction that refused, as `(index, class)` in ascending index
+    /// order.
+    pub fn refused(&self) -> &[(usize, TxFailureClass)] {
+        &self.refused
+    }
+
+    /// The index at which the block write-set ceiling was crossed, if it was.
+    pub fn ceiling_cut(&self) -> Option<usize> {
+        self.ceiling_cut
+    }
+
+    /// How many transactions may be offered when the refusal charge ran out.
+    pub fn charge_cut(&self) -> Option<usize> {
+        self.charge_cut
+    }
+
+    /// Logical write-set bytes staged and rolled back by refused transactions.
+    pub fn refusal_bytes(&self) -> u64 {
+        self.refusal_bytes
+    }
+
+    /// How many transactions the pass reached.
+    pub fn screened(&self) -> usize {
+        self.screened
+    }
+
+    /// Whether the pass found nothing to act on, in which case the proposal it
+    /// screened can be offered exactly as it stands.
+    pub fn is_clean(&self) -> bool {
+        self.refused.is_empty() && self.ceiling_cut.is_none() && self.charge_cut.is_none()
+    }
 }
 
 /// Block executor
@@ -3074,11 +3198,119 @@ impl BlockExecutor {
     pub fn execute_block(
         &self,
         block: &Block,
-        _parent_state_root: Hash,
+        parent_state_root: Hash,
         // Active PoA validator set for THIS block's height (threaded from the
         // consensus engine). Forwarded per-tx to the validator-quorum authority.
         active_validator_pubkeys: &[[u8; 32]],
     ) -> Result<BlockExecution<'_>> {
+        // `None` means "produce the block", and that arm of `execute_or_screen`
+        // returns `Some` on every path that does not return `Err` — the only
+        // `Ok(None)` is the screening return, below a `screening.is_some()`
+        // guard. Expressed as an error rather than an `expect` so that a future
+        // edit which breaks the invariant costs a refused block rather than a
+        // panic inside a validator.
+        self.execute_or_screen(block, parent_state_root, active_validator_pubkeys, None)?
+            .ok_or_else(|| {
+                StateError::BlockValidation(
+                    "execute_block was handed no screening and still produced none of a \
+                     block; this is a bug in execute_or_screen, not in the block"
+                        .to_string(),
+                )
+            })
+    }
+
+    /// PROPOSER-LOCAL: execute a candidate proposal for its VERDICTS instead of
+    /// for a block, and report every transaction that refused in ONE pass.
+    ///
+    /// # Why this exists
+    ///
+    /// [`Self::execute_block`] abandons the whole block at the first
+    /// transaction that cannot be executed, because below the per-transaction
+    /// gate the loop has nothing to undo the partial staging with. A proposer
+    /// therefore learns about exactly ONE offender per execution, and a
+    /// proposal carrying `n` of them costs `n + 1` executions —
+    /// `PoAEngine::MAX_REFUSED_TX_DROPS` bounded that at sixty-four, and
+    /// sixty-four executions is a block time an attacker buys for sixty-four
+    /// `min_fee`s.
+    ///
+    /// This pass opens a per-transaction scope for EVERY transaction whatever
+    /// the gate says, so a refusal is rolled back — the candidate is left
+    /// exactly as the transaction found it — and screening continues. One pass,
+    /// every offender, with its class.
+    ///
+    /// # The scope limit is not the gate's
+    ///
+    /// Below the per-transaction gate the scope is opened with `u64::MAX`, not
+    /// [`crate::MAX_TX_WRITE_SET_BYTES`]. A scope that refused writes the real
+    /// execution would accept would make this pass report offenders that are
+    /// not offenders, and the proposer would evict or quarantine transactions
+    /// nothing is wrong with. The scope is here to UNDO, not to bound; the
+    /// block ceiling still bounds, exactly as it does below the gate.
+    ///
+    /// # What bounds THIS pass
+    ///
+    /// Two charges, both in units a second machine computes identically:
+    ///
+    ///   * the number of transactions executed is the length of the proposal,
+    ///     which the proposer already caps at `max_txs_per_block`; and
+    ///   * `refusal_byte_budget` caps the logical write-set bytes a proposal's
+    ///     REFUSALS may stage and then roll back. Rolled-back bytes are
+    ///     refunded to the block ceiling — that is what a rollback means — so
+    ///     without this charge a flood of transactions that each stage megabytes
+    ///     and then fail would cost the ceiling nothing and the proposer
+    ///     everything. Crossing it stops the pass at that index and reports it
+    ///     as [`ProposalScreening::charge_cut`].
+    ///
+    /// Neither reads a clock, an allocator, or a thread. Both are functions of
+    /// the block and the state it is executed against.
+    ///
+    /// # It decides nothing about validity
+    ///
+    /// Nothing here is consulted by an importing node, and no block is produced
+    /// from this candidate: the buffered writes are dropped when the
+    /// `CandidateExecution` does. The one consumer is a proposer choosing which
+    /// of its OWN selected transactions to offer, which is a choice every
+    /// proposer already makes freely. So a screening verdict that turns out
+    /// wrong costs a re-execution, never a bad block — `PoAEngine::create_block`
+    /// keeps its fitting loop behind this pass for exactly that reason.
+    pub fn screen_proposal(
+        &self,
+        block: &Block,
+        parent_state_root: Hash,
+        active_validator_pubkeys: &[[u8; 32]],
+        refusal_byte_budget: u64,
+    ) -> Result<ProposalScreening> {
+        let mut screening = ProposalScreening::new(refusal_byte_budget);
+        let produced = self.execute_or_screen(
+            block,
+            parent_state_root,
+            active_validator_pubkeys,
+            Some(&mut screening),
+        )?;
+        debug_assert!(
+            produced.is_none(),
+            "a screening pass must not finish a candidate"
+        );
+        drop(produced);
+        Ok(screening)
+    }
+
+    /// The one transaction loop, run either to PRODUCE a block (`screening` is
+    /// `None`) or to SCREEN one (`screening` is `Some`).
+    ///
+    /// One body rather than two because the value of a screening pass is that
+    /// its verdicts match what the real execution will do, and two copies of a
+    /// three-hundred-line dispatch loop would agree on the day they were
+    /// written and not afterwards.
+    fn execute_or_screen(
+        &self,
+        block: &Block,
+        _parent_state_root: Hash,
+        // Active PoA validator set for THIS block's height (threaded from the
+        // consensus engine). Forwarded per-tx to the validator-quorum authority.
+        active_validator_pubkeys: &[[u8; 32]],
+        mut screening: Option<&mut ProposalScreening>,
+    ) -> Result<Option<BlockExecution<'_>>> {
         info!(
             "Executing block {} with {} transactions",
             block.height(),
@@ -3160,8 +3392,13 @@ impl BlockExecutor {
         let tx_write_set_bound_open =
             crate::subsystem_tx_write_set_bound_gate_open(&self.params, block.height());
         let mut refused_for_write_set = 0usize;
+        // How many transactions the loop REACHED. Only a screening pass reads
+        // it, and only a screening pass can leave this loop early, so on every
+        // producing path it ends equal to the block's transaction count.
+        let mut reached = 0usize;
 
         for (idx, tx) in block.transactions.iter().enumerate() {
+            reached = idx + 1;
             // Record pre-execution state for diff
             let sender = tx.sender();
             let recipient = tx.recipient();
@@ -3191,8 +3428,19 @@ impl BlockExecutor {
                 (sender_before, recipient_before, proposer_before)
             };
 
-            if tx_write_set_bound_open {
-                candidate.begin_transaction(crate::MAX_TX_WRITE_SET_BYTES)?;
+            // A SCREENING pass opens a scope for every transaction whatever
+            // the gate says, because the scope is what lets a refusal be undone
+            // and the pass carry on. Its limit is the gate's bound only when
+            // the gate is open: below the gate `u64::MAX` makes the scope a
+            // pure undo log that refuses nothing the real execution would have
+            // accepted. See `screen_proposal`.
+            let scope_open = tx_write_set_bound_open || screening.is_some();
+            if scope_open {
+                candidate.begin_transaction(if tx_write_set_bound_open {
+                    crate::MAX_TX_WRITE_SET_BYTES
+                } else {
+                    u64::MAX
+                })?;
             }
             let attempted = {
                 let mut view = candidate.view();
@@ -3212,7 +3460,7 @@ impl BlockExecutor {
 
             let result = match attempted {
                 Ok(r) => {
-                    if tx_write_set_bound_open {
+                    if scope_open {
                         candidate.commit_transaction();
                     }
                     r
@@ -3311,6 +3559,18 @@ impl BlockExecutor {
                 Err(StateError::Storage(
                     sumchain_storage::StorageError::OverlayLimitExceeded { limit, would_reach },
                 )) => {
+                    // A screening pass records WHERE the ceiling was crossed
+                    // and stops. It does not roll the crossing back and carry
+                    // on: every transaction after this index would be screened
+                    // against a budget the real execution will not have, so the
+                    // verdicts would be about a block nobody is going to build.
+                    if let Some(s) = screening.as_mut() {
+                        if scope_open {
+                            candidate.rollback_transaction();
+                        }
+                        s.ceiling_cut = Some(idx);
+                        break;
+                    }
                     return Err(StateError::BlockWriteSetExceeded {
                         tx_index: idx,
                         detail: sumchain_storage::StorageError::OverlayLimitExceeded {
@@ -3340,6 +3600,35 @@ impl BlockExecutor {
                 // `PoAEngine::create_block`.
                 Err(e) => {
                     let class = crate::classify_block_tx_failure(&e);
+                    // ── screening: roll it back and keep going ──────────────
+                    //
+                    // The scope above is open unconditionally on this path, so
+                    // "an unknown amount staged before failing" — the reason
+                    // the producing arm below has to abandon the block — is
+                    // exactly what the rollback undoes. Every later transaction
+                    // is then screened against the state it will actually meet
+                    // in the block this proposer goes on to build, which is the
+                    // block WITHOUT this transaction.
+                    if let Some(s) = screening.as_mut() {
+                        let charged = if scope_open {
+                            candidate.rollback_transaction().unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        s.record_refusal(idx, class, charged);
+                        warn!(
+                            tx = %tx.hash(),
+                            index = idx,
+                            %class,
+                            charged,
+                            "screening: a selected transaction could not be executed; \
+                             rolled back, recorded, and the pass continues: {e}"
+                        );
+                        if s.charge_cut.is_some() {
+                            break;
+                        }
+                        continue;
+                    }
                     warn!(
                         tx = %tx.hash(),
                         index = idx,
@@ -3391,6 +3680,25 @@ impl BlockExecutor {
             );
 
             receipts.push(receipt);
+        }
+
+        // ── a screening pass ends here ──────────────────────────────────
+        //
+        // Before the state root, before the journals, before
+        // `finish_execution`. The candidate is dropped on the way out with
+        // everything it buffered, so nothing this pass staged can reach a
+        // block, a journal or the database.
+        if let Some(s) = screening {
+            s.screened = reached;
+            info!(
+                height = block.height(),
+                offered = block.tx_count(),
+                screened = reached,
+                refused = s.refused.len(),
+                refusal_bytes = s.refusal_bytes,
+                "screened a proposal in one pass"
+            );
+            return Ok(None);
         }
 
         if refused_for_write_set > 0 {
@@ -3526,7 +3834,7 @@ impl BlockExecutor {
         let account_journal = encode_journal(&state_diff)?;
         let contract_journal = encode_contract_journal(&contract_diff)?;
 
-        Ok(BlockExecution {
+        Ok(Some(BlockExecution {
             state_diff,
             contract_diff,
             executed: candidate.finish_execution(
@@ -3542,7 +3850,7 @@ impl BlockExecutor {
                     beacon: beacon_journal,
                 },
             ),
-        })
+        }))
     }
 
     /// Gated compute-pool APPLY seam (issue #130).

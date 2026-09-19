@@ -100,6 +100,18 @@ pub struct PoAEngine {
     last_finalized_height: RwLock<BlockHeight>,
     /// Last finalized block hash
     last_finalized_hash: RwLock<Hash>,
+    /// How many full candidate EXECUTIONS this node has spent PROPOSING —
+    /// every `create_block_once` attempt plus every screening pass, whether it
+    /// ended in a block or in a refusal. Importing does not touch it.
+    ///
+    /// The cost this repair is about is measured in executions: `n`
+    /// transactions that refuse used to cost `n + 1` of them, and the claim
+    /// made by [`Self::screen_selection`] is that they now cost two. That claim
+    /// is not observable from a block, a receipt or a log line, so it is
+    /// counted here and asserted in
+    /// `crates/consensus/tests/proposer_invalid_tx_liveness.rs`. Relaxed
+    /// ordering: nothing branches on it.
+    proposal_executions: std::sync::atomic::AtomicU64,
 }
 
 impl PoAEngine {
@@ -138,7 +150,19 @@ impl PoAEngine {
             running: RwLock::new(false),
             last_finalized_height: RwLock::new(0),
             last_finalized_hash: RwLock::new(Hash::ZERO),
+            proposal_executions: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// How many full candidate executions this node has spent PROPOSING.
+    ///
+    /// See [`Self::proposal_executions`] — the field, not this reader — for why
+    /// the number exists. Nothing in the engine reads it; it is the only seam
+    /// through which a test can say "that flood cost two executions, not
+    /// seventy".
+    pub fn proposal_executions(&self) -> u64 {
+        self.proposal_executions
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Get the active validator set, computing it if necessary
@@ -472,17 +496,72 @@ impl PoAEngine {
     /// nothing evicted for the transient ones, the same nine selected first on
     /// the next tick. Nine `min_fee`s, and the halt was back by a side door.
     ///
-    /// Sixty-four bounds the proposer's work — every drop costs a full
+    /// Sixty-four bounded the proposer's work — every drop costs a full
     /// re-execution, so this is a real CPU budget and not a loop guard — while
     /// making the side door cost sixty-five transactions rather than nine. It
-    /// does not CLOSE it: a sustained flood of transactions that refuse
-    /// execution costs this proposer up to sixty-four executions a slot, and a
-    /// block-time spent executing is its own denial of service. The structural
-    /// answer is a per-transaction scope in `execute_block`, so one refusal is
-    /// rolled back and the block continues in ONE pass rather than one pass per
-    /// refusal — which changes what a block contains and therefore needs an
-    /// activation gate and a separate piece of work.
-    const MAX_REFUSED_TX_DROPS: usize = 64;
+    /// did not CLOSE it: a sustained flood of transactions that refuse
+    /// execution cost this proposer up to sixty-four executions a slot, and a
+    /// block-time spent executing is its own denial of service.
+    ///
+    /// EIGHT now, because this loop is no longer how a flood is answered.
+    /// [`Self::screen_selection`] runs ONE pass that rolls each refusal back
+    /// and carries on, so every offender in a proposal is named by a single
+    /// execution and removed together. What reaches this loop afterwards is
+    /// what the screening pass got WRONG — a verdict that did not survive
+    /// re-execution because the refused transaction left a mark outside the
+    /// candidate overlay, or a ceiling crossing that moved once the offenders
+    /// were gone — and that is a residue, not a population an attacker can
+    /// size. Eight is the same allowance the unattributed shrinks get, and for
+    /// the same reason: enough for a correction that converges, not enough to
+    /// be worth attacking.
+    ///
+    /// It is still SEPARATE from [`Self::MAX_BLOCK_FIT_ATTEMPTS`]. Sharing one
+    /// budget is the bug this constant was split out to fix, and the screening
+    /// pass does not make sharing safe again.
+    const MAX_REFUSED_TX_DROPS: usize = 8;
+
+    /// How many logical write-set bytes one proposal's REFUSED transactions may
+    /// stage and then roll back before the screening pass stops.
+    ///
+    /// # Why a refusal has to be charged at all
+    ///
+    /// A rollback refunds the block ceiling — that is what a rollback is — so
+    /// a transaction that stages fifteen megabytes and then fails costs the
+    /// block nothing and this proposer a real fraction of its slot. Without a
+    /// charge of its own, `MAX_BLOCK_WRITE_SET_BYTES` bounds only the work a
+    /// proposal KEEPS, and the work it throws away is free and unlimited. The
+    /// screening pass is what makes that reachable in one pass, so the screening
+    /// pass is where the meter goes.
+    ///
+    /// # Why this number
+    ///
+    /// The same figure as the execution share a proposal may KEEP
+    /// ([`Self::PROPOSAL_EXECUTION_SHARE_DIVISOR`]): a proposal may waste at
+    /// most as much as it may commit. That makes the total write-set work of
+    /// one proposal's screening pass at most twice a block's execution share —
+    /// an ordinary block's worth of staging, plus an ordinary block's worth
+    /// thrown away — rather than unbounded.
+    ///
+    /// # Why it is deterministic
+    ///
+    /// Logical write-set bytes are the overlay's own accounting: key lengths
+    /// plus value lengths plus captured pre-images, summed by
+    /// `ApplicationOverlay::stage`. Two machines executing the same transaction
+    /// against the same state charge the same number. It reads no clock, no
+    /// allocator, no thread and no I/O timing — which is the property a
+    /// wall-clock deadline could not have offered, and the reason this is a
+    /// byte budget rather than a time budget.
+    ///
+    /// # It is proposer policy even so
+    ///
+    /// Determinism is required here for a different reason than consensus:
+    /// nothing outside this node reads this number. An importing node is handed
+    /// a block and applies it or does not. What determinism buys is that a
+    /// validator's own behaviour is reproducible — the same mempool and the
+    /// same state produce the same proposal, on any machine, so a disagreement
+    /// between two nodes running this code is a bug rather than a race.
+    const MAX_PROPOSAL_REFUSAL_BYTES: u64 =
+        sumchain_state::MAX_BLOCK_WRITE_SET_BYTES / Self::PROPOSAL_EXECUTION_SHARE_DIVISOR;
 
     /// The share of `MAX_BLOCK_WRITE_SET_BYTES` a proposal's EXECUTION may
     /// claim, leaving the rest for PUBLICATION.
@@ -577,7 +656,22 @@ impl PoAEngine {
     /// gate, for the same reason `MAX_BLOCK_FIT_ATTEMPTS` is not in the protocol
     /// digest.
     fn create_block(&self, transactions: Vec<SignedTransaction>) -> Result<Block> {
-        let mut candidate_txs = transactions;
+        // ── one screening pass, BEFORE the fitting loop ─────────────────────
+        //
+        // The loop below learns about exactly ONE refusing transaction per
+        // execution, because `execute_block` abandons the whole block at the
+        // first one. `screen_selection` executes the candidate once for its
+        // VERDICTS instead — rolling each refusal back and carrying on — so a
+        // proposal carrying `n` of them costs one screening pass plus one real
+        // execution rather than `n + 1` executions.
+        //
+        // Its verdicts are ADVICE. Nothing signed, nothing published, and
+        // nothing about block validity: the loop below still executes whatever
+        // survives, and still acts on whatever that execution refuses. So a
+        // screening verdict that turns out wrong costs a re-execution, never a
+        // bad block — which is the whole reason the loop stays behind it rather
+        // than being replaced by it.
+        let mut candidate_txs = self.screen_selection(transactions);
         // Two budgets, spent independently: one for shrinks nobody is at fault
         // for, one for drops of a NAMED transaction. See
         // `MAX_REFUSED_TX_DROPS` for what sharing them cost.
@@ -767,6 +861,240 @@ impl PoAEngine {
         }
     }
 
+    /// ONE execution that names every transaction in `transactions` which
+    /// cannot execute, and the proposal that survives that verdict.
+    ///
+    /// # What it costs, and what it replaces
+    ///
+    /// `execute_block` abandons a block at the FIRST transaction it cannot
+    /// execute, so the fitting loop learns one offender per execution and a
+    /// proposal carrying `n` of them costs `n + 1`. That is what
+    /// [`Self::MAX_REFUSED_TX_DROPS`] used to bound at sixty-four, and
+    /// sixty-four executions is a block time an attacker buys for sixty-four
+    /// `min_fee`s. `BlockExecutor::screen_proposal` opens a per-transaction
+    /// scope for every transaction, rolls each refusal back and carries on, so
+    /// ONE pass names all `n`. The flood now costs two executions: this one and
+    /// the one that builds the block.
+    ///
+    /// The clean case pays for it. A proposal nothing is wrong with is screened
+    /// and then executed, which is two executions where it used to be one.
+    /// Proposal execution is the proposer's own budget — no importer waits on
+    /// it — and the alternative is that the pathological case stays unbounded,
+    /// so the tick with nothing wrong with it is where the cost is put.
+    ///
+    /// # It decides nothing about validity
+    ///
+    /// No block is produced here and nothing is signed: the candidate's
+    /// buffered writes are dropped with it. The output is a shorter list of
+    /// this proposer's OWN selected transactions, which is a choice every
+    /// proposer already makes freely — fee order, `max_txs_per_block`, the
+    /// fitting loop. An importing node never sees a screening verdict and no
+    /// block's contents depend on one being reproduced, so there is nothing
+    /// here to activate at a height.
+    ///
+    /// # Every way it can decline
+    ///
+    /// Not a validator, not this height's proposer, no parent on disk, or a
+    /// screening pass that itself refused: each returns the selection
+    /// UNCHANGED. Those are the fitting loop's to report, with the error the
+    /// caller is entitled to, and a screening pass that guessed at them would
+    /// be deciding a proposal's fate on a failure that was never about the
+    /// proposal.
+    fn screen_selection(&self, transactions: Vec<SignedTransaction>) -> Vec<SignedTransaction> {
+        if transactions.is_empty() {
+            return transactions;
+        }
+        let (draft, height) = match self.draft_block(transactions.clone()) {
+            Ok(drafted) => drafted,
+            Err(e) => {
+                debug!("no screening pass for this proposal: {e}");
+                return transactions;
+            }
+        };
+        let active_validators = self.get_active_validator_set();
+        self.proposal_executions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let screening = match self.executor.screen_proposal(
+            &draft,
+            self.state.state_root(),
+            &active_validators,
+            Self::MAX_PROPOSAL_REFUSAL_BYTES,
+        ) {
+            Ok(screening) => screening,
+            Err(e) => {
+                warn!(
+                    height,
+                    "the screening pass itself refused this proposal; offering the \
+                     selection unchanged and letting the fitting loop act on whatever \
+                     the real execution says: {e}"
+                );
+                return transactions;
+            }
+        };
+        if screening.is_clean() {
+            return transactions;
+        }
+
+        // Indices below are positions in `transactions`, and stay valid because
+        // nothing is spliced until every verdict has been read.
+        let len = transactions.len();
+        let mut drop_indices: Vec<usize> = Vec::with_capacity(screening.refused().len());
+        let mut evict: Vec<Hash> = Vec::new();
+        for &(index, class) in screening.refused() {
+            if index >= len {
+                continue;
+            }
+            let offender = transactions[index].hash();
+            drop_indices.push(index);
+            match class {
+                sumchain_state::TxFailureClass::Permanent => {
+                    warn!(
+                        height,
+                        tx = %offender,
+                        index,
+                        "screening: this transaction can never execute, at any height \
+                         against any state; dropping it from the proposal and evicting \
+                         it from the mempool, so the next tick does not select it again"
+                    );
+                    // Evicted, not merely skipped. Skipped, it is at the front
+                    // of the very next fee-ordered selection and the halt
+                    // resumes on the next tick.
+                    evict.push(offender);
+                }
+                sumchain_state::TxFailureClass::Transient => {
+                    // QUARANTINED, not destroyed. It failed against the state
+                    // it met; a later block may be the state it needs.
+                    warn!(
+                        height,
+                        tx = %offender,
+                        index,
+                        "screening: this transaction could not execute against THIS \
+                         state; dropping it from the proposal and LEAVING IT in the \
+                         mempool, because a later block may carry it"
+                    );
+                }
+            }
+        }
+
+        // The prefix that may still be offered. A cut is not an accusation
+        // against the transaction at it, so nothing here evicts — except the
+        // one case where no emptier block exists at all.
+        let mut keep_prefix = len;
+        if let Some(cut) = screening.charge_cut() {
+            // The pass stopped because this proposal's REFUSALS had staged and
+            // rolled back more than `MAX_PROPOSAL_REFUSAL_BYTES`. Everything
+            // past the cut is unscreened, so it is not offered: an unscreened
+            // tail is exactly the population this pass exists to avoid handing
+            // to the fitting loop one execution at a time.
+            warn!(
+                height,
+                cut,
+                offered = len,
+                refusal_bytes = screening.refusal_bytes(),
+                "screening: this proposal's refusals spent the whole refusal-byte \
+                 budget; offering only the prefix that was actually screened. Nothing \
+                 is evicted for it: the tail was never judged"
+            );
+            keep_prefix = keep_prefix.min(cut);
+        }
+        if let Some(cut) = screening.ceiling_cut() {
+            if cut == 0 {
+                // Nothing preceded it, so no emptier block exists: this
+                // transaction cannot be carried by any block at all. Same
+                // verdict the fitting loop reaches for `BlockWriteSetExceeded`
+                // at index zero, for the same reason.
+                let offender = transactions[0].hash();
+                warn!(
+                    height,
+                    tx = %offender,
+                    "screening: the FIRST transaction in this proposal already crosses \
+                     the block write-set ceiling, so no block can carry it; dropping it \
+                     and evicting it from the mempool"
+                );
+                drop_indices.push(0);
+                evict.push(offender);
+            } else {
+                // It crossed because the prefix spent the budget, not because
+                // of anything it did. At the head of an emptier block it fits,
+                // so it stays in the mempool.
+                warn!(
+                    height,
+                    cut,
+                    offered = len,
+                    "screening: this proposal crosses the block write-set ceiling; \
+                     truncating it at the crossing. Nothing is evicted: the transactions \
+                     beyond the cut fit in an emptier block"
+                );
+                keep_prefix = keep_prefix.min(cut);
+            }
+        }
+
+        if !evict.is_empty() {
+            self.mempool.remove_batch(&evict);
+        }
+        let survivors = Self::drop_all_with_sender_tails(&transactions, &drop_indices, keep_prefix);
+        info!(
+            height,
+            offered = len,
+            refused = screening.refused().len(),
+            evicted = evict.len(),
+            surviving = survivors.len(),
+            refusal_bytes = screening.refusal_bytes(),
+            "screened this proposal in ONE execution"
+        );
+        survivors
+    }
+
+    /// The proposal with every transaction named by `drop_indices` removed,
+    /// every LATER transaction from each of those SENDERS removed with it, and
+    /// nothing at or beyond `keep_prefix` offered at all.
+    ///
+    /// The same rule as [`Self::drop_with_sender_tail`] — read that one for why
+    /// a sender's tail has to go — applied to every offender at once. At once
+    /// because a screening pass names them all together, and re-splicing the
+    /// vector once per offender is quadratic in the size of the very flood this
+    /// pass exists to answer cheaply.
+    ///
+    /// `keep_prefix` is applied in the SAME coordinates as `drop_indices`, which
+    /// is why both are resolved here rather than by two passes over a vector
+    /// that shifts underneath them.
+    fn drop_all_with_sender_tails(
+        txs: &[SignedTransaction],
+        drop_indices: &[usize],
+        keep_prefix: usize,
+    ) -> Vec<SignedTransaction> {
+        let mut dropped = vec![false; txs.len()];
+        // The EARLIEST dropped index per sender. Everything after it from that
+        // sender goes too: nonces are contiguous, so a kept transaction behind
+        // a dropped one from the same sender takes an `InvalidNonce` receipt in
+        // this very block and is then deleted from the mempool by
+        // `remove_batch` — a transaction nothing accused, destroyed by the
+        // repair meant to stop exactly that.
+        let mut earliest: std::collections::HashMap<sumchain_primitives::Address, usize> =
+            std::collections::HashMap::new();
+        for &index in drop_indices {
+            if index >= txs.len() {
+                continue;
+            }
+            dropped[index] = true;
+            earliest
+                .entry(txs[index].sender())
+                .and_modify(|first| *first = (*first).min(index))
+                .or_insert(index);
+        }
+        txs.iter()
+            .enumerate()
+            .filter(|(index, tx)| {
+                *index < keep_prefix
+                    && !dropped[*index]
+                    && earliest
+                        .get(&tx.sender())
+                        .is_none_or(|first| *index < *first)
+            })
+            .map(|(_, tx)| tx.clone())
+            .collect()
+    }
+
     /// The proposal without the transaction at `index`, and without every LATER
     /// transaction from that transaction's SENDER.
     ///
@@ -793,7 +1121,22 @@ impl PoAEngine {
     }
 
     /// One proposal attempt: build, execute, sign, accept, publish, announce.
-    fn create_block_once(&self, transactions: Vec<SignedTransaction>) -> Result<Block> {
+    /// The unsigned, unexecuted candidate this node would propose for the next
+    /// height, carrying `transactions` in the order given.
+    ///
+    /// Shared by [`Self::create_block_once`] and the screening pass, so that
+    /// what is screened is the block that would be built — same parent, same
+    /// height, same proposer. A second copy of this construction would be a
+    /// screening pass about a block nobody was going to produce.
+    ///
+    /// The timestamp is the only thing that differs between a draft made for
+    /// screening and the one made a moment later for production, and it differs
+    /// by the time the screening took. Nothing in this repair reads it: no
+    /// executor arm branches on the block timestamp, and even if one did, the
+    /// screening decides only which of this proposer's OWN transactions to
+    /// offer. The block that results is then executed and validated by every
+    /// importer under rules this function does not touch.
+    fn draft_block(&self, transactions: Vec<SignedTransaction>) -> Result<(Block, BlockHeight)> {
         let validator_key = self
             .validator_key
             .as_ref()
@@ -811,6 +1154,38 @@ impl PoAEngine {
         if !self.is_proposer(height) {
             return Err(ConsensusError::NotProposer);
         }
+
+        // Compute tx root
+        let tx_hashes: Vec<Hash> = transactions.iter().map(|tx| tx.hash()).collect();
+        let tx_root = Hash::merkle_root(&tx_hashes);
+
+        // Create header (state_root will be set after execution)
+        // Guarantee strict timestamp monotonicity: if local clock is behind
+        // the parent (e.g. NTP skew), bump to parent_ts + 1 so validation
+        // (timestamp > parent) cannot reject our own block.
+        let timestamp = std::cmp::max(
+            Self::current_timestamp(),
+            best_block.header.timestamp.saturating_add(1),
+        );
+        let header = BlockHeader::new(
+            best_block.hash(),
+            height,
+            timestamp,
+            tx_root,
+            Hash::ZERO, // Will be updated
+            *validator_key.public_key().as_bytes(),
+        );
+
+        Ok((Block::new(header, transactions), height))
+    }
+
+    fn create_block_once(&self, transactions: Vec<SignedTransaction>) -> Result<Block> {
+        let validator_key = self
+            .validator_key
+            .as_ref()
+            .ok_or(ConsensusError::NotValidator)?;
+
+        let (mut block, height) = self.draft_block(transactions)?;
 
         // ── the disk brake ──────────────────────────────────────────────────
         //
@@ -854,33 +1229,11 @@ impl PoAEngine {
             }
         }
 
-        // Compute tx root
-        let tx_hashes: Vec<Hash> = transactions.iter().map(|tx| tx.hash()).collect();
-        let tx_root = Hash::merkle_root(&tx_hashes);
-
-        // Create header (state_root will be set after execution)
-        // Guarantee strict timestamp monotonicity: if local clock is behind
-        // the parent (e.g. NTP skew), bump to parent_ts + 1 so validation
-        // (timestamp > parent) cannot reject our own block.
-        let timestamp = std::cmp::max(
-            Self::current_timestamp(),
-            best_block.header.timestamp.saturating_add(1),
-        );
-        let header = BlockHeader::new(
-            best_block.hash(),
-            height,
-            timestamp,
-            tx_root,
-            Hash::ZERO, // Will be updated
-            *validator_key.public_key().as_bytes(),
-        );
-
-        // Create block
-        let mut block = Block::new(header, transactions);
-
         // Execute block to get state root. Authorize validator-quorum actions
         // against the same active set used to select this height's proposer.
         let active_validators = self.get_active_validator_set();
+        self.proposal_executions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let execution = self
             .executor
             .execute_block(&block, self.state.state_root(), &active_validators)?;
