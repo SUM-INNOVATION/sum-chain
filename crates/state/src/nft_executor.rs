@@ -125,6 +125,10 @@ pub struct NftGates {
     /// [`MAX_NFT_BATCH_MINT_REQUESTS`] tokens is refused before the loop that
     /// rebuilds the owner index once per request. ACTIVATION-AUDIT row AL-9.
     pub allocation_bound: bool,
+    /// The arms that write metadata or a collection config apply the rules the
+    /// CREATION arms apply. ACTIVATION-AUDIT rows OV-10 and the first half of
+    /// RY-2.
+    pub update_path_parity: bool,
 }
 
 impl NftGates {
@@ -133,6 +137,7 @@ impl NftGates {
         receipt_failure: false,
         token_authority: false,
         allocation_bound: false,
+        update_path_parity: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -140,6 +145,7 @@ impl NftGates {
         receipt_failure: true,
         token_authority: true,
         allocation_bound: true,
+        update_path_parity: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -148,6 +154,7 @@ impl NftGates {
             receipt_failure: NftExecutor::receipt_failure_gate_open(params, block_height),
             token_authority: NftExecutor::token_authority_gate_open(params, block_height),
             allocation_bound: NftExecutor::allocation_bound_gate_open(params, block_height),
+            update_path_parity: NftExecutor::update_path_parity_gate_open(params, block_height),
         }
     }
 }
@@ -242,6 +249,38 @@ impl NftExecutor {
         matches!(Self::token_authority_activation(params), Some(h) if block_height >= h)
     }
 
+    /// The activation height for the NFT update-path parity rules.
+    ///
+    /// Reads `params.nft_update_path_parity_enabled_from_height`, and nothing
+    /// else. `None` -- the default, and what a genesis written before the field
+    /// existed resolves to -- closes the gate, so a node executes exactly what
+    /// it executed before the field was declared.
+    ///
+    /// Below the gate (ACTIVATION-AUDIT rows OV-10 and the first half of RY-2):
+    ///
+    ///   * `execute_mint` enforces `max_metadata_bytes` and charges
+    ///     `storage_fee_per_byte`; `UpdateMetadata` and `BatchMint` enforce
+    ///     neither, although both of those values are SET in the release
+    ///     `genesis.json`;
+    ///   * collection creation zeroes `royalty_recipient` when `royalty_bps` is
+    ///     zero, and `UpdateCollectionConfig` sets one anyway.
+    ///
+    /// At and above it the two metadata arms apply the mint's two rules and
+    /// `UpdateCollectionConfig` refuses a recipient for a royalty of zero.
+    ///
+    /// This does NOT make a royalty payable: RY-1 is untouched, and so is the
+    /// half of RY-2 that observes the config payload has no `new_royalty_bps`.
+    #[inline]
+    fn update_path_parity_activation(params: &ChainParams) -> Option<u64> {
+        params.nft_update_path_parity_enabled_from_height
+    }
+
+    /// Whether the NFT update-path parity rules are active at `block_height`.
+    #[inline]
+    pub fn update_path_parity_gate_open(params: &ChainParams, block_height: u64) -> bool {
+        matches!(Self::update_path_parity_activation(params), Some(h) if block_height >= h)
+    }
+
     /// The errors the receipt-failure rule converts into a `Failed` receipt.
     ///
     /// Deliberately narrow. Storage and encoding errors are node-local faults
@@ -322,8 +361,7 @@ impl NftExecutor {
             block_timestamp,
             NftGates {
                 receipt_failure: receipt_failure_gate_open,
-                token_authority: false,
-                allocation_bound: false,
+                ..NftGates::CLOSED
             },
         )
     }
@@ -453,9 +491,11 @@ impl NftExecutor {
             ),
             NftOperation::BatchMint => Self::execute_batch_mint(
                 view,
+                params,
                 sender,
                 &nft_data.collection_id,
                 &nft_data.data,
+                fee,
                 block_timestamp,
                 gates,
             ),
@@ -485,11 +525,13 @@ impl NftExecutor {
             }
             NftOperation::UpdateMetadata => Self::execute_update_metadata(
                 view,
+                params,
                 sender,
                 &nft_data.collection_id,
                 nft_data.token_id,
                 &nft_data.data,
-                gates.token_authority,
+                fee,
+                gates,
             ),
             NftOperation::TransferCollectionOwnership => Self::execute_transfer_collection(
                 view,
@@ -502,6 +544,7 @@ impl NftExecutor {
                 sender,
                 &nft_data.collection_id,
                 &nft_data.data,
+                gates,
             ),
             NftOperation::LockToken => {
                 Self::execute_lock_token(view, sender, &nft_data.collection_id, nft_data.token_id)
@@ -725,11 +768,14 @@ impl NftExecutor {
     }
 
     /// Batch mint tokens
+    #[allow(clippy::too_many_arguments)]
     fn execute_batch_mint(
         view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         collection_id: &[u8; 32],
         data: &[u8],
+        fee: Balance,
         block_timestamp: u64,
         gates: NftGates,
     ) -> Result<NftExecutionResult> {
@@ -773,6 +819,39 @@ impl NftExecutor {
                 "BatchMint of {count} tokens exceeds the limit of \
                  {MAX_NFT_BATCH_MINT_REQUESTS}"
             )));
+        }
+
+        // ACTIVATION-AUDIT row OV-10. `execute_mint` checks every token's
+        // metadata against `max_metadata_bytes` and requires the fee to cover
+        // `storage_fee_per_byte`; this arm, which writes the same field on any
+        // number of tokens, checks neither. Both values are SET in the release
+        // `genesis.json`.
+        //
+        // The fee is charged against the batch's TOTAL metadata bytes rather
+        // than per request, which is what one mint of the same number of bytes
+        // costs: `calculate_nft_storage_fee` is `min_fee` plus per-byte, so
+        // summing per request would charge `min_fee` `n` times for a single
+        // transaction. Each request's own metadata is still checked against the
+        // size limit individually, because the limit is a per-row bound.
+        if gates.update_path_parity {
+            let mut total_metadata_bytes = 0usize;
+            for request in &batch_data.requests {
+                let size = request.metadata.len();
+                if !params.validate_metadata_size(size) {
+                    return Ok(NftExecutionResult::failure(format!(
+                        "Metadata too large: {} bytes exceeds maximum of {} bytes",
+                        size, params.max_metadata_bytes
+                    )));
+                }
+                total_metadata_bytes = total_metadata_bytes.saturating_add(size);
+            }
+            let required_fee = params.calculate_nft_storage_fee(total_metadata_bytes);
+            if fee < required_fee {
+                return Ok(NftExecutionResult::failure(format!(
+                    "Insufficient storage fee: {} required for {} bytes of metadata, got {}",
+                    required_fee, total_metadata_bytes, fee
+                )));
+            }
         }
 
         let first_token_id = collection.next_token_id;
@@ -978,14 +1057,18 @@ impl NftExecutor {
     }
 
     /// Update token metadata
+    #[allow(clippy::too_many_arguments)]
     fn execute_update_metadata(
         view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         collection_id: &[u8; 32],
         token_id: u64,
         data: &[u8],
-        token_authority_gate_open: bool,
+        fee: Balance,
+        gates: NftGates,
     ) -> Result<NftExecutionResult> {
+        let token_authority_gate_open = gates.token_authority;
         // Get collection
         let collection = Self::v_get_collection(view, collection_id)?
             .ok_or_else(|| StateError::BlockValidation("Collection not found".to_string()))?;
@@ -1019,6 +1102,31 @@ impl NftExecutor {
             return Ok(NftExecutionResult::failure(
                 "Not owner or creator".to_string(),
             ));
+        }
+
+        // ACTIVATION-AUDIT row OV-10. Below the gate this arm takes `data`
+        // verbatim as the new metadata -- undecoded, with no size limit and no
+        // per-byte fee -- while `execute_mint` checks both against the same
+        // `ChainParams` values, which the release `genesis.json` sets.
+        //
+        // Checked here rather than at the top of the arm so that the pre-existing
+        // ownership and lock refusals keep firing first: they are the more
+        // specific answer and were the answer before this gate existed.
+        if gates.update_path_parity {
+            let metadata_size = data.len();
+            if !params.validate_metadata_size(metadata_size) {
+                return Ok(NftExecutionResult::failure(format!(
+                    "Metadata too large: {} bytes exceeds maximum of {} bytes",
+                    metadata_size, params.max_metadata_bytes
+                )));
+            }
+            let required_fee = params.calculate_nft_storage_fee(metadata_size);
+            if fee < required_fee {
+                return Ok(NftExecutionResult::failure(format!(
+                    "Insufficient storage fee: {} required for {} bytes of metadata, got {}",
+                    required_fee, metadata_size, fee
+                )));
+            }
         }
 
         // Update metadata
@@ -1075,6 +1183,7 @@ impl NftExecutor {
         sender: &Address,
         collection_id: &[u8; 32],
         data: &[u8],
+        gates: NftGates,
     ) -> Result<NftExecutionResult> {
         // Get collection
         let mut collection = Self::v_get_collection(view, collection_id)?
@@ -1092,7 +1201,28 @@ impl NftExecutor {
         let update_data: NftUpdateCollectionConfigData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid config data: {}", e)))?;
 
+        // ACTIVATION-AUDIT row RY-2, first half. Creation zeroes
+        // `royalty_recipient` when `royalty_bps` is zero
+        // (`execute_create_collection`); this arm has no such rule and sets one
+        // anyway, so a collection that pays nothing carries a recipient the
+        // RPC reports (`nft_getCollection`). At and above the gate the update
+        // arm applies the creation arm's rule.
+        //
+        // A refusal rather than creation's silent zero, deliberately: a silent
+        // zero here would be a paid no-op, which is the OV-30 shape this audit
+        // files as a defect of its own. What the gate closes is the ASYMMETRY,
+        // and telling the sender is the better side of it.
+        //
+        // The SECOND half of RY-2 is untouched and is not closable here:
+        // `NftUpdateCollectionConfigData` has no `new_royalty_bps` field at
+        // all, so a royalty still cannot be changed after creation. That is a
+        // wire change.
         if let Some(recipient) = update_data.new_royalty_recipient {
+            if gates.update_path_parity && collection.royalty_bps == 0 {
+                return Ok(NftExecutionResult::failure(
+                    "Collection pays no royalty, so it takes no royalty recipient".to_string(),
+                ));
+            }
             collection.royalty_recipient = recipient;
         }
         if let Some(uri) = update_data.new_base_uri {

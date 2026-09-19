@@ -1158,6 +1158,53 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub subsystem_proof_presence_enabled_from_height: Option<u64>,
+
+    /// An NFT arm that writes metadata or a collection config applies the rules
+    /// the CREATION arm applies.
+    ///
+    /// Two defects that are one question — does an update path enforce what the
+    /// creation path enforces — and therefore one height (ACTIVATION-AUDIT rows
+    /// OV-10 and the first half of RY-2):
+    ///
+    ///   * `execute_mint` checks `max_metadata_bytes` and charges
+    ///     `storage_fee_per_byte`; `UpdateMetadata` takes the payload verbatim
+    ///     as the new metadata with neither check, and `BatchMint` clones
+    ///     per-request metadata with neither check, for any number of requests.
+    ///     Both of those `ChainParams` values are SET in the release
+    ///     `genesis.json` — `max_metadata_bytes: 16384`,
+    ///     `storage_fee_per_byte: 100` — and bypassed on two of the three arms
+    ///     that write metadata, so the chain's own stated limits apply to one
+    ///     third of the paths that reach them.
+    ///   * collection creation zeroes `royalty_recipient` when `royalty_bps` is
+    ///     zero; `UpdateCollectionConfig` has no such rule and sets a recipient
+    ///     on a collection that pays no royalty anyway.
+    ///
+    /// At and above the gate `UpdateMetadata` and `BatchMint` enforce the size
+    /// limit and the per-byte storage fee, and `UpdateCollectionConfig` refuses
+    /// a recipient for a royalty of zero. One height because they are one
+    /// asymmetry: activating the metadata half alone would leave a collection
+    /// whose config still accepts a field creation rejects, and activating the
+    /// royalty half alone would leave the two metadata arms writing rows the
+    /// chain says are too large. Both sides change a success receipt into a
+    /// failed one and neither can abort a block, so there is nothing to
+    /// sequence.
+    ///
+    /// **This does not make a royalty payable.** RY-1 — a royalty recorded and
+    /// never paid by any transfer — is untouched, and so is the half of RY-2
+    /// that observes `NftUpdateCollectionConfigData` carries no
+    /// `new_royalty_bps` at all: that is a wire change, not an executor change.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub nft_update_path_parity_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -1505,6 +1552,8 @@ impl Default for ChainParams {
             healthcare_state_precondition_enabled_from_height: None,
             // Production-safe default: VerifyProof stops succeeding for a proof that does not exist — dormant.
             subsystem_proof_presence_enabled_from_height: None,
+            // Production-safe default: the nft update arms apply the creation arm's rules — dormant.
+            nft_update_path_parity_enabled_from_height: None,
         }
     }
 }
@@ -1850,6 +1899,10 @@ impl ChainParams {
             (
                 "subsystem_proof_presence_enabled_from_height",
                 self.subsystem_proof_presence_enabled_from_height,
+            ),
+            (
+                "nft_update_path_parity_enabled_from_height",
+                self.nft_update_path_parity_enabled_from_height,
             ),
         ]
     }
