@@ -163,6 +163,61 @@ impl PropertyExecutor {
         .map_err(StateError::Storage)
     }
 
+    /// The STORED length of an asset row, without decoding it.
+    ///
+    /// ACTIVATION-AUDIT rows OV-22 and AL-6. At
+    /// `property_asset_relationship_enabled_from_height` a merge appends one
+    /// 32-byte id to `AssetAnchor.related_assets` on each of two rows, which
+    /// makes those rows accumulating and puts them under the same bound the
+    /// five index rows already carry. The caller refuses an oversized row, so
+    /// it has to know the size WITHOUT paying for the decode: `None` for an
+    /// absent row, `Some(n)` for one of `n` bytes. The same shape and the same
+    /// reasoning as `v_jurisdiction_index_row_len` above.
+    pub fn v_asset_row_len(
+        view: &ExecutionView<'_, '_>,
+        asset_id: &AssetId,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(cf::PROPERTY_ASSETS, asset_key(asset_id))
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
+    }
+
+    /// Append `related_asset_id` to `asset_id`'s `related_assets`, once.
+    ///
+    /// ACTIVATION-AUDIT row OV-22, and row DE-7: the committed twin
+    /// `PropertyAssetStore::add_related_asset` is the writer that could record
+    /// a merge and has no caller anywhere in the tree. This is that twin
+    /// against the block's candidate, statement for statement -- `contains`
+    /// then push, so a repeat is a no-op rather than a duplicate entry;
+    /// `updated_at` bumped only when something changed; and the ASSET ROW
+    /// alone, not `v_put_asset`, because the jurisdiction index has nothing to
+    /// learn from a merge.
+    ///
+    /// `NotFound` for an absent row, as the committed twin returns. Every
+    /// caller has already read both rows, so it is unreachable from the
+    /// executor and is reproduced rather than swallowed.
+    pub fn v_add_related_asset(
+        view: &mut ExecutionView<'_, '_>,
+        asset_id: &AssetId,
+        related_asset_id: &AssetId,
+        timestamp: Timestamp,
+    ) -> Result<()> {
+        match Self::v_get_asset(view, asset_id)? {
+            Some(mut asset) => {
+                if asset.related_assets.contains(related_asset_id) {
+                    return Ok(());
+                }
+                asset.related_assets.push(*related_asset_id);
+                asset.updated_at = timestamp;
+                let bytes = encode_asset(&asset).map_err(StateError::Storage)?;
+                view.put(cf::PROPERTY_ASSETS, asset_key(asset_id), &bytes)
+                    .map_err(StateError::Storage)
+            }
+            None => Err(not_found("Asset", asset_id)),
+        }
+    }
+
     /// Read, set status and `updated_at`, write. `NotFound` for an absent row.
     pub fn v_update_asset_status(
         view: &mut ExecutionView<'_, '_>,

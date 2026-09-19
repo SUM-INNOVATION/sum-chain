@@ -1908,6 +1908,129 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub subsystem_proof_unsupported_enabled_from_height: Option<u64>,
+
+    /// A Property transition consults the status of the row it changes.
+    ///
+    /// ACTIVATION-AUDIT row OV-21. Three arms in `property_executor.rs` guard
+    /// on the state they read -- `ReinstateCoverage` accepts only `Suspended`,
+    /// `PayClaim` only `Approved` or `PartiallyApproved`, `ReopenClaim` only
+    /// `Closed` or `Denied` -- and every other transition applies from any
+    /// prior status whatever. So `UpdateAsset` returns a `Deregistered` asset
+    /// to `Active`; a `Merged` asset is merged again into a third; and a `Paid`
+    /// claim is closed, reopened, re-approved and PAID A SECOND TIME, which is
+    /// the sharpest of them because the cycle walks around both of the guards
+    /// the subsystem does have. `UpdateCoverage` does the same to
+    /// `ReinstateCoverage`: it sets a `Cancelled` coverage back to `Active`
+    /// without ever meeting the `Suspended` requirement that operation exists
+    /// to impose.
+    ///
+    /// At and above the gate a row whose status is FINAL accepts no further
+    /// operation. Final is not a judgement made here; it is the status a NAMED
+    /// operation writes and that no named operation leaves:
+    ///
+    ///   * asset `Merged`, `Subdivided`, `Deregistered` -- written by
+    ///     `MergeAssets`, `SubdivideAsset` and `DeregisterAsset`;
+    ///   * title event `Superseded`, `Voided`;
+    ///   * encumbrance `Released`, `Foreclosed`;
+    ///   * coverage `Cancelled`, and NOT `Suspended`, which
+    ///     `ReinstateCoverage` is the named way out of;
+    ///   * claim `Paid` and `Withdrawn`, and NOT `Closed` or `Denied`, which
+    ///     `ReopenClaim` is the named way out of.
+    ///
+    /// So the rule EXPLAINS the three guards that already exist rather than
+    /// sitting beside them. `ReinstateCoverage` and `ReopenClaim` are exactly
+    /// the named returns that keep `Suspended`, `Closed` and `Denied` off the
+    /// list, and `PayClaim`'s guard is the one place the rule was already
+    /// written down.
+    ///
+    /// Statuses reachable ONLY through a free-form `Update*` arm are
+    /// deliberately NOT final here -- `AssetStatus::Destroyed`,
+    /// `EncumbranceStatus::Voided`, `CoverageStatus::Expired` and the rest.
+    /// They read as endings, and no operation in this subsystem is named for
+    /// any of them; a gate that made them final would be choosing a lifecycle
+    /// inside an executor rather than enforcing the one the arms already
+    /// describe, which is the thing the audit refuses to do elsewhere.
+    ///
+    /// ONE field for five row types, because it is one rule and the five are
+    /// the same sentence about different families. An operator who enforced it
+    /// on claims and not on assets would be running a subsystem in which a
+    /// merged asset can still be merged, which is the same defect under a
+    /// different column family -- there is nothing to sequence and nothing a
+    /// subset buys.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub property_state_precondition_enabled_from_height: Option<u64>,
+
+    /// A Property merge records the relationship it asserts.
+    ///
+    /// ACTIVATION-AUDIT row OV-22, the merge half. `MergeAssets` writes
+    /// `AssetStatus::Merged` onto the secondary and NOTHING else: the primary
+    /// asset row is not touched at all, and `AssetAnchor.related_assets` -- the
+    /// field the wire type carries, in its own words, "for subdivisions,
+    /// mergers" -- stays empty on both sides.
+    /// `PropertyAssetStore::add_related_asset` is the writer that would record
+    /// it and has no caller anywhere in the tree (ACTIVATION-AUDIT row DE-7).
+    /// A `Merged` asset therefore names nothing it was merged INTO, and the
+    /// asset that absorbed it says nothing about the absorption, so the merge
+    /// is unreadable from either row afterwards.
+    ///
+    /// At and above the gate a merge links both rows: the primary gains the
+    /// secondary's id and the secondary gains the primary's, each idempotently
+    /// -- `contains`, then push -- exactly as the committed twin writes it, and
+    /// both rows carry the block's `updated_at`. BOTH directions, because the
+    /// audit row names both halves of the omission: "records no relationship"
+    /// and "never writes the primary asset". One direction would leave a
+    /// `Merged` row still pointing nowhere.
+    ///
+    /// The write brings its own bound. `related_assets` becomes an accumulating
+    /// list -- decoded, appended to and re-encoded on every merge -- which is
+    /// precisely the shape ACTIVATION-AUDIT row AL-6 files as a defect wherever
+    /// it already exists. Introducing an unbounded one would be adding that
+    /// defect in the act of closing this one. So at the gate a merge is
+    /// refused, before the fee, when either stored asset row already exceeds
+    /// `MAX_ACCUMULATING_ROW_BYTES`. The bound belongs to THIS height rather
+    /// than to `subsystem_allocation_bound_enabled_from_height` because an
+    /// operator who opened this gate alone would otherwise be running the one
+    /// accumulating row in the tree that nothing bounds.
+    ///
+    /// NOT the same rule as
+    /// [`Self::property_state_precondition_enabled_from_height`], and
+    /// deliberately a separate height. That one decides whether an operation
+    /// APPLIES; this one decides what an operation that does apply RECORDS.
+    /// They fail differently -- one lets a dead row move, the other loses a
+    /// fact a live row asserted -- they are argued from different evidence, and
+    /// either is coherent without the other: linking merges of any two assets
+    /// is an improvement even where dead assets can still be merged, and
+    /// refusing dead assets is an improvement even where no link is written.
+    /// Sharing a height would mean an operator could not have the one it had
+    /// reviewed.
+    ///
+    /// What this does NOT close: `SubdivideAsset` still creates no children and
+    /// `TransferAsset` still moves no ownership. The audit records both as
+    /// BLOCKED, STRUCTURAL and they stay so -- the subdivide payload names no
+    /// child to create, and an asset row has no owner field to move -- and both
+    /// are wire changes rather than executor changes.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub property_asset_relationship_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -2280,6 +2403,10 @@ impl Default for ChainParams {
             nft_collection_id_nonce_enabled_from_height: None,
             // Production-safe default: VerifyProof stops claiming to verify — dormant.
             subsystem_proof_unsupported_enabled_from_height: None,
+            // Production-safe default: a property transition consults the status of the row it changes — dormant.
+            property_state_precondition_enabled_from_height: None,
+            // Production-safe default: a property merge records the relationship it asserts — dormant.
+            property_asset_relationship_enabled_from_height: None,
         }
     }
 }
@@ -2727,6 +2854,14 @@ impl ChainParams {
                 "subsystem_proof_unsupported_enabled_from_height",
                 self.subsystem_proof_unsupported_enabled_from_height,
             ),
+            (
+                "property_state_precondition_enabled_from_height",
+                self.property_state_precondition_enabled_from_height,
+            ),
+            (
+                "property_asset_relationship_enabled_from_height",
+                self.property_asset_relationship_enabled_from_height,
+            ),
         ]
     }
 
@@ -2818,6 +2953,8 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "nft_collection_id_nonce_enabled_from_height",
     "subsystem_proof_unsupported_enabled_from_height",
     "subsystem_tx_write_set_bound_enabled_from_height",
+    "property_state_precondition_enabled_from_height",
+    "property_asset_relationship_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started

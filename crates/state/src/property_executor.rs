@@ -176,6 +176,14 @@ pub struct PropertyGates {
     /// audit does name. The retired presence gate covered six of seven for that
     /// reason; this one covers all seven.
     pub proof_unsupported: bool,
+    /// A transition consults the status of the row it changes: a row whose
+    /// status is FINAL accepts no further operation.
+    /// ACTIVATION-AUDIT row OV-21.
+    pub state_precondition: bool,
+    /// `MergeAssets` records the relationship it asserts, on both rows, and
+    /// bounds the accumulating list it writes into.
+    /// ACTIVATION-AUDIT row OV-22, the merge half.
+    pub asset_relationship: bool,
 }
 
 impl PropertyGates {
@@ -185,6 +193,8 @@ impl PropertyGates {
         real_block_timestamp: false,
         allocation_bound: false,
         proof_unsupported: false,
+        state_precondition: false,
+        asset_relationship: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -193,6 +203,8 @@ impl PropertyGates {
         real_block_timestamp: true,
         allocation_bound: true,
         proof_unsupported: true,
+        state_precondition: true,
+        asset_relationship: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -202,6 +214,14 @@ impl PropertyGates {
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
             allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
             proof_unsupported: crate::subsystem_proof_unsupported_gate_open(params, block_height),
+            state_precondition: PropertyExecutor::state_precondition_gate_open(
+                params,
+                block_height,
+            ),
+            asset_relationship: PropertyExecutor::asset_relationship_gate_open(
+                params,
+                block_height,
+            ),
         }
     }
 
@@ -214,6 +234,22 @@ impl PropertyGates {
     #[inline]
     pub fn row_limit(self) -> Option<usize> {
         self.allocation_bound
+            .then_some(crate::MAX_ACCUMULATING_ROW_BYTES)
+    }
+
+    /// The stored asset-row limit the RELATIONSHIP write imposes, or `None`
+    /// when that gate is closed.
+    ///
+    /// Deliberately not `row_limit` above, and deliberately reading a different
+    /// gate. `related_assets` only becomes an accumulating list at
+    /// `asset_relationship`, so the bound on it has to arrive with the write
+    /// that creates it: an operator who opened the relationship gate alone and
+    /// found the bound behind `subsystem_allocation_bound_enabled_from_height`
+    /// would be running the one accumulating row in the tree that nothing
+    /// bounds. Same constant, because it is the same kind of row.
+    #[inline]
+    pub fn related_row_limit(self) -> Option<usize> {
+        self.asset_relationship
             .then_some(crate::MAX_ACCUMULATING_ROW_BYTES)
     }
 }
@@ -251,6 +287,156 @@ impl PropertyExecutor {
     #[inline]
     pub fn authorization_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
         matches!(Self::authorization_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the Property state preconditions.
+    ///
+    /// Reads `params.property_state_precondition_enabled_from_height`, and
+    /// nothing else. `None` -- the default, and what a genesis written before
+    /// the field existed resolves to -- closes the gate, so a node executes
+    /// exactly what it executed before the field was declared.
+    ///
+    /// Below the gate (ACTIVATION-AUDIT row OV-21) only `ReinstateCoverage`,
+    /// `PayClaim` and `ReopenClaim` guard on the state they read; every other
+    /// transition applies from any prior status, so `UpdateAsset` returns a
+    /// `Deregistered` asset to `Active`, a `Merged` asset is merged again, and
+    /// a `Paid` claim is closed, reopened, re-approved and paid a second time.
+    /// At and above it a row whose status is FINAL accepts no further
+    /// operation, where final means the status a NAMED operation writes and
+    /// that no named operation leaves.
+    #[inline]
+    fn state_precondition_activation(params: &ChainParams) -> Option<u64> {
+        params.property_state_precondition_enabled_from_height
+    }
+
+    /// Whether the Property state preconditions are active at `block_height`.
+    #[inline]
+    pub fn state_precondition_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::state_precondition_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the Property merge relationship record.
+    ///
+    /// Reads `params.property_asset_relationship_enabled_from_height`, and
+    /// nothing else. `None` -- the default, and what a genesis written before
+    /// the field existed resolves to -- closes the gate, so a node executes
+    /// exactly what it executed before the field was declared.
+    ///
+    /// Below the gate (ACTIVATION-AUDIT row OV-22, the merge half) `MergeAssets`
+    /// writes `AssetStatus::Merged` onto the secondary and nothing else: the
+    /// primary row is never touched and `related_assets` stays empty on both.
+    /// At and above it the merge links both rows, idempotently, and is refused
+    /// before the fee when either stored row already exceeds
+    /// `MAX_ACCUMULATING_ROW_BYTES`.
+    #[inline]
+    fn asset_relationship_activation(params: &ChainParams) -> Option<u64> {
+        params.property_asset_relationship_enabled_from_height
+    }
+
+    /// Whether the Property merge relationship record is active at
+    /// `block_height`.
+    #[inline]
+    pub fn asset_relationship_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(Self::asset_relationship_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// A status a NAMED operation writes and that no named operation leaves.
+    ///
+    /// ACTIVATION-AUDIT row OV-21, and the definition the gate turns on. It is
+    /// read off the arms rather than chosen here: `MergeAssets`,
+    /// `SubdivideAsset` and `DeregisterAsset` each write one of these three and
+    /// this subsystem offers no operation that writes an asset back out of one.
+    ///
+    /// `AssetStatus::Destroyed` and `Seized` are NOT here. Both read as
+    /// endings, and neither is written by any named operation -- only by the
+    /// free-form `UpdateAsset` -- so calling them final would be inventing a
+    /// lifecycle inside an executor instead of enforcing the one the arms
+    /// describe. `PendingTransfer` and `Encumbered` are live states by the same
+    /// reading.
+    #[inline]
+    fn asset_status_is_final(status: AssetStatus) -> bool {
+        matches!(
+            status,
+            AssetStatus::Merged | AssetStatus::Subdivided | AssetStatus::Deregistered
+        )
+    }
+
+    /// `SupersedeTitleEvent` writes `Superseded` and `VoidTitleEvent` writes
+    /// `Voided`; nothing writes a title event back out of either.
+    #[inline]
+    fn title_event_status_is_final(status: TitleEventStatus) -> bool {
+        matches!(
+            status,
+            TitleEventStatus::Superseded | TitleEventStatus::Voided
+        )
+    }
+
+    /// `ReleaseEncumbrance` writes `Released` and `ForecloseEncumbrance` writes
+    /// `Foreclosed`; nothing writes an encumbrance back out of either.
+    ///
+    /// `Expired` and `Voided` are reachable only through `UpdateEncumbrance`
+    /// and are not final here, for the reason `asset_status_is_final` gives.
+    #[inline]
+    fn encumbrance_status_is_final(status: EncumbranceStatus) -> bool {
+        matches!(
+            status,
+            EncumbranceStatus::Released | EncumbranceStatus::Foreclosed
+        )
+    }
+
+    /// `CancelCoverage` writes `Cancelled` and nothing writes a coverage back
+    /// out of it.
+    ///
+    /// `Suspended` is deliberately NOT final: `ReinstateCoverage` is the named
+    /// way out of it, which is the same fact that keeps it off this list and
+    /// the reason that arm already carries a guard.
+    #[inline]
+    fn coverage_status_is_final(status: CoverageStatus) -> bool {
+        matches!(status, CoverageStatus::Cancelled)
+    }
+
+    /// `PayClaim` writes `Paid` and `WithdrawClaim` writes `Withdrawn`; nothing
+    /// writes a claim back out of either.
+    ///
+    /// `Closed` and `Denied` are deliberately NOT final: `ReopenClaim` is the
+    /// named way out of both, and its existing guard names exactly those two.
+    /// `Paid` being final is what breaks the pay-close-reopen-approve-pay cycle
+    /// that walks around `PayClaim`'s own guard.
+    #[inline]
+    fn claim_status_is_final(status: ClaimStatus) -> bool {
+        matches!(status, ClaimStatus::Paid | ClaimStatus::Withdrawn)
+    }
+
+    /// The refusal a final row returns. One phrasing across all five families,
+    /// with the STATUS in it, because the remedy for a final row is never
+    /// "retry" -- it is a different row.
+    fn row_is_final(what: &str, status: impl std::fmt::Debug) -> PropertyExecutionResult {
+        PropertyExecutionResult::failure(format!(
+            "{what} is {status:?}, which is final: no further operation applies to it"
+        ))
+    }
+
+    /// The stored asset row this merge would append to, checked against the
+    /// bound before it is decoded.
+    ///
+    /// ACTIVATION-AUDIT row OV-22 -- and row AL-6, which is why the check is
+    /// here at all. The same shape as the five index bounds above and the same
+    /// reason: a caller that wants to refuse an oversized row must know its
+    /// size WITHOUT paying for the decode.
+    fn asset_row_within_bound(
+        view: &ExecutionView<'_, '_>,
+        asset_id: &[u8; 32],
+        max_bytes: Option<usize>,
+    ) -> Result<Option<PropertyExecutionResult>> {
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        match Self::v_asset_row_len(view, asset_id)? {
+            Some(bytes) if bytes > max => {
+                Ok(Some(Self::row_too_large("Property asset row", bytes)))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// A stored index row longer than the bound, refused without being decoded.
@@ -517,6 +703,13 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can update"));
                 }
 
+                // ACTIVATION-AUDIT row OV-21. The free-form status write. Below the gate
+                // it is the un-deregister, the un-merge and the un-subdivide this
+                // subsystem otherwise has no operation for.
+                if gates.state_precondition && Self::asset_status_is_final(asset.status) {
+                    return Ok(Self::row_is_final("Asset", asset.status));
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -544,6 +737,12 @@ impl PropertyExecutor {
 
                 if asset.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Only issuer can transfer"));
+                }
+
+                // ACTIVATION-AUDIT row OV-21. A deregistered or merged asset cannot begin
+                // a transfer.
+                if gates.state_precondition && Self::asset_status_is_final(asset.status) {
+                    return Ok(Self::row_is_final("Asset", asset.status));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -592,6 +791,32 @@ impl PropertyExecutor {
                     ));
                 }
 
+                // ACTIVATION-AUDIT row OV-21. A merge is a statement about BOTH rows, so
+                // both are checked. An asset already merged into something else cannot
+                // absorb a third, and one that was absorbed cannot be absorbed again.
+                if gates.state_precondition && Self::asset_status_is_final(primary.status) {
+                    return Ok(Self::row_is_final("Primary asset", primary.status));
+                }
+
+                if gates.state_precondition && Self::asset_status_is_final(secondary.status) {
+                    return Ok(Self::row_is_final("Secondary asset", secondary.status));
+                }
+
+                // ACTIVATION-AUDIT row OV-22, and row AL-6 which is why the
+                // bound travels with the write rather than behind the
+                // allocation height. At this gate the two rows below stop
+                // being fixed-size records and start accumulating one 32-byte
+                // id per merge, decoded and re-encoded whole each time. Both
+                // are checked, because both are written. Refused before the
+                // fee, like the two guards above it.
+                for id in [&d.primary_asset_id, &d.secondary_asset_id] {
+                    if let Some(refusal) =
+                        Self::asset_row_within_bound(view, id, gates.related_row_limit())?
+                    {
+                        return Ok(refusal);
+                    }
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -601,6 +826,31 @@ impl PropertyExecutor {
                     AssetStatus::Merged,
                     block_timestamp,
                 )?;
+
+                // ACTIVATION-AUDIT row OV-22, the merge half. Below the gate
+                // the line above is the WHOLE of what a merge does: the
+                // primary row is never written and `related_assets` -- the
+                // field `AssetAnchor` carries "for subdivisions, mergers" --
+                // stays empty on both sides, so the merge is unreadable from
+                // either row afterwards. At and above it each row names the
+                // other. The status write comes first and the links second, so
+                // a reader that sees `Merged` never sees it without the link
+                // in the same candidate.
+                if gates.asset_relationship {
+                    Self::v_add_related_asset(
+                        view,
+                        &d.primary_asset_id,
+                        &d.secondary_asset_id,
+                        block_timestamp,
+                    )?;
+                    Self::v_add_related_asset(
+                        view,
+                        &d.secondary_asset_id,
+                        &d.primary_asset_id,
+                        block_timestamp,
+                    )?;
+                }
+
                 Ok(PropertyExecutionResult::success())
             }
 
@@ -619,6 +869,12 @@ impl PropertyExecutor {
 
                 if asset.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Only issuer can subdivide"));
+                }
+
+                // ACTIVATION-AUDIT row OV-21. A subdivided asset is not subdivided again,
+                // and a deregistered one is not subdivided at all.
+                if gates.state_precondition && Self::asset_status_is_final(asset.status) {
+                    return Ok(Self::row_is_final("Asset", asset.status));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -648,6 +904,12 @@ impl PropertyExecutor {
 
                 if asset.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Only issuer can deregister"));
+                }
+
+                // ACTIVATION-AUDIT row OV-21. Deregistering a row that is already final
+                // rewrites its ending.
+                if gates.state_precondition && Self::asset_status_is_final(asset.status) {
+                    return Ok(Self::row_is_final("Asset", asset.status));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -717,6 +979,13 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can update"));
                 }
 
+                // ACTIVATION-AUDIT row OV-21. The free-form status write again: below the
+                // gate it un-voids and un-supersedes a title event, which is how a history
+                // is rewritten without `SupersedeTitleEvent` ever being called.
+                if gates.state_precondition && Self::title_event_status_is_final(event.status) {
+                    return Ok(Self::row_is_final("Title event", event.status));
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -753,6 +1022,13 @@ impl PropertyExecutor {
                             "The replacement event must be issued by the sender",
                         ));
                     }
+                }
+
+                // ACTIVATION-AUDIT row OV-21. A superseded event is not superseded twice
+                // -- that forks the history into two replacements of one event -- and a
+                // voided one has no standing left to supersede.
+                if gates.state_precondition && Self::title_event_status_is_final(old_event.status) {
+                    return Ok(Self::row_is_final("Title event", old_event.status));
                 }
 
                 // ACTIVATION-AUDIT row AL-6, the asset-title family: a
@@ -800,6 +1076,12 @@ impl PropertyExecutor {
 
                 if event.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Only issuer can void"));
+                }
+
+                // ACTIVATION-AUDIT row OV-21. A voided or superseded event is already out
+                // of the history.
+                if gates.state_precondition && Self::title_event_status_is_final(event.status) {
+                    return Ok(Self::row_is_final("Title event", event.status));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -871,6 +1153,13 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can update"));
                 }
 
+                // ACTIVATION-AUDIT row OV-21. The free-form status write: below the gate a
+                // released lien becomes `Active` again.
+                if gates.state_precondition && Self::encumbrance_status_is_final(encumbrance.status)
+                {
+                    return Ok(Self::row_is_final("Encumbrance", encumbrance.status));
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -898,6 +1187,13 @@ impl PropertyExecutor {
 
                 if encumbrance.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Only issuer can subordinate"));
+                }
+
+                // ACTIVATION-AUDIT row OV-21. Priority between a released lien and a live
+                // one is not a question.
+                if gates.state_precondition && Self::encumbrance_status_is_final(encumbrance.status)
+                {
+                    return Ok(Self::row_is_final("Encumbrance", encumbrance.status));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -930,6 +1226,13 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can release"));
                 }
 
+                // ACTIVATION-AUDIT row OV-21. A released lien is not released twice, and a
+                // foreclosed one has already had its remedy.
+                if gates.state_precondition && Self::encumbrance_status_is_final(encumbrance.status)
+                {
+                    return Ok(Self::row_is_final("Encumbrance", encumbrance.status));
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -958,6 +1261,13 @@ impl PropertyExecutor {
 
                 if encumbrance.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Only issuer can foreclose"));
+                }
+
+                // ACTIVATION-AUDIT row OV-21. Foreclosing a RELEASED lien is the sharp
+                // one: it takes a remedy on a debt the row itself records as satisfied.
+                if gates.state_precondition && Self::encumbrance_status_is_final(encumbrance.status)
+                {
+                    return Ok(Self::row_is_final("Encumbrance", encumbrance.status));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -1029,6 +1339,14 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can update"));
                 }
 
+                // ACTIVATION-AUDIT row OV-21. The free-form status write, and the way
+                // around `ReinstateCoverage`: below the gate it sets a `Cancelled`
+                // coverage back to `Active` without ever meeting the `Suspended`
+                // requirement that operation exists to impose.
+                if gates.state_precondition && Self::coverage_status_is_final(coverage.status) {
+                    return Ok(Self::row_is_final("Coverage", coverage.status));
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -1054,6 +1372,12 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can renew"));
                 }
 
+                // ACTIVATION-AUDIT row OV-21. A cancelled policy is not renewed; it is re-
+                // issued.
+                if gates.state_precondition && Self::coverage_status_is_final(coverage.status) {
+                    return Ok(Self::row_is_final("Coverage", coverage.status));
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -1077,6 +1401,12 @@ impl PropertyExecutor {
 
                 if coverage.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Only issuer can cancel"));
+                }
+
+                // ACTIVATION-AUDIT row OV-21. Cancelling a cancelled coverage rewrites its
+                // `updated_at` and says nothing.
+                if gates.state_precondition && Self::coverage_status_is_final(coverage.status) {
+                    return Ok(Self::row_is_final("Coverage", coverage.status));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -1107,6 +1437,13 @@ impl PropertyExecutor {
 
                 if coverage.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Only issuer can suspend"));
+                }
+
+                // ACTIVATION-AUDIT row OV-21. Suspending a cancelled coverage would make
+                // it eligible for `ReinstateCoverage`, which is the same walk-around from
+                // the other side.
+                if gates.state_precondition && Self::coverage_status_is_final(coverage.status) {
+                    return Ok(Self::row_is_final("Coverage", coverage.status));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -1210,6 +1547,13 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can update"));
                 }
 
+                // ACTIVATION-AUDIT row OV-21. The free-form status write, and the first
+                // step of the cycle: below the gate it sets a `Paid` claim back to
+                // `Approved`, and `PayClaim`'s own guard then admits it and pays it AGAIN.
+                if gates.state_precondition && Self::claim_status_is_final(claim.status) {
+                    return Ok(Self::row_is_final("Claim", claim.status));
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -1234,6 +1578,12 @@ impl PropertyExecutor {
 
                 if claim.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Only issuer can approve"));
+                }
+
+                // ACTIVATION-AUDIT row OV-21. Approving a paid claim is the second half of
+                // the double payment.
+                if gates.state_precondition && Self::claim_status_is_final(claim.status) {
+                    return Ok(Self::row_is_final("Claim", claim.status));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -1264,6 +1614,12 @@ impl PropertyExecutor {
 
                 if claim.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Only issuer can deny"));
+                }
+
+                // ACTIVATION-AUDIT row OV-21. A paid claim cannot be denied after the
+                // fact.
+                if gates.state_precondition && Self::claim_status_is_final(claim.status) {
+                    return Ok(Self::row_is_final("Claim", claim.status));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -1324,6 +1680,13 @@ impl PropertyExecutor {
 
                 if claim.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Only issuer can close"));
+                }
+
+                // ACTIVATION-AUDIT row OV-21. `Paid` is final and `Closed` is not, so
+                // closing a paid claim is the step that makes it reopenable -- which is
+                // the cycle's route around `ReopenClaim`'s guard as well.
+                if gates.state_precondition && Self::claim_status_is_final(claim.status) {
+                    return Ok(Self::row_is_final("Claim", claim.status));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -1388,6 +1751,12 @@ impl PropertyExecutor {
 
                 if claim.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Only issuer can withdraw"));
+                }
+
+                // ACTIVATION-AUDIT row OV-21. A paid claim cannot be withdrawn, and a
+                // withdrawn one is already gone.
+                if gates.state_precondition && Self::claim_status_is_final(claim.status) {
+                    return Ok(Self::row_is_final("Claim", claim.status));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;

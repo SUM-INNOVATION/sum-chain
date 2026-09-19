@@ -201,6 +201,16 @@ const WIRING: &[(&str, &str, &str)] = &[
         "subsystem_tx_write_set_bound_activation",
         "subsystem_tx_write_set_bound_enabled_from_height",
     ),
+    (
+        "property_executor.rs",
+        "state_precondition_activation",
+        "property_state_precondition_enabled_from_height",
+    ),
+    (
+        "property_executor.rs",
+        "asset_relationship_activation",
+        "property_asset_relationship_enabled_from_height",
+    ),
 ];
 
 fn source(file: &str) -> String {
@@ -309,19 +319,28 @@ fn every_remediation_gate_reads_the_field_it_names() {
 /// would simply never open, which is indistinguishable from an operator who has
 /// not set a height.
 ///
+/// The thirty-first and thirty-second, `state_precondition_activation` and
+/// `asset_relationship_activation`, arrived together and are a SECOND and
+/// THIRD accessor in `property_executor.rs`, which had one. The first of them
+/// also shares its accessor NAME with `healthcare_executor.rs`'s
+/// `state_precondition_activation` -- two functions spelled identically in two
+/// files, reading two different fields -- which is the closest the swap hazard
+/// has come yet, and the reason the table is keyed by (file, accessor) rather
+/// than by accessor alone.
+///
 /// That hazard is not hypothetical here. Making one accessor read its
 /// neighbour's field was killed by `every_remediation_gate_reads_the_field_it_names`
 /// while the behavioural suite for that subsystem still reported every test
 /// passing.
 #[test]
-fn the_thirty_gates_are_thirty_distinct_fields() {
+fn the_thirty_two_gates_are_thirty_two_distinct_fields() {
     let fields: BTreeSet<&str> = WIRING.iter().map(|(_, _, f)| *f).collect();
     assert_eq!(
         fields.len(),
-        30,
-        "expected thirty distinct fields: {fields:?}"
+        32,
+        "expected thirty-two distinct fields: {fields:?}"
     );
-    assert_eq!(WIRING.len(), 30, "expected thirty accessors");
+    assert_eq!(WIRING.len(), 32, "expected thirty-two accessors");
 }
 
 /// Wiring a gate is not opening it: the release configuration is unchanged.
@@ -455,6 +474,14 @@ fn every_remediation_gate_is_dormant_by_default() {
             "subsystem_tx_write_set_bound_enabled_from_height",
             p.subsystem_tx_write_set_bound_enabled_from_height,
         ),
+        (
+            "property_state_precondition_enabled_from_height",
+            p.property_state_precondition_enabled_from_height,
+        ),
+        (
+            "property_asset_relationship_enabled_from_height",
+            p.property_asset_relationship_enabled_from_height,
+        ),
     
     
     ];
@@ -560,5 +587,5 @@ fn the_genesis_gate_list_matches_the_accessor_table() {
     // such branches lost three attributes, three doc blocks and two
     // activation_heights entries, and left this list at 20 against a table of
     // 28, all of which compiled.
-    assert_eq!(in_genesis.len(), 30);
+    assert_eq!(in_genesis.len(), 32);
 }
