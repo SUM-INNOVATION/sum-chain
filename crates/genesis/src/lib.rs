@@ -2767,7 +2767,12 @@ impl ChainParams {
     }
 }
 
-/// The twenty remediation gates, by field name.
+/// The thirty remediation gates, by field name.
+///
+/// The count in this sentence has been wrong twice, both times because a wave
+/// added gates and nothing checked the prose. It is checked now:
+/// `tools/lane-b/gate-structure-check.py` pins this list against the WIRING
+/// table as SETS, so the names cannot drift even while a sentence does.
 ///
 /// Every one of them is dormant in `ChainParams::default()` and each opens a
 /// rule change that a node built before it cannot reproduce. They are named

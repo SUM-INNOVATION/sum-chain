@@ -28,6 +28,32 @@ for:
 
 ---
 
+## Part 0a — Two gates arrived after this packet was regenerated
+
+`ChainParams` now declares **fifty-one**. This packet covers forty-nine, and the
+two it does not cover are named here rather than left to be discovered by
+counting:
+
+  * `subsystem_proof_unsupported_enabled_from_height` — every `VerifyProof` arm
+    refuses as unsupported. It also RETIRED `subsystem_proof_presence_enabled_from_height`,
+    which still has a section below; that section now describes a gate that
+    decides nothing, and a test pins that setting it changes no behaviour.
+  * `subsystem_tx_write_set_bound_enabled_from_height` — a per-transaction
+    bound on the overlay charge.
+
+**Neither is scheduled below, and that is deliberate.** Each needs the same six
+fields Part 1 gives the other forty-nine — behaviour, dependency ordering,
+persistent data impact, rollback-in-effect, monitoring signal, recommended wave
+— and scheduling a gate that has not had that treatment is the shortcut this
+packet exists to prevent. The same note appeared in the previous edition for
+three gates, and those three were given their treatment before being scheduled;
+these two should be handled the same way.
+
+This is the second time a wave has outrun this document. The count in a sentence
+is not checkable by any tool here, which is why the two uncovered gates are
+named: a reader can verify the claim against
+`tools/lane-b/gate-structure-check.py`'s output without recounting prose.
+
 ## Part 0 — The facts that apply to all forty-nine
 
 ### 0.1 How the authoritative list was established
