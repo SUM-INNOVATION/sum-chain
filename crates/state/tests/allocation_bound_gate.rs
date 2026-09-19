@@ -6,15 +6,16 @@
 //!
 //! # The ceiling this runs at
 //!
-//! `RELEASE_CEILING` here is `1 << 30`, which is `CANDIDATE_LIMIT_SCAFFOLD` in
-//! `crates/state/src/executor.rs` -- the ceiling a release node runs, not the
-//! 4,096 or 8,192 bytes the `*_index_allocation` files used. That matters for
-//! what the closed-gate half of each pair MEANS: at 8,192 bytes every one of
-//! these transactions is refused by the ceiling and the measurement shows the
-//! allocation happening on the way to a refusal. At 1 GiB none of them is
-//! refused -- they are ADMITTED and they COMMIT -- so the allocation happens on
-//! the way to a successful transaction, and the ceiling is not a bound on
-//! anything an attacker has to work around.
+//! `RELEASE_CEILING` here is `sumchain_state::MAX_BLOCK_WRITE_SET_BYTES`, the
+//! derived ceiling a release node runs -- read from the constant rather than
+//! restated, so this file cannot drift from it -- and not the 4,096 or 8,192
+//! bytes the `*_index_allocation` files used. That matters for what the
+//! closed-gate half of each pair MEANS: at 8,192 bytes every one of these
+//! transactions is refused by the ceiling and the measurement shows the
+//! allocation happening on the way to a refusal. At the release ceiling none of
+//! them is refused -- they are ADMITTED and they COMMIT -- so the allocation
+//! happens on the way to a successful transaction, and the ceiling is not a
+//! bound on anything an attacker has to work around.
 //! `crates/state/tests/release_ceiling_allocation.rs` is the measurement; this
 //! file is the remedy.
 //!
@@ -103,8 +104,9 @@ fn measure<T>(f: impl FnOnce() -> T) -> (T, Alloc) {
     )
 }
 
-/// `CANDIDATE_LIMIT_SCAFFOLD`, `crates/state/src/executor.rs`.
-const RELEASE_CEILING: u64 = 1 << 30;
+/// The ceiling a release node runs, read from the constant the production
+/// `execute_block` path reads.
+const RELEASE_CEILING: u64 = sumchain_state::MAX_BLOCK_WRITE_SET_BYTES;
 
 const IDENT: u8 = 0xE0;
 const COLLECTION: [u8; 32] = [0xC0; 32];
@@ -462,7 +464,7 @@ fn the_allocation_bound_gate_refuses_oversized_input_before_it_is_built() {
     assert!(
         closed_row.ok,
         "closed gate reproduces today: a two-megabyte row is read, decoded, \
-         appended to and re-encoded, and the 1 GiB ceiling does not object"
+         appended to and re-encoded, and the release ceiling does not object"
     );
     assert!(
         closed_row.alloc.peak > 3 * over,

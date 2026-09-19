@@ -4714,8 +4714,8 @@ fn journal_bytes_per_block_are_measured_against_real_published_blocks() {
         full_block
     );
     assert!(
-        full_block < (1u64 << 30) as f64,
-        "a full block's journal must fit inside CANDIDATE_LIMIT_SCAFFOLD with room to \
+        full_block < sumchain_state::MAX_BLOCK_WRITE_SET_BYTES as f64,
+        "a full block's journal must fit inside MAX_BLOCK_WRITE_SET_BYTES with room to \
          spare, or the ceiling is the binding constraint rather than the block limit"
     );
 }

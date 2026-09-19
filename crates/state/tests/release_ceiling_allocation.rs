@@ -1,14 +1,14 @@
 //! What ONE transaction can make a validator allocate under the RELEASE
-//! configuration -- 1 GiB candidate ceiling, 2,000,000-byte blocks, 1000
-//! transactions per block.
+//! configuration -- the derived `MAX_BLOCK_WRITE_SET_BYTES` candidate ceiling,
+//! 2,000,000-byte blocks, 1000 transactions per block.
 //!
 //! # Why this file exists
 //!
 //! `crates/state/tests/*_index_allocation.rs` measure the same read-modify-write
 //! accumulators under a 4,096- or 8,192-byte candidate ceiling. Those ceilings
 //! are five to six orders of magnitude below the one a release node runs:
-//! `CANDIDATE_LIMIT_SCAFFOLD` in `crates/state/src/executor.rs` is `1 << 30`,
-//! and `crates/state/src/executor.rs`'s only production construction site uses
+//! `sumchain_state::MAX_BLOCK_WRITE_SET_BYTES` is `1 << 28`, and
+//! `crates/state/src/executor.rs`'s only production construction site uses
 //! it. So those files prove the refusal MECHANISM works and describe no
 //! behaviour a release node exhibits. Under the release ceiling the very
 //! transactions they show being refused are ADMITTED, and that is what is
@@ -41,8 +41,8 @@
 //!
 //! # What this file does NOT claim
 //!
-//! It does not measure a 1 GiB row. Materialising one needs more than three
-//! gibibytes of resident memory and would make this suite unrunnable on a
+//! It does not measure a row at the ceiling. Materialising one needs twice the
+//! ceiling in resident memory and would make this suite unrunnable on a
 //! developer machine. What it does instead is measure the SLOPE at four row
 //! sizes spanning six doublings and report it, so the extrapolation to the
 //! ceiling is arithmetic on measured points rather than assertion. Every
@@ -129,10 +129,12 @@ fn measure<T>(f: impl FnOnce() -> T) -> (T, Alloc) {
 
 // ── The release configuration, named once ───────────────────────────────────
 
-/// `CANDIDATE_LIMIT_SCAFFOLD`, `crates/state/src/executor.rs`. The ceiling a
-/// release node actually runs, and the number `common::TEST_CANDIDATE_LIMIT`
-/// also carries.
-const RELEASE_CEILING: u64 = 1 << 30;
+/// `sumchain_state::MAX_BLOCK_WRITE_SET_BYTES`. The ceiling a release node
+/// actually runs, and the number `common::TEST_CANDIDATE_LIMIT` also carries.
+/// Read from the constant, never restated: this file's whole claim is that it
+/// measures the RELEASE configuration, and a local copy of the number would be
+/// the way that claim quietly stops being true.
+const RELEASE_CEILING: u64 = sumchain_state::MAX_BLOCK_WRITE_SET_BYTES;
 
 /// `params.max_block_bytes` in this repository's `genesis.json`. A transaction's
 /// serialized payload cannot exceed this, because `validate_block` refuses the
@@ -317,7 +319,7 @@ fn run_one_tx(
         let receipt = outcome.expect(
             "under the RELEASE ceiling this transaction is not refused -- that \
              is the whole finding; an Err here would mean the ceiling bit, and \
-             at 1 GiB it does not",
+             at the release ceiling it does not",
         );
         let row_after = view
             .get(cf::DOCCLASS_IDENTITY_ROOTS, &[IDENT; 32])
@@ -420,7 +422,7 @@ fn one_transaction_at_the_release_ceiling_allocates_what_the_release_ceiling_doe
         let (row, alloc, accounted, status) = (m2.seeded, m2.alloc, m2.accounted, m2.status);
         assert!(
             matches!(status, TxStatus::Success),
-            "a {mib} MiB row is well under the 1 GiB ceiling, so the append is \
+            "a {mib} MiB row is well under the release ceiling, so the append is \
              ADMITTED and commits: {status:?}"
         );
         println!(
@@ -457,8 +459,8 @@ fn one_transaction_at_the_release_ceiling_allocates_what_the_release_ceiling_doe
     let cum_factor = biggest.cumulative as f64 / biggest_row as f64;
     assert!(
         biggest_accounted < RELEASE_CEILING,
-        "and the ceiling charged {biggest_accounted} B, under its own 1 GiB \
-         limit, so nothing was refused"
+        "and the ceiling charged {biggest_accounted} B, under its own \
+         {RELEASE_CEILING} B limit, so nothing was refused"
     );
 
     // ── 3. How fast a row reaches the ceiling ───────────────────────────────

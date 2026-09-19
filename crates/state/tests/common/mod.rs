@@ -164,11 +164,13 @@ pub fn build_signed_attestation_tx(
 
 /// The per-block write-set ceiling these tests run under.
 ///
-/// Mirrors the executor's own scaffolding constant, which is private. Both are
-/// stand-ins for the versioned consensus parameter that has to replace them
-/// before any of this is proposed for publication; a test that wanted to
-/// exercise the limit would set its own, not read this.
-pub const TEST_CANDIDATE_LIMIT: u64 = 1 << 30;
+/// The production ceiling itself, read from the constant `execute_block` reads,
+/// so a same-block fixture here executes under the rule a release node
+/// enforces. It used to be a local copy of the scaffolding constant; a local
+/// copy is how a fixture ends up describing a configuration no node runs. A
+/// test that wants to exercise the limit still sets its own, rather than
+/// lowering this.
+pub const TEST_CANDIDATE_LIMIT: u64 = sumchain_state::MAX_BLOCK_WRITE_SET_BYTES;
 
 /// One candidate for one block.
 ///

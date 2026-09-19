@@ -173,7 +173,7 @@ pub fn effective_tx_index(tx_index: u32, gate_open: bool) -> u32 {
 /// payload driving it is decoded with no length check ahead of it. The ceiling
 /// therefore bounds what a block may COMMIT and bounds nothing about what one
 /// refused transaction may ALLOCATE — which matters because the release ceiling
-/// is `CANDIDATE_LIMIT_SCAFFOLD`, `1 << 30`, and not the 4,096 or 8,192 bytes
+/// is [`MAX_BLOCK_WRITE_SET_BYTES`], `1 << 28`, and not the 4,096 or 8,192 bytes
 /// the `*_index_allocation` files measured against.
 /// `crates/state/tests/release_ceiling_allocation.rs` measures the release
 /// configuration instead.
@@ -376,6 +376,184 @@ pub fn index_key_text_within_bound(text: &str, gate_open: bool) -> bool {
 /// are untouched. A row may also overshoot by at most one payload, because the
 /// check refuses the NEXT operation rather than the one that crossed.
 pub const MAX_ACCUMULATING_ROW_BYTES: usize = 1_048_576;
+
+/// The largest logical write set one block may buffer, in bytes.
+///
+/// This is the ceiling `BlockExecutor::execute_block` gives its candidate. It
+/// replaces `CANDIDATE_LIMIT_SCAFFOLD`, whose own doc comment said it was
+/// scaffolding, that the real ceiling was "a versioned consensus parameter
+/// derived from measured write sets", and that it "must be replaced before
+/// publication".
+///
+/// It decides BLOCK APPLICABILITY, which is why it is consensus-relevant:
+/// `ApplicationOverlay::stage` refuses the write that would cross it, the
+/// refusal leaves `execute_tx` as an `Err`, `execute_block`'s transaction loop
+/// propagates it with `?`, and `PoaEngine::do_import_block` therefore rejects
+/// the whole block. A binary with a larger value applies a block its peers
+/// refuse. It is folded into [`protocol_digest::consensus_limits`] for exactly
+/// that reason.
+///
+/// # Why a versioned binary constant and not a `ChainParams` field
+///
+/// A ceiling is not the dormant-gate pattern. Every `*_enabled_from_height`
+/// field defaults to `None` because ACTIVATING it changes behaviour; this must
+/// have a working value from the first block, so the question is what value,
+/// not when. That is an argument for configuring it, and it is answered by
+/// looking at what would then compare it. `Genesis::activation_digest` folds
+/// `chain_id`, `genesis_time`, the validator set, the allocations and
+/// `ChainParams::activation_heights` — every `Option<u64>` gate — and nothing
+/// else. No digest anywhere covers `max_block_bytes`, `min_fee` or any other
+/// plain `ChainParams` field, and [`protocol_digest::consensus_limits`] takes no
+/// `Genesis`, so it cannot fold one either. A plain `ChainParams` field for this
+/// number would therefore be a value that decides whether a block is applicable
+/// and that NOTHING in the tree compares between two validators: the exact
+/// hazard `protocol_digest` exists to close, reintroduced one level up. The
+/// three sibling limits above make the same choice for the same reason, and
+/// `protocol_digest`'s module doc completes the argument: the fix is not to make
+/// such a value configurable, it is to make it comparable.
+///
+/// The cost is stated rather than hidden: a chain that raises
+/// `max_block_bytes` or `max_txs_per_block` far beyond this repository's
+/// `genesis.json` must rebuild rather than edit a config file.
+/// `block_write_set_ceiling.rs` reads those two fields out of `genesis.json` and
+/// fails if the derivation's inputs have moved, so the rebuild is demanded by a
+/// test rather than remembered.
+///
+/// # Derivation
+///
+/// Every figure below is labelled MEASURED (a test in this tree prints it),
+/// RECORDED (a number this repository already states elsewhere) or ASSUMED (a
+/// judgement, made here, with its reasoning visible). Arithmetic on measured
+/// points is labelled DERIVED.
+///
+/// MEASURED — `crates/state/tests/release_ceiling_allocation.rs`, from a
+/// counting global allocator that reports churn, PEAK LIVE and largest single
+/// allocation separately. One `AddKey` against a committed row of R bytes, at
+/// R = 1, 4, 16 and 64 MiB:
+///
+///   * peak LIVE memory is 4.00 x R at every one of the four points, linear
+///     across six doublings;
+///   * the overlay charges 2.00 x R against this ceiling, because `put` charges
+///     the new value AND the captured pre-image.
+///
+/// Peak live, not cumulative churn: the same window churns 5.00 x R, and
+/// sizing against churn overstates footprint.
+///
+/// MEASURED — `crates/storage/tests/application_journal.rs`
+/// (`journal_bytes_are_charged_against_the_candidate_ceiling`): a pre-image N
+/// bytes larger raises the minimum publishing ceiling by exactly 2N — N for the
+/// overlay's capture, N for the application journal's copy, both charged
+/// against this same number. The journal is inside the ceiling, not beside it.
+///
+/// MEASURED — `crates/consensus/tests/reorg_execution.rs`
+/// (`journal_bytes_per_block_are_measured_against_real_published_blocks`): the
+/// journal's marginal cost is about 87 bytes per transaction, so a full
+/// 1,000-transaction block journals about 87 KB. Journal framing is not the
+/// binding term.
+///
+/// MEASURED — `crates/state/tests/block_write_set_ceiling.rs`: what a full
+/// block at this repository's own declared limits actually charges. That test
+/// reads `max_block_bytes` and `max_txs_per_block` from `genesis.json`
+/// (2,000,000 and 1,000 — NOT `ChainParams::default()`, which differs) and
+/// publishes a block at each of them:
+///
+///   * the transaction-count bound, 1,000 transfers to 1,000 DISTINCT
+///     recipients: 72,363 bytes of execution charge, a 55,274-byte journal
+///     record;
+///   * the block-bytes bound, ~1.9 MB of `CreateIdentityRoot` payload:
+///     1,903,881 bytes of execution charge, a 1,219-byte journal record.
+///
+/// Distinct recipients on purpose: the overlay charges a key and its pre-image
+/// once per DISTINCT key, so 1,000 transfers to one address charge three
+/// account rows and report a write set two hundred times smaller than the bound
+/// they claim to measure.
+///
+/// With the publication allowance that test states — four times
+/// `max_block_bytes`, covering the block record, the duplicate transaction
+/// rows, the receipts, the indexes, the legacy diffs and the journal, each of
+/// which is a new key bounded by the block's own size — the worse of the two
+/// blocks costs about 9.9 MB, and this ceiling clears it by 27x.
+///
+/// DERIVED — from the two measured factors. The largest single row a block can
+/// still commit is R_max = C/2, because `put` charges value plus pre-image.
+/// During the transaction that commits it, peak live is 4.00 x R_max, of which
+/// 2.00 x R_max is the overlay's own retained charge; the transient excess is
+/// therefore 2.00 x R_max = C. With the overlay itself at its limit, one
+/// block's peak live application memory is about
+///
+/// ```text
+/// C + 2.00 x (C/2)  =  2C
+/// ```
+///
+/// RECORDED — the validator memory envelope. This repository states three
+/// figures and they do not agree, so the binding one is used and the others are
+/// named. `deploy/kubernetes/statefulset.yaml` and the three
+/// `statefulset-validator-*.yaml` files set `limits.memory: "4Gi"` on every
+/// validator pod: a cgroup limit, enforced by the kernel with an OOM kill, and
+/// the only one of the three that is machine-checked rather than prose.
+/// `docs/architecture/performance-guide.md` targets `Memory usage < 2 GB` for
+/// the whole node and separately recommends 32 GB for a production validator;
+/// that table carries no date, no provenance and no measurement command, and it
+/// predates the overlay accounting it would have to be reconciled with.
+/// `tools/b0-pre-validator/src/consts.rs` pins a 4 GiB verification reference
+/// envelope and explicitly disclaims being a hardware minimum. Nothing in the
+/// tree derives a memory budget from the protocol's own limits; the capacity
+/// work in `docs/lane-a/JOURNAL-CONTRACT.md` §12 models DISK only.
+///
+/// ASSUMED — one block's execution may claim at most one eighth of the 4 GiB
+/// cgroup limit, 512 MiB. The reasoning, stated so it can be disagreed with: a
+/// validator inside that 4 GiB is also holding RocksDB's block cache and
+/// memtables, a mempool, p2p buffers and the node's own steady state, which the
+/// performance guide puts at about 1.5 GB; the remaining headroom has to absorb
+/// importing one block while producing another, and a compaction landing during
+/// both. A single block taking a quarter of that headroom is the line drawn
+/// here. It is a judgement, not a measurement, and it is the one number in this
+/// derivation that a reviewer with better data should move.
+///
+/// DERIVED — 2C <= 512 MiB gives C <= 256 MiB, and
+///
+/// ```text
+/// C = 1 << 28 = 268,435,456 bytes
+/// ```
+///
+/// Worst-case peak live for one block is then 512 MiB: 12.5% of the enforced
+/// cgroup limit. The scaffold it replaces implied 2 GiB — 50% of the same
+/// limit, and more than the whole node's stated steady-state target — for a
+/// single block, which is why the scaffold could not survive its own doc
+/// comment.
+///
+/// # What this ceiling does NOT establish, and what would
+///
+/// It is a SAFETY bound. It is not a sufficiency bound, and no value of this
+/// constant could be, which is the finding worth carrying forward.
+///
+/// A block's write set is not bounded by the block's size. Read-modify-write
+/// charges the pre-image of a row the block does not carry: one ~100-byte
+/// `AddKey` against a committed 1 MiB row charges 2 MiB. A 2,000,000-byte block
+/// holds 1,000 such transactions comfortably, so a block of entirely VALID
+/// transactions can charge about 2 GiB even with
+/// [`MAX_ACCUMULATING_ROW_BYTES`] active — and below that gate, which is the
+/// production default, row size is bounded by nothing except this ceiling, so
+/// the bound is self-referential. No ceiling that a validator can survive is
+/// large enough to admit that block. The replaced 1 GiB scaffold did not admit
+/// it either; lowering the ceiling changes how many such transactions fit, not
+/// whether the class exists.
+///
+/// Erring low is the correct direction, because the two failure modes are not
+/// symmetric. Too low: `execute_block` returns the same `Err` on every
+/// validator, the block is refused identically everywhere, and the next
+/// proposer's slot proceeds — deterministic, and visible. Too high: the
+/// validator with less memory is OOM-killed while the one with more follows the
+/// chain, which is a split decided by hardware rather than by rules.
+///
+/// What is missing is a bound on the write set ONE TRANSACTION may charge, so
+/// that `max_block_bytes` actually bounds a block's write set. That is not this
+/// constant's to fix and cannot be measured into existence: it is a rule that
+/// does not exist yet, and it belongs to whoever owns
+/// `subsystem_allocation_bound_enabled_from_height` and the block producer in
+/// `crates/consensus/src/poa.rs`, which builds blocks without simulating what
+/// they will charge.
+pub const MAX_BLOCK_WRITE_SET_BYTES: u64 = 1 << 28;
 
 pub use agreement_executor::{AgreementExecutionResult, AgreementExecutor, AgreementGates};
 pub use cache::{CacheStats, CachedAccount, StateCache};

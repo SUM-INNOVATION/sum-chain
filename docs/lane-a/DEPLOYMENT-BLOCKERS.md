@@ -21,8 +21,11 @@ byte ceiling set to **4,096 or 8,192 bytes**. Those are TEST ceilings, chosen
 small so that a refusal happens early and the allocation that precedes it can be
 observed. They are not production values.
 
-**Production uses a 1 GiB candidate ceiling**: `CANDIDATE_LIMIT_SCAFFOLD =
-1 << 30` (`crates/state/src/executor.rs:269`, used at `:3074`).
+**Production uses a 256 MiB candidate ceiling**: `MAX_BLOCK_WRITE_SET_BYTES =
+1 << 28` (`crates/state/src/lib.rs`, used on the production `execute_block`
+path). It replaced `CANDIDATE_LIMIT_SCAFFOLD = 1 << 30`; the ratios quoted
+below were taken against the scaffold and the argument they make is unchanged
+by the replacement, because it is an argument about ORDER, not magnitude.
 
 So the ratios quoted per subsystem -- "3.2 MB allocated against a 4,096 B
 ceiling" and similar -- demonstrate ONE thing and must not be read as
@@ -1665,24 +1668,35 @@ so a later reader can re-establish it rather than trust it.
 
 ### Still blocking
 
-  * **`CANDIDATE_LIMIT_SCAFFOLD` is a live consensus parameter that says of
-    itself that it must not ship.** `crates/state/src/executor.rs:269` defines a
-    1 GiB ceiling on a block's logical write set, and `:3118` uses it on the
-    production `execute_block` path. It is UNGATED: it decides today which
-    blocks are applicable. Its own documentation says it is "SCAFFOLDING", that
-    "the real ceiling is a versioned consensus parameter derived from measured
-    write sets", that "a limit that can refuse a write helps decide whether a
-    block is applicable, which makes it consensus-relevant and not a number a
-    storage or executor module may invent", and that it "must be replaced before
-    publication".
+  * **The block write-set ceiling is derived, but only on its SAFETY side.**
+    `CANDIDATE_LIMIT_SCAFFOLD` — a 1 GiB ceiling whose own documentation said it
+    was "SCAFFOLDING" and "must be replaced before publication" — has been
+    replaced by `sumchain_state::MAX_BLOCK_WRITE_SET_BYTES`, `1 << 28`
+    (256 MiB), derived from measured write sets and folded into the protocol
+    digest by name. The derivation is on the constant and is re-checked by
+    `crates/state/tests/block_write_set_ceiling.rs`, which reads the block
+    limits out of `genesis.json`, reads the validator memory envelope out of the
+    deployment manifests that enforce it, and fails if the ceiling is raised
+    past the memory budget or lowered towards the block limit.
 
-    Two binaries compiled with different values disagree about which blocks are
-    valid. Since `817e141` they at least no longer do so silently — the value is
-    folded into the protocol digest peers exchange and compare, so a mismatched
-    peer is refused rather than admitted. That converts a silent fork into a
-    refusal; it does not derive the number. Deriving it from measured write sets
-    and versioning it as a chain parameter is outstanding, and the scaffold's own
-    comment is the specification.
+    What that closes: one block's worst-case peak LIVE memory is now 512 MiB,
+    12.5% of the 4 GiB cgroup limit the validator manifests set, instead of the
+    2 GiB the scaffold implied — which was half the whole envelope, and more
+    than `docs/architecture/performance-guide.md`'s steady-state target for the
+    entire node.
+
+    What remains open, and is the reason this stays here: the ceiling is a
+    safety bound and NOT a sufficiency bound, and no value of it could be. A
+    block's write set is not bounded by the block's size, because
+    read-modify-write charges the pre-image of a row the block does not carry:
+    one ~100-byte `AddKey` against a committed 1 MiB row charges 2 MiB, and a
+    2,000,000-byte block holds a thousand of those. A block of entirely VALID
+    transactions can therefore charge about 2 GiB, which no ceiling a validator
+    survives can admit. The scaffold did not admit it either. What is missing is
+    a bound on the write set ONE TRANSACTION may charge — so that
+    `max_block_bytes` actually bounds a block's write set — and a proposer that
+    simulates what a block will charge before signing it
+    (`crates/consensus/src/poa.rs` does not).
 
   * **Thirty-three audit remedies are implemented and dormant.** The eleven
     `*_enabled_from_height` fields they read now exist, are covered by the

@@ -839,7 +839,7 @@ block and silently lose every earlier event in that block.
 - an NFT `BatchMint` naming more than `MAX_NFT_BATCH_MINT_REQUESTS` tokens is
   refused before the owner-index rebuild loop.
 
-Below the gate the release ceiling (`CANDIDATE_LIMIT_SCAFFOLD`, `1<<30`) bounds
+Below the gate the release ceiling (`MAX_BLOCK_WRITE_SET_BYTES`, `1<<28`) bounds
 what a block may *commit* and nothing about what one refused transaction may
 *allocate*. Measured: one `AddKey` peaks at 4.00x the row size, churns 5.00x,
 and grows the row by 1,899,873 bytes for one `min_fee`.

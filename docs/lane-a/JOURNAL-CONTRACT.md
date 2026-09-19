@@ -850,9 +850,12 @@ accounting, the ceiling would grow by N alone.
 This does tighten the effective ceiling for a block near it, and this document
 says so rather than implying otherwise. The increase is bounded by the pre-image
 bytes already charged plus fixed framing, and the ceiling in the tree is the
-1 GiB `CANDIDATE_LIMIT_SCAFFOLD`, so no block reachable today is affected. When
-that scaffold is replaced by the versioned consensus parameter it stands in for,
-the parameter must be derived from write sets measured WITH the journal included.
+256 MiB `MAX_BLOCK_WRITE_SET_BYTES`, so no block reachable today is affected.
+That constant replaced the `CANDIDATE_LIMIT_SCAFFOLD` this paragraph used to
+name, and its derivation does take the journal into account: the sufficiency
+side of `crates/state/tests/block_write_set_ceiling.rs` measures a published
+block's journal record and charges a publication allowance on top of what
+execution charged.
 
 ---
 
@@ -1106,9 +1109,9 @@ so the fixed cost cancels. A transfer journals five rows at one transaction
 (sender, recipient, fee credit, and the rows those share) and about three per
 transaction thereafter.
 
-Against the **1 GiB `CANDIDATE_LIMIT_SCAFFOLD`**: a full 1,000-transaction
-block's journal is 87 KB, which is **0.008%** of the ceiling — a headroom factor
-of roughly 12,000×. §9 notes that journal bytes tighten the effective ceiling;
+Against the **256 MiB `MAX_BLOCK_WRITE_SET_BYTES`**: a full 1,000-transaction
+block's journal is 87 KB, which is **0.03%** of the ceiling — a headroom factor
+of roughly 3,000×. §9 notes that journal bytes tighten the effective ceiling;
 at these magnitudes no block reachable today is affected, and that is now a
 measurement rather than an expectation.
 
