@@ -3365,7 +3365,18 @@ fn a_suspended_finance_issuer_keeps_control_below_the_gate_and_loses_it_above() 
         revocation_ref: [u8; 32],
     }
 
-    for gates in [FinanceGates::CLOSED, FinanceGates::OPEN] {
+    // NOT `FinanceGates::OPEN`: `issuer_self_registration_unsupported` refuses
+    // `RegisterIssuer` for every payload (AU-21), and every case below needs a
+    // registered issuer to exist before the rule it IS about can be reached.
+    // That is the stated cost of that gate rather than a conflict with it, and
+    // these tests pin the rules that apply while a lawful issuer does exist.
+    for gates in [
+        FinanceGates::CLOSED,
+        FinanceGates {
+            issuer_self_registration_unsupported: false,
+            ..FinanceGates::OPEN
+        },
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let issuer = KeyPair::generate();
         fund(&db, &issuer, 100_000_000);
@@ -3460,7 +3471,18 @@ fn update_issuer_cannot_walk_around_reactivate_at_the_gate() {
         status: FinanceIssuerStatus,
     }
 
-    for gates in [FinanceGates::CLOSED, FinanceGates::OPEN] {
+    // NOT `FinanceGates::OPEN`: `issuer_self_registration_unsupported` refuses
+    // `RegisterIssuer` for every payload (AU-21), and every case below needs a
+    // registered issuer to exist before the rule it IS about can be reached.
+    // That is the stated cost of that gate rather than a conflict with it, and
+    // these tests pin the rules that apply while a lawful issuer does exist.
+    for gates in [
+        FinanceGates::CLOSED,
+        FinanceGates {
+            issuer_self_registration_unsupported: false,
+            ..FinanceGates::OPEN
+        },
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let issuer = KeyPair::generate();
         fund(&db, &issuer, 100_000_000);
@@ -3521,7 +3543,18 @@ fn update_issuer_cannot_walk_around_reactivate_at_the_gate() {
 /// AU-25: anyone who pays writes any proof envelope, until the gate.
 #[test]
 fn submit_proof_requires_a_registered_active_issuer_at_the_gate() {
-    for gates in [FinanceGates::CLOSED, FinanceGates::OPEN] {
+    // NOT `FinanceGates::OPEN`: `issuer_self_registration_unsupported` refuses
+    // `RegisterIssuer` for every payload (AU-21), and every case below needs a
+    // registered issuer to exist before the rule it IS about can be reached.
+    // That is the stated cost of that gate rather than a conflict with it, and
+    // these tests pin the rules that apply while a lawful issuer does exist.
+    for gates in [
+        FinanceGates::CLOSED,
+        FinanceGates {
+            issuer_self_registration_unsupported: false,
+            ..FinanceGates::OPEN
+        },
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let stranger = KeyPair::generate();
         fund(&db, &stranger, 100_000_000);

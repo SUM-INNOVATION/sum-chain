@@ -2733,7 +2733,20 @@ fn agreement_at(
 /// OV-28: a signature for somebody the agreement does not bind.
 #[test]
 fn a_signature_from_a_stranger_to_the_agreement_is_stored_only_below_the_gate() {
-    for gates in [AgreementGates::CLOSED, AgreementGates::OPEN] {
+    // NOT `AgreementGates::OPEN`: `party_authority_unsupported` refuses
+    // `SignAgreement` and `RevokeSignature` outright (AU-9/AU-10/AU-11), so
+    // with it open the signature-integrity rule this test is about is
+    // unreachable and the pair would differ for a reason that is not OV-28's.
+    // The two gates are ordered rather than alternative -- the party-authority
+    // refusal supersedes the integrity rule on these arms -- and an operator
+    // opening both gets the refusal, which the structural suite pins.
+    for gates in [
+        AgreementGates::CLOSED,
+        AgreementGates {
+            party_authority_unsupported: false,
+            ..AgreementGates::OPEN
+        },
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let actor = KeyPair::generate();
         fund(&db, &actor, 100_000_000);
@@ -2827,7 +2840,20 @@ fn revoking_a_signature_leaves_the_agreement_executed_only_below_the_gate() {
         signature_id: [u8; 32],
     }
 
-    for gates in [AgreementGates::CLOSED, AgreementGates::OPEN] {
+    // NOT `AgreementGates::OPEN`: `party_authority_unsupported` refuses
+    // `SignAgreement` and `RevokeSignature` outright (AU-9/AU-10/AU-11), so
+    // with it open the signature-integrity rule this test is about is
+    // unreachable and the pair would differ for a reason that is not OV-28's.
+    // The two gates are ordered rather than alternative -- the party-authority
+    // refusal supersedes the integrity rule on these arms -- and an operator
+    // opening both gets the refusal, which the structural suite pins.
+    for gates in [
+        AgreementGates::CLOSED,
+        AgreementGates {
+            party_authority_unsupported: false,
+            ..AgreementGates::OPEN
+        },
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let actor = KeyPair::generate();
         fund(&db, &actor, 100_000_000);

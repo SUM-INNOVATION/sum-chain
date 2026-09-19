@@ -3897,6 +3897,25 @@ fn healthcare_at(
     .unwrap()
 }
 
+/// `HealthcareGates::OPEN`, minus the one gate that changes what a
+/// `GrantConsent` PAYLOAD IS.
+///
+/// Every test that uses this reaches its own subject through a granted consent,
+/// and at `consent_subject_signature` (ACTIVATION-AUDIT row AU-3, the GRANT
+/// half) a bare `ConsentEnvelope` stops being a grant: the payload becomes a
+/// `ConsentGrantRequest` carrying the subject's own ed25519 signature over
+/// `ConsentEnvelope::grant_signing_input`. The `consent` fixture above names a
+/// subject address no keypair in this file controls, so these tests build their
+/// setup the way a chain below that height does, and stay pairs that differ in
+/// what they are actually about. The gate itself is driven end to end in
+/// `consent_subject_signature_gate.rs`.
+fn open_but_the_old_consent_payload() -> HealthcareGates {
+    HealthcareGates {
+        consent_subject_signature: false,
+        ..HealthcareGates::OPEN
+    }
+}
+
 /// AU-1: a stranger's supersession succeeds below the gate and is refused above.
 #[test]
 fn any_sender_can_supersede_any_consent_below_the_gate_and_none_can_above_it() {
@@ -3906,7 +3925,7 @@ fn any_sender_can_supersede_any_consent_below_the_gate_and_none_can_above_it() {
         new_consent: ConsentEnvelope,
     }
 
-    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+    for gates in [HealthcareGates::CLOSED, open_but_the_old_consent_payload()] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let issuer = KeyPair::generate();
         let stranger = KeyPair::generate();
@@ -4003,7 +4022,7 @@ fn the_issuer_may_still_supersede_but_cannot_move_the_subject_at_the_gate() {
             &issuer.address(),
             HealthcareOperation::GrantConsent,
             &original,
-            HealthcareGates::OPEN
+            open_but_the_old_consent_payload()
         )
         .success
     );
@@ -4020,7 +4039,7 @@ fn the_issuer_may_still_supersede_but_cannot_move_the_subject_at_the_gate() {
                 old_consent_id: original.consent_id,
                 new_consent: moved,
             },
-            HealthcareGates::OPEN
+            open_but_the_old_consent_payload()
         )
         .success,
         "a supersession is not a way to re-point a consent at somebody else"
@@ -4037,7 +4056,7 @@ fn the_issuer_may_still_supersede_but_cannot_move_the_subject_at_the_gate() {
                 old_consent_id: original.consent_id,
                 new_consent: replacement,
             },
-            HealthcareGates::OPEN
+            open_but_the_old_consent_payload()
         )
         .success,
         "the legitimate supersession still works"
@@ -4050,6 +4069,14 @@ fn the_issuer_may_still_supersede_but_cannot_move_the_subject_at_the_gate() {
 /// participate in granting without a signature the `ConsentEnvelope` does not
 /// carry; that is a wire change, not a guard, and it is recorded as still
 /// blocking rather than quietly counted as fixed.
+///
+/// **That wire change has since landed**, behind
+/// `healthcare_consent_subject_signature_enabled_from_height`: the
+/// `GrantConsent` payload becomes a `ConsentGrantRequest` carrying the
+/// subject's own signature. The paragraph above is kept rather than deleted
+/// because it is still true of THIS test, which holds that gate closed -- its
+/// fixture names a subject address no keypair here controls. The grant half is
+/// driven in `consent_subject_signature_gate.rs`.
 #[test]
 fn the_subject_can_revoke_its_own_consent_only_at_the_gate() {
     #[derive(serde::Serialize)]
@@ -4057,7 +4084,7 @@ fn the_subject_can_revoke_its_own_consent_only_at_the_gate() {
         consent_id: [u8; 32],
     }
 
-    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+    for gates in [HealthcareGates::CLOSED, open_but_the_old_consent_payload()] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let issuer = KeyPair::generate();
         fund(&db, &issuer, 100_000_000);
@@ -4451,7 +4478,7 @@ fn a_consent_revocation_stamps_a_real_time_only_at_the_gate() {
         consent_id: [u8; 32],
     }
 
-    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+    for gates in [HealthcareGates::CLOSED, open_but_the_old_consent_payload()] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let issuer = KeyPair::generate();
         fund(&db, &issuer, 100_000_000);

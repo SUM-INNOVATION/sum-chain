@@ -197,6 +197,31 @@ const WIRING: &[(&str, &str, &str)] = &[
         "subsystem_proof_unsupported_enabled_from_height",
     ),
     (
+        "agreement_executor.rs",
+        "party_authority_unsupported_activation",
+        "agreement_party_authority_unsupported_enabled_from_height",
+    ),
+    (
+        "healthcare_executor.rs",
+        "consent_subject_signature_activation",
+        "healthcare_consent_subject_signature_enabled_from_height",
+    ),
+    (
+        "lib.rs",
+        "subsystem_issuer_registration_activation",
+        "subsystem_issuer_self_registration_unsupported_enabled_from_height",
+    ),
+    (
+        "property_executor.rs",
+        "proof_submission_unsupported_activation",
+        "property_proof_submission_unsupported_enabled_from_height",
+    ),
+    (
+        "nft_executor.rs",
+        "unpayable_royalty_refused_activation",
+        "nft_unpayable_royalty_refused_enabled_from_height",
+    ),
+    (
         "lib.rs",
         "subsystem_tx_write_set_bound_activation",
         "subsystem_tx_write_set_bound_enabled_from_height",
@@ -314,14 +339,14 @@ fn every_remediation_gate_reads_the_field_it_names() {
 /// while the behavioural suite for that subsystem still reported every test
 /// passing.
 #[test]
-fn the_thirty_gates_are_thirty_distinct_fields() {
+fn the_thirty_five_gates_are_thirty_five_distinct_fields() {
     let fields: BTreeSet<&str> = WIRING.iter().map(|(_, _, f)| *f).collect();
     assert_eq!(
         fields.len(),
-        30,
-        "expected thirty distinct fields: {fields:?}"
+        35,
+        "expected thirty-five distinct fields: {fields:?}"
     );
-    assert_eq!(WIRING.len(), 30, "expected thirty accessors");
+    assert_eq!(WIRING.len(), 35, "expected thirty-five accessors");
 }
 
 /// Wiring a gate is not opening it: the release configuration is unchanged.
@@ -452,6 +477,26 @@ fn every_remediation_gate_is_dormant_by_default() {
             p.subsystem_proof_unsupported_enabled_from_height,
         ),
         (
+            "agreement_party_authority_unsupported_enabled_from_height",
+            p.agreement_party_authority_unsupported_enabled_from_height,
+        ),
+        (
+            "healthcare_consent_subject_signature_enabled_from_height",
+            p.healthcare_consent_subject_signature_enabled_from_height,
+        ),
+        (
+            "subsystem_issuer_self_registration_unsupported_enabled_from_height",
+            p.subsystem_issuer_self_registration_unsupported_enabled_from_height,
+        ),
+        (
+            "property_proof_submission_unsupported_enabled_from_height",
+            p.property_proof_submission_unsupported_enabled_from_height,
+        ),
+        (
+            "nft_unpayable_royalty_refused_enabled_from_height",
+            p.nft_unpayable_royalty_refused_enabled_from_height,
+        ),
+        (
             "subsystem_tx_write_set_bound_enabled_from_height",
             p.subsystem_tx_write_set_bound_enabled_from_height,
         ),
@@ -560,5 +605,5 @@ fn the_genesis_gate_list_matches_the_accessor_table() {
     // such branches lost three attributes, three doc blocks and two
     // activation_heights entries, and left this list at 20 against a table of
     // 28, all of which compiled.
-    assert_eq!(in_genesis.len(), 30);
+    assert_eq!(in_genesis.len(), 35);
 }

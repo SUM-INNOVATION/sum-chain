@@ -11,9 +11,9 @@ use sumchain_storage::exec_view::ExecutionView;
 
 use sumchain_primitives::{
     healthcare::{
-        ConsentEnvelope, ConsentStatus, HealthcareOperation, HealthcareProofEnvelope,
-        HealthcareTxData, MembershipRecord, MembershipStatus, Prescription, PrescriptionStatus,
-        ProviderProfile, ProviderStatus,
+        ConsentEnvelope, ConsentGrantRequest, ConsentStatus, HealthcareOperation,
+        HealthcareProofEnvelope, HealthcareTxData, MembershipRecord, MembershipStatus,
+        Prescription, PrescriptionStatus, ProviderProfile, ProviderStatus,
     },
     Address, Balance, BlockHeight, Hash, Timestamp,
 };
@@ -160,6 +160,12 @@ pub struct HealthcareGates {
     /// an arm would append to before it is decoded.
     /// ACTIVATION-AUDIT rows AL-8 and the Healthcare third of AL-12.
     pub allocation_bound: bool,
+    /// A `GrantConsent` payload carries the SUBJECT's own signature over the
+    /// grant, and a grant without one is refused. ACTIVATION-AUDIT row AU-3,
+    /// the GRANT half -- the half `authorization` above does NOT reach, because
+    /// no sender check can make a two-party record out of a transaction that
+    /// carries one signature.
+    pub consent_subject_signature: bool,
 }
 
 impl HealthcareGates {
@@ -171,6 +177,7 @@ impl HealthcareGates {
         state_precondition: false,
         proof_unsupported: false,
         allocation_bound: false,
+        consent_subject_signature: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -180,6 +187,7 @@ impl HealthcareGates {
         state_precondition: true,
         proof_unsupported: true,
         allocation_bound: true,
+        consent_subject_signature: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -193,6 +201,10 @@ impl HealthcareGates {
             ),
             proof_unsupported: crate::subsystem_proof_unsupported_gate_open(params, block_height),
             allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
+            consent_subject_signature: HealthcareExecutor::consent_subject_signature_gate_open(
+                params,
+                block_height,
+            ),
         }
     }
 
@@ -273,6 +285,98 @@ impl HealthcareExecutor {
     #[inline]
     pub fn state_precondition_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
         matches!(Self::state_precondition_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the consent subject's signature.
+    ///
+    /// Reads `params.healthcare_consent_subject_signature_enabled_from_height`,
+    /// and nothing else. `None` -- the default, and what a genesis written
+    /// before the field existed resolves to -- closes the gate, so a node
+    /// executes exactly what it executed before the field was declared.
+    ///
+    /// ACTIVATION-AUDIT row AU-3, the GRANT half. Below the gate `GrantConsent`
+    /// checks `issuer_address == sender` and nothing else, so a disclosure
+    /// authorization naming any person is recorded by the issuer alone and the
+    /// person it is about never participates. The REVOCATION half is already
+    /// remedied under `healthcare_authorization_enabled_from_height`, so
+    /// without this a subject can withdraw a consent they were never asked to
+    /// give.
+    ///
+    /// At and above the gate the payload is a
+    /// [`sumchain_primitives::healthcare::ConsentGrantRequest`]: the envelope,
+    /// the subject's ed25519 public key and the subject's signature over
+    /// [`ConsentEnvelope::grant_signing_input`]. The key must derive to the
+    /// envelope's own `subject_address` and the signature must verify. The
+    /// issuer still has to be the sender, so the transaction carries BOTH
+    /// parties: the issuer signs the transaction, the subject signs the
+    /// consent.
+    ///
+    /// **Why a signature, and not a sender check.** The cheap repair -- require
+    /// the SUBJECT to send the transaction -- was written out and rejected on
+    /// what it costs: `issuer_address` would then be unverified, and anybody
+    /// could record a consent attributing the disclosure to an issuer who had
+    /// nothing to do with it. That trades a false claim about the subject for a
+    /// false claim about the issuer. A `SignedTransaction` carries exactly one
+    /// signature, so no sender check can make a two-party record out of a
+    /// one-party transaction; the second party's agreement has to be IN the
+    /// payload.
+    ///
+    /// **Its own height, and not `healthcare_authorization_...`.** That gate is
+    /// about which SENDER an arm accepts and changes no payload; this one
+    /// changes what a `GrantConsent` payload IS. A node that opened them
+    /// together could not be told which of the two a refusal came from, and an
+    /// operator must be able to sequence a wire change separately from a guard.
+    ///
+    /// **What it does not reach, said plainly.** `SupersedeConsent` carries a
+    /// replacement envelope and is not gated here: at
+    /// `healthcare_authorization_enabled_from_height` it already refuses a
+    /// sender who is neither the old consent's issuer nor its subject and
+    /// refuses to move the subject, so it cannot MINT a consent about somebody
+    /// who never agreed -- but an issuer can still re-scope a consent the
+    /// subject did agree to, without a fresh signature. That is AU-1's arm and
+    /// AU-1's row; it is recorded here rather than left for a reader to
+    /// discover, and it is not closed by this height.
+    #[inline]
+    fn consent_subject_signature_activation(params: &ChainParams) -> Option<u64> {
+        params.healthcare_consent_subject_signature_enabled_from_height
+    }
+
+    /// Whether the consent subject's signature is required at `block_height`.
+    #[inline]
+    pub fn consent_subject_signature_gate_open(
+        params: &ChainParams,
+        block_height: BlockHeight,
+    ) -> bool {
+        matches!(Self::consent_subject_signature_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The subject's own agreement to a consent grant, checked.
+    ///
+    /// Three conditions, and a distinct refusal for each, because a reader of
+    /// the receipt has to be able to tell which one failed:
+    ///
+    ///   1. the payload decodes as a [`ConsentGrantRequest`] -- below the gate
+    ///      it is a bare `ConsentEnvelope`, and the two encodings are not
+    ///      interchangeable, which is the point of versioning the payload
+    ///      rather than appending to the stored row;
+    ///   2. the supplied public key derives to the envelope's own
+    ///      `subject_address` -- otherwise any key would do and the signature
+    ///      would prove only that SOMEBODY signed;
+    ///   3. the signature verifies over
+    ///      [`ConsentEnvelope::grant_signing_input`].
+    ///
+    /// Returns the envelope to store on success, or the refusal to return.
+    fn subject_agreed(data: &[u8]) -> std::result::Result<ConsentEnvelope, String> {
+        let request: ConsentGrantRequest = bincode::deserialize(data)
+            .map_err(|_| crate::CONSENT_GRANT_REQUEST_REQUIRED.to_string())?;
+        let key = sumchain_crypto::PublicKey::from_bytes(request.subject_public_key);
+        if key.address() != request.envelope.subject_address {
+            return Err(crate::CONSENT_SUBJECT_KEY_MISMATCH.to_string());
+        }
+        let signature = sumchain_crypto::Signature::from_bytes(request.subject_signature);
+        sumchain_crypto::verify(&request.envelope.grant_signing_input(), &signature, &key)
+            .map_err(|_| crate::CONSENT_SUBJECT_SIGNATURE_INVALID.to_string())?;
+        Ok(request.envelope)
     }
 
     /// Who may fill or partially fill a prescription, at the gate.
@@ -1064,8 +1168,33 @@ impl HealthcareExecutor {
             // SRC-874: Consent Operations
             // =================================================================
             HealthcareOperation::GrantConsent => {
-                let consent: ConsentEnvelope = bincode::deserialize(&data.data)
-                    .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
+                // ACTIVATION-AUDIT row AU-3, the GRANT half. Below the gate the
+                // payload is a bare `ConsentEnvelope` and the only party who
+                // has to participate is the issuer, who is also the sender: a
+                // disclosure authorization naming any person is recorded
+                // without that person ever being asked. The revocation half is
+                // already remedied under `authorization`, so below this gate a
+                // subject can withdraw a consent they were never asked to give.
+                //
+                // At and above the gate the payload is a
+                // `ConsentGrantRequest` and the subject's own signature over
+                // `grant_signing_input` is required, keyed to an ed25519 public
+                // key that must derive to the envelope's `subject_address`. The
+                // issuer check below still applies, so the accepted transaction
+                // carries BOTH parties.
+                //
+                // Refused BEFORE the deduct, where this arm's own issuer and
+                // duplicate refusals return, so a refused grant writes nothing
+                // and costs nothing.
+                let consent: ConsentEnvelope = if gates.consent_subject_signature {
+                    match Self::subject_agreed(&data.data) {
+                        Ok(envelope) => envelope,
+                        Err(reason) => return Ok(HealthcareExecutionResult::failure(reason)),
+                    }
+                } else {
+                    bincode::deserialize(&data.data)
+                        .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?
+                };
 
                 if consent.issuer_address != *sender {
                     return Ok(HealthcareExecutionResult::failure("Issuer must be sender"));

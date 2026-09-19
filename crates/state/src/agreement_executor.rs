@@ -172,6 +172,11 @@ pub struct AgreementGates {
     /// An accumulating index row past the limit is refused BEFORE it is
     /// decoded, appended to and re-encoded. ACTIVATION-AUDIT row AL-5.
     pub allocation_bound: bool,
+    /// Every arm that needs a party's authority refuses as UNSUPPORTED.
+    /// ACTIVATION-AUDIT rows AU-9, AU-10 and AU-11. An agreement records no
+    /// party ADDRESS, so there is no sender any of these arms could accept and
+    /// no canonical input any stored signature could be checked against.
+    pub party_authority_unsupported: bool,
 }
 
 impl AgreementGates {
@@ -182,6 +187,7 @@ impl AgreementGates {
         proof_unsupported: false,
         no_op_receipt: false,
         allocation_bound: false,
+        party_authority_unsupported: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -191,6 +197,7 @@ impl AgreementGates {
         proof_unsupported: true,
         no_op_receipt: true,
         allocation_bound: true,
+        party_authority_unsupported: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -204,6 +211,10 @@ impl AgreementGates {
             proof_unsupported: crate::subsystem_proof_unsupported_gate_open(params, block_height),
             no_op_receipt: crate::subsystem_no_op_receipt_gate_open(params, block_height),
             allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
+            party_authority_unsupported: AgreementExecutor::party_authority_unsupported_gate_open(
+                params,
+                block_height,
+            ),
         }
     }
 
@@ -245,6 +256,54 @@ impl AgreementExecutor {
     #[inline]
     pub fn signature_integrity_gate_open(params: &ChainParams, block_height: BlockHeight) -> bool {
         matches!(Self::signature_integrity_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the Agreement party-authority refusal.
+    ///
+    /// Reads `params.agreement_party_authority_unsupported_enabled_from_height`,
+    /// and nothing else. `None` -- the default, and what a genesis written
+    /// before the field existed resolves to -- closes the gate, so a node
+    /// executes exactly what it executed before the field was declared.
+    ///
+    /// ACTIVATION-AUDIT rows AU-9, AU-10 and AU-11. Below the gate a signature
+    /// names its own party and nothing compares that party to the sender, so
+    /// any funded account signs for anybody and carries a two-party agreement
+    /// to `Executed` alone; the `signature` bytes it supplies are stored and
+    /// checked against nothing; and any funded account terminates, voids or
+    /// supersedes any agreement, revokes any IP action, and drives any executor
+    /// link through its whole lifecycle. At and above the gate every one of
+    /// those arms returns a FAILED receipt carrying
+    /// [`crate::AGREEMENT_PARTY_AUTHORITY_UNSUPPORTED`], before the deduct,
+    /// where this executor's other refusals already return.
+    ///
+    /// **Why refusal and not a guard.** `AgreementCommitment` carries no
+    /// address, and `PartyRef` is a 32-byte commitment or a 32-byte subject id.
+    /// Neither is an `Address` and neither can be mapped to one without
+    /// inventing the mapping. Checking the stored `signature` is no better off:
+    /// it needs a canonical signing input, and this subsystem defines none.
+    /// Both are wire changes to `crates/sumchain-wire/src/agreement.rs`.
+    #[inline]
+    fn party_authority_unsupported_activation(params: &ChainParams) -> Option<u64> {
+        params.agreement_party_authority_unsupported_enabled_from_height
+    }
+
+    /// Whether the Agreement party-authority refusal is active at
+    /// `block_height`.
+    #[inline]
+    pub fn party_authority_unsupported_gate_open(
+        params: &ChainParams,
+        block_height: BlockHeight,
+    ) -> bool {
+        matches!(Self::party_authority_unsupported_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The refusal every party-authority arm returns at the gate.
+    ///
+    /// One helper rather than twelve copies of the same `failure(..)`, so the
+    /// arms cannot drift into saying different things about one absence.
+    #[inline]
+    fn party_authority_unsupported() -> AgreementExecutionResult {
+        AgreementExecutionResult::failure(crate::AGREEMENT_PARTY_AUTHORITY_UNSUPPORTED)
     }
 
     /// Execute an Agreement transaction.
@@ -382,6 +441,76 @@ impl AgreementExecutor {
                 data.data.len(),
                 crate::MAX_SUBSYSTEM_PAYLOAD_BYTES
             )));
+        }
+
+        // ACTIVATION-AUDIT rows AU-9, AU-10 and AU-11.
+        //
+        // Every arm named here needs a PARTY's authority and has none to ask
+        // for: `AgreementCommitment` carries no address, `PartyRef` is a
+        // commitment or a subject id, and the stored `signature` has no
+        // canonical input to be checked against. So at and above the gate they
+        // refuse as UNSUPPORTED rather than pretend to authorize, and below it
+        // they are byte-for-byte the unremediated binary.
+        //
+        // ONE list, at the top of the dispatch, rather than a branch inside
+        // each arm: the claim is that these are one rule, and twelve copies of
+        // it would let eleven drift. It is written as an exhaustive `match`
+        // with no wildcard so that an operation added to `AgreementOperation`
+        // later is a COMPILE ERROR here -- somebody then has to decide which
+        // side of this rule it is on, instead of defaulting to reachable.
+        //
+        // Refused before the payload is even decoded. Every refusal in this
+        // executor is free and writes nothing, and this one is the same; it
+        // also means an undecodable payload for a gated arm is a failed
+        // receipt rather than the `Err(..)` that takes the whole block with it,
+        // which is the direction `MAX_SUBSYSTEM_PAYLOAD_BYTES` above already
+        // moved this arm.
+        //
+        // What is deliberately NOT here: `CommitAgreement`, `RecordIpAction`
+        // and `LinkExecutor`, which CREATE a row under a fresh id and damage
+        // nothing that exists; and the three attestation arms, which already
+        // check `issuer_address == sender` and are the reason this defect is
+        // specific rather than architectural. The family keeps a way to record
+        // an agreement. What it loses is the ability of a stranger to change
+        // one.
+        //
+        // `UpdateAgreement` is here although AU-11 does not name it: it writes
+        // an `AgreementStatus` taken straight from the payload over any
+        // agreement, so it REACHES `Terminated`, `Voided` and `Superseded` --
+        // the three states AU-11 is about -- and a gate that left it open
+        // would close nothing. `RevokeSignature` is here for the matching
+        // reason on AU-9's side: authorizing the writing of a signature while
+        // leaving any sender able to delete one is not an authorization rule.
+        if gates.party_authority_unsupported {
+            let needs_a_party = match data.operation {
+                AgreementOperation::UpdateAgreement
+                | AgreementOperation::TerminateAgreement
+                | AgreementOperation::VoidAgreement
+                | AgreementOperation::SupersedeAgreement
+                | AgreementOperation::SignAgreement
+                | AgreementOperation::RevokeSignature
+                | AgreementOperation::UpdateIpAction
+                | AgreementOperation::TerminateIpAction
+                | AgreementOperation::RevokeIpAction
+                | AgreementOperation::ActivateExecutor
+                | AgreementOperation::PauseExecutor
+                | AgreementOperation::ResumeExecutor
+                | AgreementOperation::TerminateExecutor
+                | AgreementOperation::CompleteExecutor => true,
+                AgreementOperation::CommitAgreement
+                | AgreementOperation::AddParty
+                | AgreementOperation::RemoveParty
+                | AgreementOperation::CreateAttestation
+                | AgreementOperation::RevokeAttestation
+                | AgreementOperation::UpdateAttestationStatus
+                | AgreementOperation::RecordIpAction
+                | AgreementOperation::LinkExecutor
+                | AgreementOperation::SubmitProof
+                | AgreementOperation::VerifyProof => false,
+            };
+            if needs_a_party {
+                return Ok(Self::party_authority_unsupported());
+            }
         }
 
         match data.operation {

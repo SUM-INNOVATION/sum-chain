@@ -146,6 +146,11 @@ pub struct FinanceGates {
     /// A payload-chosen index key is bounded before it becomes a key.
     /// ACTIVATION-AUDIT row the Finance instance of AL-7.
     pub allocation_bound: bool,
+    /// `RegisterIssuer` refuses as UNSUPPORTED, for every payload.
+    /// ACTIVATION-AUDIT row AU-21. No registrar exists for this subsystem's
+    /// issuer classes, so the registry can only record what the applicant
+    /// claimed about itself.
+    pub issuer_self_registration_unsupported: bool,
 }
 
 impl FinanceGates {
@@ -155,6 +160,7 @@ impl FinanceGates {
         real_block_timestamp: false,
         proof_unsupported: false,
         allocation_bound: false,
+        issuer_self_registration_unsupported: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -163,6 +169,7 @@ impl FinanceGates {
         real_block_timestamp: true,
         proof_unsupported: true,
         allocation_bound: true,
+        issuer_self_registration_unsupported: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -172,6 +179,11 @@ impl FinanceGates {
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
             proof_unsupported: crate::subsystem_proof_unsupported_gate_open(params, block_height),
             allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
+            issuer_self_registration_unsupported:
+                crate::subsystem_issuer_self_registration_unsupported_gate_open(
+                    params,
+                    block_height,
+                ),
         }
     }
 
@@ -334,6 +346,36 @@ impl FinanceExecutor {
             // SRC-891: Issuer Registry Operations
             // =================================================================
             FinanceOperation::RegisterIssuer => {
+                // ACTIVATION-AUDIT row AU-21. Below the gate this arm writes the
+                // applicant's own payload into the issuer registry: the only
+                // guards are that the profile names the sender and that the
+                // sender is not registered already, so the CLASS -- `FinanceIssuerClass::CentralBank`
+                // included -- and the STATUS are whatever the applicant typed.
+                // One funded account becomes an authority the rest of this
+                // subsystem then resolves its authorization rules against.
+                //
+                // At and above the gate the arm refuses as UNSUPPORTED. A
+                // registrar is what is missing, and there is none to consult:
+                // no `ChainParams` field names one for Finance, nothing in
+                // `genesis.json` seeds this registry, and no governance path in
+                // this tree writes to it. Inventing one here would be a rule
+                // nobody set.
+                //
+                // Refused BEFORE the deduct and before the payload is decoded,
+                // where this arm's own duplicate refusal returns, so a refused
+                // registration writes nothing and costs nothing.
+                //
+                // The cost is stated rather than hidden: with no registrar a
+                // chain at this height cannot obtain a Finance issuer at all, so
+                // every arm that requires one is unsatisfiable and the
+                // subsystem is DEFERRED. Nothing that ever worked is stranded,
+                // because there has never been a lawful issuer here to strand.
+                if gates.issuer_self_registration_unsupported {
+                    return Ok(FinanceExecutionResult::failure(
+                        crate::ISSUER_SELF_REGISTRATION_UNSUPPORTED,
+                    ));
+                }
+
                 let issuer: FinanceIssuerProfile = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 

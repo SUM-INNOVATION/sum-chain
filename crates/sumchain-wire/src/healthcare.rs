@@ -8,6 +8,7 @@
 //! - SRC-876: Prescription Standard (NON-TRANSFERABLE)
 
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 use crate::{Address, BlockHeight, Timestamp};
 use crate::agreement::{AttachmentRef, PartyRef};
 
@@ -40,6 +41,10 @@ pub const MEMBERSHIP_DOMAIN_SEP: &[u8] = b"SRC872-MEMBERSHIP:";
 pub const MEMBERSHIP_COMMITMENT_SEP: &[u8] = b"SRC872-COMMITMENT:v1:";
 pub const CONSENT_DOMAIN_SEP: &[u8] = b"SRC874-CONSENT:";
 pub const CONSENT_COMMITMENT_SEP: &[u8] = b"SRC874-COMMITMENT:v1:";
+/// The domain tag under which a consent's SUBJECT signs the grant.
+/// ACTIVATION-AUDIT row AU-3, the GRANT half. See
+/// [`ConsentEnvelope::grant_signing_input`].
+pub const CONSENT_GRANT_SIGNING_SEP: &[u8] = b"SRC874-CONSENT-GRANT:v1:";
 pub const PRESCRIPTION_DOMAIN_SEP: &[u8] = b"SRC876-PRESCRIPTION:";
 pub const PRESCRIPTION_COMMITMENT_SEP: &[u8] = b"SRC876-COMMITMENT:v1:";
 pub const HEALTHCARE_PROOF_DOMAIN_SEP: &[u8] = b"SRC875-PROOF:";
@@ -720,6 +725,140 @@ impl ConsentEnvelope {
         }
         true
     }
+
+    /// The digest a consent's SUBJECT signs to agree to the grant.
+    ///
+    /// ACTIVATION-AUDIT row AU-3, the GRANT half. A `SignedTransaction` carries
+    /// exactly one signature, and on a `GrantConsent` that signature is the
+    /// ISSUER's -- so the subject's agreement cannot be expressed by who sent
+    /// the transaction and has to be IN the payload.
+    /// [`ConsentGrantRequest`] is where it goes, and this is what it is over.
+    ///
+    /// Domain-separated with its own tag, so a signature produced for a consent
+    /// grant cannot be replayed as any other digest this subsystem hashes
+    /// (`generate_id` and `generate_commitment` both use `SRC874-CONSENT:`
+    /// prefixes of their own). Ambiguity between adjacent fields is avoided by
+    /// hashing only fixed-width values plus explicit one-byte tags for the
+    /// enums and for each `Option`'s presence -- and by padding an absent
+    /// `Option` to the same width as a present one, so "no expiry" and "expires
+    /// at 0" are different inputs.
+    ///
+    /// **What it binds, and why exactly these.** Everything that decides WHAT
+    /// is being disclosed (`consent_type`, `consent_commitment`,
+    /// `purpose_commitment`, `scope`, `scope_commitment`), ABOUT WHOM
+    /// (`consent_id`, `subject_address`, `subject_ref`, `subject_nullifier`),
+    /// TO WHOM (`recipient_ref`, `issuer_address`, `issuer_class`), UNDER WHAT
+    /// RULE (`policy_id`), FOR HOW LONG (`effective_from`, `expiry`) and WHAT
+    /// IT REPLACES (`supersedes`). A signature over this digest cannot be moved
+    /// to a consent that discloses more, lasts longer, names another recipient
+    /// or is about somebody else.
+    ///
+    /// **What it deliberately does NOT bind, stated rather than left to be
+    /// discovered.** `status`, `created_at`, `updated_at`,
+    /// `recorded_at_height`, `revocation_ref` and `attachments`. None of them
+    /// changes what is disclosed or to whom: the first is the row's own
+    /// lifecycle marker, which the revocation and supersession arms move after
+    /// the fact, the next three are provenance stamps, and the last two are
+    /// after-the-fact references. Binding a field the chain itself rewrites
+    /// would leave a stored consent whose signature no longer verifies against
+    /// its own row, which is worse than not binding it.
+    ///
+    /// `PartyRef` is hashed as a one-byte variant tag followed by its 32 bytes,
+    /// NOT through `PartyRef::as_hash`: `as_hash` collapses `Commitment(x)` and
+    /// `Subject(x)` to the same bytes, and a signing input that cannot tell a
+    /// commitment from a subject id is one a signature can be carried between.
+    pub fn grant_signing_input(&self) -> [u8; 32] {
+        fn party(hasher: &mut blake3::Hasher, party_ref: &PartyRef) {
+            match party_ref {
+                PartyRef::Commitment(c) => {
+                    hasher.update(&[0u8]);
+                    hasher.update(c);
+                }
+                PartyRef::Subject(s) => {
+                    hasher.update(&[1u8]);
+                    hasher.update(s);
+                }
+            };
+        }
+        fn opt32(hasher: &mut blake3::Hasher, value: &Option<[u8; 32]>) {
+            match value {
+                Some(v) => {
+                    hasher.update(&[1u8]);
+                    hasher.update(v);
+                }
+                None => {
+                    hasher.update(&[0u8; 33]);
+                }
+            };
+        }
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(CONSENT_GRANT_SIGNING_SEP);
+        hasher.update(&self.consent_id);
+        hasher.update(self.subject_address.as_bytes());
+        hasher.update(&[self.consent_type as u8]);
+        hasher.update(&self.consent_commitment);
+        party(&mut hasher, &self.subject_ref);
+        hasher.update(&self.subject_nullifier);
+        party(&mut hasher, &self.recipient_ref);
+        hasher.update(&self.purpose_commitment);
+        hasher.update(&[self.scope as u8]);
+        opt32(&mut hasher, &self.scope_commitment);
+        hasher.update(&self.effective_from.to_le_bytes());
+        match self.expiry {
+            Some(e) => {
+                hasher.update(&[1u8]);
+                hasher.update(&e.to_le_bytes());
+            }
+            None => {
+                hasher.update(&[0u8; 9]);
+            }
+        };
+        hasher.update(self.issuer_address.as_bytes());
+        hasher.update(&[self.issuer_class as u8]);
+        hasher.update(&self.policy_id);
+        opt32(&mut hasher, &self.supersedes);
+        *hasher.finalize().as_bytes()
+    }
+}
+
+/// A `GrantConsent` payload that carries the SUBJECT's agreement.
+///
+/// ACTIVATION-AUDIT row AU-3, the GRANT half. The unremediated payload for
+/// `HealthcareOperation::GrantConsent` is a bare [`ConsentEnvelope`], and the
+/// only party who has to participate is the issuer, who is also the sender. So
+/// a disclosure authorization naming any person is recorded without that person
+/// ever being asked.
+///
+/// This is the payload at and above
+/// `healthcare_consent_subject_signature_enabled_from_height`: the envelope,
+/// the subject's ed25519 public key, and the subject's signature over
+/// [`ConsentEnvelope::grant_signing_input`]. The executor requires the key to
+/// derive to the envelope's own `subject_address` and the signature to verify,
+/// so the transaction carries BOTH parties -- the issuer signs the transaction,
+/// the subject signs the consent.
+///
+/// **A wrapper, and not two new fields on `ConsentEnvelope`.** The envelope is
+/// what this subsystem STORES and what `healthcare_store` encodes; appending to
+/// it would change what an already-written encoding decodes to on disk.
+/// Wrapping leaves the stored bytes untouched and versions only the
+/// TRANSACTION payload: below the gate the payload is a bare envelope, at and
+/// above it this one, and each side fails to decode the other rather than
+/// silently reinterpreting it.
+///
+/// No verification happens here. This crate is the wire leaf and depends on no
+/// ed25519 crate by construction; the check lives in `sumchain-state`, which is
+/// where every other signature in this tree is verified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsentGrantRequest {
+    /// The consent being granted. Stored verbatim when the grant is accepted.
+    pub envelope: ConsentEnvelope,
+    /// The subject's ed25519 public key. Must derive to
+    /// `envelope.subject_address`.
+    pub subject_public_key: [u8; 32],
+    /// The subject's signature over `envelope.grant_signing_input()`.
+    #[serde(with = "BigArray")]
+    pub subject_signature: [u8; 64],
 }
 
 // =============================================================================
