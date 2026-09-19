@@ -251,6 +251,27 @@ impl EmploymentExecutor {
         }
     }
 
+    /// The STORED LENGTH of the employee index row, without decoding it.
+    ///
+    /// ACTIVATION-AUDIT row AL-2. The bounded readers in
+    /// `employment_executor.rs` compare this against
+    /// [`crate::MAX_ACCUMULATING_ROW_BYTES`] and refuse, so a row that has
+    /// already grown past the bound is never handed to `decode_id_list`. The
+    /// same spelling `agreement_view.rs::v_party_index_row_len` uses, because
+    /// it is the same rule.
+    pub fn v_employee_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        employee_ref: &SubjectRef,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::EMPLOYMENT_EMPLOYEE_INDEX,
+                employee_index_key(employee_ref),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
+    }
+
     fn v_add_to_employee_index(
         view: &mut ExecutionView<'_, '_>,
         employee_ref: &SubjectRef,
@@ -289,6 +310,21 @@ impl EmploymentExecutor {
         }
     }
 
+    /// The stored length of the employee-address index row (AL-2), by the
+    /// reasoning [`Self::v_employee_index_row_len`] gives.
+    pub fn v_employee_address_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        employee_address: &Address,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::EMPLOYMENT_EMPLOYEE_ADDRESS_INDEX,
+                employee_address_index_key(employee_address),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
+    }
+
     fn v_add_to_employee_address_index(
         view: &mut ExecutionView<'_, '_>,
         employee_address: &Address,
@@ -322,6 +358,21 @@ impl EmploymentExecutor {
             Some(bytes) => decode_id_list(&bytes).map_err(StateError::Storage),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// The stored length of the employer index row (AL-2), by the reasoning
+    /// [`Self::v_employee_index_row_len`] gives.
+    pub fn v_employer_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        employer_ref: &EmployerRef,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::EMPLOYMENT_EMPLOYER_INDEX,
+                employer_index_key(employer_ref),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
     }
 
     fn v_add_to_employer_index(
@@ -444,6 +495,21 @@ impl EmploymentExecutor {
         }
     }
 
+    /// The stored length of the subject income index row (AL-2), by the
+    /// reasoning [`Self::v_employee_index_row_len`] gives.
+    pub fn v_subject_income_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        subject_ref: &SubjectRef,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::EMPLOYMENT_SUBJECT_INCOME_INDEX,
+                subject_income_index_key(subject_ref),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
+    }
+
     fn v_add_to_subject_income_index(
         view: &mut ExecutionView<'_, '_>,
         subject_ref: &SubjectRef,
@@ -477,6 +543,21 @@ impl EmploymentExecutor {
             Some(bytes) => decode_id_list(&bytes).map_err(StateError::Storage),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// The stored length of the income holder-address index row (AL-2), by the
+    /// reasoning [`Self::v_employee_index_row_len`] gives.
+    pub fn v_holder_address_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        holder_address: &Address,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::EMPLOYMENT_INCOME_HOLDER_ADDRESS_INDEX,
+                income_holder_address_index_key(holder_address),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
     }
 
     fn v_add_to_holder_address_index(

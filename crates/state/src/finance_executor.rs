@@ -172,6 +172,18 @@ impl FinanceGates {
             allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
         }
     }
+
+    /// The stored-row length limit this gate imposes, or `None` when closed.
+    ///
+    /// `None` is what the bounded readers treat as "no limit", so a closed gate
+    /// reads byte-for-byte what the unbounded reader read. The same spelling
+    /// `AgreementGates::row_limit` and `DocClassGates::row_limit` use, reading
+    /// the same constant, because it is the same rule.
+    #[inline]
+    pub fn row_limit(self) -> Option<usize> {
+        self.allocation_bound
+            .then_some(crate::MAX_ACCUMULATING_ROW_BYTES)
+    }
 }
 
 impl FinanceExecutor {
@@ -220,6 +232,53 @@ impl FinanceExecutor {
         Ok(match Self::v_get_issuer(view, sender)? {
             Some(issuer) => issuer.status.is_active(),
             None => false,
+        })
+    }
+
+    /// A stored index row longer than the bound, refused without being decoded.
+    ///
+    /// The DocClass and Agreement wording verbatim, and for the reason those
+    /// give: one phrasing across every family so the refusal is greppable, with
+    /// the LENGTH in it, because the remedy for a row over the limit is not
+    /// "retry".
+    fn row_too_large(what: &str, bytes: usize) -> FinanceExecutionResult {
+        FinanceExecutionResult::failure(format!(
+            "{what} too large to modify: {bytes} bytes, limit {}",
+            crate::MAX_ACCUMULATING_ROW_BYTES
+        ))
+    }
+
+    /// One accumulating index row, checked against the bound before anything
+    /// decodes it.
+    ///
+    /// ACTIVATION-AUDIT row AL-4. Each of the subsystem's four index families
+    /// holds one bincode list that `v_add_to_*` decodes in full, pushes one
+    /// entry onto and re-encodes in full, before `view.put` charges the
+    /// candidate a single byte. So the candidate ceiling bounds what a block
+    /// may COMMIT and bounds nothing about what one transaction may ALLOCATE,
+    /// which is the same sentence AL-2, AL-5, AL-10 and AL-11 make in four
+    /// other subsystems.
+    ///
+    /// `None` -- a closed gate -- reads NOTHING, not merely refuses nothing: a
+    /// read here would move a decode earlier than the unremediated binary
+    /// reaches it.
+    ///
+    /// Checked before `v_deduct`, because every other refusal in these arms is
+    /// checked there too -- a Finance refusal writes nothing at all, and a
+    /// bound that charged for the refusal would be the one exception.
+    /// `row_len` is a CLOSURE and not a value so that a closed gate performs no
+    /// read at all -- see the paragraph above.
+    fn index_row_within_bound(
+        what: &str,
+        max_bytes: Option<usize>,
+        row_len: impl FnOnce() -> Result<Option<usize>>,
+    ) -> Result<Option<FinanceExecutionResult>> {
+        let Some(max) = max_bytes else {
+            return Ok(None);
+        };
+        Ok(match row_len()? {
+            Some(bytes) if bytes > max => Some(Self::row_too_large(what, bytes)),
+            _ => None,
         })
     }
 
@@ -300,6 +359,19 @@ impl FinanceExecutor {
                         issuer.jurisdiction_code.len(),
                         crate::MAX_INDEX_KEY_TEXT_BYTES
                     )));
+                }
+
+                // ACTIVATION-AUDIT row AL-4, the jurisdiction half. The bound
+                // above is on the KEY this code writes; this one is on the
+                // VALUE it appends to, and they are independent: a short code
+                // naming a row that has already accumulated a megabyte of
+                // addresses passes the first and must not pass the second.
+                if let Some(refusal) = Self::index_row_within_bound(
+                    "Finance jurisdiction index",
+                    gates.row_limit(),
+                    || Self::v_jurisdiction_index_row_len(view, &issuer.jurisdiction_code),
+                )? {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -444,6 +516,15 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Address proof already exists"));
                 }
 
+                // ACTIVATION-AUDIT row AL-4, the address-proof half.
+                if let Some(refusal) = Self::index_row_within_bound(
+                    "Finance subject address index",
+                    gates.row_limit(),
+                    || Self::v_subject_address_index_row_len(view, &proof.subject_ref),
+                )? {
+                    return Ok(refusal);
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
@@ -521,6 +602,15 @@ impl FinanceExecutor {
 
                 if Self::v_bank_standing_exists(view, &credential.credential_id)? {
                     return Ok(FinanceExecutionResult::failure("Bank standing credential already exists"));
+                }
+
+                // ACTIVATION-AUDIT row AL-4, the bank-standing half.
+                if let Some(refusal) = Self::index_row_within_bound(
+                    "Finance subject bank index",
+                    gates.row_limit(),
+                    || Self::v_subject_bank_index_row_len(view, &credential.subject_ref),
+                )? {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -637,6 +727,15 @@ impl FinanceExecutor {
 
                 if Self::v_kyc_attestation_exists(view, &attestation.attestation_id)? {
                     return Ok(FinanceExecutionResult::failure("KYC attestation already exists"));
+                }
+
+                // ACTIVATION-AUDIT row AL-4, the KYC half.
+                if let Some(refusal) = Self::index_row_within_bound(
+                    "Finance subject KYC index",
+                    gates.row_limit(),
+                    || Self::v_subject_kyc_index_row_len(view, &attestation.subject_ref),
+                )? {
+                    return Ok(refusal);
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;

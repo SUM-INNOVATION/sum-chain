@@ -144,6 +144,27 @@ impl FinanceExecutor {
         }
     }
 
+    /// The STORED LENGTH of the jurisdiction index row, without decoding it.
+    ///
+    /// ACTIVATION-AUDIT row AL-4. The bounded readers in
+    /// `finance_executor.rs` compare this against
+    /// [`crate::MAX_ACCUMULATING_ROW_BYTES`] and refuse, so a row that has
+    /// already grown past the bound is never handed to `decode_addresses`. The
+    /// same spelling `agreement_view.rs::v_party_index_row_len` uses, because
+    /// it is the same rule.
+    pub fn v_jurisdiction_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        jurisdiction_code: &str,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::FINANCE_JURISDICTION_INDEX,
+                jurisdiction_index_key(jurisdiction_code),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
+    }
+
     /// Read-modify-write on an accumulating `Vec<Address>`: a second issuer
     /// registered into the same jurisdiction in one block has to see the first.
     fn v_add_to_jurisdiction_index(
@@ -245,6 +266,21 @@ impl FinanceExecutor {
             Some(bytes) => decode_id_list(&bytes).map_err(StateError::Storage),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// The stored length of the subject address-proof index row (AL-4), by the
+    /// reasoning [`Self::v_jurisdiction_index_row_len`] gives.
+    pub fn v_subject_address_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        subject_ref: &SubjectRef,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::FINANCE_SUBJECT_ADDRESS_INDEX,
+                subject_address_index_key(subject_ref),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
     }
 
     fn v_add_to_subject_address_index(
@@ -370,6 +406,21 @@ impl FinanceExecutor {
             Some(bytes) => decode_id_list(&bytes).map_err(StateError::Storage),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// The stored length of the subject bank-standing index row (AL-4), by the
+    /// reasoning [`Self::v_jurisdiction_index_row_len`] gives.
+    pub fn v_subject_bank_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        subject_ref: &SubjectRef,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::FINANCE_SUBJECT_BANK_INDEX,
+                subject_bank_index_key(subject_ref),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
     }
 
     fn v_add_to_subject_bank_index(
@@ -509,6 +560,21 @@ impl FinanceExecutor {
             Some(bytes) => decode_id_list(&bytes).map_err(StateError::Storage),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// The stored length of the subject KYC index row (AL-4), by the reasoning
+    /// [`Self::v_jurisdiction_index_row_len`] gives.
+    pub fn v_subject_kyc_index_row_len(
+        view: &ExecutionView<'_, '_>,
+        subject_ref: &SubjectRef,
+    ) -> Result<Option<usize>> {
+        Ok(view
+            .get(
+                cf::FINANCE_SUBJECT_KYC_INDEX,
+                subject_kyc_index_key(subject_ref),
+            )
+            .map_err(StateError::Storage)?
+            .map(|bytes| bytes.len()))
     }
 
     fn v_add_to_subject_kyc_index(

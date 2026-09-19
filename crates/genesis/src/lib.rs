@@ -1025,6 +1025,28 @@ pub struct ChainParams {
     /// above word for word, and an attacker refused by the DocClass or NFT
     /// bound moves to the Agreement one for the price of one `min_fee`.
     ///
+    /// Employment's five accumulating indexes (ACTIVATION-AUDIT row AL-2) and
+    /// Finance's four (row AL-4) are the FOURTH and FIFTH readers, on that same
+    /// argument rather than on a new one. `v_put_credential` appends to three
+    /// rows and `v_put_attestation` to two; `v_put_issuer`,
+    /// `v_put_address_proof`, `v_put_bank_standing` and `v_put_kyc_attestation`
+    /// append to one each. Every one of those decodes a whole stored row,
+    /// pushes one entry and re-encodes the whole row before the candidate
+    /// ceiling sees a byte — the sentence above, in two more subsystems — and
+    /// each is reachable for one `min_fee` by any registered active issuer,
+    /// which is the cheapest of the five. Activating the DocClass, NFT and
+    /// Agreement bounds and not these two would close three vectors and leave
+    /// the cheapest two open, which is the argument this comment already makes
+    /// twice. The row BYTES are bounded, not the entry count, for the reason
+    /// `MAX_ACCUMULATING_ROW_BYTES` gives: bounding the bytes subsumes it.
+    ///
+    /// The Finance jurisdiction index is now read by BOTH halves of this gate
+    /// and they are independent: `MAX_INDEX_KEY_TEXT_BYTES` bounds the KEY
+    /// `RegisterIssuer` writes, `MAX_ACCUMULATING_ROW_BYTES` bounds the VALUE
+    /// it appends to, and a short jurisdiction code naming a row that has
+    /// already accumulated a megabyte of addresses passes the first and must
+    /// not pass the second.
+    ///
     /// Production-safe default `None`, which is what an absent field resolves
     /// to and what every genesis written before this gate existed carries.
     /// `None` closes the gate, and a closed gate means a node executes exactly
