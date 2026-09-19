@@ -479,68 +479,155 @@ impl PoAEngine {
 
     /// Create a new block.
     ///
-    /// # Fitting the block under the write-set ceiling
+    /// # Why a proposer cannot just return the error
     ///
-    /// `execute_block` gives its candidate `MAX_BLOCK_WRITE_SET_BYTES`, and a
-    /// block whose transactions charge past it is refused. That refusal used to
-    /// land here as a plain `Err` — before signing, which is correct, and
-    /// INSTEAD OF A BLOCK, which is not.
+    /// `create_block_once` executes a candidate before signing it, so a
+    /// proposer never signs a block its own execution refused. That much was
+    /// never the gap. The gap is what happens INSTEAD of a block.
     ///
-    /// It is not enough to refuse to sign. `select_for_block` is
-    /// non-destructive and orders by fee, so the transaction that made the
-    /// block unexecutable is still in the mempool on the next tick and is
-    /// selected FIRST, and `mempool.remove_batch` is only reached on the
-    /// success path. One transaction, for one `min_fee`, therefore halted this
-    /// validator's block production permanently — not for a slot, but for every
-    /// slot after it.
+    /// `Mempool::select_for_block` is non-destructive and ordered by FEE, and
+    /// `mempool.remove_batch` is reached only on the success path. So a
+    /// transaction that makes the candidate unexecutable is still in the
+    /// mempool on the next tick, sorted to the FRONT, and is selected first
+    /// again — and again. Not a lost slot: a validator that never produces
+    /// another block. It costs one `min_fee` and anyone can pay it.
     ///
-    /// So the refusal is acted on rather than propagated, in two shapes:
+    /// So every refusal that names a transaction is ACTED ON here rather than
+    /// propagated, and the proposal is retried. Each arm shrinks the candidate
+    /// strictly, so the loop terminates whatever the input.
     ///
-    ///   * ONE transaction crossed the ceiling. `execute_block` reports which;
-    ///     it is evicted from the mempool so the next tick does not select it
-    ///     again, and the proposal is truncated at it — which always fits,
-    ///     because the prefix before it executed.
-    ///   * The block executed but left no room to PUBLISH. Nobody is at fault
-    ///     and nothing is evicted; the proposal is truncated in proportion to
-    ///     how far over it was.
+    /// # Acting on it is not the same as destroying it
     ///
-    /// Both shrink the proposal strictly, so the loop terminates whatever the
-    /// input.
+    /// The transactions that reach these arms are four populations, and a
+    /// remedy that evicts all of them ends the halt by throwing away honest
+    /// traffic:
     ///
-    /// This is the half of the problem the per-transaction bound cannot solve
-    /// and is not meant to. `MAX_TX_WRITE_SET_BYTES x max_txs_per_block` is two
-    /// orders of magnitude past any survivable block ceiling — deliberately,
-    /// because the per-transaction bound has to admit the largest HONEST
-    /// transaction — so a block of transactions every one of which is inside
-    /// its own bound can still cross the block's. Only the proposer can decide
-    /// which of them not to include.
+    ///   * PERMANENTLY INVALID (`BlockTransactionAborted` with
+    ///     [`sumchain_state::TxFailureClass::Permanent`]). Refused on the
+    ///     transaction's own contents before any state was read —
+    ///     `PolicyAccount { ModifyMembership }` is reachable only through
+    ///     `ExecuteProposal`, so a directly submitted one fails at every height
+    ///     against every state. Evicted, because evicting it is the only thing
+    ///     that ends the halt.
+    ///   * TEMPORARILY INELIGIBLE (`BlockTransactionAborted` with
+    ///     [`sumchain_state::TxFailureClass::Transient`]). Refused against the
+    ///     state it met. An NFT mint naming a collection the NEXT block creates
+    ///     is the shape: nothing is wrong with the transaction except when it
+    ///     arrived. Dropped from this proposal and LEFT IN THE MEMPOOL.
+    ///   * TOO BIG FOR THIS BLOCK (`BlockWriteSetExceeded` at an index above
+    ///     zero). It crossed `MAX_BLOCK_WRITE_SET_BYTES` because the
+    ///     transactions before it had already spent the budget. At the head of
+    ///     an emptier block it fits. The proposal is truncated AT it — the
+    ///     prefix is known to execute, because it did — and nothing is evicted.
+    ///     Index zero is the one case where no emptier block exists, and that
+    ///     one is evicted.
+    ///   * NO ROOM TO PUBLISH (`BlockWriteSetPublicationHeadroom`). The block
+    ///     executed inside the ceiling but left nothing underneath it for the
+    ///     block record, the transaction copies, the receipts, the indexes and
+    ///     the pre-image journal. Nobody is at fault; the proposal is truncated
+    ///     in proportion to how far over it was. The exception is a proposal
+    ///     that has already shrunk to ONE transaction and still does not fit:
+    ///     that transaction cannot be published in any block, so it is evicted
+    ///     rather than left to empty every future block by sitting at the top
+    ///     of the fee order.
+    ///
+    /// Dropping a transaction mid-proposal also drops every LATER transaction
+    /// from the SAME SENDER — see [`Self::drop_with_sender_tail`]. Nonces are
+    /// contiguous, and splicing one out of the middle of a sender's run would
+    /// hand the rest of that run `InvalidNonce` receipts inside this very
+    /// block, and `remove_batch` would then delete them. That would destroy
+    /// transactions nothing accused, in the name of a repair whose whole point
+    /// is not doing that.
+    ///
+    /// # This is proposer policy, not a consensus rule
+    ///
+    /// Nothing here changes which blocks are VALID or what any block's state
+    /// root is: an importing node is handed a block and applies it or does not,
+    /// by rules this function does not touch. What changes is which
+    /// transactions THIS proposer puts in the block it builds, which is a
+    /// choice every proposer already makes freely (fee order, `max_txs_per_block`,
+    /// the fitting loop that preceded this one). So it carries no activation
+    /// gate, for the same reason `MAX_BLOCK_FIT_ATTEMPTS` is not in the protocol
+    /// digest.
     fn create_block(&self, transactions: Vec<SignedTransaction>) -> Result<Block> {
         let mut candidate_txs = transactions;
         for attempt in 0..Self::MAX_BLOCK_FIT_ATTEMPTS {
             match self.create_block_once(candidate_txs.clone()) {
+                // ── a transaction that could not be executed at all ──────────
+                Err(ConsensusError::State(sumchain_state::StateError::BlockTransactionAborted {
+                    tx_index,
+                    class,
+                    detail,
+                })) if tx_index < candidate_txs.len() => {
+                    let offender = candidate_txs[tx_index].hash();
+                    match class {
+                        sumchain_state::TxFailureClass::Permanent => {
+                            warn!(
+                                attempt,
+                                tx = %offender,
+                                index = tx_index,
+                                "a selected transaction can never execute, at any height \
+                                 against any state; dropping it from the proposal and \
+                                 evicting it from the mempool, so the next tick does not \
+                                 select it again: {detail}"
+                            );
+                            // Evicted, not merely skipped. Skipped, it is at the
+                            // front of the very next fee-ordered selection and
+                            // the halt resumes on the next tick.
+                            self.mempool.remove_batch(&[offender]);
+                        }
+                        sumchain_state::TxFailureClass::Transient => {
+                            warn!(
+                                attempt,
+                                tx = %offender,
+                                index = tx_index,
+                                "a selected transaction could not execute against THIS \
+                                 state; dropping it from the proposal and LEAVING IT in \
+                                 the mempool, because a later block may carry it: {detail}"
+                            );
+                        }
+                    }
+                    candidate_txs = Self::drop_with_sender_tail(&candidate_txs, tx_index);
+                }
+
+                // ── a transaction took the block past the write-set ceiling ──
                 Err(ConsensusError::State(sumchain_state::StateError::BlockWriteSetExceeded {
                     tx_index,
                     detail,
                 })) if tx_index < candidate_txs.len() => {
                     let offender = candidate_txs[tx_index].hash();
-                    warn!(
-                        attempt,
-                        tx = %offender,
-                        index = tx_index,
-                        "a selected transaction takes this block past the write-set \
-                         ceiling; dropping it from the proposal and evicting it from \
-                         the mempool, so the next tick does not select it again: {detail}"
-                    );
-                    // Evicted, not merely skipped. Skipping it would build one
-                    // block and then select the same transaction first on the
-                    // next tick, which is the permanent halt this whole path
-                    // exists to end.
-                    self.mempool.remove_batch(&[offender]);
-                    // Truncated AT it, not spliced around it: the prefix is
-                    // known to execute, because it did. The transactions after
-                    // it are not lost, they are the next block's.
-                    candidate_txs.truncate(tx_index);
+                    if tx_index == 0 {
+                        // Nothing preceded it, so no emptier block exists: this
+                        // transaction cannot be carried by any block at all.
+                        warn!(
+                            attempt,
+                            tx = %offender,
+                            "the FIRST transaction in this proposal already crosses the \
+                             block write-set ceiling, so no block can carry it; dropping \
+                             it and evicting it from the mempool: {detail}"
+                        );
+                        self.mempool.remove_batch(&[offender]);
+                        candidate_txs = Self::drop_with_sender_tail(&candidate_txs, 0);
+                    } else {
+                        // It crossed because the prefix spent the budget, not
+                        // because of anything it did. Truncated AT it, not
+                        // spliced around it: the prefix is known to execute,
+                        // because it did. Nothing is evicted — at the head of
+                        // the next block this transaction fits, and evicting it
+                        // would destroy a transaction whose only fault is the
+                        // company it was selected with.
+                        warn!(
+                            attempt,
+                            tx = %offender,
+                            index = tx_index,
+                            "a selected transaction takes THIS block past the write-set \
+                             ceiling; truncating the proposal at it. It stays in the \
+                             mempool: it fits at the head of an emptier block: {detail}"
+                        );
+                        candidate_txs.truncate(tx_index);
+                    }
                 }
+
                 Err(ConsensusError::State(
                     sumchain_state::StateError::BlockWriteSetPublicationHeadroom {
                         charged,
@@ -560,16 +647,37 @@ impl PoAEngine {
                         .checked_div(charged.max(1))
                         .unwrap_or(0) as usize;
                     let keep = proportional.min(len - 1);
-                    warn!(
-                        attempt,
-                        charged,
-                        budget,
-                        from = len,
-                        to = keep,
-                        "this block executes inside the write-set ceiling but leaves no \
-                         room to publish beneath it; carrying fewer transactions. \
-                         Nothing is evicted: no single transaction is at fault"
-                    );
+                    if keep == 0 && len == 1 {
+                        // The proposal has shrunk to one transaction and that
+                        // transaction still will not fit underneath the
+                        // publication budget. No block can publish it, so
+                        // leaving it costs more than a slot: it sits at the top
+                        // of the fee order and empties EVERY future block while
+                        // the smaller transactions behind it never confirm.
+                        let offender = candidate_txs[0].hash();
+                        warn!(
+                            attempt,
+                            charged,
+                            budget,
+                            tx = %offender,
+                            "one transaction alone leaves no room to publish beneath the \
+                             write-set ceiling, so no block can carry it; evicting it \
+                             from the mempool rather than letting it empty every block \
+                             behind it"
+                        );
+                        self.mempool.remove_batch(&[offender]);
+                    } else {
+                        warn!(
+                            attempt,
+                            charged,
+                            budget,
+                            from = len,
+                            to = keep,
+                            "this block executes inside the write-set ceiling but leaves \
+                             no room to publish beneath it; carrying fewer transactions. \
+                             Nothing is evicted: no single transaction is at fault"
+                        );
+                    }
                     candidate_txs.truncate(keep);
                 }
                 other => return other,
@@ -579,6 +687,34 @@ impl PoAEngine {
         // Out of attempts. Propose whatever survived the shrinking, which is
         // strictly shorter than what came in.
         self.create_block_once(candidate_txs)
+    }
+
+    /// The proposal without the transaction at `index`, and without every LATER
+    /// transaction from that transaction's SENDER.
+    ///
+    /// The offender goes because it is what refused. The sender's tail goes
+    /// because nonces are contiguous: splice one transaction out of the middle
+    /// of a sender's run and every transaction after it in that run fails
+    /// `validate_tx` with `InvalidNonce` — which is a RECEIPT, so the block is
+    /// built and signed carrying them, and `remove_batch` then deletes them
+    /// from the mempool. Transactions nothing accused, destroyed by the repair
+    /// meant to stop exactly that.
+    ///
+    /// Every OTHER sender's transactions are kept, which is what makes this a
+    /// splice rather than a truncation: the honest traffic behind a poisoned
+    /// transaction is carried by THIS block rather than waiting for the next
+    /// one. The dropped tail is untouched in the mempool and is selected again
+    /// on the next tick.
+    fn drop_with_sender_tail(
+        txs: &[SignedTransaction],
+        index: usize,
+    ) -> Vec<SignedTransaction> {
+        let sender = txs[index].sender();
+        txs.iter()
+            .enumerate()
+            .filter(|(i, tx)| *i < index || (*i > index && tx.sender() != sender))
+            .map(|(_, tx)| tx.clone())
+            .collect()
     }
 
     /// One proposal attempt: build, execute, sign, accept, publish, announce.

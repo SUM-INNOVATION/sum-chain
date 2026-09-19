@@ -796,6 +796,92 @@ pub type State = StateManager;
 
 use thiserror::Error;
 
+/// What a transaction's execution failure inside a block says about the
+/// transaction's FUTURE.
+///
+/// `execute_block`'s transaction loop turns most failures into receipts — a bad
+/// nonce, an empty balance, a subsystem's own semantic refusal — and a block
+/// carrying one of those is still a block. A handful of dispatch arms instead
+/// `?` a [`StateError`] straight out, and those make the whole block
+/// unexecutable. A PROPOSER that hits one has to do something about the
+/// transaction, because `Mempool::select_for_block` is non-destructive and
+/// ordered by fee: left alone it is selected first on the next tick, and the
+/// tick after that, and the validator never produces another block.
+///
+/// "Do something" is not "throw it away". The transactions that reach that arm
+/// are not one population, and the difference between them is exactly this
+/// type:
+///
+///   * [`TxFailureClass::Permanent`] — no state and no height makes this
+///     transaction succeed. It is safe to evict, and evicting it is the only
+///     thing that ends the halt.
+///   * [`TxFailureClass::Transient`] — it failed against THIS state. An NFT
+///     mint naming a collection the next block creates is the shape to hold in
+///     mind. Evicting it destroys honest traffic to fix somebody else's
+///     problem, so it is quarantined for one proposal and left in the mempool.
+///
+/// The classification is FAIL-SAFE: [`classify_block_tx_failure`] answers
+/// `Transient` for everything it has not been taught, because the cost of
+/// holding a dead transaction one more tick is a wasted selection slot and the
+/// cost of evicting a live one is a user's transaction destroyed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxFailureClass {
+    /// Refused on the transaction's own contents, before any state was
+    /// consulted. No height, no state, no ordering makes it succeed.
+    Permanent,
+    /// Refused against the state it happened to meet. A different block may
+    /// carry it successfully.
+    Transient,
+}
+
+impl std::fmt::Display for TxFailureClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TxFailureClass::Permanent => f.write_str("permanently invalid"),
+            TxFailureClass::Transient => f.write_str("temporarily ineligible"),
+        }
+    }
+}
+
+/// Classify a [`StateError`] raised while executing a transaction inside a
+/// block.
+///
+/// Only the variants a transaction earns on its OWN CONTENTS are
+/// [`TxFailureClass::Permanent`]:
+///
+///   * [`StateError::InvalidOperation`] — a dispatch arm refusing an operation
+///     code it does not serve at all. `PolicyAccount { ModifyMembership }` is
+///     the live example: it is reachable only through `ExecuteProposal`, so a
+///     directly submitted one is refused before any state is read, forever.
+///   * [`StateError::SerializationError`] — encoding a value the payload
+///     dictates. Deterministic in the payload; a second attempt encodes the
+///     same bytes and fails the same way.
+///   * [`StateError::InvalidChainId`], [`StateError::InvalidSignature`],
+///     [`StateError::SignerMismatch`] — properties of the signed bytes. Nothing
+///     the chain later does changes them.
+///
+/// Everything else is [`TxFailureClass::Transient`], and the interesting
+/// members of that set are the ones a reader might expect to find above:
+///
+///   * [`StateError::BlockValidation`] — the NFT executors raise it for
+///     "Collection not found", and the very next block may contain the
+///     `CreateCollection`.
+///   * [`StateError::Storage`] — the database, not the transaction.
+///   * the `*NotActivated` variants — a closed gate opens at a height.
+///   * [`StateError::DeserializationError`] — it reads both ways (a malformed
+///     payload OR a row this node stored badly), and an error that reads both
+///     ways is not evidence enough to destroy a transaction.
+pub fn classify_block_tx_failure(e: &StateError) -> TxFailureClass {
+    match e {
+        StateError::InvalidOperation(_)
+        | StateError::SerializationError(_)
+        | StateError::InvalidChainId { .. }
+        | StateError::InvalidSignature
+        | StateError::SignerMismatch { .. } => TxFailureClass::Permanent,
+        _ => TxFailureClass::Transient,
+    }
+}
+
 /// State errors
 #[derive(Debug, Error)]
 pub enum StateError {
@@ -843,6 +929,41 @@ pub enum StateError {
     /// in the text a node logs.
     #[error("block write set exceeded while executing transaction {tx_index}: {detail}")]
     BlockWriteSetExceeded { tx_index: usize, detail: String },
+
+    /// A transaction inside this block could not be EXECUTED at all, so the
+    /// block cannot be evaluated — and here is which one, and whether it can
+    /// ever succeed.
+    ///
+    /// Most transaction failures are receipts: `execute_tx_with_validators`
+    /// turns a bad nonce, an empty balance and every subsystem's semantic
+    /// refusal into a `TxStatus`, and the block carrying one is still a block.
+    /// A handful of dispatch arms instead propagate a [`StateError`], and the
+    /// loop used to return it bare. Bare, it names nothing a proposer can act
+    /// on — and a proposer must act, because `Mempool::select_for_block` is
+    /// non-destructive and ordered by fee, so the transaction that made the
+    /// block unexecutable is selected FIRST on the next tick and every tick
+    /// after it. One `min_fee`, paid once by anyone, stopped that validator
+    /// producing blocks for good.
+    ///
+    /// So the loop reports the INDEX, which is the only thing a proposer can
+    /// decline to include, and the CLASS, which is the only thing that decides
+    /// whether declining should also mean destroying. See
+    /// [`classify_block_tx_failure`] for why those are two different questions
+    /// and `PoAEngine::create_block` for what is done with each answer.
+    ///
+    /// `detail` carries the original error's message verbatim, so nothing a
+    /// node used to log about the refusal is lost.
+    ///
+    /// An IMPORTING node is unaffected by the distinction: it is handed a block
+    /// and either applies it or does not, and this is the second case either
+    /// way. Only a proposer, which chooses its own transactions, has a decision
+    /// to make.
+    #[error("transaction {tx_index} in this block could not be executed ({class}): {detail}")]
+    BlockTransactionAborted {
+        tx_index: usize,
+        class: TxFailureClass,
+        detail: String,
+    },
 
     /// A block EXECUTED inside [`MAX_BLOCK_WRITE_SET_BYTES`] but left no room
     /// underneath it to PUBLISH.
