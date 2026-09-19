@@ -740,11 +740,11 @@ async fn more_unexecutable_transactions_than_the_old_budget_still_yields_a_block
 /// back to halving the proposal until something is accepted, which the empty
 /// proposal always is.
 ///
-/// What this does NOT claim is that the flood is harmless. It costs this
-/// proposer up to sixty-four re-executions and a slot that carries little or
-/// nothing. The structural answer is a per-transaction scope inside
-/// `execute_block`, so one refusal is rolled back and the block continues in
-/// ONE pass — which changes what a block contains and needs an activation gate.
+/// It is no longer the path a flood takes. `PoAEngine::screen_selection` names
+/// every offender in ONE execution ahead of the fitting loop, so seventy
+/// poisons are removed together and the loop never sees them — section 7
+/// asserts that directly, and asserts what it costs. This test stays because
+/// the fallback must keep working for whatever the screening pass gets WRONG.
 #[tokio::test]
 async fn a_flood_larger_than_the_drop_budget_still_yields_a_block() {
     let (genesis, key, senders) = many_senders(70);
@@ -767,4 +767,253 @@ async fn a_flood_larger_than_the_drop_budget_still_yields_a_block() {
     );
     assert_eq!(block.height(), 1, "the chain advanced");
     assert_ne!(block.header.proposer_sig, [0u8; 64], "and it is signed");
+}
+
+// ── 7. What the flood COSTS ─────────────────────────────────────────────────
+//
+// The five sections above are about the halt: a proposer that produces no
+// block. This one is about the price of not halting. `execute_block` abandons a
+// block at the FIRST transaction it cannot execute, so the fitting loop learns
+// one offender per execution and a proposal carrying `n` of them costs `n + 1`.
+// `MAX_REFUSED_TX_DROPS` bounded that at sixty-four and left the door open:
+// sixty-four full block executions, bought for sixty-four `min_fee`s, and a
+// slot spent executing is its own denial of service.
+//
+// `PoAEngine::screen_selection` runs ONE pass that rolls each refusal back and
+// carries on, so every offender is named by a single execution and removed
+// together. The flood now costs two executions — the screening pass and the one
+// that builds the block — and it carries the honest traffic that was behind it.
+
+/// Seventy transactions that cannot execute, and the honest traffic behind them
+/// is STILL CARRIED.
+///
+/// `a_flood_larger_than_the_drop_budget_still_yields_a_block` asserts only that
+/// a block comes out. That is the weaker half, and a proposer satisfies it by
+/// producing empty blocks forever while nothing confirms. Seventy offenders is
+/// past any drop budget this loop has had, so under the fitting loop alone the
+/// budget is exhausted, the proposal is HALVED until something is accepted, and
+/// the honest traffic sorted behind the high-fee poison is halved away with it.
+///
+/// One screening pass removes all seventy together, and what is left is the
+/// honest traffic — every transaction of it.
+#[tokio::test]
+async fn a_flood_of_seventy_refusals_still_carries_the_honest_traffic_behind_it() {
+    let (genesis, key, senders) = many_senders(76);
+    let node = Node::new(&genesis, key);
+    let sink = Address::new([0xAB; 20]);
+    let (poisoned, clean) = senders.split_at(70);
+
+    // The poison pays the top fee, which is where a fee-ordered selection puts
+    // it: at the FRONT, ahead of everything honest.
+    let mut proposal: Vec<SignedTransaction> = poisoned
+        .iter()
+        .map(|kp| mint_absent_collection_tx(kp, 0, 9_000_000))
+        .collect();
+    let honest: Vec<SignedTransaction> = clean
+        .iter()
+        .map(|kp| transfer_tx(kp, sink, 0, 1_000))
+        .collect();
+    proposal.extend(honest.iter().cloned());
+
+    let block = node
+        .consensus
+        .propose_block(proposal)
+        .await
+        .expect("seventy unexecutable transactions must not stop a block being produced");
+    let carried = hashes(&block.transactions);
+    println!(
+        "COST: 70 poisons + 6 honest -> block {} carried {} tx",
+        block.hash(),
+        block.tx_count()
+    );
+    for (i, tx) in honest.iter().enumerate() {
+        assert!(
+            carried.contains(&tx.hash()),
+            "honest transfer {i} of 6 must be carried. A block that advances the \
+             chain while confirming nothing is the halt wearing a different face, \
+             and halving a proposal down past seventy poisons is how the fitting \
+             loop alone gets there"
+        );
+    }
+    for tx in poisoned
+        .iter()
+        .map(|kp| mint_absent_collection_tx(kp, 0, 9_000_000))
+    {
+        assert!(
+            !carried.contains(&tx.hash()),
+            "and none of the poison is in the block"
+        );
+    }
+}
+
+/// A flood of `n` transactions that refuse costs ONE screening execution, not
+/// `n`.
+///
+/// This is the defect stated as a number. Before the screening pass, seventy
+/// offenders cost seventy-one full block executions — one to learn each, one to
+/// build the block — and the only thing standing between a validator and a slot
+/// spent entirely on execution was `MAX_REFUSED_TX_DROPS`, which bounded the
+/// work by giving up on the proposal.
+///
+/// Two executions now, whatever `n` is: the screening pass that names all
+/// seventy at once, and the one that builds the block they were removed from.
+/// The count is read from `PoAEngine::proposal_executions`, which exists for no
+/// other purpose — a claim about cost that no test can fail is not a claim.
+#[tokio::test]
+async fn a_flood_of_refusals_costs_one_screening_execution_not_one_each() {
+    let (genesis, key, senders) = many_senders(74);
+    let node = Node::new(&genesis, key);
+    let sink = Address::new([0xAB; 20]);
+    let (poisoned, clean) = senders.split_at(70);
+
+    assert_eq!(
+        node.consensus.proposal_executions(),
+        0,
+        "genesis initialisation is not a proposal"
+    );
+
+    let mut proposal: Vec<SignedTransaction> = poisoned
+        .iter()
+        .map(|kp| mint_absent_collection_tx(kp, 0, 9_000_000))
+        .collect();
+    let honest: Vec<SignedTransaction> = clean
+        .iter()
+        .map(|kp| transfer_tx(kp, sink, 0, 1_000))
+        .collect();
+    proposal.extend(honest.iter().cloned());
+
+    let block = node
+        .consensus
+        .propose_block(proposal)
+        .await
+        .expect("a block");
+    let spent = node.consensus.proposal_executions();
+    println!(
+        "EXECUTIONS: 70 refusing transactions cost {spent} execution(s); block {} \
+         carried {}",
+        block.hash(),
+        block.tx_count()
+    );
+    assert_eq!(
+        spent, 2,
+        "one screening pass plus one real execution. Seventy-one is the defect: \
+         it is a whole slot of CPU bought for seventy min_fees, and it is what \
+         MAX_REFUSED_TX_DROPS used to cap by abandoning the proposal instead"
+    );
+    assert!(
+        honest
+            .iter()
+            .all(|t| block.transactions.iter().any(|c| c.hash() == t.hash())),
+        "and the two executions produced a block that carries the honest traffic"
+    );
+}
+
+/// A proposal with nothing wrong with it costs TWO executions, and the second
+/// one is the block.
+///
+/// Stated so that the price of the repair is in a test rather than in a comment.
+/// Screening runs on every proposal, so the clean tick pays for the poisoned
+/// one. Proposal execution is the proposer's own budget and no importer waits on
+/// it, which is why this is the trade that was taken — but it is a real cost and
+/// it is pinned here, so that a later change which makes it three is noticed.
+#[tokio::test]
+async fn a_clean_proposal_costs_the_screening_pass_and_nothing_more() {
+    let f = fixture();
+    let node = Node::new(&f.genesis, f.key);
+    let honest: Vec<SignedTransaction> = (0..5)
+        .map(|n| transfer_tx(&f.honest, f.sink, n, 1_000))
+        .collect();
+
+    let block = node
+        .consensus
+        .propose_block(honest.clone())
+        .await
+        .expect("a block");
+    let spent = node.consensus.proposal_executions();
+    println!(
+        "CLEAN COST: {spent} execution(s) for {} clean tx",
+        block.tx_count()
+    );
+    assert_eq!(
+        block.tx_count(),
+        5,
+        "a clean proposal is carried whole: screening must not remove what \
+         executes"
+    );
+    assert_eq!(
+        spent, 2,
+        "the screening pass and the block. Not three: a clean verdict must not \
+         send the fitting loop back for another execution"
+    );
+}
+
+/// The two verdicts, kept apart, in one proposal.
+///
+/// This is the owner's condition stated as one test: a permanently invalid
+/// high-fee transaction does not prevent a block that carries the later valid
+/// transactions, AND a temporarily ineligible one is not destroyed. Both
+/// offenders are in the same proposal, so a screening pass that collapsed the
+/// two classes into one verdict fails here whichever way it collapsed them —
+/// evict-everything destroys the early mint, quarantine-everything leaves the
+/// permanent poison at the top of the fee order to halt the next tick.
+///
+/// The transient one goes through the MEMPOOL, because "not destroyed" is a
+/// statement about the mempool. The permanent one is handed to `propose_block`
+/// directly: `Mempool::add` refuses that shape at admission (see
+/// `crates/state/tests/mempool_permanent_admission.rs`), and a proposal is not
+/// obliged to have come through this node's admission at all.
+#[tokio::test]
+async fn the_screening_pass_keeps_the_two_verdicts_apart_in_one_proposal() {
+    // Three independently FUNDED senders. Funded matters: an unfunded sender's
+    // transaction fails `validate_tx` and takes a RECEIPT, which is a different
+    // population entirely and would make this a test of nothing.
+    let (genesis, key, senders) = many_senders(3);
+    let node = Node::new(&genesis, key);
+    let sink = Address::new([0xAB; 20]);
+
+    let early = mint_absent_collection_tx(&senders[1], 0, 9_000_000);
+    node.mempool.add(early.clone()).expect("admitted");
+    let honest: Vec<SignedTransaction> = (0..3)
+        .map(|n| transfer_tx(&senders[2], sink, n, 1_000))
+        .collect();
+    for tx in &honest {
+        node.mempool.add(tx.clone()).expect("admitted");
+    }
+
+    // The permanent poison joins the fee-ordered selection at the FRONT, where
+    // its fee puts it.
+    let permanent = modify_membership_tx(&senders[0], 0, 9_900_000);
+    let mut proposal = vec![permanent.clone()];
+    proposal.extend(node.mempool.select_for_block(1_000));
+
+    let block = node
+        .consensus
+        .propose_block(proposal)
+        .await
+        .expect("a permanently invalid high-fee transaction must not prevent a block");
+    let carried = hashes(&block.transactions);
+    println!(
+        "TWO VERDICTS: block carried {} tx; early mint still pending: {}",
+        block.tx_count(),
+        node.mempool.contains(&early.hash())
+    );
+    assert!(
+        honest.iter().all(|t| carried.contains(&t.hash())),
+        "the block carries the LATER VALID transactions — both offenders are \
+         sorted ahead of them, so a proposer that stops at the first one \
+         carries none of this"
+    );
+    assert!(
+        !carried.contains(&permanent.hash()) && !carried.contains(&early.hash()),
+        "and neither offender is in it"
+    );
+    assert!(
+        node.mempool.contains(&early.hash()),
+        "the TEMPORARILY ineligible one is still in the mempool. Its collection \
+         does not exist YET; the block after this one may create it, and a \
+         screening pass that evicted it would have destroyed honest traffic in \
+         the name of a repair whose whole point is not doing that"
+    );
+    let held = node.mempool.get(&early.hash()).expect("still held");
+    assert_eq!(held.hash(), early.hash(), "byte for byte");
 }

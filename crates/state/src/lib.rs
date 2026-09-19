@@ -801,7 +801,7 @@ pub use docclass_executor::{
 pub use docclass_view::BoundedRow;
 pub use employment_executor::{EmploymentExecutionResult, EmploymentExecutor, EmploymentGates};
 pub use equity_executor::{EquityExecutionResult, EquityExecutor};
-pub use executor::{BlockExecutor, TxExecutionResult};
+pub use executor::{BlockExecutor, ProposalScreening, TxExecutionResult};
 pub use finance_executor::{FinanceExecutionResult, FinanceExecutor, FinanceGates};
 pub use healthcare_executor::{HealthcareExecutionResult, HealthcareExecutor, HealthcareGates};
 pub use legal_executor::{LegalExecutionResult, LegalExecutor, LegalGates};
