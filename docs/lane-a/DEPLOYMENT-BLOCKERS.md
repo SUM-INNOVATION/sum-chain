@@ -1020,6 +1020,24 @@ transaction makes the whole block unexecutable, for the producer and for every
 importer. Any sender can submit one, for the minimum fee, naming a collection id
 that does not exist.
 
+AMENDED. The second half of that sentence — "for the producer" — no longer
+means what it meant when it was written, and the difference is the difference
+between a lost slot and a stopped validator. `execute_block` now reports WHICH
+transaction refused and whether the refusal is permanent
+(`StateError::BlockTransactionAborted`, `sumchain_state::TxFailureClass`), and
+`PoAEngine::create_block` drops that transaction and produces a block out of
+what is left. An absent collection classifies as TRANSIENT, so the transaction
+is quarantined for one proposal and stays in the mempool — the block that
+creates the collection may be the next one.
+
+What has NOT changed is the defect below, which is why the entry stands and the
+count is unmoved: the transaction still makes a block unexecutable, an importer
+handed such a block still refuses it, and turning these into failed receipts
+still changes which blocks are valid. What changed is that a proposer no longer
+stops producing over one. The proposer-side property is pinned by
+`crates/consensus/tests/proposer_invalid_tx_liveness.rs` and the classification
+by `crates/state/tests/block_tx_failure_classification.rs`.
+
   * `Collection not found`, from mint, batch mint, transfer, burn, metadata
     update, collection-ownership transfer and config update.
     -- a_transaction_naming_an_absent_collection_aborts_the_whole_block
