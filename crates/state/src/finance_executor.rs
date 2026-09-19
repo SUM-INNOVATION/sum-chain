@@ -138,6 +138,12 @@ pub struct FinanceGates {
     /// Executor-written timestamps are the block's, not a literal zero.
     /// ACTIVATION-AUDIT class 2.
     pub real_block_timestamp: bool,
+    /// `VerifyProof` refuses a payload that does not name a proof this
+    /// subsystem holds. ACTIVATION-AUDIT row AU-26 (= PR-4).
+    pub proof_presence: bool,
+    /// A payload-chosen index key is bounded before it becomes a key.
+    /// ACTIVATION-AUDIT row the Finance instance of AL-7.
+    pub allocation_bound: bool,
 }
 
 impl FinanceGates {
@@ -145,12 +151,16 @@ impl FinanceGates {
     pub const CLOSED: Self = Self {
         authorization: false,
         real_block_timestamp: false,
+        proof_presence: false,
+        allocation_bound: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
     pub const OPEN: Self = Self {
         authorization: true,
         real_block_timestamp: true,
+        proof_presence: true,
+        allocation_bound: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -158,6 +168,8 @@ impl FinanceGates {
         Self {
             authorization: FinanceExecutor::authorization_gate_open(params, block_height),
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
+            proof_presence: crate::subsystem_proof_presence_gate_open(params, block_height),
+            allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
         }
     }
 }
@@ -270,6 +282,24 @@ impl FinanceExecutor {
 
                 if Self::v_issuer_exists(view, &issuer.issuer_address)? {
                     return Ok(FinanceExecutionResult::failure("Issuer already exists"));
+                }
+
+                // ACTIVATION-AUDIT AL-7, the Finance instance. `FinanceIssuerProfile.jurisdiction_code` is free text from the
+                // sender's own payload and becomes the raw KEY of
+                // `cf::FINANCE_JURISDICTION_INDEX`, with no width check anywhere ahead of
+                // the `put`. Below the gate one transaction writes a key of
+                // most of `max_block_bytes`. At and above it the key is
+                // bounded. Refused before the fee, like the duplicate guard
+                // above it.
+                if !crate::index_key_text_within_bound(
+                    &issuer.jurisdiction_code,
+                    gates.allocation_bound,
+                ) {
+                    return Ok(FinanceExecutionResult::failure(format!(
+                        "Jurisdiction code too long: {} bytes, limit {}",
+                        issuer.jurisdiction_code.len(),
+                        crate::MAX_INDEX_KEY_TEXT_BYTES
+                    )));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
@@ -728,6 +758,29 @@ impl FinanceExecutor {
             }
 
             FinanceOperation::VerifyProof => {
+                // ACTIVATION-AUDIT AU-26 (= PR-4). Below the gate this arm reads no
+                // payload and no proof, and reports success for a proof the chain
+                // has never held. At and above it the payload must be the 32 bytes
+                // of a proof id and that proof must be present. Presence is NOT
+                // verification and this does not claim to be: nothing in this tree
+                // checks `proof_data` against `public_inputs`. What it removes is
+                // the false positive.
+                //
+                // Refused BEFORE the deduct, which is where the sibling
+                // `SubmitProof` arm's duplicate-id refusal returns, so a refused
+                // proof operation costs the same in both.
+                if gates.proof_presence {
+                    let Some(proof_id) = crate::verify_proof_target(&data.data) else {
+                        return Ok(FinanceExecutionResult::failure(format!(
+                            "VerifyProof payload must be a {}-byte proof id, got {} bytes",
+                            crate::PROOF_ID_BYTES,
+                            data.data.len()
+                        )));
+                    };
+                    if !Self::v_proof_exists(view, &proof_id)? {
+                        return Ok(FinanceExecutionResult::failure("Proof not found"));
+                    }
+                }
                 // Verification is read-only - just record the request
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;

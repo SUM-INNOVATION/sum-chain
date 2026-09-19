@@ -1114,6 +1114,50 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub healthcare_state_precondition_enabled_from_height: Option<u64>,
+
+    /// A `VerifyProof` transaction stops reporting success for a proof that
+    /// does not exist.
+    ///
+    /// **This gate does not make anything verify a proof.** No proof verifier
+    /// exists in this tree: nothing consumes `proof_data` against
+    /// `public_inputs`, in any subsystem. What the six arms do below the gate
+    /// (ACTIVATION-AUDIT rows AU-6, AU-12, AU-17, AU-20, AU-26 and AU-29, the
+    /// same defects as PR-1 to PR-6) is deduct, credit, increment and return
+    /// SUCCESS, without reading the payload at all — so a receipt says a proof
+    /// verified when the chain holds no such proof, and a relying party reading
+    /// receipts cannot tell the two apart. At and above the gate the payload
+    /// must be the 32 bytes of a proof id and that proof must be present in the
+    /// subsystem's proof family, or the operation is a failed receipt. What
+    /// remains true above the gate is that presence is not verification, and
+    /// the rows stay open on that half.
+    ///
+    /// Defining the payload as the proof id is a choice, and it is recorded as
+    /// one: `crates/sumchain-wire` declares no request type for a `VerifyProof`
+    /// payload, so `data` is free bytes today and the only reading under which
+    /// the operation names anything at all is that it names the proof. The same
+    /// choice was made, and recorded, for the `RevokeClaim` payload of
+    /// `tax_proof_lifecycle_enabled_from_height`.
+    ///
+    /// ONE field for six subsystems, for the reason
+    /// `subsystem_block_timestamp_enabled_from_height` is one field for eight:
+    /// it is one rule, the six arms are character-for-character identical, and
+    /// the blast radius is identical on both sides — a transaction that was a
+    /// success receipt becomes a failed one. There is nothing to sequence, and
+    /// an operator who closed five of the six would be shipping a chain in
+    /// which the meaning of `VerifyProof` depended on which subsystem was
+    /// asked.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub subsystem_proof_presence_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -1459,6 +1503,8 @@ impl Default for ChainParams {
             agreement_signature_integrity_enabled_from_height: None,
             // Production-safe default: a healthcare write consults the row it is about to change — dormant.
             healthcare_state_precondition_enabled_from_height: None,
+            // Production-safe default: VerifyProof stops succeeding for a proof that does not exist — dormant.
+            subsystem_proof_presence_enabled_from_height: None,
         }
     }
 }
@@ -1800,6 +1846,10 @@ impl ChainParams {
             (
                 "healthcare_state_precondition_enabled_from_height",
                 self.healthcare_state_precondition_enabled_from_height,
+            ),
+            (
+                "subsystem_proof_presence_enabled_from_height",
+                self.subsystem_proof_presence_enabled_from_height,
             ),
         ]
     }

@@ -63,6 +63,9 @@ pub struct TaxGates {
     /// The proof store and `TAX_SUBJECT_INDEX` stop disagreeing.
     /// ACTIVATION-AUDIT rows OV-1, OV-2 and OV-3.
     pub proof_lifecycle: bool,
+    /// `VerifyProof` refuses a payload that does not name a proof this
+    /// subsystem holds. ACTIVATION-AUDIT row AU-20 (= PR-1).
+    pub proof_presence: bool,
 }
 
 impl TaxGates {
@@ -71,6 +74,7 @@ impl TaxGates {
         authorization: false,
         real_block_timestamp: false,
         proof_lifecycle: false,
+        proof_presence: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -78,6 +82,7 @@ impl TaxGates {
         authorization: true,
         real_block_timestamp: true,
         proof_lifecycle: true,
+        proof_presence: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -86,6 +91,7 @@ impl TaxGates {
             authorization: TaxExecutor::authorization_gate_open(params, block_height),
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
             proof_lifecycle: TaxExecutor::proof_lifecycle_gate_open(params, block_height),
+            proof_presence: crate::subsystem_proof_presence_gate_open(params, block_height),
         }
     }
 }
@@ -466,6 +472,29 @@ impl TaxExecutor {
             }
 
             TaxOperation::VerifyProof => {
+                // ACTIVATION-AUDIT AU-20 (= PR-1). Below the gate this arm reads no
+                // payload and no proof, and reports success for a proof the chain
+                // has never held. At and above it the payload must be the 32 bytes
+                // of a proof id and that proof must be present. Presence is NOT
+                // verification and this does not claim to be: nothing in this tree
+                // checks `proof_data` against `public_inputs`. What it removes is
+                // the false positive.
+                //
+                // Refused BEFORE the deduct, which is where the sibling
+                // `SubmitProof` arm's duplicate-id refusal returns, so a refused
+                // proof operation costs the same in both.
+                if gates.proof_presence {
+                    let Some(proof_id) = crate::verify_proof_target(&data.data) else {
+                        return Ok(TaxExecutionResult::failure(format!(
+                            "VerifyProof payload must be a {}-byte proof id, got {} bytes",
+                            crate::PROOF_ID_BYTES,
+                            data.data.len()
+                        )));
+                    };
+                    if !Self::v_get_proof(view, &proof_id)?.is_some() {
+                        return Ok(TaxExecutionResult::failure("Proof not found"));
+                    }
+                }
                 // Verify a submitted proof - just record verification request
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;

@@ -4524,16 +4524,19 @@ fn a_consent_revocation_stamps_a_real_time_only_at_the_gate() {
 
 /// Both values of the state-precondition gate, with authorization and the block
 /// timestamp held CLOSED so only one decision moves.
+///
+/// Spelled with `..CLOSED` rather than field by field: a gate added to
+/// `HealthcareGates` later must leave this pair differing in exactly one
+/// decision, and listing the fields makes that a compile error somebody then
+/// fixes by guessing. The proof-presence gate arrived and this is what it cost.
 const PRECONDITION: [HealthcareGates; 2] = [
     HealthcareGates {
-        authorization: false,
-        real_block_timestamp: false,
         state_precondition: false,
+        ..HealthcareGates::CLOSED
     },
     HealthcareGates {
-        authorization: false,
-        real_block_timestamp: false,
         state_precondition: true,
+        ..HealthcareGates::CLOSED
     },
 ];
 
