@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use sumchain_consensus::{
     bft::{BftEngine, Proposal, Vote},
-    ConsensusEngine, ConsensusEvent, PoAEngine,
+    ConsensusEngine, ConsensusEvent, ConsensusQuery, PoAEngine,
 };
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::Genesis;
@@ -261,11 +261,26 @@ impl ConsensusWrapper {
         }
     }
 
-    /// Get inner engine as trait object for RPC
-    pub fn as_consensus_engine(&self) -> Arc<dyn ConsensusEngine> {
+    /// Get the inner engine as the READ-ONLY consensus handle, for the RPC
+    /// server.
+    ///
+    /// Deliberately `Arc<dyn ConsensusQuery>` and not `Arc<dyn ConsensusEngine>`.
+    /// It is the same `Arc<PoAEngine>` the event loop holds — a clone of the
+    /// pointer, not of the engine, so every read the RPC server does still sees
+    /// live state. What the narrower type removes is the CAPABILITY: the handle
+    /// the RPC server ends up with has no `import_block`, so proposal
+    /// acceptance and fork choice (`PoAEngine::do_import_block`) are not
+    /// reachable from an HTTP request. That route carried no `PeerId`, so
+    /// `Node::admit_peer_block`'s participation check had nothing to judge —
+    /// it was a route AROUND the boundary, not a route through it.
+    ///
+    /// The coercion is one-way. `dyn ConsensusQuery` has no `Any` supertrait,
+    /// so there is no downcast back to `dyn ConsensusEngine`; handing this out
+    /// is final. Proved in `crates/rpc/tests/consensus_capability_probe.rs`.
+    pub fn as_consensus_query(&self) -> Arc<dyn ConsensusQuery> {
         match self {
-            Self::Poa(engine) => Arc::clone(engine) as Arc<dyn ConsensusEngine>,
-            Self::Bft(engine) => Arc::clone(engine) as Arc<dyn ConsensusEngine>,
+            Self::Poa(engine) => Arc::clone(engine) as Arc<dyn ConsensusQuery>,
+            Self::Bft(engine) => Arc::clone(engine) as Arc<dyn ConsensusQuery>,
         }
     }
 }

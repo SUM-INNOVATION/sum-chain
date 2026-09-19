@@ -35,7 +35,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use sumchain_consensus::{ConsensusEngine, PoAEngine};
+use sumchain_consensus::{ConsensusEngine, ConsensusQuery, PoAEngine};
 use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::{ChainParams, Genesis};
 use sumchain_primitives::{
