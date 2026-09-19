@@ -1278,6 +1278,34 @@ impl HealthcareExecutor {
                     return Ok(refusal);
                 }
 
+                // ACTIVATION-AUDIT row OV-19. `UpdatePrescription` refuses to
+                // move a controlled prescription into `TransferRequested`, and
+                // that is the subsystem's ONLY rule about `is_controlled` --
+                // SRC-876 calls itself "NON-TRANSFERABLE for controlled
+                // substances" and `TransferRequested` is the only transfer
+                // state there is. Below the gate the rule is enforced on the
+                // path that MOVES a prescription and on no other, and this arm
+                // stores the payload's `status` VERBATIM -- so the state the
+                // guard exists to keep a controlled prescription out of is
+                // reached by issuing it there in the first place, for one
+                // `min_fee`, by the same issuer the guard would have refused.
+                //
+                // At and above the gate the creation path carries the same
+                // check as the update path. Refused before the fee, like the
+                // duplicate guard above it. Deliberately NOT a normalization of
+                // `status` to `Active`: which initial states are lawful for a
+                // prescription is a policy this tree does not state, and
+                // inventing one here would refuse lawful `Pending` issuance to
+                // close a hole that is about one state.
+                if gates.state_precondition
+                    && prescription.is_controlled
+                    && prescription.status == PrescriptionStatus::TransferRequested
+                {
+                    return Ok(HealthcareExecutionResult::failure(
+                        "Controlled substance prescriptions cannot be transferred",
+                    ));
+                }
+
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
