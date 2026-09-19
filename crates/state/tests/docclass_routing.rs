@@ -4581,3 +4581,335 @@ fn a_suspended_issuer_keeps_the_revocation_family_only_below_the_gate() {
         );
     }
 }
+
+// ── AU-33, AU-37 and D-19b: declared, defaulted, and read by nothing ────────
+//
+// Three rows the audit records as EXAMINED AND LEFT, each blocked on a
+// SPECIFICATION decision rather than on code, and each pinned below in the
+// direction a later pass would break. None of them is remedied here: every one
+// of the missing rules decides which transactions succeed, so every one is a
+// consensus change that may not arrive ungated, and a wrong guess at any of
+// them refuses LAWFUL transactions -- which is worse than the gap it closes.
+
+/// AU-33. Every signature field in the subsystem is decorative, in both
+/// directions.
+///
+/// The executor ASSERTS a signature that does not exist: `RevokeCredential`
+/// builds a `RevocationRecord` with `signature: [0u8; 64]` on every path, into
+/// a field the wire type documents as "Signature over the revocation". And the
+/// executor CHECKS no signature that does exist: a credential arrives carrying
+/// `issuer_signature` and `issuer_key_id` from the payload, both are stored
+/// verbatim, and no `verify` or `ed25519` call appears anywhere in
+/// `docclass_executor.rs`.
+///
+/// Left, with the blocker named. Verifying requires a canonical signing payload
+/// this tree does not define for DocClass. The convention EXISTS elsewhere --
+/// `*_signing_bytes` builders in `sumchain-wire` for validator authority and
+/// policy accounts -- and DocClass has none for any of its four signature
+/// fields. Supplying one means deciding which fields are covered, in what
+/// order, under what domain separator, with `issuer_signature` necessarily
+/// excluded from its own preimage, and then resolving `issuer_key_id: String`
+/// against the issuer's key list under an algorithm nothing states. A
+/// verification rule that computes the wrong preimage refuses every LAWFUL
+/// credential.
+#[test]
+fn docclass_signatures_are_written_as_zero_and_checked_as_nothing() {
+    let (_state, db, _dir, executor) = setup_with_params(params());
+    let edu = KeyPair::generate();
+    fund(&db, &edu, 100_000_000);
+    let proposer = Address::new([9; 20]);
+    DocClassStore::new(&db)
+        .issuers()
+        .put(&educational_issuer(edu.address()))
+        .unwrap();
+
+    // A credential whose issuer_signature is 64 bytes of nonsense, over a
+    // key id that names no key on the issuer's key list.
+    let mut forged = credential(0x91, edu.address());
+    forged.issuer_signature = [0xAB; 64];
+    forged.issuer_key_id = "a key id this issuer has never held".to_string();
+
+    let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+    let mut view = ExecutionView::new(&mut overlay);
+
+    let r = executor
+        .execute_tx(
+            &mut view,
+            &tx(
+                &edu,
+                0,
+                DocClassOperation::IssueCredential,
+                DocSubcode::Diploma,
+                &forged,
+            ),
+            &proposer,
+            1,
+            1000,
+        )
+        .unwrap();
+    assert!(
+        matches!(r.status, TxStatus::Success),
+        "AU-33: nothing verifies the issuer signature, and nothing resolves \
+         `issuer_key_id` against the issuer's key list, so neither can refuse \
+         a credential: {:?}",
+        r.status
+    );
+    let stored = DocClassExecutor::v_get_credential(&view, &[0x91; 32])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.issuer_signature, [0xAB; 64],
+        "AU-33: the unverifiable signature is STORED verbatim"
+    );
+    assert_eq!(
+        stored.issuer_key_id, "a key id this issuer has never held",
+        "AU-33: and so is the key id that names no key"
+    );
+
+    // The other direction: what the executor WRITES into a signature field.
+    let r2 = executor
+        .execute_tx(
+            &mut view,
+            &tx(
+                &edu,
+                1,
+                DocClassOperation::RevokeCredential,
+                DocSubcode::Revocation,
+                &ReasonedData {
+                    credential_id: [0x91; 32],
+                    reason: RevocationReason::FraudulentIssuance,
+                },
+            ),
+            &proposer,
+            1,
+            1000,
+        )
+        .unwrap();
+    assert!(matches!(r2.status, TxStatus::Success), "{:?}", r2.status);
+
+    let records = DocClassExecutor::v_get_revocations_for_credential(&view, &[0x91; 32]).unwrap();
+    assert_eq!(records.len(), 1, "one revocation record was written");
+    assert_eq!(
+        records[0].signature, [0u8; 64],
+        "AU-33: the executor writes SIXTY-FOUR ZEROES into a field the wire \
+         type documents as \"Signature over the revocation\" -- an assertion of \
+         a signature that does not exist, on every path. Repairing this half \
+         alone means either changing the stored bytes, a consensus change with \
+         nothing to put there, or changing the wire type"
+    );
+}
+
+/// AU-37. `max_credential_validity` bounds nothing, and `initial_issuers`
+/// admits nobody.
+///
+/// `require_issuer_stake`, the third field the row names, IS remedied and sits
+/// behind `docclass_issuer_stake_requirement_enabled_from_height`; the RPC half
+/// is fixed outright. These two are what stays open, and each is open for a
+/// reason this test makes concrete rather than restating.
+///
+///   * `max_credential_validity` is documented "in seconds" while this chain's
+///     `Timestamp` is milliseconds, and a credential's `valid_from` and
+///     `expires_at` are payload values bound to no clock at all. Bounding their
+///     difference against the field would bake in a unit contract this tree
+///     does not state, and a wrong guess is a consensus rule that refuses
+///     lawful credentials.
+///   * `initial_issuers` is genesis STATE, not a rule an executor can apply.
+///     Honouring it means writing issuer rows into the genesis state, a path
+///     this tree does not have.
+#[test]
+fn max_credential_validity_bounds_nothing_and_initial_issuers_admits_nobody() {
+    let mut p = params();
+    let listed = KeyPair::generate();
+    if let Some(ref mut d) = p.docclass {
+        // Ten years, the value the release reports. Whatever unit it is in, the
+        // credential below exceeds it.
+        d.max_credential_validity = 10 * 365 * 24 * 60 * 60;
+        d.initial_issuers = vec![format!("{:?}", listed.address())];
+    }
+
+    let (_state, db, _dir, executor) = setup_with_params(p);
+    fund(&db, &listed, 100_000_000);
+    let proposer = Address::new([9; 20]);
+
+    let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+    let mut view = ExecutionView::new(&mut overlay);
+
+    // `initial_issuers` first: the address is listed and has no issuer row, so
+    // it cannot issue. Listing is not registering.
+    let r = executor
+        .execute_tx(
+            &mut view,
+            &tx(
+                &listed,
+                0,
+                DocClassOperation::IssueCredential,
+                DocSubcode::Diploma,
+                &credential(0x92, listed.address()),
+            ),
+            &proposer,
+            1,
+            1000,
+        )
+        .unwrap();
+    assert_eq!(
+        r.status, DOCCLASS_FAILED,
+        "AU-37: an address named in `initial_issuers` is not an issuer. The \
+         field is genesis STATE and no execution path reads it, so honouring \
+         it means writing issuer rows into the genesis state -- a path this \
+         tree does not have"
+    );
+    assert!(
+        DocClassExecutor::v_get_credential(&view, &[0x92; 32])
+            .unwrap()
+            .is_none(),
+        "and nothing is written for it"
+    );
+
+    // With the row actually present, the same sender issues a credential whose
+    // validity window is the widest a `Timestamp` can express.
+    DocClassStore::new(&db)
+        .issuers()
+        .put(&educational_issuer(listed.address()))
+        .unwrap();
+    let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+    let mut view = ExecutionView::new(&mut overlay);
+
+    let mut forever = credential(0x93, listed.address());
+    forever.valid_from = 0;
+    forever.expires_at = u64::MAX;
+    let r2 = executor
+        .execute_tx(
+            &mut view,
+            &tx(
+                &listed,
+                0,
+                DocClassOperation::IssueCredential,
+                DocSubcode::Diploma,
+                &forever,
+            ),
+            &proposer,
+            1,
+            1000,
+        )
+        .unwrap();
+    assert!(
+        matches!(r2.status, TxStatus::Success),
+        "AU-37: a validity window of `u64::MAX` is accepted against a \
+         configured `max_credential_validity` of ten years -- no execution \
+         path reads the field: {:?}",
+        r2.status
+    );
+    let stored = DocClassExecutor::v_get_credential(&view, &[0x93; 32])
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.valid_from, 0);
+    assert_eq!(
+        stored.expires_at,
+        u64::MAX,
+        "AU-37: and the unbounded window is STORED. `min_issuer_stake` is the \
+         only params field any DocClass execution path reads"
+    );
+}
+
+/// D-19b, the half the schema gate does NOT close: the allowlists.
+///
+/// Above `docclass_credential_schema_enabled_from_height` every academic
+/// subcode gets the core field bounds, the attribute NAME cap and the
+/// per-attribute VALUE cap, and `payload_hint` is checked for all of them. What
+/// the three uncovered subcodes -- 813 professional licence, 814 government id,
+/// 815 employment verification -- do NOT get is an attribute-key allowlist,
+/// because an allowlist is a policy decision about which public attributes a
+/// credential type may carry and inventing three of them in a remediation pass
+/// would be writing standard rather than closing a defect.
+///
+/// So the keys stay unrestricted for those subcodes, and that is pinned here
+/// rather than hidden: an attribute named `ssn` -- a key that is on the
+/// module's own explicitly-disallowed PII list, and that the covered subcodes
+/// refuse -- is VALID on an SRC-813 at a height above the gate. The covered
+/// subcode is checked in the same test, against the same key, so the assertion
+/// is about the SUBCODE and not about a validator that passes everything; and
+/// the caps that DO apply to 813 are checked too, so it is not about a
+/// validator that refuses nothing.
+#[test]
+fn the_uncovered_subcodes_still_take_any_attribute_key_above_the_schema_gate() {
+    use sumchain_state::{SchemaValidator, SchemaValidatorConfig, ValidationResult};
+
+    let validator = SchemaValidator::with_config(SchemaValidatorConfig {
+        activation_height: 10,
+        enabled: true,
+    });
+    const ABOVE: u64 = 11;
+
+    let pii = |name: &str| CredentialAttribute {
+        name: name.to_string(),
+        value: "000-00-0000".to_string(),
+    };
+
+    // SRC-813, uncovered: any key at all.
+    let mut licence = credential(0x94, Address::new([1; 20]));
+    licence.subcode = DocSubcode::ProfessionalLicense;
+    licence.metadata.attributes = vec![pii("ssn")];
+    assert!(
+        matches!(
+            validator.validate_academic_credential_wide(&licence, ABOVE),
+            ValidationResult::Valid
+        ),
+        "D-19b: an SRC-813 credential carrying an attribute named `ssn` -- a \
+         key on this module's own explicitly-disallowed PII list -- is VALID \
+         above the schema gate, because no allowlist exists for 813 and \
+         inventing one would be writing standard"
+    );
+
+    // SRC-810, covered: the same key is refused. This is what makes the
+    // assertion above a statement about the subcode.
+    let mut transcript = credential(0x95, Address::new([1; 20]));
+    transcript.subcode = DocSubcode::AcademicTranscript;
+    transcript.metadata.attributes = vec![pii("ssn")];
+    assert!(
+        !validator
+            .validate_academic_credential_wide(&transcript, ABOVE)
+            .is_valid(),
+        "D-19b: the SAME attribute key on SRC-810 is refused by the allowlist \
+         that subcode does have"
+    );
+
+    // And what 813 DOES get above the gate: the attribute name and value caps.
+    // Without these the first assertion would also hold for a validator that
+    // checked nothing at all for uncovered subcodes.
+    let mut oversized_name = credential(0x96, Address::new([1; 20]));
+    oversized_name.subcode = DocSubcode::ProfessionalLicense;
+    oversized_name.metadata.attributes = vec![CredentialAttribute {
+        name: "n".repeat(5_000),
+        value: "ok".to_string(),
+    }];
+    assert!(
+        !validator
+            .validate_academic_credential_wide(&oversized_name, ABOVE)
+            .is_valid(),
+        "D-19b: the uncovered subcodes DO get the attribute-name cap above the \
+         gate -- what they do not get is an allowlist"
+    );
+
+    let mut oversized_value = credential(0x97, Address::new([1; 20]));
+    oversized_value.subcode = DocSubcode::ProfessionalLicense;
+    oversized_value.metadata.attributes = vec![CredentialAttribute {
+        name: "licence_class".to_string(),
+        value: "v".repeat(5_000),
+    }];
+    assert!(
+        !validator
+            .validate_academic_credential_wide(&oversized_value, ABOVE)
+            .is_valid(),
+        "D-19b: and the per-attribute value cap"
+    );
+
+    // Below the gate none of it runs, including the caps.
+    assert!(
+        matches!(
+            validator.validate_academic_credential_wide(&oversized_name, 9),
+            ValidationResult::Valid
+        ),
+        "D-19b: below the height the wide validator is inert, so this gate \
+         changes nothing a release node executes today"
+    );
+}

@@ -162,6 +162,21 @@ that validator's block slots until it rejoins, so coordinate restarts.
    height advances.
 4. **One at a time** — for rolling restarts, restart a single validator and wait
    for it to rejoin and produce before touching the next.
+5. **Never downgrade a binary that has executed a block** — the per-block undo
+   journal changed key shape, from height alone to `height ‖ block_hash`
+   (`crates/storage/src/schema.rs`). The UPGRADE direction is handled in code: a
+   journal written by an older binary is still read, because the reader falls
+   back to the legacy key, and still deleted, because the delete removes both
+   forms. The DOWNGRADE direction is not and cannot be: a journal written under
+   the new key is invisible to a binary that only knows the old one, so rolling
+   a validator back after it has executed even one block loses that block's undo
+   record and the reorg that would have used it. If a rollback is unavoidable,
+   restore the validator's data directory from a snapshot taken BEFORE the new
+   binary first produced or imported a block, rather than pointing the old
+   binary at the new data directory. The journals are node-local — neither
+   `STATE_DIFFS` nor `CONTRACT_STATE_DIFFS` reaches the state root — so this is
+   a per-validator recovery hazard and not a consensus one, which is why it
+   belongs here and not in an activation height. (ACTIVATION-AUDIT row JR-1.)
 
 ## Security
 

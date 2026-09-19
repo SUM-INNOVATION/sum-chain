@@ -1313,9 +1313,10 @@ pub struct ChainParams {
     /// An NFT arm that writes metadata or a collection config applies the rules
     /// the CREATION arm applies.
     ///
-    /// Two defects that are one question — does an update path enforce what the
-    /// creation path enforces — and therefore one height (ACTIVATION-AUDIT rows
-    /// OV-10 and the first half of RY-2):
+    /// Three defects that are one question — does a later-write path enforce
+    /// what the creation path enforces — and therefore one height
+    /// (ACTIVATION-AUDIT rows OV-10, the first half of RY-2, and the
+    /// zero-owner hazard recorded under RY-3):
     ///
     ///   * `execute_mint` checks `max_metadata_bytes` and charges
     ///     `storage_fee_per_byte`; `UpdateMetadata` takes the payload verbatim
@@ -1329,15 +1330,23 @@ pub struct ChainParams {
     ///   * collection creation zeroes `royalty_recipient` when `royalty_bps` is
     ///     zero; `UpdateCollectionConfig` has no such rule and sets a recipient
     ///     on a collection that pays no royalty anyway.
+    ///   * collection creation sets `owner` to the sender, so no collection is
+    ///     ever created ownerless; `TransferCollectionOwnership` accepts
+    ///     `Address::ZERO` — this tree's null sentinel, the value the same
+    ///     creation arm writes into `royalty_recipient` to mean "none" — and a
+    ///     collection left owned by it can never be reconfigured and, while
+    ///     `owner_only_minting` is set, never minted in again, by anybody, at
+    ///     any height, with no operation in the subsystem that undoes it.
     ///
     /// At and above the gate `UpdateMetadata` and `BatchMint` enforce the size
-    /// limit and the per-byte storage fee, and `UpdateCollectionConfig` refuses
-    /// a recipient for a royalty of zero. One height because they are one
+    /// limit and the per-byte storage fee, `UpdateCollectionConfig` refuses
+    /// a recipient for a royalty of zero, and `TransferCollectionOwnership`
+    /// refuses `Address::ZERO`. One height because they are one
     /// asymmetry: activating the metadata half alone would leave a collection
     /// whose config still accepts a field creation rejects, and activating the
     /// royalty half alone would leave the two metadata arms writing rows the
-    /// chain says are too large. Both sides change a success receipt into a
-    /// failed one and neither can abort a block, so there is nothing to
+    /// chain says are too large. All three change a success receipt into a
+    /// failed one and none can abort a block, so there is nothing to
     /// sequence.
     ///
     /// **This does not make a royalty payable.** RY-1 — a royalty recorded and

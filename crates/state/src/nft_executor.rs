@@ -148,8 +148,8 @@ pub struct NftGates {
     /// rebuilds the owner index once per request. ACTIVATION-AUDIT row AL-9.
     pub allocation_bound: bool,
     /// The arms that write metadata or a collection config apply the rules the
-    /// CREATION arms apply. ACTIVATION-AUDIT rows OV-10 and the first half of
-    /// RY-2.
+    /// CREATION arms apply. ACTIVATION-AUDIT rows OV-10, the first half of
+    /// RY-2, and the zero-owner hazard recorded under RY-3.
     pub update_path_parity: bool,
     /// A failed NFT receipt reports the fee the executor actually took.
     /// ACTIVATION-AUDIT row OV-9.
@@ -296,17 +296,24 @@ impl NftExecutor {
     /// existed resolves to -- closes the gate, so a node executes exactly what
     /// it executed before the field was declared.
     ///
-    /// Below the gate (ACTIVATION-AUDIT rows OV-10 and the first half of RY-2):
+    /// Below the gate (ACTIVATION-AUDIT rows OV-10, the first half of RY-2,
+    /// and the zero-owner hazard recorded under RY-3):
     ///
     ///   * `execute_mint` enforces `max_metadata_bytes` and charges
     ///     `storage_fee_per_byte`; `UpdateMetadata` and `BatchMint` enforce
     ///     neither, although both of those values are SET in the release
     ///     `genesis.json`;
     ///   * collection creation zeroes `royalty_recipient` when `royalty_bps` is
-    ///     zero, and `UpdateCollectionConfig` sets one anyway.
+    ///     zero, and `UpdateCollectionConfig` sets one anyway;
+    ///   * collection creation sets `owner` to the sender, so no collection is
+    ///     created ownerless, and `TransferCollectionOwnership` accepts
+    ///     `Address::ZERO` -- this tree's null sentinel -- leaving a collection
+    ///     that can never be reconfigured and, under `owner_only_minting`,
+    ///     never minted in again, with no operation that undoes it.
     ///
-    /// At and above it the two metadata arms apply the mint's two rules and
-    /// `UpdateCollectionConfig` refuses a recipient for a royalty of zero.
+    /// At and above it the two metadata arms apply the mint's two rules,
+    /// `UpdateCollectionConfig` refuses a recipient for a royalty of zero, and
+    /// `TransferCollectionOwnership` refuses the zero address.
     ///
     /// This does NOT make a royalty payable: RY-1 is untouched, and so is the
     /// half of RY-2 that observes the config payload has no `new_royalty_bps`.
@@ -703,6 +710,7 @@ impl NftExecutor {
                 sender,
                 &nft_data.collection_id,
                 &nft_data.data,
+                gates,
             ),
             NftOperation::UpdateCollectionConfig => Self::execute_update_collection_config(
                 view,
@@ -1328,11 +1336,30 @@ impl NftExecutor {
     }
 
     /// Transfer collection ownership
+    ///
+    /// ACTIVATION-AUDIT row RY-3, the hazard recorded alongside it rather than
+    /// the row's own sentence. The row itself is LEFT: this arm reads the
+    /// collection, checks `collection.owner == sender`, writes exactly one
+    /// field and returns, which is ordinary Ownable semantics and not a rule
+    /// this tree states differently. What is closed here is the one thing the
+    /// arm accepts that creation cannot produce: `new_owner ==
+    /// Address::ZERO`. `execute_create_collection` sets `owner: *sender` -- an
+    /// address that signed the transaction -- so no collection is ever CREATED
+    /// ownerless, and `Address::ZERO` is this tree's null sentinel (the same
+    /// arm writes it into `royalty_recipient` to mean "no recipient"). A
+    /// collection whose `owner` is that sentinel can never be reconfigured and,
+    /// while `owner_only_minting` is set, can never be minted in again, by
+    /// anybody, at any height. There is no counterpart operation to undo it.
+    ///
+    /// That is the same asymmetry `update_path_parity` already gates -- an
+    /// invariant the creation arm establishes that a later-write arm does not
+    /// preserve -- so it is the same height and not a ninth field.
     fn execute_transfer_collection(
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         collection_id: &[u8; 32],
         data: &[u8],
+        gates: NftGates,
     ) -> Result<NftExecutionResult> {
         // Get collection
         let mut collection = Self::v_get_collection(view, collection_id)?
@@ -1349,6 +1376,15 @@ impl NftExecutor {
         // Shared wire struct (issue #89)
         let transfer_data: NftTransferCollectionOwnershipData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid transfer data: {}", e)))?;
+
+        // Refused ABOVE the gate only. Below it the transfer to the null
+        // sentinel still succeeds, byte for byte as the unremediated binary
+        // did, which is what a closed gate means.
+        if gates.update_path_parity && transfer_data.new_owner == Address::ZERO {
+            return Ok(NftExecutionResult::failure(
+                "Cannot transfer collection ownership to the zero address".to_string(),
+            ));
+        }
 
         collection.owner = transfer_data.new_owner;
         Self::v_put_collection(view, collection_id, &collection)?;
