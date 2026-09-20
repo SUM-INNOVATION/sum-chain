@@ -68,6 +68,33 @@
 //! the node's network boundary is therefore refusing it proposal acceptance and
 //! fork-choice influence in one place.
 //!
+//! # This registry is in memory, and that is ACCEPTED
+//!
+//! `PeerCompatRegistry::declared` is a `RwLock<HashMap<..>>` and nothing
+//! persists it, so a restart forgets every declaration. The two sides of the
+//! enforcement boundary fail in opposite directions, and the release position
+//! on each is different:
+//!
+//! * **Below the height — ACCEPTED.** A restart re-admits a peer this node had
+//!   marked [`PeerCompat::Incompatible`]. Pre-enforcement compatibility state
+//!   may reset on restart. The cost is bounded by what phase one already
+//!   means: below the height every node executes the same rules, so the
+//!   re-admitted peer's blocks are blocks this node would have produced
+//!   itself. This is a decided property of the release, not a residual waiting
+//!   on a persistence change, and it should not be recorded as outstanding
+//!   work.
+//! * **At or above the height — NOT negotiable.** A restart re-refuses a peer
+//!   it had VERIFIED, until that peer answers `GetProtocolId` again. Post-
+//!   enforcement behaviour must remain fail-closed: an unverified peer is
+//!   refused, and no change to the reset behaviour above may relax that.
+//!
+//! `protocol_enforcement.rs::a_restart_forgets_declarations_and_the_window_fails_closed_above_the_height`
+//! pins both halves — the accepted one so that it is a recorded decision rather
+//! than an accident, and the fail-closed one so that it cannot be traded away
+//! while making the first survive a restart.
+//! `docs/operations/p2p-admission-and-compatibility.md` states them for
+//! operators.
+//!
 //! See `crates/p2p/tests/protocol_enforcement.rs` for the phase matrix and
 //! `crates/node/src/node.rs` for the two arrival paths it is applied to.
 
