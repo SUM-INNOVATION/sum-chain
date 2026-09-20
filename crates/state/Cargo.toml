@@ -46,9 +46,21 @@ tracing = { workspace = true }
 
 [features]
 # Test modules that were written against pre-migration primitives schemas and
-# were gated off while they did not compile. They compile and pass now:
-# `cargo test -p sumchain-state --all-targets --features legacy_tests` is
-# 1053 passed / 0 failed / 1 ignored. They stay behind a feature because they
-# are per-executor unit tests that overlap the `tests/` suites, not because
-# they are expected to fail. Anything that breaks them is a real break.
+# were gated off while they did not compile. They compile and pass. They stay
+# behind a feature because they are per-executor unit tests that overlap the
+# `tests/` suites, not because they are expected to fail. Anything that breaks
+# them is a real break.
+#
+# TEST-ONLY, AND THAT IS STRUCTURAL: every use site in this crate is
+# `#[cfg(all(test, feature = "legacy_tests"))]`, the feature is in no
+# `default` list, and no crate that ships in a release binary enables it.
+# A release build cannot turn it on.
+#
+# One of these modules WAS uncompilable, inherited from 8789f6b and earlier:
+# `nft_executor.rs`'s `test_create_collection` called
+# `execute_create_collection` with four arguments while the function grew two
+# gate parameters (`collection_id_nonce`, then `unpayable_royalty_refused`).
+# A gated-off module does not get rebuilt, so the arity drifted twice without
+# anything noticing. Repaired with both gates closed, which is the
+# configuration the case was written against.
 legacy_tests = []

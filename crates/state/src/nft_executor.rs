@@ -1711,9 +1711,29 @@ mod tests {
         let mut candidate = CandidateExecution::new(&db, 1 << 30);
         let mut view = candidate.view();
 
-        let result =
-            NftExecutor::execute_create_collection(&mut view, &sender, &data, 1_000_000_000)
-                .unwrap();
+        // Both gates CLOSED, which is the configuration this case was written
+        // against and is byte-for-byte the unremediated binary:
+        // `collection_id_nonce` (R28) changes how a `CollectionId` is derived
+        // and `unpayable_royalty_refused` (R33) refuses a royalty recipient on
+        // a collection that pays nothing. Neither is what this case is about —
+        // it asserts that a well-formed creation succeeds and reads back — and
+        // opening either here would turn it into a gate test that happens to
+        // live in the legacy module. The gated behaviour has its own coverage
+        // in `crates/state/tests/nft_collection_id_nonce_gate.rs` and
+        // `crates/state/tests/nft_update_path_parity_gate.rs`.
+        //
+        // The arity grew from 4 to 5 and then to 6 while this module was
+        // gated off, which is how it came to be uncompilable; supplying the
+        // two `false`s restores the call this case always made.
+        let result = NftExecutor::execute_create_collection(
+            &mut view,
+            &sender,
+            &data,
+            1_000_000_000,
+            false,
+            false,
+        )
+        .unwrap();
 
         assert!(result.success);
         assert!(result.collection_id.is_some());
