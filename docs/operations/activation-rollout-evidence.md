@@ -163,7 +163,7 @@ sumchain-node run \
 
 **Pass:** the node starts, and the log carries
 `Genesis activation digest … N gates set: …` and, if any height moved,
-`Activation parameter changed (permitted): …` (`crates/node/src/node.rs:514,545`).
+`Activation parameter changed (permitted): …` (`crates/node/src/node.rs:584,615`).
 Record both lines.
 
 **Fail:** startup exits with `chain activation parameters are unsound: …`.
