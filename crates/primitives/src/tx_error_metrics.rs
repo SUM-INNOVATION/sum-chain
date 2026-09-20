@@ -45,7 +45,12 @@ pub const TX_EXECUTION_ERROR_METRIC: &str = "sumchain_tx_execution_errors_total"
 
 /// The label NAMES this counter carries. **Exactly two, and this is pinned by
 /// test.** A third label is a cardinality multiplier and is refused here.
-pub const TX_EXECUTION_ERROR_LABEL_NAMES: [&str; 2] = ["subsystem", "code"];
+///
+/// A slice rather than a `[&str; 2]` deliberately: the arity must be a VALUE
+/// the pin below can reject at run time. Declared as a fixed-length array, a
+/// third label would change the type and fail to compile in the test, and a
+/// test that cannot be made to fail cannot be shown to be load-bearing.
+pub const TX_EXECUTION_ERROR_LABEL_NAMES: &[&str] = &["subsystem", "code"];
 
 /// One series' labels. Both halves are `&'static str` by construction: there
 /// is no constructor that takes an owned string, so a caller cannot invent a
@@ -327,7 +332,7 @@ mod tests {
             2,
             "a third label on a per-transaction counter multiplies the registry"
         );
-        assert_eq!(TX_EXECUTION_ERROR_LABEL_NAMES, ["subsystem", "code"]);
+        assert_eq!(TX_EXECUTION_ERROR_LABEL_NAMES, &["subsystem", "code"]);
         // The struct carries exactly the two fields the names describe: a
         // third field could not be rendered without a third name.
         let l = labels_at(0);
