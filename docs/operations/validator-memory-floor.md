@@ -122,25 +122,103 @@ files are the whole manifest surface.
 
 All four StatefulSets already carried `limits.memory: "4Gi"`. All four carried
 `requests.memory: "1Gi"`, and **that is the setting that made the floor
-untrue.** In Kubernetes:
-
-* `limits.memory` is the cgroup ceiling — exceed it and the container is
-  OOM-killed. It bounds the node from above; it guarantees nothing.
-* `requests.memory` is what the scheduler reserves. With a 1Gi request the pod
-  is placed on a node that only ever guaranteed it 1 GiB, and its QoS class is
-  **Burstable** — so under node memory pressure the kubelet evicts it as soon
-  as it is above its request, which can be at 1.1 GiB, long before the 4 GiB
-  limit.
-
-A validator that can be evicted at 1 GiB does not have a 4 GiB envelope, and a
-256 MiB write-set ceiling derived from 4 GiB is not conservative for it. Setting
-`requests.memory` equal to `limits.memory` makes the pod **Guaranteed** QoS for
-memory, which is what actually reserves the floor.
+untrue.** A validator that can be evicted at 1 GiB does not have a 4 GiB
+envelope, and a 256 MiB write-set ceiling derived from 4 GiB is not
+conservative for it. Both sides are now `4Gi`.
 
 The compose files set no memory bound, so nothing in them contradicts the
 floor. They are local/CI presets;
 `deploy/snip-local-mirror.yaml`'s own header says it is not production-like.
 Neither is a shipped validator deployment.
+
+---
+
+## The QoS class these pods actually get: **Burstable**
+
+> **An earlier revision of this page, and of all four StatefulSets, called
+> these pods Guaranteed QoS on the strength of the memory request equalling
+> the memory limit. That was wrong.** These pods are **Burstable**, and the
+> memory pair is not what decides it. The correction is recorded here rather
+> than quietly applied, because the eviction reasoning below is what an
+> operator acts on, and it is not the same reasoning under the two labels.
+
+Kubernetes assigns `Guaranteed` only when, **for every container in the pod
+(init containers included), BOTH memory AND cpu have a request and a limit and
+the two are equal.** These manifests set:
+
+```yaml
+resources:
+  requests: { cpu: "500m",  memory: "4Gi" }
+  limits:   { cpu: "2000m", memory: "4Gi" }
+```
+
+The CPU request and limit differ, so the pod is **Burstable** — regardless of
+the memory fields being equal. Each pod has exactly one container and no init
+containers, so there is nothing else to check.
+
+`crates/state/tests/validator_pod_qos.rs` derives the class from the four
+manifests by that rule on every test run; it does not take this page's word for
+it, and it fails if the numbers move in either direction.
+
+### Four things that are routinely conflated, kept apart
+
+| | field | what it actually does | changed by the QoS class? |
+|---|---|---|---|
+| **scheduler reservation** | `requests` | The scheduler will only place the pod on a node with 4 GiB of *allocatable* memory still unreserved, and that 4 GiB stays reserved against other pods for as long as this one is bound. | **No.** Requests reserve identically in every class. |
+| **cgroup limit** | `limits` | `memory.max` (cgroup v2). The container is OOM-killed by the kernel and restarted per `restartPolicy` if it exceeds 4 GiB. | **No.** Limits enforce identically in every class. |
+| **QoS classification** | derived | The pod-level label Kubernetes computes from the two above. **Burstable** here. | — it *is* this row. |
+| **eviction behaviour** | derived from *usage vs `requests`* | Which pod the kubelet picks when the node is under memory pressure. | **Not by class alone** — see below. |
+
+### What Burstable means for memory eviction, specifically
+
+The claim worth being precise about is this one, and it is **verified, not
+assumed**:
+
+> **kubelet node-pressure eviction does not evict a pod whose usage does not
+> exceed its requests.** The kubelet ranks candidates first by whether the
+> starved resource's usage exceeds requests; `BestEffort` and `Burstable` pods
+> *above* their requests are evicted first, ordered by Priority and then by how
+> far above. **`Guaranteed` pods and `Burstable` pods that are below their
+> requests are evicted last, ordered by Priority.**
+>
+> — Kubernetes, *Node-pressure Eviction*, "Pod selection for kubelet eviction".
+
+Apply that to these manifests. `requests.memory == limits.memory == 4Gi`, so
+this container **cannot exceed its memory request without having already
+exceeded its identical memory limit** — and exceeding the limit is a cgroup
+OOM-kill of the container (a restart), not a kubelet eviction. On the memory
+signal, this pod is therefore permanently in the last-evicted tier, exactly
+where a Guaranteed pod sits. **The 4 GiB memory reservation is protected on the
+eviction path even though the pod-level label is Burstable.** That is the whole
+reason Burstable is acceptable here.
+
+This is also why the CPU numbers were **not** changed to buy the label. Raising
+`requests.cpu` from `500m` to `2000m` would quadruple the CPU each validator
+reserves from its node's allocatable, and can leave the pods unschedulable on
+small nodes — a real availability cost, paid for a label that would not improve
+the memory outcome described above.
+
+### The residual Burstable does cost, stated rather than hidden
+
+One thing the label does change, and it is not the eviction path:
+
+* Under a **system-level (kernel) OOM** — as opposed to a kubelet eviction —
+  the victim is chosen by `oom_score_adj`. The kubelet writes `-997` for a
+  container in a `Guaranteed` pod, and for a `Burstable` one it writes
+  `1000 - 1000 * memoryRequest / machineCapacity`, clamped into `[2, 999]`.
+  On a 16 GiB node a 4 GiB request gives roughly `750`. So if the node reaches
+  a kernel OOM, this container is a more attractive victim than a Guaranteed
+  one would be.
+* **What to do about it, without touching CPU:** keep the node's allocatable
+  memory comfortably above the sum of the pods' requests, and leave the
+  kubelet's `--eviction-hard` memory threshold at a non-zero default. The
+  kubelet's own eviction runs *before* the kernel OOM killer for exactly this
+  reason, and on that path this pod is protected. Co-scheduling
+  `BestEffort` workloads on validator nodes is the configuration that makes the
+  kernel-OOM path reachable; do not.
+* This residual cannot be closed by any field these manifests could set while
+  leaving the CPU reservation alone. It is a known, bounded cost of the
+  decision, not an oversight.
 
 ---
 

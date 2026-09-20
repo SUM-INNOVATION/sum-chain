@@ -85,12 +85,22 @@ spec:
           # eligibility gate — see docs/operations/validator-memory-floor.md.
           #
           # The request must equal the limit. A lower request (this was 1Gi)
-          # schedules the pod onto a node that guarantees only that much and
-          # makes it Burstable, so it is an eviction candidate under node
-          # memory pressure long before it reaches 4 GiB — which means the
-          # floor the block write-set ceiling is derived from is not actually
-          # guaranteed to the process. Equal request and limit is Guaranteed
-          # QoS for memory, which is what makes the floor real.
+          # schedules the pod onto a node that reserves only that much, and
+          # the kubelet evicts under node memory pressure as soon as usage is
+          # above the REQUEST — which means the floor the block write-set
+          # ceiling is derived from would not actually be reserved.
+          #
+          # This pod's QoS class is BURSTABLE, not Guaranteed: Guaranteed
+          # needs request == limit for BOTH cpu and memory in every
+          # container, and cpu here is 500m against 2000m deliberately.
+          # Raising the cpu request to buy the label would quadruple the CPU
+          # reserved on every validator node and can make these pods
+          # unschedulable; it would not improve the memory outcome. Equal
+          # MEMORY request and limit is what protects the floor: kubelet
+          # node-pressure eviction does not evict a pod whose usage does not
+          # exceed its requests, and this container cannot exceed its memory
+          # request without having already hit its identical memory limit.
+          # See docs/operations/validator-memory-floor.md.
           #
           # MAX_BLOCK_WRITE_SET_BYTES (256 MiB) is derived from this envelope;
           # crates/state/tests/block_write_set_ceiling.rs reads the "4Gi" limit

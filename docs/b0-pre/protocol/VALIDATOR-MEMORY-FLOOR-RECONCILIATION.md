@@ -98,10 +98,22 @@ cgroup reservation:
 * `deploy/kubernetes/statefulset-validator-3.yaml`
 
 each of which sets `requests.memory: "4Gi"` **and** `limits.memory: "4Gi"`. The
-request was `1Gi` before this release; a 1 GiB request makes the pod Burstable
-and evictable well under 4 GiB, which meant the floor the write-set ceiling is
-derived from was not actually reserved. Equal request and limit is Guaranteed
-QoS for memory.
+request was `1Gi` before this release, which meant the floor the write-set
+ceiling is derived from was not actually reserved: the scheduler reserved 1 GiB
+and the kubelet could evict the pod as soon as it went above that.
+
+**These pods are Burstable, not Guaranteed.** An earlier revision of this file
+called these pods Guaranteed QoS on the strength of the memory pair alone.
+They are not, because
+the same containers set `requests.cpu: 500m` against `limits.cpu: 2000m` and
+Guaranteed requires equality on BOTH resources in EVERY container. What the
+equal memory pair does buy is the thing that matters here: kubelet
+node-pressure eviction does not evict a pod whose usage does not exceed its
+requests, and with request == limit this container cannot exceed its memory
+request without first exceeding its identical memory limit. The 4 GiB is
+reserved and protected on the eviction path regardless of the pod-level label.
+The full treatment, including the kernel-OOM residual Burstable does cost, is
+in `docs/operations/validator-memory-floor.md`.
 
 `crates/state/tests/block_write_set_ceiling.rs::the_recorded_validator_memory_envelope_is_still_what_the_derivation_assumed`
 reads the `4Gi` limit out of all four and fails if it moves.
