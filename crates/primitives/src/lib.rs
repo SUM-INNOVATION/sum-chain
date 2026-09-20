@@ -10,6 +10,7 @@ pub mod block;
 pub mod inference_attestation;
 pub mod messaging_sponsored;
 pub mod receipt;
+pub mod tx_error_metrics;
 
 // The on-chain wire formats now live in the `sumchain-wire` leaf crate
 // (sum-chain #124 / W1a). Re-export each moved module here so every existing
@@ -26,6 +27,7 @@ pub use address::Address;
 pub use block::{Block, BlockHeader};
 pub use hash::Hash;
 pub use receipt::{Receipt, TxStatus};
+pub use tx_error_metrics::{TxExecutionErrorLabels, TX_EXECUTION_ERROR_LABEL_NAMES, TX_EXECUTION_ERROR_METRIC};
 pub use governance::GovernanceParams;
 pub use validator_authority::ValidatorApproval;
 pub use staking::{

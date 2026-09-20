@@ -3671,6 +3671,31 @@ impl BlockExecutor {
                 state_diff.add_change(proposer, proposer_before, proposer_after);
             }
 
+            // ── the failed-receipt telemetry seam ───────────────────────────
+            //
+            // `sumchain_tx_execution_errors_total`, and this is the ONE place
+            // it is incremented. Every subsystem's receipt is built here and
+            // nowhere else — `crates/state/tests/wave1_execution_error_signal.rs`
+            // derives that from the source on every run — so a per-subsystem
+            // signal costs one call rather than twenty-four, and a subsystem
+            // added later is counted without anyone remembering to add it.
+            //
+            // The labels are `&'static str` from a closed table in
+            // `sumchain_primitives::tx_error_metrics`: two of them, bounded,
+            // and no value taken from the transaction. A sender, a hash or a
+            // formatted reason here would let one funded account allocate a
+            // registry series per transaction.
+            //
+            // NOT on the screening pass. A screening pass executes a proposal
+            // this node is deciding whether to build; its refusals are already
+            // counted in `ProposalScreening` and the block never exists, so
+            // counting them here would make every proposer's error rate a
+            // function of how much it screened rather than of what the chain
+            // executed.
+            if screening.is_none() {
+                sumchain_primitives::tx_error_metrics::record(&result.status);
+            }
+
             let receipt = Receipt::new(
                 result.tx_hash,
                 block.height(),

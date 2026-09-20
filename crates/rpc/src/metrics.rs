@@ -158,12 +158,23 @@ impl TransactionMetrics {
     }
 
     pub fn snapshot(&self) -> TransactionMetricsSnapshot {
+        // `tx_execution_errors` is read from the execution path's own registry
+        // rather than from the local `AtomicU64`. The local counter has no
+        // writer and never had one: the failed receipt is built in
+        // `sumchain_state::executor`, a crate BELOW this one, which cannot
+        // reach an `rpc` type. Reporting the local zero next to a non-zero
+        // per-series breakdown would be the same dead signal in a new place.
+        let by_series = sumchain_primitives::tx_error_metrics::snapshot();
         TransactionMetricsSnapshot {
             txs_processed: self.txs_processed.load(Ordering::Relaxed),
             txs_received: self.txs_received.load(Ordering::Relaxed),
             txs_submitted: self.txs_submitted.load(Ordering::Relaxed),
             tx_validation_errors: self.tx_validation_errors.load(Ordering::Relaxed),
-            tx_execution_errors: self.tx_execution_errors.load(Ordering::Relaxed),
+            tx_execution_errors: sumchain_primitives::tx_error_metrics::total(),
+            tx_execution_errors_by_series: by_series
+                .into_iter()
+                .map(|(l, v)| (l.subsystem.to_string(), l.code.to_string(), v))
+                .collect(),
         }
     }
 }
@@ -351,7 +362,39 @@ impl MetricsSnapshot {
         add_counter(&mut output, "sumchain_txs_received_total", "Total transactions received from network", self.transactions.txs_received);
         add_counter(&mut output, "sumchain_txs_submitted_total", "Total transactions submitted via RPC", self.transactions.txs_submitted);
         add_counter(&mut output, "sumchain_tx_validation_errors_total", "Total transaction validation errors", self.transactions.tx_validation_errors);
-        add_counter(&mut output, "sumchain_tx_execution_errors_total", "Total transaction execution errors", self.transactions.tx_execution_errors);
+
+        // ── the failed-receipt counter, per subsystem and code ──────────────
+        //
+        // Emitted as a LABELLED family, from the closed table in
+        // `sumchain_primitives::tx_error_metrics`. Every series is emitted on
+        // every scrape, including the zeroes: an operator alerting on a gate
+        // that has just been opened needs to tell "the gate refused nothing"
+        // from "this binary does not have the counter", and an absent series
+        // cannot make that distinction.
+        //
+        // Exactly two labels. See the module comment in
+        // `crates/primitives/src/tx_error_metrics.rs` for why a third is a
+        // production incident and not a preference.
+        output.push_str(&format!(
+            "# HELP {} Failed transaction receipts, by subsystem and status code\n",
+            sumchain_primitives::TX_EXECUTION_ERROR_METRIC
+        ));
+        output.push_str(&format!(
+            "# TYPE {} counter\n",
+            sumchain_primitives::TX_EXECUTION_ERROR_METRIC
+        ));
+        for (subsystem, code, value) in &self.transactions.tx_execution_errors_by_series {
+            output.push_str(&format!(
+                "{}{{{}=\"{}\",{}=\"{}\"}} {}\n",
+                sumchain_primitives::TX_EXECUTION_ERROR_METRIC,
+                sumchain_primitives::TX_EXECUTION_ERROR_LABEL_NAMES[0],
+                subsystem,
+                sumchain_primitives::TX_EXECUTION_ERROR_LABEL_NAMES[1],
+                code,
+                value
+            ));
+        }
+        output.push('\n');
 
         // P2P metrics
         add_metric(&mut output, "sumchain_peer_count", "Current number of connected peers", self.p2p.peer_count);
@@ -393,7 +436,13 @@ pub struct TransactionMetricsSnapshot {
     pub txs_received: u64,
     pub txs_submitted: u64,
     pub tx_validation_errors: u64,
+    /// The sum over every series below.
     pub tx_execution_errors: u64,
+    /// `(subsystem, code, value)`, one entry per series in the closed table
+    /// `sumchain_primitives::tx_error_metrics` declares. Length is a compile-
+    /// time constant of that crate, so this vector cannot grow at runtime.
+    #[serde(default)]
+    pub tx_execution_errors_by_series: Vec<(String, String, u64)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -504,5 +553,125 @@ mod tests {
         assert_eq!(snapshot.p2p.peer_count, 5);
         assert_eq!(snapshot.rpc.requests_total, 1);
         assert_eq!(snapshot.mempool.size, 10);
+    }
+}
+
+#[cfg(test)]
+mod execution_error_exposition_tests {
+    use super::*;
+
+    /// Every rendered line of the `sumchain_tx_execution_errors_total` family.
+    fn series_lines(text: &str) -> Vec<&str> {
+        text.lines()
+            .filter(|l| l.starts_with(sumchain_primitives::TX_EXECUTION_ERROR_METRIC))
+            .filter(|l| !l.starts_with("# "))
+            .collect()
+    }
+
+    /// **The rendered label-set pin.**
+    ///
+    /// The table-side pin lives in `sumchain-primitives`; this one is on the
+    /// EXPOSITION, because that is the other place a third label can be added
+    /// — a `format!` here would compile and the table test would still pass.
+    /// Every sample line must carry exactly two label pairs, named
+    /// `subsystem` and `code`, in that order.
+    #[test]
+    fn every_execution_error_sample_carries_exactly_two_named_labels() {
+        let text = Metrics::new().snapshot().to_prometheus();
+        let lines = series_lines(&text);
+        assert!(
+            !lines.is_empty(),
+            "the metric family rendered no samples at all"
+        );
+        for line in &lines {
+            let open = line.find('{').expect("a labelled sample");
+            let close = line.find('}').expect("a labelled sample");
+            let inside = &line[open + 1..close];
+            let pairs: Vec<&str> = inside.split(',').collect();
+            assert_eq!(
+                pairs.len(),
+                2,
+                "exactly two labels; this sample has {}: {line}",
+                pairs.len()
+            );
+            assert!(
+                pairs[0].starts_with("subsystem=\""),
+                "first label must be subsystem: {line}"
+            );
+            assert!(
+                pairs[1].starts_with("code=\""),
+                "second label must be code: {line}"
+            );
+        }
+    }
+
+    /// The sample count equals the closed table's length: the exposition
+    /// emits the whole family and invents nothing.
+    #[test]
+    fn the_exposed_family_is_exactly_the_closed_series_table() {
+        let text = Metrics::new().snapshot().to_prometheus();
+        assert_eq!(
+            series_lines(&text).len(),
+            sumchain_primitives::tx_error_metrics::SERIES_COUNT
+        );
+        assert!(text.contains(&format!(
+            "# TYPE {} counter\n",
+            sumchain_primitives::TX_EXECUTION_ERROR_METRIC
+        )));
+    }
+
+    /// No label value is ever taken from a transaction. Asserted against the
+    /// rendered text so a future edit that interpolates a hash, an address or
+    /// a `format!`ed reason has to get past this.
+    #[test]
+    fn no_label_value_can_come_from_a_transaction() {
+        let text = Metrics::new().snapshot().to_prometheus();
+        let allowed: std::collections::BTreeSet<&str> =
+            sumchain_primitives::tx_error_metrics::SUBSYSTEMS
+                .iter()
+                .copied()
+                .collect();
+        for line in series_lines(&text) {
+            let open = line.find('{').unwrap();
+            let close = line.find('}').unwrap();
+            let inside = &line[open + 1..close];
+            let subsystem = inside
+                .split(',')
+                .next()
+                .unwrap()
+                .trim_start_matches("subsystem=\"")
+                .trim_end_matches('"');
+            assert!(
+                allowed.contains(subsystem),
+                "subsystem label {subsystem:?} is not in the closed table"
+            );
+            let code = inside
+                .split(',')
+                .nth(1)
+                .unwrap()
+                .trim_start_matches("code=\"")
+                .trim_end_matches('"');
+            assert!(
+                code.chars()
+                    .all(|c| c.is_ascii_digit() || c == '_' || c.is_ascii_lowercase()),
+                "code label {code:?} is not a stable identifier"
+            );
+            assert!(code.len() <= 24, "code label {code:?} is too long to be an identifier");
+        }
+    }
+
+    /// The counter the packet called dead now reports the execution path's
+    /// own total rather than an `AtomicU64` with no writer.
+    #[test]
+    fn the_aggregate_reads_the_execution_path_registry() {
+        let m = Metrics::new();
+        let before = m.snapshot().transactions.tx_execution_errors;
+        sumchain_primitives::tx_error_metrics::record(
+            &sumchain_primitives::TxStatus::InvalidNonce,
+        );
+        assert!(
+            m.snapshot().transactions.tx_execution_errors > before,
+            "the aggregate is still reading the dead local counter"
+        );
     }
 }
