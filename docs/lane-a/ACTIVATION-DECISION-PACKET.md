@@ -1,4 +1,4 @@
-# Owner decision packet: the fifty-six activation heights
+# Owner decision packet: the sixty-one activation heights
 
 **This document sets no height.** No `genesis.json` in this branch is modified
 by it, and neither release template (`genesis/mainnet_genesis.json`,
@@ -7,13 +7,13 @@ decision. What this document does is put, in one place, the facts each decision
 needs.
 
 It replaces an earlier packet that covered seventeen gates. `ChainParams` now
-declares **fifty-eight**. The set below is regenerated from the field
+declares **sixty-three**. The set below is regenerated from the field
 declarations in `crates/genesis/src/lib.rs`, which are the authority —
 `ChainParams::activation_heights()` is generated from them and pinned to them by
 test — and **not** from the previous document.
 
-For every one of the fifty-six it covers, Part 1 states the six things the owner asked
-for:
+For every one of the sixty-one it covers, Part 1 states the six things the owner
+asked for:
 
 1. **affected behaviour** — what changes at the height;
 2. **dependency ordering** — what `ChainParams::validate` actually constrains,
@@ -30,8 +30,8 @@ for:
 
 ## Part 0a — Two gates arrived after this packet was regenerated
 
-`ChainParams` now declares **fifty-eight**. This packet covers fifty-six, and the
-two it does not cover are named here rather than left to be discovered by
+`ChainParams` now declares **sixty-three**. This packet covers sixty-one, and
+the two it does not cover are named here rather than left to be discovered by
 counting:
 
   * `subsystem_proof_unsupported_enabled_from_height` — every `VerifyProof` arm
@@ -42,7 +42,7 @@ counting:
     bound on the overlay charge.
 
 **Neither is scheduled below, and that is deliberate.** Each needs the same six
-fields Part 1 gives the other fifty-six — behaviour, dependency ordering,
+fields Part 1 gives the other sixty-one — behaviour, dependency ordering,
 persistent data impact, rollback-in-effect, monitoring signal, recommended wave
 — and scheduling a gate that has not had that treatment is the shortcut this
 packet exists to prevent. The same note appeared in the previous edition for
@@ -50,15 +50,18 @@ three gates, and those three were given their treatment before being scheduled;
 these two should be handled the same way.
 
 Nine gates arrived in the wave that outran the previous edition of this
-document. **Seven of them are now written up** — R29 to R35, in Part 1A — and the
-two above are what is left; the deficit is named rather than closed silently.
+document. **Seven of them were written up** — R29 to R35, in Part 1A — and the
+two above are what was left. **A release-closure wave has since added five more,
+and they did NOT join that deficit**: R36 to R40 arrive with their six fields
+already written, which is the standing this section exists to require. The
+deficit is therefore unchanged at two, and it is the same two.
 
-This is the second time a wave has outrun this document. The count in a sentence
-is not checkable by any tool here, which is why the two uncovered gates are
-named: a reader can verify the claim against
+This is the second time a wave has outrun this document, and the third wave did
+not. The count in a sentence is not checkable by any tool here, which is why the
+two uncovered gates are named: a reader can verify the claim against
 `tools/lane-b/gate-structure-check.py`'s output without recounting prose.
 
-## Part 0 — The facts that apply to all fifty-six
+## Part 0 — The facts that apply to all sixty-one
 
 ### 0.1 How the authoritative list was established
 
@@ -86,24 +89,24 @@ EOF
 Output, reproduced on this tree:
 
 ```
-total 58 remediation 37 predating 18
+total 63 remediation 42 predating 18
 overlap set()
 neither: ['account_root_enabled_from_height', 'application_journal_enabled_from_height', 'peer_protocol_declaration_required_from_height']
 named but not declared: []
 ```
 
-**58 = 37 + 18 + 3, with no overlap and no orphan.** That is the partition Part 1
+**63 = 42 + 18 + 3, with no overlap and no orphan.** That is the partition Part 1
 uses, and every gate is placed in exactly one of the three classes:
 
 | class | count | what it means | source of truth |
 |---|---:|---|---|
-| **REMEDIATION** | 37 | produced by the activation audit; each closes a defect; every one dormant | `crates/genesis/src/lib.rs:3214 REMEDIATION_GATES`, cross-pinned to the 37-row `WIRING` table in `crates/state/tests/remediation_gates.rs:53` |
+| **REMEDIATION** | 42 | produced by the activation audit; each closes a defect; every one dormant | `crates/genesis/src/lib.rs` `REMEDIATION_GATES`, cross-pinned to the 42-row `WIRING` table in `crates/state/tests/remediation_gates.rs` |
 | **PREDATING** | 18 | shipped in binaries that produced existing blocks; grandfathered, may legally sit below the head | `crates/genesis/src/lib.rs:2783 GATES_PREDATING_ACTIVATION_RECORDING` |
 | **NEITHER** | 3 | introduced by this work, but not remediation: they add or constrain machinery rather than repair a defect | the complement, computed above |
 
-**The packet covers 56 of the 58: 35 + 18 + 3.** The two remediation gates it
-does not cover are named in Part 0a, so `35 + 2 = 37` closes the remediation
-column and nothing is unaccounted for. Part 1A holds the 35, Part 1B the 18,
+**The packet covers 61 of the 63: 40 + 18 + 3.** The two remediation gates it
+does not cover are named in Part 0a, so `40 + 2 = 42` closes the remediation
+column and nothing is unaccounted for. Part 1A holds the 40, Part 1B the 18,
 Part 1C the 3.
 
 The `WIRING` table was independently extracted and compared:
@@ -115,10 +118,10 @@ s = open('crates/state/tests/remediation_gates.rs').read()
 m = re.search(r'const WIRING: &\[\(&str, &str, &str\)\] = &\[(.*?)\n\];', s, re.S)
 rows = re.findall(r'\(\s*\"([^\"]+)\",\s*\"([^\"]+)\",\s*\"([^\"]+)\",?\s*\)', m.group(1))
 print(len(rows))"
-# 37
+# 42
 ```
 
-37 rows, matching `REMEDIATION_GATES` element for element. The accessor each
+42 rows, matching `REMEDIATION_GATES` element for element. The accessor each
 names is cited per gate in Part 1.
 
 ### 0.2 The live chain, re-derived today
@@ -153,7 +156,7 @@ chain_getActivationStatus → {"code":-32601,"message":"Method not found"}
 So every activation below is a **binary rollout first, genesis edit second**. A
 height set in a genesis that no deployed binary reads is a number nothing does.
 
-**`chain_getChainParams` serialises 6 of the 58.** The live response carries
+**`chain_getChainParams` serialises 6 of the 63.** The live response carries
 `v2`, `omninode`, `education`, `governance`, `monetary_policy` and
 `service_grants` heights and no others. The remaining 52 — including all 37
 remediation gates and all 3 of the "neither" class — are invisible from outside
@@ -201,7 +204,7 @@ safe form of the decision is *head at rollout + N blocks*, converted to UTC only
 for communication, with the interval re-measured immediately before the
 coordinated restart.
 
-### 0.4 The hard floor: strictly above the head, for 40 of the 58
+### 0.4 The hard floor: strictly above the head, for 45 of the 63
 
 On the **first start** of an upgraded node there is no recorded activation
 history to compare against — `ACTIVATION_META_KEY` (`crates/node/src/node.rs:432`)
@@ -211,7 +214,7 @@ exactly once. `ChainParams::retroactive_gates_on_a_first_start`
 
 - a gate on `GATES_PREDATING_ACTIVATION_RECORDING` (the 18) **may** sit at or
   below the head — it shipped in the binary that produced those blocks;
-- any of the other **40** at or below the head is `RetroactivelyOpened` and the
+- any of the other **45** at or below the head is `RetroactivelyOpened` and the
   node **refuses to start**, naming the gate
   (`crates/node/src/node.rs:486-503`).
 
@@ -220,7 +223,7 @@ head + 1 is a scheduled activation. Pinned by
 `crates/genesis/tests/activation_digest.rs:525 a_newly_introduced_gate_below_the_head_refuses_a_first_start`.
 
 **With the head at 12,977,656 and rising 57,524/day, every height chosen for the
-37 remediation gates and the 3 "neither" gates must still be above the head at
+42 remediation gates and the 3 "neither" gates must still be above the head at
 the moment the coordinated restart happens** — with margin enough that the chain
 does not cross it while the rollout is in progress.
 
@@ -283,9 +286,12 @@ gate moved balances. E exists and should be understood as the thing it is.
 
 ### 0.7 Dependency ordering — read from `ChainParams::validate`, not assumed
 
-`ChainParams::validate` (`crates/genesis/src/lib.rs:2190`) constrains exactly
-four things. There are no others; every other gate is independent of every other
-gate at load time.
+`ChainParams::validate` (`crates/genesis/src/lib.rs`) constrains exactly
+**five** things. There are no others; every other gate is independent of every
+other gate at load time. It constrained four until the release-closure wave
+added rule (5), which is the one ordering this packet previously described as a
+soft one the code could not enforce — see R30's field 2, which has been corrected
+rather than left standing.
 
 **(1) `compute_pool_enabled_from_height` must be `None`.** Any `Some(_)` is
 `GenesisError::IncompleteSubsystemActivation`. Not schedulable.
@@ -326,7 +332,30 @@ activation every node executes the same rules, so admitting a peer that declared
 nothing costs nothing; at that height the rules diverge and an undeclared peer
 becomes indistinguishable from one running the unremediated binary.
 
-**Both are LOAD-time checks**, so an inconsistent pair is refused before a block
+**(5) The healthcare consent-grant ordering:**
+
+```
+healthcare_authorization_enabled_from_height <= healthcare_consent_subject_signature_enabled_from_height
+```
+
+with `(None, Some(grant))` refused as
+`ConsentGrantGateWithoutHealthcareAuthorization` and
+`(Some(authorization), Some(grant)) if authorization > grant` refused as
+`HealthcareAuthorizationAfterConsentGrantGate`. Both `None` is legal and is the
+production default; authorization alone is legal and is strictly stronger than
+the default. The argument, from the source: the grant gate makes `GrantConsent`
+carry the subject's own signature, and it does not reach `SupersedeConsent`,
+which is gated by the AUTHORIZATION height and below it checks nothing about the
+sender — so the same record is minted by another arm. `None` there is not
+"later", it is never, so the second route would stay open at every height above
+the grant gate rather than for a bounded band.
+
+**This is the only rule in this section that constrains two REMEDIATION gates
+against each other**, and the sentence in Part 1A's preamble that says no
+remediation gate is ordered against another at load time no longer holds without
+this exception.
+
+**All of these are LOAD-time checks**, so an inconsistent pair is refused before a block
 executes rather than at the boundary a hundred thousand blocks later.
 
 **Consequence for the owner.** Among the 37 remediation gates there is no
@@ -474,13 +503,13 @@ comments, and a reader counting twenty would under-state what the rule binds.
 | the refusal-rate signal for the 19 refusal-only gates | §0.8 — the two obvious counters are dead; either wire them or accept M4 |
 
 ---
-## Part 1A — The 35 REMEDIATION gates
+## Part 1A — The 40 REMEDIATION gates
 
 Every one is dormant (`None`) today. Every one is absent from `chain_getChainParams`, so its height is invisible from outside a node until `chain_getActivationStatus` is deployed (§0.2). Every one is subject to the §0.4 floor: **strictly above the head**.
 
-`REMEDIATION_GATES` holds 37; the 35 below are all of them except the two that Part 0a names as deliberately uncovered, which are not scheduled here.
+`REMEDIATION_GATES` holds 42; the 40 below are all of them except the two that Part 0a names as deliberately uncovered, which are not scheduled here.
 
-**No remediation gate is ordered against another at LOAD time.** The only constraint that touches them is §0.7 rule (4): opening ANY of them forces `peer_protocol_declaration_required_from_height` to be set at or below the earliest. **Three soft orderings are noted — R17, R24 and R30 — arguments from the source, not load-time refusals.** R30 is the one to read before scheduling anything: its guarantee is conditional on R5 being open, the code cannot enforce that, and opening R30 first leaves `SupersedeConsent` minting exactly the record R30 refuses.
+**Exactly ONE pair of remediation gates is ordered against another at LOAD time**, and it is §0.7 rule (5): `healthcare_authorization_enabled_from_height` (R5) must be at or below `healthcare_consent_subject_signature_enabled_from_height` (R30). Every other remediation gate is independent of every other at load time. The constraint that touches all of them is §0.7 rule (4): opening ANY of them forces `peer_protocol_declaration_required_from_height` to be set at or below the earliest. **Two soft orderings are noted — R17 and R24 — arguments from the source, not load-time refusals.** R30's used to be the third and is now rule (5): a genesis that opens it over a closed R5 is refused, on the genesis path and on the restart path alike.
 
 ---
 
@@ -495,7 +524,7 @@ Every one is dormant (`None`) today. Every one is absent from `chain_getChainPar
 
 **4. Rollback in effect.** **B and E only.** A is useless — the sender choosing the payload is the adversary. If the gate misbehaves the symptom is a proposer that cannot produce; the only forward fix is a superseding gate (B) that re-narrows `as_receipt_failure`, and the only backward one is E.
 
-**5. Monitoring signal.** **M2 is the signal: `sumchain_block_height` stops advancing and `sumchain_blocks_produced_total` goes flat.** M3 (`sumchain_block_errors_total`) rising while M2 is flat is the unambiguous form. Working looks like M2 unchanged and M4 showing charged failed receipts on NFT transactions that previously killed blocks. **This is the only gate in the 35 whose misbehaviour is a liveness failure**, which is why it must not share a height with anything else.
+**5. Monitoring signal.** **M2 is the signal: `sumchain_block_height` stops advancing and `sumchain_blocks_produced_total` goes flat.** M3 (`sumchain_block_errors_total`) rising while M2 is flat is the unambiguous form. Working looks like M2 unchanged and M4 showing charged failed receipts on NFT transactions that previously killed blocks. **This is the only gate in the 40 whose misbehaviour is a liveness failure**, which is why it must not share a height with anything else.
 
 **6. Recommended wave.** Wave 3. **Proposed height:** — owner decision —
 
@@ -923,7 +952,7 @@ Part 3.1, which carries the reasoning forward in full.
 
 **4. Rollback in effect.** **B only.** The receipts are in the chain; nothing rewrites a receipts root. D is not applicable — the fees were correctly taken, only mis-reported.
 
-**5. Monitoring signal.** M4 on refused NFT transactions: **the working signal is `fee_paid` on a failed NFT receipt becoming non-zero.** That is a one-call check and is the cleanest confirmation of any gate in the 35. Misbehaving would be a mismatch between `fee_paid` and the sender's actual balance delta — which requires comparing `sum_getBalance` across the block and has no instrument. Paired with gate 19 in Wave 2c because both move fee accounting.
+**5. Monitoring signal.** M4 on refused NFT transactions: **the working signal is `fee_paid` on a failed NFT receipt becoming non-zero.** That is a one-call check and is the cleanest confirmation of any gate in the 40. Misbehaving would be a mismatch between `fee_paid` and the sender's actual balance delta — which requires comparing `sum_getBalance` across the block and has no instrument. Paired with gate 19 in Wave 2c because both move fee accounting.
 
 **6. Recommended wave.** Wave 2c. **Proposed height:** — owner decision —
 
@@ -968,7 +997,7 @@ Part 3.1, which carries the reasoning forward in full.
 
 **1. Affected behaviour.** Rows AU-9, AU-10, AU-11. Below the gate a signature names its party in its own payload and nothing compares that party to the sender, so any funded account signs on behalf of any party and carries a two-party agreement to `Executed` alone (AU-9); the `signature` bytes it supplies are stored and checked against nothing (AU-10); and any funded account terminates, voids or supersedes any agreement, revokes any IP action, and drives any executor link through its whole lifecycle (AU-11). At and above it **fourteen arms** return a FAILED receipt carrying `AGREEMENT_PARTY_AUTHORITY_UNSUPPORTED` (`crates/state/src/lib.rs:486`) **before the deduct**, where this executor's other refusals already return, so a refused Agreement transaction writes nothing and costs nothing exactly as `Agreement not found` already does: `UpdateAgreement`, `TerminateAgreement`, `VoidAgreement`, `SupersedeAgreement`, `SignAgreement`, `RevokeSignature`, `UpdateIpAction`, `TerminateIpAction`, `RevokeIpAction` and the five executor-link arms. **Ten arms stay reachable** — `CommitAgreement`, `AddParty`, `RemoveParty`, `RecordIpAction`, `LinkExecutor`, `SubmitProof`, `VerifyProof` and the three attestation arms, which already check `issuer_address == sender` and are the reason the defect is specific rather than architectural. So the family is not stranded: an agreement can still be RECORDED; what it can no longer do is CHANGE, which is the half that today any stranger can do. **`UpdateAgreement` is in the gate although AU-11 does not name it** — it takes an `AgreementStatus` straight from the payload with `Agreement not found` as its only guard, so it reaches the three states AU-11 is about, and a gate that closed the named arms while leaving it open would close nothing. `RevokeSignature` is in for the matching reason on AU-9's side.
 
-**2. Dependency ordering.** None at load: `ChainParams::validate` constrains four things (§0.7) and this is not among them. §0.7 rule (4) applies as it does to every remediation gate — opening this forces `peer_protocol_declaration_required_from_height` to be set at or below its height. **This is a refusal and not a guard, and the source is explicit about what that depends on**: `AgreementCommitment` carries no address at all and `PartyRef` is either a 32-byte commitment or a 32-byte subject id, so there is nothing to compare a sender to; verifying the stored `signature` would need a canonical signing input this subsystem does not define. Both repairs are wire changes to `crates/sumchain-wire/src/agreement.rs`. Nothing in this schedule supplies them, so no later gate relaxes this one.
+**2. Dependency ordering.** None at load: `ChainParams::validate` constrains five things (§0.7) and this is not among them. §0.7 rule (4) applies as it does to every remediation gate — opening this forces `peer_protocol_declaration_required_from_height` to be set at or below its height. **This is a refusal and not a guard, and the source is explicit about what that depends on**: `AgreementCommitment` carries no address at all and `PartyRef` is either a 32-byte commitment or a 32-byte subject id, so there is nothing to compare a sender to; verifying the stored `signature` would need a canonical signing input this subsystem does not define. Both repairs are wire changes to `crates/sumchain-wire/src/agreement.rs`. Nothing in this schedule supplies them, so no later gate relaxes this one.
 
 **3. Persistent data impact.** **None.** No row changes shape, key or location. A transaction that used to succeed produces a failed receipt instead, and the state it would have written is simply not written. **Rows written below the gate keep whatever a stranger put in them** — an agreement carried to `Executed` by somebody with no standing stays `Executed`, and a stored `signature` that was never checked stays stored. Activation repairs nothing that already exists.
 
@@ -985,9 +1014,9 @@ Part 3.1, which carries the reasoning forward in full.
 
 **1. Affected behaviour.** Row AU-3, the GRANT half. Below the gate `GrantConsent` checks `issuer_address == sender` and nothing else, so a disclosure authorization naming any person is recorded by the issuer alone and the person it is about never participates. The REVOCATION half is already remedied under `healthcare_authorization_enabled_from_height` (R5), so today **a subject can withdraw a consent they were never asked to give.** At and above the gate the payload is a `ConsentGrantRequest` (`crates/sumchain-wire/src/healthcare.rs:853`): the envelope, the subject's ed25519 public key, and the subject's signature over `ConsentEnvelope::grant_signing_input` — a domain-separated blake3 digest that binds what is being disclosed, about whom, to whom, under what rule, for how long and what it replaces, and deliberately does not bind `status`, `created_at`, `updated_at`, `recorded_at_height`, `revocation_ref` or `attachments`, because binding a field the chain itself rewrites would leave a stored consent whose signature no longer verifies against its own row. The key must derive to the envelope's own `subject_address` and the signature must verify. **The issuer still has to be the sender, so the transaction carries BOTH parties**: the issuer signs the transaction, the subject signs the consent. Three distinct refusals, one per condition, all before the deduct: `CONSENT_GRANT_REQUEST_REQUIRED` (which says in its own text that it is a client-version fact), `CONSENT_SUBJECT_KEY_MISMATCH`, `CONSENT_SUBJECT_SIGNATURE_INVALID` (`crates/state/src/lib.rs:521,531,536`). The cheap repair — require the SUBJECT to send the transaction — was written out and rejected: it would leave `issuer_address` unverified and trade a false claim about the subject for a false claim about the issuer, and a `SignedTransaction` carries exactly one signature, so no sender check can make a two-party record out of a one-party transaction.
 
-**2. Dependency ordering.** **None at load — and this is the one gate in this packet whose guarantee is CONDITIONAL on another gate, in a way the code cannot enforce.** §0.7 constrains four things and this pair is not among them, so a genesis that opens this gate with `healthcare_authorization_enabled_from_height` closed loads, starts and runs. The engineer who wrote the gate states the consequence and pins it: `SupersedeConsent` carries a replacement envelope and is not gated here, and **with `authorization` still closed it checks NOTHING about the sender (row AU-1)** — so a stranger supersedes any consent that exists with a replacement naming any subject they like and the widest scope there is, **which mints exactly the record `GrantConsent` has just been stopped from minting.** Opening this one alone narrows the door rather than shutting it. Asserted by `the_grant_gate_alone_does_not_close_supersession` (`crates/state/tests/consent_subject_signature_gate.rs:407`), which runs both halves — this gate alone, and the two together — precisely because a conditional guarantee that is only written down is one an operator can activate half of. **So: `healthcare_authorization_enabled_from_height` must be at or below this height.** An equal height satisfies it: at block `h` both are open, which is the same construction §2.3 uses for R11/R17/R24, and Wave 1 holds R5. The fields are deliberately separate — R5 changes which SENDER an arm accepts and changes no payload, this one changes what a `GrantConsent` payload IS, and an operator must be able to sequence a wire change separately from a guard — but separate FIELDS do not mean separate heights, and the ordering above is the constraint that survives. **What stays open even with both:** an issuer can still re-scope a consent the subject did agree to, via `SupersedeConsent`, without a fresh signature. That is AU-1's arm and AU-1's row, and this height does not close it.
+**2. Dependency ordering.** **A LOAD-TIME CONSTRAINT, and the only one that orders two remediation gates against each other.** §0.7 rule (5): `healthcare_authorization_enabled_from_height` (R5) must be `Some(a)` with `a <= this height`. A genesis that opens this gate with R5 closed is REFUSED, as `ConsentGrantGateWithoutHealthcareAuthorization`; one that opens R5 later is refused as `HealthcareAuthorizationAfterConsentGrantGate`. Both paths refuse: the genesis path through `Genesis::validate`, and the restart path through `sumchain_state::account_root::validate_runtime_activation`, which is what `Node::new` actually calls — pinned by `the_consent_grant_gate_cannot_open_over_a_closed_healthcare_authorization`, `a_healthcare_authorization_gate_later_than_the_consent_grant_gate_is_refused` and `the_restart_path_refuses_a_consent_grant_gate_its_authorization_does_not_cover`. **This edition of the packet corrects the previous one**, which said the pair was not constrained and that an operator could open this gate alone: that was true of the tree it described and is no longer true of this one. The reason it became a refusal is unchanged and is the reason to read it: `SupersedeConsent` carries a replacement envelope, is not gated here, and **with `authorization` closed checks NOTHING about the sender (row AU-1)** — so a stranger supersedes any consent that exists with a replacement naming any subject they like and the widest scope there is, **which mints exactly the record `GrantConsent` has just been stopped from minting.** Asserted by `the_grant_gate_alone_does_not_close_supersession` (`crates/state/tests/consent_subject_signature_gate.rs:407`), which runs both halves. An equal height satisfies the rule: at block `h` both are open, the same construction §2.3 uses for R11/R17/R24, and Wave 1 holds R5. The fields stay deliberately separate — R5 changes which SENDER an arm accepts and changes no payload, this one changes what a `GrantConsent` payload IS — but separate FIELDS never meant separate heights, and the ordering is now enforced rather than advised. **What stays open even with both:** an issuer can still re-scope a consent the subject did agree to, via `SupersedeConsent`, without a fresh signature. That is AU-1's arm and AU-1's row, and this height does not close it.
 
-**3. Persistent data impact.** **No stored row changes.** `ConsentEnvelope` is what the consent family stores and what `healthcare_store` encodes; the gate WRAPS it rather than appending to it, so no already-written encoding decodes to anything different on disk, and an accepted grant stores the same envelope bytes it always stored. What changes is the TRANSACTION payload, and **that reaches outside the node binary**: `ConsentGrantRequest` is a new public wire type in `sumchain-wire` **0.4.0**, a crate whose manifest description calls it "Byte-frozen on-chain wire formats for SUM Chain" and which carries an explicit hand-written package `include` allowlist because it is packaged for publication (`crates/sumchain-wire/Cargo.toml`). The addition is additive — a new struct beside the existing ones, no change to any existing type's field order or width, no new transaction ordinal, and the crate's frozen golden fixtures are untouched — and the wire tests pass. **But the publish and version decision is not made in this branch, and this packet does not make it.** An owner scheduling this height is also deciding that a published byte-frozen crate gains a public type; that decision should be recorded before the height is, and it is the only item in Part 1 that is not settled inside a node.
+**3. Persistent data impact.** **No stored row changes.** `ConsentEnvelope` is what the consent family stores and what `healthcare_store` encodes; the gate WRAPS it rather than appending to it, so no already-written encoding decodes to anything different on disk, and an accepted grant stores the same envelope bytes it always stored. What changes is the TRANSACTION payload, and **that reaches outside the node binary**: `ConsentGrantRequest` is a new public wire type in `sumchain-wire` **0.5.0**, a crate whose manifest description calls it "Byte-frozen on-chain wire formats for SUM Chain" and which carries an explicit hand-written package `include` allowlist because it is packaged for publication (`crates/sumchain-wire/Cargo.toml`). The addition is additive — a new struct beside the existing ones, no change to any existing type's field order or width, no new transaction ordinal, and the crate's frozen golden fixtures are untouched — and the wire tests pass. **But the publish and version decision is not made in this branch, and this packet does not make it.** An owner scheduling this height is also deciding that a published byte-frozen crate gains a public type; that decision should be recorded before the height is, and it is the only item in Part 1 that is not settled inside a node.
 
 **4. Rollback in effect.** **A and B**, plus a rollout obligation that is not a rollback. Below the gate the payload is a bare envelope, at and above it the wrapper, and **each side fails to decode the other rather than silently reinterpreting it** — so every client that submits `GrantConsent` must be upgraded before the height, and a client that is not upgraded gets A by accident: it stops being able to grant at all. Consents written below the gate keep their bytes, are not re-verified and are not re-signed; the gate stops new unsigned grants and reverses none.
 
@@ -1082,11 +1111,96 @@ Part 3.1, which carries the reasoning forward in full.
 
 ---
 
+### R36 — `docclass_signature_unsupported_enabled_from_height`
+*accessor `DocClassExecutor::signature_unsupported_activation, crates/state/src/docclass_executor.rs:478`* — cost shape **REFUSAL ONLY**
+
+**1. Affected behaviour.** Row AU-33. Below the gate **no signature is verified anywhere in DocClass**: an `IssueCredential` carrying sixty-four bytes of nonsense in `issuer_signature`, under an `issuer_key_id` naming a key the issuer has never held, is ACCEPTED and both are STORED verbatim — there is no `verify` or `ed25519` call in `docclass_executor.rs` at all. At and above the gate that credential returns a FAILED receipt carrying `DOCCLASS_SIGNATURE_UNSUPPORTED` (`crates/state/src/lib.rs:594`), before the deduct, where the arm's own duplicate-id refusal returns. **Both halves of the claim are refused** — a non-zero `issuer_signature` and a non-empty `issuer_key_id` — because they are two different assertions: that something was signed, and that a particular key signed it. A credential with an all-zero signature and an empty key id asserts nothing and is issued exactly as before, on both credential families. **The gate closes the CLAIM, not the credential.** **Verification was attempted first and refused, against the tree's own convention rather than in the abstract.** The convention is R30's: a domain separator, a blake3 digest over an explicitly enumerated fixed-width field set built ON the wire type (`ConsentEnvelope::grant_signing_input` under `SRC874-CONSENT-GRANT:v1:`), and an ed25519 check whose public key is IN the payload and must derive to an address IN the payload. DocClass satisfies none of the three: it carries `issuer: Address` and `issuer_key_id: String`, a NAME whose resolution against `DocClassIssuer.keys` no rule states — the list carries `active`, `is_primary` and `expires_at`, and nothing says whether a signature made under a key later rotated out still verifies — and its credentials are half variable-length `String` (`jurisdiction`, `institution_id`, `payload_hint`, `issuer_key_id`, an arbitrary attribute list) with no framing convention. A rule that computes the wrong preimage refuses every LAWFUL credential, which is worse than the gap.
+
+**2. Dependency ordering.** None at load: §0.7 constrains five things and this is not among them. Rule (4) applies as to every remediation gate. **One interaction worth reading rather than discovering:** R38 (`docclass_unknown_attribute_refused`) refuses a different field of the same payload, so a client fixing one and not the other still fails; the two are independent and either order is legal.
+
+**3. Persistent data impact.** **None at or above the height** — a refused issuance writes no row. The residue is on both sides of it and should be read as permanent: **every credential issued BELOW the height keeps the signature and key id it recorded**, and `docclass_getCredential` keeps publishing them, so the decorative-signature claim this gate exists to stop is permanent for every credential already carrying one. Activation stops new ones. **And the half the gate cannot reach:** `RevokeCredential` still writes `[0u8; 64]` into `RevocationRecord.signature`, a field the wire type documents as "Signature over the revocation". Repairing that means changing the stored encoding — a consensus change with nothing to put there — or the wire type. Zero is at least the honest value, and it is pinned by `docclass_signatures_are_written_as_zero_and_checked_as_nothing`.
+
+**4. Rollback in effect.** **A and B.** A is the lever and it is a CLIENT change, not an operator one: an issuer who wants a credential submits an all-zero `issuer_signature` and an empty `issuer_key_id`. That has to happen before the height, on every issuing client, which makes this one of the gates whose real cost is a rollout rather than a genesis edit. B is a DocClass signing standard: if one is later defined, a further height can start verifying, and this gate becomes the interval in which the chain declined to pretend. There is no D — nothing moved value.
+
+**5. Monitoring signal.** M4 on `IssueCredential`: the refusal names VERIFICATION as unsupported, so a receipt attributes it without any other instrument. **M6 covers this family** — `docclass_getCredential` returns `issuer_signature` and `issuer_key_id` — so the working signal is checkable in one call: **no credential issued at or above the height carries a non-zero signature or a non-empty key id.** The misbehaving signal is an issuer who cannot issue at all, which is the intended cost and is not distinguishable in the receipt from a client that has simply not been upgraded. No counter. Pinned by `a_credential_asserts_an_uncheckable_signature_below_the_gate_and_not_above_it` and `either_half_of_the_signature_claim_is_refused_on_either_credential_family` (`crates/state/tests/docclass_closure_gates.rs`).
+
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
+
+---
+
+### R37 — `docclass_credential_validity_bound_enabled_from_height`
+*accessor `DocClassExecutor::credential_validity_bound_activation, crates/state/src/docclass_executor.rs:506`* — cost shape **REFUSAL ONLY**
+
+**1. Affected behaviour.** Row AU-37, the `max_credential_validity` third. Below the gate the field is declared, defaulted, reported over `docclass_getConfig` and **read by no execution path**, so a credential declaring `valid_from: 0` and `expires_at: u64::MAX` is accepted against a configured ten-year maximum and the unbounded window is STORED. At and above the gate an issuance whose `expires_at - valid_from` exceeds a non-zero `max_credential_validity` returns a FAILED receipt carrying `DOCCLASS_CREDENTIAL_VALIDITY_TOO_LONG` (`crates/state/src/lib.rs:606`), before the deduct. **The blocker was the UNIT, and the unit is settled from the code rather than guessed from the field name.** The chain's canonical block timestamp is MILLISECONDS since the epoch: `PoaEngine::current_timestamp` builds it with `SystemTime::now().duration_since(UNIX_EPOCH).as_millis()` (`crates/consensus/src/poa.rs`), and `BlockHeader::timestamp` documents itself "(ms since epoch)". A credential's `valid_from` and `expires_at` are the same `Timestamp` alias as that field, so their difference is a duration in milliseconds and the bound is one too. The field's own doc comment said "in seconds" — a unit matching no clock in this tree — and now says milliseconds and names where that comes from. **Two configurations pass through untouched, each because the field's own documentation says so:** `max_credential_validity == 0` is NO LIMIT and is the default, so an operator who has configured nothing sees no change at the height; `expires_at == 0` is NO EXPIRY, so bounding it would refuse the credential the wire type calls unexpiring.
+
+**2. Dependency ordering.** None at load; §0.7 rule (4) applies. **This is the only gate in the packet whose effect depends on a NON-GATE genesis field**, and that is worth stating: with `docclass.max_credential_validity` left at its default of 0 the height changes nothing at all. An owner scheduling it is scheduling a rule that does nothing until a second, separate edit to `DocClassParams` is made — and that second edit is NOT itself gated, so it takes effect on the block after the genesis is reloaded, at whatever height that is. The gate bounds WHETHER the field is read; the field bounds WHAT it refuses.
+
+**3. Persistent data impact.** **None at or above the height.** Credentials issued BELOW it keep whatever window they recorded, including unbounded ones, and nothing re-examines them: the rule is applied at ISSUANCE and never at read, so an over-long credential written below the height stays valid, stays readable and stays unexpiring for ever. An owner should not read this height as "no credential on this chain outlives the maximum".
+
+**4. Rollback in effect.** **A and B**, and A here is unusually clean because it is an OPERATOR lever rather than a client one: setting `max_credential_validity` back to 0 disables the rule without touching the height. That makes this the one gate in the set whose effect can be withdrawn after its height has passed, and the reason is that the height gates a READ of a mutable parameter rather than a rule with its own constant. B would be a different bound. No C — no row changes shape. No D.
+
+**5. Monitoring signal.** M4 on `IssueCredential`, and the refusal names the bound's UNIT, deliberately: milliseconds is the one thing a submitter cannot infer from the wire type, where `valid_from` and `expires_at` are bare `u64`s. **M6 covers the check's inputs** — `docclass_getCredential` returns both timestamps and `docclass_getConfig` returns the configured bound — so the working signal is arithmetic an operator can do from two RPC calls. The misbehaving signal is the one that matters and it is the row's own warning: a LAWFUL credential refused because the bound is being read in the wrong unit. That is what the boundary case in `the_validity_bound_is_read_and_is_read_in_milliseconds` (`crates/state/tests/docclass_closure_gates.rs`) exists to catch — a window exactly equal to the bound is accepted and one MILLISECOND more is not, so the comparison's granularity is pinned as a number rather than asserted as prose. No counter.
+
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
+
+---
+
+### R38 — `docclass_unknown_attribute_refused_enabled_from_height`
+*accessor `DocClassExecutor::unknown_attribute_refused_activation, crates/state/src/docclass_executor.rs:534`* — cost shape **REFUSAL ONLY**
+
+**1. Affected behaviour.** Row D-19b, the half no height closed. R23 (`docclass_credential_schema`) extends the core field bounds, the attribute NAME cap and the per-attribute VALUE cap to every academic subcode, and deliberately leaves the attribute KEYS unrestricted for the subcodes whose standard lists none — 813 professional licence, 814 government id, 815 employment verification, and any later academic subcode — because inventing three allowlists in a remediation pass would be writing standard. So **above R23 an SRC-813 carrying an attribute named `ssn` is VALID**, while the same key on an SRC-810 transcript is refused by the allowlist that subcode does have. This gate invents no allowlist either. It takes the other reading of "no allowlist exists": a subcode whose standard names no public attribute classifies no key, so EVERY key on it is unknown, and an unknown key fails closed. At and above the height a credential on an uncovered subcode carrying ANY attribute returns a FAILED receipt carrying `DOCCLASS_UNKNOWN_ATTRIBUTE_REFUSED` (`crates/state/src/lib.rs:617`) before the deduct; one carrying NO attributes is issued exactly as before; and 810, 811 and 812 keep the lists they already have and keep taking the keys those lists classify. **The policy decision the row says is a policy decision is left open**, for a later standard to make by supplying an allowlist — at which point this gate stops refusing that subcode without any further height.
+
+**2. Dependency ordering.** None at load; §0.7 rule (4) applies. **A real soft ordering against R23, in the opposite direction from the obvious one:** this gate does NOT require R23, and the two are about different things — R23 extends checks that already existed to families that lacked them, this one refuses a family's attributes outright. Opening this alone is coherent and is strictly stronger on the uncovered subcodes than opening R23 alone. The packet puts both in Wave 1 (R23 and this one), which means an operator gets the caps and the key refusal at the same block; that is a schedule fact and not a requirement.
+
+**3. Persistent data impact.** **None at or above the height.** Credentials issued below it keep the attributes they recorded — including keys on this module's own explicitly-disallowed PII list — and nothing removes them. **That is the residue an owner should weigh**, because it is the whole reason the row exists: the gate stops new PII-shaped keys reaching an uncovered subcode and retracts none of the ones already there.
+
+**4. Rollback in effect.** **A and B.** A is a client change: an issuer on an uncovered subcode submits the credential with an empty attribute list, which costs them the attributes and nothing else. B is the real exit and is the one to plan for: **defining an allowlist for 813, 814 or 815 narrows this gate without a further height**, because the refusal is keyed on the subcode having no list rather than on a constant. That makes this the only gate in the set that a later standard can relax by addition. No C, no D.
+
+**5. Monitoring signal.** M4 on `IssueCredential`: the refusal names the SUBCODE's missing allowlist rather than the key, because no other key would have been accepted either. **M6 covers it** — `docclass_getCredential` returns `metadata.attributes` — so the working signal is that no credential on an uncovered subcode issued at or above the height carries any attribute at all. The misbehaving signal is an issuer with a legitimate, non-PII attribute losing the ability to record it; that is the intended cost, it is not distinguishable in the receipt, and the remedy is B rather than a rollback. No counter. Pinned by `an_unclassified_attribute_is_stored_below_the_gate_and_refused_above_it` (`crates/state/tests/docclass_closure_gates.rs`), which runs the SAME attribute key against an uncovered subcode and a covered one so the assertion is about the subcode and not about a validator that refuses everything.
+
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
+
+---
+
+### R39 — `subsystem_ambiguous_policy_id_refused_enabled_from_height`
+*accessor `subsystem_policy_id_activation, crates/state/src/lib.rs:550`* — cost shape **REFUSAL ONLY**
+
+**1. Affected behaviour.** Row AU-8. Thirteen wire types across three subsystems carry a `policy_id: [u8; 32]` — Healthcare `ProviderProfile`, `MembershipRecord`, `ConsentEnvelope`, `Prescription`; Property `AssetAnchor`, `TitleEvent`, `Encumbrance`, `InsuranceCoverage`, `InsuranceClaim`; Agreement `AgreementCommitment`, `AttestationPacket`, `IpRightsAction`, and `ExecutorLink`'s `activation_policy_id` — and below the gate every one is written from the payload and consulted by no guard. **What makes that unsafe rather than merely unused is that nothing in this tree says WHICH NAMESPACE the value is in:** a policy-ACCOUNT id, which `PolicyAccountExecutor::v_get_policy_account` could resolve and which is mechanically reachable from the state crate, or a COMMITMENT to an off-chain policy document, which it could not. The two are typed identically so the compiler cannot tell them apart, no subsystem executor names `PolicyAccount` at all, and no `policy_id` in any fixture is a policy-account key. Binding them would be inventing the binding; binding them WRONG would refuse every lawful transaction of the other kind. At and above the gate a NON-ZERO `policy_id` returns a FAILED receipt carrying `AMBIGUOUS_POLICY_ID_UNRESOLVABLE` (`crates/state/src/lib.rs:581`), before the deduct, in **sixteen** arms. Sixteen and not thirteen: the three SUPERSESSION arms write a replacement of the same type, and a gate that refused the claim on creation while leaving supersession open would close nothing — the same lesson §0.7 rule (5) encodes for R30. `[0u8; 32]` is this tree's absent sentinel, the same null `Address::ZERO` and `Hash::ZERO` are, and stays accepted at every height, so an operation that names no policy is untouched. **The three proof envelopes are deliberately out of reach** — `HealthcareProofEnvelope`, `PropertyProofEnvelope` and `AgreementProofEnvelope` carry `policy_ids: Vec<PolicyId>` — because Property `SubmitProof` already refuses under R32 and every `VerifyProof` under `subsystem_proof_unsupported`, so a third refusal on an operation two gates already refuse would say nothing new.
+
+**2. Dependency ordering.** None at load; §0.7 rule (4) applies. **This is the widest-blast-radius gate in the packet and the ordering that matters is not a load rule but a reach one:** it touches three subsystems at once, on one field, and it is ONE field deliberately — there is no configuration in which an operator wants a `policy_id` to be unresolvable in Property and meaningful in Healthcare, because the ambiguity is a fact about the tree and not about a subsystem. An owner who wants a narrower blast radius does not get it by scheduling differently; they get it by resolving the namespace, which is the B exit below.
+
+**3. Persistent data impact.** **None at or above the height.** Every row already carrying a non-zero `policy_id` keeps it, and every RPC that returns one keeps returning it, so the unresolvable claim is permanent for everything already written — this gate stops new ones. **No row changes shape and no read path changes**, so a consumer reading `policy_id` sees exactly what it saw before, on old rows and on the zero-valued new ones alike.
+
+**4. Rollback in effect.** **A and B.** A is a client change across three subsystems: submit `[0u8; 32]`. That is the widest client-side rollout item in the packet and should be costed as such — every issuer, every registrar and every agreement party has to stop sending a value the chain has been storing since genesis. B is the real exit: **deciding what a `policy_id` names**, which would let a later height resolve rather than refuse. Nothing in this schedule supplies that decision. No C — no row shape changes. No D — nothing moved value.
+
+**5. Monitoring signal.** M4 on all three subsystems: the refusal names the AMBIGUITY and not the value, so a receipt is unambiguous about which claim was refused. **M6 covers part of it** — `property_getAsset`, `healthcare_getProvider` and their siblings return `policy_id` — so the working signal is that no row created at or above the height carries a non-zero one. The misbehaving signal is a lawful operation that genuinely needed to name a policy being unable to; that is the intended cost, and because it is intended there is no instrument that distinguishes it from the gate working. No counter. Pinned behaviourally by `a_property_asset_claims_an_unresolvable_policy_below_the_gate_and_not_above_it`, `a_healthcare_provider_...` and `an_agreement_...`, and structurally by `every_arm_that_stores_a_policy_id_calls_the_refusal`, which reads the three executors and requires all sixteen arms to call the guard (`crates/state/tests/ambiguous_policy_id_gate.rs`). The structural test is the one that matters for reach: the realistic failure in sixteen near-identical guards is a missing one, not a wrong one.
+
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
+
+---
+
+### R40 — `nft_royalty_operation_unsupported_enabled_from_height`
+*accessor `NftExecutor::royalty_operation_unsupported_activation, crates/state/src/nft_executor.rs:479`* — cost shape **REFUSAL ONLY**
+
+**1. Affected behaviour.** Rows RY-2 and RY-3, the residue the two existing royalty gates leave between them. R33 (`nft_unpayable_royalty_refused`) refuses a non-zero `royalty_bps` at CREATION, which is the only place `royalty_bps` can be set. R19 (`nft_update_path_parity`) refuses a `new_royalty_recipient` only for a collection whose `royalty_bps` is ZERO, which is the rule creation applies. **Neither reaches a collection created BELOW R33 with a non-zero `royalty_bps`**: its recipient stays settable, re-settable and published by `nft_getCollection`, for ever. At and above this height an `UpdateCollectionConfig` carrying a `new_royalty_recipient` returns a FAILED receipt carrying `ROYALTY_OPERATION_UNSUPPORTED` (`crates/state/src/lib.rs:630`), for EVERY collection, before any field is written — and an update carrying only `new_base_uri` is applied exactly as before, so the arm is not shut down. **The ground is the same as R33's and is re-established rather than inherited:** `NftTransferData` is `{ to }`, `execute_transfer` and `v_transfer_token` move a token and no balance, and **nothing anywhere in the tree computes a royalty amount** — so the recipient field records who would be paid out of a price that does not exist.
+
+**2. Dependency ordering.** None at load; §0.7 rule (4) applies. **Deliberately a separate height from R19, and the reason is what each one claims:** parity says the update path should apply the rule CREATION applies, and would be right even if royalties were paid; this says the operation is unpayable at all. An operator must be able to take the first without the second, and a reader of either receipt must be able to tell which claim was refused. The refusal here is placed AHEAD of the parity refusal in the arm, because it is the wider claim. Together with R33 the three cover the whole royalty surface: creation, the zero-royalty update, and the paying-collection update.
+
+**3. Persistent data impact.** **None at or above the height** — a refused update writes nothing, and the collection keeps whatever recipient it already held. **The residue is the same one R33 carries and is worth repeating because this gate does not fix it either:** every collection created below R33 keeps its `royalty_bps` and its `royalty_recipient`, and `nft_getCollection` keeps publishing both. A marketplace reading the chain after both heights is still told a royalty exists on those collections. What the pair stops is new claims and changes to old ones.
+
+**4. Rollback in effect.** **A and B.** A is a client change and a narrow one: submit an `UpdateCollectionConfig` with `new_royalty_recipient: None`. B is the royalty protocol itself — a two-sided order, a standing listing or an escrowed bid, which is a new wire type and for two of the three a new state family — and R33 already records that as a future design rather than a superseding narrow. No C. **No D, and the reason is the point of the whole royalty group: no royalty has ever been paid on this chain, so no recipient loses income.**
+
+**5. Monitoring signal.** M4 on `UpdateCollectionConfig`, and **M6 `nft_getCollection`**: the working signal is that no collection's `royalty_recipient` changes at or above the height, checkable against any collection an operator is watching. The misbehaving signal is demand for a feature the chain never had, which makes this — like R33 — a gate whose "misbehaviour" is a product decision rather than a fault. No counter. Pinned by `a_royalty_recipient_stops_being_recordable_on_any_collection` (`crates/state/tests/nft_update_path_parity_gate.rs`), which uses a collection paying 250 bps precisely so the refusal cannot be R19's.
+
+**6. Recommended wave.** Wave 1. **Proposed height:** — owner decision —
+
+---
+
 ## Part 1B — The 18 PREDATING gates
 
 `GATES_PREDATING_ACTIVATION_RECORDING` (`crates/genesis/src/lib.rs:2783`) is a **closed** list: it names the gates that shipped in binaries which produced existing blocks, which is a historical fact and cannot grow. A gate on it **may legally sit at or below the head**; every other gate may not (§0.4).
 
-Eight of the eighteen have a passed height. Two are confirmed dormant over RPC. **Eight are neither RPC-visible nor named in the production checklist's genesis**, so their deployed value cannot be established from outside a node today. That is a consequence of `chain_getChainParams` serialising only six of the fifty-eight, and it is exactly what `chain_getActivationStatus` exists to fix.
+Eight of the eighteen have a passed height. Two are confirmed dormant over RPC. **Eight are neither RPC-visible nor named in the production checklist's genesis**, so their deployed value cannot be established from outside a node today. That is a consequence of `chain_getChainParams` serialising only six of the sixty-three, and it is exactly what `chain_getActivationStatus` exists to fix.
 
 For the eight that have passed, fields 1-3 are history rather than a decision, and field 6 is "nothing to schedule". They are stated anyway, because an owner reading a 56-gate table needs to know which rows are already spent.
 
@@ -1423,7 +1537,7 @@ neither. `None` does not mean "always enforce" — it means **phase one forever*
 no peer is ever refused for silence.
 
 **2. Dependency ordering.** **This is one half of §0.7 rule (4), and it is the
-only gate in the 58 whose height is constrained by the heights of other gates at
+only gate in the 63 whose height is constrained by the heights of other gates at
 load time:**
 
 ```
@@ -1499,7 +1613,7 @@ block, never folded into a state root, never sent over the wire. Two nodes that
 disagree about this height cannot fork; one of them simply refuses a reorg the
 other would perform.
 
-**4. Rollback in effect.** **B**, and uniquely among the 58, a genuine operational
+**4. Rollback in effect.** **B**, and uniquely among the 63, a genuine operational
 option: because the value is not consensus, a node that refuses a reorg can be
 restarted under a corrected genesis without the chain caring — subject to §0.5's
 freeze, which still applies because the field is in the activation digest.
@@ -1582,7 +1696,7 @@ before the row count is measured.
 ---
 ## Part 2 — The recommendation: one prerequisite, five waves, one deferral, two out of band
 
-Part 1 gives the owner 56 rows. This part is the schedule: **the fewest waves
+Part 1 gives the owner 61 rows. This part is the schedule: **the fewest waves
 that are still safe, with heights.** It is a recommendation, not a setting — no
 height is written anywhere in this branch.
 
@@ -1654,16 +1768,36 @@ be decided *with* Wave 1 and not after it.
 Recommended: **the same height as Wave 1**, or earlier. Equal satisfies `<=`.
 
 Wave 0 also contains the thing that is not a height at all: **the binary
-rollout.** Every one of the 35 is code that is not on mainnet (§0.2). A genesis
+rollout.** Every one of the 40 is code that is not on mainnet (§0.2). A genesis
 edit without the binary is a number nothing reads. **R30 adds a second rollout
 item that is not a binary:** every client that submits `GrantConsent` must be
-upgraded to the `ConsentGrantRequest` payload before that height, and the
-`sumchain-wire` version/publish decision behind it is not made in this branch.
+upgraded to the `ConsentGrantRequest` payload before that height. **The
+`sumchain-wire` VERSION half of that item is settled**: the crate is 0.5.0, not
+0.4.0, and the workspace dependency spec moves with it, because a byte-frozen
+published crate gaining a public type is the next API and not a patch of the
+current one. The PUBLISH half is still not decided in this branch.
 
-#### Wave 1 — refusal-only. 19 gates. Recommended height **13,782,992** (head + 14 days, ≈2026-10-03)
+**Five of the 40 are new in the release-closure wave — R36 to R40 — and four of
+them add a second client-side rollout item each**, which an owner scheduling
+them should read as a rollout cost rather than a genesis edit: R36 refuses a
+credential carrying a signature or a key id, R37 refuses one whose validity
+window exceeds the configured maximum, R38 refuses an attribute on an
+unclassified subcode, and R39 refuses a non-zero `policy_id` in sixteen arms
+across three subsystems. Every one of those is a payload a client sends today
+and will have to stop sending. R40 is the exception: it refuses an operator
+action on a collection, not a routine client payload.
+
+#### Wave 1 — refusal-only. 24 gates. Recommended height **13,782,992** (head + 14 days, ≈2026-10-03)
 
 R4, R5, R6, R7, R8, R9, R10, R13, R15, R18, R20, R23, R25, R29, R30, R31, R32,
-R33, R34.
+R33, R34, R36, R37, R38, R39, R40.
+
+The five added by the release-closure wave are all refusal-only and all take the
+same shape as the nineteen before them — a failed receipt ahead of the deduct,
+no row written, no state-root movement on the refusal — so they belong in this
+wave for the reason the others do. **R30 and R5 must be in the same wave or R5
+earlier**, which Wave 1 satisfies by holding both; that is now a load rule
+(§0.7 rule 5) rather than a scheduling note.
 
 The six subsystem authorization gates, DocClass revocation standing, the
 allocation bound, NFT token authority, subsystem proof presence, the no-op
@@ -1762,7 +1896,7 @@ receipts root).
 - **Why only two and not alone each:** they share a signal — M7 plus a
   balance-delta comparison across the height — and R26's check is a one-call
   confirmation (`fee_paid` on a failed NFT receipt becoming non-zero), which is
-  the cleanest working signal of any gate in the 35. It makes 2c self-diagnosing
+  the cleanest working signal of any gate in the 40. It makes 2c self-diagnosing
   in a way 2b is not.
 - **Rollback:** B for R26 (the receipts are in the chain), A/B/D for R19.
 
@@ -1779,7 +1913,7 @@ charged failed receipt.
 - **Why last and alone:** it is the only gate that converts a liveness failure
   into a receipt. If it misbehaves the symptom is a proposer that cannot produce
   — the one symptom that must not be confused with anything else. It is also the
-  only gate in the 35 whose monitoring signal is a metric that actually works
+  only gate in the 40 whose monitoring signal is a metric that actually works
   (M2 / M3), which is a reason to put it where an operator is watching for
   exactly that and nothing else.
 
@@ -1788,7 +1922,7 @@ charged failed receipt.
 | wave | gates | height | ≈ elapsed | ≈ UTC | cost shape |
 |---|---:|---:|---:|---|---|
 | **0** | N1 + the binary rollout | ≤ Wave 1 | — | — | prerequisite (load-enforced) |
-| **1** | 19 | **13,782,992** | 14 days | 2026-10-03 | refusal only |
+| **1** | 24 | **13,782,992** | 14 days | 2026-10-03 | refusal only |
 | **2a** | 4 | **14,588,328** | 28 days | 2026-10-17 | key space |
 | **2b** | 8 | **15,393,664** | 42 days | 2026-10-31 | row content / existence |
 | **2c** | 2 | **16,199,000** | 56 days | 2026-11-14 | value and fee |
@@ -1798,9 +1932,9 @@ charged failed receipt.
 | **not schedulable** | P16, P17 | — | — | — | refused at load |
 | **already passed** | 8 of the 18 | — | — | — | frozen |
 
-19 + 4 + 8 + 2 + 1 + 1 = **35**. Plus N1 in Wave 0, N2 and N3 out of band, and
-the 18 predating = **56**, which is what Part 1 covers. `ChainParams` declares
-**58**; the difference is the two remediation gates Part 0a names as deliberately
+24 + 4 + 8 + 2 + 1 + 1 = **40**. Plus N1 in Wave 0, N2 and N3 out of band, and
+the 18 predating = **61**, which is what Part 1 covers. `ChainParams` declares
+**63**; the difference is the two remediation gates Part 0a names as deliberately
 uncovered, which are not scheduled and are not counted here.
 
 **Every height must be re-derived against the head at the moment of decision.**
@@ -1890,12 +2024,12 @@ in relation to an account-root height.
 
 They are **refused at load** (§0.7 rules 1 and 2). There is no height for the
 owner to decline to set; a genesis carrying one does not start a node. Recorded
-here only so that a reader counting the 58 does not mistake their absence from
+here only so that a reader counting the 63 does not mistake their absence from
 the schedule for an oversight.
 
 ---
 
-## Appendix — the 58, in one table
+## Appendix — the 63, in one table
 
 Order is `activation_heights()` order, which is the digest's order and must never
 be permuted.
@@ -1956,11 +2090,16 @@ be permuted.
 | 52 | `property_state_precondition_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
 | 53 | `property_asset_relationship_enabled_from_height` | REMEDIATION | `None` | **Wave 2b** |
 | 54 | `agreement_party_authority_unsupported_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
-| 55 | `healthcare_consent_subject_signature_enabled_from_height` | REMEDIATION | `None` | **Wave 1** (never before R5) |
+| 55 | `healthcare_consent_subject_signature_enabled_from_height` | REMEDIATION | `None` | **Wave 1** (never before R5 — §0.7 rule 5, refused at load) |
 | 56 | `subsystem_issuer_self_registration_unsupported_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
 | 57 | `property_proof_submission_unsupported_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
 | 58 | `nft_unpayable_royalty_refused_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 59 | `docclass_signature_unsupported_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 60 | `docclass_credential_validity_bound_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 61 | `docclass_unknown_attribute_refused_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 62 | `subsystem_ambiguous_policy_id_refused_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
+| 63 | `nft_royalty_operation_unsupported_enabled_from_height` | REMEDIATION | `None` | **Wave 1** |
 
-**37 REMEDIATION + 18 PREDATING + 3 NEITHER = 58**, matching §0.1. Fifty-six of
-the fifty-eight have a section in Part 1; the two marked NOT COVERED are the
+**42 REMEDIATION + 18 PREDATING + 3 NEITHER = 63**, matching §0.1. Sixty-one of
+the sixty-three have a section in Part 1; the two marked NOT COVERED are the
 ones Part 0a names, and they are the whole of the difference.
