@@ -347,10 +347,15 @@ mod tests {
     #[test]
     fn the_series_set_is_closed_and_bounded() {
         assert_eq!(SERIES_COUNT, FAILURE_SERIES.len() + 5);
-        assert_eq!(snapshot().len(), SERIES_COUNT);
+        // Through `snapshot()` rather than the constant: `SERIES_COUNT < 256`
+        // is const-folded to `assert!(true)` and asserts nothing at run time
+        // (clippy `assert_on_constants`). The emitted length is the thing the
+        // exposition actually pays for anyway.
+        let emitted = snapshot().len();
+        assert_eq!(emitted, SERIES_COUNT);
         assert!(
-            SERIES_COUNT < 256,
-            "the whole metric must stay a few hundred series at most; it is {SERIES_COUNT}"
+            emitted < 256,
+            "the whole metric must stay a few hundred series at most; it is {emitted}"
         );
         // Every emitted subsystem value is one of the declared ones.
         let declared: BTreeSet<&str> = SUBSYSTEMS.iter().copied().collect();
