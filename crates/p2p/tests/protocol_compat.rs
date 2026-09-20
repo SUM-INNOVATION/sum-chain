@@ -122,6 +122,11 @@ fn the_new_wire_variants_are_appended_and_renumber_nothing() {
 #[test]
 fn a_peer_that_predates_the_change_cannot_decode_the_request() {
     /// `SyncRequest` exactly as it was before `GetProtocolId` was appended.
+    ///
+    /// The `Get` prefix is not a naming slip to tidy up: these are a
+    /// transcription of `sumchain_p2p::sync::SyncRequest`, and a reader can only
+    /// check the transcription by eye if the names match the original's.
+    #[allow(clippy::enum_variant_names)]
     #[derive(serde::Deserialize)]
     enum LegacySyncRequest {
         #[allow(dead_code)]

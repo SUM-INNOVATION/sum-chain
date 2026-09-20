@@ -332,7 +332,7 @@ impl<'a> ProviderStore<'a> {
             self.db,
             cf::HEALTHCARE_PROVIDERS,
             page,
-            |v| decode_provider(v),
+            decode_provider,
             |p: &ProviderProfile| p.status == ProviderStatus::Active && keep(p),
         )
     }
@@ -343,7 +343,7 @@ impl<'a> ProviderStore<'a> {
             self.db,
             cf::HEALTHCARE_PROVIDERS,
             page,
-            |v| decode_provider(v),
+            decode_provider,
             |p: &ProviderProfile| p.status == ProviderStatus::Active,
         )
     }

@@ -316,7 +316,7 @@ impl<'a> IdentityRootStore<'a> {
             self.db,
             cf::DOCCLASS_IDENTITY_ROOTS,
             page,
-            |v| decode_identity_root(v),
+            decode_identity_root,
             |i: &IdentityRoot| {
                 i.controller == *controller || i.additional_controllers.contains(controller)
             },
@@ -630,7 +630,7 @@ impl<'a> CredentialStore<'a> {
             self.db,
             cf::DOCCLASS_CREDENTIALS,
             page,
-            |v| decode_credential(v),
+            decode_credential,
             |c: &AcademicCredential| c.subject_address == *holder && subcodes.contains(&c.subcode),
         )
     }
@@ -650,7 +650,7 @@ impl<'a> CredentialStore<'a> {
             self.db,
             cf::DOCCLASS_CREDENTIALS,
             page,
-            |v| decode_credential(v),
+            decode_credential,
             |c: &AcademicCredential| c.subcode == subcode,
         )
     }
@@ -864,7 +864,7 @@ impl<'a> RevocationStore<'a> {
             self.db,
             cf::DOCCLASS_REVOCATIONS,
             page,
-            |v| decode_revocation_record(v),
+            decode_revocation_record,
             |r: &RevocationRecord| r.revoker == *revoker,
         )
     }
@@ -998,7 +998,7 @@ impl<'a> DocClassIssuerStore<'a> {
             self.db,
             cf::DOCCLASS_ISSUERS,
             page,
-            |v| decode_docclass_issuer(v),
+            decode_docclass_issuer,
             |_| true,
         )
     }
@@ -1010,7 +1010,7 @@ impl<'a> DocClassIssuerStore<'a> {
             self.db,
             cf::DOCCLASS_ISSUERS,
             page,
-            |v| decode_docclass_issuer(v),
+            decode_docclass_issuer,
             |i: &DocClassIssuer| i.status.can_issue(),
         )
     }
@@ -1027,7 +1027,7 @@ impl<'a> DocClassIssuerStore<'a> {
             self.db,
             cf::DOCCLASS_ISSUERS,
             page,
-            |v| decode_docclass_issuer(v),
+            decode_docclass_issuer,
             |i: &DocClassIssuer| {
                 i.jurisdictions.is_empty()
                     || i.jurisdictions
@@ -1048,7 +1048,7 @@ impl<'a> DocClassIssuerStore<'a> {
             self.db,
             cf::DOCCLASS_ISSUERS,
             page,
-            |v| decode_docclass_issuer(v),
+            decode_docclass_issuer,
             |i: &DocClassIssuer| i.authorized_subcodes.contains(&subcode),
         )
     }

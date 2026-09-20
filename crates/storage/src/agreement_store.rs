@@ -651,7 +651,7 @@ impl<'a> ExecutorLinkStore<'a> {
             self.db,
             cf::AGREEMENT_EXECUTOR_LINKS,
             page,
-            |v| decode_executor_link(v),
+            decode_executor_link,
             |l: &ExecutorLink| l.agreement_id == *agreement_id,
         )
     }
@@ -673,7 +673,7 @@ impl<'a> ExecutorLinkStore<'a> {
             self.db,
             cf::AGREEMENT_EXECUTOR_LINKS,
             page,
-            |v| decode_executor_link(v),
+            decode_executor_link,
             |l: &ExecutorLink| l.state == ExecutorState::Active,
         )
     }

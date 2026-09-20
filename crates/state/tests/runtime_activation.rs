@@ -20,10 +20,11 @@ use sumchain_storage::candidate::LEGACY_ROOT_COMPATIBILITY_HEIGHT;
 use sumchain_storage::pruner::UNDO_RETENTION_FLOOR;
 
 fn params(journal: Option<u64>, account: Option<u64>) -> ChainParams {
-    let mut p = ChainParams::default();
-    p.application_journal_enabled_from_height = journal;
-    p.account_root_enabled_from_height = account;
-    p
+    ChainParams {
+        application_journal_enabled_from_height: journal,
+        account_root_enabled_from_height: account,
+        ..Default::default()
+    }
 }
 
 /// The release-shaped pair passes.

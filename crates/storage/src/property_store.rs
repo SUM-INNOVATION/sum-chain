@@ -283,7 +283,7 @@ impl<'a> AssetStore<'a> {
             self.db,
             cf::PROPERTY_ASSETS,
             page,
-            |v| decode_asset(v),
+            decode_asset,
             |a: &AssetAnchor| a.status == AssetStatus::Active,
         )
     }

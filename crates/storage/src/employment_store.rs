@@ -229,7 +229,7 @@ impl<'a> EmploymentIssuerStore<'a> {
             self.db,
             cf::EMPLOYMENT_ISSUERS,
             page,
-            |v| decode_issuer(v),
+            decode_issuer,
             |i: &EmploymentIssuerProfile| i.status.is_active(),
         )
     }

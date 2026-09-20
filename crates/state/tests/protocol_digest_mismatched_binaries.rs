@@ -206,10 +206,14 @@ fn the_digest_is_a_function_of_the_genesis_and_the_limits() {
 /// defect walked straight back in.
 #[test]
 fn an_activation_height_difference_still_moves_the_protocol_digest() {
-    let mut a = ChainParams::default();
-    a.healthcare_authorization_enabled_from_height = Some(6);
-    let mut b = ChainParams::default();
-    b.healthcare_authorization_enabled_from_height = Some(7);
+    let a = ChainParams {
+        healthcare_authorization_enabled_from_height: Some(6),
+        ..Default::default()
+    };
+    let b = ChainParams {
+        healthcare_authorization_enabled_from_height: Some(7),
+        ..Default::default()
+    };
 
     let ga = genesis(a);
     let gb = genesis(b);

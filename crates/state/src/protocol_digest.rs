@@ -374,7 +374,7 @@ pub fn protocol_digest_with_limits(
     limits: &[(&str, LimitValue)],
 ) -> Result<Hash> {
     let activation = genesis.activation_digest().map_err(|e| {
-        StateError::Genesis(format!("computing the genesis activation digest: {}", e))
+        StateError::Genesis(format!("computing the genesis activation digest: {e}"))
     })?;
 
     let mut data = Vec::new();

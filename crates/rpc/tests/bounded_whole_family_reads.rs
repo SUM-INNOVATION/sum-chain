@@ -118,8 +118,7 @@ fn assert_refused(err: jsonrpsee::types::ErrorObjectOwned) {
     assert_eq!(
         err.code(),
         -32004,
-        "a page out of bounds must be refused with -32004, got: {:?}",
-        err
+        "a page out of bounds must be refused with -32004, got: {err:?}"
     );
 }
 
@@ -140,7 +139,7 @@ fn seed_tax(db: &Arc<Database>) {
     let ps = TaxPolicyStore::new(db);
     for n in 0..SEEDED {
         cts.put(&TaxClaimTypeEntry {
-            claim_type: format!("tax.seeded.{:05}", n),
+            claim_type: format!("tax.seeded.{n:05}"),
             schema_hash: [1u8; 32],
             risk_level: TaxRiskLevel::Medium,
             recommended_validity_secs: 86_400,
@@ -676,7 +675,7 @@ fn seed_docclass_issuers(db: &Arc<Database>) {
         store
             .put(&DocClassIssuer {
                 address: addr(n),
-                name: format!("issuer-{:05}", n),
+                name: format!("issuer-{n:05}"),
                 issuer_type: DocClassIssuerType::Educational,
                 jurisdictions: vec!["US".to_string()],
                 authorized_subcodes: vec![],
@@ -800,7 +799,7 @@ fn seed_employment_issuers(db: &Arc<Database>) {
             .put(&EmploymentIssuerProfile {
                 issuer_address: addr(n),
                 issuer_class: EmploymentIssuerClass::Employer,
-                display_name: format!("employer-{:05}", n),
+                display_name: format!("employer-{n:05}"),
                 issuer_commitment: [2u8; 32],
                 jurisdiction_code: "US".to_string(),
                 policy_id: [3u8; 32],
@@ -995,7 +994,7 @@ async fn a_caller_that_sends_no_pagination_argument_still_gets_a_useful_answer()
         .expect_err("over-large limit must be refused over the wire");
     match err {
         JsonRpseeError::Call(obj) => assert_eq!(obj.code(), -32004),
-        other => panic!("expected a -32004 call error, got {:?}", other),
+        other => panic!("expected a -32004 call error, got {other:?}"),
     }
 
     handle.stop().unwrap();

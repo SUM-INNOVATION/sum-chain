@@ -740,6 +740,15 @@ fn describe(v: &Option<Vec<u8>>) -> String {
 /// irreversible checkpoint. See [`crosses_activation_checkpoint`] for the
 /// argument, and for why choosing the record per block does not make a crossing
 /// unwind correct.
+// The refusal is large on purpose: clippy measures `CurrentValueMismatch` at
+// 136 bytes, which is the block, the height, the column family, the key and
+// both rendered values -- a refusal an operator cannot act on is not worth
+// returning. Boxing it is not a local change. `UndoRefusal` is this module's
+// public error type and is matched by variant at nineteen sites in
+// `crates/consensus`, so `Box<UndoRefusal>` would rewrite all of them: a
+// signature change on the consensus reorg path, which is not something to make
+// inside a lint pass.
+#[allow(clippy::result_large_err)]
 pub fn stage_branch_unwind(
     db: &Database,
     batch: &mut WriteBatch<'_>,

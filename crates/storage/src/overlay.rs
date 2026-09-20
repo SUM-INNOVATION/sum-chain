@@ -1380,20 +1380,18 @@ mod tests {
     }
     // ── Per-transaction scopes ──────────────────────────────────────────────
 
+    /// One observed row: the column family, the key, and the value (`None` for
+    /// an absent one).
+    type Row = (String, Vec<u8>, Option<Vec<u8>>);
+
     /// EVERYTHING observable, values included.
     ///
     /// Stronger than `snapshot` above, which compares the pre-image KEYS. A
     /// rollback that restored the right set of keys with the wrong values would
     /// pass that one, and the wrong value is precisely what a reversal log gets
     /// wrong when it replays in the wrong order.
-    fn deep_snapshot(
-        ov: &ApplicationOverlay<'_>,
-    ) -> (
-        u64,
-        Vec<(String, Vec<u8>, Option<Vec<u8>>)>,
-        Vec<(String, Vec<u8>, Option<Vec<u8>>)>,
-    ) {
-        let mut writes: Vec<(String, Vec<u8>, Option<Vec<u8>>)> = ov
+    fn deep_snapshot(ov: &ApplicationOverlay<'_>) -> (u64, Vec<Row>, Vec<Row>) {
+        let mut writes: Vec<Row> = ov
             .writes
             .iter()
             .flat_map(|(c, m)| {
@@ -1410,7 +1408,7 @@ mod tests {
             })
             .collect();
         writes.sort();
-        let mut pre: Vec<(String, Vec<u8>, Option<Vec<u8>>)> = ov
+        let mut pre: Vec<Row> = ov
             .preimages
             .iter()
             .flat_map(|(c, m)| {
@@ -1435,7 +1433,7 @@ mod tests {
         assert_eq!(ov.rollback_transaction(), None);
         assert_eq!(
             ov.logical_bytes(),
-            1 + 0 + 1 + 4096,
+            1 + 1 + 4096,
             "the key once for the captured (absent) pre-image and once for the \
              write, plus the value; no scope changed the accounting"
         );
