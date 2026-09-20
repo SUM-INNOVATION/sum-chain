@@ -363,6 +363,26 @@ impl MetricsSnapshot {
         add_counter(&mut output, "sumchain_txs_submitted_total", "Total transactions submitted via RPC", self.transactions.txs_submitted);
         add_counter(&mut output, "sumchain_tx_validation_errors_total", "Total transaction validation errors", self.transactions.tx_validation_errors);
 
+        // P2P metrics
+        add_metric(&mut output, "sumchain_peer_count", "Current number of connected peers", self.p2p.peer_count);
+        add_counter(&mut output, "sumchain_peers_connected_total", "Total peers connected (lifetime)", self.p2p.peers_connected);
+        add_counter(&mut output, "sumchain_peers_disconnected_total", "Total peers disconnected (lifetime)", self.p2p.peers_disconnected);
+        add_counter(&mut output, "sumchain_p2p_messages_received_total", "Total P2P messages received", self.p2p.messages_received);
+        add_counter(&mut output, "sumchain_p2p_messages_sent_total", "Total P2P messages sent", self.p2p.messages_sent);
+
+        // RPC metrics
+        add_counter(&mut output, "sumchain_rpc_requests_total", "Total RPC requests", self.rpc.requests_total);
+        add_counter(&mut output, "sumchain_rpc_requests_success_total", "Total successful RPC requests", self.rpc.requests_success);
+        add_counter(&mut output, "sumchain_rpc_requests_failed_total", "Total failed RPC requests", self.rpc.requests_failed);
+        add_counter(&mut output, "sumchain_rpc_rate_limited_total", "Total requests rejected by rate limiter", self.rpc.requests_rate_limited);
+        add_counter(&mut output, "sumchain_rpc_unauthorized_total", "Total unauthorized RPC requests", self.rpc.requests_unauthorized);
+
+        // Mempool metrics
+        add_metric(&mut output, "sumchain_mempool_size", "Current mempool size", self.mempool.size);
+        add_counter(&mut output, "sumchain_mempool_txs_added_total", "Total transactions added to mempool", self.mempool.txs_added);
+        add_counter(&mut output, "sumchain_mempool_txs_removed_total", "Total transactions removed from mempool", self.mempool.txs_removed);
+        add_counter(&mut output, "sumchain_mempool_txs_rejected_total", "Total transactions rejected by mempool", self.mempool.txs_rejected);
+
         // ── the failed-receipt counter, per subsystem and code ──────────────
         //
         // Emitted as a LABELLED family, from the closed table in
@@ -395,26 +415,6 @@ impl MetricsSnapshot {
             ));
         }
         output.push('\n');
-
-        // P2P metrics
-        add_metric(&mut output, "sumchain_peer_count", "Current number of connected peers", self.p2p.peer_count);
-        add_counter(&mut output, "sumchain_peers_connected_total", "Total peers connected (lifetime)", self.p2p.peers_connected);
-        add_counter(&mut output, "sumchain_peers_disconnected_total", "Total peers disconnected (lifetime)", self.p2p.peers_disconnected);
-        add_counter(&mut output, "sumchain_p2p_messages_received_total", "Total P2P messages received", self.p2p.messages_received);
-        add_counter(&mut output, "sumchain_p2p_messages_sent_total", "Total P2P messages sent", self.p2p.messages_sent);
-
-        // RPC metrics
-        add_counter(&mut output, "sumchain_rpc_requests_total", "Total RPC requests", self.rpc.requests_total);
-        add_counter(&mut output, "sumchain_rpc_requests_success_total", "Total successful RPC requests", self.rpc.requests_success);
-        add_counter(&mut output, "sumchain_rpc_requests_failed_total", "Total failed RPC requests", self.rpc.requests_failed);
-        add_counter(&mut output, "sumchain_rpc_rate_limited_total", "Total requests rejected by rate limiter", self.rpc.requests_rate_limited);
-        add_counter(&mut output, "sumchain_rpc_unauthorized_total", "Total unauthorized RPC requests", self.rpc.requests_unauthorized);
-
-        // Mempool metrics
-        add_metric(&mut output, "sumchain_mempool_size", "Current mempool size", self.mempool.size);
-        add_counter(&mut output, "sumchain_mempool_txs_added_total", "Total transactions added to mempool", self.mempool.txs_added);
-        add_counter(&mut output, "sumchain_mempool_txs_removed_total", "Total transactions removed from mempool", self.mempool.txs_removed);
-        add_counter(&mut output, "sumchain_mempool_txs_rejected_total", "Total transactions rejected by mempool", self.mempool.txs_rejected);
 
         output
     }
@@ -656,7 +656,10 @@ mod execution_error_exposition_tests {
                     .all(|c| c.is_ascii_digit() || c == '_' || c.is_ascii_lowercase()),
                 "code label {code:?} is not a stable identifier"
             );
-            assert!(code.len() <= 24, "code label {code:?} is too long to be an identifier");
+            assert!(
+                code.len() <= 24,
+                "code label {code:?} is too long to be an identifier"
+            );
         }
     }
 
@@ -666,9 +669,7 @@ mod execution_error_exposition_tests {
     fn the_aggregate_reads_the_execution_path_registry() {
         let m = Metrics::new();
         let before = m.snapshot().transactions.tx_execution_errors;
-        sumchain_primitives::tx_error_metrics::record(
-            &sumchain_primitives::TxStatus::InvalidNonce,
-        );
+        sumchain_primitives::tx_error_metrics::record(&sumchain_primitives::TxStatus::InvalidNonce);
         assert!(
             m.snapshot().transactions.tx_execution_errors > before,
             "the aggregate is still reading the dead local counter"
