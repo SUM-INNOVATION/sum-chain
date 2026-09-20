@@ -232,6 +232,44 @@ compare it across the height, and nothing in this release changes that.
 
 ---
 
+## 5b. What the counter does NOT count: proposal screening
+
+`sumchain_tx_execution_errors_total` counts refusals that produced a COMMITTED
+RECEIPT. Refusals seen during proposal screening are deliberately excluded --
+the `record` call sits behind `screening.is_none()` at the receipt-construction
+seam.
+
+**Why, and what it means for reading the number.** A proposer screens a
+candidate selection in one pass to find every transaction that cannot execute,
+then builds a block from what survives. The refusals that pass finds belong to
+a block that will never exist. Counting them would make the series a measure of
+proposer effort rather than of chain behaviour, and it would do so unevenly:
+
+* **Screening attempts may REPEAT.** The same permanently-invalid transaction
+  can be screened by every proposer that selects it, and by the same proposer on
+  successive slots until it is evicted from the mempool. One offending
+  transaction could therefore contribute many counts while producing no receipt
+  at all.
+* **Screening attempts do NOT correspond to committed receipts.** A screened-out
+  transaction is absent from the block. There is no receipt, no fee, and nothing
+  an importing node ever sees. A dashboard mixing the two would show refusals
+  with no on-chain trace behind them.
+* **The counts are proposer-local.** Screening is proposer policy; an importing
+  node does no screening. So the same chain history would produce different
+  totals on a validator and on a full node, and comparing two validators'
+  counters -- which `wave1-monitor.sh agree` does -- would report disagreement
+  that is not disagreement.
+
+So a Wave 1 activation signal read from this counter is a count of refusals that
+actually reached the chain. That is the property that makes the cross-validator
+comparison meaningful: two validators importing the same blocks see the same
+receipts, and therefore the same increments.
+
+Screening has its own reporting: `ProposalScreening` records every offender,
+its class, and the bytes charged, and `PoAEngine::proposal_executions` counts
+screening passes. Those are the numbers to read when the question is what a
+proposer is spending its slot on, and they are separate on purpose.
+
 ## 6. Related
 
 * [activation-rollout-evidence.md](activation-rollout-evidence.md) — the

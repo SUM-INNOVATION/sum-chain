@@ -284,6 +284,51 @@ than passing review.
 
 ---
 
+## AL-13: the accepted release basis, in one place
+
+Audit row AL-13 asked for a comparison the tree could not make, because the
+third number did not exist: eight subsystems claim bounded memory behaviour and
+nothing stated what memory a validator is specified to have. The owner supplied
+it by decision. This section is that decision and its arithmetic, recorded
+together so a reader does not have to assemble it from five files.
+
+| | value | status |
+|---|---|---|
+| supported production validator memory reservation | **4 GiB** = 4,294,967,296 B | operational minimum, by owner decision |
+| block write-set ceiling | **256 MiB** = 268,435,456 B | consensus constant, in the protocol digest |
+| largest single committable row | 128 MiB = 134,217,728 B | consensus constant |
+| **measured worst-case peak-live amplification** | **4.00x the largest row** | MEASURED, not modelled |
+| resulting worst-case peak live bytes | **512 MiB** = 536,870,912 B | = 12.5% of the 4 GiB reservation |
+| remaining headroom assumption | the other **87.5%** (3.5 GiB) | process, RocksDB block cache, networking, allocator slack |
+| Kubernetes QoS | **Burstable** | because `requests.cpu` 500m differs from `limits.cpu` 2000m |
+| memory request and limit | **4Gi / 4Gi**, equal | unchanged by the QoS correction |
+
+**The amplification figure is measured, and that matters.** 4.00x is what
+`release_ceiling_allocation` observes for an `AddKey` against a 1,048,809 B row
+-- `PEAK LIVE 4198522 B (4.00x row)` -- not a factor someone chose. The safety
+statement is then arithmetic on it: a 128 MiB largest committable row at 4x is
+512 MiB of peak live memory, which is an eighth of the reservation.
+
+**Sufficiency is a separate and much weaker claim, and is also measured.** A
+full block at the declared limits charges 8,072,363 B against the 256 MiB
+ceiling -- 33.3x of headroom. So the ceiling is nowhere near binding in normal
+operation; it exists to bound the pathological case, and 256 MiB is chosen to
+be conservative against the 4 GiB envelope rather than to be tight against
+observed traffic.
+
+**Why this is coherent only now.** The ceiling was always described as derived
+from a 4 GiB envelope, while the protocol artifact denied that any validator
+memory minimum existed and the shipped manifests reserved 1 GiB. The derivation
+divided by a number nothing guaranteed. With 4 GiB stated as the supported
+profile and reserved by `requests.memory`, the division has a basis.
+
+**What is NOT claimed.** The canonical B0 artifact is not re-ratified and its
+`b0_pre_spec_hash` is unchanged. It continues to describe protocol
+ELIGIBILITY -- no minimum CPU or RAM to participate -- and that remains true.
+The supported deployment profile supplies the operational requirement. The two
+are different claims about different questions and both hold; see
+`docs/b0-pre/protocol/VALIDATOR-MEMORY-FLOOR-RECONCILIATION.md`.
+
 ## What this does NOT settle
 
 `ACTIVATION-AUDIT` row **AL-13** asks whether arbitrary input can reach an
