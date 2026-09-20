@@ -128,6 +128,39 @@ pub enum GenesisError {
         gate: &'static str,
         height: u64,
     },
+
+    /// `healthcare_consent_subject_signature_enabled_from_height` is `Some(_)`
+    /// while `healthcare_authorization_enabled_from_height` is `None`.
+    ///
+    /// The grant gate makes `GrantConsent` carry the subject's own signature.
+    /// That guarantee is CONDITIONAL on the other gate: with `authorization`
+    /// closed, `SupersedeConsent` checks nothing about the sender and mints the
+    /// very record the grant gate refuses to let `GrantConsent` mint. `None` on
+    /// the authorization gate is not "off for now" — it is never, so the second
+    /// route stays open at every height.
+    #[error(
+        "healthcare_consent_subject_signature_enabled_from_height is Some({grant}) while \
+         healthcare_authorization_enabled_from_height is None. The grant gate makes \
+         GrantConsent carry the subject's own signature, but SupersedeConsent is not \
+         gated by it and, with authorization closed, checks NOTHING about the sender — \
+         so a stranger still mints a consent naming any subject, which is the record \
+         the grant gate exists to refuse. Set \
+         healthcare_authorization_enabled_from_height to a height at or below {grant}"
+    )]
+    ConsentGrantGateWithoutHealthcareAuthorization { grant: u64 },
+
+    /// The authorization gate activates LATER than the consent-grant gate,
+    /// leaving a band of heights in which the grant guarantee is advertised and
+    /// the supersession route around it is still open.
+    #[error(
+        "healthcare_authorization_enabled_from_height is Some({authorization}), later \
+         than healthcare_consent_subject_signature_enabled_from_height Some({grant}). \
+         Heights {grant}..{authorization} would require the subject's signature on \
+         GrantConsent while SupersedeConsent still accepts any sender and mints the \
+         same record — a guarantee that reads as closed and is not. The authorization \
+         gate must be at or below the consent-grant gate"
+    )]
+    HealthcareAuthorizationAfterConsentGrantGate { authorization: u64, grant: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, GenesisError>;
@@ -2133,6 +2166,16 @@ pub struct ChainParams {
     /// payload is versioned: below the gate the payload is a bare envelope, at
     /// and above it the wrapper, and each side refuses the other's encoding
     /// rather than silently reinterpreting it.
+    ///
+    /// **This gate may not be opened without
+    /// [`Self::healthcare_authorization_enabled_from_height`] at or below it,
+    /// and that is ENFORCED rather than advised.** `SupersedeConsent` is not
+    /// gated here and, with authorization closed, checks nothing about the
+    /// sender — so it mints the very record this gate refuses to let
+    /// `GrantConsent` mint. [`ChainParams::validate`] rejects the pair, on the
+    /// genesis path through [`Genesis::validate`] and on the restart path
+    /// through `sumchain_state::account_root::validate_runtime_activation`.
+    ///
     /// Production-safe default `None`, which is what an absent field resolves
     /// to and what every genesis written before this gate existed carries.
     /// `None` closes the gate, and a closed gate means a node executes exactly
@@ -2823,6 +2866,57 @@ impl ChainParams {
                     enforcement,
                     gate,
                     height,
+                })
+            }
+            (Some(_), Some(_)) => {}
+        }
+
+        // ── the healthcare consent-grant ordering, enforced at load ─────────
+        //
+        //     healthcare_authorization_enabled_from_height
+        //         <= healthcare_consent_subject_signature_enabled_from_height
+        //
+        // The grant gate makes `GrantConsent` carry the SUBJECT's own signature
+        // over the consent. What it does not reach is `SupersedeConsent`, which
+        // carries a replacement `ConsentEnvelope` and is gated by the
+        // AUTHORIZATION height instead. Below that height supersession checks
+        // nothing about the sender at all (ACTIVATION-AUDIT row AU-1), so a
+        // stranger supersedes any consent that exists with a replacement naming
+        // any subject they like — which mints exactly the record `GrantConsent`
+        // has just been stopped from minting.
+        //
+        // So the grant gate's guarantee is CONDITIONAL on the other gate, and a
+        // conditional guarantee that is only written down is one an operator can
+        // activate half of. It was written down — in the field's doc comment and
+        // in `the_grant_gate_alone_does_not_close_supersession` — and it is
+        // enforced here so that the half-activation is not merely discouraged.
+        //
+        // `None` on the authorization gate is refused when the grant gate is
+        // open, for the same reason the journal pair refuses it: `None` is not
+        // "later", it is never, so the supersession route stays open at every
+        // height above the grant gate rather than for a bounded band.
+        //
+        // Both `None` is legal and is the production default: no grant gate, no
+        // requirement. Authorization open alone is legal too — it is a strictly
+        // stronger configuration than the default and closes AU-1's arm without
+        // claiming anything about the grant arm.
+        //
+        // A LOAD-time check, on the genesis path through [`Genesis::validate`]
+        // and on the restart path through
+        // `sumchain_state::account_root::validate_runtime_activation`, so the
+        // pair is refused before a block executes rather than at the boundary.
+        match (
+            self.healthcare_authorization_enabled_from_height,
+            self.healthcare_consent_subject_signature_enabled_from_height,
+        ) {
+            (_, None) => {}
+            (None, Some(grant)) => {
+                return Err(GenesisError::ConsentGrantGateWithoutHealthcareAuthorization { grant })
+            }
+            (Some(authorization), Some(grant)) if authorization > grant => {
+                return Err(GenesisError::HealthcareAuthorizationAfterConsentGrantGate {
+                    authorization,
+                    grant,
                 })
             }
             (Some(_), Some(_)) => {}
@@ -4528,6 +4622,98 @@ mod tests {
             ),
             "{err}"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // The healthcare consent-grant ordering:
+    //     healthcare_authorization_enabled_from_height
+    //         <= healthcare_consent_subject_signature_enabled_from_height
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// A genesis whose params satisfy every OTHER load ordering, with the
+    /// healthcare pair supplied by the caller.
+    ///
+    /// `peer_protocol_declaration_required_from_height` has to be at or below
+    /// the first open remediation gate, and both halves of this pair are
+    /// remediation gates — so without it every case below would be refused for
+    /// the wrong reason and prove nothing about this one.
+    fn healthcare_pair(authorization: Option<u64>, grant: Option<u64>) -> ChainParams {
+        ChainParams {
+            healthcare_authorization_enabled_from_height: authorization,
+            healthcare_consent_subject_signature_enabled_from_height: grant,
+            peer_protocol_declaration_required_from_height: Some(0),
+            ..ChainParams::default()
+        }
+    }
+
+    /// Opening the consent-grant gate while authorization stays `None` is
+    /// REFUSED at load.
+    ///
+    /// The grant gate stops `GrantConsent` recording a consent the subject never
+    /// signed. It does not reach `SupersedeConsent`, which is gated by
+    /// AUTHORIZATION and, below it, checks nothing about the sender — so the
+    /// same record is minted by another arm. `None` there is not "later", it is
+    /// never, so the second route would stay open at every height.
+    #[test]
+    fn the_consent_grant_gate_cannot_open_over_a_closed_healthcare_authorization() {
+        let p = healthcare_pair(None, Some(1_000));
+        let err = p
+            .validate()
+            .expect_err("the grant gate alone must be refused");
+        assert!(
+            matches!(
+                err,
+                GenesisError::ConsentGrantGateWithoutHealthcareAuthorization { grant: 1_000 }
+            ),
+            "{err}"
+        );
+        // And through the authoritative loader, not only the method — which is
+        // the path every genesis load takes.
+        let mut g = Genesis::from_json(LOCAL_GENESIS_JSON).unwrap();
+        g.params = healthcare_pair(None, Some(1_000));
+        assert!(
+            g.validate().is_err(),
+            "Genesis::validate must refuse it too"
+        );
+    }
+
+    /// An authorization gate LATER than the grant gate is refused, naming the
+    /// band in which the guarantee reads as closed and is not.
+    #[test]
+    fn a_healthcare_authorization_gate_later_than_the_consent_grant_gate_is_refused() {
+        let p = healthcare_pair(Some(1_001), Some(1_000));
+        let err = p
+            .validate()
+            .expect_err("a later authorization gate must be refused");
+        assert!(
+            matches!(
+                err,
+                GenesisError::HealthcareAuthorizationAfterConsentGrantGate {
+                    authorization: 1_001,
+                    grant: 1_000
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    /// The legal healthcare orderings, including both `None` — the production
+    /// default, which must stay loadable — and authorization alone, which is
+    /// strictly stronger than the default and claims nothing about the grant arm.
+    #[test]
+    fn the_legal_healthcare_consent_orderings_are_admitted() {
+        for (authorization, grant) in [
+            (None, None),               // production default
+            (Some(0), None),            // authorization alone, from genesis
+            (Some(1_000), None),        // authorization alone, at a height
+            (Some(1_000), Some(1_000)), // same height: both rules arrive together
+            (Some(500), Some(1_000)),   // authorization strictly earlier
+            (Some(0), Some(0)),         // both from genesis
+        ] {
+            healthcare_pair(authorization, grant)
+                .validate()
+                .unwrap_or_else(|e| panic!("({authorization:?}, {grant:?}) must be legal: {e}"));
+        }
     }
 
     /// The legal orderings, including both `None` — which is the production

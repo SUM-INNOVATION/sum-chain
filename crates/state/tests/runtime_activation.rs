@@ -84,6 +84,54 @@ fn each_invalid_pair_is_refused_with_its_own_error_identity() {
     }
 }
 
+/// The healthcare consent-grant pair is refused on the RESTART path too.
+///
+/// `ChainParams::validate` owns the ordering
+/// `healthcare_authorization_enabled_from_height <=
+/// healthcare_consent_subject_signature_enabled_from_height`, and the genesis
+/// crate's own tests prove the genesis path refuses it. This is the other path:
+/// `Node::new` never calls `ChainParams::validate` directly — it calls
+/// `validate_runtime_activation`, which is also what
+/// `StateManager::init_from_genesis` calls — so a rule only the genesis crate
+/// tested would be a rule that binds a new chain and not a restarted one, which
+/// is the exact asymmetry this file exists to make impossible.
+///
+/// `peer_protocol_declaration_required_from_height` is pinned at 0 in every
+/// case, because both halves of the pair are remediation gates: without it the
+/// enforcement deadline refuses these params first and the test would pass
+/// while proving nothing about the pair.
+#[test]
+fn the_restart_path_refuses_a_consent_grant_gate_its_authorization_does_not_cover() {
+    let pair = |authorization: Option<u64>, grant: Option<u64>| ChainParams {
+        healthcare_authorization_enabled_from_height: authorization,
+        healthcare_consent_subject_signature_enabled_from_height: grant,
+        peer_protocol_declaration_required_from_height: Some(0),
+        ..ChainParams::default()
+    };
+
+    match validate_runtime_activation(&pair(None, Some(1_000))) {
+        Err(StateError::ActivationParams(m)) => assert!(
+            m.contains("healthcare_authorization_enabled_from_height is None"),
+            "the loader's own message must survive, not be flattened: {m}"
+        ),
+        other => panic!("a grant gate over a closed authorization must be refused: {other:?}"),
+    }
+    match validate_runtime_activation(&pair(Some(1_001), Some(1_000))) {
+        Err(StateError::ActivationParams(m)) => assert!(
+            m.contains("later than"),
+            "the ordering fault must name itself: {m}"
+        ),
+        other => panic!("an authorization gate after the grant gate must be refused: {other:?}"),
+    }
+
+    // And the legal shapes still start: the production default, authorization
+    // alone, and the two together in the admitted order.
+    for (authorization, grant) in [(None, None), (Some(1_000), None), (Some(500), Some(1_000))] {
+        validate_runtime_activation(&pair(authorization, grant))
+            .unwrap_or_else(|e| panic!("({authorization:?}, {grant:?}) must start: {e:?}"));
+    }
+}
+
 /// The structural fault is reported before the one needing chain constants.
 ///
 /// A pair wrong in two ways should name the simpler fault: "your journal gate

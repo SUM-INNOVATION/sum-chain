@@ -137,7 +137,7 @@ fn each_of_the_twenty_gates_sets_the_deadline_on_its_own() {
         json.as_object_mut()
             .expect("object")
             .insert((*gate).to_string(), serde_json::json!(500));
-        let p: ChainParams = serde_json::from_value(json).expect("parse");
+        let mut p: ChainParams = serde_json::from_value(json).expect("parse");
 
         assert_eq!(
             p.remediation_activation_floor(),
@@ -145,13 +145,30 @@ fn each_of_the_twenty_gates_sets_the_deadline_on_its_own() {
             "{gate} must set the enforcement deadline by itself"
         );
 
+        // One gate in the list carries a SECOND load ordering of its own:
+        // `ChainParams::validate` refuses
+        // `healthcare_consent_subject_signature_enabled_from_height` unless
+        // `healthcare_authorization_enabled_from_height` is at or below it,
+        // because `SupersedeConsent` is gated by the second and mints the
+        // record the first refuses. Opening the prerequisite at the SAME height
+        // keeps the deadline at 500 and moves only WHICH gate reports it: ties
+        // in `remediation_activation_floor` go to the earlier entry in
+        // `REMEDIATION_GATES`, and authorization precedes the grant gate there.
+        // Stated rather than skipped -- a loop that quietly excluded a gate
+        // would stop proving the deadline for it.
+        let mut floor_gate: &str = gate;
+        if *gate == "healthcare_consent_subject_signature_enabled_from_height" {
+            p.healthcare_authorization_enabled_from_height = Some(500);
+            floor_gate = "healthcare_authorization_enabled_from_height";
+        }
+
         // Unset enforcement: refused.
         match genesis(p.clone()).validate() {
             Err(GenesisError::RemediationGateWithoutPeerProtocolEnforcement {
                 gate: g,
                 height,
             }) => {
-                assert_eq!(g, *gate);
+                assert_eq!(g, floor_gate);
                 assert_eq!(height, 500);
             }
             other => {
@@ -179,7 +196,7 @@ fn each_of_the_twenty_gates_sets_the_deadline_on_its_own() {
                 gate: g,
                 height,
             }) => {
-                assert_eq!((enforcement, g, height), (501, *gate, 500));
+                assert_eq!((enforcement, g, height), (501, floor_gate, 500));
             }
             other => {
                 panic!("{gate} with enforcement one block late must be refused, got {other:?}")
