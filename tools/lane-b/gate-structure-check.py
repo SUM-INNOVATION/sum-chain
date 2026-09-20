@@ -356,6 +356,23 @@ REGISTRY: list[Structure] = [
         token=None,
     ),
     Structure(
+        name="state_tests::genesis-list size pin",
+        path="crates/state/tests/remediation_gates.rs",
+        locator=r"\n    assert_eq!\(in_genesis\.len\(\), (?P<count>\d+)\);",
+        mode="count",
+        entry="",
+        # The FIFTH hardcoded count pin, and the last one to be registered.
+        # A closure wave moved the other four and this one failed loudly, which
+        # is the only reason it was found -- but "it happened to fail" is not
+        # coverage. A merge that left it behind while the four registered pins
+        # moved would have passed this checker with a tree that still asserts
+        # the old number, and the registry would have reported a complete set
+        # of counts while one count was stale.
+        expect=("count", "genesis::REMEDIATION_GATES"),
+        minimum=0,
+        token=None,
+    ),
+    Structure(
         name="packet::decision-packet gate sections",
         path="docs/lane-a/ACTIVATION-DECISION-PACKET.md",
         locator=r"\n## Part 1A ",

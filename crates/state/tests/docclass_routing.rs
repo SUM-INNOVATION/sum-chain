@@ -4790,16 +4790,37 @@ fn docclass_signatures_are_written_as_zero_and_checked_as_nothing() {
 fn max_credential_validity_bounds_nothing_and_initial_issuers_admits_nobody() {
     let mut p = params();
     let listed = KeyPair::generate();
+    // Listed in `initial_issuers` exactly as `listed` is, and deliberately
+    // never given an issuer row. The two halves of this test need OPPOSITE
+    // things from a listed address -- one with no row, one with a row -- and
+    // the row has to exist before the candidate opens (see below), so they
+    // cannot be the same address.
+    let unseeded = KeyPair::generate();
     if let Some(ref mut d) = p.docclass {
         // Ten years, the value the release reports. Whatever unit it is in, the
         // credential below exceeds it.
         d.max_credential_validity = 10 * 365 * 24 * 60 * 60;
-        d.initial_issuers = vec![format!("{:?}", listed.address())];
+        d.initial_issuers = vec![
+            format!("{:?}", listed.address()),
+            format!("{:?}", unseeded.address()),
+        ];
     }
 
     let (_state, db, _dir, executor) = setup_with_params(p);
     fund(&db, &listed, 100_000_000);
+    fund(&db, &unseeded, 100_000_000);
     let proposer = Address::new([9; 20]);
+
+    // Seeded BEFORE the candidate opens, rather than between two candidates.
+    // Writing the store after reading a candidate makes this test a second
+    // publisher, which `execution_boundary::no_test_publishes_a_candidate_by_hand`
+    // forbids -- rightly: a fixture that commits by hand halfway through is the
+    // shape that hides a boundary bug. Nothing is lost by hoisting it, because
+    // the row is fixture and not subject.
+    DocClassStore::new(&db)
+        .issuers()
+        .put(&educational_issuer(listed.address()))
+        .unwrap();
 
     let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
     let mut view = ExecutionView::new(&mut overlay);
@@ -4810,11 +4831,11 @@ fn max_credential_validity_bounds_nothing_and_initial_issuers_admits_nobody() {
         .execute_tx(
             &mut view,
             &tx(
-                &listed,
+                &unseeded,
                 0,
                 DocClassOperation::IssueCredential,
                 DocSubcode::Diploma,
-                &credential(0x92, listed.address()),
+                &credential(0x92, unseeded.address()),
             ),
             &proposer,
             1,
@@ -4835,15 +4856,10 @@ fn max_credential_validity_bounds_nothing_and_initial_issuers_admits_nobody() {
         "and nothing is written for it"
     );
 
-    // With the row actually present, the same sender issues a credential whose
-    // validity window is the widest a `Timestamp` can express.
-    DocClassStore::new(&db)
-        .issuers()
-        .put(&educational_issuer(listed.address()))
-        .unwrap();
-    let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
-    let mut view = ExecutionView::new(&mut overlay);
-
+    // With the row actually present -- `listed`, seeded above -- a sender
+    // issues a credential whose validity window is the widest a `Timestamp`
+    // can express. Same candidate: the first half wrote nothing, which is what
+    // it asserted.
     let mut forever = credential(0x93, listed.address());
     forever.valid_from = 0;
     forever.expires_at = u64::MAX;
