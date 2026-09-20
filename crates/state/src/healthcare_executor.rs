@@ -166,6 +166,12 @@ pub struct HealthcareGates {
     /// no sender check can make a two-party record out of a transaction that
     /// carries one signature.
     pub consent_subject_signature: bool,
+    /// An operation carrying a `policy_id` this chain cannot resolve refuses.
+    /// ACTIVATION-AUDIT row AU-8: nothing states whether a `policy_id` names a
+    /// policy ACCOUNT or commits to an off-chain policy DOCUMENT, so the claim
+    /// is refused rather than guessed at. A zero `policy_id` names no policy
+    /// and is unaffected.
+    pub policy_id_ambiguous_refused: bool,
 }
 
 impl HealthcareGates {
@@ -177,6 +183,7 @@ impl HealthcareGates {
         state_precondition: false,
         proof_unsupported: false,
         allocation_bound: false,
+        policy_id_ambiguous_refused: false,
         consent_subject_signature: false,
     };
 
@@ -187,6 +194,7 @@ impl HealthcareGates {
         state_precondition: true,
         proof_unsupported: true,
         allocation_bound: true,
+        policy_id_ambiguous_refused: true,
         consent_subject_signature: true,
     };
 
@@ -202,6 +210,10 @@ impl HealthcareGates {
             proof_unsupported: crate::subsystem_proof_unsupported_gate_open(params, block_height),
             allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
             consent_subject_signature: HealthcareExecutor::consent_subject_signature_gate_open(
+                params,
+                block_height,
+            ),
+            policy_id_ambiguous_refused: crate::subsystem_ambiguous_policy_id_refused_gate_open(
                 params,
                 block_height,
             ),
@@ -222,6 +234,25 @@ impl HealthcareGates {
 }
 
 impl HealthcareExecutor {
+    /// The ACTIVATION-AUDIT row AU-8 refusal, or `None` when the operation
+    /// names no policy.
+    ///
+    /// One helper rather than a copy of the predicate per arm: the arms are
+    /// several and the rule is one, and two copies that drifted would refuse
+    /// different things under one height.
+    #[inline]
+    fn ambiguous_policy_refusal(
+        gates: HealthcareGates,
+        policy_id: &[u8; 32],
+    ) -> Option<HealthcareExecutionResult> {
+        if gates.policy_id_ambiguous_refused && policy_id != &crate::UNNAMED_POLICY_ID {
+            return Some(HealthcareExecutionResult::failure(
+                crate::AMBIGUOUS_POLICY_ID_UNRESOLVABLE,
+            ));
+        }
+        None
+    }
+
     /// The activation height for the Healthcare authorization rules.
     ///
     /// **This is a seam for a `ChainParams` field that does not exist yet.**
@@ -657,6 +688,13 @@ impl HealthcareExecutor {
                 let provider: ProviderProfile = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
+                // ACTIVATION-AUDIT row AU-8: a `policy_id` this chain cannot
+                // resolve is a claim it cannot back, so it is refused ahead of
+                // the deduct rather than stored. Zero names no policy.
+                if let Some(refusal) = Self::ambiguous_policy_refusal(gates, &provider.policy_id) {
+                    return Ok(refusal);
+                }
+
                 if provider.issuer_address != *sender {
                     return Ok(HealthcareExecutionResult::failure("Issuer must be sender"));
                 }
@@ -892,6 +930,14 @@ impl HealthcareExecutor {
             HealthcareOperation::IssueMembership => {
                 let membership: MembershipRecord = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
+
+                // ACTIVATION-AUDIT row AU-8: a `policy_id` this chain cannot
+                // resolve is a claim it cannot back, so it is refused ahead of
+                // the deduct rather than stored. Zero names no policy.
+                if let Some(refusal) = Self::ambiguous_policy_refusal(gates, &membership.policy_id)
+                {
+                    return Ok(refusal);
+                }
 
                 if membership.issuer_address != *sender {
                     return Ok(HealthcareExecutionResult::failure("Issuer must be sender"));
@@ -1206,6 +1252,13 @@ impl HealthcareExecutor {
                         .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?
                 };
 
+                // ACTIVATION-AUDIT row AU-8: a `policy_id` this chain cannot
+                // resolve is a claim it cannot back, so it is refused ahead of
+                // the deduct rather than stored. Zero names no policy.
+                if let Some(refusal) = Self::ambiguous_policy_refusal(gates, &consent.policy_id) {
+                    return Ok(refusal);
+                }
+
                 if consent.issuer_address != *sender {
                     return Ok(HealthcareExecutionResult::failure("Issuer must be sender"));
                 }
@@ -1304,6 +1357,15 @@ impl HealthcareExecutor {
                 let d: SupersedeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
+                // ACTIVATION-AUDIT row AU-8: a `policy_id` this chain cannot
+                // resolve is a claim it cannot back, so it is refused ahead of
+                // the deduct rather than stored. Zero names no policy.
+                if let Some(refusal) =
+                    Self::ambiguous_policy_refusal(gates, &d.new_consent.policy_id)
+                {
+                    return Ok(refusal);
+                }
+
                 let old = match Self::v_get_consent(view, &d.old_consent_id)? {
                     Some(c) => c,
                     None => return Ok(HealthcareExecutionResult::failure("Old consent not found")),
@@ -1374,6 +1436,15 @@ impl HealthcareExecutor {
             HealthcareOperation::IssuePrescription => {
                 let prescription: Prescription = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
+
+                // ACTIVATION-AUDIT row AU-8: a `policy_id` this chain cannot
+                // resolve is a claim it cannot back, so it is refused ahead of
+                // the deduct rather than stored. Zero names no policy.
+                if let Some(refusal) =
+                    Self::ambiguous_policy_refusal(gates, &prescription.policy_id)
+                {
+                    return Ok(refusal);
+                }
 
                 if prescription.issuer_address != *sender {
                     return Ok(HealthcareExecutionResult::failure("Issuer must be sender"));

@@ -501,3 +501,115 @@ fn a_collection_stops_being_transferable_to_the_zero_address() {
         );
     }
 }
+
+// ── RY-2 / RY-3 residue: the royalty operation itself ───────────────────────
+
+/// `nft_royalty_operation_unsupported_enabled_from_height`: the recipient stops
+/// being recordable on EVERY collection, not only one that pays nothing.
+///
+/// The residue the two existing royalty gates leave between them.
+/// `nft_unpayable_royalty_refused_enabled_from_height` refuses a non-zero
+/// `royalty_bps` at CREATION, which is the only place `royalty_bps` can be set;
+/// the parity gate above refuses a recipient only when `royalty_bps` is ZERO,
+/// which is the rule creation applies. Neither reaches a collection created
+/// BELOW the creation gate with a non-zero `royalty_bps`: its recipient stays
+/// settable, re-settable, and published by `nft_getCollection`, for ever.
+///
+/// Nothing on this chain pays it. `NftTransferData` is `{ to }`,
+/// `execute_transfer` and `v_transfer_token` move a token and no balance, and
+/// no execution path anywhere computes a royalty amount — so the field records
+/// who would be paid out of a price that does not exist.
+///
+/// The pair differs in exactly this one decision and the parity gate is held
+/// CLOSED on both sides, which is what makes the assertion about THIS gate: on
+/// the paying collection the parity gate would accept the update, so the
+/// refusal at the open side cannot be its.
+#[test]
+fn a_royalty_recipient_stops_being_recordable_on_any_collection() {
+    const ROYALTY_OP: [NftGates; 2] = [
+        NftGates::CLOSED,
+        NftGates {
+            royalty_operation_unsupported: true,
+            ..NftGates::CLOSED
+        },
+    ];
+
+    for gates in ROYALTY_OP {
+        let (_state, db, _dir, _executor) = setup_with_params(params());
+        let owner = KeyPair::generate();
+        fund(&db, &owner, 100_000_000_000);
+        let sender = owner.address();
+        let paying = [0x31u8; 32];
+        seed_collection(&db, &sender, &paying, 250);
+
+        let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        let set_recipient = bincode::serialize(&NftUpdateCollectionConfigData {
+            new_royalty_recipient: Some(Address::new([0x77; 20])),
+            new_base_uri: None,
+        })
+        .unwrap();
+
+        let accepted = nft_at(
+            &mut view,
+            &sender,
+            paying,
+            0,
+            NftOperation::UpdateCollectionConfig,
+            set_recipient,
+            storage_fee(0),
+            gates,
+        );
+        assert_eq!(
+            accepted, !gates.royalty_operation_unsupported,
+            "a recipient on a collection that DOES pay a royalty is the case \
+             neither existing gate reaches: accepted below this one and refused \
+             at it (royalty_operation_unsupported={})",
+            gates.royalty_operation_unsupported
+        );
+
+        // The ROW, not only the receipt: below the gate the recipient is
+        // written, at it the collection is untouched.
+        let stored = NftExecutor::v_get_collection(&view, &paying)
+            .unwrap()
+            .expect("the collection is there either way");
+        assert_eq!(
+            stored.royalty_recipient != Address::ZERO,
+            !gates.royalty_operation_unsupported,
+            "the recipient is IN the row below the gate and absent at it"
+        );
+
+        // An update that carries no recipient is applied on both sides. The
+        // gate refuses the royalty OPERATION, not the arm: a collection can
+        // still be reconfigured, which is what stops this being a shutdown of
+        // `UpdateCollectionConfig`.
+        let base_uri_only = bincode::serialize(&NftUpdateCollectionConfigData {
+            new_royalty_recipient: None,
+            new_base_uri: Some("ipfs://cid/".to_string()),
+        })
+        .unwrap();
+        assert!(
+            nft_at(
+                &mut view,
+                &sender,
+                paying,
+                0,
+                NftOperation::UpdateCollectionConfig,
+                base_uri_only,
+                storage_fee(0),
+                gates,
+            ),
+            "an update carrying only a base URI is applied on both sides"
+        );
+        assert_eq!(
+            NftExecutor::v_get_collection(&view, &paying)
+                .unwrap()
+                .unwrap()
+                .base_uri
+                .as_deref(),
+            Some("ipfs://cid/"),
+            "and it really was applied, on both sides"
+        );
+    }
+}

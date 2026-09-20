@@ -236,6 +236,31 @@ const WIRING: &[(&str, &str, &str)] = &[
         "asset_relationship_activation",
         "property_asset_relationship_enabled_from_height",
     ),
+    (
+        "docclass_executor.rs",
+        "signature_unsupported_activation",
+        "docclass_signature_unsupported_enabled_from_height",
+    ),
+    (
+        "docclass_executor.rs",
+        "credential_validity_bound_activation",
+        "docclass_credential_validity_bound_enabled_from_height",
+    ),
+    (
+        "docclass_executor.rs",
+        "unknown_attribute_refused_activation",
+        "docclass_unknown_attribute_refused_enabled_from_height",
+    ),
+    (
+        "lib.rs",
+        "subsystem_policy_id_activation",
+        "subsystem_ambiguous_policy_id_refused_enabled_from_height",
+    ),
+    (
+        "nft_executor.rs",
+        "royalty_operation_unsupported_activation",
+        "nft_royalty_operation_unsupported_enabled_from_height",
+    ),
 ];
 
 fn source(file: &str) -> String {
@@ -358,14 +383,14 @@ fn every_remediation_gate_reads_the_field_it_names() {
 /// while the behavioural suite for that subsystem still reported every test
 /// passing.
 #[test]
-fn the_thirty_seven_gates_are_thirty_seven_distinct_fields() {
+fn the_forty_two_gates_are_forty_two_distinct_fields() {
     let fields: BTreeSet<&str> = WIRING.iter().map(|(_, _, f)| *f).collect();
     assert_eq!(
         fields.len(),
-        37,
-        "expected thirty-seven distinct fields: {fields:?}"
+        42,
+        "expected forty-two distinct fields: {fields:?}"
     );
-    assert_eq!(WIRING.len(), 37, "expected thirty-seven accessors");
+    assert_eq!(WIRING.len(), 42, "expected forty-two accessors");
 }
 
 /// Wiring a gate is not opening it: the release configuration is unchanged.
@@ -527,8 +552,26 @@ fn every_remediation_gate_is_dormant_by_default() {
             "property_asset_relationship_enabled_from_height",
             p.property_asset_relationship_enabled_from_height,
         ),
-    
-    
+        (
+            "docclass_signature_unsupported_enabled_from_height",
+            p.docclass_signature_unsupported_enabled_from_height,
+        ),
+        (
+            "docclass_credential_validity_bound_enabled_from_height",
+            p.docclass_credential_validity_bound_enabled_from_height,
+        ),
+        (
+            "docclass_unknown_attribute_refused_enabled_from_height",
+            p.docclass_unknown_attribute_refused_enabled_from_height,
+        ),
+        (
+            "subsystem_ambiguous_policy_id_refused_enabled_from_height",
+            p.subsystem_ambiguous_policy_id_refused_enabled_from_height,
+        ),
+        (
+            "nft_royalty_operation_unsupported_enabled_from_height",
+            p.nft_royalty_operation_unsupported_enabled_from_height,
+        ),
     ];
     assert_eq!(dormant.len(), WIRING.len());
     for (name, value) in dormant {
@@ -632,5 +675,5 @@ fn the_genesis_gate_list_matches_the_accessor_table() {
     // such branches lost three attributes, three doc blocks and two
     // activation_heights entries, and left this list at 20 against a table of
     // 28, all of which compiled.
-    assert_eq!(in_genesis.len(), 37);
+    assert_eq!(in_genesis.len(), 42);
 }

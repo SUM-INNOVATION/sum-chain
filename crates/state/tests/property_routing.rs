@@ -3049,7 +3049,20 @@ fn a_stranger_can_merge_assets_it_did_not_issue_only_below_the_gate() {
         secondary_asset_id: [u8; 32],
     }
 
-    for gates in [PropertyGates::CLOSED, PropertyGates::OPEN] {
+    // NOT `PropertyGates::OPEN`: every payload in this file carries
+    // `policy_id: [12u8; 32]`, and
+    // `subsystem_ambiguous_policy_id_refused_enabled_from_height` (AU-8)
+    // refuses a non-zero one before the rule this test is about is reached.
+    // Held closed rather than zeroing the fixture, because `[12u8; 32]` is what
+    // a real payload looks like today; the gate is driven end to end in
+    // `ambiguous_policy_id_gate.rs`.
+    for gates in [
+        PropertyGates::CLOSED,
+        PropertyGates {
+            policy_id_ambiguous_refused: false,
+            ..PropertyGates::OPEN
+        },
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let owner = KeyPair::generate();
         let stranger = KeyPair::generate();
@@ -3119,7 +3132,20 @@ fn a_stranger_cannot_rewrite_a_title_history_at_the_gate() {
         new_event: TitleEvent,
     }
 
-    for gates in [PropertyGates::CLOSED, PropertyGates::OPEN] {
+    // NOT `PropertyGates::OPEN`: every payload in this file carries
+    // `policy_id: [12u8; 32]`, and
+    // `subsystem_ambiguous_policy_id_refused_enabled_from_height` (AU-8)
+    // refuses a non-zero one before the rule this test is about is reached.
+    // Held closed rather than zeroing the fixture, because `[12u8; 32]` is what
+    // a real payload looks like today; the gate is driven end to end in
+    // `ambiguous_policy_id_gate.rs`.
+    for gates in [
+        PropertyGates::CLOSED,
+        PropertyGates {
+            policy_id_ambiguous_refused: false,
+            ..PropertyGates::OPEN
+        },
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let owner = KeyPair::generate();
         let stranger = KeyPair::generate();

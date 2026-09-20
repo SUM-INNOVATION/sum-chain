@@ -87,6 +87,17 @@ pub struct DocClassGates {
     /// `DocClassParams::require_issuer_stake` says to. ACTIVATION-AUDIT row
     /// AU-37, in part.
     pub issuer_stake_requirement: bool,
+    /// A credential carrying a signature this subsystem cannot check is
+    /// refused rather than stored. ACTIVATION-AUDIT row AU-33.
+    pub signature_unsupported: bool,
+    /// A credential's validity window is bounded by
+    /// `DocClassParams::max_credential_validity`, in milliseconds.
+    /// ACTIVATION-AUDIT row AU-37, the `max_credential_validity` third.
+    pub credential_validity_bound: bool,
+    /// An attribute key on a subcode that has no allowlist is refused, because
+    /// every key on it is unclassified. ACTIVATION-AUDIT row D-19b, the half no
+    /// height closed.
+    pub unknown_attribute_refused: bool,
 }
 
 impl DocClassGates {
@@ -115,6 +126,9 @@ impl DocClassGates {
         credential_schema: false,
         identity_binding: false,
         issuer_stake_requirement: false,
+        signature_unsupported: false,
+        credential_validity_bound: false,
+        unknown_attribute_refused: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -130,6 +144,9 @@ impl DocClassGates {
         credential_schema: true,
         identity_binding: true,
         issuer_stake_requirement: true,
+        signature_unsupported: true,
+        credential_validity_bound: true,
+        unknown_attribute_refused: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -152,6 +169,18 @@ impl DocClassGates {
             credential_schema: DocClassExecutor::credential_schema_gate_open(params, block_height),
             identity_binding: DocClassExecutor::identity_binding_gate_open(params, block_height),
             issuer_stake_requirement: DocClassExecutor::issuer_stake_requirement_gate_open(
+                params,
+                block_height,
+            ),
+            signature_unsupported: DocClassExecutor::signature_unsupported_gate_open(
+                params,
+                block_height,
+            ),
+            credential_validity_bound: DocClassExecutor::credential_validity_bound_gate_open(
+                params,
+                block_height,
+            ),
+            unknown_attribute_refused: DocClassExecutor::unknown_attribute_refused_gate_open(
                 params,
                 block_height,
             ),
@@ -427,6 +456,113 @@ impl DocClassExecutor {
         matches!(Self::issuer_stake_requirement_activation(params), Some(h) if block_height >= h)
     }
 
+    /// The activation height for the DocClass signature refusal.
+    ///
+    /// Reads `params.docclass_signature_unsupported_enabled_from_height`, and
+    /// nothing else. `None` closes the gate.
+    ///
+    /// ACTIVATION-AUDIT row AU-33. No signature is verified anywhere in this
+    /// subsystem: `issuer_signature` is stored verbatim and read by nothing.
+    /// Verification was examined against the tree's own convention -- the
+    /// domain-separated blake3 digest plus ed25519 check that
+    /// `healthcare_consent_subject_signature_enabled_from_height` uses -- and
+    /// refused rather than invented. That construction needs a public key IN
+    /// the payload that derives to an address IN the payload, and a canonical
+    /// fixed-width field set on the wire type. DocClass has neither: it carries
+    /// `issuer_key_id: String`, a NAME whose resolution against
+    /// `DocClassIssuer.keys` no rule states, and its credentials are half
+    /// variable-length `String` with no framing convention. A rule that
+    /// computes the wrong preimage refuses every lawful credential, so the
+    /// operation stays UNSUPPORTED and says so.
+    #[inline]
+    fn signature_unsupported_activation(params: &ChainParams) -> Option<u64> {
+        params.docclass_signature_unsupported_enabled_from_height
+    }
+
+    /// Whether the DocClass signature refusal is active at `block_height`.
+    #[inline]
+    pub fn signature_unsupported_gate_open(
+        params: &ChainParams,
+        block_height: BlockHeight,
+    ) -> bool {
+        matches!(Self::signature_unsupported_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the credential-validity bound.
+    ///
+    /// Reads `params.docclass_credential_validity_bound_enabled_from_height`,
+    /// and nothing else. `None` closes the gate.
+    ///
+    /// ACTIVATION-AUDIT row AU-37, the `max_credential_validity` third. The
+    /// field is declared, defaulted and reported over `docclass_getConfig`, and
+    /// read by no execution path -- so a credential declaring `valid_from: 0`
+    /// and `expires_at: u64::MAX` is accepted and the unbounded window stored.
+    /// What blocked the reader was the UNIT, and the unit is now settled from
+    /// the code: `PoaEngine::current_timestamp` builds a block timestamp with
+    /// `as_millis()`, `BlockHeader::timestamp` documents itself "(ms since
+    /// epoch)", and a credential's `valid_from`/`expires_at` share that
+    /// `Timestamp` alias -- so the bound is a duration in MILLISECONDS.
+    #[inline]
+    fn credential_validity_bound_activation(params: &ChainParams) -> Option<u64> {
+        params.docclass_credential_validity_bound_enabled_from_height
+    }
+
+    /// Whether the credential-validity bound is applied at `block_height`.
+    #[inline]
+    pub fn credential_validity_bound_gate_open(
+        params: &ChainParams,
+        block_height: BlockHeight,
+    ) -> bool {
+        matches!(Self::credential_validity_bound_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the unclassified-attribute refusal.
+    ///
+    /// Reads `params.docclass_unknown_attribute_refused_enabled_from_height`,
+    /// and nothing else. `None` closes the gate.
+    ///
+    /// ACTIVATION-AUDIT row D-19b, the half
+    /// `docclass_credential_schema_enabled_from_height` leaves open: that gate
+    /// extends the LENGTH bounds to every academic subcode and leaves the
+    /// attribute KEYS unrestricted for the subcodes whose standard lists none,
+    /// because inventing an allowlist would be writing standard. This gate does
+    /// not invent one either -- it takes the other reading of "no allowlist
+    /// exists": every key on such a subcode is unclassified, and an
+    /// unclassified key fails closed. A credential carrying no attributes is
+    /// unaffected, and the three covered subcodes keep their own allowlists.
+    #[inline]
+    fn unknown_attribute_refused_activation(params: &ChainParams) -> Option<u64> {
+        params.docclass_unknown_attribute_refused_enabled_from_height
+    }
+
+    /// Whether the unclassified-attribute refusal is active at `block_height`.
+    #[inline]
+    pub fn unknown_attribute_refused_gate_open(
+        params: &ChainParams,
+        block_height: BlockHeight,
+    ) -> bool {
+        matches!(Self::unknown_attribute_refused_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// Whether `subcode` has an attribute allowlist in `SchemaValidator`.
+    ///
+    /// The three that do are the three the validator dispatches on: 810
+    /// (`AcademicTranscript`), 811 (`Diploma`) and 812
+    /// (`EnrollmentVerification`). Every other academic subcode reaches the
+    /// `_` arm, which applies length bounds and no key rule at all. Kept beside
+    /// the gate rather than inside `SchemaValidator` because it is the GATE's
+    /// question -- "is there a list for this key to be unknown to" -- and not
+    /// the validator's.
+    #[inline]
+    fn subcode_has_attribute_allowlist(subcode: DocSubcode) -> bool {
+        matches!(
+            subcode,
+            DocSubcode::AcademicTranscript
+                | DocSubcode::Diploma
+                | DocSubcode::EnrollmentVerification
+        )
+    }
+
     /// Execute a DocClass transaction.
     ///
     /// Reads every activation height this subsystem is gated on out of `params`
@@ -624,6 +760,7 @@ impl DocClassExecutor {
             // Credential operations (SRC-802, SRC-810-813)
             DocClassOperation::IssueCredential => Self::issue_credential(
                 view,
+                params,
                 sender,
                 data.subcode,
                 &data.data,
@@ -1273,8 +1410,73 @@ impl DocClassExecutor {
     /// check `v_can_issue_subcode` is asked about, so two subcodes that
     /// disagree are two different questions answered about one row.
     #[allow(clippy::too_many_arguments)]
+    /// The AU-33 refusal, or `None` when the credential asserts no signature.
+    ///
+    /// Both halves are refused, because both are a claim: sixty-four bytes in
+    /// `issuer_signature` assert that something was signed, and a non-empty
+    /// `issuer_key_id` asserts that a particular key signed it. Neither can be
+    /// checked -- there is no canonical signing input for the bytes to be over,
+    /// and no stated rule for resolving the id against `DocClassIssuer.keys`.
+    /// An all-zero signature with an empty key id asserts nothing and is
+    /// admitted unchanged, which is what keeps the gate a refusal of the CLAIM
+    /// rather than of the credential.
+    #[inline]
+    fn signature_claim_refusal(
+        gates: DocClassGates,
+        issuer_signature: &[u8; 64],
+        issuer_key_id: &str,
+    ) -> Option<DocClassExecutionResult> {
+        if gates.signature_unsupported
+            && (issuer_signature != &[0u8; 64] || !issuer_key_id.is_empty())
+        {
+            return Some(DocClassExecutionResult::failure(
+                crate::DOCCLASS_SIGNATURE_UNSUPPORTED,
+            ));
+        }
+        None
+    }
+
+    /// The AU-37 refusal, or `None` when the window is within the bound.
+    ///
+    /// Three configurations pass through untouched, each for a reason the
+    /// field's own documentation states. `max_credential_validity == 0` is NO
+    /// LIMIT and is the default, so an operator who configured nothing sees no
+    /// change at the height. `expires_at == 0` is NO EXPIRY, so bounding it
+    /// would refuse the credential the wire type calls unexpiring. An
+    /// `expires_at` at or below `valid_from` is a window of zero or a malformed
+    /// one, and this rule is a ceiling rather than a well-formedness check --
+    /// `saturating_sub` makes it zero rather than an underflow into acceptance.
+    ///
+    /// The unit is MILLISECONDS on both sides: `valid_from` and `expires_at`
+    /// share the `Timestamp` alias with `BlockHeader::timestamp`, which
+    /// `PoaEngine::current_timestamp` fills with `as_millis()`.
+    #[inline]
+    fn validity_window_refusal(
+        gates: DocClassGates,
+        params: &ChainParams,
+        valid_from: Timestamp,
+        expires_at: Timestamp,
+    ) -> Option<DocClassExecutionResult> {
+        if !gates.credential_validity_bound || expires_at == 0 {
+            return None;
+        }
+        let max = params
+            .docclass
+            .as_ref()
+            .map(|d| d.max_credential_validity)
+            .unwrap_or(0);
+        if max != 0 && expires_at.saturating_sub(valid_from) > max {
+            return Some(DocClassExecutionResult::failure(
+                crate::DOCCLASS_CREDENTIAL_VALIDITY_TOO_LONG,
+            ));
+        }
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn issue_credential(
         view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         subcode: DocSubcode,
         data: &[u8],
@@ -1296,6 +1498,7 @@ impl DocClassExecutor {
                         }
                         Ok(att) => Self::issue_eligibility(
                             view,
+                            params,
                             sender,
                             att,
                             proposer,
@@ -1319,6 +1522,7 @@ impl DocClassExecutor {
                         }
                         Ok(cred) => Self::issue_academic_credential(
                             view,
+                            params,
                             sender,
                             cred,
                             proposer,
@@ -1342,6 +1546,7 @@ impl DocClassExecutor {
         if let Ok(cred) = bincode::deserialize::<AcademicCredential>(data) {
             return Self::issue_academic_credential(
                 view,
+                params,
                 sender,
                 cred,
                 proposer,
@@ -1355,6 +1560,7 @@ impl DocClassExecutor {
         if let Ok(att) = bincode::deserialize::<EligibilityAttestation>(data) {
             return Self::issue_eligibility(
                 view,
+                params,
                 sender,
                 att,
                 proposer,
@@ -1370,6 +1576,7 @@ impl DocClassExecutor {
     #[allow(clippy::too_many_arguments)]
     fn issue_academic_credential(
         view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         credential: AcademicCredential,
         proposer: &Address,
@@ -1390,6 +1597,39 @@ impl DocClassExecutor {
 
         if Self::v_credential_exists(view, &credential.credential_id)? {
             return Ok(DocClassExecutionResult::failure("Credential exists"));
+        }
+
+        // ACTIVATION-AUDIT row AU-33. A signature this subsystem cannot check
+        // is refused rather than stored. Ahead of the schema validator and
+        // ahead of the deduct, where this arm's own refusals return.
+        if let Some(refusal) = Self::signature_claim_refusal(
+            gates,
+            &credential.issuer_signature,
+            &credential.issuer_key_id,
+        ) {
+            return Ok(refusal);
+        }
+
+        // ACTIVATION-AUDIT row AU-37. The window is bounded in MILLISECONDS,
+        // the unit the chain's block timestamp uses.
+        if let Some(refusal) = Self::validity_window_refusal(
+            gates,
+            params,
+            credential.valid_from,
+            credential.expires_at,
+        ) {
+            return Ok(refusal);
+        }
+
+        // ACTIVATION-AUDIT row D-19b. A subcode with no allowlist has no
+        // classified key, so every attribute on it is unknown and fails closed.
+        if gates.unknown_attribute_refused
+            && !Self::subcode_has_attribute_allowlist(credential.subcode)
+            && !credential.metadata.attributes.is_empty()
+        {
+            return Ok(DocClassExecutionResult::failure(
+                crate::DOCCLASS_UNKNOWN_ATTRIBUTE_REFUSED,
+            ));
         }
 
         // PRIVACY ENFORCEMENT: Validate schema to prevent PII on-chain
@@ -1439,6 +1679,7 @@ impl DocClassExecutor {
     #[allow(clippy::too_many_arguments)]
     fn issue_eligibility(
         view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         attestation: EligibilityAttestation,
         proposer: &Address,
@@ -1462,6 +1703,26 @@ impl DocClassExecutor {
 
         if Self::v_eligibility_exists(view, &attestation.credential_id)? {
             return Ok(DocClassExecutionResult::failure("Credential exists"));
+        }
+
+        // ACTIVATION-AUDIT rows AU-33 and AU-37, the same two rules the
+        // academic arm applies. There is no attributes list on this family, so
+        // D-19b's attribute refusal has nothing to reach here -- said rather
+        // than left as an omission a reader has to notice.
+        if let Some(refusal) = Self::signature_claim_refusal(
+            gates,
+            &attestation.issuer_signature,
+            &attestation.issuer_key_id,
+        ) {
+            return Ok(refusal);
+        }
+        if let Some(refusal) = Self::validity_window_refusal(
+            gates,
+            params,
+            attestation.valid_from,
+            attestation.expires_at,
+        ) {
+            return Ok(refusal);
         }
 
         // No validator has ever run on this family, on any path, at any height.

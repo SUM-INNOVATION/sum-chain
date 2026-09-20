@@ -2744,6 +2744,10 @@ fn a_signature_from_a_stranger_to_the_agreement_is_stored_only_below_the_gate() 
         AgreementGates::CLOSED,
         AgreementGates {
             party_authority_unsupported: false,
+            // And not `policy_id_ambiguous_refused` either: this file's
+            // agreements carry `policy_id: [12u8; 32]`, which AU-8's gate
+            // refuses ahead of everything else. Same reasoning, second gate.
+            policy_id_ambiguous_refused: false,
             ..AgreementGates::OPEN
         },
     ] {
@@ -2851,6 +2855,10 @@ fn revoking_a_signature_leaves_the_agreement_executed_only_below_the_gate() {
         AgreementGates::CLOSED,
         AgreementGates {
             party_authority_unsupported: false,
+            // And not `policy_id_ambiguous_refused` either: this file's
+            // agreements carry `policy_id: [12u8; 32]`, which AU-8's gate
+            // refuses ahead of everything else. Same reasoning, second gate.
+            policy_id_ambiguous_refused: false,
             ..AgreementGates::OPEN
         },
     ] {

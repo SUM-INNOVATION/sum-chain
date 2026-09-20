@@ -4070,7 +4070,21 @@ fn a_registration_stake_is_destroyed_below_the_gate_and_escrowed_above_it() {
         &issuer,
     );
 
-    for gates in [DocClassGates::CLOSED, DocClassGates::OPEN] {
+    // NOT `DocClassGates::OPEN`: this file's credential and attestation
+    // fixtures carry `issuer_key_id: "edu-1"` / `"gov-1"`, and
+    // `docclass_signature_unsupported_enabled_from_height` (AU-33) refuses a
+    // credential that names a key this subsystem has no stated rule for
+    // resolving. With it open the issuance these tests build on never lands and
+    // the pair differs for a reason that is not the test's. Held closed rather
+    // than emptying the fixture's key id, because a real credential names one
+    // today; the gate is driven end to end in `docclass_closure_gates.rs`.
+    for gates in [
+        DocClassGates::CLOSED,
+        DocClassGates {
+            signature_unsupported: false,
+            ..DocClassGates::OPEN
+        },
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params_with_stake(1_000));
         fund(&db, &gov, 100_000_000);
         let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
@@ -4136,7 +4150,21 @@ fn deactivation_refunds_the_escrowed_stake_once_and_only_at_the_gate() {
         issuer_address: Address,
     }
 
-    for gates in [DocClassGates::CLOSED, DocClassGates::OPEN] {
+    // NOT `DocClassGates::OPEN`: this file's credential and attestation
+    // fixtures carry `issuer_key_id: "edu-1"` / `"gov-1"`, and
+    // `docclass_signature_unsupported_enabled_from_height` (AU-33) refuses a
+    // credential that names a key this subsystem has no stated rule for
+    // resolving. With it open the issuance these tests build on never lands and
+    // the pair differs for a reason that is not the test's. Held closed rather
+    // than emptying the fixture's key id, because a real credential names one
+    // today; the gate is driven end to end in `docclass_closure_gates.rs`.
+    for gates in [
+        DocClassGates::CLOSED,
+        DocClassGates {
+            signature_unsupported: false,
+            ..DocClassGates::OPEN
+        },
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params_with_stake(1_000));
         fund(&db, &gov, 100_000_000);
         let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
@@ -4226,7 +4254,21 @@ fn an_update_cannot_inflate_the_recorded_stake_at_the_gate() {
     let mut issuer = government_issuer(gov.address());
     issuer.stake_amount = 1_000;
 
-    for gates in [DocClassGates::CLOSED, DocClassGates::OPEN] {
+    // NOT `DocClassGates::OPEN`: this file's credential and attestation
+    // fixtures carry `issuer_key_id: "edu-1"` / `"gov-1"`, and
+    // `docclass_signature_unsupported_enabled_from_height` (AU-33) refuses a
+    // credential that names a key this subsystem has no stated rule for
+    // resolving. With it open the issuance these tests build on never lands and
+    // the pair differs for a reason that is not the test's. Held closed rather
+    // than emptying the fixture's key id, because a real credential names one
+    // today; the gate is driven end to end in `docclass_closure_gates.rs`.
+    for gates in [
+        DocClassGates::CLOSED,
+        DocClassGates {
+            signature_unsupported: false,
+            ..DocClassGates::OPEN
+        },
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params_with_stake(1_000));
         fund(&db, &gov, 100_000_000);
         let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
@@ -4331,7 +4373,21 @@ fn a_colliding_subject_commitment_ends_the_block_below_the_gate_and_is_harmless_
     let mut att = eligibility(0x8B, gov.address());
     att.subject_commitment = shared;
 
-    for gates in [DocClassGates::CLOSED, DocClassGates::OPEN] {
+    // NOT `DocClassGates::OPEN`: this file's credential and attestation
+    // fixtures carry `issuer_key_id: "edu-1"` / `"gov-1"`, and
+    // `docclass_signature_unsupported_enabled_from_height` (AU-33) refuses a
+    // credential that names a key this subsystem has no stated rule for
+    // resolving. With it open the issuance these tests build on never lands and
+    // the pair differs for a reason that is not the test's. Held closed rather
+    // than emptying the fixture's key id, because a real credential names one
+    // today; the gate is driven end to end in `docclass_closure_gates.rs`.
+    for gates in [
+        DocClassGates::CLOSED,
+        DocClassGates {
+            signature_unsupported: false,
+            ..DocClassGates::OPEN
+        },
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         fund(&db, &gov, 100_000_000);
         DocClassStore::new(&db)
@@ -4515,7 +4571,21 @@ fn an_identity_indexed_before_the_split_is_still_found_after_it() {
 /// would strand credentials nobody could withdraw.
 #[test]
 fn a_suspended_issuer_keeps_the_revocation_family_only_below_the_gate() {
-    for gates in [DocClassGates::CLOSED, DocClassGates::OPEN] {
+    // NOT `DocClassGates::OPEN`: this file's credential and attestation
+    // fixtures carry `issuer_key_id: "edu-1"` / `"gov-1"`, and
+    // `docclass_signature_unsupported_enabled_from_height` (AU-33) refuses a
+    // credential that names a key this subsystem has no stated rule for
+    // resolving. With it open the issuance these tests build on never lands and
+    // the pair differs for a reason that is not the test's. Held closed rather
+    // than emptying the fixture's key id, because a real credential names one
+    // today; the gate is driven end to end in `docclass_closure_gates.rs`.
+    for gates in [
+        DocClassGates::CLOSED,
+        DocClassGates {
+            signature_unsupported: false,
+            ..DocClassGates::OPEN
+        },
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let gov = KeyPair::generate();
         fund(&db, &gov, 100_000_000);

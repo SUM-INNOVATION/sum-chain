@@ -189,6 +189,12 @@ pub struct PropertyGates {
     /// address and Property has no issuer registry, so the arm has neither an
     /// address in the payload to check nor a registry to check it against.
     pub proof_submission_unsupported: bool,
+    /// An operation carrying a `policy_id` this chain cannot resolve refuses.
+    /// ACTIVATION-AUDIT row AU-8: nothing states whether a `policy_id` names a
+    /// policy ACCOUNT or commits to an off-chain policy DOCUMENT, so the claim
+    /// is refused rather than guessed at. A zero `policy_id` names no policy
+    /// and is unaffected.
+    pub policy_id_ambiguous_refused: bool,
 }
 
 impl PropertyGates {
@@ -200,6 +206,7 @@ impl PropertyGates {
         proof_unsupported: false,
         state_precondition: false,
         asset_relationship: false,
+        policy_id_ambiguous_refused: false,
         proof_submission_unsupported: false,
     };
 
@@ -211,6 +218,7 @@ impl PropertyGates {
         proof_unsupported: true,
         state_precondition: true,
         asset_relationship: true,
+        policy_id_ambiguous_refused: true,
         proof_submission_unsupported: true,
     };
 
@@ -230,6 +238,10 @@ impl PropertyGates {
                 block_height,
             ),
             proof_submission_unsupported: PropertyExecutor::proof_submission_unsupported_gate_open(
+                params,
+                block_height,
+            ),
+            policy_id_ambiguous_refused: crate::subsystem_ambiguous_policy_id_refused_gate_open(
                 params,
                 block_height,
             ),
@@ -289,6 +301,25 @@ impl PropertyExecutor {
     /// Until it exists this returns `None`, which is exactly what an absent
     /// `#[serde(default)] Option<u64>` resolves to, so production behaviour is
     /// unchanged and `three_operations_check_no_authority_at_all` still passes.
+    /// The ACTIVATION-AUDIT row AU-8 refusal, or `None` when the operation
+    /// names no policy.
+    ///
+    /// One helper rather than a copy of the predicate per arm: the arms are
+    /// several and the rule is one, and two copies that drifted would refuse
+    /// different things under one height.
+    #[inline]
+    fn ambiguous_policy_refusal(
+        gates: PropertyGates,
+        policy_id: &[u8; 32],
+    ) -> Option<PropertyExecutionResult> {
+        if gates.policy_id_ambiguous_refused && policy_id != &crate::UNNAMED_POLICY_ID {
+            return Some(PropertyExecutionResult::failure(
+                crate::AMBIGUOUS_POLICY_ID_UNRESOLVABLE,
+            ));
+        }
+        None
+    }
+
     #[inline]
     fn authorization_activation(params: &ChainParams) -> Option<u64> {
         params.property_authorization_enabled_from_height
@@ -682,6 +713,13 @@ impl PropertyExecutor {
                 let asset: AssetAnchor = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
+                // ACTIVATION-AUDIT row AU-8: a `policy_id` this chain cannot
+                // resolve is a claim it cannot back, so it is refused ahead of
+                // the deduct rather than stored. Zero names no policy.
+                if let Some(refusal) = Self::ambiguous_policy_refusal(gates, &asset.policy_id) {
+                    return Ok(refusal);
+                }
+
                 if asset.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Issuer must be sender"));
                 }
@@ -977,6 +1015,13 @@ impl PropertyExecutor {
                 let event: TitleEvent = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
+                // ACTIVATION-AUDIT row AU-8: a `policy_id` this chain cannot
+                // resolve is a claim it cannot back, so it is refused ahead of
+                // the deduct rather than stored. Zero names no policy.
+                if let Some(refusal) = Self::ambiguous_policy_refusal(gates, &event.policy_id) {
+                    return Ok(refusal);
+                }
+
                 if event.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Issuer must be sender"));
                 }
@@ -1046,6 +1091,14 @@ impl PropertyExecutor {
                 }
                 let d: SupersedeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
+
+                // ACTIVATION-AUDIT row AU-8: a `policy_id` this chain cannot
+                // resolve is a claim it cannot back, so it is refused ahead of
+                // the deduct rather than stored. Zero names no policy.
+                if let Some(refusal) = Self::ambiguous_policy_refusal(gates, &d.new_event.policy_id)
+                {
+                    return Ok(refusal);
+                }
 
                 let old_event = match Self::v_get_title_event(view, &d.old_event_id)? {
                     Some(e) => e,
@@ -1148,6 +1201,14 @@ impl PropertyExecutor {
             PropertyOperation::RecordEncumbrance => {
                 let encumbrance: Encumbrance = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
+
+                // ACTIVATION-AUDIT row AU-8: a `policy_id` this chain cannot
+                // resolve is a claim it cannot back, so it is refused ahead of
+                // the deduct rather than stored. Zero names no policy.
+                if let Some(refusal) = Self::ambiguous_policy_refusal(gates, &encumbrance.policy_id)
+                {
+                    return Ok(refusal);
+                }
 
                 if encumbrance.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Issuer must be sender"));
@@ -1334,6 +1395,13 @@ impl PropertyExecutor {
             PropertyOperation::IssueCoverage => {
                 let coverage: InsuranceCoverage = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
+
+                // ACTIVATION-AUDIT row AU-8: a `policy_id` this chain cannot
+                // resolve is a claim it cannot back, so it is refused ahead of
+                // the deduct rather than stored. Zero names no policy.
+                if let Some(refusal) = Self::ambiguous_policy_refusal(gates, &coverage.policy_id) {
+                    return Ok(refusal);
+                }
 
                 if coverage.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Issuer must be sender"));
@@ -1542,6 +1610,13 @@ impl PropertyExecutor {
             PropertyOperation::FileClaim => {
                 let claim: InsuranceClaim = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
+
+                // ACTIVATION-AUDIT row AU-8: a `policy_id` this chain cannot
+                // resolve is a claim it cannot back, so it is refused ahead of
+                // the deduct rather than stored. Zero names no policy.
+                if let Some(refusal) = Self::ambiguous_policy_refusal(gates, &claim.policy_id) {
+                    return Ok(refusal);
+                }
 
                 if claim.issuer_address != *sender {
                     return Ok(PropertyExecutionResult::failure("Issuer must be sender"));

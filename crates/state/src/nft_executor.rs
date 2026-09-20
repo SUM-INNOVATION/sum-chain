@@ -163,6 +163,10 @@ pub struct NftGates {
     /// A collection creation carrying a non-zero `royalty_bps` is refused,
     /// because no transfer on this chain pays one. ACTIVATION-AUDIT row RY-1.
     pub unpayable_royalty_refused: bool,
+    /// `UpdateCollectionConfig` stops recording a royalty recipient, on every
+    /// collection. ACTIVATION-AUDIT rows RY-2 and RY-3, the residue the
+    /// creation refusal does not reach.
+    pub royalty_operation_unsupported: bool,
 }
 
 impl NftGates {
@@ -176,6 +180,7 @@ impl NftGates {
         index_symmetry: false,
         collection_id_nonce: false,
         unpayable_royalty_refused: false,
+        royalty_operation_unsupported: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -188,6 +193,7 @@ impl NftGates {
         index_symmetry: true,
         collection_id_nonce: true,
         unpayable_royalty_refused: true,
+        royalty_operation_unsupported: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -201,6 +207,10 @@ impl NftGates {
             index_symmetry: NftExecutor::index_symmetry_gate_open(params, block_height),
             collection_id_nonce: NftExecutor::collection_id_nonce_gate_open(params, block_height),
             unpayable_royalty_refused: NftExecutor::unpayable_royalty_refused_gate_open(
+                params,
+                block_height,
+            ),
+            royalty_operation_unsupported: NftExecutor::royalty_operation_unsupported_gate_open(
                 params,
                 block_height,
             ),
@@ -440,6 +450,43 @@ impl NftExecutor {
     #[inline]
     pub fn unpayable_royalty_refused_gate_open(params: &ChainParams, block_height: u64) -> bool {
         matches!(Self::unpayable_royalty_refused_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// The activation height for the royalty-operation refusal.
+    ///
+    /// Reads `params.nft_royalty_operation_unsupported_enabled_from_height`,
+    /// and nothing else. `None` closes the gate.
+    ///
+    /// ACTIVATION-AUDIT rows RY-2 and RY-3, the residue
+    /// `nft_unpayable_royalty_refused_enabled_from_height` cannot reach. That
+    /// gate refuses a non-zero `royalty_bps` at CREATION, which is the only
+    /// place `royalty_bps` can be set -- and leaves the update path.
+    /// `NftUpdateCollectionConfigData` carries `new_royalty_recipient`, and
+    /// `nft_update_path_parity_enabled_from_height` refuses it only for a
+    /// collection whose `royalty_bps` is ZERO, which is the rule creation
+    /// applies. A collection created BELOW the creation gate keeps its non-zero
+    /// `royalty_bps`, so its recipient stays settable, re-settable and
+    /// published by `nft_getCollection`, for ever.
+    ///
+    /// No NFT transfer on this chain carries consideration: `NftTransferData`
+    /// is `{ to }`, `execute_transfer` and `v_transfer_token` move a token and
+    /// no balance, and nothing anywhere computes a royalty amount. So the
+    /// recipient records who would be paid out of a price that does not exist.
+    /// At and above the gate the arm refuses, for every collection, before any
+    /// field is written; an update carrying only `new_base_uri` is applied
+    /// exactly as before.
+    #[inline]
+    fn royalty_operation_unsupported_activation(params: &ChainParams) -> Option<u64> {
+        params.nft_royalty_operation_unsupported_enabled_from_height
+    }
+
+    /// Whether the royalty-operation refusal is active at `block_height`.
+    #[inline]
+    pub fn royalty_operation_unsupported_gate_open(
+        params: &ChainParams,
+        block_height: u64,
+    ) -> bool {
+        matches!(Self::royalty_operation_unsupported_activation(params), Some(h) if block_height >= h)
     }
 
     /// The errors the receipt-failure rule converts into a `Failed` receipt.
@@ -1518,6 +1565,17 @@ impl NftExecutor {
         // all, so a royalty still cannot be changed after creation. That is a
         // wire change.
         if let Some(recipient) = update_data.new_royalty_recipient {
+            // ACTIVATION-AUDIT rows RY-2 and RY-3 residue: the recipient is
+            // refused on EVERY collection, not only one that pays nothing,
+            // because nothing on this chain pays anything. Ahead of the parity
+            // refusal, because it is the wider claim: parity says the update
+            // path should apply creation's rule, and this says the field
+            // records a payment that cannot happen.
+            if gates.royalty_operation_unsupported {
+                return Ok(NftExecutionResult::failure(
+                    crate::ROYALTY_OPERATION_UNSUPPORTED.to_string(),
+                ));
+            }
             if gates.update_path_parity && collection.royalty_bps == 0 {
                 return Ok(NftExecutionResult::failure(
                     "Collection pays no royalty, so it takes no royalty recipient".to_string(),

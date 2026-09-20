@@ -3912,6 +3912,28 @@ fn healthcare_at(
 fn open_but_the_old_consent_payload() -> HealthcareGates {
     HealthcareGates {
         consent_subject_signature: false,
+        ..open_but_the_unresolvable_policy_id()
+    }
+}
+
+/// `HealthcareGates::OPEN`, minus the gate that refuses this file's fixtures'
+/// own `policy_id`.
+///
+/// Every payload built here carries `policy_id: [12u8; 32]` -- a well-formed
+/// thirty-two bytes that this chain cannot say anything about, which is exactly
+/// ACTIVATION-AUDIT row AU-8 and exactly what
+/// `subsystem_ambiguous_policy_id_refused_enabled_from_height` refuses. With it
+/// open these transactions are refused before the rule each test is about is
+/// ever reached, and the pair would differ for a reason that is not the test's.
+///
+/// Held closed rather than changing the fixtures to a zero `policy_id`,
+/// deliberately: `[12u8; 32]` is what a real payload in this subsystem looks
+/// like today, and a suite that quietly stopped exercising it would stop being
+/// about the chain as configured. The gate itself is driven end to end in
+/// `ambiguous_policy_id_gate.rs`.
+fn open_but_the_unresolvable_policy_id() -> HealthcareGates {
+    HealthcareGates {
+        policy_id_ambiguous_refused: false,
         ..HealthcareGates::OPEN
     }
 }
@@ -4130,7 +4152,10 @@ fn a_stranger_can_fill_any_prescription_below_the_gate_and_none_above_it() {
         fill_commitment: [u8; 32],
     }
 
-    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+    for gates in [
+        HealthcareGates::CLOSED,
+        open_but_the_unresolvable_policy_id(),
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let issuer = KeyPair::generate();
         let stranger = KeyPair::generate();
@@ -4206,7 +4231,10 @@ fn a_stranger_can_change_network_affiliations_only_below_the_gate() {
         plan_id: [u8; 32],
     }
 
-    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+    for gates in [
+        HealthcareGates::CLOSED,
+        open_but_the_unresolvable_policy_id(),
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let issuer = KeyPair::generate();
         let stranger = KeyPair::generate();
@@ -4258,7 +4286,10 @@ fn a_stranger_can_change_network_affiliations_only_below_the_gate() {
 /// AU-5: a prescription naming somebody else's provider as prescriber.
 #[test]
 fn a_prescription_naming_another_issuers_prescriber_is_refused_only_at_the_gate() {
-    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+    for gates in [
+        HealthcareGates::CLOSED,
+        open_but_the_unresolvable_policy_id(),
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let real = KeyPair::generate();
         let impostor = KeyPair::generate();
@@ -4311,7 +4342,10 @@ fn a_prescription_with_no_refills_is_filled_once_more_below_the_gate_only() {
         fill_commitment: [u8; 32],
     }
 
-    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+    for gates in [
+        HealthcareGates::CLOSED,
+        open_but_the_unresolvable_policy_id(),
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let issuer = KeyPair::generate();
         fund(&db, &issuer, 100_000_000);
@@ -4388,7 +4422,10 @@ fn prescription_validity_is_evaluated_at_time_zero_until_the_gate() {
         fill_commitment: [u8; 32],
     }
 
-    for gates in [HealthcareGates::CLOSED, HealthcareGates::OPEN] {
+    for gates in [
+        HealthcareGates::CLOSED,
+        open_but_the_unresolvable_policy_id(),
+    ] {
         let (_state, db, _dir, _executor) = setup_with_params(params());
         let issuer = KeyPair::generate();
         fund(&db, &issuer, 100_000_000);

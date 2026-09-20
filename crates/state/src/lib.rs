@@ -511,6 +511,127 @@ pub const UNPAYABLE_ROYALTY_UNSUPPORTED: &str =
     "Royalty enforcement is unsupported: no NFT transfer on this chain carries \
      consideration and none pays a royalty, so a collection must not record one";
 
+/// The activation height for the ambiguous-`policy_id` refusal.
+///
+/// Reads `params.subsystem_ambiguous_policy_id_refused_enabled_from_height`,
+/// and nothing else. `None` -- the default, and what a genesis written before
+/// the field existed resolves to -- closes the gate, so a node executes exactly
+/// what it executed before the field was declared.
+///
+/// ACTIVATION-AUDIT row AU-8. Thirteen wire types across Healthcare, Property
+/// and Agreement carry a `policy_id: [u8; 32]`, every one of them written from
+/// the payload and consulted by no guard. What makes the field unsafe rather
+/// than merely unused is that nothing in this tree says WHICH NAMESPACE it is
+/// in: a policy-ACCOUNT id, which `PolicyAccountExecutor::v_get_policy_account`
+/// could resolve, or a COMMITMENT to an off-chain policy document, which it
+/// could not. The two are typed identically, no subsystem executor names
+/// `PolicyAccount` at all, and no `policy_id` in any fixture is a policy-account
+/// key -- so binding them would be inventing the binding, and binding them
+/// wrong would refuse every lawful transaction whose `policy_id` is a document
+/// commitment.
+///
+/// That decision is a specification decision and is not made here. At and above
+/// the gate the affected arms refuse a NON-ZERO `policy_id`, before the deduct,
+/// carrying [`AMBIGUOUS_POLICY_ID_UNRESOLVABLE`]. `[0u8; 32]` is this tree's
+/// absent sentinel and stays accepted, so an operation that names no policy is
+/// untouched and the gate removes exactly the claim the chain cannot back.
+///
+/// ONE field for three subsystems, on the
+/// `subsystem_proof_unsupported_enabled_from_height` argument: one ambiguity,
+/// thirteen identical guards, the same blast radius on each side.
+///
+/// The accessor is named SHORTER than its field, for the reason
+/// [`subsystem_issuer_registration_activation`] is:
+/// `every_remediation_gate_reads_the_field_it_names` locates an accessor by the
+/// literal text `fn <name>(params: &`, so a signature rustfmt wraps is one the
+/// pairing test cannot find, and the full name does not fit in one hundred
+/// columns beside `&sumchain_genesis::ChainParams`.
+#[inline]
+fn subsystem_policy_id_activation(params: &sumchain_genesis::ChainParams) -> Option<u64> {
+    params.subsystem_ambiguous_policy_id_refused_enabled_from_height
+}
+
+/// Whether the ambiguous-`policy_id` refusal is active at `block_height`.
+#[inline]
+pub fn subsystem_ambiguous_policy_id_refused_gate_open(
+    params: &sumchain_genesis::ChainParams,
+    block_height: u64,
+) -> bool {
+    matches!(subsystem_policy_id_activation(params), Some(h) if block_height >= h)
+}
+
+/// The `policy_id` sentinel this tree already uses to mean "none named".
+///
+/// Every `policy_id` field is a bare `[u8; 32]` with no `Option` around it, so
+/// an operation that names no policy has to write SOMETHING, and what it writes
+/// is zero -- the same null sentinel `Address::ZERO` and `Hash::ZERO` are. The
+/// gate is built on that rather than on a new convention: refusing zero too
+/// would refuse every operation in three subsystems, which is not a fail-closed
+/// surface, it is a shutdown.
+pub const UNNAMED_POLICY_ID: [u8; 32] = [0u8; 32];
+
+/// The reason a gated arm refuses a `policy_id` it cannot resolve.
+///
+/// One string for all thirteen arms, for the same reason
+/// [`VERIFY_PROOF_UNSUPPORTED`] is one string for seven. It names the
+/// AMBIGUITY and not the value: the thirty-two bytes are well formed, and there
+/// is no other non-zero `policy_id` the sender could have supplied that this
+/// chain would have been able to resolve. "Policy not found" would be a claim
+/// about the argument and would imply a lookup that no arm performs.
+pub const AMBIGUOUS_POLICY_ID_UNRESOLVABLE: &str =
+    "policy_id is unresolvable: this chain does not state whether a policy_id \
+     names a policy account or commits to an off-chain policy document, so a \
+     record must not claim to be governed by one. Submit a zero policy_id to \
+     record no policy";
+
+/// The reason a gated DocClass issuance refuses a signature it cannot check.
+///
+/// It names VERIFICATION as unsupported rather than the signature as invalid:
+/// the sixty-four bytes may be a perfectly good ed25519 signature, and the
+/// chain has no way to find out. Nothing in DocClass defines a canonical
+/// signing input, and `issuer_key_id` names a key with no stated resolution
+/// rule, so storing the bytes would assert a check that never ran.
+pub const DOCCLASS_SIGNATURE_UNSUPPORTED: &str =
+    "DocClass signature verification is unsupported: this subsystem defines no \
+     canonical signing input and no rule for resolving issuer_key_id to a key, \
+     so a credential must not carry a signature nothing can check. Submit an \
+     all-zero issuer_signature and an empty issuer_key_id";
+
+/// The reason a gated DocClass issuance refuses an over-long validity window.
+///
+/// It names the bound's UNIT, because that is the one thing a submitter cannot
+/// infer from the wire type: `valid_from` and `expires_at` are bare `u64`s, and
+/// the chain's block timestamp -- the clock they share an alias with -- is in
+/// milliseconds.
+pub const DOCCLASS_CREDENTIAL_VALIDITY_TOO_LONG: &str =
+    "credential validity window exceeds max_credential_validity: the bound is a \
+     duration in MILLISECONDS, the same unit as the chain's block timestamp, and \
+     expires_at - valid_from is over it";
+
+/// The reason a gated DocClass issuance refuses an unclassified attribute key.
+///
+/// It names the SUBCODE's missing allowlist and not the key, because no other
+/// key would have been accepted either: the subcode has no allowlist at all, so
+/// every key on it is unknown. "Attribute not allowed" would imply a list the
+/// key failed to be on.
+pub const DOCCLASS_UNKNOWN_ATTRIBUTE_REFUSED: &str =
+    "this credential subcode has no attribute allowlist, so every attribute key \
+     on it is unclassified and is refused rather than stored: an allowlist is a \
+     policy decision this chain has not made for this subcode";
+
+/// The reason a gated `UpdateCollectionConfig` refuses a royalty recipient.
+///
+/// It names the ROYALTY OPERATION as unsupported rather than the recipient as
+/// invalid. The address is well formed; what cannot be done is paying it,
+/// because no NFT transfer on this chain carries consideration and no execution
+/// path computes a royalty amount. Distinct from the parity refusal, which is
+/// about a collection that pays none: this one refuses the recipient on a
+/// collection that records one too.
+pub const ROYALTY_OPERATION_UNSUPPORTED: &str =
+    "Royalty operations are unsupported: no NFT transfer on this chain carries \
+     consideration and none pays a royalty, so a collection's royalty recipient \
+     must not be recorded or changed";
+
 /// A gated `GrantConsent` whose payload is still the unremediated encoding.
 ///
 /// Three separate reasons rather than one, for the three ways a consent grant

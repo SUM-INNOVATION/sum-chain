@@ -177,6 +177,12 @@ pub struct AgreementGates {
     /// party ADDRESS, so there is no sender any of these arms could accept and
     /// no canonical input any stored signature could be checked against.
     pub party_authority_unsupported: bool,
+    /// An operation carrying a `policy_id` this chain cannot resolve refuses.
+    /// ACTIVATION-AUDIT row AU-8: nothing states whether a `policy_id` names a
+    /// policy ACCOUNT or commits to an off-chain policy DOCUMENT, so the claim
+    /// is refused rather than guessed at. A zero `policy_id` names no policy
+    /// and is unaffected.
+    pub policy_id_ambiguous_refused: bool,
 }
 
 impl AgreementGates {
@@ -187,6 +193,7 @@ impl AgreementGates {
         proof_unsupported: false,
         no_op_receipt: false,
         allocation_bound: false,
+        policy_id_ambiguous_refused: false,
         party_authority_unsupported: false,
     };
 
@@ -197,6 +204,7 @@ impl AgreementGates {
         proof_unsupported: true,
         no_op_receipt: true,
         allocation_bound: true,
+        policy_id_ambiguous_refused: true,
         party_authority_unsupported: true,
     };
 
@@ -212,6 +220,10 @@ impl AgreementGates {
             no_op_receipt: crate::subsystem_no_op_receipt_gate_open(params, block_height),
             allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
             party_authority_unsupported: AgreementExecutor::party_authority_unsupported_gate_open(
+                params,
+                block_height,
+            ),
+            policy_id_ambiguous_refused: crate::subsystem_ambiguous_policy_id_refused_gate_open(
                 params,
                 block_height,
             ),
@@ -232,6 +244,25 @@ impl AgreementGates {
 }
 
 impl AgreementExecutor {
+    /// The ACTIVATION-AUDIT row AU-8 refusal, or `None` when the operation
+    /// names no policy.
+    ///
+    /// One helper rather than a copy of the predicate per arm: the arms are
+    /// several and the rule is one, and two copies that drifted would refuse
+    /// different things under one height.
+    #[inline]
+    fn ambiguous_policy_refusal(
+        gates: AgreementGates,
+        policy_id: &[u8; 32],
+    ) -> Option<AgreementExecutionResult> {
+        if gates.policy_id_ambiguous_refused && policy_id != &crate::UNNAMED_POLICY_ID {
+            return Some(AgreementExecutionResult::failure(
+                crate::AMBIGUOUS_POLICY_ID_UNRESOLVABLE,
+            ));
+        }
+        None
+    }
+
     /// The activation height for the Agreement signature-integrity rules.
     ///
     /// Reads `params.agreement_signature_integrity_enabled_from_height`, and
@@ -519,6 +550,13 @@ impl AgreementExecutor {
                 let agreement: AgreementCommitment = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
+                // ACTIVATION-AUDIT row AU-8: a `policy_id` this chain cannot
+                // resolve is a claim it cannot back, so it is refused ahead of
+                // the deduct rather than stored. Zero names no policy.
+                if let Some(refusal) = Self::ambiguous_policy_refusal(gates, &agreement.policy_id) {
+                    return Ok(refusal);
+                }
+
                 if Self::v_agreement_exists(view, &agreement.agreement_id)? {
                     return Ok(AgreementExecutionResult::failure("Agreement already exists"));
                 }
@@ -602,6 +640,15 @@ impl AgreementExecutor {
                 }
                 let d: SupersedeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
+
+                // ACTIVATION-AUDIT row AU-8: a `policy_id` this chain cannot
+                // resolve is a claim it cannot back, so it is refused ahead of
+                // the deduct rather than stored. Zero names no policy.
+                if let Some(refusal) =
+                    Self::ambiguous_policy_refusal(gates, &d.new_agreement.policy_id)
+                {
+                    return Ok(refusal);
+                }
 
                 if Self::v_get_agreement(view, &d.old_agreement_id)?.is_none() {
                     return Ok(AgreementExecutionResult::failure("Old agreement not found"));
@@ -749,6 +796,14 @@ impl AgreementExecutor {
                 let attestation: AttestationPacket = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
+                // ACTIVATION-AUDIT row AU-8: a `policy_id` this chain cannot
+                // resolve is a claim it cannot back, so it is refused ahead of
+                // the deduct rather than stored. Zero names no policy.
+                if let Some(refusal) = Self::ambiguous_policy_refusal(gates, &attestation.policy_id)
+                {
+                    return Ok(refusal);
+                }
+
                 if attestation.issuer_address != *sender {
                     return Ok(AgreementExecutionResult::failure("Issuer must be sender"));
                 }
@@ -824,6 +879,13 @@ impl AgreementExecutor {
                 let action: IpRightsAction = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
+                // ACTIVATION-AUDIT row AU-8: a `policy_id` this chain cannot
+                // resolve is a claim it cannot back, so it is refused ahead of
+                // the deduct rather than stored. Zero names no policy.
+                if let Some(refusal) = Self::ambiguous_policy_refusal(gates, &action.policy_id) {
+                    return Ok(refusal);
+                }
+
                 if Self::v_ip_action_exists(view, &action.action_id)? {
                     return Ok(AgreementExecutionResult::failure("IP action already exists"));
                 }
@@ -866,6 +928,15 @@ impl AgreementExecutor {
             AgreementOperation::LinkExecutor => {
                 let link: ExecutorLink = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
+
+                // ACTIVATION-AUDIT row AU-8: a `policy_id` this chain cannot
+                // resolve is a claim it cannot back, so it is refused ahead of
+                // the deduct rather than stored. Zero names no policy.
+                if let Some(refusal) =
+                    Self::ambiguous_policy_refusal(gates, &link.activation_policy_id)
+                {
+                    return Ok(refusal);
+                }
 
                 // Verify agreement exists
                 if Self::v_get_agreement(view, &link.agreement_id)?.is_none() {

@@ -2333,6 +2333,247 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub nft_unpayable_royalty_refused_enabled_from_height: Option<u64>,
+
+    /// A DocClass credential stops carrying a signature nothing can check.
+    ///
+    /// ACTIVATION-AUDIT row AU-33. No signature is verified anywhere in
+    /// DocClass: `issuer_signature` on a credential and on an attestation is
+    /// stored verbatim and read by nothing, and the revocation record the
+    /// executor builds writes `[0u8; 64]` into a field the wire type documents
+    /// as "Signature over the revocation". Every signature field in the
+    /// subsystem is decorative.
+    ///
+    /// **Verification was examined against the tree's OWN convention and
+    /// refused, rather than invented.** The convention is the one
+    /// `healthcare_consent_subject_signature_enabled_from_height` uses: a
+    /// domain separator, a blake3 digest over an explicitly enumerated
+    /// fixed-width field set built ON the wire type
+    /// (`ConsentEnvelope::grant_signing_input` under
+    /// `SRC874-CONSENT-GRANT:v1:`), and an ed25519 check whose public key is IN
+    /// the payload and must derive to an address IN the payload. DocClass can
+    /// satisfy none of the three.
+    ///
+    ///   * **No key on the wire.** `AcademicCredential`, `EligibilityAttestation`
+    ///     and `RevocationRecord` carry `issuer: Address` (or `revoker`) and
+    ///     `issuer_key_id: String` -- a NAME, not a key. Resolving it needs
+    ///     `DocClassIssuer.keys`, and nothing states which entry answers: the
+    ///     list carries `active`, `is_primary` and `expires_at`, and no rule
+    ///     says whether a signature made under a key later rotated out still
+    ///     verifies. The consent construction is registry-free precisely so
+    ///     that question cannot arise.
+    ///   * **No registry on the issuance path either.** A credential is issued
+    ///     through `v_can_issue_subcode`, so a subcode an issuer is not
+    ///     registered for is refused -- but the KEY LIST is never consulted,
+    ///     and the field would be the first thing to consult it.
+    ///   * **No canonical field set.** The consent digest hashes fixed-width
+    ///     values and one-byte tags only, and says so, because a preimage over
+    ///     variable-length data needs a length convention. A DocClass credential
+    ///     is half `String` and `Option<String>` -- `jurisdiction`,
+    ///     `institution_id`, `payload_hint`, `issuer_key_id`, and an arbitrary
+    ///     list of `CredentialAttribute` name/value pairs. Choosing which are
+    ///     covered, in what order, and how a string is framed is writing
+    ///     standard.
+    ///
+    /// A verification rule that computes the WRONG preimage refuses every
+    /// LAWFUL credential, so a guess here is worse than the gap. It stays
+    /// UNSUPPORTED, and at and above the gate that is said out loud: an
+    /// `IssueCredential` whose `issuer_signature` is not sixty-four zero bytes,
+    /// or whose `issuer_key_id` is not empty, returns a FAILED receipt before
+    /// the deduct. A credential that asserts no signature is issued exactly as
+    /// before. The gate closes the CLAIM, not the credential.
+    ///
+    /// **What it cannot close**, stated rather than left to be discovered: the
+    /// revocation record still writes `[0u8; 64]`, because the field is not
+    /// optional and removing it changes the stored encoding -- a consensus
+    /// change with nothing to put there. Zero is at least the honest value.
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub docclass_signature_unsupported_enabled_from_height: Option<u64>,
+
+    /// `DocClassParams::max_credential_validity` bounds a credential's validity
+    /// window, in the chain's own timestamp unit.
+    ///
+    /// ACTIVATION-AUDIT row AU-37, the `max_credential_validity` third. The
+    /// field is declared, defaulted, reported over `docclass_getConfig` -- and
+    /// read by no execution path, so a credential declaring `valid_from: 0` and
+    /// `expires_at: u64::MAX` is accepted and the unbounded window is stored.
+    ///
+    /// **The unit is settled from the code, not from the field name.** The
+    /// chain's canonical block timestamp is MILLISECONDS since the Unix epoch:
+    /// `PoaEngine::current_timestamp` builds it with
+    /// `SystemTime::now().duration_since(UNIX_EPOCH).as_millis()`
+    /// (`crates/consensus/src/poa.rs`), and `BlockHeader::timestamp` documents
+    /// itself "(ms since epoch)". A credential's `valid_from` and `expires_at`
+    /// are the same `Timestamp` alias as that field, so the difference between
+    /// them is a duration in milliseconds, and
+    /// [`DocClassParams::max_credential_validity`] is a duration in
+    /// milliseconds too. That is now what its own doc comment says; it
+    /// previously said seconds, which matched no clock in this tree.
+    ///
+    /// At and above the gate an issuance whose `expires_at` exceeds
+    /// `valid_from` by more than a non-zero `max_credential_validity` returns a
+    /// FAILED receipt before the deduct. `0` keeps its documented meaning of NO
+    /// LIMIT and is the default, so an operator who has configured nothing sees
+    /// no change at the height; `expires_at == 0` keeps its documented meaning
+    /// of no expiry and is not bounded, because bounding it would refuse the
+    /// credential the field's own comment calls unexpiring.
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub docclass_credential_validity_bound_enabled_from_height: Option<u64>,
+
+    /// An attribute key no allowlist covers is REFUSED rather than admitted.
+    ///
+    /// ACTIVATION-AUDIT row D-19b, the half no height closed.
+    /// `docclass_credential_schema_enabled_from_height` extended the length
+    /// bounds to every academic subcode and left the attribute KEYS
+    /// unrestricted for the subcodes whose standard lists none -- 813, 814, 815
+    /// and every later academic subcode -- because inventing three allowlists
+    /// in a remediation pass would be writing standard. So above that gate an
+    /// SRC-813 credential carrying an attribute named `ssn` is VALID, while the
+    /// same key on an SRC-810 transcript is refused by the allowlist that
+    /// subcode does have.
+    ///
+    /// The allowlist is still not invented here. The other reading of "no
+    /// allowlist exists" is taken instead: if the standard for a subcode names
+    /// no public attribute, then EVERY attribute key on it is unknown, and an
+    /// unknown key fails closed. At and above the gate a credential on an
+    /// uncovered subcode carrying ANY attribute returns a FAILED receipt; one
+    /// carrying NO attributes is issued exactly as before, and the three
+    /// covered subcodes keep the allowlists they already have. That refuses a
+    /// key nobody has classified without deciding which keys would be lawful --
+    /// the decision the row says is a policy decision, and which this gate
+    /// leaves open for a later standard to make by supplying an allowlist.
+    ///
+    /// Its own height rather than the schema one, because they are different
+    /// rules: that gate extends CHECKS that already existed to families that
+    /// lacked them, this one refuses a family's attributes outright. An
+    /// operator must be able to take the first without the second.
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub docclass_unknown_attribute_refused_enabled_from_height: Option<u64>,
+
+    /// An operation carrying a `policy_id` this chain cannot resolve REFUSES.
+    ///
+    /// ACTIVATION-AUDIT row AU-8. Thirteen wire types across three subsystems
+    /// carry a `policy_id: [u8; 32]` -- Healthcare `ProviderProfile`,
+    /// `MembershipRecord`, `ConsentEnvelope` and `Prescription`; Property
+    /// `AssetAnchor`, `TitleEvent`, `Encumbrance`, `InsuranceCoverage` and
+    /// `InsuranceClaim`; Agreement `AgreementCommitment`, `AttestationPacket`,
+    /// `IpRightsAction` and `ExecutorLink`'s `activation_policy_id`. Every one
+    /// of them is written from the payload and consulted by no guard.
+    ///
+    /// **The ambiguity, which is the whole of it.** Nothing in this tree states
+    /// whether such a `policy_id` is a POLICY-ACCOUNT id or a COMMITMENT to an
+    /// off-chain policy document. `PolicyAccountExecutor::v_get_policy_account`
+    /// exists and is reachable, so "consult the registry" is mechanically
+    /// available -- and no subsystem executor names `PolicyAccount` at all, no
+    /// `policy_id` in any fixture is a policy-account key, and the two are
+    /// typed identically, so the compiler cannot tell them apart either.
+    /// Binding them would be inventing the binding; binding them WRONG would
+    /// refuse every lawful transaction whose `policy_id` is a document
+    /// commitment. Resolving the ambiguity is a specification decision.
+    ///
+    /// So it is not resolved. At and above the gate the affected arms refuse a
+    /// NON-ZERO `policy_id`, before the deduct, with a reason that names the
+    /// ambiguity. `[0u8; 32]` is this tree's absent sentinel and stays
+    /// accepted, so every operation that names no policy is unaffected, and the
+    /// gate takes away exactly the claim the chain cannot back: that a record
+    /// is governed by a policy it cannot identify.
+    ///
+    /// **The three proof envelopes are deliberately out of reach.**
+    /// `HealthcareProofEnvelope`, `PropertyProofEnvelope` and
+    /// `AgreementProofEnvelope` carry `policy_ids: Vec<PolicyId>` and are not
+    /// touched here, because the arms that write and read them already refuse:
+    /// Property `SubmitProof` under
+    /// [`Self::property_proof_submission_unsupported_enabled_from_height`], and
+    /// every `VerifyProof` under
+    /// [`Self::subsystem_proof_unsupported_enabled_from_height`]. Adding a
+    /// third refusal to an operation two gates already refuse would say nothing
+    /// new.
+    ///
+    /// ONE field for three subsystems, on the
+    /// `subsystem_proof_unsupported_enabled_from_height` argument: one
+    /// ambiguity, thirteen identical guards, the same blast radius on each
+    /// side. There is no configuration in which an operator wants a `policy_id`
+    /// to be unresolvable in Property and meaningful in Healthcare.
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub subsystem_ambiguous_policy_id_refused_enabled_from_height: Option<u64>,
+
+    /// `UpdateCollectionConfig` stops recording a royalty arrangement.
+    ///
+    /// ACTIVATION-AUDIT rows RY-2 and RY-3, the residue
+    /// [`Self::nft_unpayable_royalty_refused_enabled_from_height`] does not
+    /// reach. That gate refuses a non-zero `royalty_bps` at CREATION, which is
+    /// the only place `royalty_bps` can be set. It leaves the update path:
+    /// `NftUpdateCollectionConfigData` carries `new_royalty_recipient`, and
+    /// `nft_update_path_parity_enabled_from_height` refuses it only for a
+    /// collection whose `royalty_bps` is ZERO -- the rule creation applies. A
+    /// collection created BELOW the creation gate keeps its non-zero
+    /// `royalty_bps`, so its recipient stays settable, re-settable and
+    /// published by `nft_getCollection`, for ever.
+    ///
+    /// **No NFT transfer on this chain carries consideration.**
+    /// `NftTransferData` is `{ to }`; `execute_transfer` and `v_transfer_token`
+    /// move a token and no balance; nothing anywhere computes a royalty amount.
+    /// So the recipient field records who would be paid out of a price that does
+    /// not exist. At and above the gate an `UpdateCollectionConfig` carrying a
+    /// `new_royalty_recipient` returns a FAILED receipt, for every collection,
+    /// before any field is written -- and an update that carries only
+    /// `new_base_uri` is applied exactly as before.
+    ///
+    /// Its own height rather than the parity one, because they are different
+    /// claims: parity is about the update path applying the rule CREATION
+    /// applies, and would be right even if royalties were paid; this is about
+    /// the operation being unpayable at all. An operator must be able to take
+    /// the first without the second, and a reader of either receipt must be
+    /// able to tell which claim was refused. Nothing is stranded: no royalty has
+    /// ever been paid on this chain, so no recipient loses income, and a
+    /// collection's existing recipient keeps whatever value it already held --
+    /// a gate changes what a node does next, not what a chain already wrote.
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub nft_royalty_operation_unsupported_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -2511,7 +2752,25 @@ pub struct DocClassParams {
     /// Initial registered issuers (for bootstrapping)
     #[serde(default)]
     pub initial_issuers: Vec<String>,
-    /// Credential validity period limits (in seconds, 0 = no limit)
+    /// Credential validity period limit, in MILLISECONDS (0 = no limit).
+    ///
+    /// The unit is the chain's canonical block timestamp unit, read from the
+    /// code rather than guessed from the field name: `PoaEngine::current_timestamp`
+    /// builds a block's timestamp with `SystemTime::now().duration_since(UNIX_EPOCH)
+    /// .as_millis()` (`crates/consensus/src/poa.rs`), and `BlockHeader::timestamp`
+    /// documents itself "(ms since epoch)". A credential's `valid_from` and
+    /// `expires_at` are the same `Timestamp` alias as that field, so
+    /// `expires_at - valid_from` is a duration in milliseconds and this bound
+    /// has to be one too.
+    ///
+    /// This comment said "in seconds" until the unit was settled. It matched no
+    /// clock in this tree, and nothing read the field, so nothing was wrong at
+    /// runtime -- but a bound applied under the wrong unit is a consensus rule
+    /// that refuses lawful credentials by a factor of a thousand, which is why
+    /// the unit was established before the reader was written. Read by
+    /// `DocClassExecutor` at and above
+    /// [`ChainParams::docclass_credential_validity_bound_enabled_from_height`],
+    /// and by nothing below it.
     #[serde(default)]
     pub max_credential_validity: u64,
     /// Whether to require issuer stake for registration
@@ -2719,6 +2978,16 @@ impl Default for ChainParams {
             property_proof_submission_unsupported_enabled_from_height: None,
             // Production-safe default: a collection cannot record a royalty this chain will never pay — dormant.
             nft_unpayable_royalty_refused_enabled_from_height: None,
+            // Production-safe default: a DocClass credential carrying a signature nothing checks refuses — dormant.
+            docclass_signature_unsupported_enabled_from_height: None,
+            // Production-safe default: a credential's validity window is bounded by the configured maximum — dormant.
+            docclass_credential_validity_bound_enabled_from_height: None,
+            // Production-safe default: an attribute key no allowlist covers refuses — dormant.
+            docclass_unknown_attribute_refused_enabled_from_height: None,
+            // Production-safe default: an operation carrying an unresolvable policy_id refuses — dormant.
+            subsystem_ambiguous_policy_id_refused_enabled_from_height: None,
+            // Production-safe default: UpdateCollectionConfig stops recording a royalty arrangement — dormant.
+            nft_royalty_operation_unsupported_enabled_from_height: None,
         }
     }
 }
@@ -3245,6 +3514,26 @@ impl ChainParams {
                 "nft_unpayable_royalty_refused_enabled_from_height",
                 self.nft_unpayable_royalty_refused_enabled_from_height,
             ),
+            (
+                "docclass_signature_unsupported_enabled_from_height",
+                self.docclass_signature_unsupported_enabled_from_height,
+            ),
+            (
+                "docclass_credential_validity_bound_enabled_from_height",
+                self.docclass_credential_validity_bound_enabled_from_height,
+            ),
+            (
+                "docclass_unknown_attribute_refused_enabled_from_height",
+                self.docclass_unknown_attribute_refused_enabled_from_height,
+            ),
+            (
+                "subsystem_ambiguous_policy_id_refused_enabled_from_height",
+                self.subsystem_ambiguous_policy_id_refused_enabled_from_height,
+            ),
+            (
+                "nft_royalty_operation_unsupported_enabled_from_height",
+                self.nft_royalty_operation_unsupported_enabled_from_height,
+            ),
         ]
     }
 
@@ -3285,7 +3574,7 @@ impl ChainParams {
     }
 }
 
-/// The thirty-seven remediation gates, by field name.
+/// The forty-two remediation gates, by field name.
 ///
 /// The count in this sentence has been wrong twice, both times because a wave
 /// added gates and nothing checked the prose. It is checked now:
@@ -3343,6 +3632,11 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "subsystem_issuer_self_registration_unsupported_enabled_from_height",
     "property_proof_submission_unsupported_enabled_from_height",
     "nft_unpayable_royalty_refused_enabled_from_height",
+    "docclass_signature_unsupported_enabled_from_height",
+    "docclass_credential_validity_bound_enabled_from_height",
+    "docclass_unknown_attribute_refused_enabled_from_height",
+    "subsystem_ambiguous_policy_id_refused_enabled_from_height",
+    "nft_royalty_operation_unsupported_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started

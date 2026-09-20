@@ -307,10 +307,10 @@ fn the_enforcement_height_and_every_remediation_gate_are_named_in_activation_hei
     }
     assert_eq!(
         REMEDIATION_GATES.len(),
-        37,
-        "thirty-seven remediation gates; a merge that spliced two entries together \
+        42,
+        "forty-two remediation gates; a merge that spliced two entries together \
          leaves a list that still compiles and is one short"
     );
     let distinct: std::collections::BTreeSet<&&str> = REMEDIATION_GATES.iter().collect();
-    assert_eq!(distinct.len(), 37, "and thirty-seven DISTINCT ones");
+    assert_eq!(distinct.len(), 42, "and forty-two DISTINCT ones");
 }
