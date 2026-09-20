@@ -895,7 +895,26 @@ impl Node {
                         // place rather than costing the operator a fork.
                         NetworkEvent::ProtocolIdResponse { peer, digest } => {
                             if self.peer_compat.on_declaration(peer, digest) {
-                                debug!("Peer {} enforces our protocol digest", peer);
+                                // `info!`, not `debug!`, and the level is the
+                                // point. The binary-rollout gate requires a
+                                // RECORDED successful compatibility handshake
+                                // per validator pair; at `debug!` that evidence
+                                // exists only if someone thought to raise the
+                                // level for the rollout window, so a correct
+                                // rollout and an unobserved one look identical
+                                // afterwards. The refusal beside it is already
+                                // `warn!` -- logging only the failure makes
+                                // silence ambiguous, reading as "no mismatch"
+                                // and "no handshake" at once, and below the
+                                // enforcement height an undeclared peer is
+                                // ADMITTED, so those two have different
+                                // consequences. Bounded by the peer count, not
+                                // by traffic: one line per peer per declaration.
+                                info!(
+                                    peer = %peer,
+                                    digest = %digest,
+                                    "compatibility handshake accepted: peer enforces our protocol digest"
+                                );
                             } else {
                                 warn!(
                                     "REFUSING peer {}: it enforces protocol digest {} but this \

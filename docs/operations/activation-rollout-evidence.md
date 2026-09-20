@@ -81,14 +81,17 @@ the log line per peer, per validator:
 
 ```bash
 kubectl logs "$POD" --since=1h \
-  | grep -E 'enforces our protocol digest|REFUSING peer|declared protocol digest'
+  | grep -E 'compatibility handshake accepted|REFUSING peer|declared protocol digest'
 ```
 
-* **Success** (`crates/node/src/node.rs:898`): `Peer <id> enforces our protocol
-  digest` — emitted at `debug`, so the validator must be started with
-  `RUST_LOG` at `debug` for `sumchain_node` during the rollout window, or this
-  evidence does not exist.
-* **Failure** (`crates/node/src/node.rs:899`, `crates/p2p/src/peer_compat.rs:196`):
+* **Success** (`crates/node/src/node.rs:916`): `compatibility handshake
+  accepted: peer enforces our protocol digest`, carrying `peer` and `digest` as
+  fields — emitted at **`info`**, so this evidence exists under the default log
+  level and does not depend on anyone having raised it for the rollout window.
+  It was `debug!` until this procedure was written: at that level a correct
+  rollout and an unobserved one leave identical logs afterwards, which is
+  exactly the distinction this section exists to make.
+* **Failure** (`crates/node/src/node.rs:920`, `crates/p2p/src/peer_compat.rs:196`):
   `REFUSING peer <id>: it enforces protocol digest X but this node enforces Y`.
   **Any occurrence stops the rollout.** The peer is banned for 24h and is
   permanently `Incompatible` from that point whatever it declares later, so
