@@ -1,0 +1,370 @@
+{
+  "schema": "sumchain.activation-proposal/v1",
+  "generated_by": "tools/lane-b/activation-proposal.py",
+  "derived_from": {
+    "packet": "docs/lane-a/ACTIVATION-DECISION-PACKET.md",
+    "field": "**6. Recommended wave.**",
+    "audit": "docs/lane-a/ACTIVATION-AUDIT.md"
+  },
+  "status": "STAGE 1 ARTIFACT. NO HEIGHT IS SET ANYWHERE IN THIS FILE AND NONE MAY BE ADDED HERE. The owner has not authorized recalculation. Absolute heights belong to the separate stage-2 activation-configuration commit.",
+  "deployment_stages": [
+    {
+      "stage": 1,
+      "name": "binary rollout",
+      "what": "Deploy the exact release binary to every validator with ALL activation gates still UNSET. The failed-receipt telemetry (`sumchain_tx_execution_errors_total`, labelled by subsystem and code) must already be present in that binary, because it is the signal the stage-2 waves are monitored with.",
+      "complete_when": "Every validator has all five records of docs/operations/activation-rollout-evidence.md \u00a71."
+    },
+    {
+      "stage": 2,
+      "name": "activation configuration",
+      "what": "Only after stage 1 completion is PROVEN: recalculate the heights from the then-current head, commit the release genesis configuration, validate it, deploy it.",
+      "not_in_this_commit": true
+    }
+  ],
+  "height_marker": "UNSET-PENDING-OWNER-AUTHORIZATION",
+  "derivation_rule": {
+    "floor": "Every height must be STRICTLY ABOVE the chain head at the moment the genesis is written (packet \u00a70.4). A height that has already passed is refused at startup, which is the safe direction.",
+    "peer_protocol": "`peer_protocol_declaration_required_from_height` must be at or below the earliest open remediation gate or the genesis is refused at load (packet \u00a70.7 rule 4). ACCEPTANCE CRITERION, stricter than the load rule: it goes BEFORE the earliest behavioural gate, with at least 48 hours of observation before Wave 1.",
+    "healthcare_pair": "`healthcare_authorization_enabled_from_height` (R5) at or before `healthcare_consent_subject_signature_enabled_from_height` (R30). Refused at load otherwise, on the genesis path and the restart path alike (packet \u00a70.7 rule 5).",
+    "lead_time_rule": "THE EXISTING WAVE 1 LEAD TIME IS PRESERVED AFTER RECALCULATION. Fourteen days from the recalculation head, not fourteen days from the head this schedule was first drafted against, and NOT shortened to recover time lost to a slipped rollout. Compressing the lead to catch up is precisely the move that produces a mixed-binary fork: the whole function of the lead is to give every operator time to be on the new binary before behaviour changes under it, and a slipped rollout is evidence that MORE time is needed, not less.",
+    "abort_rule": "If any validator misses the configuration rollout, STOP BEFORE the `peer_protocol_declaration_required_from_height` enforcement height. Do not continue toward Wave 1. See docs/operations/activation-rollout-evidence.md \u00a74 for the stop condition and the two ways out of it."
+  },
+  "wave_0": {
+    "name": "compatibility enforcement -- a prerequisite, not an activation",
+    "gates": [
+      {
+        "id": "N1",
+        "field": "peer_protocol_declaration_required_from_height",
+        "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+      }
+    ],
+    "note": "Not a choice: the genesis is refused at load unless this is set at or below the earliest open remediation gate. It is decided WITH Wave 1, not after it. Wave 0 also holds the thing that is not a height at all -- the binary rollout, which is stage 1."
+  },
+  "waves": [
+    {
+      "wave": "1",
+      "cost_shape": "refusal only",
+      "gate_count": 24,
+      "offset_from_recalculation_head": {
+        "expression": "H + 14 * BLOCKS_PER_DAY",
+        "days": 14,
+        "note": "H is the chain head at the moment of recalculation, and BLOCKS_PER_DAY must be RE-MEASURED then. The last measurement was 57,524 blocks/day against a two-validator set (packet \u00a70.3); it is not a constant of the protocol and changes when the validator set changes."
+      },
+      "prerequisites": [
+        "`peer_protocol_declaration_required_from_height` is set STRICTLY BELOW the earliest behavioural gate in this wave -- not merely at or below it -- with at least 48 hours of observation between the two heights. The load rule (packet \u00a70.7 rule 4) only requires `<=`; 48 hours earlier is the acceptance criterion, because a shared height gives an operator no window in which to see enforcement working before behaviour changes under it.",
+        "R5 `healthcare_authorization_enabled_from_height` at or below R30 `healthcare_consent_subject_signature_enabled_from_height` (packet \u00a70.7 rule 5, refused at load otherwise). A shared wave height satisfies it.",
+        "Every client that submits `GrantConsent` upgraded to the `ConsentGrantRequest` payload (R30), and the four R36-R39 client payload changes rolled out (packet 2.3, Wave 0).",
+        "`tax_getActiveIssuers` and `finance_getActiveIssuers` enumerated and recorded: R31 freezes whatever is there.",
+        "`docclass_getConfig` read: R25 is the one gate whose direction of effect depends on deployed configuration.",
+        "`sumchain_tx_execution_errors_total` scraping and alerting live on every validator, per docs/operations/wave1-activation-monitoring.md.",
+        "STAGE 1 COMPLETE: every validator is running the exact release binary with all activation gates UNSET, proven per docs/operations/activation-rollout-evidence.md \u00a71 (binary sha256, activation digest, chain id, current height, and a successful peer compatibility handshake recorded for EVERY validator).",
+        "Every validator received BYTE-IDENTICAL genesis bytes (docs/operations/activation-rollout-evidence.md \u00a73).",
+        "`ChainParams::validate` run against the EXACT committed genesis, and a restart performed from an EXISTING populated database, not a fresh one (docs/operations/activation-rollout-evidence.md \u00a72)."
+      ],
+      "gates": [
+        {
+          "id": "R4",
+          "field": "docclass_revocation_standing_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R5",
+          "field": "healthcare_authorization_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R6",
+          "field": "legal_authorization_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R7",
+          "field": "finance_authorization_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R8",
+          "field": "employment_authorization_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R9",
+          "field": "property_authorization_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R10",
+          "field": "tax_authorization_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R13",
+          "field": "subsystem_allocation_bound_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R15",
+          "field": "nft_token_authority_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R18",
+          "field": "subsystem_proof_presence_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R20",
+          "field": "subsystem_no_op_receipt_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R23",
+          "field": "docclass_credential_schema_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R25",
+          "field": "docclass_issuer_stake_requirement_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R29",
+          "field": "agreement_party_authority_unsupported_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R30",
+          "field": "healthcare_consent_subject_signature_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R31",
+          "field": "subsystem_issuer_self_registration_unsupported_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R32",
+          "field": "property_proof_submission_unsupported_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R33",
+          "field": "nft_unpayable_royalty_refused_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R34",
+          "field": "property_state_precondition_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R36",
+          "field": "docclass_signature_unsupported_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R37",
+          "field": "docclass_credential_validity_bound_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R38",
+          "field": "docclass_unknown_attribute_refused_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R39",
+          "field": "subsystem_ambiguous_policy_id_refused_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R40",
+          "field": "nft_royalty_operation_unsupported_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        }
+      ]
+    },
+    {
+      "wave": "2a",
+      "cost_shape": "key space",
+      "gate_count": 4,
+      "offset_from_recalculation_head": {
+        "expression": "H + 28 * BLOCKS_PER_DAY",
+        "days": 28,
+        "note": "H is the chain head at the moment of recalculation, and BLOCKS_PER_DAY must be RE-MEASURED then. The last measurement was 57,524 blocks/day against a two-validator set (packet \u00a70.3); it is not a constant of the protocol and changes when the validator set changes."
+      },
+      "prerequisites": [
+        "Wave 1 observed for its full interval with no unexplained movement in its stated signal.",
+        "`peer_protocol_declaration_required_from_height` already enforcing from Wave 1 (it is a single height and is not re-set per wave).",
+        "Node-level disk usage baselined before the height: R3, R12 and R22 add rows and no metric exposes per-family row counts.",
+        "Every off-chain consumer that recomputes a `CollectionId` told the height (R28). This is invisible on-chain and is the single most likely silent break in the schedule."
+      ],
+      "gates": [
+        {
+          "id": "R3",
+          "field": "docclass_subject_index_split_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R12",
+          "field": "subsystem_tx_index_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R22",
+          "field": "docclass_revocation_record_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R28",
+          "field": "nft_collection_id_nonce_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        }
+      ]
+    },
+    {
+      "wave": "2b",
+      "cost_shape": "row content / existence",
+      "gate_count": 8,
+      "offset_from_recalculation_head": {
+        "expression": "H + 42 * BLOCKS_PER_DAY",
+        "days": 42,
+        "note": "H is the chain head at the moment of recalculation, and BLOCKS_PER_DAY must be RE-MEASURED then. The last measurement was 57,524 blocks/day against a two-validator set (packet \u00a70.3); it is not a constant of the protocol and changes when the validator set changes."
+      },
+      "prerequisites": [
+        "Wave 2a observed for its full interval with no unexplained movement in its stated signal.",
+        "`peer_protocol_declaration_required_from_height` already enforcing from Wave 1 (it is a single height and is not re-set per wave).",
+        "`docclass_getIssuers` and the identity roots enumerated: R21 and R24 freeze whatever is there."
+      ],
+      "gates": [
+        {
+          "id": "R11",
+          "field": "subsystem_block_timestamp_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R14",
+          "field": "tax_proof_lifecycle_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R16",
+          "field": "agreement_signature_integrity_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R17",
+          "field": "healthcare_state_precondition_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R21",
+          "field": "docclass_issuer_authority_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R24",
+          "field": "docclass_identity_binding_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R27",
+          "field": "nft_index_symmetry_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R35",
+          "field": "property_asset_relationship_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        }
+      ]
+    },
+    {
+      "wave": "2c",
+      "cost_shape": "value and fee",
+      "gate_count": 2,
+      "offset_from_recalculation_head": {
+        "expression": "H + 56 * BLOCKS_PER_DAY",
+        "days": 56,
+        "note": "H is the chain head at the moment of recalculation, and BLOCKS_PER_DAY must be RE-MEASURED then. The last measurement was 57,524 blocks/day against a two-validator set (packet \u00a70.3); it is not a constant of the protocol and changes when the validator set changes."
+      },
+      "prerequisites": [
+        "Wave 2b observed for its full interval with no unexplained movement in its stated signal.",
+        "`peer_protocol_declaration_required_from_height` already enforcing from Wave 1 (it is a single height and is not re-set per wave)."
+      ],
+      "gates": [
+        {
+          "id": "R19",
+          "field": "nft_update_path_parity_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        },
+        {
+          "id": "R26",
+          "field": "nft_charged_receipt_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        }
+      ]
+    },
+    {
+      "wave": "3",
+      "cost_shape": "block existence",
+      "gate_count": 1,
+      "offset_from_recalculation_head": {
+        "expression": "H + 70 * BLOCKS_PER_DAY",
+        "days": 70,
+        "note": "H is the chain head at the moment of recalculation, and BLOCKS_PER_DAY must be RE-MEASURED then. The last measurement was 57,524 blocks/day against a two-validator set (packet \u00a70.3); it is not a constant of the protocol and changes when the validator set changes."
+      },
+      "prerequisites": [
+        "Wave 2c observed for its full interval with no unexplained movement in its stated signal.",
+        "`peer_protocol_declaration_required_from_height` already enforcing from Wave 1 (it is a single height and is not re-set per wave)."
+      ],
+      "gates": [
+        {
+          "id": "R1",
+          "field": "nft_receipt_failure_enabled_from_height",
+          "height": "UNSET-PENDING-OWNER-AUTHORIZATION"
+        }
+      ]
+    }
+  ],
+  "must_remain_unset": [
+    {
+      "field": "docclass_stake_escrow_enabled_from_height",
+      "id": "R2",
+      "why": "DEFERRED INDEFINITELY. Blocked on an owner decision about value that has already been destroyed, not on a schedule (packet 3.1). It is not in a wave and deliberately has no proposed height."
+    },
+    {
+      "field": "account_root_enabled_from_height",
+      "id": "N3",
+      "why": "Blocked on an EXTERNAL MEASUREMENT -- the production `cf::STATE` row count, against the acceptance threshold in docs/lane-a/ACCOUNT-ROOT-RELEASE-EVIDENCE.md \u00a71.5 (packet 3.3). Not settleable from this worktree."
+    },
+    {
+      "row": "OC-3",
+      "why": "An audit row, NOT a gate. No `*_enabled_from_height` field exists for it anywhere in the tree, which this generator derives rather than assumes. External evidence: the identity of the tree the designated count of thirteen was taken against."
+    },
+    {
+      "row": "SC-8",
+      "why": "An audit row, NOT a gate. No `*_enabled_from_height` field exists for it anywhere in the tree. External evidence: the deployed operator configuration for the RPC surface."
+    }
+  ],
+  "out_of_band": [
+    {
+      "id": "N2",
+      "field": "application_journal_enabled_from_height",
+      "height": "UNSET-PENDING-OWNER-AUTHORIZATION",
+      "why": "Not a member of any wave; its own readiness question."
+    }
+  ],
+  "counts": {
+    "scheduled_remediation_gates": 39,
+    "plus_peer_protocol": 1,
+    "total_in_this_proposal": 40,
+    "by_wave": {
+      "1": 24,
+      "2a": 4,
+      "2b": 8,
+      "2c": 2,
+      "3": 1
+    }
+  }
+}
