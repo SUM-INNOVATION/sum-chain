@@ -76,8 +76,25 @@ spec:
             - { name: config,        mountPath: /config,  readOnly: true }
             - { name: data,          mountPath: /data }
             - { name: validator-key, mountPath: /secrets, readOnly: true }
+          # Memory: 4Gi request AND 4Gi limit, deliberately equal.
+          #
+          # 4 GiB is the SUPPORTED VALIDATOR MEMORY FLOOR for this release. It
+          # is an OPERATIONAL minimum, not a consensus rule and not an
+          # eligibility gate — see docs/operations/validator-memory-floor.md.
+          #
+          # The request must equal the limit. A lower request (this was 1Gi)
+          # schedules the pod onto a node that guarantees only that much and
+          # makes it Burstable, so it is an eviction candidate under node
+          # memory pressure long before it reaches 4 GiB — which means the
+          # floor the block write-set ceiling is derived from is not actually
+          # guaranteed to the process. Equal request and limit is Guaranteed
+          # QoS for memory, which is what makes the floor real.
+          #
+          # MAX_BLOCK_WRITE_SET_BYTES (256 MiB) is derived from this envelope;
+          # crates/state/tests/block_write_set_ceiling.rs reads the "4Gi" limit
+          # out of these files and fails if it changes.
           resources:
-            requests: { cpu: "500m",  memory: "1Gi" }
+            requests: { cpu: "500m",  memory: "4Gi" }
             limits:   { cpu: "2000m", memory: "4Gi" }
           livenessProbe:
             httpGet: { path: /health, port: health }

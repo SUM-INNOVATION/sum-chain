@@ -60,6 +60,17 @@ identically before starting or restarting the network.
   in the active validator set (defined in the runtime genesis and coordinated by
   the operator team) — running a node alone does not add it to the set.
 - Supply bootnodes via `--bootnodes` (see Node Configuration).
+- **Provision at least 4 GiB of memory per validator.** 4 GiB is the supported
+  validator memory floor for this release — an OPERATIONAL minimum, not a
+  consensus rule and not an eligibility gate. The shipped StatefulSets reserve
+  it as an equal `requests.memory` / `limits.memory`. See
+  [validator-memory-floor.md](validator-memory-floor.md), which also explains
+  why the 256 MiB block write-set ceiling is derived from it.
+- **A node accepts at most 50 inbound peers** (100 total) and now actually
+  enforces that: a node at 50 refuses the 51st where it previously accepted it.
+  `[network] max_peers` in `config.toml` does **not** change these numbers — it
+  is read by nothing. See
+  [p2p-admission-and-compatibility.md](p2p-admission-and-compatibility.md).
 
 ## Deployment Assets
 
@@ -162,6 +173,13 @@ that validator's block slots until it rejoins, so coordinate restarts.
    height advances.
 4. **One at a time** — for rolling restarts, restart a single validator and wait
    for it to rejoin and produce before touching the next.
+5. **Expect a short peer-compatibility window after each restart.** Peer
+   protocol-digest declarations are held in memory and are forgotten on
+   restart. Below the enforcement height this is an accepted property and needs
+   no action; at or above it, peers the node had verified cannot supply blocks
+   until each re-answers the handshake, which resolves on its own. Details and
+   the test that pins both halves:
+   [p2p-admission-and-compatibility.md](p2p-admission-and-compatibility.md).
 5. **Never downgrade a binary that has executed a block** — the per-block undo
    journal changed key shape, from height alone to `height ‖ block_hash`
    (`crates/storage/src/schema.rs`). The UPGRADE direction is handled in code: a

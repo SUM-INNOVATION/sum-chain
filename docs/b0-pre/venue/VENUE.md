@@ -294,10 +294,33 @@ the former `>= 16`-core / `>= 64`-GiB / 35%-cap proving-resource gate is removed
   incomplete run requiring continuation/retry; it is not a candidate performance
   failure or a disqualification.
 - **Validators** have no hardware-class eligibility either: qualification is
-  performance-based, not device-based, with no minimum CPU or RAM to participate.
-  The controlled chain-verification reference envelope is a configured 2-core
+  performance-based, not device-based, with no minimum CPU or RAM **to
+  participate**. The controlled chain-verification reference envelope is a
+  configured 2-core
   cpuset and 4-GiB memory limit (detected host hardware need only be sufficient to
   establish those limits, and is never gated), under which the candidate gates are
   worst-architecture verify p99 `<= 75 ms` and aggregate verification
   `<= 300 ms/block`. A validator whose machine cannot keep that pace has an
   operational-liveness condition, not a consensus or proof-system disqualification.
+- **There is, separately, a SUPPORTED OPERATIONAL memory floor, and it is not a
+  contradiction of the bullet above.** For this release the supported validator
+  memory floor is **4 GiB**, stated in
+  `docs/operations/validator-memory-floor.md` and enforced as a cgroup request
+  and limit by every shipped validator manifest in `deploy/kubernetes/`. The two
+  statements are about different things and both hold:
+  - *eligibility* — unchanged, and exactly as the bullet above says. No minimum
+    RAM to participate. Nothing detects host memory, nothing refuses a node for
+    having less, no block is invalid because a validator had less, and the
+    figure is folded into no digest and compared by nothing.
+  - *support* — a validator provisioned with less than 4 GiB is a deployment
+    this release does not support. It is the envelope `MAX_BLOCK_WRITE_SET_BYTES`
+    (256 MiB) is derived from, and the derivation is checked against the
+    manifests by
+    `crates/state/tests/block_write_set_ceiling.rs::the_recorded_validator_memory_envelope_is_still_what_the_derivation_assumed`.
+
+  The floor is also **not** `reference_memory_bytes` promoted into a
+  requirement. That figure remains what this document and the normative artifact
+  say it is — the controlled candidate-comparison envelope, never a deployment
+  or consensus hardware minimum — and it is the same number by derivation, not
+  by reinterpretation. See
+  `docs/b0-pre/protocol/VALIDATOR-MEMORY-FLOOR-RECONCILIATION.md`.
