@@ -604,8 +604,12 @@ fn a_ban_binds_on_a_peer_this_node_has_never_seen() {
          the caller believes it fired"
     );
     assert!(
-        !pm.can_connect_outbound(&stranger),
-        "this node must not dial a peer it has banned, seen before or not"
+        !pm.peer_is_admissible(&stranger),
+        "this node must not hold a connection with a peer it has banned, in \
+         EITHER direction, seen before or not. `peer_is_admissible` is the \
+         predicate the outbound half of the `ConnectionEstablished` gate \
+         actually calls, so asserting on it asserts on the live rule rather \
+         than on a dial-time composition nothing reaches"
     );
     assert!(
         !pm.can_accept_inbound(&stranger, None),
@@ -620,10 +624,9 @@ fn a_ban_binds_on_a_peer_this_node_has_never_seen() {
     );
 
     // The production ordering — connected first, then banned — is unchanged and
-    // reports the other outcome. The control is `can_accept_inbound` and not
-    // `can_connect_outbound`, because the latter is already `false` for a
-    // CONNECTED peer (`PeerEntry::should_attempt_connection` refuses any state
-    // but `Disconnected`) and so could not tell a ban from a live session.
+    // reports the other outcome. The control is `can_accept_inbound`, which is
+    // `true` for a connected peer until the ban lands and `false` after, so the
+    // change is attributable to the ban and to nothing else.
     let peer = PeerId::random();
     pm.peer_connected(peer, ConnectionDirection::Inbound, None);
     assert!(pm.can_accept_inbound(&peer, None));
@@ -642,7 +645,7 @@ fn a_ban_binds_on_a_peer_this_node_has_never_seen() {
     );
     assert!(info.ban_expires.is_some());
     assert_eq!(pm.stats().banned, 2);
-    assert!(!pm.can_connect_outbound(&peer));
+    assert!(!pm.peer_is_admissible(&peer));
     assert!(!pm.can_accept_inbound(&peer, None));
 }
 
@@ -757,8 +760,9 @@ fn a_banned_peer_stays_banned_through_the_disconnect_and_its_redial_is_refused()
          refusal survive the peer dialling back"
     );
     assert!(
-        !pm.can_connect_outbound(&peer),
-        "and this node must not dial it either"
+        !pm.peer_is_admissible(&peer),
+        "and the outbound half of the gate must refuse it too — that half is \
+         `peer_is_admissible`, and it is the one the swarm loop calls"
     );
 }
 
@@ -918,9 +922,25 @@ async fn a_matching_peer_is_neither_banned_nor_disconnected() {
 ///   produced itself.
 ///
 /// The ban is forgotten too, and for the same reason — `PeerManager` is in
-/// memory. Closing that window means persisting the declarations, which is a
-/// separate change; pinning it here is what stops the window from being closed
-/// by accident in the direction that ADMITS an unverified peer.
+/// memory.
+///
+/// # ACCEPTED for this release, not outstanding
+///
+/// The below-the-height half is an ACCEPTED property of this release and not a
+/// residual awaiting work: pre-enforcement compatibility state may reset on
+/// restart, and post-enforcement behaviour must remain fail-closed. Persisting
+/// the declarations is therefore not a prerequisite of shipping, and this test
+/// is not a placeholder for it.
+///
+/// What is NOT accepted, and what this test exists to hold, is the other half.
+/// If a future change makes the registry survive a restart, or seeds it, or
+/// widens the below-the-height admission upward, the assertions over
+/// `[ENFORCE_FROM, ENFORCE_FROM + 1, u64::MAX]` must keep refusing a peer that
+/// has not re-declared. The accepted reset buys nothing above the height and
+/// must never be allowed to leak there.
+///
+/// Operator-facing statement of the same two halves:
+/// `docs/operations/p2p-admission-and-compatibility.md`.
 #[test]
 fn a_restart_forgets_declarations_and_the_window_fails_closed_above_the_height() {
     let peer = PeerId::random();
@@ -1059,5 +1079,112 @@ fn the_disconnect_command_reaches_the_swarm_and_the_admission_gate_precedes_regi
         hangup < register,
         "the refusal must close the connection, not just skip registration and \
          leave the refused peer connected and gossiping"
+    );
+}
+
+/// `can_connect_outbound` does not become `pub` again without a caller.
+///
+/// # The rule this enforces, and why it is worth a test
+///
+/// `PeerManager::can_connect_outbound` was `pub` and had no production caller
+/// anywhere. That is not an unused helper; from outside the crate it reads as
+/// an enforced outbound admission rule, and it enforced nothing — exactly the
+/// shape `can_accept_inbound` was in before the `ConnectionEstablished` arm was
+/// made to call it, and exactly the shape that lets a refusal be believed
+/// rather than enforced. It is now private, and its two in-file unit tests are
+/// the only things that reach it.
+///
+/// The condition is deliberately NOT "it must stay private forever". A real
+/// dial-by-`PeerId` site is a legitimate change, and on the day one exists this
+/// predicate is the right thing for it to call. What must not happen is the
+/// `pub` coming back WITHOUT the caller, which is the state this repository was
+/// already in once. So: public is allowed only in the same change that
+/// introduces a production call site.
+///
+/// The scan drops `//` lines, so the prose in `network.rs` and `peer_manager.rs`
+/// that names this predicate while explaining why nothing calls it is not
+/// mistaken for a call.
+#[test]
+fn the_dead_outbound_dial_predicate_is_not_public_without_a_caller() {
+    const NAME: &str = "can_connect_outbound";
+
+    let p2p_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let workspace_crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/p2p has a parent");
+
+    let manager_path = p2p_src.join("peer_manager.rs");
+    let manager = std::fs::read_to_string(&manager_path).expect("peer_manager.rs is readable");
+    let decl = manager
+        .find(&format!("fn {NAME}("))
+        .unwrap_or_else(|| panic!("`{NAME}` must still be declared in peer_manager.rs"));
+    let line_start = manager[..decl].rfind('\n').map_or(0, |i| i + 1);
+    let declared_pub = manager[line_start..decl].contains("pub ");
+
+    // Every non-comment mention outside the declaring file. A `mod tests` in
+    // peer_manager.rs itself is not a production caller and is not counted; the
+    // point of the rule is what a caller OUTSIDE the file can rely on.
+    let mut callers: Vec<String> = Vec::new();
+    let mut stack = vec![workspace_crates.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n == "target") {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "rs") || path == manager_path {
+                continue;
+            }
+            // Only production source, never tests: a test calling a private
+            // item cannot compile anyway, and a test calling a public one is
+            // not the caller this rule is about.
+            if !path.components().any(|c| c.as_os_str() == "src") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let code: String = text
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if code.contains(&format!("{NAME}(")) {
+                callers.push(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    assert!(
+        !(declared_pub && callers.is_empty()),
+        "`PeerManager::{NAME}` is `pub` again and still has no production \
+         caller anywhere under crates/*/src. A public predicate that nothing \
+         consults is not policy — it reads as an enforced outbound admission \
+         rule from outside this crate and enforces nothing, which is the exact \
+         state this repository was already in. Either give it a caller in the \
+         same change (a real dial-by-`PeerId` site, which this crate does not \
+         have: `dial_bootnodes` and `NetworkCommand::Dial` both take a \
+         `Multiaddr`), or leave it private."
+    );
+
+    // And the state this tree is actually in, so the assertion above cannot be
+    // satisfied vacuously by the declaration being renamed out from under it.
+    assert!(
+        !declared_pub,
+        "`{NAME}` is expected to be private in this tree; if a dialer has been \
+         added, update this assertion in the same change that adds it, and say \
+         which call site now reaches it. Found callers: {callers:?}"
+    );
+    assert!(
+        manager[line_start.saturating_sub(64)..decl].contains("#[cfg(test)]"),
+        "`{NAME}` is expected to be `#[cfg(test)]`-gated as well as private, \
+         so that it is compiled out of every release binary rather than \
+         shipping as an uncalled admission rule. Removing the gate is how it \
+         becomes live-looking again."
     );
 }

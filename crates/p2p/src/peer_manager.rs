@@ -351,8 +351,11 @@ impl PeerManager {
     ///   and `Swarm::disconnect_peer_id` closes EVERY connection to a peer — so
     ///   a capacity refusal there would kill the connection that is working.
     ///
-    /// [`Self::can_accept_inbound`] and [`Self::can_connect_outbound`] are this
-    /// predicate plus the capacity each of them is entitled to check.
+    /// [`Self::can_accept_inbound`] is this predicate plus the capacity the
+    /// inbound half is entitled to check. It is also the WHOLE of the outbound
+    /// half of the `ConnectionEstablished` gate: there is no public outbound
+    /// predicate on this type, because there is no dial-by-`PeerId` site in
+    /// this crate for one to govern.
     pub fn peer_is_admissible(&self, peer_id: &PeerId) -> bool {
         let peers = self.peers.read();
         let Some(entry) = peers.get(peer_id) else {
@@ -434,25 +437,38 @@ impl PeerManager {
         true
     }
 
-    /// Check if a new outbound connection can be INITIATED.
+    /// NOT POLICY, and NOT SHIPPED. A `#[cfg(test)]`-only composition of the
+    /// checks a dialer WOULD make, kept solely so the two unit tests below can
+    /// exercise the backoff and the outbound capacity arithmetic through one
+    /// call. It is compiled out of every release binary.
     ///
-    /// A dial-time predicate, and it stays one: `should_attempt_connection`
-    /// refuses any state but `Disconnected` and applies an exponential backoff,
-    /// both of which are right before a dial and wrong after a connection
-    /// exists. It is therefore NOT the predicate the outbound half of the
-    /// `ConnectionEstablished` gate calls — that calls
-    /// [`Self::peer_is_admissible`], the part the two share.
+    /// # Why it is private, and what that is asserting
     ///
-    /// It has no production caller, and the honest reason is that this crate
-    /// has no dial-by-`PeerId` site: `dial_bootnodes` and
+    /// It has no production caller and cannot acquire one by accident, because
+    /// this crate has no dial-by-`PeerId` site at all: `dial_bootnodes` and
     /// `NetworkCommand::Dial` both take a `Multiaddr`, which need not carry a
-    /// peer id at all, and the bootnode retry loop (#237) must stay
-    /// unconditional or a wedged node stops retrying. It is kept because a ban
-    /// and a backoff are real dial-time policy and `PeerManager::stats` /
-    /// `get_connection_candidates` are the shape a dialer would be built from —
-    /// but it is not doing any work today and this comment says so rather than
-    /// implying otherwise.
-    pub fn can_connect_outbound(&self, peer_id: &PeerId) -> bool {
+    /// peer id, and the bootnode retry loop (#237) must stay unconditional or a
+    /// wedged node stops retrying. While it was `pub` it read from outside this
+    /// file as an enforced outbound admission rule, and it enforced nothing —
+    /// the same "believed rather than enforced" shape that
+    /// [`Self::can_accept_inbound`] was in before the
+    /// `ConnectionEstablished` gate was made to call it. A dead predicate that
+    /// is PUBLIC is worse than one that is private, because a reader outside
+    /// the crate has no way to discover that nothing calls it.
+    ///
+    /// It is also not the outbound half of the `ConnectionEstablished` gate and
+    /// must never be made into it: `should_attempt_connection` refuses any
+    /// state but `Disconnected` and applies an exponential backoff, both right
+    /// BEFORE a dial and wrong once a connection exists. That gate calls
+    /// [`Self::peer_is_admissible`], the part the two share, and that is the
+    /// only outbound rule this type publishes.
+    ///
+    /// `protocol_enforcement.rs::the_dead_outbound_dial_predicate_is_not_public_without_a_caller`
+    /// fails if this regains `pub` without a production caller appearing with
+    /// it. Adding a real dialer means making this public AND calling it, in the
+    /// same change.
+    #[cfg(test)]
+    fn can_connect_outbound(&self, peer_id: &PeerId) -> bool {
         if !self.peer_is_admissible(peer_id) {
             return false;
         }
@@ -651,7 +667,7 @@ impl PeerManager {
     /// only one of them fails in the safe direction:
     ///
     /// * **Write nothing** (what it did). Fails OPEN. The caller believes the
-    ///   peer is refused; `can_accept_inbound` and `can_connect_outbound` read
+    ///   peer is refused; `can_accept_inbound` and `peer_is_admissible` read
     ///   an absent entry as "nothing known against it" and let the peer in. The
     ///   one call site that mattered was correct only by an accident of
     ///   ordering — `SwarmEvent::ConnectionEstablished` inserts the entry before
