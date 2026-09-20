@@ -27,7 +27,9 @@ pub use address::Address;
 pub use block::{Block, BlockHeader};
 pub use hash::Hash;
 pub use receipt::{Receipt, TxStatus};
-pub use tx_error_metrics::{TxExecutionErrorLabels, TX_EXECUTION_ERROR_LABEL_NAMES, TX_EXECUTION_ERROR_METRIC};
+pub use tx_error_metrics::{
+    TxExecutionErrorLabels, TX_EXECUTION_ERROR_LABEL_NAMES, TX_EXECUTION_ERROR_METRIC,
+};
 pub use governance::GovernanceParams;
 pub use validator_authority::ValidatorApproval;
 pub use staking::{
