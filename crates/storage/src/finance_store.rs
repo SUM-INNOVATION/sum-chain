@@ -240,7 +240,7 @@ impl<'a> FinanceIssuerStore<'a> {
             self.db,
             cf::FINANCE_ISSUERS,
             page,
-            |v| decode_issuer(v),
+            decode_issuer,
             |i: &FinanceIssuerProfile| i.status.is_active(),
         )
     }

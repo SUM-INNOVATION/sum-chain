@@ -46,22 +46,6 @@ impl ConsensusWrapper {
         Ok(Self::Bft(Arc::new(engine)))
     }
 
-    /// Check if this node is a validator
-    pub fn is_validator(&self) -> bool {
-        match self {
-            Self::Poa(engine) => engine.is_validator(),
-            Self::Bft(engine) => engine.is_validator(),
-        }
-    }
-
-    /// Get the consensus engine name
-    pub fn engine_name(&self) -> &'static str {
-        match self {
-            Self::Poa(_) => "PoA",
-            Self::Bft(_) => "BFT",
-        }
-    }
-
     /// Handle BFT proposal (BFT only)
     pub fn handle_proposal(&self, proposal: Proposal) -> Result<Option<Vote>> {
         match self {
@@ -134,6 +118,15 @@ impl ConsensusWrapper {
     }
 
     /// Get BFT engine (if BFT)
+    ///
+    /// Nothing calls this today, and it is kept rather than deleted because
+    /// `consensus_sinks` in `crates/node/tests/consensus_participation_guard.rs`
+    /// derives "the calls that can reach consensus" from this impl block's
+    /// method list and asserts `as_bft` is among them. Handing out the engine
+    /// itself is the capability escape that derivation exists to name; deleting
+    /// the method would make that assertion fail, and re-listing the sinks by
+    /// hand instead is exactly what the derivation replaced.
+    #[allow(dead_code)]
     pub fn as_bft(&self) -> Option<&Arc<BftEngine>> {
         match self {
             Self::Bft(engine) => Some(engine),
@@ -142,6 +135,14 @@ impl ConsensusWrapper {
     }
 
     /// Get PoA engine (if PoA)
+    ///
+    /// Reached only from the crate's own `#[cfg(test)]` unit tests
+    /// (`tests/unit/peer_block_admission_tests.rs`), so the shipped binary
+    /// builds it dead. Kept for the same reason as `as_bft`: it is one of the
+    /// capability escapes `consensus_sinks` derives, and that derivation is
+    /// what makes handing the engine out a reviewable act rather than an
+    /// incidental one.
+    #[allow(dead_code)]
     pub fn as_poa(&self) -> Option<&Arc<PoAEngine>> {
         match self {
             Self::Poa(engine) => Some(engine),
@@ -180,14 +181,6 @@ impl ConsensusWrapper {
         match self {
             Self::Poa(engine) => engine.best_block_hash(),
             Self::Bft(engine) => engine.best_block_hash(),
-        }
-    }
-
-    /// Get validators
-    pub fn validators(&self) -> Vec<[u8; 32]> {
-        match self {
-            Self::Poa(engine) => engine.validators(),
-            Self::Bft(engine) => engine.validators(),
         }
     }
 

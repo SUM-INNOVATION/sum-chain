@@ -665,8 +665,7 @@ fn an_abandoned_candidate_writes_no_journal() {
             empty_journals(),
         )
         .accept_imported(&high)
-        .err()
-        .expect("a root mismatch above the cutoff must be refused");
+        .expect_err("a root mismatch above the cutoff must be refused");
     assert!(err.to_string().contains("state root mismatch"), "{err}");
     assert!(
         journal_rows(&d).is_empty(),

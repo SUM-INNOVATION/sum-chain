@@ -155,23 +155,25 @@ fn transfer(from: &KeyPair, to: Address, amount: u128, fee: u128, nonce: u64) ->
 }
 
 fn genesis_for(validators: &[KeyPair], funded: &[&KeyPair]) -> Genesis {
-    let mut params = ChainParams::default();
-    params.application_journal_enabled_from_height = Some(BOUNDARY);
-    // Finality is put out of reach ON PURPOSE, and the reason is worth stating.
-    //
-    // `plan_reorg` refuses to walk at or below the finalized height, and it does
-    // that BEFORE the activation checkpoint is consulted. On a chain with an
-    // ordinary finality depth, finality is usually what refuses a deep crossing
-    // switch, and the checkpoint never gets a turn — which is a fine thing to be
-    // true in production and useless here, because a test that measures
-    // finality's refusal has measured nothing about the checkpoint.
-    //
-    // So this fixture removes finality from the picture, leaving the checkpoint
-    // as the only rule that can refuse. The corollary belongs in the report
-    // rather than hidden here: the checkpoint's practical importance is confined
-    // to the window where the activation boundary is DEEPER than finality, which
-    // is exactly the window right after an upgrade.
-    params.finality_depth = 1_000_000;
+    let params = ChainParams {
+        application_journal_enabled_from_height: Some(BOUNDARY),
+        // Finality is put out of reach ON PURPOSE, and the reason is worth stating.
+        //
+        // `plan_reorg` refuses to walk at or below the finalized height, and it does
+        // that BEFORE the activation checkpoint is consulted. On a chain with an
+        // ordinary finality depth, finality is usually what refuses a deep crossing
+        // switch, and the checkpoint never gets a turn — which is a fine thing to be
+        // true in production and useless here, because a test that measures
+        // finality's refusal has measured nothing about the checkpoint.
+        //
+        // So this fixture removes finality from the picture, leaving the checkpoint
+        // as the only rule that can refuse. The corollary belongs in the report
+        // rather than hidden here: the checkpoint's practical importance is confined
+        // to the window where the activation boundary is DEEPER than finality, which
+        // is exactly the window right after an upgrade.
+        finality_depth: 1_000_000,
+        ..Default::default()
+    };
     let mut alloc: HashMap<String, u128> = validators
         .iter()
         .map(|v| (v.address().to_base58(), 100_000_000u128))

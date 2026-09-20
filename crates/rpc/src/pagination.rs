@@ -46,17 +46,15 @@ pub fn page_of(
 
     if limit > RPC_PAGE_MAX {
         return Err(RpcError::PageOutOfBounds(format!(
-            "{}: limit {} exceeds the maximum page of {}; ask for {} or fewer rows and page with \
-             offset. This node refuses rather than truncating, so that a short answer always \
-             means there is no more to say.",
-            method, limit, RPC_PAGE_MAX, RPC_PAGE_MAX
+            "{method}: limit {limit} exceeds the maximum page of {RPC_PAGE_MAX}; ask for \
+             {RPC_PAGE_MAX} or fewer rows and page with offset. This node refuses rather than \
+             truncating, so that a short answer always means there is no more to say."
         )));
     }
     if offset > RPC_PAGE_OFFSET_MAX {
         return Err(RpcError::PageOutOfBounds(format!(
-            "{}: offset {} exceeds the maximum of {}; this node will not walk further into a \
-             column family than that for one request.",
-            method, offset, RPC_PAGE_OFFSET_MAX
+            "{method}: offset {offset} exceeds the maximum of {RPC_PAGE_OFFSET_MAX}; this node \
+             will not walk further into a column family than that for one request."
         )));
     }
 

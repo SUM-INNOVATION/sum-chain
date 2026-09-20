@@ -9,7 +9,6 @@ use parking_lot::RwLock;
 use sumchain_genesis::Genesis;
 use sumchain_primitives::{Address, Balance, BlockHeight, ChainId, Hash, Nonce};
 use sumchain_storage::exec_view::ExecutionView;
-use sumchain_storage::journal::JournalRequirement;
 use sumchain_storage::schema::{decode_account, encode_account, ACCOUNT_KEY_PREFIX};
 use sumchain_storage::{cf, schema::AccountState, Database, StateStore};
 use tracing::{debug, info};
@@ -369,9 +368,9 @@ impl StateManager {
     /// constructible only by classifying a height against a resolved
     /// [`sumchain_storage::journal::JournalActivation`] and only when that
     /// classification comes back
-    /// [`JournalRequirement::PreActivation`]. There is no post-activation case
-    /// in this function because there is no way to name a post-activation block
-    /// to it.
+    /// [`sumchain_storage::journal::JournalRequirement::PreActivation`]. There
+    /// is no post-activation case in this function because there is no way to
+    /// name a post-activation block to it.
     ///
     /// That is a change from an earlier signature, which took a
     /// `JournalRequirement` and REFUSED `Required` at run time. A runtime

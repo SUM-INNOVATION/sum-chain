@@ -3565,8 +3565,10 @@ fn the_journal_activation_gate_is_its_own_and_leaves_the_dormant_gates_closed() 
     assert_eq!(default.compute_pool_enabled_from_height, None);
     assert_eq!(default.beacon_enabled_from_height, None);
 
-    let mut pinned = ChainParams::default();
-    pinned.application_journal_enabled_from_height = Some(1_000);
+    let pinned = ChainParams {
+        application_journal_enabled_from_height: Some(1_000),
+        ..Default::default()
+    };
     assert_eq!(
         pinned.compute_pool_enabled_from_height, None,
         "pinning the journal boundary must not open the compute-pool gate"
@@ -4709,10 +4711,7 @@ fn journal_bytes_per_block_are_measured_against_real_published_blocks() {
     // cost, against the 1 GiB logical candidate ceiling the tree carries.
     let max_txs = ChainParams::default().max_txs_per_block as f64;
     let full_block = one as f64 + marginal * (max_txs - 1.0);
-    println!(
-        "journal sizing: a full {max_txs:.0}-tx block journals ~{:.0} bytes",
-        full_block
-    );
+    println!("journal sizing: a full {max_txs:.0}-tx block journals ~{full_block:.0} bytes");
     assert!(
         full_block < sumchain_state::MAX_BLOCK_WRITE_SET_BYTES as f64,
         "a full block's journal must fit inside MAX_BLOCK_WRITE_SET_BYTES with room to \
@@ -5255,7 +5254,6 @@ fn the_height_index_survives_a_refusal_and_follows_an_adoption() {
         canonical,
         "a refused switch must leave the canonical height index exactly as it was"
     );
-    drop(real);
 
     // ── direction 2: the index moves with the COMMIT, not before it ─────────
     //
@@ -5279,7 +5277,6 @@ fn the_height_index_survives_a_refusal_and_follows_an_adoption() {
     }
     sumchain_state::reorg_undo::stage_head_reset(&mut batch, &genesis).expect("head");
     batch.commit().expect("commit the unwind");
-    drop(journal);
     a.state.set_state_root(accumulator_of(&genesis));
 
     let after_unwind = height_index(&a);
@@ -5795,7 +5792,6 @@ fn a_rollback_restores_every_family_the_legacy_diffs_never_covered() {
         journals.policy(),
     )
     .expect("execute");
-    drop(journals);
 
     assert_eq!(report.blocks, 2);
     assert_eq!(report.tolerated_absences, 0);
@@ -5990,7 +5986,6 @@ fn an_interrupted_rollback_leaves_the_old_tip_untouched() {
     )
     .expect("stage");
     drop(batch);
-    drop(journals);
 
     assert_eq!(
         node.snapshot(),

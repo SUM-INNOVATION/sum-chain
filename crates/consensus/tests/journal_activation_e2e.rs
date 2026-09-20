@@ -58,7 +58,7 @@ struct E2ENode {
 impl E2ENode {
     fn new(genesis: &Genesis, validator: [u8; 32]) -> Self {
         let dir = TempDir::new().expect("temp dir");
-        let mut node = Self::open(dir, genesis, validator);
+        let node = Self::open(dir, genesis, validator);
         node.consensus.init_genesis(genesis).expect("init genesis");
         node.started_clean();
         node
@@ -189,9 +189,11 @@ fn genesis_json_with_pinned_gate(
     pinned: Option<u64>,
     account_root: Option<u64>,
 ) -> Genesis {
-    let mut params = ChainParams::default();
-    params.application_journal_enabled_from_height = pinned;
-    params.account_root_enabled_from_height = account_root;
+    let params = ChainParams {
+        application_journal_enabled_from_height: pinned,
+        account_root_enabled_from_height: account_root,
+        ..Default::default()
+    };
     let genesis = Genesis::new(
         CHAIN_ID,
         0,
@@ -787,9 +789,11 @@ fn a_coordinated_activation_pair_is_accepted_by_the_authoritative_loader() {
         ),
     ];
     for (j, a, why) in loader_refuses {
-        let mut params = ChainParams::default();
-        params.application_journal_enabled_from_height = *j;
-        params.account_root_enabled_from_height = *a;
+        let params = ChainParams {
+            application_journal_enabled_from_height: *j,
+            account_root_enabled_from_height: *a,
+            ..Default::default()
+        };
         let genesis = Genesis::new(
             CHAIN_ID,
             0,
@@ -822,9 +826,11 @@ fn a_coordinated_activation_pair_is_accepted_by_the_authoritative_loader() {
         ),
     ];
     for (j, a, why) in state_refuses {
-        let mut params = ChainParams::default();
-        params.application_journal_enabled_from_height = *j;
-        params.account_root_enabled_from_height = *a;
+        let params = ChainParams {
+            application_journal_enabled_from_height: *j,
+            account_root_enabled_from_height: *a,
+            ..Default::default()
+        };
         assert!(
             sumchain_state::account_root::validate_account_root_activation(&params).is_err(),
             "the state-side validator must refuse: {why} (journal={j:?}, account={a:?})"

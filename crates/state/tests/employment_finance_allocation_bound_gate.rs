@@ -897,29 +897,24 @@ fn an_open_gate_over_small_rows_refuses_nothing() {
     let mut overlay = ApplicationOverlay::new(&db, common::TEST_CANDIDATE_LIMIT);
     let mut view = ExecutionView::new(&mut overlay);
 
-    for (op, payload) in [(
-        EmploymentOperation::RegisterIssuer,
-        bincode::serialize(&employment_issuer(&emp)).unwrap(),
-    )] {
-        let r = EmploymentExecutor::execute_with_gates(
-            &mut view,
-            &emp.address(),
-            &EmploymentTxData {
-                operation: op,
-                data: payload,
-                recipient: Address::ZERO,
-            },
-            &Address::new([9; 20]),
-            FEE,
-            1,
-            1_000,
-            0,
-            Hash::ZERO,
-            e,
-        )
-        .unwrap();
-        assert!(r.success, "{:?}", r.error);
-    }
+    let r = EmploymentExecutor::execute_with_gates(
+        &mut view,
+        &emp.address(),
+        &EmploymentTxData {
+            operation: EmploymentOperation::RegisterIssuer,
+            data: bincode::serialize(&employment_issuer(&emp)).unwrap(),
+            recipient: Address::ZERO,
+        },
+        &Address::new([9; 20]),
+        FEE,
+        1,
+        1_000,
+        0,
+        Hash::ZERO,
+        e,
+    )
+    .unwrap();
+    assert!(r.success, "{:?}", r.error);
     assert!(
         employment_at(
             &mut view,

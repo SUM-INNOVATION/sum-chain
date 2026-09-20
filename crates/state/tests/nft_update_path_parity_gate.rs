@@ -54,7 +54,6 @@ mod common;
 use common::{fund, setup_with_params};
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::ChainParams;
-use sumchain_nft::collection::CollectionConfig;
 use sumchain_nft::ops::{
     NftBatchMintData, NftBatchMintRequest, NftMintData, NftTransferCollectionOwnershipData,
     NftUpdateCollectionConfigData,

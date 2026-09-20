@@ -164,7 +164,7 @@ impl<'a> TaxClaimTypeStore<'a> {
             self.db,
             cf::TAX_CLAIM_TYPES,
             page,
-            |v| decode_claim_type(v),
+            decode_claim_type,
             |_| true,
         )
     }
@@ -285,7 +285,7 @@ impl<'a> TaxIssuerStore<'a> {
             self.db,
             cf::TAX_ISSUERS,
             page,
-            |v| decode_issuer(v),
+            decode_issuer,
             |i: &TaxIssuer| i.tax_class == class,
         )
     }
@@ -296,7 +296,7 @@ impl<'a> TaxIssuerStore<'a> {
             self.db,
             cf::TAX_ISSUERS,
             page,
-            |v| decode_issuer(v),
+            decode_issuer,
             |i: &TaxIssuer| i.status == TaxIssuerStatus::Active,
         )
     }
@@ -362,13 +362,7 @@ impl<'a> TaxPolicyStore<'a> {
 
     /// One bounded page of policies, in key order (SC-1).
     pub fn list_all_paged(&self, page: PageSpec) -> Result<Vec<TaxPolicy>> {
-        paged_scan(
-            self.db,
-            cf::TAX_POLICIES,
-            page,
-            |v| decode_policy(v),
-            |_| true,
-        )
+        paged_scan(self.db, cf::TAX_POLICIES, page, decode_policy, |_| true)
     }
 
     /// List policies by template type

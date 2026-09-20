@@ -29,7 +29,7 @@ use sumchain_primitives::{
 use sumchain_state::{DocClassExecutionResult, DocClassExecutor, DocClassGates, StateManager};
 use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::overlay::ApplicationOverlay;
-use sumchain_storage::{cf, Database, DocClassStore};
+use sumchain_storage::{cf, DocClassStore};
 
 const JURISDICTION: &str = "US";
 /// Past `SchemaValidatorConfig::default().activation_height` (385,000), which
@@ -1558,15 +1558,38 @@ fn the_five_docclass_gates_are_dormant_by_default() {
             );
         }
     }
-    assert!(!CLOSED.issuer_authority);
-    assert!(!CLOSED.revocation_record);
-    assert!(!CLOSED.credential_schema);
-    assert!(DocClassGates::OPEN.issuer_authority);
-    assert!(DocClassGates::OPEN.revocation_record);
-    assert!(DocClassGates::OPEN.credential_schema);
-    assert!(DocClassGates::OPEN.identity_binding);
-    assert!(DocClassGates::OPEN.issuer_stake_requirement);
+    // The two named constants are what their names claim, all five gates at a
+    // time. Asserted as a tuple rather than field by field: a bare
+    // `assert!(!CLOSED.issuer_authority)` const-folds to `assert!(true)`, which
+    // is not an assertion at all. The tuple also closes the gap the field-by-
+    // field form had -- it checked three of CLOSED's five gates.
+    assert_eq!(
+        (
+            CLOSED.issuer_authority,
+            CLOSED.revocation_record,
+            CLOSED.credential_schema,
+            CLOSED.identity_binding,
+            CLOSED.issuer_stake_requirement,
+        ),
+        (false, false, false, false, false),
+        "DocClassGates::CLOSED must hold all five of these gates shut"
+    );
+    assert_eq!(
+        (
+            DocClassGates::OPEN.issuer_authority,
+            DocClassGates::OPEN.revocation_record,
+            DocClassGates::OPEN.credential_schema,
+            DocClassGates::OPEN.identity_binding,
+            DocClassGates::OPEN.issuer_stake_requirement,
+        ),
+        (true, true, true, true, true),
+        "DocClassGates::OPEN must hold all five of these gates open"
+    );
 }
+
+/// One row of the pairing table below: a gate's name, and the setter that pins
+/// that gate's activation height on a `ChainParams`.
+type GateCase = (&'static str, fn(&mut ChainParams, u64));
 
 /// Each accessor answers for its own field and no other.
 ///
@@ -1574,7 +1597,7 @@ fn the_five_docclass_gates_are_dormant_by_default() {
 /// it out of BEHAVIOUR, which is the half a source scan cannot reach.
 #[test]
 fn each_of_the_five_gates_answers_only_to_its_own_height() {
-    let cases: [(&str, fn(&mut ChainParams, u64)); 5] = [
+    let cases: [GateCase; 5] = [
         ("issuer_authority", |p, h| {
             p.docclass_issuer_authority_enabled_from_height = Some(h)
         }),
