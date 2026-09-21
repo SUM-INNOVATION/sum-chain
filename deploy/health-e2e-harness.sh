@@ -68,6 +68,7 @@ RPC_HOST_PORT="${RPC_HOST_PORT:-8545}" # validator-1 RPC, published to the host
 READY_TIMEOUT="${READY_TIMEOUT:-180}"  # seconds to wait for /ready -> 200
 SOLO_OBSERVE="${SOLO_OBSERVE:-20}"     # seconds to confirm validator-1 stalls
 POLL_INTERVAL="${POLL_INTERVAL:-2}"
+HEIGHT_TIMEOUT="${HEIGHT_TIMEOUT:-120}" # seconds to wait for the chain to advance past a floor
 NO_CACHE="${NO_CACHE:-0}"              # NO_CACHE=1 -> `build --no-cache`
 
 # Evidence log lives OUTSIDE the repo so the worktree stays clean; it is
@@ -138,6 +139,36 @@ frozen_height() { # retry a few times while the node finishes binding
     if h=$(rpc_height); then printf '%s\n' "$h"; return 0; fi
     sleep 1
   done
+  return 1
+}
+
+# Wait until the chain height exceeds $1, or HEIGHT_TIMEOUT expires. Prints the
+# height it reached. Fails only if the chain never advances.
+#
+# `/ready` returning 200 does NOT imply a block has been produced, and checks
+# (6) and (8) used to assume it did by reading the height exactly once, right
+# after the readiness poll. Readiness is
+# `sync_state_synced || current_height > genesis_height` (see
+# `single_validator_synced`, crates/node/src/node.rs) -- an OR. The height
+# clause exists for a LONE validator, which never reaches `SyncState::Synced`
+# and would otherwise never report ready (#120). In a three-validator quorum the
+# FIRST disjunct fires: all peers connect with nothing to fetch, so the net is
+# legitimately "synced" at height 0 and answers /ready 200 before its first
+# block exists. Reading the height at that instant is a race against one block
+# interval (~1.5s), and from WIPED volumes -- check (8) -- there is no prior
+# block at all, which is why that check lost the race first.
+#
+# This does not weaken either assertion: the height must still exceed the
+# frozen baseline, and a chain that never advances still fails. It waits for
+# the block the harness was already assuming, the same way the /ready probe
+# above it already polls rather than sampling once.
+wait_height_gt() {
+  local floor="$1" t h=""
+  for ((t = 0; t < HEIGHT_TIMEOUT; t += POLL_INTERVAL)); do
+    if h="$(rpc_height)" && [ "$h" -gt "$floor" ]; then printf '%s\n' "$h"; return 0; fi
+    sleep "$POLL_INTERVAL"
+  done
+  printf '%s\n' "${h:-unreadable}"
   return 1
 }
 
@@ -342,8 +373,8 @@ quorum_ready_transition() { # (4)(5)(6)
   [ "$code" = 200 ] || die "(5) /ready never reached 200 within ${READY_TIMEOUT}s"
 
   local h
-  h="$(rpc_height)" || die "(6) could not read chain height after ready"
-  [ "$h" -gt "$H0" ] || die "(6) chain height $h did not advance beyond frozen H0=$H0"
+  h="$(wait_height_gt "$H0")" \
+    || die "(6) chain height $h did not advance beyond frozen H0=$H0 within ${HEIGHT_TIMEOUT}s"
   ok "(6) chain height advanced to $h (> frozen H0=$H0)"
 }
 
@@ -369,8 +400,8 @@ second_run() { # (8) from wiped volumes
   [ "$code" = 200 ] || die "(8) second run /ready never reached 200 within ${READY_TIMEOUT}s"
 
   local h
-  h="$(rpc_height)" || die "(8) second run: could not read chain height"
-  [ "$h" -gt "$H0" ] || die "(8) second run: chain height $h did not advance beyond genesis"
+  h="$(wait_height_gt "$H0")" \
+    || die "(8) second run: chain height $h did not advance beyond genesis within ${HEIGHT_TIMEOUT}s"
   ok "(8) second run from wiped volumes reached /ready=200 at height $h"
 }
 
