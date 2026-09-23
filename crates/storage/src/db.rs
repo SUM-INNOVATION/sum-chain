@@ -808,7 +808,16 @@ pub struct DatabaseConfig {
     pub write_buffer_size: usize,
     /// Maximum write buffers
     pub max_write_buffer_number: i32,
-    /// Try to repair database on corruption
+    /// Run `DB::repair` when opening fails with what looks like corruption.
+    ///
+    /// **Off by default, and it should stay off on a validator.** The repair
+    /// calls `DB::repair` with no column-family descriptors, and RocksDB then
+    /// recovers only `default` and moves the data of every other family to
+    /// `lost/`. This database has 188 other families, so the "repair" does not
+    /// repair anything: the node reopens with every application family empty
+    /// and re-initialises from genesis. A validator that refuses to start is
+    /// recoverable from a snapshot; one that silently wipes itself and resyncs
+    /// looks healthy while having lost its history.
     pub auto_repair: bool,
     /// Enable paranoid checks for data integrity
     pub paranoid_checks: bool,
@@ -822,7 +831,7 @@ impl Default for DatabaseConfig {
             max_open_files: 512,
             write_buffer_size: 64 * 1024 * 1024, // 64MB
             max_write_buffer_number: 3,
-            auto_repair: true,
+            auto_repair: false,
             paranoid_checks: true,
         }
     }
@@ -963,13 +972,19 @@ impl Database {
     }
 
     /// Check if an error indicates database corruption
+    ///
+    /// NOT "invalid argument". RocksDB reports that for a caller error -- most
+    /// importantly "Column families not opened", which is what a binary sees
+    /// when it opens a database a NEWER binary has added a family to. That is
+    /// a downgrade, not corruption, and treating it as corruption is how an
+    /// image rollback turned into an empty database: the open failed, this
+    /// matched, and the repair above wiped every family.
     fn is_corruption_error(e: &rocksdb::Error) -> bool {
         let msg = e.to_string().to_lowercase();
         msg.contains("corruption")
             || msg.contains("checksum")
             || msg.contains("manifest")
             || msg.contains("current")
-            || msg.contains("invalid argument")
     }
 
     /// Attempt to repair a corrupted database
@@ -1495,6 +1510,86 @@ impl<'a> WriteBatch<'a> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// A future binary's database: every family this binary knows, plus one it
+    /// does not, with `rows` rows flushed into `blocks`.
+    fn database_from_a_newer_binary(path: &std::path::Path, rows: u32) {
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let mut names: Vec<&str> = ALL_CFS.to_vec();
+        names.push(FUTURE_CF);
+        let db = DB::open_cf(&opts, path, &names).unwrap();
+        let h = db.cf_handle(cf::BLOCKS).unwrap();
+        for i in 0..rows {
+            db.put_cf(&h, i.to_be_bytes(), b"row").unwrap();
+        }
+        db.flush_cf(&h).unwrap();
+    }
+
+    const FUTURE_CF: &str = "zz_added_by_a_newer_binary";
+
+    /// The downgrade, exactly as it happens in production: a newer binary added
+    /// a column family and wrote data, then this binary -- which does not know
+    /// that family -- opens the same directory WITH ITS PRODUCTION DEFAULTS.
+    ///
+    /// It must refuse, and every byte must still be there afterwards. Before
+    /// this was fixed, the open failed with "Invalid argument: Column families
+    /// not opened", `is_corruption_error` read that as corruption, `auto_repair`
+    /// (then on by default) ran `DB::repair`, and the database came back with
+    /// one family and zero rows.
+    #[test]
+    fn a_database_from_a_newer_binary_refuses_to_open_and_loses_nothing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("db");
+        database_from_a_newer_binary(&path, 500);
+
+        let err = Database::open_default(&path)
+            .err()
+            .expect("a family this binary does not know must refuse the open");
+        let msg = format!("{err:?}").to_lowercase();
+        assert!(msg.contains("column families not opened"), "{msg}");
+
+        let on_disk = DB::list_cf(&Options::default(), &path).unwrap();
+        assert!(
+            on_disk.iter().any(|c| c == FUTURE_CF),
+            "the family this binary does not know must survive: {} families left",
+            on_disk.len()
+        );
+        let mut names: Vec<&str> = ALL_CFS.to_vec();
+        names.push(FUTURE_CF);
+        let db = DB::open_cf(&Options::default(), &path, &names).unwrap();
+        let h = db.cf_handle(cf::BLOCKS).unwrap();
+        assert_eq!(
+            db.iterator_cf(&h, rocksdb::IteratorMode::Start).count(),
+            500,
+            "no row may be lost to a 'repair'"
+        );
+    }
+
+    /// The real error, produced by the real open -- not a hand-built message.
+    #[test]
+    fn a_column_family_mismatch_is_not_corruption() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("db");
+        database_from_a_newer_binary(&path, 1);
+        let e = DB::open_cf(&Options::default(), &path, ALL_CFS)
+            .err()
+            .expect("an unopened family must be refused");
+        assert!(e.to_string().to_lowercase().contains("invalid argument"), "{e}");
+        assert!(
+            !Database::is_corruption_error(&e),
+            "a downgrade is not corruption, and must not route to a repair: {e}"
+        );
+    }
+
+    #[test]
+    fn auto_repair_is_off_by_default() {
+        assert!(
+            !DatabaseConfig::default().auto_repair,
+            "DB::repair without family descriptors wipes every non-default family"
+        );
+    }
 
     fn temp_db() -> (Database, TempDir) {
         let dir = TempDir::new().unwrap();
