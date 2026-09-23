@@ -241,14 +241,25 @@ height, **halt** if any of these is true:
    `chain activation parameters are unsound`.
 5. Any log line matching `REFUSING peer .*: it enforces protocol digest`
    appears on any validator.
-6. `tools/lane-b/wave1-monitor.sh agree <every validator metrics url>` reports
-   `DISAGREE` on counts taken over a common window.
+6. `tools/lane-b/wave1-monitor.sh agree <every validator's baseline>` reports
+   `DISAGREE` (exit 1): the same blocks, no restart on any node, different
+   refusals.
 
 ```bash
-# The whole stop condition, as one check. Non-zero exit means HALT.
-tools/lane-b/wave1-monitor.sh agree \
-  http://validator-1:9090 http://validator-2:9090 http://validator-3:9090
+# Baselines are taken on the health port, 8546 -- NOT 9090, which nothing binds.
+tools/lane-b/wave1-monitor.sh baseline http://validator-1:8546 > baseline-v1.txt
+tools/lane-b/wave1-monitor.sh baseline http://validator-2:8546 > baseline-v2.txt
+# ... observe ...
+tools/lane-b/wave1-monitor.sh agree baseline-v1.txt baseline-v2.txt
 ```
+
+**Exit 1 means HALT. Exit 3 does NOT.** Exit 3 is INCONCLUSIVE: a node
+restarted inside the window, or the nodes' windows cover different blocks. It
+is never a fork signal -- the counter is per-process and resets on restart, so a
+restart makes a window unmeasurable rather than disagreeing. Take new baselines
+and observe again. The pre-repair script compared raw totals, which differ
+between any two validators that started at different times, and so reported
+"fork in progress" -- and sent the operator here -- after every restart.
 
 ### 4.2 Why the peer-protocol height specifically, and not Wave 1
 
