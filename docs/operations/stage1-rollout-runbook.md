@@ -300,6 +300,34 @@ head will make the Stage 1 binary **refuse to start**
 (`crates/node/src/node.rs:514-608` `check_activation_parameters`, first-start refusal at `:563`). That refusal comes *after* the database
 open, so it trips §0.2.
 
+**(d) — and this is the one the three conditions above do NOT catch: the four
+live heights must be PRESENT, with these exact values.**
+
+```bash
+jq -c '.params | {v2_enabled_from_height, omninode_enabled_from_height,
+                  education_enabled_from_height, governance_enabled_from_height}' genesis.<POD>.json
+# must print exactly:
+# {"v2_enabled_from_height":5200000,"omninode_enabled_from_height":6000000,"education_enabled_from_height":8900000,"governance_enabled_from_height":8900000}
+```
+
+Those are the values live `chain_getChainParams` reports (read 2026-09-23), and
+all four passed millions of blocks ago. A genesis MISSING them fails loudly
+nowhere. All four are on `GATES_PREDATING_ACTIVATION_RECORDING`, and
+`retroactive_gates_on_a_first_start` exempts that list
+(`crates/genesis/src/lib.rs`), so the Stage 1 binary **starts normally** with
+`v2`, `omninode`, `education` and `governance` read as `None` — disabled — on a
+network that has run them since those heights. The 0.2.0 validator exchanges no
+protocol digest, so nothing compares the two. Any block that uses one of those
+features is then judged differently by the two validators: a consensus split,
+with no refusal and no log line to announce it. Conditions (a)–(c) all pass for
+the committed root `genesis.json`, which is exactly the file an operator is
+most likely to reach for.
+
+**Therefore: never swap the genesis file as part of this upgrade.** Stage 1
+starts on the SAME genesis bytes the 0.2.0 node is running now — copied out in
+the block above, byte-identical, not regenerated and not replaced with any
+committed file. This rollout changes the image and nothing else.
+
 ### 2.3 Gate: resources, QoS, schedulability
 
 What the repo declares **[V]**. There are no init or sidecar containers in any
@@ -404,6 +432,26 @@ date -u +%FT%TZ; j sum_blockNumber; j get_finality; j get_p2p_stats; j get_metri
 
 Re-measure the interval (120 s apart, two samples). **Pass:** about 1.5 s/block
 and `block_errors 0` on both validators.
+
+**Capture each validator's consensus params, from the OLD binary, before
+anything changes.** §4.3 check 7 compares the upgraded node against this file,
+and it is the only check in this runbook that catches a node started on the
+wrong genesis (§2.2 d). Take it per validator, through that validator's own
+tunnel, not only through the public endpoint -- the public endpoint is one node.
+
+```bash
+curl -s -X POST localhost:18545 -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"chain_getChainParams","params":[]}' \
+  | jq -S '.result' > params.before.<POD>.json
+jq -c '{v2_enabled_from_height, omninode_enabled_from_height,
+        education_enabled_from_height, governance_enabled_from_height}' params.before.<POD>.json
+# must print the four live heights of §2.2 (d). The two files must be identical.
+```
+
+Tested against the live 21-field params on 2026-09-23: an identical copy prints
+`[]`; a copy with `v2_enabled_from_height` nulled prints
+`["v2_enabled_from_height"]`; a copy with an extra field only the new binary
+exposes prints `[]`, so the new binary's larger RPC surface cannot false-stop it.
 
 ---
 
@@ -524,6 +572,16 @@ k logs $POD_D -c sumchain --since=30m | grep -Ei 'invalid|reject|mismatch|failed
 
 # 5. strict alternation over the window (proposer parity never breaks)
 for h in $(seq $((F-40)) $F); do l sum_getBlockByHeight "[$h]" | jq -r '.result|"\(.height) \(.proposer[0:8])"'; done | awk '{print $1%2, $2}' | sort | uniq -c   # exactly two lines
+
+# 7. the upgraded node runs the SAME consensus params the old one did.
+#    Capture BEFORE the upgrade (old binary), compare AFTER (new binary). Any
+#    difference in a field both expose is an immediate STOP: the node is running
+#    different rules -- see §2.2 (d) for why no startup check catches this.
+curl -s -X POST localhost:18545 -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"chain_getChainParams","params":[]}' \
+  | jq -S '.result' > params.after.<POD>.json
+jq -S --slurpfile a params.after.<POD>.json '. as $b | [keys[] | select($a[0][.] != $b[.])]' params.before.<POD>.json
+# must print []
 
 # 6. the new RPC surface, on the new node only
 d chain_getActivationStatus | jq '{chain_id,current_height,digest,protocol_digest,gates_set:([.gates[]|select(.height!=null)]|length)}'
