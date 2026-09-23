@@ -686,7 +686,14 @@ startup, so the listener must already be up.
 **Rollback after the listener is also upgraded** means both volumes are
 post-open. Rolling back one validator runs mixed versions in the other
 direction, which 4.3 already passed. Rolling back both needs both snapshots and
-a coordinated halt.
+a coordinated halt -- **and it rewinds the chain.** With both volumes restored,
+no node holds any block produced after the snapshots, so every block since the
+upgrade is abandoned, FINALIZED ones included, and any transaction in them is
+undone. That is the decision packet's rollback option E ("a chain-wide rollback
+below h ... abandons finalised blocks; a social decision, not an operational
+one"), not a step an operator takes on their own. The later the both-validator
+rollback, the more it abandons, so the practical window for it is the
+observation period after 4.4, and after that the answer is fix-forward.
 
 ### 5.3 Listener-restart deadlock (§0.4), break-glass
 
