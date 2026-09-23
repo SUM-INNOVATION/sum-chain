@@ -26,7 +26,7 @@ Let `$V` be the validator's RPC base URL and `$POD` its pod name.
 
 | # | record | how |
 |---|---|---|
-| 1 | **binary sha256** | `kubectl exec $POD -- sha256sum /usr/local/bin/sumchain-node` — **and** the image digest, `kubectl get pod $POD -o jsonpath='{.status.containerStatuses[0].imageID}'`. The image digest is what Kubernetes actually pulled; the file hash is what is running. Record both, because a mutable tag makes them able to disagree. |
+| 1 | **binary sha256** | `kubectl -n sumchain exec $POD -- sha256sum /usr/local/bin/sumchain` — the path the `Dockerfile` installs the node at (`COPY --from=builder /build/target/release/sumchain /usr/local/bin/`, `ENTRYPOINT ["sumchain"]`); `tools/lane-b/rollout-check-test.py` derives it from the Dockerfile and fails if this document hashes anything else — **and** the image digest, `kubectl -n sumchain get pod $POD -o jsonpath='{.status.containerStatuses[0].imageID}'`. The image digest is what Kubernetes actually pulled; the file hash is what is running. Record both, because a mutable tag makes them able to disagree. **The file hash is the binary's only identity:** the binary cannot report its own commit (`crates/node/src/main.rs` reads `option_env!("GIT_HASH")`, nothing in the build sets it, and every shipped binary logs `Commit: unknown`), so it is compared against the sha256 of the release build artifact, never against anything the node says about itself. |
 | 2 | **activation digest** | `chain_getActivationStatus` → `digest` **and** `protocol_digest`. `digest` answers "do our genesis files agree"; `protocol_digest` answers "do our binaries enforce the same rules", and it is the one peers compare at the handshake. Two binaries from different commits can share a `digest` and differ in `protocol_digest`. |
 | 3 | **chain id** | `chain_getActivationStatus` → `chain_id`. |
 | 4 | **current height** | `chain_getActivationStatus` → `current_height`. Carried in the same response as 2 and 3 deliberately: a digest recorded without the height it was read at cannot be placed in time. |
@@ -36,51 +36,74 @@ Let `$V` be the validator's RPC base URL and `$POD` its pod name.
 
 ```bash
 #!/usr/bin/env bash
-# rollout-record.sh <pod> <rpc-url> <metrics-url>
+# rollout-record.sh <pod> <rpc-url> <metrics-url> <out-dir>
+# Writes <out-dir>/<pod>.record and <out-dir>/<pod>.log. Namespace: $NS (default sumchain).
 set -euo pipefail
-POD=$1 RPC=$2 METRICS=$3
+POD=$1 RPC=$2 METRICS=$3 OUT=$4 NS=${NS:-sumchain}
+mkdir -p "$OUT"
 
 rpc() { curl -fsS -X POST "$RPC" -H 'content-type: application/json' \
           -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":[]}" | jq -c '.result'; }
 
+# The WHOLE current-container log, not a --since window: the handshake lines
+# are written when each peer connects, which can be long before the window, and
+# the peer-ID line is written once at startup.
+kubectl -n "$NS" logs "$POD" > "$OUT/$POD.log"
+
+{
 echo "pod:            $POD"
-echo "binary_sha256:  $(kubectl exec "$POD" -- sha256sum /usr/local/bin/sumchain-node | awk '{print $1}')"
-echo "image_id:       $(kubectl get pod "$POD" -o jsonpath='{.status.containerStatuses[0].imageID}')"
+echo "binary_sha256:  $(kubectl -n "$NS" exec "$POD" -- sha256sum /usr/local/bin/sumchain | awk '{print $1}')"
+echo "image_id:       $(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.containerStatuses[0].imageID}')"
 rpc chain_getActivationStatus | jq -r '
   "activation_digest: \(.digest)",
   "protocol_digest:   \(.protocol_digest)",
   "chain_id:          \(.chain_id)",
   "current_height:    \(.current_height)",
   "gates_set:         \([.gates[] | select(.height != null)] | length)"'
-echo "peers:          $(rpc get_peers | jq -r '[.[] | select(.state=="Connected")] | length')"
-
+# How this validator's handshake lines are attributed by the others.
+echo "local_peer_id:  $(grep -m1 -o 'Local peer ID: [0-9A-Za-z]*' "$OUT/$POD.log" | awk '{print $4}')"
 # Stage 1 requires the telemetry to already be present.
-tools/lane-b/wave1-monitor.sh verify "$METRICS"
+tools/lane-b/wave1-monitor.sh verify "$METRICS" >&2 && echo "telemetry:      OK"
+} > "$OUT/$POD.record"
 ```
 
-**Record the output for every validator into one file.** Then:
+**Run it for every validator into one directory, then let the checker decide.**
+Nothing in this section is read by eye:
 
 ```bash
-# Every validator must agree on chain_id, activation_digest and protocol_digest.
-grep -E 'chain_id|activation_digest|protocol_digest' rollout-records.txt \
-  | sort | uniq -c | sort -rn
+python3 tools/lane-b/rollout-check.py \
+  --validators <N> \
+  --expected-binary-sha256 <sha256 of the release build artifact> \
+  --expected-chain-id <chain id> \
+  <out-dir>
 ```
 
-Any line with a count below the validator count is a disagreement. **A
-`protocol_digest` disagreement means the binaries are not the same release and
-stage 1 is not complete**, regardless of what the image tags say.
+It exits 0 only when every validator has every record, the same
+`binary_sha256` (equal to the release artifact's), the same
+`activation_digest` and `protocol_digest`, the expected `chain_id`, a
+`current_height` above 0, `gates_set` of `0`, `telemetry: OK`, and the
+N·(N−1) handshakes of §1.2 with zero refusals. **A missing record, field, log
+or handshake line is a failure, not a pass.** `rollout-check-test.py` proves
+each of those rules fails the check when it is broken.
 
-**`gates_set` must be `0` for every validator at stage 1.** A validator
-reporting a non-zero count is running a genesis with heights in it and has
-skipped straight to stage 2.
+A **`protocol_digest` disagreement means the binaries are not the same release
+and stage 1 is not complete**, regardless of what the image tags say. A
+**non-zero `gates_set`** means the validator is running a genesis with heights
+in it and has skipped straight to stage 2.
+
+If `local_peer_id` comes back empty, the startup line has rotated out of the
+container log. The record is then incomplete and the check fails; it is not
+filled in by hand from anything other than that node's own log.
 
 ### 1.2 The handshake record
 
-The digest exchange is a p2p event, and the node logs both outcomes. Collect
-the log line per peer, per validator:
+The digest exchange is a p2p event, and the node logs both outcomes, one line
+per peer, per validator. `rollout-record.sh` above captures each validator's whole current-container
+log into `<pod>.log`; `rollout-check.py` reads the two lines below out of it.
+To look at them by hand:
 
 ```bash
-kubectl logs "$POD" --since=1h \
+kubectl -n sumchain logs "$POD" \
   | grep -E 'compatibility handshake accepted|REFUSING peer|declared protocol digest'
 ```
 
@@ -101,7 +124,10 @@ kubectl logs "$POD" --since=1h \
 every OTHER validator.** N validators means N·(N−1) success lines and zero
 refusals. Silence is not success: a peer that declares nothing is admitted
 below the enforcement height, so an absent line means the exchange did not
-happen, not that it passed.
+happen, not that it passed. `rollout-check.py` enforces exactly this: for every
+ordered pair of validators it requires a success line in the first one's log
+naming the second one's `local_peer_id` and the common `protocol_digest`, and it
+fails on any refusal line in any log.
 
 ---
 
@@ -144,18 +170,18 @@ nothing about it. The procedure:
 
 ```bash
 # 1. Take a backup of a POPULATED validator database. Node stopped.
-sumchain-node backup --data-dir /data --output /backups/pre-activation
+sumchain backup --data-dir /data --output /backups/pre-activation
 
 # 2. Restore it somewhere isolated, off the network.
-sumchain-node restore --backup /backups/pre-activation --data-dir /tmp/restart-check
+sumchain restore --backup /backups/pre-activation --data-dir /tmp/restart-check
 
 # 3. Confirm it is actually populated. A height of 0 means you are about to
 #    run the fresh-database test again by accident.
-sumchain-node info --data-dir /tmp/restart-check    # height MUST be > 0
+sumchain info --data-dir /tmp/restart-check    # height MUST be > 0
 
 # 4. Start against the EXACT committed genesis, with p2p and RPC bound to
 #    loopback and no bootnodes, so this node joins nothing.
-sumchain-node run \
+sumchain run \
   --data-dir /tmp/restart-check \
   --genesis ./genesis.json \
   --p2p-addr 127.0.0.1:0 \
