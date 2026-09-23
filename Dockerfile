@@ -8,7 +8,12 @@
 # same compiler features as `cargo` would locally. Earlier `rust:1.75` would
 # fail on stable-Rust APIs the workspace uses (e.g. `u64::div_ceil` from 1.73
 # is fine in 1.75, but other 1.80+ features are referenced; pin to match).
-FROM rust:1.85-slim-bookworm AS builder
+# Pinned to the SAME toolchain rust-toolchain.toml pins and CI tests with (1.88.0),
+# and by digest, so the image that ships is built by the compiler every test,
+# clippy identity and green gate in this release was produced by. It was
+# `rust:1.85-slim-bookworm`, unpinned: a different compiler than CI ever ran,
+# resolved to whatever that mutable tag pointed at on the day of the build.
+FROM rust:1.88.0-slim-bookworm@sha256:38bc5a86d998772d4aec2348656ed21438d20fcdce2795b56ca434cf21430d89 AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -65,7 +70,17 @@ COPY crates crates
 COPY scripts scripts
 
 # Build the actual binaries
-RUN cargo build --release --bin sumchain --bin sumchain-wallet
+# `--locked`: refuse to build if Cargo.lock would change, rather than silently
+# resolving different dependency versions than the ones CI tested and audited.
+#
+# GIT_HASH is read at COMPILE time by `option_env!` (crates/node/src/main.rs), so
+# it must be in the environment of this RUN. It is exported only when non-empty:
+# `option_env!` returns `Some("")` for an empty variable, which would make the
+# binary report a BLANK commit -- worse than the "unknown" it reports when the
+# variable is absent. Pass it with `--build-arg GIT_HASH=$(git rev-parse HEAD)`.
+ARG GIT_HASH
+RUN if [ -n "${GIT_HASH:-}" ]; then export GIT_HASH; else unset GIT_HASH; fi \
+ && cargo build --release --locked --bin sumchain --bin sumchain-wallet
 
 # ===========================
 # Runtime Stage
