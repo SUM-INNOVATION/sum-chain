@@ -9,9 +9,21 @@
 #   verify   <url>                 the binary carries the telemetry, correctly shaped
 #   baseline <url>                 the nine Wave 1 series, before the height
 #   delta    <url> <baseline-file> what has moved since the baseline
-#   agree    <url> <url> [<url>…]  do the validators report the same counts
+#   agree    <baseline> <baseline> [<baseline>…]
+#                                  do the validators refuse the same things over
+#                                  the same blocks (each baseline names its url)
 #
-# Exit codes: 0 ok, 1 a check failed, 2 usage.
+# Exit codes: 0 ok, 1 a check failed, 2 usage, 3 INCONCLUSIVE -- the window
+# cannot be measured (a node restarted inside it, or the nodes' windows cover
+# different blocks). 3 is never success and never a fork: it means "measure
+# again", and a script must not collapse it into either.
+#
+# THE COUNTER IS PER-PROCESS. It lives in a static array and starts at zero
+# every time the node starts; nothing persists it. So a raw total means
+# "refusals since this process started", which differs between two healthy
+# validators whenever they started at different times, and resets under any
+# single one of them on restart. Every comparison here is therefore a DELTA
+# over a window, and every window is first checked for a restart.
 #
 # See docs/operations/wave1-activation-monitoring.md.
 
@@ -95,11 +107,36 @@ cmd_verify() {
   echo "    all nine Wave 1 subsystems represented."
 }
 
+# Seconds within which two estimates of the process start time are treated as
+# the same start. Uptime is whole seconds and each scrape takes time, so two
+# readings of an unchanged process can disagree by a second or two. A real
+# restart moves the start time by at least the downtime.
+RESTART_TOLERANCE=${WAVE1_RESTART_TOLERANCE:-3}
+
+# Wall-clock seconds. Overridable ONLY so the test battery can drive time.
+now_epoch() { echo "${WAVE1_NOW:-$(date +%s)}"; }
+
+# A plain gauge from the exposition, e.g. `sumchain_uptime_seconds 12345`.
+gauge() { awk -v n="$1" '$1==n {print $2; exit}'; }
+
+# A `# key value` header line of a baseline file.
+hdr() { awk -v k="$2" '$1=="#" && $2==k {print $3; exit}' "$1"; }
+
 cmd_baseline() {
-  local url=$1 text
+  local url=$1 text up h
   text=$(scrape "$url")
   cmd_verify "$url" >/dev/null || return 1
+  up=$(gauge sumchain_uptime_seconds <<<"$text")
+  h=$(gauge sumchain_block_height <<<"$text")
+  [[ -n $up && -n $h ]] || {
+    echo "FAIL: ${url} exposes no sumchain_uptime_seconds or sumchain_block_height;" >&2
+    echo "      without them a restart inside the window cannot be detected." >&2
+    return 1; }
   echo "# baseline ${url} $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "# url ${url}"
+  echo "# epoch $(now_epoch)"
+  echo "# uptime ${up}"
+  echo "# height ${h}"
   local pair subsystem code
   for pair in $WAVE1; do
     subsystem=${pair%%:*}; code=${pair##*:}
@@ -107,28 +144,85 @@ cmd_baseline() {
   done
 }
 
-cmd_delta() {
-  local url=$1 base=$2 text
+# Measure one node against its baseline. Writes into directory $3:
+#   reset   empty, or the reason the window is unmeasurable
+#   range   "<height at baseline> <height now>"
+#   deltas  "subsystem code before now delta", one line per Wave 1 series
+#
+# A reset is detected two independent ways, because either alone has a hole:
+#   * the PROCESS START TIME (wall clock minus uptime) moved forward. Comparing
+#     uptimes directly is not enough -- baseline at uptime 10s, restart 5s
+#     later, and uptime passes 10 again soon after, looking continuous.
+#   * any series went DOWN. A counter that only increments can only fall by
+#     being reset.
+# The residual case neither catches is a restart faster than the tolerance in
+# which, by coincidence, every series has since climbed back to at least its
+# baseline. That needs a sub-${RESTART_TOLERANCE}s node restart; it is stated
+# here rather than hidden.
+measure() {
+  local url=$1 base=$2 out=$3 text b_ep b_up b_h n_ep n_up n_h
   [[ -r $base ]] || { echo "FAIL: cannot read baseline $base" >&2; return 1; }
+  b_ep=$(hdr "$base" epoch); b_up=$(hdr "$base" uptime); b_h=$(hdr "$base" height)
+  : >"$out/reset"
+  if [[ -z $b_ep || -z $b_up || -z $b_h ]]; then
+    echo "baseline $base predates restart detection (no epoch/uptime/height); take a new one" >"$out/reset"
+  fi
   text=$(scrape "$url")
-  echo "subsystem   code  baseline  now       delta"
-  local moved=0 subsystem code before now d
+  n_ep=$(now_epoch)
+  n_up=$(gauge sumchain_uptime_seconds <<<"$text")
+  n_h=$(gauge sumchain_block_height <<<"$text")
+  [[ -n $n_up && -n $n_h ]] || {
+    echo "FAIL: ${url} exposes no sumchain_uptime_seconds or sumchain_block_height" >&2
+    return 1; }
+  echo "${b_h:-?} ${n_h}" >"$out/range"
+  if [[ ! -s $out/reset ]]; then
+    local b_start=$((b_ep - b_up)) n_start=$((n_ep - n_up))
+    if (( n_start - b_start > RESTART_TOLERANCE )); then
+      echo "the process restarted: its start time moved from ${b_start} to ${n_start}" >"$out/reset"
+    fi
+  fi
+  : >"$out/deltas"
+  local subsystem code before now d
   while read -r subsystem code before; do
     [[ $subsystem == \#* || -z $subsystem ]] && continue
     now=$(value_of "$subsystem" "$code" <<<"$text")
     now=${now:-0}
     d=$(awk -v a="$now" -v b="$before" 'BEGIN{printf "%.0f", a-b}')
-    printf '%-11s %-5s %-9s %-9s %s\n' "$subsystem" "$code" "$before" "$now" "$d"
-    [[ $d -gt 0 ]] && moved=1
+    echo "$subsystem $code $before $now $d" >>"$out/deltas"
+    if (( d < 0 )) && [[ ! -s $out/reset ]]; then
+      echo "${subsystem}/${code} fell from ${before} to ${now}, which only a reset can do" >"$out/reset"
+    fi
   done <"$base"
+}
+
+cmd_delta() {
+  local url=$1 base=$2 m; m=$(mktemp -d); trap 'rm -rf "$m"' RETURN
+  measure "$url" "$base" "$m" || return 1
+  echo "subsystem   code  baseline  now       delta"
+  local moved=0 subsystem code before now d
+  while read -r subsystem code before now d; do
+    printf '%-11s %-5s %-9s %-9s %s\n' "$subsystem" "$code" "$before" "$now" "$d"
+    if (( d > 0 )); then moved=1; fi
+  done <"$m/deltas"
+  echo "blocks: $(cat "$m/range")"
   echo
+  # A reset is checked FIRST and wins. Before this, a restart zeroed the counter,
+  # every delta went negative, and the script printed "Nothing moved" -- hiding
+  # every refusal since the restart, which is the unsafe direction.
+  if [[ -s $m/reset ]]; then
+    echo "INCONCLUSIVE: $(cat "$m/reset")."
+    echo "The counter began again at zero, so no delta over this window means"
+    echo "anything -- in particular it does NOT mean nothing was refused. Take a"
+    echo "new baseline and observe a fresh window."
+    return 3
+  fi
   if [[ $moved -eq 1 ]]; then
     echo "At least one subsystem started refusing. Sample one transaction with"
     echo "sum_getReceipt to see whether the refused sender had standing --"
     echo "the counter names the subsystem, not the legitimacy."
   else
-    echo "Nothing moved. Before concluding 'no refused traffic', confirm the"
-    echo "gate is actually open on this node:"
+    echo "Nothing moved, over a window with no restart. Before concluding 'no"
+    echo "refused traffic', confirm the gate is actually open on this node:"
     echo "  curl -s -X POST ${url%/}/ -H 'content-type: application/json' \\"
     echo "    -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"chain_getActivationStatus\"}'"
     echo "and read gates[].active."
@@ -136,37 +230,61 @@ cmd_delta() {
 }
 
 cmd_agree() {
-  local urls=("$@") first="" bad=0
-  [[ ${#urls[@]} -ge 2 ]] || { echo "FAIL: need at least two nodes" >&2; return 1; }
+  [[ $# -ge 2 ]] || { echo "FAIL: need at least two baselines" >&2; return 2; }
   local tmp; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' RETURN
-  local i=0 url
-  for url in "${urls[@]}"; do
-    scrape "$url" | samples | sort > "$tmp/$i"
+  local i=0 base url incon=0
+  for base in "$@"; do
+    url=$(hdr "$base" url)
+    [[ -n $url ]] || { echo "FAIL: $base names no url; take it with this version's baseline" >&2; return 1; }
+    mkdir -p "$tmp/$i"
+    measure "$url" "$base" "$tmp/$i" || return 1
+    echo "$url" >"$tmp/$i/url"
+    cut -d' ' -f1,2,5 "$tmp/$i/deltas" | sort >"$tmp/$i/cmp"
+    if [[ -s $tmp/$i/reset ]]; then
+      echo "INCONCLUSIVE: ${url}: $(cat "$tmp/$i/reset")"; incon=1
+    fi
     i=$((i + 1))
   done
-  first="$tmp/0"
-  for ((i = 1; i < ${#urls[@]}; i++)); do
-    if ! diff -q "$first" "$tmp/$i" >/dev/null; then
-      echo "DISAGREE: ${urls[0]} vs ${urls[$i]}"
-      # `|| true`: diff exits 1 on a difference, which is the case this
-      # branch exists for, and `set -e` would abort before the explanation.
-      diff "$first" "$tmp/$i" | sed 's/^/    /' || true
-      bad=1
-    fi
+  # A restart anywhere makes that node's window unmeasurable, so comparing it
+  # would be comparing a reset counter with a live one -- which is exactly the
+  # false "fork in progress" the old raw-total comparison raised on every
+  # restart.
+  if [[ $incon -eq 1 ]]; then
+    echo "At least one node restarted inside its window. Nothing is compared."
+    echo "Re-baseline every node and observe a fresh window."
+    return 3
+  fi
+  local n=$i same_range=1 same_delta=1
+  for ((i = 1; i < n; i++)); do
+    diff -q "$tmp/0/range" "$tmp/$i/range" >/dev/null || same_range=0
+    diff -q "$tmp/0/cmp" "$tmp/$i/cmp" >/dev/null || same_delta=0
   done
-  if [[ $bad -eq 1 ]]; then
+  for ((i = 0; i < n; i++)); do
+    echo "  $(cat "$tmp/$i/url")  blocks $(cat "$tmp/$i/range")"
+  done
+  if [[ $same_range -eq 1 && $same_delta -eq 1 ]]; then
+    echo "OK: ${n} nodes, same blocks, no restart, identical refusal deltas."
+    return 0
+  fi
+  if [[ $same_range -eq 1 ]]; then
+    # The ONLY case that is a fork signal: the same blocks, no restart on any
+    # node, and different refusals. Two nodes executing the same blocks under
+    # the same rules cannot disagree here.
+    echo "DISAGREE: the same blocks produced different refusals:"
+    for ((i = 1; i < n; i++)); do
+      diff "$tmp/0/cmp" "$tmp/$i/cmp" | sed 's/^/    /' || true
+    done
     echo
-    echo "The validators are not reporting the same refusals. Two nodes"
-    echo "executing the same blocks cannot disagree here. This is a"
-    echo "mixed-binary or mixed-genesis condition and it is a fork in"
+    echo "This is a mixed-binary or mixed-genesis condition and a fork in"
     echo "progress -- go to the abort rule in"
     echo "docs/operations/activation-rollout-evidence.md section 4."
     return 1
   fi
-  echo "OK: ${#urls[@]} nodes report identical ${METRIC} series."
-  echo "    (Counts can legitimately differ across a restart, because the"
-  echo "     counter is per-process and not persisted. Compare nodes with"
-  echo "     comparable uptime, or compare DELTAS over the same window.)"
+  echo "INCONCLUSIVE: the nodes' windows cover different blocks, so their deltas"
+  echo "are not comparable -- one node can be a block ahead of another without"
+  echo "anything being wrong. Take every baseline at the same height, and run"
+  echo "agree when every node reports the same height again."
+  return 3
 }
 
 [[ $# -ge 1 ]] || usage

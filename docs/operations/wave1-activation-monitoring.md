@@ -31,8 +31,14 @@ sumchain_tx_execution_errors_total{subsystem="docclass",code="8"} 0
 …
 ```
 
-* Endpoint: `GET /metrics` on the health port (container port `9090`,
-  `deploy/kubernetes/servicemonitor.yaml` already scrapes it at 15s).
+* Endpoint: `GET /metrics` on the **health port, 8546** -- served by
+  `crates/rpc/src/health.rs` beside `/health` and `/ready`, bound to
+  `[health] addr` (default `0.0.0.0:8546`). **Not 9090.** The manifests declare
+  a container port 9090 and annotate `prometheus.io/port: "9090"`, and nothing
+  in the code binds that port: anything scraping 9090 -- Prometheus through that
+  annotation, or an operator following an older copy of this page -- gets a
+  refused connection, not a zero. Check that the scrape actually returns a
+  body before trusting any silence from it.
 * **Exactly two labels, and they are bounded.** Both values are `&'static str`
   drawn from a closed table in `crates/primitives/src/tx_error_metrics.rs`; the
   counters are a fixed-length array indexed by position in that table, so there
@@ -75,10 +81,37 @@ Run on every validator, and keep the output. A rate that looks alarming after
 the height is only alarming relative to what it was before.
 
 ```bash
-tools/lane-b/wave1-monitor.sh baseline http://validator-1:9090 > baseline-v1.txt
-tools/lane-b/wave1-monitor.sh baseline http://validator-2:9090 > baseline-v2.txt
-tools/lane-b/wave1-monitor.sh baseline http://validator-3:9090 > baseline-v3.txt
+tools/lane-b/wave1-monitor.sh baseline http://validator-1:8546 > baseline-v1.txt
+tools/lane-b/wave1-monitor.sh baseline http://validator-2:8546 > baseline-v2.txt
 ```
+
+One line per validator. The live network has **two** (`sum_getValidators`,
+and the proposer alternates strictly between two keys); an earlier copy of this
+page listed three.
+
+**The counter is per-process and starts at zero on every restart.** A raw total
+means "refusals since this process started", so it differs between two healthy
+validators that started at different times, and it drops to zero under any one
+of them when it restarts. That is why each baseline records the wall-clock
+time, the node's uptime and the block height, and why `delta` and `agree`
+compare DELTAS over a window instead of totals:
+
+```bash
+# later: what has moved on one validator since its baseline
+tools/lane-b/wave1-monitor.sh delta http://validator-1:8546 baseline-v1.txt
+
+# do the validators refuse the same things over the same blocks?
+tools/lane-b/wave1-monitor.sh agree baseline-v1.txt baseline-v2.txt
+```
+
+Both check the window for a restart first -- the process start time (wall
+clock minus uptime) moving forward, or any series going down -- and exit **3,
+INCONCLUSIVE** if there was one: the window cannot be measured, so take new
+baselines. `delta` never reports "nothing moved" across a restart; before this
+was fixed it did, hiding every refusal since the restart. `agree` reports
+DISAGREE (exit 1) only when every node covered the identical block range with
+no restart and the refusals still differ -- the one case that really is a fork.
+Nodes a block apart are INCONCLUSIVE, not a fork.
 
 The script also asserts the metric family is present and correctly shaped. **If
 it reports `MISSING` the deployed binary predates this telemetry and stage 1 is
