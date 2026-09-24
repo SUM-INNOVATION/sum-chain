@@ -113,6 +113,20 @@ DISAGREE (exit 1) only when every node covered the identical block range with
 no restart and the refusals still differ -- the one case that really is a fork.
 Nodes a block apart are INCONCLUSIVE, not a fork.
 
+**Missing data is its own answer, exit 4 -- never zero, never a fork.** If an
+endpoint cannot be scraped, or a Wave 1 series or the uptime/height gauge is
+absent, `delta` and `agree` print MISSING DATA and exit 4 without comparing
+anything. An absent series used to be read as 0, so a node that stopped
+exporting a subsystem showed "nothing moved"; and an unreachable validator made
+`agree` exit 1, which the rollout treats as a fork and a halt.
+
+| exit | meaning | operator action |
+|---|---|---|
+| 0 | measured, no disagreement | proceed |
+| 1 | DISAGREE: same blocks, no restart, different refusals | HALT -- abort rule |
+| 3 | INCONCLUSIVE: restart in the window, or different block ranges | re-baseline, observe again |
+| 4 | MISSING DATA: unreachable endpoint or absent series | fix the scrape, then re-run |
+
 The script also asserts the metric family is present and correctly shaped. **If
 it reports `MISSING` the deployed binary predates this telemetry and stage 1 is
 not complete** — do not proceed to stage 2.

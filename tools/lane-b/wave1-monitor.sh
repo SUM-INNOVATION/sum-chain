@@ -17,6 +17,10 @@
 # cannot be measured (a node restarted inside it, or the nodes' windows cover
 # different blocks). 3 is never success and never a fork: it means "measure
 # again", and a script must not collapse it into either.
+# 4 MISSING DATA -- an endpoint could not be scraped, or a series or gauge the
+# measurement needs is absent. Absent data is not zero change and not a fork:
+# a validator whose metrics port is down must never read as "nothing moved",
+# and must never read as DISAGREE (exit 1), which the rollout treats as HALT.
 #
 # THE COUNTER IS PER-PROCESS. It lives in a static array and starts at zero
 # every time the node starts; nothing persists it. So a raw total means
@@ -44,7 +48,7 @@ usage() {
 scrape() {
   local url=$1
   curl -fsS --max-time 10 "${url%/}/metrics" \
-    || { echo "FAIL: cannot scrape ${url%/}/metrics" >&2; exit 1; }
+    || { echo "MISSING DATA: cannot scrape ${url%/}/metrics" >&2; exit 4; }
 }
 
 # Every sample line of the counter family, "subsystem code value".
@@ -167,13 +171,16 @@ measure() {
   if [[ -z $b_ep || -z $b_up || -z $b_h ]]; then
     echo "baseline $base predates restart detection (no epoch/uptime/height); take a new one" >"$out/reset"
   fi
-  text=$(scrape "$url")
+  # Handled explicitly: callers invoke measure from an `||` list, and bash
+  # disables `set -e` inside such a call, so a failed scrape would otherwise
+  # continue with empty text and surface as some unrelated failure.
+  text=$(scrape "$url") || return 4
   n_ep=$(now_epoch)
   n_up=$(gauge sumchain_uptime_seconds <<<"$text")
   n_h=$(gauge sumchain_block_height <<<"$text")
   [[ -n $n_up && -n $n_h ]] || {
-    echo "FAIL: ${url} exposes no sumchain_uptime_seconds or sumchain_block_height" >&2
-    return 1; }
+    echo "MISSING DATA: ${url} exposes no sumchain_uptime_seconds or sumchain_block_height" >&2
+    return 4; }
   echo "${b_h:-?} ${n_h}" >"$out/range"
   if [[ ! -s $out/reset ]]; then
     local b_start=$((b_ep - b_up)) n_start=$((n_ep - n_up))
@@ -181,12 +188,18 @@ measure() {
       echo "the process restarted: its start time moved from ${b_start} to ${n_start}" >"$out/reset"
     fi
   fi
-  : >"$out/deltas"
+  : >"$out/deltas"; : >"$out/missing"
   local subsystem code before now d
   while read -r subsystem code before; do
     [[ $subsystem == \#* || -z $subsystem ]] && continue
     now=$(value_of "$subsystem" "$code" <<<"$text")
-    now=${now:-0}
+    # An absent series is NOT a zero. It used to be defaulted to 0 here, which
+    # made a node that stopped exporting a subsystem read as "nothing moved".
+    if [[ -z $now || -z $before ]]; then
+      echo "${subsystem}/${code} absent $([[ -z $before ]] && echo 'from the baseline' || echo 'from the node now')" >>"$out/missing"
+      echo "$subsystem $code ${before:--} ${now:--} missing" >>"$out/deltas"
+      continue
+    fi
     d=$(awk -v a="$now" -v b="$before" 'BEGIN{printf "%.0f", a-b}')
     echo "$subsystem $code $before $now $d" >>"$out/deltas"
     if (( d < 0 )) && [[ ! -s $out/reset ]]; then
@@ -196,17 +209,25 @@ measure() {
 }
 
 cmd_delta() {
-  local url=$1 base=$2 m; m=$(mktemp -d); trap 'rm -rf "$m"' RETURN
-  measure "$url" "$base" "$m" || return 1
+  local url=$1 base=$2 m rc=0; m=$(mktemp -d); trap 'rm -rf "$m"' RETURN
+  measure "$url" "$base" "$m" || rc=$?
+  (( rc == 0 )) || return "$rc"
   echo "subsystem   code  baseline  now       delta"
   local moved=0 subsystem code before now d
   while read -r subsystem code before now d; do
     printf '%-11s %-5s %-9s %-9s %s\n' "$subsystem" "$code" "$before" "$now" "$d"
-    if (( d > 0 )); then moved=1; fi
+    if [[ $d != missing ]] && (( d > 0 )); then moved=1; fi
   done <"$m/deltas"
   echo "blocks: $(cat "$m/range")"
   echo
-  # A reset is checked FIRST and wins. Before this, a restart zeroed the counter,
+  if [[ -s $m/missing ]]; then
+    echo "MISSING DATA:"; sed 's/^/  /' "$m/missing"
+    echo "An absent series is not a series that did not move. Nothing here says"
+    echo "whether anything was refused. Check that the node exports all nine Wave 1"
+    echo "series (\`verify\`) and that the baseline was taken by this script."
+    return 4
+  fi
+  # A reset is checked next and wins over any delta. Before this, a restart zeroed the counter,
   # every delta went negative, and the script printed "Nothing moved" -- hiding
   # every refusal since the restart, which is the unsafe direction.
   if [[ -s $m/reset ]]; then
@@ -232,12 +253,18 @@ cmd_delta() {
 cmd_agree() {
   [[ $# -ge 2 ]] || { echo "FAIL: need at least two baselines" >&2; return 2; }
   local tmp; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' RETURN
-  local i=0 base url incon=0
+  local i=0 base url incon=0 rc
   for base in "$@"; do
     url=$(hdr "$base" url)
     [[ -n $url ]] || { echo "FAIL: $base names no url; take it with this version's baseline" >&2; return 1; }
     mkdir -p "$tmp/$i"
-    measure "$url" "$base" "$tmp/$i" || return 1
+    rc=0; measure "$url" "$base" "$tmp/$i" || rc=$?
+    (( rc == 0 )) || { echo "not compared: ${url} (exit ${rc})"; return "$rc"; }
+    if [[ -s $tmp/$i/missing ]]; then
+      echo "MISSING DATA on ${url}:"; sed 's/^/  /' "$tmp/$i/missing"
+      echo "Nothing is compared. Absent data is not a disagreement."
+      return 4
+    fi
     echo "$url" >"$tmp/$i/url"
     cut -d' ' -f1,2,5 "$tmp/$i/deltas" | sort >"$tmp/$i/cmp"
     if [[ -s $tmp/$i/reset ]]; then
