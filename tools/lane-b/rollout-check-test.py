@@ -50,6 +50,16 @@ ACT = "a" * 64  # NONPRODUCTION activation digest
 PROTO = "b" * 64  # NONPRODUCTION protocol digest
 PROTO_OTHER = "c" * 64
 CHAIN = "1"
+GENESIS = "9" * 64  # NONPRODUCTION genesis sha256
+GENESIS_OTHER = "8" * 64
+PRODUCTION_PREDATING = ["v2_enabled_from_height", "omninode_enabled_from_height",
+                        "education_enabled_from_height", "governance_enabled_from_height"]
+STRAY_GATE = "subsystem_proof_unsupported_enabled_from_height"  # a remediation gate
+
+
+def ident(i: int) -> str:
+    """A NONPRODUCTION 64-hex validator public key per validator index."""
+    return format(i + 1, "x") * 64
 
 
 def dockerfile_binary_path() -> str:
@@ -99,6 +109,7 @@ while [[ ${args[0]} == -n || ${args[0]} == --namespace ]]; do args=("${args[@]:2
 case "${args[0]}" in
   exec) pod=${args[1]}; cmd=${args[3]}; path=${args[4]}
         if [[ $cmd == sha256sum && $path == "$BINARY" ]]; then echo "$(cat "$FX/$pod.sha")  $path"
+        elif [[ $cmd == sha256sum && $path == /config/genesis.json ]]; then echo "$(cat "$FX/$pod.genesis")  $path"
         else echo "$cmd: $path: No such file or directory" >&2; exit 1; fi ;;
   get)  cat "$FX/${args[2]}.imageid" ;;
   logs) cat "$FX/${args[1]}.log" ;;
@@ -114,6 +125,7 @@ host=${url#http://}; pod=${host%%.fixture*}
 if [[ $url == */metrics ]]; then cat "$FX/$pod.metrics"; exit 0; fi
 case "$data" in
   *chain_getActivationStatus*) cat "$FX/$pod.status" ;;
+  *get_block_by_height*) echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"proposer\":\"$(cat "$FX/$pod.ident")\"}}" ;;
   *get_peers*) echo '{"jsonrpc":"2.0","id":1,"result":[]}' ;;
   *) echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}' ;;
 esac
@@ -139,11 +151,14 @@ def log_line(level: str, target: str, msg: str, ansi: bool) -> str:
 
 def make_pods(fx: Path, n: int, *, drop_handshake=None, refusal_on=None,
               digest_off=None, empty_log=None, no_image_digest=None,
-              status_without_digest=None, metrics_missing=None) -> None:
+              status_without_digest=None, metrics_missing=None, dup_ident=None,
+              genesis_off=None, no_produced=None, gates=None) -> None:
     for i in range(n):
         pod = f"sumchain-validator-{i + 1}-0"
         proto = PROTO_OTHER if digest_off == i else PROTO
         (fx / f"{pod}.sha").write_text(FIXTURE_SHA + "\n")
+        (fx / f"{pod}.ident").write_text(ident(0) if dup_ident == i else ident(i))
+        (fx / f"{pod}.genesis").write_text(GENESIS_OTHER if genesis_off == i else GENESIS)
         (fx / f"{pod}.imageid").write_text(
             "docker.io/fixture/node:latest" if no_image_digest == i
             else "docker.io/fixture/node@sha256:" + "0" * 64)
@@ -154,9 +169,13 @@ def make_pods(fx: Path, n: int, *, drop_handshake=None, refusal_on=None,
             **({} if status_without_digest == i else {"digest": ACT}),
             "protocol_digest": proto, "chain_id": int(CHAIN),
             "current_height": 1000 + i,  # NONPRODUCTION
-            "gates": [{"gate": "x", "height": None, "active": False}]}}))
+            "gates": [{"gate": g, "height": 5200000, "active": True} for g in (gates or [])]
+                     + [{"gate": "x", "height": None, "active": False}]}}))
         lines = [log_line("INFO", "sumchain_p2p::network", f"Local peer ID: {peer(i)}", i == 0)
                  + ("\x1b[0m" if i == 0 else "")]
+        if no_produced != i:
+            lines.append(log_line("INFO", "sumchain::node",
+                                  f"Produced block 0x{'ab' * 32} at height {1000 + i}", i == 0))
         for j in range(n):
             if j == i or drop_handshake == (i, j):
                 continue
@@ -218,18 +237,24 @@ def collect(tmp: Path, n: int, *, no_kubectl=False, binary=None, **kw) -> tuple[
     return out, errs
 
 
-def run_checker(out: Path, n: int, sha: str = FIXTURE_SHA) -> tuple[int, str]:
-    r = subprocess.run([sys.executable, str(CHECKER), "--validators", str(n),
-                        "--expected-binary-sha256", sha, "--expected-chain-id", CHAIN, str(out)],
-                       capture_output=True, text=True)
+def run_checker(out: Path, n: int, sha: str = FIXTURE_SHA, *, genesis: str | None = GENESIS,
+                validators: list[str] | None = None) -> tuple[int, str]:
+    args = [sys.executable, str(CHECKER), "--validators", str(n),
+            "--expected-binary-sha256", sha, "--expected-chain-id", CHAIN]
+    for v in (validators if validators is not None else [ident(i) for i in range(n)]):
+        args += ["--expected-validator", v]
+    if genesis is not None:
+        args += ["--expected-genesis-sha256", genesis]
+    r = subprocess.run(args + [str(out)], capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr
 
 
 # (name, validators, fixture kwargs, post-collect mutation, expected exit, must-contain)
 CASES = [
-    ("complete N=2", 2, {}, None, 0, "2/2 handshakes, 0 refusals"),
-    ("complete N=3", 3, {}, None, 0, "6/6 handshakes, 0 refusals"),
-    ("missing handshake line", 2, {"drop_handshake": (1, 0)}, None, 1, "MISSING HANDSHAKE"),
+    ("complete N=2", 2, {}, None, 0, "2/2 directed handshakes, 0 refusals"),
+    ("complete N=3", 3, {}, None, 0, "6/6 directed handshakes, 0 refusals"),
+    ("missing handshake v1->v0", 2, {"drop_handshake": (1, 0)}, None, 1, "MISSING HANDSHAKE"),
+    ("missing handshake v0->v1", 2, {"drop_handshake": (0, 1)}, None, 1, "MISSING HANDSHAKE"),
     ("incompatibility refusal", 2, {"refusal_on": 0}, None, 1, "INCOMPATIBILITY REFUSAL"),
     ("validator on a different digest", 2, {"digest_off": 1}, None, 1, "DIGEST DISAGREEMENT"),
     ("activation digest differs, no refusal", 2, {}, "act_digest", 1, "DIGEST DISAGREEMENT on activation_digest"),
@@ -238,7 +263,18 @@ CASES = [
     ("missing log file", 2, {}, "drop_log", 1, "MISSING LOG"),
     ("wrong binary sha", 2, {}, "wrong_sha", 1, "BINARY MISMATCH"),
     ("missing binary_sha256 field", 2, {}, "blank_sha", 1, "MISSING FIELD binary_sha256"),
-    ("gates set at stage 1", 2, {}, "gates", 1, "gates_set is 3"),
+    ("gates_set recorded as a bare count", 2, {}, "gates_count", 1, "gates_set is a count"),
+    ("a non-predating gate set", 2, {"gates": [STRAY_GATE]}, None, 1, "non-predating gate"),
+    # Production's genesis legitimately carries these four; the old count-of-0
+    # rule refused it, pushing an operator towards removing heights.
+    ("production shape: four predating gates set", 2, {"gates": PRODUCTION_PREDATING}, None, 0,
+     "2/2 directed handshakes"),
+    ("duplicate validator identity", 2, {"dup_ident": 1}, None, 1, "DUPLICATE VALIDATOR IDENTITY"),
+    ("unequal genesis hashes", 2, {"genesis_off": 1}, None, 1, "GENESIS DISAGREEMENT"),
+    ("production genesis hash not supplied", 2, {}, "no_expected_genesis", 1,
+     "STOP: the production genesis sha256 was not supplied"),
+    ("genesis differs from the production hash", 2, {}, "wrong_expected_genesis", 1, "GENESIS MISMATCH"),
+    ("expected identity not recorded", 2, {}, "wrong_expected_ident", 1, "VALIDATOR SET MISMATCH"),
     ("wrong chain id", 2, {}, "chain", 1, "CHAIN ID MISMATCH"),
     ("empty evidence directory", 2, {}, "empty_dir", 1, "MISSING RECORD"),
 ]
@@ -257,6 +293,7 @@ RECORDER_REFUSALS = [
      "chain_getActivationStatus returned no digest"),
     ("telemetry series absent", {"metrics_missing": 0}, "telemetry verify failed"),
     ("empty log (no peer ID)", {"empty_log": 0}, "no 'Local peer ID' line"),
+    ("no produced block (identity unprovable)", {"no_produced": 0}, "no 'Produced block' line"),
 ]
 
 
@@ -270,7 +307,7 @@ def mutate(out: Path, how: str | None) -> None:
         rec.write_text(re.sub(r"(?m)^binary_sha256:.*$", "binary_sha256:  ", rec.read_text()))
     elif how == "act_digest":
         rec.write_text(re.sub(r"(?m)^activation_digest:.*$", "activation_digest: " + "d" * 64, rec.read_text()))
-    elif how == "gates":
+    elif how == "gates_count":
         rec.write_text(re.sub(r"(?m)^gates_set:.*$", "gates_set:         3", rec.read_text()))
     elif how == "chain":
         rec.write_text(re.sub(r"(?m)^chain_id:.*$", "chain_id:          7", rec.read_text()))
@@ -291,7 +328,14 @@ def main() -> int:
             out, errs = collect(tmp, n, **kw)
             mutate(out, how)
             sha = OTHER_SHA if how == "wrong_sha" else FIXTURE_SHA
-            code, text = run_checker(out, n, sha)
+            kw_chk = {}
+            if how == "no_expected_genesis":
+                kw_chk["genesis"] = None
+            elif how == "wrong_expected_genesis":
+                kw_chk["genesis"] = GENESIS_OTHER
+            elif how == "wrong_expected_ident":
+                kw_chk["validators"] = [ident(0), ident(7)]
+            code, text = run_checker(out, n, sha, **kw_chk)
             ok = code == want_exit and want_text in text
             print(f"  {'ok  ' if ok else 'FAIL'} {name:34s} expected exit {want_exit}, got {code}")
             if not ok:

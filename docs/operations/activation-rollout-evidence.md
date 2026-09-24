@@ -48,6 +48,7 @@ Let `$V` be the validator's RPC base URL and `$POD` its pod name.
 set -euo pipefail
 [[ $# -eq 4 ]] || { echo "usage: rollout-record.sh <pod> <rpc-url> <metrics-url> <out-dir>" >&2; exit 2; }
 POD=$1 RPC=$2 METRICS=$3 OUT=$4 NS=${NS:-sumchain}
+GENESIS_PATH=${GENESIS_PATH:-/config/genesis.json}   # the genesis file the pod mounts
 fail() { echo "FAIL [$POD]: $*; no record written" >&2; exit 1; }
 for c in kubectl curl jq awk grep; do
   command -v "$c" >/dev/null || fail "required command '$c' not found"
@@ -55,7 +56,7 @@ done
 mkdir -p "$OUT"
 
 rpc() { curl -fsS -X POST "$RPC" -H 'content-type: application/json' \
-          -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":[]}"; }
+          -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":${2:-[]}}"; }
 
 # The WHOLE current-container log, not a --since window: the handshake lines
 # are written when each peer connects, which can be long before the window, and
@@ -78,12 +79,33 @@ act=$(field digest)
 proto=$(field protocol_digest)
 chain=$(field chain_id)
 height=$(field current_height)
-gates=$(jq -er '[.result.gates[] | select(.height != null)] | length' <<<"$status" 2>/dev/null) \
+# The NAMES of every gate with a height, not a count: a count of 0 is wrong for
+# production, whose genesis legitimately carries four passed PREDATING gates
+# (v2, omninode, education, governance). The checker classifies the names.
+gates=$(jq -er '[.result.gates[] | select(.height != null) | .gate] | join(",")' <<<"$status" 2>/dev/null) \
   || fail "chain_getActivationStatus returned no gates list"
+[[ -n $gates ]] || gates=none
 
 # How this validator's handshake lines are attributed by the others.
 peer=$(grep -m1 -o 'Local peer ID: [0-9A-Za-z]*' "$OUT/$POD.log" | awk '{print $4}') || true
 [[ -n $peer ]] || fail "no 'Local peer ID' line in the container log; its handshakes cannot be attributed"
+
+# The public validator identity, PROVEN BY POSSESSION rather than self-reported:
+# the node reports no validator key of its own (node_info has none, and no log
+# line states it), and its key file is private. So take a height this
+# workload's log says it produced, and read that block's proposer from public
+# RPC. A block signed by the key is the proof the workload holds it. A
+# validator that has produced no block yet cannot be identified, and fails.
+H=$(grep -oE 'Produced block [0-9a-fx]+ at height [0-9]+' "$OUT/$POD.log" | tail -1 | awk '{print $NF}') || true
+[[ -n $H ]] || fail "no 'Produced block' line in the log; this workload's validator identity cannot be proven"
+vpk=$(rpc get_block_by_height "[$H]" | jq -er '.result.proposer // empty' 2>/dev/null) \
+  || fail "get_block_by_height $H returned no proposer"
+[[ $vpk =~ ^[0-9a-f]{64}$ ]] || fail "validator_pubkey '$vpk' is not 64-hex"
+
+gen=$(kubectl -n "$NS" exec "$POD" -- sha256sum "$GENESIS_PATH") \
+  || fail "hashing the mounted genesis $GENESIS_PATH failed"
+gen=${gen%% *}
+[[ $gen =~ ^[0-9a-f]{64}$ ]] || fail "genesis_sha256 '$gen' is not a sha256"
 
 # Stage 1 requires the telemetry to already be present.
 tools/lane-b/wave1-monitor.sh verify "$METRICS" >&2 || fail "telemetry verify failed"
@@ -99,6 +121,8 @@ echo "chain_id:          $chain"
 echo "current_height:    $height"
 echo "gates_set:         $gates"
 echo "local_peer_id:  $peer"
+echo "validator_pubkey: $vpk"
+echo "genesis_sha256: $gen"
 echo "telemetry:      OK"
 } > "$tmp"
 mv "$tmp" "$OUT/$POD.record"
