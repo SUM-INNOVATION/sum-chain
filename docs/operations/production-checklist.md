@@ -180,8 +180,34 @@ that validator's block slots until it rejoins, so coordinate restarts.
    until each re-answers the handshake, which resolves on its own. Details and
    the test that pins both halves:
    [p2p-admission-and-compatibility.md](p2p-admission-and-compatibility.md).
-5. **Never downgrade a binary that has executed a block** — the per-block undo
-   journal changed key shape, from height alone to `height ‖ block_hash`
+5. **Never start an older binary on a data directory a newer binary has OPENED
+   — not "executed a block": opened.** Snapshot restoration is the only
+   supported rollback once a newer binary has touched the volume, and the
+   snapshot must be taken BEFORE the newer binary first opens it.
+
+   This supersedes the image-only rollback PR #254 describes. The 0.2.0-era
+   binaries deployed today classify RocksDB's "Invalid argument" as corruption
+   and auto-repair by default; the repair recovers only the `default` column
+   family and moves every other family to `lost/`. Stage 1 adds one family
+   (`application_journal`) at its FIRST OPEN, before any activation check and
+   before any block. So reverting the image after that open -- even if the new
+   binary then refused to start -- makes the old binary empty the database and
+   re-initialise from genesis. Reproduced: 189 families before, 1 after;
+   `blocks`, `state` and `meta` from 2000 rows to 0.
+
+   From this release on the node fails closed instead: a data directory
+   containing a family it does not know refuses to open, `auto_repair` is off
+   by default, and "Invalid argument" is no longer treated as corruption. That
+   protects the NEXT transition (rolling back to this binary), not this one --
+   the binary that runs on a revert from Stage 1 is the deployed 0.2.0, which
+   still has the defect. There is no in-place repair or migration command:
+   `Database::repair` has no caller outside `crates/storage/src/db.rs`, and as
+   implemented it would destroy every non-default family anyway. When a node
+   refuses to open, the operator's options are to run the binary that wrote
+   the data, or to restore the pre-upgrade snapshot.
+
+   The same holds for the undo journal on its own. Its
+   key shape changed, from height alone to `height ‖ block_hash`
    (`crates/storage/src/schema.rs`). The UPGRADE direction is handled in code: a
    journal written by an older binary is still read, because the reader falls
    back to the legacy key, and still deleted, because the delete removes both
