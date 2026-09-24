@@ -1,0 +1,10 @@
+[package]
+name = "cfprobe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[workspace]
+[dependencies]
+sumchain-storage = { path = "../../../crates/storage" }
+rocksdb = "0.22"
+sumchain-genesis = { path = "../../../crates/genesis" }

@@ -987,7 +987,15 @@ impl Database {
             || msg.contains("current")
     }
 
-    /// Attempt to repair a corrupted database
+    /// Run RocksDB's repair on a database directory. **Destructive here.**
+    ///
+    /// `DB::repair` is called without column-family descriptors, so RocksDB
+    /// recovers only `default` and moves the data of every other family to
+    /// `lost/`. This database keeps everything in its 188 other families, so
+    /// the result opens with every application family empty. It is reached only
+    /// from the `auto_repair` path, which is off by default; nothing else calls
+    /// it. Never run it on the only copy of a validator's data -- restore a
+    /// snapshot instead (docs/operations/production-checklist.md, item 5).
     pub fn repair<P: AsRef<Path>>(path: P) -> Result<()> {
         let path_str = path.as_ref().to_string_lossy().to_string();
         info!("Attempting to repair database at {}", path_str);
