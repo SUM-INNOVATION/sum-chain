@@ -40,6 +40,12 @@ pub const GIT_HASH: &str = match option_env!("GIT_HASH") {
 #[derive(Parser)]
 #[command(name = "sumchain")]
 #[command(about = "SUM Chain Node", long_about = None)]
+// `-V` prints the package version; `--version` prints the exact commit this
+// binary was built from. The commit is how a running validator is identified
+// against a rollout record -- the package version alone spans hundreds of
+// commits. clap has no const way to join the two strings, so they are the two
+// forms of the same flag rather than one line.
+#[command(version, long_version = GIT_HASH)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -1499,5 +1505,32 @@ fn truncate_str(s: &str, max_len: usize) -> String {
         format!("{}...", &s[..max_len - 3])
     } else {
         s[..max_len].to_string()
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// `--version` is how an operator identifies a running validator against a
+    /// rollout record, so it must print the commit the binary was built from.
+    /// When the build supplied GIT_HASH (every image build does -- the
+    /// Dockerfile refuses otherwise) it must be exactly that commit.
+    #[test]
+    fn long_version_reports_the_build_commit() {
+        let long = Cli::command().render_long_version();
+        assert!(long.contains(GIT_HASH), "{long}");
+        if let Some(built_from) = option_env!("GIT_HASH") {
+            assert_eq!(long.trim(), format!("sumchain {built_from}"));
+        }
+    }
+
+    /// `-V` keeps reporting the package version, so nothing that parsed it
+    /// before breaks.
+    #[test]
+    fn short_version_reports_the_package_version() {
+        let short = Cli::command().render_version();
+        assert_eq!(short.trim(), format!("sumchain {VERSION}"));
     }
 }

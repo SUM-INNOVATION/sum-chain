@@ -1,0 +1,78 @@
+name: docker-image
+
+# Builds the REAL release image from the Dockerfile and proves the binary
+# inside it reports the exact commit it was built from. Nothing is pushed:
+# there is no registry login and no push step, and the job holds read-only
+# repository permission.
+#
+# Why this exists: until it did, the only release-profile build of the node
+# ran inside health-e2e and was discarded, it used a different compiler from
+# the one every test ran on, and the binary reported `Commit: unknown`. A
+# release artifact that cannot be tied to its commit cannot be verified
+# against a rollout record.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'crates/**'
+      - 'scripts/**'
+      - '.github/workflows/docker-image.yml'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-identify:
+    name: release image reports its commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # On a pull_request the checkout is the merge commit, so the image is
+      # built from exactly that tree -- and HEAD is what it must report.
+      - name: Commit being built
+        id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build the release image (no push)
+        run: |
+          docker build \
+            --build-arg GIT_HASH=${{ steps.commit.outputs.sha }} \
+            -t sumchain-node:ci-${{ steps.commit.outputs.sha }} .
+
+      - name: The running binary reports the exact commit
+        run: |
+          set -euo pipefail
+          want="${{ steps.commit.outputs.sha }}"
+          got="$(docker run --rm sumchain-node:ci-$want --version)"
+          echo "--version: $got"
+          [ "$got" = "sumchain $want" ] \
+            || { echo "::error::image reports '$got', expected 'sumchain $want'"; exit 1; }
+          short="$(docker run --rm sumchain-node:ci-$want -V)"
+          echo "-V: $short"
+
+      - name: The build refuses without a commit
+        run: |
+          set -uo pipefail
+          if docker build -t sumchain-node:ci-nohash . >build-nohash.log 2>&1; then
+            echo "::error::the image built with no GIT_HASH; it must refuse"; exit 1
+          fi
+          grep -q 'GIT_HASH must be the full 40-hex commit' build-nohash.log \
+            || { echo "::error::refused, but not for the GIT_HASH reason"; tail -20 build-nohash.log; exit 1; }
+          echo "refused as required"
+
+      - name: Record the image identity (local only)
+        run: |
+          want="${{ steps.commit.outputs.sha }}"
+          docker image inspect sumchain-node:ci-$want \
+            --format 'image id {{.Id}}  created {{.Created}}  arch {{.Architecture}}'
