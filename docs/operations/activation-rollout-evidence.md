@@ -38,33 +38,70 @@ Let `$V` be the validator's RPC base URL and `$POD` its pod name.
 #!/usr/bin/env bash
 # rollout-record.sh <pod> <rpc-url> <metrics-url> <out-dir>
 # Writes <out-dir>/<pod>.record and <out-dir>/<pod>.log. Namespace: $NS (default sumchain).
+#
+# Every field is read and validated BEFORE anything is written, and the record
+# is written atomically. A missing command, a failing command, a blank or
+# malformed field, or failed telemetry exits non-zero and leaves NO record: a
+# record that exists is one whose every field was read. (An earlier version put
+# each command inside `echo "$(...)"`, where a failure does not trip `set -e`,
+# and wrote a blank field with exit 0.)
 set -euo pipefail
+[[ $# -eq 4 ]] || { echo "usage: rollout-record.sh <pod> <rpc-url> <metrics-url> <out-dir>" >&2; exit 2; }
 POD=$1 RPC=$2 METRICS=$3 OUT=$4 NS=${NS:-sumchain}
+fail() { echo "FAIL [$POD]: $*; no record written" >&2; exit 1; }
+for c in kubectl curl jq awk grep; do
+  command -v "$c" >/dev/null || fail "required command '$c' not found"
+done
 mkdir -p "$OUT"
 
 rpc() { curl -fsS -X POST "$RPC" -H 'content-type: application/json' \
-          -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":[]}" | jq -c '.result'; }
+          -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":[]}"; }
 
 # The WHOLE current-container log, not a --since window: the handshake lines
 # are written when each peer connects, which can be long before the window, and
 # the peer-ID line is written once at startup.
-kubectl -n "$NS" logs "$POD" > "$OUT/$POD.log"
+kubectl -n "$NS" logs "$POD" > "$OUT/$POD.log" || fail "kubectl logs failed"
 
+sha=$(kubectl -n "$NS" exec "$POD" -- sha256sum /usr/local/bin/sumchain) \
+  || fail "hashing /usr/local/bin/sumchain in the pod failed"
+sha=${sha%% *}
+[[ $sha =~ ^[0-9a-f]{64}$ ]] || fail "binary_sha256 '$sha' is not a sha256"
+
+img=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.containerStatuses[0].imageID}') \
+  || fail "reading the pod's imageID failed"
+[[ $img == *sha256:* ]] || fail "image_id '$img' carries no digest"
+
+status=$(rpc chain_getActivationStatus) || fail "chain_getActivationStatus failed"
+field() { jq -er ".result.$1 // empty" <<<"$status" 2>/dev/null \
+            || fail "chain_getActivationStatus returned no $1"; }
+act=$(field digest)
+proto=$(field protocol_digest)
+chain=$(field chain_id)
+height=$(field current_height)
+gates=$(jq -er '[.result.gates[] | select(.height != null)] | length' <<<"$status" 2>/dev/null) \
+  || fail "chain_getActivationStatus returned no gates list"
+
+# How this validator's handshake lines are attributed by the others.
+peer=$(grep -m1 -o 'Local peer ID: [0-9A-Za-z]*' "$OUT/$POD.log" | awk '{print $4}') || true
+[[ -n $peer ]] || fail "no 'Local peer ID' line in the container log; its handshakes cannot be attributed"
+
+# Stage 1 requires the telemetry to already be present.
+tools/lane-b/wave1-monitor.sh verify "$METRICS" >&2 || fail "telemetry verify failed"
+
+tmp=$(mktemp "$OUT/.$POD.record.XXXXXX")
 {
 echo "pod:            $POD"
-echo "binary_sha256:  $(kubectl -n "$NS" exec "$POD" -- sha256sum /usr/local/bin/sumchain | awk '{print $1}')"
-echo "image_id:       $(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.containerStatuses[0].imageID}')"
-rpc chain_getActivationStatus | jq -r '
-  "activation_digest: \(.digest)",
-  "protocol_digest:   \(.protocol_digest)",
-  "chain_id:          \(.chain_id)",
-  "current_height:    \(.current_height)",
-  "gates_set:         \([.gates[] | select(.height != null)] | length)"'
-# How this validator's handshake lines are attributed by the others.
-echo "local_peer_id:  $(grep -m1 -o 'Local peer ID: [0-9A-Za-z]*' "$OUT/$POD.log" | awk '{print $4}')"
-# Stage 1 requires the telemetry to already be present.
-tools/lane-b/wave1-monitor.sh verify "$METRICS" >&2 && echo "telemetry:      OK"
-} > "$OUT/$POD.record"
+echo "binary_sha256:  $sha"
+echo "image_id:       $img"
+echo "activation_digest: $act"
+echo "protocol_digest:   $proto"
+echo "chain_id:          $chain"
+echo "current_height:    $height"
+echo "gates_set:         $gates"
+echo "local_peer_id:  $peer"
+echo "telemetry:      OK"
+} > "$tmp"
+mv "$tmp" "$OUT/$POD.record"
 ```
 
 **Run it for every validator into one directory, then let the checker decide.**

@@ -69,7 +69,10 @@ def check_binary_path() -> list[str]:
     want = dockerfile_binary_path()
     name = want.rsplit("/", 1)[1]
     doc = DOC.read_text()
-    hashed = re.findall(r"sha256sum (/usr/local/bin/\S+?)[`\s|]", doc)
+    # The path ends at whitespace, a backtick, a pipe, a closing paren or a
+    # quote -- `$(... sha256sum /usr/local/bin/sumchain)` must not read as
+    # `sumchain)`.
+    hashed = re.findall(r"sha256sum (/usr/local/bin/\S+?)[`\s|)\"']", doc)
     if not hashed:
         fails.append("the rollout document hashes no /usr/local/bin binary at all")
     for path in hashed:
@@ -135,15 +138,21 @@ def log_line(level: str, target: str, msg: str, ansi: bool) -> str:
 
 
 def make_pods(fx: Path, n: int, *, drop_handshake=None, refusal_on=None,
-              digest_off=None, empty_log=None) -> None:
+              digest_off=None, empty_log=None, no_image_digest=None,
+              status_without_digest=None, metrics_missing=None) -> None:
     for i in range(n):
         pod = f"sumchain-validator-{i + 1}-0"
         proto = PROTO_OTHER if digest_off == i else PROTO
         (fx / f"{pod}.sha").write_text(FIXTURE_SHA + "\n")
-        (fx / f"{pod}.imageid").write_text("docker.io/fixture/node@sha256:" + "0" * 64)
-        (fx / f"{pod}.metrics").write_text(METRICS)
+        (fx / f"{pod}.imageid").write_text(
+            "docker.io/fixture/node:latest" if no_image_digest == i
+            else "docker.io/fixture/node@sha256:" + "0" * 64)
+        (fx / f"{pod}.metrics").write_text(
+            "\n".join(l for l in METRICS.split("\n") if 'subsystem="healthcare"' not in l)
+            if metrics_missing == i else METRICS)
         (fx / f"{pod}.status").write_text(json.dumps({"jsonrpc": "2.0", "id": 1, "result": {
-            "digest": ACT, "protocol_digest": proto, "chain_id": int(CHAIN),
+            **({} if status_without_digest == i else {"digest": ACT}),
+            "protocol_digest": proto, "chain_id": int(CHAIN),
             "current_height": 1000 + i,  # NONPRODUCTION
             "gates": [{"gate": "x", "height": None, "active": False}]}}))
         lines = [log_line("INFO", "sumchain_p2p::network", f"Local peer ID: {peer(i)}", i == 0)
@@ -167,24 +176,43 @@ def make_pods(fx: Path, n: int, *, drop_handshake=None, refusal_on=None,
         (fx / f"{pod}.log").write_text("" if empty_log == i else "\n".join(lines) + "\n")
 
 
-def collect(tmp: Path, n: int, **kw) -> tuple[Path, str]:
+# Tools the recorder and `wave1-monitor.sh verify` need, linked into a sandbox
+# so a case can run with NO kubectl on PATH at all. Hermetic on purpose: GitHub's
+# runners ship a real kubectl, which would otherwise be found and make the
+# "kubectl missing" case test nothing.
+SANDBOX_TOOLS = ["bash", "env", "jq", "awk", "grep", "sed", "tr", "wc", "cat", "mktemp",
+                 "mv", "mkdir", "rm", "head", "tail", "sort", "cut", "date", "dirname", "basename"]
+
+
+def sandbox_path(tmp: Path) -> str:
+    box = tmp / "sandbox"
+    box.mkdir()
+    for t in SANDBOX_TOOLS:
+        real = shutil.which(t)
+        assert real, f"sandbox needs {t}"
+        (box / t).symlink_to(real)
+    return str(box)
+
+
+def collect(tmp: Path, n: int, *, no_kubectl=False, binary=None, **kw) -> tuple[Path, str]:
     fx, out, shim = tmp / "fx", tmp / "out", tmp / "bin"
     for d in (fx, out, shim):
         d.mkdir()
     make_pods(fx, n, **kw)
-    (shim / "kubectl").write_text(KUBECTL)
+    if not no_kubectl:
+        (shim / "kubectl").write_text(KUBECTL)
     (shim / "curl").write_text(CURL)
     for s in shim.iterdir():
         s.chmod(0o755)
     script = tmp / "rollout-record.sh"
     script.write_text(extract_record_script())
     script.chmod(0o755)
-    env = dict(os.environ, FX=str(fx), BINARY=dockerfile_binary_path(),
-               PATH=f"{shim}:{os.environ['PATH']}")
+    path = f"{shim}:{sandbox_path(tmp)}" if no_kubectl else f"{shim}:{os.environ['PATH']}"
+    env = dict(os.environ, FX=str(fx), BINARY=binary or dockerfile_binary_path(), PATH=path)
     errs = ""
     for i in range(n):
         pod = f"sumchain-validator-{i + 1}-0"
-        r = subprocess.run([str(script), pod, f"http://{pod}.fixture/", f"http://{pod}.fixture:9090",
+        r = subprocess.run([str(script), pod, f"http://{pod}.fixture/", f"http://{pod}.fixture:8546",
                             str(out)], cwd=ROOT, env=env, capture_output=True, text=True)
         errs += r.stderr if r.returncode == 0 else f"[{pod} exit {r.returncode}] {r.stderr}"
     return out, errs
@@ -205,7 +233,7 @@ CASES = [
     ("incompatibility refusal", 2, {"refusal_on": 0}, None, 1, "INCOMPATIBILITY REFUSAL"),
     ("validator on a different digest", 2, {"digest_off": 1}, None, 1, "DIGEST DISAGREEMENT"),
     ("activation digest differs, no refusal", 2, {}, "act_digest", 1, "DIGEST DISAGREEMENT on activation_digest"),
-    ("empty log", 2, {"empty_log": 0}, None, 1, "MISSING HANDSHAKE"),
+    ("empty log", 2, {"empty_log": 0}, None, 1, "MISSING RECORD"),
     ("missing validator record", 2, {}, "drop_record", 1, "MISSING RECORD"),
     ("missing log file", 2, {}, "drop_log", 1, "MISSING LOG"),
     ("wrong binary sha", 2, {}, "wrong_sha", 1, "BINARY MISMATCH"),
@@ -213,6 +241,22 @@ CASES = [
     ("gates set at stage 1", 2, {}, "gates", 1, "gates_set is 3"),
     ("wrong chain id", 2, {}, "chain", 1, "CHAIN ID MISMATCH"),
     ("empty evidence directory", 2, {}, "empty_dir", 1, "MISSING RECORD"),
+]
+
+
+# The recorder ITSELF must refuse: exit non-zero, name the reason, and leave no
+# record behind. Every case in CASES above runs the recorder successfully and
+# then edits the record, so none of them tests this. (fixture kwargs,
+# recorder-stderr text that must appear)
+RECORDER_REFUSALS = [
+    ("kubectl not installed", {"no_kubectl": True}, "required command 'kubectl' not found"),
+    ("binary missing from the pod", {"binary": "/usr/local/bin/not-the-binary"},
+     "hashing /usr/local/bin/sumchain in the pod failed"),
+    ("image id carries no digest", {"no_image_digest": 0}, "carries no digest"),
+    ("activation status lacks its digest", {"status_without_digest": 0},
+     "chain_getActivationStatus returned no digest"),
+    ("telemetry series absent", {"metrics_missing": 0}, "telemetry verify failed"),
+    ("empty log (no peer ID)", {"empty_log": 0}, "no 'Local peer ID' line"),
 ]
 
 
@@ -256,11 +300,28 @@ def main() -> int:
         finally:
             shutil.rmtree(tmp)
 
+    print("recorder refusals (NONPRODUCTION fixtures): the recorder must exit non-zero and write nothing")
+    for name, kw, want in RECORDER_REFUSALS:
+        tmp = Path(tempfile.mkdtemp(prefix="rollout-record-"))
+        try:
+            out, errs = collect(tmp, 1, **kw)
+            record = out / "sumchain-validator-1-0.record"
+            leftover = sorted(p.name for p in out.glob(".*.record.*"))
+            ok = ("exit 1]" in errs) and (want in errs) and not record.exists() and not leftover
+            print(f"  {'ok  ' if ok else 'FAIL'} {name:34s} refused={'exit 1]' in errs} "
+                  f"record_written={record.exists()}")
+            if not ok:
+                failures.append(f"recorder {name}: wanted a refusal naming {want!r} and no record; "
+                                f"stderr: {errs.strip()} record={record.exists()} partial={leftover}")
+        finally:
+            shutil.rmtree(tmp)
+
     for f in failures:
         print(f"FAIL: {f}", file=sys.stderr)
     if failures:
         return 1
-    print(f"ROLLOUT CHECK BATTERY OK: {len(CASES)} cases, binary path matches the Dockerfile.")
+    print(f"ROLLOUT CHECK BATTERY OK: {len(CASES)} checker cases + {len(RECORDER_REFUSALS)} "
+          f"recorder refusals, binary path matches the Dockerfile.")
     return 0
 
 
