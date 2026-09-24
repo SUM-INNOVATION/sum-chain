@@ -62,6 +62,8 @@ REQUIRED = (
     "current_height",
     "gates_set",
     "local_peer_id",
+    "validator_pubkey",
+    "genesis_sha256",
     "telemetry",
 )
 
@@ -73,6 +75,23 @@ REFUSAL = re.compile(
 )
 FIELD = re.compile(r"\b(peer|digest)=(\S+)")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+GENESIS_SRC = Path(__file__).resolve().parents[2] / "crates" / "genesis" / "src" / "lib.rs"
+
+
+def predating_gates() -> set[str]:
+    """GATES_PREDATING_ACTIVATION_RECORDING, read from the genesis crate.
+
+    The gates that shipped in binaries which produced existing blocks, and may
+    legitimately carry a height at or below the head. Read from the source, not
+    copied, so the list cannot drift from the one the node enforces.
+    """
+    src = GENESIS_SRC.read_text()
+    i = src.index("GATES_PREDATING_ACTIVATION_RECORDING")
+    body = src[src.index("[", i): src.index("];", i)]
+    names = set(re.findall(r'"([a-z_0-9]+_(?:enabled|required)_from_height)"', body))
+    if len(names) < 10:
+        raise SystemExit(f"could not read the predating gate list from {GENESIS_SRC} ({len(names)} names)")
+    return names
 
 
 def parse_record(path: Path) -> dict[str, str]:
@@ -117,7 +136,9 @@ def handshake_lines(text: str) -> tuple[list[tuple[str, str]], list[str]]:
     return accepted, refusals
 
 
-def check(evidence: Path, n: int, expected_sha: str, expected_chain: str) -> list[str]:
+def check(evidence: Path, n: int, expected_sha: str, expected_chain: str,
+          expected_validators: list[str] | None = None,
+          expected_genesis: str | None = None) -> list[str]:
     failures: list[str] = []
     if n < 2:
         return [f"--validators {n}: a handshake needs at least two validators"]
@@ -154,13 +175,58 @@ def check(evidence: Path, n: int, expected_sha: str, expected_chain: str) -> lis
         h = rec.get("current_height", "")
         if h and (not h.isdigit() or int(h) <= 0):
             failures.append(f"{name}: current_height {h!r} is not a height above genesis")
-        if rec.get("gates_set") and rec["gates_set"] != "0":
-            failures.append(
-                f"{name}: gates_set is {rec['gates_set']}; stage 1 requires 0 (this "
-                f"validator is running a genesis with heights in it)"
-            )
+        # Stage 1 sets no gate of its own. A PREDATING gate may carry a height --
+        # production's genesis carries four -- so the rule is "nothing outside the
+        # predating list", not "nothing at all". The old rule (a count of 0)
+        # would have refused the correct production genesis, and pushed an
+        # operator towards removing heights: the silent consensus split.
+        gs = rec.get("gates_set", "")
+        if gs:
+            if gs.isdigit():
+                failures.append(f"{name}: gates_set is a count ({gs}); this recorder "
+                                f"must list gate names so they can be classified")
+            elif gs != "none":
+                stray = sorted(g for g in gs.split(",") if g and g not in predating_gates())
+                if stray:
+                    failures.append(
+                        f"{name}: gates_set includes non-predating gate(s) {stray}; stage 1 "
+                        f"sets no gate outside GATES_PREDATING_ACTIVATION_RECORDING"
+                    )
         if rec.get("telemetry") and rec["telemetry"] != "OK":
             failures.append(f"{name}: telemetry is {rec['telemetry']!r}, not OK")
+        for key in ("validator_pubkey", "genesis_sha256"):
+            v = rec.get(key, "").lower()
+            if v and not HEX64.match(v):
+                failures.append(f"{name}: {key} {v!r} is not 64-hex")
+
+    # The public validator identity, proven by possession: the recorder takes it
+    # from a block this workload's own log says it produced. Two records naming
+    # the same identity means one key is running in two places -- or one
+    # workload was recorded twice -- and either way a validator is unaccounted
+    # for.
+    ident = {name: rec.get("validator_pubkey", "").lower() for name, rec in records.items()}
+    present = [v for v in ident.values() if v]
+    if len(set(present)) != len(present):
+        failures.append(f"DUPLICATE VALIDATOR IDENTITY across records: {ident}")
+    if expected_validators is not None:
+        want = {v.lower() for v in expected_validators}
+        if set(present) != want:
+            failures.append(
+                f"VALIDATOR SET MISMATCH: recorded {sorted(set(present))}, expected {sorted(want)}"
+            )
+
+    # Every validator must run byte-identical genesis, and it must be the
+    # production genesis -- whose bytes are supplied separately, not taken from
+    # any file in this repository.
+    gen = {name: rec.get("genesis_sha256", "").lower() for name, rec in records.items()}
+    if len({v for v in gen.values() if v}) > 1:
+        failures.append("GENESIS DISAGREEMENT: " + ", ".join(f"{k}={v}" for k, v in gen.items()))
+    if expected_genesis is not None:
+        for name, v in gen.items():
+            if v and v != expected_genesis.lower():
+                failures.append(
+                    f"{name}: GENESIS MISMATCH genesis_sha256 {v} != expected {expected_genesis.lower()}"
+                )
 
     for key in ("activation_digest", "protocol_digest"):
         values = {name: rec.get(key, "") for name, rec in records.items() if rec.get(key)}
@@ -213,14 +279,33 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--validators", type=int, required=True)
     ap.add_argument("--expected-binary-sha256", required=True)
     ap.add_argument("--expected-chain-id", required=True)
+    ap.add_argument("--expected-validator", action="append", default=[],
+                    help="a validator public key, 64-hex; give it once per validator")
+    ap.add_argument("--expected-genesis-sha256",
+                    help="sha256 of the PRODUCTION genesis bytes, supplied by the owner")
     ap.add_argument("evidence", type=Path)
     try:
         args = ap.parse_args(argv)
     except SystemExit:
         return 2
 
+    # These two are not optional, and their absence is a STOP with its own
+    # message rather than a usage error: the rollout must not proceed on any
+    # substitute, and a local or committed genesis is exactly the substitute an
+    # operator under time pressure reaches for.
+    if not args.expected_genesis_sha256:
+        print("STOP: the production genesis sha256 was not supplied (--expected-genesis-sha256).")
+        print("      Stage 1 evidence cannot be complete without it. Do not substitute the")
+        print("      hash of any committed or locally generated genesis file.")
+        return 1
+    if len(args.expected_validator) != args.validators:
+        print(f"STOP: {len(args.expected_validator)} --expected-validator given, "
+              f"{args.validators} required -- one public key per validator.")
+        return 1
+
     failures = check(
-        args.evidence, args.validators, args.expected_binary_sha256, args.expected_chain_id
+        args.evidence, args.validators, args.expected_binary_sha256, args.expected_chain_id,
+        args.expected_validator, args.expected_genesis_sha256,
     )
     for f in failures:
         print(f"FAIL: {f}")
@@ -229,8 +314,9 @@ def main(argv: list[str]) -> int:
         return 1
     n = args.validators
     print(
-        f"STAGE 1 ROLLOUT EVIDENCE COMPLETE: {n} validators, identical binary, "
-        f"digests and chain id, {n * (n - 1)}/{n * (n - 1)} handshakes, 0 refusals."
+        f"STAGE 1 ROLLOUT EVIDENCE COMPLETE: {n} validators with the expected public "
+        f"identities, identical binary, genesis, digests and chain id, "
+        f"{n * (n - 1)}/{n * (n - 1)} directed handshakes, 0 refusals."
     )
     return 0
 
