@@ -49,6 +49,11 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      # Required by the Dockerfile, which refuses to build without the full
+      # commit. Empty here rather than `:?`, because compose interpolates this
+      # file on every command and a hard failure would break `down` too.
+      args:
+        GIT_HASH: ${GIT_HASH:-}
     container_name: snip-mirror-validator
     hostname: validator
     command:

@@ -73,13 +73,19 @@ COPY scripts scripts
 # `--locked`: refuse to build if Cargo.lock would change, rather than silently
 # resolving different dependency versions than the ones CI tested and audited.
 #
-# GIT_HASH is read at COMPILE time by `option_env!` (crates/node/src/main.rs), so
-# it must be in the environment of this RUN. It is exported only when non-empty:
-# `option_env!` returns `Some("")` for an empty variable, which would make the
-# binary report a BLANK commit -- worse than the "unknown" it reports when the
-# variable is absent. Pass it with `--build-arg GIT_HASH=$(git rev-parse HEAD)`.
+# GIT_HASH is REQUIRED, and must be the full 40-hex commit being built. It is
+# read at COMPILE time by `option_env!` (crates/node/src/main.rs) and reported
+# by `sumchain --version`, which is how an operator identifies a running binary.
+# An image that cannot say which commit it is cannot be verified against a
+# rollout record, so the build refuses rather than falling back to "unknown".
+# (`option_env!` also returns `Some("")` for an empty variable, which would
+# report a blank commit.) Pass it with:
+#   docker build --build-arg GIT_HASH="$(git rev-parse HEAD)" .
+# docker compose forwards it from the environment; export it before building.
 ARG GIT_HASH
-RUN if [ -n "${GIT_HASH:-}" ]; then export GIT_HASH; else unset GIT_HASH; fi \
+RUN printf '%s' "${GIT_HASH:-}" | grep -Eqx '[0-9a-f]{40}' \
+ || { echo "GIT_HASH must be the full 40-hex commit (got '${GIT_HASH:-}'). Build with --build-arg GIT_HASH=\$(git rev-parse HEAD)" >&2; exit 1; } \
+ && export GIT_HASH \
  && cargo build --release --locked --bin sumchain --bin sumchain-wallet
 
 # ===========================

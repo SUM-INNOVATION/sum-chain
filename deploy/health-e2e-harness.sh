@@ -313,7 +313,10 @@ YAML
 # Assertions.
 # ---------------------------------------------------------------------------
 build_images() { # (1)
-  log "building images ($([ "$NO_CACHE" = 1 ] && echo '--no-cache' || echo 'cached'))..."
+  # The Dockerfile requires the full commit. The worktree is clean (preflight
+  # refuses otherwise), so HEAD is exactly the tree being built.
+  export GIT_HASH="${GIT_HASH:-$(git -C "$REPO" rev-parse HEAD)}"
+  log "building images for commit ${GIT_HASH} ($([ "$NO_CACHE" = 1 ] && echo '--no-cache' || echo 'cached'))..."
   if [ "$NO_CACHE" = 1 ]; then dc build --no-cache; else dc build; fi
   ok "(1) images built"
 }

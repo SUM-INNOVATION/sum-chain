@@ -41,6 +41,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Required by the Dockerfile, which refuses to build without the full
+      # commit. Empty here rather than `:?`, because compose interpolates this
+      # file on every command and a hard failure would break `down` too.
+      args:
+        GIT_HASH: ${GIT_HASH:-}
     container_name: sumchain-validator-1
     hostname: validator-1
     command:
@@ -80,6 +85,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Required by the Dockerfile, which refuses to build without the full
+      # commit. Empty here rather than `:?`, because compose interpolates this
+      # file on every command and a hard failure would break `down` too.
+      args:
+        GIT_HASH: ${GIT_HASH:-}
     container_name: sumchain-validator-2
     hostname: validator-2
     command:
@@ -128,6 +138,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Required by the Dockerfile, which refuses to build without the full
+      # commit. Empty here rather than `:?`, because compose interpolates this
+      # file on every command and a hard failure would break `down` too.
+      args:
+        GIT_HASH: ${GIT_HASH:-}
     container_name: sumchain-validator-3
     hostname: validator-3
     command:
@@ -174,6 +189,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Required by the Dockerfile, which refuses to build without the full
+      # commit. Empty here rather than `:?`, because compose interpolates this
+      # file on every command and a hard failure would break `down` too.
+      args:
+        GIT_HASH: ${GIT_HASH:-}
     container_name: sumchain-fullnode
     hostname: fullnode
     command:
