@@ -31,7 +31,7 @@ Five findings, each reproduced or verified independently, not taken on report.
 2. **The only image build uses a different compiler from the one every test ran
    on.** The Dockerfile builds with `rust:1.85`, unpinned, without `--locked`;
    `rust-toolchain.toml` and all CI pin 1.88.0. The binary also cannot report
-   its commit (`GIT_HASH` is never set). **VERIFIED.** Repaired on a branch.
+   its commit (`GIT_HASH` is never set). **VERIFIED.** Repaired in this PR (§14).
 3. **Rolling back by reverting the image destroys the validator's database.**
    Stage 1 adds one column family (`application_journal`) to the 187 the
    deployed 0.2.0 binary knows, and creates it at first open. On revert, 0.2.0's
@@ -41,7 +41,7 @@ Five findings, each reproduced or verified independently, not taken on report.
    `meta` 2000 rows → 0. Stage 1 also writes every journal under a new key on
    every block, so this is not one fixable column: **snapshot restore is the only
    safe rollback.** The release candidate carries the same landmine forward to
-   Stage 2; repaired on a branch.
+   Stage 2; repaired in this PR (§14).
 4. **One validator down halts the chain.** Proposer is `validators[height % N]`
    (`poa.rs`), importers reject any other proposer, and nothing skips a slot.
    With two validators, a "rolling" upgrade is **two planned halts**.
@@ -54,9 +54,12 @@ Five findings, each reproduced or verified independently, not taken on report.
    **The upgrade must never replace the genesis file.** Runbook §2.2 (d), §2.7
    and §4.3 check 7 now catch it.
 
-**PR #254's merged description is now inaccurate on point 3.** It presents
+**This PR supersedes PR #254's rollback statement.** #254's historical
+description is left unedited. It presents
 image revert as a safe pre-activation rollback. Stage 1 is dormant in consensus
-but not on disk. Editing a merged PR is an external write and was not done.
+but not on disk. From this PR on, the supported rollback after Stage 1 has
+opened a volume is **restoring a volume snapshot taken before that first open**,
+and nothing else (`production-checklist.md` item 5, §9 below).
 
 ---
 
@@ -70,20 +73,23 @@ but not on disk. Editing a merged PR is an external write and was not done.
 | toolchain the image uses | rustc **1.85**, unpinned tag | VERIFIED — defect |
 | image tag / digest | **none exists** | VERIFIED — blocker |
 | binary sha256 | **none exists** (CI discards its release build) | VERIFIED — blocker |
-| binary reports its commit | **no** — logs `Commit: unknown` | VERIFIED — defect |
+| binary reports its commit | **no** on `main` — logs `Commit: unknown`; **yes** with this PR (`sumchain --version`) | VERIFIED |
 | SBOM / provenance / signature | none; no workflow signs or attests | VERIFIED |
 | `sumchain-wire` 0.5.0 | workspace path dependency; crates.io publish **not** needed for the node; `publish-wire.yml` fires only on a `wire-v*` tag, and none exists | VERIFIED |
 | manifests' image | `sumchain/node:latest` — mutable, and absent from Docker Hub | VERIFIED |
 | private registry (GHCR) | could not check: `gh` lacks `read:packages` | UNVERIFIED — needs access |
 
-**Repair, on branch `rollout/fix-dockerfile-toolchain` (`4fe78898`), not
-merged:** `FROM rust:1.88.0-slim-bookworm@sha256:38bc5a86…d89` (resolved
-read-only from the registry), `--locked`, and `GIT_HASH` forwarded only when
-non-empty (`option_env!` returns `Some("")` for an empty variable, which would
-report a blank commit). Tested: the guard across set/empty/absent; the repaired
-`cargo` command on 1.88.0 builds, leaves `Cargo.lock` untouched and embeds the
-full SHA. **Not tested: the Docker image itself** — this machine has no Docker.
-CI's `health-e2e` builds it; that needs the branch pushed.
+**Repair, in this PR:** `FROM rust:1.88.0-slim-bookworm@sha256:38bc5a86…d89`
+(resolved read-only from the registry) and `--locked`. The image now
+**refuses to build without the full 40-hex `GIT_HASH`** instead of falling back
+to `unknown`, and every caller of the Dockerfile supplies it (four compose
+services, the snip mirror, the health-e2e harness). `sumchain --version` prints
+the exact commit. The new workflow `docker-image.yml` builds the real image,
+runs it, and fails unless `--version` prints exactly the commit it built. It
+also proves the build refuses without one. **No image is pushed**: no registry
+login, no push step, `contents: read`. Locally: the guard over 7 inputs, the
+built binary's `--version`, and 30 node tests. The Docker image itself is tested
+only in CI, because this machine has no Docker.
 
 The exact build, push and digest-inspect commands are in
 `stage1-release-artifact.md`, with the registry left as `<REGISTRY>`.
@@ -189,8 +195,8 @@ check that matters, since no gate opens and the counter should stay flat),
 accepted"; refusal: `warn!` "REFUSING peer". Full queries and alert rules:
 `wave1-activation-monitoring.md`.
 
-**The monitor as merged was wrong in both directions, and is repaired on a
-branch** (`rollout/fix-wave1-monitor`, `b5bdc0fc`). The counter is per-process
+**The monitor as merged was wrong in both directions, and is repaired in
+this PR.** The counter is per-process
 and resets on restart. `delta` computed `now − baseline`, so a restart made
 every delta negative and it printed "Nothing moved" — **reproduced on the merged
 script: baseline 100, restart, three real refusals, delta −97, "Nothing moved",
@@ -302,17 +308,22 @@ to its full length; the rollback decision per §9; and the evidence bundle
 
 ## 14. Defects found and repaired this round
 
-Each repair is on its own local branch, tested, **not pushed and not merged**,
-and integrated onto `rollout/stage1-packet` for checking together.
+Everything is in **this one PR, as separate commits**, on top of `8954b0d`.
+Nothing is merged, no image or package is published, and no activation height
+is set. The final tree is byte-identical to the integrated tree every battery
+below ran on.
 
-| # | defect | repair branch | tested |
+| # | defect | commits | tested |
 |---|---|---|---|
-| 1 | image built with rustc 1.85, unpinned, no `--locked`, no `GIT_HASH` | `rollout/fix-dockerfile-toolchain` `4fe78898` | command on 1.88.0; guard 3 cases. **Docker build untested.** |
-| 2 | auto-repair wipes the database on a downgrade (release candidate carries it to Stage 2) | `rollout/fix-db-auto-repair` `10afd027` | 3 tests, 3 mutations killed, storage 372/372 |
-| 3 | monitor hid refusals after a restart and cried fork on healthy nodes; dead port; wrong count | `rollout/fix-wave1-monitor` `b5bdc0fc` | 10-case battery, defect reproduced on merged script |
-| 4 | evidence collector hashed a path that does not exist and **silently recorded a blank hash, exit 0**; enforced none of its rules | `rollout/r3-evidence` `ef0eab02` | 14-case battery; path derived from the Dockerfile |
-| 5 | runbook could not catch a wrong-genesis start; understated a both-validator rollback | `rollout/stage1-packet` | params check tested against live params |
+| 1 | image built with rustc 1.85, unpinned, no `--locked`, and the binary cannot report its commit | `docker:` ×2 | guard over 7 inputs; built `--version` = the commit; 30 node tests; clippy and rustfmt identical to base; **the image is tested by `docker-image.yml` in CI** |
+| 2 | auto-repair wipes the database on a downgrade, and the release candidate carries this forward to Stage 2; the checklist put the danger at the first block instead of the first open | `storage:` ×2 | 3 tests; 3 mutations killed; workspace 212 suites / 2837 passed / 0 failed; `downgrade-probe` reproduction preserved (rocksdb 0.22.0 pinned) |
+| 3 | monitor hid refusals after a restart, reported a fork on healthy nodes, read missing data as zero, and scraped a port nothing binds | `monitor:` ×2 | 15-case battery (the original 10 plus 5 missing-data cases); the defects reproduced on the earlier scripts |
+| 4 | evidence recorder hashed a path that does not exist and **silently wrote a blank hash, exit 0**; its rules were prose | `rollout evidence:` ×2 | 14 checker cases + 6 recorder refusals; path derived from the Dockerfile; the 6 refusals fail against the old recorder |
+| 5 | runbook could not catch a wrong-genesis start, and understated a both-validator rollback | `runbook:` ×2 | params check tested against the live 21-field params |
 
-Repair 2 does **not** make the Stage 1 rollback safe — the deployed 0.2.0
-binary is what runs on a revert. It stops the next transition inheriting the
-defect.
+Plus the release-artifact manifest (`docs(ops):`), the runbook itself
+(`ops:`), and this packet (`packet:`).
+
+Repair 2 does **not** make the Stage 1 rollback safe. On a revert, the binary
+that runs is the deployed 0.2.0. What repair 2 does is stop the next transition
+from inheriting the defect.
