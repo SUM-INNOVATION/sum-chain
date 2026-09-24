@@ -1333,7 +1333,7 @@ impl Node {
         // `HealthCheck::new` defaults `min_peers_for_ready` to 0, so a
         // single-validator devnet is not blocked on peers.
         let health_check = Arc::new(HealthCheck::new(is_synced, peer_count, current_height));
-        let server = HealthServer::new(health_check);
+        let server = health_server(health_check, self.metrics.clone());
 
         let handle = server
             .start(self.health_addr)
@@ -1403,6 +1403,21 @@ fn single_validator_synced(
     genesis_height: u64,
 ) -> bool {
     sync_state_synced || current_height > genesis_height
+}
+
+/// The health server this node runs: `/health`, `/ready`, and the Prometheus
+/// `/metrics` exposition, fed by the node's own metrics registry.
+///
+/// It used to be `HealthServer::new(health_check)`, which has no metrics
+/// provider, so `/metrics` answered 404 "Metrics not enabled" on every running
+/// node. The exposition itself was tested -- `to_prometheus` directly, and a
+/// separately built server -- but not the server the node actually starts, so
+/// the Wave 1 monitoring procedure, the manifests' Prometheus annotation and
+/// the rollout evidence collector all pointed at an endpoint that did not
+/// exist. Found by running the evidence collector against a live two-validator
+/// devnet.
+fn health_server(health_check: Arc<HealthCheck>, metrics: Arc<Metrics>) -> HealthServer {
+    HealthServer::with_metrics(health_check, Arc::new(move || metrics.snapshot()))
 }
 
 /// Run both shutdown steps, health first, so a failing RPC shutdown can never
@@ -1489,6 +1504,57 @@ fn build_rpc_server(
 #[cfg(test)]
 mod health_wiring_tests {
     use super::single_validator_synced;
+
+    /// The server the node starts serves `/metrics` with the execution-error
+    /// family. Exercised through `health_server`, the function `start_health`
+    /// calls, over a real socket -- the path that was 404 before.
+    #[tokio::test]
+    async fn the_node_health_server_serves_prometheus_metrics() {
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let health = Arc::new(super::HealthCheck::new(
+            Arc::new(|| true),
+            Arc::new(|| 1usize),
+            Arc::new(|| 1u64),
+        ));
+        let metrics = Arc::new(super::Metrics::new());
+        let addr = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap()
+        };
+        let mut handle = super::health_server(health, metrics).start(addr).await.unwrap();
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let text = String::from_utf8_lossy(&buf);
+        assert!(text.starts_with("HTTP/1.1 200"), "{}", text.lines().next().unwrap_or(""));
+        assert!(
+            text.contains("# TYPE sumchain_tx_execution_errors_total counter"),
+            "the execution-error family is missing from /metrics"
+        );
+        handle.stop();
+    }
+
+    /// Production code must build the health server through `health_server`.
+    /// `HealthServer::new` has no metrics provider, so using it again would
+    /// silently turn `/metrics` back into a 404.
+    #[test]
+    fn production_never_builds_a_health_server_without_metrics() {
+        let src = include_str!("node.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        // Code only: the doc comment on `health_server` names the old call on
+        // purpose, to say why it went.
+        let calls = production
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .filter(|l| l.contains("HealthServer::new("))
+            .count();
+        assert_eq!(calls, 0, "node.rs builds a HealthServer without a metrics provider");
+    }
 
     /// The single-validator readiness predicate: a fresh validator (started at
     /// genesis height 0, no peers, `sync_state` = Initializing so
