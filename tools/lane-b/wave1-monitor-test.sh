@@ -105,6 +105,35 @@ mk "$T/v2" 800 701 11                     # v2 one block ahead
 expect "agree: nodes a block apart -> not a fork" 3 "cover different blocks" -- \
   env WAVE1_NOW=10600 bash "$MON" agree "$T/v1.base" "$T/v2.base"
 
+# ---- missing data is not zero change, and is not a fork ----------------------
+# drop <dir> <subsystem>: remove one series from a fixture, as a node that
+# stopped exporting it would.
+drop() { grep -v "subsystem=\"$2\"" "$1/metrics" >"$1/m.tmp" && mv "$1/m.tmp" "$1/metrics"; }
+
+mk "$T/m" 1000 500 0
+WAVE1_NOW=10000 bash "$MON" baseline "$(url "$T/m")" >"$T/m.base"
+mk "$T/m" 1600 700 0; drop "$T/m" healthcare
+expect "delta: a series absent now -> MISSING, not 'nothing moved'" 4 "MISSING DATA" -- \
+  env WAVE1_NOW=10600 bash "$MON" delta "$(url "$T/m")" "$T/m.base"
+
+expect "delta: endpoint unreachable -> MISSING" 4 "MISSING DATA: cannot scrape" -- \
+  env WAVE1_NOW=10600 bash "$MON" delta "file://$T/does-not-exist" "$T/m.base"
+
+mk "$T/g" 1600 700 0; grep -v '^sumchain_uptime_seconds' "$T/g/metrics" >"$T/g/x" && mv "$T/g/x" "$T/g/metrics"
+expect "delta: uptime gauge absent -> MISSING" 4 "MISSING DATA" -- \
+  env WAVE1_NOW=10600 bash "$MON" delta "$(url "$T/g")" "$T/m.base"
+
+# agree: exit 1 there means DISAGREE = HALT, so missing data must never reach it.
+mk "$T/v1" 1000 500 50; WAVE1_NOW=10000 bash "$MON" baseline "$(url "$T/v1")" >"$T/v1.base"
+mk "$T/v2" 200  500 9;  WAVE1_NOW=10000 bash "$MON" baseline "$(url "$T/v2")" >"$T/v2.base"
+mk "$T/v1" 1600 700 52; mk "$T/v2" 800 700 11; drop "$T/v2" healthcare
+expect "agree: a series absent on one node -> MISSING, never DISAGREE" 4 "Absent data is not a disagreement" -- \
+  env WAVE1_NOW=10600 bash "$MON" agree "$T/v1.base" "$T/v2.base"
+
+mk "$T/v2" 800 700 11; rm -rf "$T/v2"
+expect "agree: one endpoint unreachable -> MISSING, never DISAGREE" 4 "MISSING DATA: cannot scrape" -- \
+  env WAVE1_NOW=10600 bash "$MON" agree "$T/v1.base" "$T/v2.base"
+
 echo
 if [[ $fail -eq 0 ]]; then echo "WAVE1 MONITOR BATTERY OK: $n cases"; exit 0; fi
 echo "WAVE1 MONITOR BATTERY FAILED: $fail of $n"; exit 1

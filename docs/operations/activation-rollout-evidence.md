@@ -316,7 +316,11 @@ tools/lane-b/wave1-monitor.sh baseline http://validator-2:8546 > baseline-v2.txt
 tools/lane-b/wave1-monitor.sh agree baseline-v1.txt baseline-v2.txt
 ```
 
-**Exit 1 means HALT. Exit 3 does NOT.** Exit 3 is INCONCLUSIVE: a node
+**Exit 1 means HALT. Exits 3 and 4 do NOT.** Exit 4 is MISSING DATA: an
+endpoint could not be scraped, or a series the check needs is absent -- fix the
+scrape and run it again; an unreachable metrics port is not a fork. (Before
+this was fixed, an unreachable validator made `agree` exit 1.) Exit 3 is
+INCONCLUSIVE: a node
 restarted inside the window, or the nodes' windows cover different blocks. It
 is never a fork signal -- the counter is per-process and resets on restart, so a
 restart makes a window unmeasurable rather than disagreeing. Take new baselines
