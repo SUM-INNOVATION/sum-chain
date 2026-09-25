@@ -142,23 +142,42 @@ Nothing in this section is read by eye:
 ```bash
 python3 tools/lane-b/rollout-check.py \
   --validators <N> \
-  --expected-binary-sha256 <sha256 of the release build artifact> \
+  --expected-binary-sha256 <binary_sha256 from the release record> \
+  --expected-commit <40-hex release commit> \
+  --expected-image-digest <sha256:... registry digest from the release record> \
   --expected-chain-id <chain id> \
+  --expected-validator <64-hex public key of validator 1> \
+  --expected-validator <64-hex public key of validator 2> \
+  --expected-genesis-sha256 <sha256 of the PRODUCTION genesis bytes> \
   <out-dir>
 ```
 
-It exits 0 only when every validator has every record, the same
-`binary_sha256` (equal to the release artifact's), the same
-`activation_digest` and `protocol_digest`, the expected `chain_id`, a
-`current_height` above 0, `gates_set` of `0`, `telemetry: OK`, and the
-N·(N−1) handshakes of §1.2 with zero refusals. **A missing record, field, log
+It exits 0 only when:
+- every validator has a complete record;
+- `binary_sha256` equals the release record's;
+- `binary_version` is `sumchain <release commit>`;
+- `image_id` is pinned at the release digest;
+- `activation_digest` and `protocol_digest` are the same on every validator;
+- `chain_id` is the expected one, and `current_height` is above 0;
+- `gates_set` is exactly the four production predecessor gates at their live
+  heights;
+- the `validator_pubkey` values are distinct and equal the expected set;
+- `genesis_sha256` is identical on every validator and equal to the
+  production hash;
+- `telemetry` is `OK`;
+- the N·(N−1) handshakes of §1.2 are present, with zero refusals.
+
+Without the production genesis hash, the release commit or the image digest,
+it prints `STOP` and exits 1. **A missing record, field, log
 or handshake line is a failure, not a pass.** `rollout-check-test.py` proves
 each of those rules fails the check when it is broken.
 
 A **`protocol_digest` disagreement means the binaries are not the same release
 and stage 1 is not complete**, regardless of what the image tags say. A
-**non-zero `gates_set`** means the validator is running a genesis with heights
-in it and has skipped straight to stage 2.
+**`gates_set` with any gate beyond the four predecessor gates** means the
+validator is running a genesis with a remediation height in it: it has skipped
+straight to stage 2. A `gates_set` **missing** one of the four means a genesis
+that silently disables a live feature (runbook §2.2 (d)).
 
 If `local_peer_id` comes back empty, the startup line has rotated out of the
 container log. The record is then incomplete and the check fails; it is not

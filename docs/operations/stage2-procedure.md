@@ -21,8 +21,13 @@ rules) and §0.9 (deployment).
    ```bash
    python3 tools/lane-b/rollout-check.py \
      --validators <N> \
-     --expected-binary-sha256 <sha256 of the release build artifact> \
+     --expected-binary-sha256 <binary_sha256 from the release record> \
+     --expected-commit <40-hex release commit> \
+     --expected-image-digest <sha256:... registry digest from the release record> \
      --expected-chain-id <chain id> \
+     --expected-validator <64-hex public key of validator 1> \
+     --expected-validator <64-hex public key of validator 2> \
+     --expected-genesis-sha256 <sha256 of the PRODUCTION genesis bytes> \
      <evidence-dir>
    ```
    exits 0 and prints `STAGE 1 ROLLOUT EVIDENCE COMPLETE: N validators …
