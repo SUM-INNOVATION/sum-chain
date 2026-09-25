@@ -1,0 +1,29 @@
+# Two-validator halt and recovery (fixture keys, chain 1337). Lines from both node logs, time-ordered.
+v0 2026-09-24T02:42:31.127679Z  INFO sumchain_storage::db: Opening database at <run>/devnet/data0
+v1 2026-09-24T02:42:48.289035Z  INFO sumchain_storage::db: Opening database at <run>/devnet/data1
+v1 2026-09-24T02:43:37.467971Z  INFO sumchain_consensus::poa: Produced block 0x8da186e8fd19d8f341c3f0c72061a9046376715366529bf2cdd24f3e2cf7aba9 at height 45
+v0 2026-09-24T02:43:37.469056Z  INFO sumchain_consensus::poa: Imported block 0x8da186e8fd19d8f341c3f0c72061a9046376715366529bf2cdd24f3e2cf7aba9 at height 45
+v0 2026-09-24T02:43:38.372540Z  INFO sumchain_consensus::poa: Produced block 0x2e59e9ee55463cb3a2d76a827c08da27c5bac82838c1eff575563dbab4d8b35d at height 46
+v1 2026-09-24T02:43:38.373632Z  INFO sumchain_consensus::poa: Imported block 0x2e59e9ee55463cb3a2d76a827c08da27c5bac82838c1eff575563dbab4d8b35d at height 46
+v0 2026-09-24T02:43:38.948028Z  INFO sumchain::node: Shutdown signal received
+v1 2026-09-24T02:43:39.468226Z  INFO sumchain_consensus::poa: Produced block 0x1b336b2f01a6ac82463fe792324738f21fa37b274b15bfe47be4941aa5aa2aaf at height 47
+v0 2026-09-24T02:44:01.086711Z  INFO sumchain_storage::db: Opening database at <run>/devnet/data0
+v0 2026-09-24T02:44:18.474532Z  INFO sumchain_consensus::poa: Imported block 0x1b336b2f01a6ac82463fe792324738f21fa37b274b15bfe47be4941aa5aa2aaf at height 47
+v0 2026-09-24T02:44:20.229630Z  INFO sumchain_consensus::poa: Produced block 0x8d9b5bf2e713d75a7d2ef0bea4ef86dda576b5b0570c30bbf8abdf20f8ac91c2 at height 48
+v1 2026-09-24T02:44:20.235080Z  INFO sumchain_consensus::poa: Imported block 0x8d9b5bf2e713d75a7d2ef0bea4ef86dda576b5b0570c30bbf8abdf20f8ac91c2 at height 48
+v1 2026-09-24T02:44:21.468473Z  INFO sumchain_consensus::poa: Produced block 0x100fcdb2b0c51130dd1dc7303b8a3f83af7ddf2b84a7abacf087953d71540b19 at height 49
+v0 2026-09-24T02:44:21.471416Z  INFO sumchain_consensus::poa: Imported block 0x100fcdb2b0c51130dd1dc7303b8a3f83af7ddf2b84a7abacf087953d71540b19 at height 49
+v0 2026-09-24T02:44:36.227911Z  INFO sumchain_consensus::poa: Produced block 0xb8ff7c8ab70e9a5f288a879be652ef089277cbf914804a3c0be58f805e002125 at height 64
+v1 2026-09-24T02:44:36.230617Z  INFO sumchain_consensus::poa: Imported block 0xb8ff7c8ab70e9a5f288a879be652ef089277cbf914804a3c0be58f805e002125 at height 64
+v1 2026-09-24T02:44:37.468940Z  INFO sumchain_consensus::poa: Produced block 0x31251666cc7722aad4bbfbe50aa184fbea0965ebc027a18b766be7f5de6ab526 at height 65
+v0 2026-09-24T02:44:37.471880Z  INFO sumchain_consensus::poa: Imported block 0x31251666cc7722aad4bbfbe50aa184fbea0965ebc027a18b766be7f5de6ab526 at height 65
+v1 2026-09-24T02:44:38.141432Z  INFO sumchain::node: Shutdown signal received
+v0 2026-09-24T02:44:38.227384Z  INFO sumchain_consensus::poa: Produced block 0x94b50841090b4841c7484ded66038b09f61db0b49c832ff45a31e52c16e969c8 at height 66
+v1 2026-09-24T02:45:00.807766Z  INFO sumchain_storage::db: Opening database at <run>/devnet/data1
+v1 2026-09-24T02:45:00.946711Z  INFO sumchain_consensus::poa: Imported block 0x94b50841090b4841c7484ded66038b09f61db0b49c832ff45a31e52c16e969c8 at height 66
+v1 2026-09-24T02:45:05.943639Z  INFO sumchain_consensus::poa: Produced block 0xe4f4788e9681bce9bd4417955786a5b5efee0dfed59d47fa5af7501fb408f696 at height 67
+v0 2026-09-24T02:45:05.947324Z  INFO sumchain_consensus::poa: Imported block 0xe4f4788e9681bce9bd4417955786a5b5efee0dfed59d47fa5af7501fb408f696 at height 67
+v0 2026-09-24T02:45:06.229017Z  INFO sumchain_consensus::poa: Produced block 0xda9f9a5892b8023d5b0f1292e791bf25fd9226c54ad6ec27c1a06053d827e187 at height 68
+v1 2026-09-24T02:45:06.232529Z  INFO sumchain_consensus::poa: Imported block 0xda9f9a5892b8023d5b0f1292e791bf25fd9226c54ad6ec27c1a06053d827e187 at height 68
+v1 2026-09-24T02:45:07.944620Z  INFO sumchain_consensus::poa: Produced block 0x522a6f2b4e56b9938ac131ec816c89c9c9c3f7454837b853ed6b67ab05c1edd2 at height 69
+v0 2026-09-24T02:45:07.947500Z  INFO sumchain_consensus::poa: Imported block 0x522a6f2b4e56b9938ac131ec816c89c9c9c3f7454837b853ed6b67ab05c1edd2 at height 69

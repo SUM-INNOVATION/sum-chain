@@ -10,7 +10,7 @@ Binaries used:
 | Label | Commit | `--version` |
 |---|---|---|
 | Stage 1 (merged main) | `e93d38dfa1681ae96947f04302952d94ddd7e893` | `sumchain e93d38dfa1681ae96947f04302952d94ddd7e893` |
-| Stage 1 + `/metrics` fix | `62b8d7e201c8854a5058114f6bbfcf6fa7c12c45` (branch `rollout/local-battery`) | `sumchain 62b8d7e201c8854a5058114f6bbfcf6fa7c12c45` |
+| Stage 1 + `/metrics` fix | `62b8d7e201c8854a5058114f6bbfcf6fa7c12c45` (branch `rollout/local-battery`; the same change is `d14bc7e6` on `rollout/deployable-stage1`) | `sumchain 62b8d7e201c8854a5058114f6bbfcf6fa7c12c45` |
 | Deployed 0.2.0 | `8abbd3044a3cddca06d4df2d2ef7064339dc5492` | no `--version` flag |
 
 ## 1. Verified locally
@@ -21,11 +21,13 @@ fixture genesis (sha256 `ae235264406ea3dea7bf94725639d70c48abb0898a0e7f10af09a6e
 
 | Step | Observed |
 |---|---|
-| v0 stopped | the chain froze at 47, and height 48 is v0's slot. No block for ≥ 20 s. |
-| v0 restarted (listener) | first new block after **19.30 s**, because recovery waits for v1's 30 s redial |
-| v1 stopped | the chain froze at 66, and height 67 is v1's slot |
-| v1 restarted (dialer) | first new block after **5.52 s** |
+| v0 stopped | the chain froze at 47, and height 48 is v0's slot. v0 was down 22.1 s. |
+| v0 restarted (listener) | first new block after **19.30 s**, because recovery waits for v1's 30 s redial. The whole halt, block 47 → 48, was **40.8 s** (02:43:39.47 → 02:44:20.23 UTC). |
+| v1 stopped | the chain froze at 66, and height 67 is v1's slot. v1 was down 22.7 s. |
+| v1 restarted (dialer) | first new block after **5.52 s**. The whole halt, block 66 → 67, was **27.7 s** (02:44:38.23 → 02:45:05.94 UTC). |
 | SIGINT to exit | about 0.55 s |
+
+The per-block timeline from both node logs is in `halt-recovery.log` (§6).
 
 With two validators, either one down halts the chain. Nothing skips or times
 out a missing proposer.
@@ -101,7 +103,11 @@ workload mounts.
   - No production genesis supplied → STOP.
   - Wrong expected genesis → `GENESIS MISMATCH`.
   - Wrong expected identity → `VALIDATOR SET MISMATCH`.
-- Fixture battery (22 checker cases + 7 recorder refusals): passes. It
+- Fixture battery at the time of the live run (22 checker cases + 7
+  recorder refusals): passes. PR `rollout/deployable-stage1` extends it to
+  37 checker cases and 9 recorder refusals. The additions pin the release
+  commit (`binary_version`), the image digest, and exactly the four
+  production predecessor gates at their live heights. It
   covers blank or missing hashes, a missing handshake in either direction,
   duplicate identities, unequal genesis hashes, a missing record, a wrong
   binary sha, a wrong chain id, a missing production genesis, a
@@ -160,13 +166,14 @@ applied in production are unknown here.
    Wave 1 monitoring can run against `e93d38d`. It is fixed in `62b8d7e2`
    (the health server is built with the metrics provider, plus two tests
    and two killed mutations). That fix is not on `main`, so the release
-   artifact must be rebuilt after it merges.
+   artifact must be rebuilt after it merges. Cherry-picked as `d14bc7e6`.
 2. **The rollout checker would have refused the correct production
    genesis.** It required `gates_set == 0`, but production carries four
-   predating heights. Fixed in `3f03468d`: only gates outside
-   `GATES_PREDATING_ACTIVATION_RECORDING` fail.
+   predating heights. Fixed in `3f03468d` (cherry-picked as `5475bb8c`).
+   `rollout/deployable-stage1` tightens the rule to exactly the four
+   predecessor gates at their live heights.
 3. **The evidence recorder captured neither validator identity nor the
-   genesis hash.** Fixed in `3f03468d`.
+   genesis hash.** Fixed in `3f03468d` (`5475bb8c`).
 4. **Deployed 0.2.0 silently repairs a Stage-1 database**, then rewinds
    below its finalized height and re-produces different blocks (§1.2). This
    cannot be fixed in the deployed binary. The mitigation is procedural:
@@ -177,6 +184,24 @@ applied in production are unknown here.
    (`crates/node/src/main.rs:712`), giving "Cannot drop a runtime in a
    context where blocking is not allowed". This does not block the rollout.
 6. Runbook: wait for process exit, not port closure, before a restart (§1.1).
+   Fixed in the runbook (§4.2, §4.4, §6) on `rollout/deployable-stage1`.
+7. **Every scrape configuration pointed at port 9090, which nothing binds.**
+   That covered the StatefulSets, the Services, `prometheus.yml` and
+   `docker-compose.yaml`. `/metrics` is on the health port, 8546. Fixed on
+   `rollout/deployable-stage1` and pinned by
+   `tools/lane-b/metrics-endpoint-test.py`.
+8. **`wave1-monitor.sh verify` exited silently** on a family with no samples,
+   because grep's no-match status under `pipefail` ended the script. It
+   failed closed, but said nothing. Fixed on `rollout/deployable-stage1`.
+
+### Known, not blocking, and not in this PR
+- The `transfer` CLI panic (item 5), at `crates/node/src/main.rs:712`.
+- The 30-second redial asymmetry: a restarted listener waits for the
+  dialer's redial (§1.1: 19.3 s against 5.5 s).
+- Validator anti-affinity is *preferred*, not *required*, so both validators
+  may share a node (§1.6).
+- No production access from this environment.
+- Future activation work (Stage 2 heights), which needs production evidence.
 
 ## 4. Owner-attested (not verified here)
 - Production has exactly two validators.
@@ -205,6 +230,20 @@ Deployment stays blocked until every item has production evidence.
 Local substitutes do not close any of these, and do not close any issue.
 
 ## 6. Evidence set
-The source logs, inventories, genesis files, chain params, monitor outputs,
-live evidence records and the CI log are kept outside the repository with a
-`SHA256SUMS` manifest (34 files). The fixture keys are not in it.
+Tracked, sanitized:
+[`evidence/stage1-local-2026-09-24/`](evidence/stage1-local-2026-09-24/INDEX.txt),
+with a `SHA256SUMS` manifest. It holds:
+- the per-step database inventories and the nonproduction timings;
+- the halt/recovery timeline and the 0.2.0 downgrade reproduction;
+- the genesis files and chain params;
+- the live evidence records and monitor outputs;
+- the CI identity lines for `e93d38d`;
+- `mutations.txt`: every mutation run against the metrics exposition,
+  checker, recorder, preflight, monitor, manifest check and genesis check,
+  with the named test that failed and the restored hash.
+
+Before tracking, the source bundle (34 files) was scanned for secrets,
+tokens, private keys, local credentials, local paths and production
+identifiers. It contained no secrets or private keys; the fixture keys were
+never in it. Local paths are replaced, ANSI codes are stripped, and the full
+node and CI logs are reduced to the excerpts the report cites.

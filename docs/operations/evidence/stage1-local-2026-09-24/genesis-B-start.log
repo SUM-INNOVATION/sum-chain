@@ -1,0 +1,11 @@
+# Stage 1 (e93d38d) started on genesis-B (governance height removed): startup lines. No refusal.
+2026-09-25T03:52:19.079800Z  INFO sumchain: Loaded configuration from "../dbtest/node.toml"
+2026-09-25T03:52:19.080074Z  INFO sumchain: Loaded genesis for chain 1337
+2026-09-25T03:52:19.193478Z  INFO sumchain::node: Genesis activation digest 0x07ddca8523f45881b1f270f977781b9fce47af81dec868849ef98174c7750aa4 (chain 1337, height 0, 3 gates set: v2_enabled_from_height=0, omninode_enabled_from_height=0, education_enabled_from_height=0)
+2026-09-25T03:52:19.193490Z  INFO sumchain::node: Activation heights recorded for the first time on this database
+2026-09-25T03:52:19.193849Z  INFO sumchain::node: Protocol digest (activation heights + consensus constants): 0x1f42adfe5153c4af46bb532838bba05d5872d83141b30f4f2dad9ba9be096a3b
+2026-09-25T03:52:19.193877Z  INFO sumchain::node: Initializing new chain from genesis
+2026-09-25T03:52:19.193884Z  INFO sumchain_consensus::poa: Initializing chain from genesis
+2026-09-25T03:52:19.193891Z  INFO sumchain_state::state: Initializing state from genesis
+2026-09-25T03:52:19.194017Z  INFO sumchain_state::state: Genesis state initialized, root: 0xe2711f5e07574ca1371c938f6f04482f52bddaa1f1b8e3aa94f269487440d584
+2026-09-25T03:52:19.194129Z  INFO sumchain_consensus::poa: Genesis block created: 0x9c22b13ee6c753f288538165afac3dd48ea79a5581341fa2d08e23035726e28e (height 0)

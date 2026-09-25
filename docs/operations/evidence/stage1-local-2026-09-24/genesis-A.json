@@ -1,0 +1,24 @@
+{
+  "chain_id": 1337,
+  "genesis_time": 1765922762359,
+  "validators": [
+    "BAuPKGoqABNpxXMvH8EQS51Ba2hdLQNtJBcVcCH2AHSD"
+  ],
+  "alloc": {
+    "EBgG1n9ssuQiJSWp2N5kZzYu1bqYmBdfA": 1000000000000000000,
+    "ChBEvSC2DKPKr8qFgbSv69Xnm8JNAKdiY": 1000000000000000000,
+    "jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j": 1000000000000000000,
+    "JDyrkrUim1Y439pgRNZJgcsbdYzziAbHt": 1000000000000000000,
+    "FiUCy1qiMbPYRXYz5dMVHhhtRsdtuAsBm": 1000000000000000000
+  },
+  "params": {
+    "block_time_ms": 2000,
+    "max_block_bytes": 1000000,
+    "max_txs_per_block": 1000,
+    "min_fee": 1,
+    "v2_enabled_from_height": 0,
+    "education_enabled_from_height": 0,
+    "omninode_enabled_from_height": 0,
+    "governance_enabled_from_height": 0
+  }
+}

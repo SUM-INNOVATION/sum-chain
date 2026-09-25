@@ -1,0 +1,16 @@
+subsystem   code  baseline  now       delta
+nft         2     0         0         0
+docclass    8     0         0         0
+tax         9     0         0         0
+agreement   11    0         0         0
+legal       12    0         0         0
+property    13    0         0         0
+healthcare  14    0         0         0
+employment  15    0         0         0
+finance     16    0         0         0
+blocks: 8314 8318
+
+INCONCLUSIVE: the process restarted: its start time moved from 1790300646 to 1790308590.
+The counter began again at zero, so no delta over this window means
+anything -- in particular it does NOT mean nothing was refused. Take a
+new baseline and observe a fresh window.

@@ -1,0 +1,23 @@
+# Deployed 0.2.0 (8abbd304) started on a COPY of a volume Stage 1 (e93d38d) had advanced 27 -> 38.
+2026-09-25T03:50:48.419667Z  INFO sumchain: Loaded genesis for chain 1337
+2026-09-25T03:50:48.434869Z ERROR sumchain_storage::db: Failed to open database: Invalid argument: Column families not opened: application_journal
+2026-09-25T03:50:48.434902Z  WARN sumchain_storage::db: Database appears corrupted, attempting repair...
+2026-09-25T03:50:48.434910Z  INFO sumchain_storage::db: Attempting to repair database at <run>/dbtest/post1-copy
+2026-09-25T03:50:48.440673Z  INFO sumchain_storage::db: Database repair completed for <run>/dbtest/post1-copy
+2026-09-25T03:50:48.440701Z  INFO sumchain_storage::db: Database repair completed, retrying open...
+2026-09-25T03:50:48.543090Z  INFO sumchain_storage::db: Database opened successfully after repair
+2026-09-25T03:50:48.543515Z  INFO sumchain_consensus::poa: Loaded chain at height 27 (0x7bbcf83926c91ea4ff25df5d77c92aee041a9dd7542e137227d91a7d5c8809b2)
+2026-09-25T03:50:48.543552Z  INFO sumchain_consensus::poa: Restored finality state: height 35 finalized
+2026-09-25T03:50:48.543577Z  INFO sumchain::node: Loaded existing chain at height 27
+2026-09-25T03:50:53.548415Z  INFO sumchain_consensus::poa: Produced block 0xc28f0d379692427ed1397276394e02bb1bf136cf6ada585d52cbe01751efe134 at height 28
+2026-09-25T03:50:55.549986Z  INFO sumchain_consensus::poa: Produced block 0x61c45a383241ebb49bf86f9dc2ca8e2499a1e35cb906daa8faa710f5cff9f461 at height 29
+# Stage 1 on the original volume, for comparison (its heights 28-30):
+2026-09-25T03:50:14.672286Z  INFO sumchain::node: Application journal format: binary v1, stamped None, records None, revert boundary None
+2026-09-25T03:50:14.683821Z  INFO sumchain_consensus::poa: Restored finality state: height 24 finalized
+2026-09-25T03:50:19.702899Z  INFO sumchain::node: Produced block 0xdbc281be1765651278294823ece9396d840864ec990b4d2353cfad5d9bc2830a at height 28
+2026-09-25T03:50:21.695654Z  INFO sumchain::node: Produced block 0xc4c51972188e8a862a2cd8db64286dc8a46e588778eb858b6e58e367ea341692 at height 29
+2026-09-25T03:50:23.695971Z  INFO sumchain::node: Produced block 0xa50b653f94103feab0d1832ba042444518c83bb62baadafa95a1fb55fa714686 at height 30
+# Deployed 0.2.0 on the volume RESTORED from the pre-upgrade snapshot:
+2026-09-25T03:51:42.244624Z  INFO sumchain_consensus::poa: Restored finality state: height 24 finalized
+2026-09-25T03:51:42.244647Z  INFO sumchain::node: Loaded existing chain at height 27
+2026-09-25T03:51:47.251185Z  INFO sumchain::node: Produced block 0x6094d1d627523a6e01c41cdf8799da00c9ebc3244892dc065fe7b18769327593 at height 28

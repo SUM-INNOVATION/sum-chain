@@ -1,0 +1,12 @@
+pod:            local-v0
+binary_sha256:  7d7ccde4f06100b9d925dc3ee6aff039c1f304bdf70f2830016af8edac7878a3
+image_id:       local-process@sha256:7d7ccde4f06100b9d925dc3ee6aff039c1f304bdf70f2830016af8edac7878a3
+activation_digest: 0x21bb16fb696583d5547eda9de86fe702e343acdc4703cee5b39831798b0c9052
+protocol_digest:   0xe97a8c6c96b57f89775f2035ea9a0ac9947c5db18d4294d3c10070918ff36782
+chain_id:          1337
+current_height:    504
+gates_set:         v2_enabled_from_height,education_enabled_from_height
+local_peer_id:  12D3KooWEybGn7ZdpHRrxMYFyr2yBaYhDtWAYSD9NJ59EiGX8MSZ
+validator_pubkey: 971e54026c295fb4faa15b944f822467f6add379914c833bfd34c13d55a488ae
+genesis_sha256: ae235264406ea3dea7bf94725639d70c48abb0898a0e7f10af09a6e572f8ccde
+telemetry:      OK

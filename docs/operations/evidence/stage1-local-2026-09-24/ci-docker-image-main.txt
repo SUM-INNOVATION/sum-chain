@@ -1,0 +1,8 @@
+# CI run 35948150237 (docker-image, push to main, e93d38dfa1681ae96947f04302952d94ddd7e893)
+# https://github.com/SUM-INNOVATION/sum-chain/actions/runs/35948150237
+2026-09-24T02:39:19.4891018Z #5 [internal] load metadata for docker.io/library/rust:1.88.0-slim-bookworm@sha256:38bc5a86d998772d4aec2348656ed21438d20fcdce2795b56ca434cf21430d89
+2026-09-24T02:39:19.8606962Z #5 [internal] load metadata for docker.io/library/rust:1.88.0-slim-bookworm@sha256:38bc5a86d998772d4aec2348656ed21438d20fcdce2795b56ca434cf21430d89
+2026-09-24T02:49:48.2530001Z --version: sumchain e93d38dfa1681ae96947f04302952d94ddd7e893
+2026-09-24T02:49:48.4174568Z -V: sumchain 0.4.0
+2026-09-24T02:49:49.0543726Z refused as required
+2026-09-24T02:49:49.0807204Z image id sha256:3c76216151c1c819d5b11eae7b960e3c8aa80457895fe11f8696cc202bdcaa1f  created 2026-09-24T02:49:47.344899873Z  arch amd64

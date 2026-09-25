@@ -1,0 +1,33 @@
+# Mutation evidence. Discipline: the change under test was committed first; one
+# mutation at a time; the NAMED test had to FAIL (a compile error does not
+# count); the file was restored and its sha256 checked equal to the committed one.
+#
+# id   file                                        mutation                                         named test that failed                                           restored sha256
+M1   crates/node/src/node.rs                     start_health back to HealthServer::new           production_never_builds_a_health_server_without_metrics          e39c5d0e (prefix; 2026-09-24 battery)
+M2   crates/node/src/node.rs                     health_server drops the metrics provider         the_node_health_server_serves_prometheus_metrics                  e39c5d0e (prefix; 2026-09-24 battery)
+M3   crates/rpc/src/metrics.rs                   a third label node="x" on every sample           the_node_health_server_serves_prometheus_metrics (node.rs:1556)   cad7060d112bf6ae7a8a57b6a56265b777c48943c9c7ca0c4c81605c507f722a
+M4   crates/rpc/src/metrics.rs                   the finance series skipped                       the_node_health_server_serves_prometheus_metrics (node.rs:1573)   cad7060d112bf6ae7a8a57b6a56265b777c48943c9c7ca0c4c81605c507f722a
+C1   tools/lane-b/rollout-check.py               duplicate-identity rule disabled                 duplicate validator identity                                      f824cc81 (prefix; 2026-09-24 battery)
+C2   tools/lane-b/rollout-check.py               genesis-disagreement rule disabled               unequal genesis hashes                                            f824cc81 (prefix)
+C3   tools/lane-b/rollout-check.py               stray-gate rule disabled                         a non-predating gate set                                          f824cc81 (prefix)
+C4   tools/lane-b/rollout-check.py               missing-genesis STOP disabled                    production genesis hash not supplied                              f824cc81 (prefix)
+C5   tools/lane-b/rollout-check.py               missing-predecessor rule disabled                a predecessor gate missing; no gate set at all                    4339873b949273dd91570bc822c99252d39ab060f20022166067afd2375ccaf9
+C6   tools/lane-b/rollout-check.py               remediation-gate rule disabled                   a remediation gate set                                            4339873b949273dd91570bc822c99252d39ab060f20022166067afd2375ccaf9
+C7   tools/lane-b/rollout-check.py               predecessor height comparison disabled           a predecessor gate at the wrong height                            4339873b949273dd91570bc822c99252d39ab060f20022166067afd2375ccaf9
+C8   tools/lane-b/rollout-check.py               commit comparison disabled                       wrong release commit                                              4339873b949273dd91570bc822c99252d39ab060f20022166067afd2375ccaf9
+C9   tools/lane-b/rollout-check.py               image digest comparison disabled                 wrong image digest                                                4339873b949273dd91570bc822c99252d39ab060f20022166067afd2375ccaf9
+C10  tools/lane-b/rollout-check.py               --expected-commit STOP disabled                  release commit not supplied                                       4339873b949273dd91570bc822c99252d39ab060f20022166067afd2375ccaf9
+R1   docs/operations/activation-rollout-evidence.md  version regex relaxed to non-empty           binary reports a version, not a commit (recorder refusal)         e2e9cddefb3b7fb1161292c0f64f94b061f8b2a864a888230ffe98d20d2da619
+R2   docs/operations/activation-rollout-evidence.md  no "Produced block" line tolerated (H=1)     no produced block (identity unprovable) (recorder refusal)        e2e9cddefb3b7fb1161292c0f64f94b061f8b2a864a888230ffe98d20d2da619
+P1   tools/lane-b/rollout-preflight.py           digest STOPs disabled                            old digest not supplied; given as a tag; new digest not supplied  e99f264c0c6526e3b8a1b77c1cc5a7c07f66ae979f1780f3b3936bf0927495c2
+P2   tools/lane-b/rollout-preflight.py           rehearsal STOP disabled                          restore rehearsal not supplied                                    e99f264c0c6526e3b8a1b77c1cc5a7c07f66ae979f1780f3b3936bf0927495c2
+P3   tools/lane-b/rollout-preflight.py           repair-lines rule disabled                       rehearsal: old binary repaired the copy                           e99f264c0c6526e3b8a1b77c1cc5a7c07f66ae979f1780f3b3936bf0927495c2
+P4   tools/lane-b/rollout-preflight.py           cf::STATE equality disabled                      rehearsal: cf::STATE rows differ                                  e99f264c0c6526e3b8a1b77c1cc5a7c07f66ae979f1780f3b3936bf0927495c2
+P5   tools/lane-b/rollout-preflight-record.sh    Stage-1-opened check disabled                    Stage 1 already opened the volume; ... in a previous container    2ebac87a8417e5946bfe6d324ef2bbdca80d0159db09ba88151375814f112e80
+P6   tools/lane-b/rollout-preflight-record.sh    readyToUse relaxed to non-empty                  snapshot not ready                                                2ebac87a8417e5946bfe6d324ef2bbdca80d0159db09ba88151375814f112e80
+W1   tools/lane-b/wave1-monitor.sh               scrape failure read as data                      verify/delta/agree: endpoint unreachable -> MISSING (3 cases)     af35e6b9ca4e932a8443fbbe2ebcb82ced6aae53a038db68725de41bcc0e5b36
+W2   tools/lane-b/wave1-monitor.sh               missing Wave 1 subsystem ignored                 verify: one Wave 1 subsystem absent                               af35e6b9ca4e932a8443fbbe2ebcb82ced6aae53a038db68725de41bcc0e5b36
+W3   tools/lane-b/wave1-monitor.sh               third-label check disabled                       verify: a third label (unbounded cardinality)                     af35e6b9ca4e932a8443fbbe2ebcb82ced6aae53a038db68725de41bcc0e5b36
+E1   deploy/kubernetes/statefulset-validator-2.yaml  restored to the 9090 scrape port             metrics-endpoint-test.py (3 failures)                             working copy restored
+E2   docker-compose.yaml                         restored to 909x:9090 mappings                   metrics-endpoint-test.py (4 failures)                             working copy restored
+G1   genesis/testnet_genesis.json                a remediation height added                       check-genesis-gates.py                                            working copy restored

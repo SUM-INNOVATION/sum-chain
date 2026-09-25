@@ -1,0 +1,17 @@
+subsystem   code  baseline  now       delta
+nft         2     0         0         0
+docclass    8     0         0         0
+tax         9     0         0         0
+agreement   11    0         0         0
+legal       12    0         0         0
+property    13    0         0         0
+healthcare  14    0         0         0
+employment  15    0         0         0
+finance     16    0         0         0
+blocks: 8290 8298
+
+Nothing moved, over a window with no restart. Before concluding 'no
+refused traffic', confirm the gate is actually open on this node:
+  curl -s -X POST http://127.0.0.1:8602/ -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"chain_getActivationStatus"}'
+and read gates[].active.

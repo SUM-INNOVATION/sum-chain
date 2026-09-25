@@ -1,0 +1,2 @@
+OK: sumchain_tx_execution_errors_total present at http://127.0.0.1:8612, 124 series, two bounded labels,
+    all nine Wave 1 subsystems represented.

@@ -1,0 +1,16 @@
+Stage 1 local evidence battery, 2026-09-24 (log timestamps are UTC). NONPRODUCTION: fixture keys, chain 1337.
+Report: docs/operations/stage1-local-evidence.md. Sanitized: ANSI stripped; local paths replaced by <run>/<local-path>;
+full node logs and the full CI log are not kept, only the excerpts below. No private key material is included.
+
+halt-recovery.log            two-validator halt at each validator's slot, and recovery (section 1.1)
+downgrade-and-restore.log    0.2.0 on a Stage-1 volume copy: silent repair, rewind below finality, a different block 28;
+                             Stage 1's own 28-30; 0.2.0 on the snapshot-restored volume (section 1.2)
+inv-*.txt                    read-only per-column-family row counts and sha256 digests (cfcount-main.rs), per step
+snap-time.txt restore-time.txt   nonproduction snapshot and restore timings (1.1 MB)
+genesis-1v.json genesis-2v.json  the fixture genesis files used by the devnets
+genesis-A.json genesis-B.json params-A.json params-B.json genesis-B-start.log   genesis byte and semantic difference (section 1.3)
+records/local-v{0,1}.record  rollout-record.sh output from the live two-validator devnet (section 1.4)
+monitor/                     wave1-monitor.sh verify/baseline/delta/agree outputs from the live devnet (section 1.5)
+ci-docker-image-main.txt     CI identity lines for e93d38d (section 2)
+mutations.txt                every mutation run, the named test it failed, and the restored hash
+pubkeys.txt                  the two FIXTURE validator public keys
