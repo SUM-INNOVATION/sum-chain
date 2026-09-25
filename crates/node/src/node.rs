@@ -1536,6 +1536,45 @@ mod health_wiring_tests {
             text.contains("# TYPE sumchain_tx_execution_errors_total counter"),
             "the execution-error family is missing from /metrics"
         );
+
+        // Every sample carries exactly the two bounded labels, with a
+        // subsystem from the closed table.
+        let family = "sumchain_tx_execution_errors_total{";
+        let samples: Vec<&str> = text.lines().filter(|l| l.starts_with(family)).collect();
+        assert!(!samples.is_empty(), "the family declares a type but emits no samples");
+        for line in &samples {
+            let labels = &line[family.len()..line.find('}').expect("unterminated labels")];
+            let (subsystem, code) = labels
+                .strip_prefix("subsystem=\"")
+                .and_then(|r| r.split_once("\",code=\""))
+                .and_then(|(s, c)| Some((s, c.strip_suffix('"')?)))
+                .unwrap_or_else(|| panic!("labels are not exactly subsystem,code: {line}"));
+            assert!(
+                sumchain_primitives::tx_error_metrics::SUBSYSTEMS.contains(&subsystem),
+                "subsystem {subsystem:?} is outside the closed table: {line}"
+            );
+            assert!(!code.contains('"') && !code.contains(','), "a third label: {line}");
+        }
+
+        // All nine Wave 1 subsystems appear, under the codes the operator's
+        // monitor looks for. The list is read from the monitor itself, so the
+        // two cannot drift apart.
+        let monitor = include_str!("../../../tools/lane-b/wave1-monitor.sh");
+        let wave1 = monitor
+            .lines()
+            .find_map(|l| l.strip_prefix("WAVE1='"))
+            .and_then(|l| l.strip_suffix('\''))
+            .expect("WAVE1 list in wave1-monitor.sh");
+        let pairs: Vec<&str> = wave1.split_whitespace().collect();
+        assert_eq!(pairs.len(), 9, "the monitor names {} Wave 1 subsystems", pairs.len());
+        for pair in pairs {
+            let (subsystem, code) = pair.split_once(':').unwrap();
+            let series = format!("{family}subsystem=\"{subsystem}\",code=\"{code}\"}}");
+            assert!(
+                samples.iter().any(|l| l.starts_with(&series)),
+                "/metrics has no series {series}"
+            );
+        }
         handle.stop();
     }
 

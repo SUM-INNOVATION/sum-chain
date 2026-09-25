@@ -19,7 +19,7 @@ spec:
     - { name: p2p,     port: 30303, targetPort: p2p }
     - { name: rpc,     port: 8545,  targetPort: rpc }
     - { name: health,  port: 8546,  targetPort: health }
-    - { name: metrics, port: 9090,  targetPort: metrics }
+    - { name: metrics, port: 9090,  targetPort: health }
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -45,7 +45,7 @@ spec:
         app.kubernetes.io/instance: validator-3
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
+        prometheus.io/port: "8546"
         prometheus.io/path: "/metrics"
     spec:
       securityContext:
@@ -68,7 +68,6 @@ spec:
             - { name: p2p,     containerPort: 30303, protocol: TCP }
             - { name: rpc,     containerPort: 8545,  protocol: TCP }
             - { name: health,  containerPort: 8546,  protocol: TCP }
-            - { name: metrics, containerPort: 9090,  protocol: TCP }
           env:
             - name: RUST_LOG
               value: "info,sumchain=debug"

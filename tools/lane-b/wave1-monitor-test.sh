@@ -41,6 +41,33 @@ expect() {
   fi
 }
 
+# ---- verify -----------------------------------------------------------------
+# The gate to Stage 1 being complete. Every way the telemetry can be absent
+# must fail it, and none may read as "present, nothing refused".
+mk "$T/ok" 100 10 0
+expect "verify: all nine subsystems, two labels" 0 "all nine Wave 1 subsystems" -- \
+  bash "$MON" verify "$(url "$T/ok")"
+
+expect "verify: no /metrics at all (a 404 or no listener)" 4 "MISSING DATA: cannot scrape" -- \
+  bash "$MON" verify "file://$T/no-such-node"
+
+mkdir -p "$T/nofam"; printf 'sumchain_uptime_seconds 100\nsumchain_block_height 10\n' >"$T/nofam/metrics"
+expect "verify: the counter family absent" 1 "is not exposed" -- \
+  bash "$MON" verify "$(url "$T/nofam")"
+
+mkdir -p "$T/typeonly"; echo "# TYPE sumchain_tx_execution_errors_total counter" >"$T/typeonly/metrics"
+expect "verify: family typed but no samples" 1 "emits no samples" -- \
+  bash "$MON" verify "$(url "$T/typeonly")"
+
+mk "$T/eight" 100 10 0; grep -v 'subsystem="finance"' "$T/eight/metrics" >"$T/eight/x" && mv "$T/eight/x" "$T/eight/metrics"
+expect "verify: one Wave 1 subsystem absent" 1 "no series for finance/16" -- \
+  bash "$MON" verify "$(url "$T/eight")"
+
+mk "$T/three" 100 10 0
+sed 's/code="9"}/code="9",sender="abc"}/' "$T/three/metrics" >"$T/three/x" && mv "$T/three/x" "$T/three/metrics"
+expect "verify: a third label (unbounded cardinality)" 1 "other than two labels" -- \
+  bash "$MON" verify "$(url "$T/three")"
+
 # ---- delta ------------------------------------------------------------------
 # The node has run 1000s at baseline (t=10000, so it started at t=9000).
 mk "$T/a" 1000 500 0

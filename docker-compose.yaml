@@ -67,7 +67,7 @@ services:
     ports:
       - "30303:30303"
       - "8545:8545"
-      - "9090:9090"
+      - "9090:8546"
     environment:
       - RUST_LOG=info,sumchain=debug
     networks:
@@ -118,7 +118,7 @@ services:
     ports:
       - "30304:30303"
       - "8546:8545"
-      - "9091:9090"
+      - "9091:8546"
     environment:
       - RUST_LOG=info,sumchain=debug
     networks:
@@ -166,7 +166,7 @@ services:
     ports:
       - "30305:30303"
       - "8547:8545"
-      - "9092:9090"
+      - "9092:8546"
     environment:
       - RUST_LOG=info,sumchain=debug
     networks:
@@ -214,7 +214,7 @@ services:
     ports:
       - "30306:30303"
       - "8548:8545"   # SNIP integration clients point at host port 8548
-      - "9093:9090"
+      - "9093:8546"
     environment:
       - RUST_LOG=info,sumchain=debug
     networks:

@@ -40,7 +40,7 @@ spec:
         app.kubernetes.io/component: validator
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
+        prometheus.io/port: "8546"
         prometheus.io/path: "/metrics"
     spec:
       securityContext:
@@ -66,9 +66,6 @@ spec:
               protocol: TCP
             - name: health
               containerPort: 8546
-              protocol: TCP
-            - name: metrics
-              containerPort: 9090
               protocol: TCP
           env:
             - name: RUST_LOG

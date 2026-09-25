@@ -33,12 +33,15 @@ sumchain_tx_execution_errors_total{subsystem="docclass",code="8"} 0
 
 * Endpoint: `GET /metrics` on the **health port, 8546** -- served by
   `crates/rpc/src/health.rs` beside `/health` and `/ready`, bound to
-  `[health] addr` (default `0.0.0.0:8546`). **Not 9090.** The manifests declare
-  a container port 9090 and annotate `prometheus.io/port: "9090"`, and nothing
-  in the code binds that port: anything scraping 9090 -- Prometheus through that
-  annotation, or an operator following an older copy of this page -- gets a
-  refused connection, not a zero. Check that the scrape actually returns a
-  body before trusting any silence from it.
+  `[health] addr` (default `0.0.0.0:8546`). **Not 9090:** nothing in the code
+  binds 9090. The manifests, `prometheus.yml` and `docker-compose.yaml` used to
+  point scrapes there. They now annotate `prometheus.io/port: "8546"` and route
+  the Services' `metrics` port to the pod's `health` port, pinned by
+  `tools/lane-b/metrics-endpoint-test.py`. A cluster still running the older
+  manifests scrapes a refused connection, not a zero: check that the scrape
+  actually returns a body before trusting any silence from it. The binary
+  merged as `e93d38d` served no `/metrics` at all (404); only a binary with the
+  health-server metrics fix answers here.
 * **Exactly two labels, and they are bounded.** Both values are `&'static str`
   drawn from a closed table in `crates/primitives/src/tx_error_metrics.rs`; the
   counters are a fixed-length array indexed by position in that table, so there

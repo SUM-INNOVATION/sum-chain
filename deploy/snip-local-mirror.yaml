@@ -73,7 +73,7 @@ services:
       - ../genesis/snip-mirror-genesis.json:/config/genesis.json:ro
       - ../keys/validator1.json:/secrets/validator.key:ro
     ports:
-      # RPC plus the health/readiness port. P2P (30303) and metrics (9090) stay
+      # RPC plus the health/readiness port. P2P (30303) and /metrics (health port 8546) stay
       # inside the compose network — SNIP doesn't need them and surfacing
       # extra ports invites confusion. If you need metrics, run the full
       # 3-validator `docker-compose.yaml` instead.

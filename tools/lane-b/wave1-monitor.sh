@@ -53,7 +53,9 @@ scrape() {
 
 # Every sample line of the counter family, "subsystem code value".
 samples() {
-  grep "^${METRIC}{" \
+  # `|| true`: no samples is an answer for the caller to report, not a reason
+  # for pipefail to end the script silently.
+  { grep "^${METRIC}{" || true; } \
     | sed -E 's/^.*subsystem="([^"]*)",code="([^"]*)"\} ([0-9.e+]+).*$/\1 \2 \3/'
 }
 
