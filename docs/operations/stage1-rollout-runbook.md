@@ -102,10 +102,24 @@ binary. The mixed-version window is Stage 1's consensus-equivalence test (§4.3)
   `state` and `meta` numbered **0**, down from 2,000 each. An older node would
   come up with no chain and **re-initialise from genesis**.
 
+**[V] with the real binaries (docs/operations/stage1-local-evidence.md §1.2).**
+The deployed 0.2.0 binary (`8abbd304`), started on a copy of a volume that the
+Stage 1 binary had advanced from height 27 to 38, logged `Invalid argument:
+Column families not opened: application_journal`, then `Database appears
+corrupted, attempting repair...` and `Database opened successfully after
+repair`. It loaded height **27** while its restored finality state read
+**35 finalized**, then produced a **different** block 28 (`0xc28f…`; Stage 1's
+was `0xdbc281…`). On this small database the loss was partial rather than a
+wipe, and that is worse: the node looks healthy, and it re-produces heights
+its peer holds as final. `auto_repair` is hard-coded `true` in 0.2.0 (the node
+never builds a `DatabaseConfig`), so no setting prevents it.
+
 **Rule:** once the Stage 1 binary has started on a volume, even for a moment and
-even if it failed, **the previous binary must never be pointed at that volume.**
+even if it failed, **the 0.2.0 binary must never open that volume.** Not to
+"check", not read-only, not once.
 From then on, rollback means restoring the volume from a snapshot taken before
-that first start, and then reverting the image. This goes further than the
+that first start **into a new volume**, and starting the **exact old image
+digest** on that new volume. This goes further than the
 existing warning at `production-checklist.md:183` ("never downgrade a binary
 that has executed a block"). The hazard is triggered by the **open**, not by the
 first executed block.
@@ -453,6 +467,36 @@ Tested against the live 21-field params on 2026-09-23: an identical copy prints
 `["v2_enabled_from_height"]`; a copy with an extra field only the new binary
 exposes prints `[]`, so the new binary's larger RPC surface cannot false-stop it.
 
+
+### 2.8 Gate: the rollback preflight (after 4.1's snapshots, before 4.2)
+
+Numbered after 2.7 because it needs 4.1's snapshots, but it gates 4.2: **no pod
+gets the Stage 1 image until this prints `PREFLIGHT COMPLETE`.**
+
+```bash
+export OLD_DIGEST='sha256:<the digest both pods run now>'   # from §2.6; production-only evidence
+export NEW_DIGEST='sha256:<the release image registry digest>'
+tools/lane-b/rollout-preflight-record.sh $POD_D stage1-pre-$STS_D preflight/
+tools/lane-b/rollout-preflight-record.sh $POD_L stage1-pre-$STS_L preflight/
+python3 tools/lane-b/rollout-preflight.py --validators 2 \
+  --expected-old-image-digest "$OLD_DIGEST" --new-image-digest "$NEW_DIGEST" \
+  --restore-rehearsal restore-rehearsal.txt preflight/
+```
+
+The recorder refuses, and writes nothing, when a pod's image is not pinned
+by digest, when its volume is not `Retain`, when the snapshot is not
+`readyToUse` or is of another claim, when the snapshot content has no
+handle, or when either the current or the previous container log shows the
+Stage 1 binary has already opened the volume.
+
+The checker stops without the exact old digest, the new digest, or a restore
+rehearsal record. That record comes from restoring one of these snapshots
+into a **scratch** claim and starting the old image on it. It gives the
+snapshot handle, the scratch claim, the old digest, `repair_lines: 0`, the
+`cf::STATE` row count of the snapshot and of the restored copy (they must be
+equal), and the measured `snapshot_seconds` and `restore_seconds`. Nothing in
+this repository can produce that record; it is production-only evidence.
+
 ---
 
 ## 3. Halt budget
@@ -507,17 +551,28 @@ evidence:
 for S in $STS_D $STS_L; do PV=$(k get pvc data-$S-0 -o jsonpath='{.spec.volumeName}'); kubectl --context $CTX patch pv $PV -p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'; done
 ```
 
-**Do not proceed** until both snapshots report `readyToUse: true`. Record the
-chain height at snapshot time.
+**Do not proceed** until both snapshots report `readyToUse: true`, and §2.8
+prints `PREFLIGHT COMPLETE`. Record the chain height at snapshot time.
 
 ### 4.2 Upgrade the DIALER (validator 0, `GW1p…`) — halt #1
 
 ```bash
 date -u +%FT%TZ; j sum_blockNumber                       # T0 and height
+OLD_UID=$(k get pod $POD_D -o jsonpath='{.metadata.uid}')
 k set image statefulset/$STS_D sumchain="$IMAGE_NEW"      # the controller deletes the pod now
 k exec $POD_D -c sumchain -- sh -c 'kill -INT 1' || true  # SIGINT while it is Terminating (§0.3)
-k get pod $POD_D -w                                       # Terminating → Pending → Running
+# The OLD process must have exited, and released /data/LOCK, before a new one
+# opens the volume. The StatefulSet controller creates the replacement only
+# after the old pod object is gone, which the kubelet allows only once its
+# containers have stopped. That guarantee is void if anything force-deletes
+# the pod: NEVER `k delete pod --force --grace-period=0` a validator.
+until [[ $(k get pod $POD_D -o jsonpath='{.metadata.uid}' 2>/dev/null) != "$OLD_UID" ]]; do sleep 2; done
+k get pod $POD_D -w                                       # Pending → Running (new uid)
 ```
+
+If the new container logs `LOCK`, `lock hold by current process` or
+`Resource temporarily unavailable` on opening `/data`, two processes reached
+the volume: **STOP** (§5.1).
 
 Once the container is `Running`:
 
@@ -530,7 +585,8 @@ reverted on this volume (§0.2).** Note the time.
 
 Expected, in order:
 
-1. The activation lines show **0 gates set** beyond the predating ones.
+1. The activation lines show no gate set beyond the four predecessor gates of
+   §2.2 (d), at their live heights.
 2. `dialing bootnode` then a connection.
 3. Blocks imported from the listener.
 4. `Produced block` at an even height.
@@ -584,7 +640,7 @@ jq -S --slurpfile a params.after.<POD>.json '. as $b | [keys[] | select($a[0][.]
 # must print []
 
 # 6. the new RPC surface, on the new node only
-d chain_getActivationStatus | jq '{chain_id,current_height,digest,protocol_digest,gates_set:([.gates[]|select(.height!=null)]|length)}'
+d chain_getActivationStatus | jq '{chain_id,current_height,digest,protocol_digest,gates_set:([.gates[]|select(.height!=null)|"\(.gate)=\(.height)"])}'
 ```
 
 **Pass:** all six hold throughout. Run 2 at least every 5 minutes.
@@ -598,8 +654,10 @@ Only after 4.3 passes, and after §2.5 is resolved:
 
 ```bash
 date -u +%FT%TZ; j sum_blockNumber
+OLD_UID=$(k get pod $POD_L -o jsonpath='{.metadata.uid}')
 k set image statefulset/$STS_L sumchain="$IMAGE_NEW"
 k exec $POD_L -c sumchain -- sh -c 'kill -INT 1' || true
+until [[ $(k get pod $POD_L -o jsonpath='{.metadata.uid}' 2>/dev/null) != "$OLD_UID" ]]; do sleep 2; done   # §4.2: old process gone
 k get pod $POD_L -w
 k logs $POD_D -c sumchain --since=5m | grep -E 'no peers connected|dialing bootnode|bootnode .* unusable'   # the dialer's 30 s retry
 k logs $POD_L -c sumchain --since=10m | grep -E 'Opening database|Usable reorg depth|Our turn|Produced block|Imported|REFUSING|ERROR' | head -60
@@ -623,7 +681,7 @@ validators.
 
 ### 5.1 Stop immediately (do not start the next step) if
 
-1. §2.1–§2.6 is not fully passed.
+1. §2.1–§2.6 is not fully passed, or §2.8 has not printed `PREFLIGHT COMPLETE`.
 2. The replacement pod is `Pending` more than 2 min (unschedulable or volume
    attach), or `ImagePullBackOff` or `CreateContainerConfigError`.
 3. The new binary logs a refusal to start: `RetroactivelyOpened`,
@@ -635,10 +693,13 @@ validators.
    failed import, or a rise in `block_errors`, on either validator. **Any**
    `REFUSING peer` line.
 6. Proposer parity breaks, or a third proposer key appears.
-7. `chain_getActivationStatus` on the new node shows `chain_id ≠ 1` or
-   `gates_set ≠ 0`.
+7. `chain_getActivationStatus` on the new node shows `chain_id ≠ 1`, or any
+   gate with a height other than the four predecessor gates of §2.2 (d) at
+   their live heights.
 8. A listener restart with no reconnection after 3 dialer retry cycles (≈90 s):
    go to §5.3.
+9. A replacement container logs a RocksDB lock error on `/data` (§4.2), or a
+   validator pod was force-deleted.
 
 ### 5.2 Rollback, decided by one question: did the new binary ever open this volume?
 
@@ -652,12 +713,12 @@ error), no `Opening database` line exists in either current or previous logs,
 and `restartCount` is 0 with no `lastState.terminated`. Image revert is safe:
 
 ```bash
-k apply -f sts-X.before.yaml       # or: k set image statefulset/$STS sumchain="$(cat old-image-X.txt | sed 's#^docker-pullable://##')"
+k set image statefulset/$STS sumchain="<REGISTRY>/<REPO>@$OLD_DIGEST"   # the EXACT digest §2.8 recorded; never a tag
 ```
 
-**B. Opened, even once, even if it then refused.** **Do not** start the old
-image on this volume. On the old binary it would auto-repair and wipe it
-(§0.2). Either fix forward on the new binary, or restore from the §4.1
+**B. Opened, even once, even if it then refused.** **0.2.0 must never open
+this volume.** It would "repair" it, fall back below its finalized height and
+produce different blocks (§0.2). Either fix forward on the new binary, or restore from the §4.1
 snapshot first. The restore replaces a volume and needs owner sign-off at the
 time:
 
@@ -674,9 +735,17 @@ spec:
   resources: { requests: { storage: 100Gi } }
   dataSource: { name: stage1-pre-$STS, kind: VolumeSnapshot, apiGroup: snapshot.storage.k8s.io }
 EOF
-k apply -f sts-X.before.yaml                # old image by digest, old resources
+# The restored claim must be a NEW volume, never the one Stage 1 opened:
+NEWPV=$(k get pvc data-$STS-0 -o jsonpath='{.spec.volumeName}')
+[[ -n $NEWPV && $NEWPV != "$(grep '^pv:' preflight/$POD.preflight | awk '{print $2}')" ]] || { echo STOP; exit 1; }
+k set image statefulset/$STS sumchain="<REGISTRY>/<REPO>@$OLD_DIGEST"   # the EXACT old digest
 k scale statefulset/$STS --replicas=1
+k logs $POD -c sumchain -f | grep -m1 -E 'attempting repair|Loaded existing chain'   # a repair line: STOP
 ```
+
+A `Database appears corrupted, attempting repair` line means the restored
+volume is not the pre-upgrade snapshot. Scale to 0 at once; do not let it
+produce.
 
 The restored validator comes back at the snapshot height and syncs forward
 from its peer. Blocks produced in between are canonical, because both
@@ -724,7 +793,9 @@ wipe, §0.3 SIGTERM, §0.4 order. Only the commands change:
 | genesis | `sha256sum <genesis path from the unit's --genesis / config>` and the same `jq` checks |
 | snapshot | stop the unit (starts halt), copy or snapshot the data dir or disk, start the **old** binary again. Or snapshot the running disk if the platform supports crash-consistent snapshots. |
 | stop cleanly | `systemctl stop` sends SIGTERM by default, which the node does **not** handle (§0.3, [I] for a non-PID-1 process: the default action terminates it immediately and uncleanly). Use `KillSignal=SIGINT` in the unit or `kill -INT <pid>` |
+| process exit and lock | before starting any binary on the data dir: the old PID is gone (`while kill -0 $PID 2>/dev/null; do sleep 0.2; done`) **and** nothing holds the lock (`lsof $DATA/LOCK` prints nothing). The RPC port closes before RocksDB releases `LOCK`; a start in that gap fails to open the database (measured locally, stage1-local-evidence.md §1.1). |
 | upgrade | swap the binary by verified sha256 and start |
+| rollback | copy the pre-upgrade snapshot into a **new, empty** data dir and point the **old** binary at that; never at a dir the Stage 1 binary opened (§0.2). The same §2.8 preflight fields apply: snapshot id, old binary sha256, rehearsed restore with timings. |
 
 ---
 

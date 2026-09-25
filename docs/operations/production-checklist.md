@@ -193,7 +193,16 @@ that validator's block slots until it rejoins, so coordinate restarts.
    before any block. So reverting the image after that open -- even if the new
    binary then refused to start -- makes the old binary empty the database and
    re-initialise from genesis. Reproduced: 189 families before, 1 after;
-   `blocks`, `state` and `meta` from 2000 rows to 0.
+   `blocks`, `state` and `meta` from 2000 rows to 0. With the real 0.2.0
+   binary on a small Stage-1 volume the loss was partial instead: it loaded a
+   height below its own finalized height and produced a different block at
+   the next height (stage1-local-evidence.md §1.2). Either outcome is silent.
+
+   The rollback target is therefore the pre-upgrade snapshot, restored into a
+   NEW volume, running the EXACT old image digest. The Stage 1 rollout does not
+   start until `tools/lane-b/rollout-preflight.py` prints `PREFLIGHT COMPLETE`
+   (stage1-rollout-runbook.md §2.8): a ready snapshot of each validator's own
+   volume, `Retain` volumes, the old digest, and a rehearsed, timed restore.
 
    From this release on the node fails closed instead: a data directory
    containing a family it does not know refuses to open, `auto_repair` is off
