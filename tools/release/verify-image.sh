@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # verify-image.sh --image <registry/repo> --tag <tag> --digest sha256:<64-hex>
 #                 --commit <40-hex> --platform <os/arch>
-#                 [--require-github-attestation <owner/repo>]
+#                 [--require-github-attestation]
 #
 # Given the commit and the registry digest a release record names, prove the
 # image in the registry is that artifact. Every check fails closed:
@@ -18,17 +18,21 @@
 #   6. GENESIS     the image contains no genesis file, and no tracked genesis
 #                  at <commit> carries a remediation height
 #                  (tools/release/check-genesis-gates.py).
-#   7. (optional)  a GitHub artifact attestation verifies for the digest.
+#   7. (optional)  the GitHub artifact attestation for the DIGEST was signed
+#                  by .github/workflows/release-image.yml of SUM-INNOVATION/
+#                  sum-chain running from refs/heads/main
+#                  (tools/release/verify-attestation.sh; the policy is fixed
+#                  there and takes no caller input).
 #
 # Needs docker with buildx, jq, git (a checkout containing <commit>), and gh for 7.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-IMAGE="" TAG="" DIGEST="" COMMIT="" PLATFORM="" ATTEST_REPO=""
+IMAGE="" TAG="" DIGEST="" COMMIT="" PLATFORM="" ATTEST=0
 while [[ $# -gt 0 ]]; do
   case $1 in
     --image) IMAGE=$2; shift 2 ;; --tag) TAG=$2; shift 2 ;; --digest) DIGEST=$2; shift 2 ;;
     --commit) COMMIT=$2; shift 2 ;; --platform) PLATFORM=$2; shift 2 ;;
-    --require-github-attestation) ATTEST_REPO=$2; shift 2 ;;
+    --require-github-attestation) ATTEST=1; shift ;;
     *) echo "usage: see the header of $0" >&2; exit 2 ;;
   esac
 done
@@ -87,10 +91,10 @@ python3 "$HERE/check-genesis-gates.py" --commit "$COMMIT" >/dev/null \
   || { python3 "$HERE/check-genesis-gates.py" --commit "$COMMIT" >&2 || true; fail "GENESIS: tracked genesis at $COMMIT"; }
 echo "ok   6 no genesis in the image; tracked genesis at the commit carries no remediation height"
 
-# 7. GitHub artifact attestation, when the release workflow produced one.
-if [[ -n $ATTEST_REPO ]]; then
-  gh attestation verify "oci://$REF" --repo "$ATTEST_REPO" >/dev/null \
-    || fail "ATTESTATION: gh attestation verify failed for $REF"
-  echo "ok   7 GitHub artifact attestation verifies against $ATTEST_REPO"
+# 7. GitHub artifact attestation: by digest, under the fixed release policy.
+if [[ $ATTEST -eq 1 ]]; then
+  bash "$HERE/verify-attestation.sh" "$IMAGE" "$DIGEST" >&2 \
+    || fail "ATTESTATION: $IMAGE@$DIGEST is not attested by the release workflow on main"
+  echo "ok   7 attestation signed by release-image.yml on refs/heads/main, for $DIGEST"
 fi
 echo "VERIFIED: $IMAGE:$TAG = $DIGEST, $PLATFORM, sumchain $COMMIT."

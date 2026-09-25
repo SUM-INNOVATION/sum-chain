@@ -191,7 +191,7 @@ jobs:
         run: |
           set -euo pipefail
           bash tools/release/verify-image.sh --image "$IMAGE" --tag "$TAG" --digest "$DIGEST" \
-            --commit "$COMMIT" --platform "$PLATFORM" --require-github-attestation "$GITHUB_REPOSITORY"
+            --commit "$COMMIT" --platform "$PLATFORM" --require-github-attestation
           bin=$(docker run --rm --entrypoint sha256sum "$IMAGE@$DIGEST" /usr/local/bin/sumchain | cut -d' ' -f1)
           docker buildx imagetools inspect "$IMAGE@$DIGEST" --format '{{json .SBOM}}' > sbom.spdx.json
           {

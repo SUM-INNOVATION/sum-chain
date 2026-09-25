@@ -5,6 +5,7 @@ name: rollout-tooling
 #   * rollout evidence recorder + checker (fixture battery)
 #   * rollback preflight recorder + checker (fixture battery)
 #   * wave1-monitor.sh (fixture battery)
+#   * release attestation policy (verify-attestation.sh, fixture battery)
 #   * scrape configuration points at the port /metrics is served on
 #   * no activation height baked into tracked genesis
 #   * git diff --check, no AI attribution in commit messages, clean tree
@@ -39,6 +40,9 @@ jobs:
 
       - name: Scrape configuration targets the /metrics port
         run: python3 tools/lane-b/metrics-endpoint-test.py
+
+      - name: Release attestation policy
+        run: bash tools/release/verify-attestation-test.sh
 
       - name: No activation height baked into tracked genesis
         run: python3 tools/release/check-genesis-gates.py --commit "$(git rev-parse HEAD)"
