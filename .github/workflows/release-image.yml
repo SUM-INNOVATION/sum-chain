@@ -100,7 +100,11 @@ jobs:
     needs: gate
     runs-on: ${{ inputs.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 90
-    # Configure required reviewers on this environment to add a human gate.
+    # REQUIRED repository setting, not enforced by this file: environment
+    # "release" with required reviewers and deployment branches limited to main
+    # (docs/operations/release-image.md). GitHub creates a missing environment
+    # with NO protection, so until it is configured nothing here waits for a
+    # human beyond the gate job's approved-PR check.
     environment: release
     permissions:
       contents: read

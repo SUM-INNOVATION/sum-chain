@@ -61,6 +61,27 @@ tags:
 | actions/attest-build-provenance | v4.2.2 | `4d101475d8b20a2381f78447822ac1eab6504dd8` |
 | actions/upload-artifact | v7.0.1 | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` |
 
+### Environment protection: required, and NOT configured today
+
+Checked 2026-09-25: `GET /repos/SUM-INNOVATION/sum-chain/environments`
+returned `total_count: 0`, and `GET .../environments/release` returned 404.
+**There is no `release` environment.** GitHub creates a missing environment
+automatically on first use, *with no protection rules*. Until an admin
+configures it, a dispatch by anyone with write access would publish **without
+any environment approval**. The gate job's merged-and-approved-PR check would
+be the only barrier.
+
+So publication does **not** require environment approval today. Before the
+first dispatch, an admin must:
+1. Create environment `release`.
+2. Add required reviewers.
+3. Restrict its deployment branches to `main`.
+4. Confirm the result:
+   `gh api repos/SUM-INNOVATION/sum-chain/environments/release --jq '.protection_rules'`
+   must list a `required_reviewers` rule.
+
+A publication authorization should name that confirmed state.
+
 ### Permissions the repository needs
 
 | setting | why |
@@ -68,7 +89,7 @@ tags:
 | Actions → Workflow permissions: the org and repo allow `GITHUB_TOKEN` to be granted `packages: write` | Push to `ghcr.io/sum-innovation/sum-chain` |
 | Organization → Packages: members may create container packages | The first push creates the package |
 | `id-token: write`, `attestations: write` (declared per job) | Artifact attestations. Supported for public repositories, and this one is public. |
-| Environment `release` with **required reviewers** (recommended) | A human approves each publish run, in addition to the PR approval check |
+| **Required before the first dispatch:** environment `release` with **required reviewers**, and deployment branches limited to `main` | A human approves each publish run, in addition to the gate job's PR-approval check |
 | Package visibility, or an `imagePullSecret` in the cluster | A new GHCR package is private until made public; the cluster must be able to pull it |
 
 ## 2. Verifying an image (`tools/release/verify-image.sh`)
