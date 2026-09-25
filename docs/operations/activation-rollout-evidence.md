@@ -26,7 +26,7 @@ Let `$V` be the validator's RPC base URL and `$POD` its pod name.
 
 | # | record | how |
 |---|---|---|
-| 1 | **binary sha256** | `kubectl -n sumchain exec $POD -- sha256sum /usr/local/bin/sumchain` — the path the `Dockerfile` installs the node at (`COPY --from=builder /build/target/release/sumchain /usr/local/bin/`, `ENTRYPOINT ["sumchain"]`); `tools/lane-b/rollout-check-test.py` derives it from the Dockerfile and fails if this document hashes anything else — **and** the image digest, `kubectl -n sumchain get pod $POD -o jsonpath='{.status.containerStatuses[0].imageID}'`. The image digest is what Kubernetes actually pulled; the file hash is what is running. Record both, because a mutable tag makes them able to disagree. **The file hash is the binary's only identity:** the binary cannot report its own commit (`crates/node/src/main.rs` reads `option_env!("GIT_HASH")`, nothing in the build sets it, and every shipped binary logs `Commit: unknown`), so it is compared against the sha256 of the release build artifact, never against anything the node says about itself. |
+| 1 | **binary sha256** | `kubectl -n sumchain exec $POD -- sha256sum /usr/local/bin/sumchain` — the path the `Dockerfile` installs the node at (`COPY --from=builder /build/target/release/sumchain /usr/local/bin/`, `ENTRYPOINT ["sumchain"]`); `tools/lane-b/rollout-check-test.py` derives it from the Dockerfile and fails if this document hashes anything else — **and** the image digest, `kubectl -n sumchain get pod $POD -o jsonpath='{.status.containerStatuses[0].imageID}'`. The image digest is what Kubernetes actually pulled; the file hash is what is running. Record both, because a mutable tag makes them able to disagree. **Three identities, all compared:** the file hash against the sha256 of the release binary; the image digest against the release image's registry digest; and `sumchain --version` against `sumchain <release commit>`. Since PR #259 the release Dockerfile refuses to build without a full 40-hex `GIT_HASH` and the binary reports it; 0.2.0 has no `--version` and cannot be recorded. The self-report is never the only identity: the file hash and the digest do not depend on anything the node says. |
 | 2 | **activation digest** | `chain_getActivationStatus` → `digest` **and** `protocol_digest`. `digest` answers "do our genesis files agree"; `protocol_digest` answers "do our binaries enforce the same rules", and it is the one peers compare at the handshake. Two binaries from different commits can share a `digest` and differ in `protocol_digest`. |
 | 3 | **chain id** | `chain_getActivationStatus` → `chain_id`. |
 | 4 | **current height** | `chain_getActivationStatus` → `current_height`. Carried in the same response as 2 and 3 deliberately: a digest recorded without the height it was read at cannot be placed in time. |
@@ -68,6 +68,12 @@ sha=$(kubectl -n "$NS" exec "$POD" -- sha256sum /usr/local/bin/sumchain) \
 sha=${sha%% *}
 [[ $sha =~ ^[0-9a-f]{64}$ ]] || fail "binary_sha256 '$sha' is not a sha256"
 
+# The commit the running binary was built from. Release builds embed it
+# (Dockerfile GIT_HASH guard); a binary that cannot say, like 0.2.0, fails.
+ver=$(kubectl -n "$NS" exec "$POD" -- /usr/local/bin/sumchain --version) \
+  || fail "/usr/local/bin/sumchain --version failed; this binary cannot report its commit"
+[[ $ver =~ ^sumchain\ [0-9a-f]{40}$ ]] || fail "binary_version '$ver' is not 'sumchain <40-hex commit>'"
+
 img=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.containerStatuses[0].imageID}') \
   || fail "reading the pod's imageID failed"
 [[ $img == *sha256:* ]] || fail "image_id '$img' carries no digest"
@@ -79,10 +85,11 @@ act=$(field digest)
 proto=$(field protocol_digest)
 chain=$(field chain_id)
 height=$(field current_height)
-# The NAMES of every gate with a height, not a count: a count of 0 is wrong for
-# production, whose genesis legitimately carries four passed PREDATING gates
-# (v2, omninode, education, governance). The checker classifies the names.
-gates=$(jq -er '[.result.gates[] | select(.height != null) | .gate] | join(",")' <<<"$status" 2>/dev/null) \
+# Every gate with a height, as name=height, not a count: a count of 0 is wrong
+# for production, whose genesis legitimately carries four passed predecessor
+# gates (v2, omninode, education, governance). The checker compares the names
+# AND heights against those four, so a genesis missing one fails here too.
+gates=$(jq -er '[.result.gates[] | select(.height != null) | "\(.gate)=\(.height)"] | join(",")' <<<"$status" 2>/dev/null) \
   || fail "chain_getActivationStatus returned no gates list"
 [[ -n $gates ]] || gates=none
 
@@ -114,6 +121,7 @@ tmp=$(mktemp "$OUT/.$POD.record.XXXXXX")
 {
 echo "pod:            $POD"
 echo "binary_sha256:  $sha"
+echo "binary_version: $ver"
 echo "image_id:       $img"
 echo "activation_digest: $act"
 echo "protocol_digest:   $proto"

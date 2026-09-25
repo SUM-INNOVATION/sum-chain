@@ -52,9 +52,16 @@ PROTO_OTHER = "c" * 64
 CHAIN = "1"
 GENESIS = "9" * 64  # NONPRODUCTION genesis sha256
 GENESIS_OTHER = "8" * 64
-PRODUCTION_PREDATING = ["v2_enabled_from_height", "omninode_enabled_from_height",
-                        "education_enabled_from_height", "governance_enabled_from_height"]
+# The production predecessor gates at their live heights (the checker's
+# default). Every complete case below is production-shaped.
+PRODUCTION_PREDECESSORS = {"v2_enabled_from_height": 5200000, "omninode_enabled_from_height": 6000000,
+                           "education_enabled_from_height": 8900000,
+                           "governance_enabled_from_height": 8900000}
 STRAY_GATE = "subsystem_proof_unsupported_enabled_from_height"  # a remediation gate
+COMMIT = "c" * 40  # NONPRODUCTION release commit
+OTHER_COMMIT = "d" * 40
+IMAGE_DIGEST = "sha256:" + "0" * 64  # NONPRODUCTION registry digest
+OTHER_DIGEST = "sha256:" + "1" * 64
 
 
 def ident(i: int) -> str:
@@ -109,6 +116,8 @@ while [[ ${args[0]} == -n || ${args[0]} == --namespace ]]; do args=("${args[@]:2
 case "${args[0]}" in
   exec) pod=${args[1]}; cmd=${args[3]}; path=${args[4]}
         if [[ $cmd == sha256sum && $path == "$BINARY" ]]; then echo "$(cat "$FX/$pod.sha")  $path"
+        elif [[ $cmd == "$BINARY" && $path == --version && -f "$FX/$pod.ver" ]]; then cat "$FX/$pod.ver"
+        elif [[ $cmd == "$BINARY" && $path == --version ]]; then echo "error: unexpected argument '--version' found" >&2; exit 2
         elif [[ $cmd == sha256sum && $path == /config/genesis.json ]]; then echo "$(cat "$FX/$pod.genesis")  $path"
         else echo "$cmd: $path: No such file or directory" >&2; exit 1; fi ;;
   get)  cat "$FX/${args[2]}.imageid" ;;
@@ -152,16 +161,21 @@ def log_line(level: str, target: str, msg: str, ansi: bool) -> str:
 def make_pods(fx: Path, n: int, *, drop_handshake=None, refusal_on=None,
               digest_off=None, empty_log=None, no_image_digest=None,
               status_without_digest=None, metrics_missing=None, dup_ident=None,
-              genesis_off=None, no_produced=None, gates=None) -> None:
+              genesis_off=None, no_produced=None, gates=None, no_version=None,
+              bad_version=None, silent=None) -> None:
+    gates = PRODUCTION_PREDECESSORS if gates is None else gates
     for i in range(n):
         pod = f"sumchain-validator-{i + 1}-0"
         proto = PROTO_OTHER if digest_off == i else PROTO
         (fx / f"{pod}.sha").write_text(FIXTURE_SHA + "\n")
+        if no_version != i:  # 0.2.0 has no --version at all
+            (fx / f"{pod}.ver").write_text(
+                "sumchain 0.4.0\n" if bad_version == i else f"sumchain {COMMIT}\n")
         (fx / f"{pod}.ident").write_text(ident(0) if dup_ident == i else ident(i))
         (fx / f"{pod}.genesis").write_text(GENESIS_OTHER if genesis_off == i else GENESIS)
         (fx / f"{pod}.imageid").write_text(
             "docker.io/fixture/node:latest" if no_image_digest == i
-            else "docker.io/fixture/node@sha256:" + "0" * 64)
+            else "docker.io/fixture/node@" + IMAGE_DIGEST)
         (fx / f"{pod}.metrics").write_text(
             "\n".join(l for l in METRICS.split("\n") if 'subsystem="healthcare"' not in l)
             if metrics_missing == i else METRICS)
@@ -169,7 +183,7 @@ def make_pods(fx: Path, n: int, *, drop_handshake=None, refusal_on=None,
             **({} if status_without_digest == i else {"digest": ACT}),
             "protocol_digest": proto, "chain_id": int(CHAIN),
             "current_height": 1000 + i,  # NONPRODUCTION
-            "gates": [{"gate": g, "height": 5200000, "active": True} for g in (gates or [])]
+            "gates": [{"gate": g, "height": h, "active": True} for g, h in gates.items()]
                      + [{"gate": "x", "height": None, "active": False}]}}))
         lines = [log_line("INFO", "sumchain_p2p::network", f"Local peer ID: {peer(i)}", i == 0)
                  + ("\x1b[0m" if i == 0 else "")]
@@ -177,7 +191,7 @@ def make_pods(fx: Path, n: int, *, drop_handshake=None, refusal_on=None,
             lines.append(log_line("INFO", "sumchain::node",
                                   f"Produced block 0x{'ab' * 32} at height {1000 + i}", i == 0))
         for j in range(n):
-            if j == i or drop_handshake == (i, j):
+            if j == i or drop_handshake == (i, j) or silent == i:
                 continue
             peer_proto = PROTO_OTHER if digest_off == j else PROTO
             if peer_proto == proto:
@@ -238,9 +252,14 @@ def collect(tmp: Path, n: int, *, no_kubectl=False, binary=None, **kw) -> tuple[
 
 
 def run_checker(out: Path, n: int, sha: str = FIXTURE_SHA, *, genesis: str | None = GENESIS,
-                validators: list[str] | None = None) -> tuple[int, str]:
+                validators: list[str] | None = None, commit: str | None = COMMIT,
+                digest: str | None = IMAGE_DIGEST, extra: list[str] | None = None) -> tuple[int, str]:
     args = [sys.executable, str(CHECKER), "--validators", str(n),
-            "--expected-binary-sha256", sha, "--expected-chain-id", CHAIN]
+            "--expected-binary-sha256", sha, "--expected-chain-id", CHAIN] + (extra or [])
+    if commit is not None:
+        args += ["--expected-commit", commit]
+    if digest is not None:
+        args += ["--expected-image-digest", digest]
     for v in (validators if validators is not None else [ident(i) for i in range(n)]):
         args += ["--expected-validator", v]
     if genesis is not None:
@@ -264,11 +283,34 @@ CASES = [
     ("wrong binary sha", 2, {}, "wrong_sha", 1, "BINARY MISMATCH"),
     ("missing binary_sha256 field", 2, {}, "blank_sha", 1, "MISSING FIELD binary_sha256"),
     ("gates_set recorded as a bare count", 2, {}, "gates_count", 1, "gates_set is a count"),
-    ("a non-predating gate set", 2, {"gates": [STRAY_GATE]}, None, 1, "non-predating gate"),
-    # Production's genesis legitimately carries these four; the old count-of-0
-    # rule refused it, pushing an operator towards removing heights.
-    ("production shape: four predating gates set", 2, {"gates": PRODUCTION_PREDATING}, None, 0,
-     "2/2 directed handshakes"),
+    # Production's genesis legitimately carries four predecessor heights; every
+    # complete case above is that shape. The old count-of-0 rule refused it.
+    ("a remediation gate set", 2, {"gates": {**PRODUCTION_PREDECESSORS, STRAY_GATE: 13300000}}, None, 1,
+     "REMEDIATION GATE SET subsystem_proof_unsupported_enabled_from_height=13300000"),
+    ("a predecessor gate missing (wrong genesis)", 2,
+     {"gates": {k: v for k, v in PRODUCTION_PREDECESSORS.items() if not k.startswith("governance")}},
+     None, 1, "MISSING PREDECESSOR GATE governance_enabled_from_height"),
+    ("a predecessor gate at the wrong height", 2,
+     {"gates": {**PRODUCTION_PREDECESSORS, "v2_enabled_from_height": 0}}, None, 1,
+     "PREDECESSOR HEIGHT MISMATCH v2_enabled_from_height=0"),
+    ("no gate set at all", 2, {"gates": {}}, None, 1, "MISSING PREDECESSOR GATE v2_enabled_from_height"),
+    # The same gates in another order is the same set, not a disagreement.
+    ("gates_set listed in another order", 2, {}, "gates_other", 0, "2/2 directed handshakes"),
+    ("gates_set entry without a height", 2, {}, "gates_names", 1, "is not name=height"),
+    ("nonproduction predecessors given explicitly", 2,
+     {"gates": {"v2_enabled_from_height": 0, "education_enabled_from_height": 0}}, "devnet_predecessors", 0,
+     "NOTE: nonproduction predecessor gates"),
+    ("a remediation gate passed off as a predecessor", 2,
+     {"gates": {STRAY_GATE: 0}}, "stray_as_predecessor", 1, "not on GATES_PREDATING_ACTIVATION_RECORDING"),
+    ("wrong release commit", 2, {}, "wrong_commit", 1, "COMMIT MISMATCH"),
+    ("release commit not supplied", 2, {}, "no_commit", 1, "STOP: --expected-commit"),
+    ("wrong image digest", 2, {}, "wrong_digest", 1, "IMAGE MISMATCH"),
+    ("image given by tag, not digest", 2, {}, "tag_digest", 1, "STOP: --expected-image-digest"),
+    ("blank binary_version", 2, {}, "blank_version", 1, "MISSING FIELD binary_version"),
+    ("blank validator_pubkey", 2, {}, "blank_ident", 1, "MISSING FIELD validator_pubkey"),
+    ("blank genesis_sha256", 2, {}, "blank_genesis", 1, "MISSING FIELD genesis_sha256"),
+    ("partial record (truncated)", 2, {}, "truncate", 1, "MISSING FIELD telemetry"),
+    ("silence: a validator logged no handshake", 2, {"silent": 0}, None, 1, "MISSING HANDSHAKE"),
     ("duplicate validator identity", 2, {"dup_ident": 1}, None, 1, "DUPLICATE VALIDATOR IDENTITY"),
     ("unequal genesis hashes", 2, {"genesis_off": 1}, None, 1, "GENESIS DISAGREEMENT"),
     ("production genesis hash not supplied", 2, {}, "no_expected_genesis", 1,
@@ -294,6 +336,9 @@ RECORDER_REFUSALS = [
     ("telemetry series absent", {"metrics_missing": 0}, "telemetry verify failed"),
     ("empty log (no peer ID)", {"empty_log": 0}, "no 'Local peer ID' line"),
     ("no produced block (identity unprovable)", {"no_produced": 0}, "no 'Produced block' line"),
+    ("binary has no --version (0.2.0)", {"no_version": 0}, "cannot report its commit"),
+    ("binary reports a version, not a commit", {"bad_version": 0},
+     "is not 'sumchain <40-hex commit>'"),
 ]
 
 
@@ -309,6 +354,20 @@ def mutate(out: Path, how: str | None) -> None:
         rec.write_text(re.sub(r"(?m)^activation_digest:.*$", "activation_digest: " + "d" * 64, rec.read_text()))
     elif how == "gates_count":
         rec.write_text(re.sub(r"(?m)^gates_set:.*$", "gates_set:         3", rec.read_text()))
+    elif how == "gates_other":
+        rec.write_text(re.sub(r"(?m)^gates_set:.*$",
+                              "gates_set:         " + ",".join(f"{k}={v}" for k, v in
+                                                            reversed(list(PRODUCTION_PREDECESSORS.items()))),
+                              rec.read_text()))
+    elif how == "gates_names":
+        rec.write_text(re.sub(r"(?m)^gates_set:.*$", "gates_set:         " + ",".join(PRODUCTION_PREDECESSORS),
+                              rec.read_text()))
+    elif how in ("blank_version", "blank_ident", "blank_genesis"):
+        key = {"blank_version": "binary_version", "blank_ident": "validator_pubkey",
+               "blank_genesis": "genesis_sha256"}[how]
+        rec.write_text(re.sub(rf"(?m)^{key}:.*$", f"{key}: ", rec.read_text()))
+    elif how == "truncate":
+        rec.write_text("\n".join(rec.read_text().splitlines()[:4]) + "\n")
     elif how == "chain":
         rec.write_text(re.sub(r"(?m)^chain_id:.*$", "chain_id:          7", rec.read_text()))
     elif how == "empty_dir":
@@ -335,6 +394,19 @@ def main() -> int:
                 kw_chk["genesis"] = GENESIS_OTHER
             elif how == "wrong_expected_ident":
                 kw_chk["validators"] = [ident(0), ident(7)]
+            elif how == "wrong_commit":
+                kw_chk["commit"] = OTHER_COMMIT
+            elif how == "no_commit":
+                kw_chk["commit"] = None
+            elif how == "wrong_digest":
+                kw_chk["digest"] = OTHER_DIGEST
+            elif how == "tag_digest":
+                kw_chk["digest"] = "latest"
+            elif how == "devnet_predecessors":
+                kw_chk["extra"] = ["--predecessor-gate", "v2_enabled_from_height=0",
+                                   "--predecessor-gate", "education_enabled_from_height=0"]
+            elif how == "stray_as_predecessor":
+                kw_chk["extra"] = ["--predecessor-gate", f"{STRAY_GATE}=0"]
             code, text = run_checker(out, n, sha, **kw_chk)
             ok = code == want_exit and want_text in text
             print(f"  {'ok  ' if ok else 'FAIL'} {name:34s} expected exit {want_exit}, got {code}")

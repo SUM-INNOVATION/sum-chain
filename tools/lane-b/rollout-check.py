@@ -4,7 +4,11 @@
     python3 tools/lane-b/rollout-check.py \\
         --validators N \\
         --expected-binary-sha256 <sha256 of the release binary file> \\
+        --expected-commit <40-hex release commit> \\
+        --expected-image-digest sha256:<release image registry digest> \\
         --expected-chain-id <chain id> \\
+        --expected-validator <64-hex public key>   (once per validator) \\
+        --expected-genesis-sha256 <sha256 of the PRODUCTION genesis bytes> \\
         <evidence-dir>
 
 `<evidence-dir>` holds, for every validator, the two files `rollout-record.sh`
@@ -23,16 +27,23 @@ admitted, so an absent handshake line means the exchange did not happen, not
 that it passed.
 
 Per validator, required and checked:
-  * binary_sha256      equal to --expected-binary-sha256. The binary cannot
-                       report its own commit (GIT_HASH is unset in every build,
-                       so it logs "Commit: unknown"); the file hash is the only
-                       identity it has.
-  * image_id           present.
+  * binary_sha256      equal to --expected-binary-sha256.
+  * binary_version     exactly "sumchain <--expected-commit>".
+  * image_id           ends in @<--expected-image-digest>.
   * activation_digest  present, not "unavailable", identical on every validator.
   * protocol_digest    present, not "unavailable", identical on every validator.
   * chain_id           equal to --expected-chain-id.
   * current_height     an integer > 0.
-  * gates_set          exactly 0 (stage 1 ships with every gate unset).
+  * gates_set          name=height pairs, EXACTLY the production predecessor
+                       gates at their live heights (PREDECESSOR_GATES, or
+                       --predecessor-gate for a nonproduction network). A
+                       missing one means a genesis that silently disables a
+                       live feature; an extra one is a Stage 1 remediation
+                       height, and Stage 1 sets none.
+  * validator_pubkey   64-hex, proven by possession; distinct; equal as a set
+                       to the --expected-validator values.
+  * genesis_sha256     64-hex; identical on every validator; equal to
+                       --expected-genesis-sha256.
   * local_peer_id      present and distinct across validators; it is how the
                        handshake lines below are attributed to a validator.
   * telemetry          "OK" (wave1-monitor.sh verify passed).
@@ -55,6 +66,7 @@ from pathlib import Path
 
 REQUIRED = (
     "binary_sha256",
+    "binary_version",
     "image_id",
     "activation_digest",
     "protocol_digest",
@@ -75,6 +87,20 @@ REFUSAL = re.compile(
 )
 FIELD = re.compile(r"\b(peer|digest)=(\S+)")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+HEX40 = re.compile(r"^[0-9a-f]{40}$")
+DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+# The four gates production's genesis carries, at the heights live
+# chain_getChainParams reported on 2026-09-23 (docs/operations/
+# stage1-rollout-runbook.md section 2.2(d)). All four passed millions of blocks
+# ago, and all four are on GATES_PREDATING_ACTIVATION_RECORDING. Any other gate
+# with a height is a Stage 1 remediation height, and Stage 1 sets none.
+PREDECESSOR_GATES = {
+    "v2_enabled_from_height": 5_200_000,
+    "omninode_enabled_from_height": 6_000_000,
+    "education_enabled_from_height": 8_900_000,
+    "governance_enabled_from_height": 8_900_000,
+}
 GENESIS_SRC = Path(__file__).resolve().parents[2] / "crates" / "genesis" / "src" / "lib.rs"
 
 
@@ -136,10 +162,34 @@ def handshake_lines(text: str) -> tuple[list[tuple[str, str]], list[str]]:
     return accepted, refusals
 
 
+def parse_gates(gs: str) -> dict[str, int] | str:
+    """{gate: height} from a gates_set field, or an error message."""
+    if gs == "none":
+        return {}
+    if gs.isdigit():
+        return f"gates_set is a count ({gs}); the recorder must list name=height pairs"
+    out: dict[str, int] = {}
+    for item in gs.split(","):
+        name, eq, height = item.partition("=")
+        if not eq or not name or not height.isdigit():
+            return f"gates_set entry {item!r} is not name=height"
+        if name in out:
+            return f"gates_set names {name} twice"
+        out[name] = int(height)
+    return out
+
+
 def check(evidence: Path, n: int, expected_sha: str, expected_chain: str,
           expected_validators: list[str] | None = None,
-          expected_genesis: str | None = None) -> list[str]:
+          expected_genesis: str | None = None,
+          expected_commit: str | None = None,
+          expected_image_digest: str | None = None,
+          predecessors: dict[str, int] | None = None) -> list[str]:
     failures: list[str] = []
+    predecessors = PREDECESSOR_GATES if predecessors is None else predecessors
+    not_predating = sorted(set(predecessors) - predating_gates())
+    if not_predating:
+        return [f"predecessor gate(s) {not_predating} are not on GATES_PREDATING_ACTIVATION_RECORDING"]
     if n < 2:
         return [f"--validators {n}: a handshake needs at least two validators"]
     if not evidence.is_dir():
@@ -175,29 +225,40 @@ def check(evidence: Path, n: int, expected_sha: str, expected_chain: str,
         h = rec.get("current_height", "")
         if h and (not h.isdigit() or int(h) <= 0):
             failures.append(f"{name}: current_height {h!r} is not a height above genesis")
-        # Stage 1 sets no gate of its own. A PREDATING gate may carry a height --
-        # production's genesis carries four -- so the rule is "nothing outside the
-        # predating list", not "nothing at all". The old rule (a count of 0)
-        # would have refused the correct production genesis, and pushed an
-        # operator towards removing heights: the silent consensus split.
+        # Stage 1 sets no gate of its own. The predecessor gates production's
+        # genesis carries must be present, at their live heights: a genesis
+        # missing one starts normally and silently disables a live feature (the
+        # consensus split of runbook section 2.2(d)). Any other gate with a
+        # height is a remediation height, which Stage 1 must not set.
         gs = rec.get("gates_set", "")
         if gs:
-            if gs.isdigit():
-                failures.append(f"{name}: gates_set is a count ({gs}); this recorder "
-                                f"must list gate names so they can be classified")
-            elif gs != "none":
-                stray = sorted(g for g in gs.split(",") if g and g not in predating_gates())
-                if stray:
-                    failures.append(
-                        f"{name}: gates_set includes non-predating gate(s) {stray}; stage 1 "
-                        f"sets no gate outside GATES_PREDATING_ACTIVATION_RECORDING"
-                    )
+            parsed = parse_gates(gs)
+            if isinstance(parsed, str):
+                failures.append(f"{name}: {parsed}")
+            else:
+                for g in sorted(set(predecessors) - set(parsed)):
+                    failures.append(f"{name}: MISSING PREDECESSOR GATE {g} (live height "
+                                    f"{predecessors[g]}); this genesis disables a live feature")
+                for g in sorted(set(parsed) - set(predecessors)):
+                    failures.append(f"{name}: REMEDIATION GATE SET {g}={parsed[g]}; Stage 1 "
+                                    f"sets no height outside the predecessor gates")
+                for g in sorted(set(parsed) & set(predecessors)):
+                    if parsed[g] != predecessors[g]:
+                        failures.append(f"{name}: PREDECESSOR HEIGHT MISMATCH {g}={parsed[g]}, "
+                                        f"live height {predecessors[g]}")
         if rec.get("telemetry") and rec["telemetry"] != "OK":
             failures.append(f"{name}: telemetry is {rec['telemetry']!r}, not OK")
         for key in ("validator_pubkey", "genesis_sha256"):
             v = rec.get(key, "").lower()
             if v and not HEX64.match(v):
                 failures.append(f"{name}: {key} {v!r} is not 64-hex")
+        ver = rec.get("binary_version", "")
+        if ver and expected_commit is not None and ver != f"sumchain {expected_commit.lower()}":
+            failures.append(f"{name}: COMMIT MISMATCH binary_version {ver!r} != "
+                            f"'sumchain {expected_commit.lower()}'")
+        img = rec.get("image_id", "")
+        if img and expected_image_digest is not None and not img.endswith("@" + expected_image_digest.lower()):
+            failures.append(f"{name}: IMAGE MISMATCH image_id {img!r} is not @{expected_image_digest.lower()}")
 
     # The public validator identity, proven by possession: the recorder takes it
     # from a block this workload's own log says it produced. Two records naming
@@ -283,6 +344,10 @@ def main(argv: list[str]) -> int:
                     help="a validator public key, 64-hex; give it once per validator")
     ap.add_argument("--expected-genesis-sha256",
                     help="sha256 of the PRODUCTION genesis bytes, supplied by the owner")
+    ap.add_argument("--expected-commit", help="the 40-hex commit the release image was built from")
+    ap.add_argument("--expected-image-digest", help="sha256:<64-hex> registry digest of the release image")
+    ap.add_argument("--predecessor-gate", action="append", default=None, metavar="NAME=HEIGHT",
+                    help="NONPRODUCTION networks only: replace the production predecessor gates")
     ap.add_argument("evidence", type=Path)
     try:
         args = ap.parse_args(argv)
@@ -298,6 +363,21 @@ def main(argv: list[str]) -> int:
         print("      Stage 1 evidence cannot be complete without it. Do not substitute the")
         print("      hash of any committed or locally generated genesis file.")
         return 1
+    if not args.expected_commit or not HEX40.match(args.expected_commit.lower()):
+        print("STOP: --expected-commit must be the full 40-hex release commit.")
+        return 1
+    if not args.expected_image_digest or not DIGEST.match(args.expected_image_digest.lower()):
+        print("STOP: --expected-image-digest must be the release image's sha256:<64-hex> "
+              "registry digest, never a tag.")
+        return 1
+    predecessors = None
+    if args.predecessor_gate is not None:
+        parsed = parse_gates(",".join(args.predecessor_gate))
+        if isinstance(parsed, str):
+            print(f"usage: --predecessor-gate: {parsed}")
+            return 2
+        predecessors = parsed
+        print(f"NOTE: nonproduction predecessor gates {parsed}; production uses {PREDECESSOR_GATES}.")
     if len(args.expected_validator) != args.validators:
         print(f"STOP: {len(args.expected_validator)} --expected-validator given, "
               f"{args.validators} required -- one public key per validator.")
@@ -306,6 +386,7 @@ def main(argv: list[str]) -> int:
     failures = check(
         args.evidence, args.validators, args.expected_binary_sha256, args.expected_chain_id,
         args.expected_validator, args.expected_genesis_sha256,
+        args.expected_commit, args.expected_image_digest, predecessors,
     )
     for f in failures:
         print(f"FAIL: {f}")
@@ -315,7 +396,8 @@ def main(argv: list[str]) -> int:
     n = args.validators
     print(
         f"STAGE 1 ROLLOUT EVIDENCE COMPLETE: {n} validators with the expected public "
-        f"identities, identical binary, genesis, digests and chain id, "
+        f"identities, release commit, image digest, identical binary, genesis, "
+        f"predecessor gates, digests and chain id, "
         f"{n * (n - 1)}/{n * (n - 1)} directed handshakes, 0 refusals."
     )
     return 0
