@@ -1522,7 +1522,10 @@ mod health_wiring_tests {
             let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             l.local_addr().unwrap()
         };
-        let mut handle = super::health_server(health, metrics).start(addr).await.unwrap();
+        let mut handle = super::health_server(health, metrics)
+            .start(addr)
+            .await
+            .unwrap();
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         stream
             .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
@@ -1531,7 +1534,11 @@ mod health_wiring_tests {
         let mut buf = Vec::new();
         stream.read_to_end(&mut buf).await.unwrap();
         let text = String::from_utf8_lossy(&buf);
-        assert!(text.starts_with("HTTP/1.1 200"), "{}", text.lines().next().unwrap_or(""));
+        assert!(
+            text.starts_with("HTTP/1.1 200"),
+            "{}",
+            text.lines().next().unwrap_or("")
+        );
         assert!(
             text.contains("# TYPE sumchain_tx_execution_errors_total counter"),
             "the execution-error family is missing from /metrics"
@@ -1541,7 +1548,10 @@ mod health_wiring_tests {
         // subsystem from the closed table.
         let family = "sumchain_tx_execution_errors_total{";
         let samples: Vec<&str> = text.lines().filter(|l| l.starts_with(family)).collect();
-        assert!(!samples.is_empty(), "the family declares a type but emits no samples");
+        assert!(
+            !samples.is_empty(),
+            "the family declares a type but emits no samples"
+        );
         for line in &samples {
             let labels = &line[family.len()..line.find('}').expect("unterminated labels")];
             let (subsystem, code) = labels
@@ -1553,7 +1563,10 @@ mod health_wiring_tests {
                 sumchain_primitives::tx_error_metrics::SUBSYSTEMS.contains(&subsystem),
                 "subsystem {subsystem:?} is outside the closed table: {line}"
             );
-            assert!(!code.contains('"') && !code.contains(','), "a third label: {line}");
+            assert!(
+                !code.contains('"') && !code.contains(','),
+                "a third label: {line}"
+            );
         }
 
         // All nine Wave 1 subsystems appear, under the codes the operator's
@@ -1566,7 +1579,12 @@ mod health_wiring_tests {
             .and_then(|l| l.strip_suffix('\''))
             .expect("WAVE1 list in wave1-monitor.sh");
         let pairs: Vec<&str> = wave1.split_whitespace().collect();
-        assert_eq!(pairs.len(), 9, "the monitor names {} Wave 1 subsystems", pairs.len());
+        assert_eq!(
+            pairs.len(),
+            9,
+            "the monitor names {} Wave 1 subsystems",
+            pairs.len()
+        );
         for pair in pairs {
             let (subsystem, code) = pair.split_once(':').unwrap();
             let series = format!("{family}subsystem=\"{subsystem}\",code=\"{code}\"}}");
@@ -1592,7 +1610,10 @@ mod health_wiring_tests {
             .filter(|l| !l.trim_start().starts_with("//"))
             .filter(|l| l.contains("HealthServer::new("))
             .count();
-        assert_eq!(calls, 0, "node.rs builds a HealthServer without a metrics provider");
+        assert_eq!(
+            calls, 0,
+            "node.rs builds a HealthServer without a metrics provider"
+        );
     }
 
     /// The single-validator readiness predicate: a fresh validator (started at
