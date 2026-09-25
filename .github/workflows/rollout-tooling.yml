@@ -1,0 +1,66 @@
+name: rollout-tooling
+
+# The Stage 1 rollout tooling and the repository hygiene rules, on every PR.
+# None of these build the workspace; they run in seconds.
+#   * rollout evidence recorder + checker (fixture battery)
+#   * rollback preflight recorder + checker (fixture battery)
+#   * wave1-monitor.sh (fixture battery)
+#   * scrape configuration points at the port /metrics is served on
+#   * no activation height baked into tracked genesis
+#   * git diff --check, no AI attribution in commit messages, clean tree
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tooling:
+    name: rollout tooling and hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rollout evidence recorder and checker
+        run: python3 tools/lane-b/rollout-check-test.py
+
+      - name: Rollback preflight recorder and checker
+        run: python3 tools/lane-b/rollout-preflight-test.py
+
+      - name: Wave 1 monitor
+        run: bash tools/lane-b/wave1-monitor-test.sh
+
+      - name: Scrape configuration targets the /metrics port
+        run: python3 tools/lane-b/metrics-endpoint-test.py
+
+      - name: No activation height baked into tracked genesis
+        run: python3 tools/release/check-genesis-gates.py --commit "$(git rev-parse HEAD)"
+
+      - name: git diff --check over the change
+        run: |
+          base=${{ github.event.pull_request.base.sha || github.event.before }}
+          if [[ -z $base || $base =~ ^0+$ ]]; then base=$(git rev-parse HEAD~1); fi
+          git diff --check "$base" HEAD
+
+      - name: No AI attribution in commit messages
+        run: |
+          set -euo pipefail
+          base=${{ github.event.pull_request.base.sha || github.event.before }}
+          if [[ -z $base || $base =~ ^0+$ ]]; then base=$(git rev-parse HEAD~1); fi
+          # Merge commits GitHub creates for the PR checkout are excluded.
+          hits=$(git log --no-merges --format='%H%n%B' "$base..${{ github.event.pull_request.head.sha || github.sha }}" \
+            | grep -inE 'co-authored-by|claude|generated (with|by)|anthropic|chatgpt|copilot' || true)
+          [[ -z $hits ]] || { echo "::error::attribution found:"; echo "$hits"; exit 1; }
+          echo "attribution: 0"
+
+      - name: The tree is clean after every check
+        run: |
+          git status --porcelain
+          [[ -z $(git status --porcelain) ]]
