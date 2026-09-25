@@ -1,9 +1,12 @@
 name: docker-image
 
-# Builds the REAL release image from the Dockerfile and proves the binary
-# inside it reports the exact commit it was built from. Nothing is pushed:
-# there is no registry login and no push step, and the job holds read-only
-# repository permission.
+# Builds the REAL release image from the Dockerfile, exactly as the release
+# workflow does (buildx, --locked, GIT_HASH, SBOM and SLSA provenance), and
+# proves it with the same tools the release uses: tools/release/verify-image.sh
+# and tools/release/smoke-image.sh. The only registry is a throwaway
+# `registry:2` service container on the runner's localhost; nothing leaves the
+# runner. There is no registry login, and the job holds read-only repository
+# permission.
 #
 # Why this exists: until it did, the only release-profile build of the node
 # ran inside health-e2e and was discarded, it used a different compiler from
@@ -22,6 +25,9 @@ on:
       - 'rust-toolchain.toml'
       - 'crates/**'
       - 'scripts/**'
+      - 'genesis/**'
+      - 'tools/release/**'
+      - 'tools/lane-b/wave1-monitor.sh'
       - '.github/workflows/docker-image.yml'
   push:
     branches: [main]
@@ -34,7 +40,14 @@ jobs:
   build-and-identify:
     name: release image reports its commit
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
+    services:
+      registry:
+        image: registry:2
+        ports: ['5000:5000']
+    env:
+      IMAGE: localhost:5000/sum-chain
+      PLATFORM: linux/amd64
     steps:
       - uses: actions/checkout@v4
 
@@ -44,22 +57,66 @@ jobs:
         id: commit
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Build the release image (no push)
+      # network=host so the BuildKit container can push to the runner's localhost.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
+
+      - name: Build the release image, push to the local registry only
+        id: build
         run: |
-          docker build \
-            --build-arg GIT_HASH=${{ steps.commit.outputs.sha }} \
-            -t sumchain-node:ci-${{ steps.commit.outputs.sha }} .
+          set -euo pipefail
+          sha="${{ steps.commit.outputs.sha }}"
+          docker buildx build --platform "$PLATFORM" \
+            --build-arg GIT_HASH="$sha" \
+            --label org.opencontainers.image.revision="$sha" \
+            --sbom=true --provenance=mode=max \
+            --metadata-file meta.json \
+            -t "$IMAGE:ci-$sha" --push .
+          digest=$(jq -r '."containerimage.digest"' meta.json)
+          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest in build metadata"; cat meta.json; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: verify-image.sh accepts the image (digest, platform, commit, SBOM, provenance, genesis)
+        run: |
+          bash tools/release/verify-image.sh --image "$IMAGE" --tag "ci-${{ steps.commit.outputs.sha }}" \
+            --digest "${{ steps.build.outputs.digest }}" --commit "${{ steps.commit.outputs.sha }}" \
+            --platform "$PLATFORM"
 
       - name: The running binary reports the exact commit
         run: |
           set -euo pipefail
           want="${{ steps.commit.outputs.sha }}"
-          got="$(docker run --rm sumchain-node:ci-$want --version)"
+          ref="$IMAGE@${{ steps.build.outputs.digest }}"
+          got="$(docker run --rm "$ref" --version)"
           echo "--version: $got"
           [ "$got" = "sumchain $want" ] \
             || { echo "::error::image reports '$got', expected 'sumchain $want'"; exit 1; }
-          short="$(docker run --rm sumchain-node:ci-$want -V)"
+          short="$(docker run --rm "$ref" -V)"
           echo "-V: $short"
+
+      - name: Smoke test -- /health, /ready and a complete /metrics
+        run: bash tools/release/smoke-image.sh "$IMAGE@${{ steps.build.outputs.digest }}"
+
+      - name: verify-image.sh refuses a wrong commit, a wrong platform and a moved tag
+        run: |
+          set -uo pipefail
+          sha="${{ steps.commit.outputs.sha }}"; digest="${{ steps.build.outputs.digest }}"
+          must_fail() {  # name, expected text, args...
+            local name=$1 text=$2; shift 2
+            if out=$(bash tools/release/verify-image.sh "$@" 2>&1); then
+              echo "::error::$name: verify-image.sh passed"; echo "$out"; exit 1
+            fi
+            grep -q -- "$text" <<<"$out" || { echo "::error::$name: refused, but not for '$text'"; echo "$out"; exit 1; }
+            echo "refused as required: $name"
+          }
+          base=(--image "$IMAGE" --tag "ci-$sha" --digest "$digest")
+          must_fail "wrong commit"   "COMMIT:"   "${base[@]}" --commit "$(printf '%040d' 0)" --platform "$PLATFORM"
+          must_fail "wrong platform" "PLATFORM:" "${base[@]}" --commit "$sha" --platform linux/arm64
+          must_fail "latest tag"     "never a release tag" --image "$IMAGE" --tag latest --digest "$digest" --commit "$sha" --platform "$PLATFORM"
+          # Move the tag to a different image, then verify against the recorded digest.
+          printf 'FROM scratch\nLABEL drift=1\n' | docker buildx build --push -t "$IMAGE:ci-$sha" -
+          must_fail "tag drift"      "TAG DRIFT" "${base[@]}" --commit "$sha" --platform "$PLATFORM"
 
       - name: The build refuses without a commit
         run: |
@@ -71,8 +128,9 @@ jobs:
             || { echo "::error::refused, but not for the GIT_HASH reason"; tail -20 build-nohash.log; exit 1; }
           echo "refused as required"
 
-      - name: Record the image identity (local only)
+      - name: Record the image identity (local registry only)
         run: |
-          want="${{ steps.commit.outputs.sha }}"
-          docker image inspect sumchain-node:ci-$want \
-            --format 'image id {{.Id}}  created {{.Created}}  arch {{.Architecture}}'
+          ref="$IMAGE@${{ steps.build.outputs.digest }}"
+          echo "digest ${{ steps.build.outputs.digest }} (localhost registry; not published)"
+          docker image inspect "$ref" --format 'image id {{.Id}}  created {{.Created}}  arch {{.Architecture}}'
+          docker run --rm --entrypoint sha256sum "$ref" /usr/local/bin/sumchain

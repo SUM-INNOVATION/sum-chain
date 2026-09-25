@@ -1,5 +1,11 @@
 # Stage 1 release artifact — merged `main` @ `8954b0d0ace726ab9491cac8a7757f11158c3d1a`
 
+> **Historical record of `8954b0d`.** Since then: PR #259 pinned the Dockerfile
+> to Rust 1.88.0 with `--locked` and made the binary report its commit; the
+> release procedure, the GHCR release workflow and the verification tooling are
+> in [release-image.md](release-image.md). The "none" rows below describe
+> `8954b0d` and are kept as they were found.
+
 This records what the release candidate for Stage 1 is, what CI did and did not
 produce for it, and how anyone can re-derive every value here without trusting
 this file. Every field has the command that re-derives it. Investigation date:
