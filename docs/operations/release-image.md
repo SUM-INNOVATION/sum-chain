@@ -39,7 +39,9 @@ of these hold:
 5. It runs `tools/release/smoke-image.sh` against the pushed digest (§3).
 6. It creates a GitHub artifact attestation, `actions/attest-build-provenance`,
    and pushes it to the registry.
-7. It runs `verify-image.sh --require-github-attestation`, then records the
+7. It runs `verify-image.sh --require-github-attestation` on the pushed
+   digest. The attestation must have been signed by this workflow on
+   `refs/heads/main` (§2a). Then it records the
    release: commit, PR, platform, `image@digest`, the sha256 of
    `/usr/local/bin/sumchain`, and the run URL. The record goes into the job
    summary and an artifact, together with the SBOM and the build metadata.
@@ -97,7 +99,7 @@ A publication authorization should name that confirmed state.
 ```bash
 bash tools/release/verify-image.sh --image ghcr.io/sum-innovation/sum-chain \
   --tag <commit>-amd64 --digest sha256:<digest> --commit <commit> --platform linux/amd64 \
-  [--require-github-attestation SUM-INNOVATION/sum-chain]
+  [--require-github-attestation]
 ```
 
 Every check fails closed:
@@ -110,7 +112,66 @@ Every check fails closed:
 6. **Genesis:** the image must contain no genesis file, and no tracked genesis
    at the commit may set a gate outside `GATES_PREDATING_ACTIVATION_RECORDING`
    (`tools/release/check-genesis-gates.py`).
-7. **Attestation (optional):** `gh attestation verify` must pass.
+7. **Attestation (with `--require-github-attestation`):** under the fixed
+   release policy of §2a.
+
+### 2a. Attestation policy (`tools/release/verify-attestation.sh`)
+
+An image is accepted only if its GitHub artifact attestation, looked up for
+the **digest**, was signed by exactly this repository's release workflow
+running from `main`. The policy is a set of read-only constants in the script,
+not arguments: a caller cannot pass another workflow, branch or repository,
+and environment variables do not override it.
+
+| rule | how |
+|---|---|
+| subject is the immutable digest | `gh attestation verify oci://<repo>@sha256:<digest>`. A tag, or a repository reference carrying one, is refused before `gh` runs. |
+| linked repository | `--repo SUM-INNOVATION/sum-chain` |
+| signer workflow **and** the ref it ran from | `--cert-identity https://github.com/SUM-INNOVATION/sum-chain/.github/workflows/release-image.yml@refs/heads/main`: an exact match on the signing certificate's identity |
+| source ref | `--source-ref refs/heads/main` |
+| GitHub-hosted runner | `--deny-self-hosted-runners` |
+| re-checked on the result | every attestation `gh` returns must carry that exact `subjectAlternativeName` and `buildSignerURI`, `sourceRepositoryRef` `refs/heads/main`, `sourceRepositoryURI` `https://github.com/SUM-INNOVATION/sum-chain`, and name the digest as a subject |
+
+**Why `--cert-identity` and not `--signer-workflow`.** In gh 2.100.0,
+`--signer-workflow` becomes the regular expression
+`^https://github.com/<repo>/<path>`, which has no end anchor. As a result,
+`.github/workflows/release-image.yml` also matches
+`.github/workflows/release-image.yml-other.yml`, at any ref. That comes from
+`validateSignerWorkflow` in `pkg/cmd/attestation/verify/policy.go`. The two
+flags are also mutually exclusive in `gh`. `--cert-identity` names the
+workflow file and its ref exactly.
+
+`tools/release/verify-attestation-test.sh` (29 cases) tests two layers
+independently, using a recording `gh` stub:
+- the flags `gh` is asked to enforce;
+- the script's own check of `gh`'s result: another workflow, a prefix-named
+  workflow, another branch, a fork, another digest, a mixed result, or no
+  attestation.
+
+It also checks the wiring: `release-image.yml` verifies the digest after
+attesting it, and `verify-image.sh` passes the digest, never the tag.
+
+### 2b. Threat model: two controls, two different attackers
+
+* **The `release` environment** (required reviewer Mike-Mans, self-review
+  prevented, admin bypass off, deployments from `main` only) controls **the
+  approved workflow**. `release-image.yml`'s publish job cannot run without
+  that approval, and cannot run from another branch.
+* **It does not control other workflows.** Anyone with write access can push
+  a branch carrying a *new* workflow that grants itself `packages: write` and
+  pushes to `ghcr.io/sum-innovation/sum-chain`. Environment protection covers
+  only jobs that name the environment. Such an image may even reuse a
+  legitimate-looking tag.
+* **Consumer-side attestation verification closes that gap for anyone who
+  runs it.** An image pushed by another workflow has either no attestation,
+  or one signed by that workflow or branch. §2a rejects both. So a rollout
+  must take its image digest from a release record, and must pass
+  `verify-image.sh --require-github-attestation` on that digest before the
+  digest goes into any manifest. A digest that fails is not a release, whatever
+  its tag says.
+* **Out of scope:** a compromise of `main` itself, such as a malicious change
+  to `release-image.yml` that passes review, or of GitHub's signing
+  infrastructure.
 
 `docker-image.yml` runs the same script on every relevant PR and `main` push,
 against a throwaway `registry:2` on the runner. It also requires the script
