@@ -760,8 +760,13 @@ impl Node {
             consensus_clone.run_block_producer().await;
         });
 
-        // Main event loop
-        info!("Node running. Press Ctrl+C to stop.");
+        // Main event loop. SIGINT and SIGTERM both end it, through the one
+        // graceful shutdown sequence below. SIGTERM is what systemd, Docker and
+        // Kubernetes send to stop a service; before it was handled, every such
+        // stop waited out the stop timeout and ended in SIGKILL, with no flush.
+        let shutdown = shutdown_signal();
+        tokio::pin!(shutdown);
+        info!("Node running. Stop with SIGINT (Ctrl+C) or SIGTERM.");
 
         loop {
             tokio::select! {
@@ -1191,8 +1196,8 @@ impl Node {
                 }
 
                 // Handle shutdown signal
-                _ = tokio::signal::ctrl_c() => {
-                    info!("Shutdown signal received");
+                signal = &mut shutdown => {
+                    info!("Shutdown signal received ({signal})");
                     break;
                 }
             }
@@ -1418,6 +1423,33 @@ fn single_validator_synced(
 /// devnet.
 fn health_server(health_check: Arc<HealthCheck>, metrics: Arc<Metrics>) -> HealthServer {
     HealthServer::with_metrics(health_check, Arc::new(move || metrics.snapshot()))
+}
+
+/// Resolves when the process is asked to stop, naming the signal: SIGINT
+/// (Ctrl+C) or, on Unix, SIGTERM. Both lead to the same graceful shutdown.
+async fn shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => "SIGINT",
+                    _ = term.recv() => "SIGTERM",
+                }
+            }
+            Err(e) => {
+                warn!("Cannot listen for SIGTERM ({e}); only SIGINT will stop the node gracefully");
+                let _ = tokio::signal::ctrl_c().await;
+                "SIGINT"
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "SIGINT"
+    }
 }
 
 /// Run both shutdown steps, health first, so a failing RPC shutdown can never
