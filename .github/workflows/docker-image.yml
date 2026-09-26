@@ -1,18 +1,25 @@
 name: docker-image
 
-# Builds the REAL release image from the Dockerfile, exactly as the release
-# workflow does (buildx, --locked, GIT_HASH, SBOM and SLSA provenance), and
-# proves it with the same tools the release uses: tools/release/verify-image.sh
-# and tools/release/smoke-image.sh. The only registry is a throwaway
-# `registry:2` service container on the runner's localhost; nothing leaves the
-# runner. There is no registry login, and the job holds read-only repository
-# permission.
+# Builds the REAL release image for BOTH Linux platforms, exactly as
+# release-image.yml does, and proves it with the same tools, end to end:
 #
-# Why this exists: until it did, the only release-profile build of the node
-# ran inside health-e2e and was discarded, it used a different compiler from
-# the one every test ran on, and the binary reported `Commit: unknown`. A
-# release artifact that cannot be tied to its commit cannot be verified
-# against a rollout record.
+#   build            one native job per platform (ubuntu-24.04, ubuntu-24.04-arm)
+#                    runs tools/release/build-child.sh: pinned Dockerfile,
+#                    --locked, GIT_HASH, --version and smoke test, OCI layout
+#                    with SBOM and SLSA v1 provenance.
+#   assemble-verify  one native job per platform. Each pushes both layouts BY
+#                    DIGEST into a throwaway `registry:2` service on its own
+#                    runner, joins them into the canonical index with
+#                    tools/release/oci.py, verifies the index, both children,
+#                    SBOMs and provenance with tools/release/verify-release.py,
+#                    and runs its own platform's child, pulled by digest, with
+#                    tools/release/verify-child-runtime.sh. The amd64 leg also
+#                    requires the tools to refuse a missing platform, a
+#                    substituted child, latest, and a moved tag, against the
+#                    real registry.
+#
+# Nothing leaves the runners: the only registry is on localhost, there is no
+# registry login, and every job holds read-only repository permission.
 
 on:
   pull_request:
@@ -37,17 +44,16 @@ permissions:
   contents: read
 
 jobs:
-  build-and-identify:
-    name: release image reports its commit
-    runs-on: ubuntu-latest
-    timeout-minutes: 75
-    services:
-      registry:
-        image: registry:2
-        ports: ['5000:5000']
-    env:
-      IMAGE: localhost:5000/sum-chain
-      PLATFORM: linux/amd64
+  build:
+    name: release image ${{ matrix.platform }} reports its commit
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux/amd64, arch: amd64, runner: ubuntu-24.04 }
+          - { platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v4
 
@@ -57,68 +63,15 @@ jobs:
         id: commit
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      # network=host so the BuildKit container can push to the runner's localhost.
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        with:
-          driver-opts: network=host
 
-      - name: Build the release image, push to the local registry only
-        id: build
-        run: |
-          set -euo pipefail
-          sha="${{ steps.commit.outputs.sha }}"
-          docker buildx build --platform "$PLATFORM" \
-            --build-arg GIT_HASH="$sha" \
-            --label org.opencontainers.image.revision="$sha" \
-            --sbom=true --provenance=mode=max \
-            --metadata-file meta.json \
-            -t "$IMAGE:ci-$sha" --push .
-          digest=$(jq -r '."containerimage.digest"' meta.json)
-          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest in build metadata"; cat meta.json; exit 1; }
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-
-      - name: verify-image.sh accepts the image (digest, platform, commit, SBOM, provenance, genesis)
-        run: |
-          bash tools/release/verify-image.sh --image "$IMAGE" --tag "ci-${{ steps.commit.outputs.sha }}" \
-            --digest "${{ steps.build.outputs.digest }}" --commit "${{ steps.commit.outputs.sha }}" \
-            --platform "$PLATFORM"
-
-      - name: The running binary reports the exact commit
-        run: |
-          set -euo pipefail
-          want="${{ steps.commit.outputs.sha }}"
-          ref="$IMAGE@${{ steps.build.outputs.digest }}"
-          got="$(docker run --rm "$ref" --version)"
-          echo "--version: $got"
-          [ "$got" = "sumchain $want" ] \
-            || { echo "::error::image reports '$got', expected 'sumchain $want'"; exit 1; }
-          short="$(docker run --rm "$ref" -V)"
-          echo "-V: $short"
-
-      - name: Smoke test -- /health, /ready and a complete /metrics
-        run: bash tools/release/smoke-image.sh "$IMAGE@${{ steps.build.outputs.digest }}"
-
-      - name: verify-image.sh refuses a wrong commit, a wrong platform and a moved tag
-        run: |
-          set -uo pipefail
-          sha="${{ steps.commit.outputs.sha }}"; digest="${{ steps.build.outputs.digest }}"
-          must_fail() {  # name, expected text, args...
-            local name=$1 text=$2; shift 2
-            if out=$(bash tools/release/verify-image.sh "$@" 2>&1); then
-              echo "::error::$name: verify-image.sh passed"; echo "$out"; exit 1
-            fi
-            grep -q -- "$text" <<<"$out" || { echo "::error::$name: refused, but not for '$text'"; echo "$out"; exit 1; }
-            echo "refused as required: $name"
-          }
-          base=(--image "$IMAGE" --tag "ci-$sha" --digest "$digest")
-          must_fail "wrong commit"   "COMMIT:"   "${base[@]}" --commit "$(printf '%040d' 0)" --platform "$PLATFORM"
-          must_fail "wrong platform" "PLATFORM:" "${base[@]}" --commit "$sha" --platform linux/arm64
-          must_fail "latest tag"     "never a release tag" --image "$IMAGE" --tag latest --digest "$digest" --commit "$sha" --platform "$PLATFORM"
-          # Move the tag to a different image, then verify against the recorded digest.
-          printf 'FROM scratch\nLABEL drift=1\n' | docker buildx build --push -t "$IMAGE:ci-$sha" -
-          must_fail "tag drift"      "TAG DRIFT" "${base[@]}" --commit "$sha" --platform "$PLATFORM"
+      - name: Build, smoke-test and export ${{ matrix.platform }}
+        run: >-
+          bash tools/release/build-child.sh "${{ matrix.platform }}" "${{ steps.commit.outputs.sha }}"
+          "$RUNNER_TEMP/out" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
       - name: The build refuses without a commit
+        if: matrix.platform == 'linux/amd64'
         run: |
           set -uo pipefail
           if docker build -t sumchain-node:ci-nohash . >build-nohash.log 2>&1; then
@@ -126,11 +79,116 @@ jobs:
           fi
           grep -q 'GIT_HASH must be the full 40-hex commit' build-nohash.log \
             || { echo "::error::refused, but not for the GIT_HASH reason"; tail -20 build-nohash.log; exit 1; }
+          rm -f build-nohash.log
           echo "refused as required"
 
-      - name: Record the image identity (local registry only)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: child-${{ matrix.arch }}
+          path: ${{ runner.temp }}/out/
+          retention-days: 3
+          if-no-files-found: error
+
+  assemble-verify:
+    name: canonical index verified, ${{ matrix.platform }} child run by digest
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux/amd64, arch: amd64, runner: ubuntu-24.04 }
+          - { platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
+    services:
+      registry:
+        image: registry:2
+        ports: ['5000:5000']
+    env:
+      IMAGE: localhost:5000/sum-chain
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Commit being built
+        id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: child-*
+          path: ${{ runner.temp }}/in
+
+      - name: Push both children by digest, join them under the commit tag
+        id: join
         run: |
-          ref="$IMAGE@${{ steps.build.outputs.digest }}"
-          echo "digest ${{ steps.build.outputs.digest }} (localhost registry; not published)"
-          docker image inspect "$ref" --format 'image id {{.Id}}  created {{.Created}}  arch {{.Architecture}}'
-          docker run --rm --entrypoint sha256sum "$ref" /usr/local/bin/sumchain
+          set -euo pipefail
+          c="${{ steps.commit.outputs.sha }}"
+          for arch in amd64 arm64; do
+            in="$RUNNER_TEMP/in/child-$arch"
+            python3 tools/release/oci.py push-layout "$in/child-$arch.tar" "$IMAGE" \
+              --platform "linux/$arch" --commit "$c" > "$RUNNER_TEMP/pushed-$arch.json"
+            cmp <(jq -S . "$in/child-$arch.json") <(jq -S . "$RUNNER_TEMP/pushed-$arch.json")
+            echo "$arch=$(jq -r .image "$RUNNER_TEMP/pushed-$arch.json")" >> "$GITHUB_OUTPUT"
+            echo "${arch}_index=$(jq -r .child_index "$RUNNER_TEMP/pushed-$arch.json")" >> "$GITHUB_OUTPUT"
+          done
+          python3 tools/release/oci.py absent "$IMAGE" "$c"
+          d=$(python3 tools/release/oci.py assemble "$IMAGE" --tag "$c" \
+                "$(jq -r .child_index "$RUNNER_TEMP/pushed-amd64.json")" \
+                "$(jq -r .child_index "$RUNNER_TEMP/pushed-arm64.json")")
+          echo "digest=$d" >> "$GITHUB_OUTPUT"
+          echo "canonical index $d"
+
+      - name: verify-release.py accepts the index, both children, SBOMs and provenance
+        run: >-
+          python3 tools/release/verify-release.py --mode ci --image "$IMAGE" --commit "${{ steps.commit.outputs.sha }}"
+          --digest "${{ steps.join.outputs.digest }}"
+          --child "linux/amd64=${{ steps.join.outputs.amd64 }}" --child "linux/arm64=${{ steps.join.outputs.arm64 }}"
+          --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          --summary "$RUNNER_TEMP/verify-release.json"
+
+      - name: Run the ${{ matrix.platform }} child pulled by digest
+        run: |
+          set -euo pipefail
+          child=$([[ "${{ matrix.arch }}" == amd64 ]] && echo "${{ steps.join.outputs.amd64 }}" || echo "${{ steps.join.outputs.arm64 }}")
+          bash tools/release/verify-child-runtime.sh "$IMAGE" "$child" "${{ steps.commit.outputs.sha }}" "${{ matrix.platform }}" \
+            | tee "$RUNNER_TEMP/runtime.json"
+          built=$(cat "$RUNNER_TEMP/in/child-${{ matrix.arch }}/binary-${{ matrix.arch }}.sha256")
+          [[ $(jq -r .binary_sha256 "$RUNNER_TEMP/runtime.json") == "$built" ]] \
+            || { echo "::error::the pulled binary differs from the built one"; exit 1; }
+          jq -r '.children | to_entries[] | "\(.key) \(.value.digest) sbom \(.value.sboms[0].spdxVersion) \(.value.sboms[0].packages) packages; provenance \(.value.provenance.predicateType) builder \(.value.provenance.builder) vcs \(.value.provenance.vcs_revision)"' \
+            "$RUNNER_TEMP/verify-release.json"
+
+      - name: The tools refuse a missing platform, a substituted child, latest and a moved tag
+        if: matrix.platform == 'linux/amd64'
+        run: |
+          set -uo pipefail
+          c="${{ steps.commit.outputs.sha }}"; d="${{ steps.join.outputs.digest }}"
+          a="${{ steps.join.outputs.amd64 }}"; r="${{ steps.join.outputs.arm64 }}"
+          must_fail() {  # name, expected text, command...
+            local name=$1 text=$2; shift 2
+            if out=$("$@" 2>&1); then echo "::error::$name: accepted"; echo "$out"; exit 1; fi
+            grep -q -- "$text" <<<"$out" || { echo "::error::$name: refused, but not for '$text'"; echo "$out"; exit 1; }
+            echo "refused as required: $name"
+          }
+          v=(python3 tools/release/verify-release.py --mode ci --image "$IMAGE" --commit "$c"
+             --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")
+          must_fail "the tag already exists" "already exists" \
+            python3 tools/release/oci.py assemble "$IMAGE" --tag "$c" "${{ steps.join.outputs.amd64_index }}" "${{ steps.join.outputs.arm64_index }}"
+          must_fail "a release missing linux/arm64" "joins exactly" \
+            python3 tools/release/oci.py assemble "$IMAGE" --tag "$(printf '%040d' 1)" "${{ steps.join.outputs.amd64_index }}"
+          must_fail "latest" "never 'latest'" \
+            python3 tools/release/oci.py assemble "$IMAGE" --tag latest "${{ steps.join.outputs.amd64_index }}" "${{ steps.join.outputs.arm64_index }}"
+          must_fail "a substituted linux/arm64 child" "SUBSTITUTED CHILD" \
+            "${v[@]}" --digest "$d" --child "linux/amd64=$a" --child "linux/arm64=sha256:$(printf '%064d' 0)"
+          must_fail "verification by tag instead of digest" "a tag is never verified" \
+            "${v[@]}" --digest "$c" --child "linux/amd64=$a" --child "linux/arm64=$r"
+          must_fail "a runtime check of the wrong platform's child" "the pulled image is linux/arm64" \
+            bash tools/release/verify-child-runtime.sh "$IMAGE" "$r" "$c" linux/amd64
+          # Move the tag to a different index (the same children, one fewer
+          # attestation descriptor), then verify against the recorded digest.
+          python3 tools/release/oci.py manifest "$IMAGE@$d" \
+            | jq -c 'del(.manifests[-1])' > "$RUNNER_TEMP/moved.json"
+          curl -fsS -X PUT -H 'Content-Type: application/vnd.oci.image.index.v1+json' \
+            --data-binary @"$RUNNER_TEMP/moved.json" "http://localhost:5000/v2/sum-chain/manifests/$c" >/dev/null
+          must_fail "a moved tag" "TAG MOVED" \
+            "${v[@]}" --digest "$d" --child "linux/amd64=$a" --child "linux/arm64=$r"
