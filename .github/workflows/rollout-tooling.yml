@@ -7,6 +7,7 @@ name: rollout-tooling
 #   * wave1-monitor.sh (fixture battery)
 #   * release attestation policy (verify-attestation.sh, fixture battery)
 #   * native release archives, installer and workflow structure
+#   * native systemd preflight (checker, and recorder on Linux)
 #   * scrape configuration points at the port /metrics is served on
 #   * no activation height baked into tracked genesis
 #   * git diff --check, no AI attribution in commit messages, clean tree
@@ -50,6 +51,16 @@ jobs:
 
       - name: Native release workflow structure
         run: python3 tools/release/release-native-workflow-test.py
+
+      - name: Native systemd preflight (checker and recorder)
+        run: python3 tools/lane-b/native-preflight-test.py
+
+      - name: No shipped unit relies on KillSignal=SIGINT
+        run: |
+          if grep -rniE '^\s*KillSignal\s*=\s*(SIGINT|INT|2)\b' deploy/; then
+            echo "::error::a shipped unit sets KillSignal=SIGINT; the node handles SIGTERM"; exit 1
+          fi
+          echo "ok: no KillSignal override"
 
       - name: No activation height baked into tracked genesis
         run: python3 tools/release/check-genesis-gates.py --commit "$(git rev-parse HEAD)"
