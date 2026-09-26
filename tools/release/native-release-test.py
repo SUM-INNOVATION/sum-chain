@@ -50,7 +50,10 @@ def fake_binary(triple: str, name: str, commit: str = COMMIT, machine: int | Non
     # wrapper; the installer's `--version` call goes through PATH-free execution of the file
     # itself, which the test makes possible with a binfmt-free trick: the script body is
     # kept separately (see Fixture.script) and the archive carries header + body.
-    body = f"#!/bin/sh\n[ \"$1\" = --version ] && echo 'sumchain {commit}' && exit 0\necho '{name}'\n".encode()
+    # The triple is part of the body, so the two architectures' binaries always
+    # hash differently (an installer that picked the wrong one must be caught).
+    body = (f"#!/bin/sh\n# {triple}\n[ \"$1\" = --version ] && echo 'sumchain {commit}' && exit 0\n"
+            f"echo '{name}'\n").encode()
     return header + b"\n" + body
 
 
