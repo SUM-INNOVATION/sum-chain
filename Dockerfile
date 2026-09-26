@@ -73,6 +73,12 @@ COPY scripts scripts
 # `--locked`: refuse to build if Cargo.lock would change, rather than silently
 # resolving different dependency versions than the ones CI tested and audited.
 #
+# The dependency pre-build above runs without --locked and may rewrite
+# Cargo.lock inside the image; `--locked` below would then hold to the
+# rewritten file. Restore the committed manifest and lockfile first, so the
+# release binary is built from exactly the dependencies in the commit.
+COPY Cargo.toml Cargo.lock ./
+
 # GIT_HASH is REQUIRED, and must be the full 40-hex commit being built. It is
 # read at COMPILE time by `option_env!` (crates/node/src/main.rs) and reported
 # by `sumchain --version`, which is how an operator identifies a running binary.
@@ -91,7 +97,10 @@ RUN printf '%s' "${GIT_HASH:-}" | grep -Eqx '[0-9a-f]{40}' \
 # ===========================
 # Runtime Stage
 # ===========================
-FROM debian:bookworm-slim AS runtime
+# Pinned by digest, like the builder. This is the multi-platform index (it
+# carries linux/amd64 and linux/arm64), so each platform's build resolves its
+# own child from the same pin.
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
 
 # Install runtime dependencies. `curl` is required by the HEALTHCHECK below
 # (and by k8s/docker-compose health probes that exec into the container);
