@@ -169,8 +169,10 @@ def verifier_cases():
             lambda t: release_dir(t, per=per(X86, bin_triple=ARM)))
     tmpcase("a non-ELF file posing as the binary", False, "is not an ELF64", lambda t: release_dir(
         t, per=per(ARM, machine=3)))
+    # A valid x86_64 ELF, so only the member-set rule can refuse it.
     tmpcase("an archive with an extra member", False, "want exactly", lambda t: release_dir(
-        t, per=per(X86, extra=[(f"{nr.names(COMMIT, X86)['dir']}/README", b"x")])))
+        t, per=per(X86, extra=[(f"{nr.names(COMMIT, X86)['dir']}/sumchain-extra",
+                                fake_binary(X86, "sumchain-extra"))])))
     tmpcase("an archive with a path escape", False, "unsafe path", lambda t: release_dir(
         t, per=per(ARM, extra=[("../evil", b"x")])))
     tmpcase("an archive whose binary is a symlink", False, "not a regular file", lambda t: release_dir(
@@ -241,8 +243,12 @@ def verifier_cases():
         rec_edit(f"release_commit:", "release_commit: " + "d" * 40 + " #"), ""))
     tmpcase("a record with another binary hash", False, "RECORD MISMATCH", after(
         lambda r: rec_edit_bin(r), ""))
-    tmpcase("verify with an abbreviated commit is refused", False, "", lambda t: (_ for _ in ()).throw(
-        nr.Refused("")) if not nr.HEX40.match(COMMIT[:12]) else None)
+    def abbreviated(t):
+        r = release_dir(t)
+        if nr.main(["verify", str(r), "--commit", COMMIT[:12]]) != 1:
+            raise ValueError("an abbreviated commit was accepted")
+        raise nr.Refused("abbreviated commit refused")
+    tmpcase("verify with an abbreviated commit is refused", False, "abbreviated commit refused", abbreviated)
 
 
 def rec_edit_bin(r: Path) -> None:
