@@ -22,6 +22,7 @@ REPO=SUM-INNOVATION/sum-chain
 ID="https://github.com/$REPO/.github/workflows/release-image.yml@refs/heads/main"
 IMG=ghcr.io/sum-innovation/sum-chain
 HEX=$(printf 'a%.0s' {1..64}); DIGEST="sha256:$HEX"          # NONPRODUCTION
+COMMIT=$(printf 'c%.0s' {1..40})                               # NONPRODUCTION
 
 cat >"$T/bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -31,11 +32,20 @@ cat "$STUB_OUT"
 EOF
 chmod +x "$T/bin/gh"
 
-# result <san> <signer> <ref> <source-uri> <subject-hex>: one gh JSON element.
+# result <san> <signer> <ref> <source-uri> <subject-hex> [wf-repo wf-path wf-ref git-commit build-type]:
+# one gh JSON element. The signed provenance defaults to the release workflow
+# at refs/heads/main building $COMMIT.
 result() {
-  jq -n --arg san "$1" --arg signer "$2" --arg ref "$3" --arg uri "$4" --arg hex "$5" '
+  jq -n --arg san "$1" --arg signer "$2" --arg ref "$3" --arg uri "$4" --arg hex "$5" \
+        --arg wrepo "${6:-https://github.com/$REPO}" --arg wpath "${7:-.github/workflows/release-image.yml}" \
+        --arg wref "${8:-refs/heads/main}" --arg git "${9:-$COMMIT}" \
+        --arg bt "${10:-https://actions.github.io/buildtypes/workflow/v1}" '
     [{attestation: {}, verificationResult: {
-       statement: {subject: [{name: "ghcr.io/sum-innovation/sum-chain", digest: {sha256: $hex}}]},
+       statement: {subject: [{name: "ghcr.io/sum-innovation/sum-chain", digest: {sha256: $hex}}],
+                   predicateType: "https://slsa.dev/provenance/v1",
+                   predicate: {buildDefinition: {buildType: $bt,
+                     externalParameters: {workflow: {repository: $wrepo, path: $wpath, ref: $wref}},
+                     resolvedDependencies: [{uri: "git+\($wrepo)@\($wref)", digest: {gitCommit: $git}}]}}},
        signature: {certificate: {subjectAlternativeName: $san, buildSignerURI: $signer,
                                  sourceRepositoryRef: $ref, sourceRepositoryURI: $uri,
                                  certificateIssuer: "CN=sigstore-intermediate,O=sigstore.dev"}}}}]'
@@ -62,7 +72,7 @@ argv_case() {  # name, flag, value
 }
 
 echo "argv: the policy gh is asked to enforce"
-ARGS=("$IMG" "$DIGEST")
+ARGS=("$IMG" "$DIGEST" "$COMMIT")
 o=$(run "$GOOD"); rc=$?
 check "a release attestation for the digest is accepted" 0 "ATTESTATION OK" $rc "$o"
 argv_case "signer identity is exact: release-image.yml at refs/heads/main" --cert-identity "$ID"
@@ -82,22 +92,25 @@ o=$(run "$GOOD" POLICY_SOURCE_REF=refs/heads/evil POLICY_IDENTITY=x SOURCE_REF=r
 check "environment overrides are ignored" 0 "ATTESTATION OK" $rc "$o"
 argv_case "  ...identity is still the constant" --cert-identity "$ID"
 argv_case "  ...source ref is still the constant" --source-ref refs/heads/main
-ARGS=("$IMG" "$DIGEST" --signer-workflow .github/workflows/evil.yml)
+ARGS=("$IMG" "$DIGEST" "$COMMIT" --signer-workflow .github/workflows/evil.yml)
 o=$(run "$GOOD"); rc=$?
 check "an extra workflow argument is a usage error" 2 "usage" $rc "$o"
 
 echo "mutable references are refused before gh runs"
-ARGS=("$IMG:8a3c942b-amd64" "$DIGEST"); o=$(run "$GOOD"); rc=$?
+ARGS=("$IMG:8a3c942b-amd64" "$DIGEST" "$COMMIT"); o=$(run "$GOOD"); rc=$?
 check "image given with a tag" 1 "a tag is never verified" $rc "$o"
-ARGS=("$IMG" latest); o=$(run "$GOOD"); rc=$?
+ARGS=("$IMG" latest "$COMMIT"); o=$(run "$GOOD"); rc=$?
 check "digest given as a tag" 1 "is not an immutable" $rc "$o"
-ARGS=("$IMG@$DIGEST" "$DIGEST"); o=$(run "$GOOD"); rc=$?
+ARGS=("$IMG@$DIGEST" "$DIGEST" "$COMMIT"); o=$(run "$GOOD"); rc=$?
 check "image already carrying a digest" 1 "already carries a digest" $rc "$o"
-ARGS=("localhost:5000/sum-chain" "$DIGEST"); o=$(run "$GOOD"); rc=$?
+ARGS=("localhost:5000/sum-chain" "$DIGEST" "$COMMIT"); o=$(run "$GOOD"); rc=$?
 check "a registry port is not mistaken for a tag" 0 "ATTESTATION OK" $rc "$o"
 
+ARGS=("$IMG" "$DIGEST" 8a3c942b); o=$(run "$GOOD"); rc=$?
+check "an abbreviated commit" 1 "not a full 40-hex commit" $rc "$o"
+
 echo "result: gh's JSON is re-checked"
-ARGS=("$IMG" "$DIGEST")
+ARGS=("$IMG" "$DIGEST" "$COMMIT")
 OTHER="https://github.com/$REPO/.github/workflows/other.yml@refs/heads/main"
 o=$(run "$(result "$OTHER" "$OTHER" refs/heads/main "https://github.com/$REPO" "$HEX")"); rc=$?
 check "signed by another workflow on main" 1 "does not match the release policy" $rc "$o"
@@ -122,20 +135,21 @@ check "no attestation at all" 1 "does not match the release policy" $rc "$o"
 o=$(run "$GOOD" STUB_EXIT=1); rc=$?
 check "gh itself rejects" 1 "rejected" $rc "$o"
 
-echo "wiring: the release workflow and verify-image.sh use this policy"
-WF="$HERE/../../.github/workflows/release-image.yml"
-VI="$HERE/verify-image.sh"
-wire() {  # name, condition-exit-status
-  n=$((n+1))
-  if [[ $2 -eq 0 ]]; then printf '  ok    %-62s\n' "$1"; else printf '  FAIL  %-62s\n' "$1"; fail=$((fail+1)); fi
-}
-attest_line=$(grep -n 'uses: actions/attest-build-provenance@' "$WF" | head -1 | cut -d: -f1)
-verify_line=$(grep -n -- '--require-github-attestation' "$WF" | head -1 | cut -d: -f1)
-[[ -n $attest_line && -n $verify_line && $verify_line -gt $attest_line ]]; wire "release-image.yml verifies the attestation after creating it" $?
-sed -n "$((verify_line-1)),${verify_line}p" "$WF" | grep -q -- '--digest "$DIGEST"'; wire "  ...on the pushed digest read back from the build" $?
-! grep -qE -- '--require-github-attestation +["$]' "$WF"; wire "  ...with no caller-supplied repository, workflow or ref" $?
-grep -q 'verify-attestation.sh" "$IMAGE" "$DIGEST"' "$VI"; wire "verify-image.sh hands the digest, never the tag, to the policy" $?
-! grep -qE 'gh attestation verify' "$VI"; wire "verify-image.sh has no second, weaker gh attestation call" $?
+echo "result: the signed provenance names the release workflow, ref, repository and commit"
+okcert=("$ID" "$ID" refs/heads/main "https://github.com/$REPO" "$HEX")
+o=$(run "$(result "${okcert[@]}" "https://github.com/$REPO" .github/workflows/other.yml)"); rc=$?
+check "provenance names another workflow" 1 "signed provenance" $rc "$o"
+o=$(run "$(result "${okcert[@]}" "https://github.com/$REPO" .github/workflows/release-image.yml refs/heads/feature)"); rc=$?
+check "provenance names another branch" 1 "signed provenance" $rc "$o"
+o=$(run "$(result "${okcert[@]}" "https://github.com/someone/sum-chain")"); rc=$?
+check "provenance names another repository" 1 "signed provenance" $rc "$o"
+o=$(run "$(result "${okcert[@]}" "https://github.com/$REPO" .github/workflows/release-image.yml refs/heads/main "$(printf 'd%.0s' {1..40})")"); rc=$?
+check "provenance names another source commit" 1 "signed provenance" $rc "$o"
+o=$(run "$(result "${okcert[@]}" "https://github.com/$REPO" .github/workflows/release-image.yml refs/heads/main "$COMMIT" https://example.com/other-buildtype)"); rc=$?
+check "provenance of another build type" 1 "signed provenance" $rc "$o"
+
+# The wiring of this policy into release-image.yml (which digests are attested
+# and verified, and in what order) is checked in tools/release/release-test.py.
 
 echo
 if [[ $fail -eq 0 ]]; then echo "ATTESTATION POLICY BATTERY OK: $n cases"; exit 0; fi

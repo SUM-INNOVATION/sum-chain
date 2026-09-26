@@ -48,6 +48,9 @@ jobs:
       - name: Two-platform release tooling (fake registry)
         run: python3 tools/release/release-test.py
 
+      - name: Release workflow structure
+        run: python3 tools/release/release-workflow-test.py
+
       - name: No activation height baked into tracked genesis
         run: python3 tools/release/check-genesis-gates.py --commit "$(git rev-parse HEAD)"
 
