@@ -4,7 +4,10 @@
 > to Rust 1.88.0 with `--locked` and made the binary report its commit; the
 > release procedure, the GHCR release workflow and the verification tooling are
 > in [release-image.md](release-image.md). The "none" rows below describe
-> `8954b0d` and are kept as they were found.
+> `8954b0d` and are kept as they were found. §7's per-architecture operator
+> steps are superseded: a release is ONE canonical manifest holding both
+> linux/amd64 and linux/arm64, and no operator needs to know which
+> architecture production runs.
 
 This records what the release candidate for Stage 1 is, what CI did and did not
 produce for it, and how anyone can re-derive every value here without trusting

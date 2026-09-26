@@ -421,14 +421,20 @@ restart may need the break-glass in §5.3.
 ### 2.6 Gate: the image, by digest
 
 ```bash
-export IMAGE_NEW='<REGISTRY>/<REPO>@sha256:<DIGEST>'   # from Track 1. Never a tag.
+# The approved CANONICAL manifest digest, from the release record
+# (docs/operations/release-image.md §3, §5). One reference for every node:
+# the runtime pulls the linux/amd64 or linux/arm64 child to match the node.
+export IMAGE_NEW='ghcr.io/sum-innovation/sum-chain@sha256:<canonical_digest>'   # never a tag
 # The OLD image, by digest, as each pod actually pulled it. This is the rollback target.
 k get pod $POD_D -o jsonpath='{.status.containerStatuses[0].imageID}{"\n"}' | tee old-image-D.txt
 k get pod $POD_L -o jsonpath='{.status.containerStatuses[0].imageID}{"\n"}' | tee old-image-L.txt
 k get sts $STS_D -o yaml > sts-D.before.yaml ; k get sts $STS_L -o yaml > sts-L.before.yaml
 ```
 
-**Pass:** `IMAGE_NEW` is a digest reference that matches the release record.
+**Pass:** `IMAGE_NEW` is the release record's `canonical_reference`, and it
+passes `verify-release.py` and `verify-attestation.sh` (release-image.md §2),
+for the canonical digest and both children. No node's CPU architecture is
+needed, here or anywhere in this runbook.
 Both old `imageID`s are digests, not tags. The manifests ship
 `sumchain/node:latest` with `IfNotPresent`, so reverting to "the old tag" could
 pull something else. Also confirm the binary path. The Dockerfile installs
@@ -669,8 +675,10 @@ both validators proposing.
 ### 4.5 Stage 1 evidence, both validators
 
 Run `activation-rollout-evidence.md` §1.1 and §1.2 for **each** pod, with the
-binary path `/usr/local/bin/sumchain` (§2.6). Record both `imageID` values,
-which must equal `IMAGE_NEW`'s digest. Record the two
+binary path `/usr/local/bin/sumchain` (§2.6). Record both `imageID` values;
+`rollout-check.py --release-record` requires each to be `IMAGE_NEW`'s canonical
+digest or one of its two children, and each binary to be that child's binary
+(release-image.md §5). Record the two
 `compatibility handshake accepted` lines, one per direction (N·(N−1) = 2), and
 zero `REFUSING`. Stage 1 is complete only when all five records exist for both
 validators.

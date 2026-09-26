@@ -1,59 +1,59 @@
-# Release image: how one is published, and how it is verified
+# Release image: one manifest for Linux amd64 and arm64, verified by digest
 
-The node's release artifact is one container image in GHCR, addressed by
-digest:
+The node's release artifact is one multi-platform OCI image index in GHCR:
 
-    ghcr.io/sum-innovation/sum-chain:<40-hex commit>-<arch>   ->   sha256:<digest>
+    ghcr.io/sum-innovation/sum-chain:<40-hex commit>   ->   sha256:<canonical manifest digest>
 
-The tag is immutable: the workflow refuses to push a tag that already exists.
-`latest` is never pushed. Rollout records, `rollout-check.py
---expected-image-digest` and every manifest use the **digest**, never the tag.
+It holds exactly two runnable images, `linux/amd64` and `linux/arm64`, each
+with its BuildKit attestation manifest (an SPDX SBOM and SLSA v1 provenance).
+Those attestation manifests carry the platform `unknown/unknown`; they are not
+images, and every tool here classifies and checks them separately.
 
-## 1. What the workflow does (`.github/workflows/release-image.yml`)
+* **Production's CPU architecture does not need to be known** — not to publish,
+  not to deploy, not to record evidence. Kubernetes and every OCI container
+  runtime pull the child that matches the node's own platform from the one
+  canonical manifest.
+* **The deployment-facing identity is the canonical manifest digest.** It is
+  what a rollout approves, what goes into the StatefulSet
+  (`ghcr.io/sum-innovation/sum-chain@sha256:<canonical>`), and what the rollout
+  checker is given. The two children are joined into it by digest; no
+  per-platform tag exists.
+* **The tag is immutable.** The workflow refuses to push a commit tag that
+  already exists, and `latest` is never pushed.
+* **After start, the rollout evidence proves which child each validator
+  pulled** and that it belongs to the approved manifest
+  (`tools/lane-b/rollout-check.py --release-record`, §5).
+* **Publication is not deployment.** The image stays unusable for the
+  production rollout until every production-only check in
+  `docs/operations/stage1-local-evidence.md` §5 is complete.
 
-It is triggered manually (`workflow_dispatch`) with two inputs: `commit` (the
-full 40-hex commit) and `platform` (`linux/amd64` by default, or
-`linux/arm64`).
+## 1. The workflow (`.github/workflows/release-image.yml`)
 
-**Job `gate`** (`contents: read`, `pull-requests: read`) refuses unless all
-of these hold:
-1. The run was dispatched from `main`, so it uses the workflow as reviewed.
-2. `commit` is a full 40-hex sha and an ancestor of `main`.
-3. `commit` is the head or merge commit of a **merged** pull request into
-   `main`, and that PR has an **APPROVED** review on its head. An unmerged or
-   unapproved commit is never published.
+Manual only (`workflow_dispatch`), with one input: `commit`, the full 40-hex
+commit that is **the head of `main` at dispatch**. There is no platform input.
 
-**Job `publish`** runs in environment `release`, with `contents: read`,
-`packages: write`, `id-token: write` and `attestations: write`:
-1. It checks out `commit` and confirms `HEAD` equals it.
-2. It refuses if `<commit>-<arch>` already exists in GHCR.
-3. It runs `docker buildx build` using the Dockerfile. That means the pinned
-   `rust:1.88.0-slim-bookworm@sha256:38bc5a86…`, `cargo build --release
-   --locked`, and the `GIT_HASH` guard (a full 40-hex hash, or the build
-   fails). The build also:
-   - adds an OCI `revision` label;
-   - attaches an SPDX SBOM (`--sbom=true`) and SLSA provenance
-     (`--provenance=mode=max`);
-   - pushes, and reads the registry digest from the build metadata.
-4. It runs `tools/release/verify-image.sh` against the pushed digest (§2).
-5. It runs `tools/release/smoke-image.sh` against the pushed digest (§3).
-6. It creates a GitHub artifact attestation, `actions/attest-build-provenance`,
-   and pushes it to the registry.
-7. It runs `verify-image.sh --require-github-attestation` on the pushed
-   digest. The attestation must have been signed by this workflow on
-   `refs/heads/main` (§2a). Then it records the
-   release: commit, PR, platform, `image@digest`, the sha256 of
-   `/usr/local/bin/sumchain`, and the run URL. The record goes into the job
-   summary and an artifact, together with the SBOM and the build metadata.
+| job | runs on | permissions | does |
+|---|---|---|---|
+| `gate` | ubuntu-24.04 | contents, pull-requests: read | Refuses unless dispatched from `main`, the commit equals `GITHUB_SHA` (the head of `main`) and is on `main`, and it is the head or merge result of a merged PR whose head has an APPROVED review. |
+| `build` × 2 | ubuntu-24.04 and ubuntu-24.04-arm, **natively** | contents: read, **no registry credential** | `tools/release/build-child.sh`: builds its platform from the pinned Dockerfile with `--locked` and `GIT_HASH`, requires `--version` = the commit and the smoke test (/health, /ready, /metrics), then exports an OCI layout with SBOM and SLSA v1 provenance (builder id = this run). |
+| `publish` | ubuntu-24.04, environment **`release`** | contents: read; **packages: write**; id-token, attestations: write | Refuses an existing tag; pushes both layouts **by digest** (no tags) and checks each matches what was built; joins them by digest into the canonical index under the commit tag; reads it back and runs `verify-release.py`; attests the canonical index and both children; verifies all three attestations. |
+| `verify` × 2 | ubuntu-24.04 and ubuntu-24.04-arm, natively | contents, packages, attestations: read | Pulls its platform's child **by digest** from GHCR and runs `verify-child-runtime.sh` (--version, /health, /ready, /metrics), requires the binary to hash as built, and re-verifies the index and attestations independently. |
+| `record` | ubuntu-24.04 | contents: read | Writes `release-record.txt` and the job summary. |
 
-Each run builds one platform, natively: `ubuntu-latest` for amd64 and
-`ubuntu-24.04-arm` for arm64. No multi-architecture manifest is created.
-`linux/amd64` is the platform CI builds and tests on every change
-(`docker-image.yml`). Publish `linux/arm64` only if production runs arm64.
-Production's architecture is production-only evidence.
+`publish` is the **only** job with `packages: write`, and it is the only job
+in environment `release`, so one approval covers the whole publication. The
+long compile runs in `build`, which holds no credential at all.
 
-Third-party actions are pinned by commit sha, resolved from their release
-tags:
+`gate` requires the commit to be the head of `main` because GitHub's signed
+provenance records `GITHUB_SHA` as the source commit. With the two equal, the
+signed source commit and the built commit are the same commit.
+
+**Native builds, no emulation.** GitHub-hosted `ubuntu-24.04-arm` runners are
+available to this public repository, so arm64 is built and tested on arm64
+hardware. No QEMU or binfmt action is used anywhere in the release path
+(`tools/release/release-workflow-test.py` checks this).
+
+Third-party actions are pinned by commit sha:
 
 | action | tag | commit |
 |---|---|---|
@@ -62,146 +62,218 @@ tags:
 | docker/login-action | v4.6.0 | `dbcb813823bdd20940b903addbd779551569679f` |
 | actions/attest-build-provenance | v4.2.2 | `4d101475d8b20a2381f78447822ac1eab6504dd8` |
 | actions/upload-artifact | v7.0.1 | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` |
+| actions/download-artifact | v8.0.1 | `3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c` |
 
-### Environment protection: required, and NOT configured today
+Registry traffic in the release path goes through `tools/release/oci.py`,
+a standard-library-only client, so no extra binary is trusted inside the
+job that holds `packages: write`.
 
-Checked 2026-09-25: `GET /repos/SUM-INNOVATION/sum-chain/environments`
-returned `total_count: 0`, and `GET .../environments/release` returned 404.
-**There is no `release` environment.** GitHub creates a missing environment
-automatically on first use, *with no protection rules*. Until an admin
-configures it, a dispatch by anyone with write access would publish **without
-any environment approval**. The gate job's merged-and-approved-PR check would
-be the only barrier.
+**The Dockerfile is pinned for both platforms.** The builder stage uses
+`rust:1.88.0-slim-bookworm@sha256:38bc5a86…` and the runtime stage
+`debian:bookworm-slim@sha256:3783cc01…`. Both are multi-platform indexes, so
+each platform's build resolves its own child from the same pin. The committed
+`Cargo.lock` is restored immediately before the `--locked` release build.
+**Limitation:** the `apt-get install` steps in both stages take the current
+Debian bookworm packages. They are not pinned to a snapshot; the provenance
+records the base-image digests, not the apt package versions.
 
-So publication does **not** require environment approval today. Before the
-first dispatch, an admin must:
-1. Create environment `release`.
-2. Add required reviewers.
-3. Restrict its deployment branches to `main`.
-4. Confirm the result:
-   `gh api repos/SUM-INNOVATION/sum-chain/environments/release --jq '.protection_rules'`
-   must list a `required_reviewers` rule.
+### The `release` environment (configured 2026-09-25, read back through the API)
 
-A publication authorization should name that confirmed state.
+- **Required reviewer:** Mike-Mans.
+- **Self-review prevented:** whoever dispatches cannot approve their own run.
+  Mike-Mans must not be the dispatcher.
+- **Deployment branches:** `main` only.
+- **Admin bypass:** disabled.
+- **Secrets and variables:** none.
+
+Confirm before any dispatch:
+`gh api repos/SUM-INNOVATION/sum-chain/environments/release --jq '{can_admins_bypass, rules: [.protection_rules[] | {type, prevent_self_review, reviewers: [.reviewers[]?.reviewer.login]}]}'`
 
 ### Permissions the repository needs
 
 | setting | why |
 |---|---|
-| Actions → Workflow permissions: the org and repo allow `GITHUB_TOKEN` to be granted `packages: write` | Push to `ghcr.io/sum-innovation/sum-chain` |
+| Actions → Workflow permissions allow `GITHUB_TOKEN` to be granted `packages: write` | The `publish` job pushes to `ghcr.io/sum-innovation/sum-chain` |
 | Organization → Packages: members may create container packages | The first push creates the package |
-| `id-token: write`, `attestations: write` (declared per job) | Artifact attestations. Supported for public repositories, and this one is public. |
-| **Required before the first dispatch:** environment `release` with **required reviewers**, and deployment branches limited to `main` | A human approves each publish run, in addition to the gate job's PR-approval check |
-| Package visibility, or an `imagePullSecret` in the cluster | A new GHCR package is private until made public; the cluster must be able to pull it |
+| `id-token: write`, `attestations: write` on `publish` only | GitHub artifact attestations (supported for this public repository) |
+| Package visibility, or an `imagePullSecret` in the cluster | A new GHCR package may be private; the cluster must be able to pull it. Changing visibility is a separate decision. |
 
-## 2. Verifying an image (`tools/release/verify-image.sh`)
+## 2. What verification requires
+
+### 2a. The canonical index, the children, SBOMs and provenance (`tools/release/verify-release.py`)
 
 ```bash
-bash tools/release/verify-image.sh --image ghcr.io/sum-innovation/sum-chain \
-  --tag <commit>-amd64 --digest sha256:<digest> --commit <commit> --platform linux/amd64 \
-  [--require-github-attestation]
+python3 tools/release/verify-release.py --mode release \
+  --image ghcr.io/sum-innovation/sum-chain --commit <commit> --digest sha256:<canonical> \
+  --child linux/amd64=sha256:<amd64 image> --child linux/arm64=sha256:<arm64 image>
 ```
 
-Every check fails closed:
-1. **Tag drift:** the tag must resolve to exactly the digest.
-2. **Platform:** the digest must carry exactly one runnable platform.
-3. **Commit:** the image, pulled by digest, must print `sumchain <commit>` for
-   `--version`, and the revision label must agree.
-4. **SBOM:** an SPDX SBOM must be attached.
-5. **Provenance:** SLSA provenance must be attached and must name the commit.
-6. **Genesis:** the image must contain no genesis file, and no tracked genesis
-   at the commit may set a gate outside `GATES_PREDATING_ACTIVATION_RECORDING`
-   (`tools/release/check-genesis-gates.py`).
-7. **Attestation (with `--require-github-attestation`):** under the fixed
-   release policy of §2a.
+Every digest is recomputed from the bytes the registry returns. The rules:
+- **Tag:** the tag must be the commit, never `latest`, and must resolve to
+  exactly the canonical digest. A moved tag fails.
+- **Index shape:** the canonical digest must be an OCI index. Its runnable
+  descriptors must be exactly one `linux/amd64` and one `linux/arm64`, equal to
+  the child digests this release produced. A missing, duplicate, extra or
+  substituted child fails.
+- **Attestation manifests:** every other descriptor must be an attestation
+  manifest pointing at one of those children, one per child. Nothing
+  unclassified may be present.
+- **Per child, image:** an OCI image manifest whose config agrees on os and
+  architecture and carries `org.opencontainers.image.revision` = the commit.
+- **Per child, SBOM:** a valid SPDX 2.x SBOM (document id, namespace,
+  creators, named packages) whose in-toto subject is that child.
+- **Per child, provenance:** exactly one SLSA v1 provenance about that child.
+  It must record:
+  - the `dockerfile.v0` frontend and `configSource.path` = `Dockerfile`;
+  - `build-arg:GIT_HASH` = the commit;
+  - the VCS source (this repository) and revision (the commit);
+  - a builder id that is a run of this repository (`--run-url`: this run);
+  - every base image the Dockerfile **at the commit** pins by digest, among
+    its resolved dependencies. An unpinned `FROM` fails verification.
 
-### 2a. Attestation policy (`tools/release/verify-attestation.sh`)
+Mode `release` verifies only `ghcr.io/sum-innovation/sum-chain`. Mode `ci`
+verifies only a registry on localhost.
 
-An image is accepted only if its GitHub artifact attestation, looked up for
-the **digest**, was signed by exactly this repository's release workflow
-running from `main`. The policy is a set of read-only constants in the script,
-not arguments: a caller cannot pass another workflow, branch or repository,
-and environment variables do not override it.
+### 2b. Who signed it (`tools/release/verify-attestation.sh`)
+
+```bash
+bash tools/release/verify-attestation.sh ghcr.io/sum-innovation/sum-chain sha256:<digest> <commit>
+```
+
+Run it for the canonical digest **and** both child digests; the release
+workflow attests all three. The policy is read-only constants in the script,
+not arguments or environment:
 
 | rule | how |
 |---|---|
-| subject is the immutable digest | `gh attestation verify oci://<repo>@sha256:<digest>`. A tag, or a repository reference carrying one, is refused before `gh` runs. |
+| subject is the immutable digest | `gh attestation verify oci://<repo>@sha256:<digest>`. A tag, or a reference carrying one, is refused before `gh` runs |
 | linked repository | `--repo SUM-INNOVATION/sum-chain` |
-| signer workflow **and** the ref it ran from | `--cert-identity https://github.com/SUM-INNOVATION/sum-chain/.github/workflows/release-image.yml@refs/heads/main`: an exact match on the signing certificate's identity |
+| signing workflow **and** the ref it ran from | `--cert-identity https://github.com/SUM-INNOVATION/sum-chain/.github/workflows/release-image.yml@refs/heads/main` (exact) |
 | source ref | `--source-ref refs/heads/main` |
 | GitHub-hosted runner | `--deny-self-hosted-runners` |
-| re-checked on the result | every attestation `gh` returns must carry that exact `subjectAlternativeName` and `buildSignerURI`, `sourceRepositoryRef` `refs/heads/main`, `sourceRepositoryURI` `https://github.com/SUM-INNOVATION/sum-chain`, and name the digest as a subject |
+| certificate re-checked on the result | every attestation must carry that exact `subjectAlternativeName` and `buildSignerURI`, `sourceRepositoryRef` `refs/heads/main`, `sourceRepositoryURI` this repository, and name the digest |
+| signed provenance re-checked | `buildType` `https://actions.github.io/buildtypes/workflow/v1`; `externalParameters.workflow` = this repository, `.github/workflows/release-image.yml`, `refs/heads/main`; the source `gitCommit` = the release commit |
 
-**Why `--cert-identity` and not `--signer-workflow`.** In gh 2.100.0,
-`--signer-workflow` becomes the regular expression
-`^https://github.com/<repo>/<path>`, which has no end anchor. As a result,
-`.github/workflows/release-image.yml` also matches
-`.github/workflows/release-image.yml-other.yml`, at any ref. That comes from
-`validateSignerWorkflow` in `pkg/cmd/attestation/verify/policy.go`. The two
-flags are also mutually exclusive in `gh`. `--cert-identity` names the
-workflow file and its ref exactly.
+**Why `--cert-identity` and not `--signer-workflow`:** in gh 2.100.0,
+`--signer-workflow` becomes a prefix regular expression with no end anchor
+and no ref (`validateSignerWorkflow`, `pkg/cmd/attestation/verify/policy.go`).
+So `release-image.yml` would also match `release-image.yml-other.yml` on any
+branch. The two flags are mutually exclusive.
 
-`tools/release/verify-attestation-test.sh` (29 cases) tests two layers
-independently, using a recording `gh` stub:
-- the flags `gh` is asked to enforce;
-- the script's own check of `gh`'s result: another workflow, a prefix-named
-  workflow, another branch, a fork, another digest, a mixed result, or no
-  attestation.
+### 2c. The running images (`tools/release/verify-child-runtime.sh`)
 
-It also checks the wiring: `release-image.yml` verifies the digest after
-attesting it, and `verify-image.sh` passes the digest, never the tag.
+Pulls one child **by digest** on a runner of its own platform, with no
+emulation. Requires the pulled image to be that platform, `--version` to be
+`sumchain <commit>`, and the smoke test to pass (`tools/release/smoke-image.sh`):
+- `/health` → 200;
+- `/ready` → 200 after a block;
+- `/metrics` passing `tools/lane-b/wave1-monitor.sh verify`: all nine Wave 1
+  subsystems, two bounded labels.
 
-### 2b. Threat model: two controls, two different attackers
+It prints the binary's sha256 for the release record.
 
-* **The `release` environment** (required reviewer Mike-Mans, self-review
-  prevented, admin bypass off, deployments from `main` only) controls **the
-  approved workflow**. `release-image.yml`'s publish job cannot run without
-  that approval, and cannot run from another branch.
+### 2d. Threat model: two controls, two different attackers
+
+* **The `release` environment** controls **the approved workflow**. The
+  `publish` job cannot run without Mike-Mans's approval, cannot run from
+  another branch, and no admin can bypass it.
 * **It does not control other workflows.** Anyone with write access can push
-  a branch carrying a *new* workflow that grants itself `packages: write` and
-  pushes to `ghcr.io/sum-innovation/sum-chain`. Environment protection covers
-  only jobs that name the environment. Such an image may even reuse a
-  legitimate-looking tag.
-* **Consumer-side attestation verification closes that gap for anyone who
-  runs it.** An image pushed by another workflow has either no attestation,
-  or one signed by that workflow or branch. §2a rejects both. So a rollout
-  must take its image digest from a release record, and must pass
-  `verify-image.sh --require-github-attestation` on that digest before the
-  digest goes into any manifest. A digest that fails is not a release, whatever
-  its tag says.
+  a branch with a *new* workflow that grants itself `packages: write` and
+  pushes to the same package. Environment protection covers only jobs that
+  name the environment.
+* **Consumer-side verification closes that gap.** An image pushed by any
+  other workflow has no attestation, or one signed by that workflow or
+  branch; §2b rejects both. A rollout takes the canonical digest from a
+  release record, and verifies it and both children with §2a and §2b
+  before the digest goes into any manifest.
 * **Out of scope:** a compromise of `main` itself, such as a malicious change
   to `release-image.yml` that passes review, or of GitHub's signing
   infrastructure.
 
-`docker-image.yml` runs the same script on every relevant PR and `main` push,
-against a throwaway `registry:2` on the runner. It also requires the script
-to refuse a wrong commit, a wrong platform, `latest`, and a tag moved to
-another image.
+## 3. The release record
 
-## 3. Smoke test (`tools/release/smoke-image.sh`)
+The `record` job writes `release-record.txt` (also in the job summary and the
+`release-<commit>` artifact, with the verification summary, both SBOMs and
+both runtime results):
 
-The test boots the image as a one-validator NONPRODUCTION devnet (chain
-1337). The fixture key is generated inside the container, never on the host,
-and never printed. The test requires:
-- `GET /health` → 200;
-- `GET /ready` → 200 after a block past genesis;
-- `tools/lane-b/wave1-monitor.sh verify` to pass on `/metrics`: all nine Wave 1
-  subsystems, with two bounded labels.
+```
+release_commit:            <40-hex>
+pull_request:              #<n>
+approved_by:               <login>
+workflow_run:              https://github.com/SUM-INNOVATION/sum-chain/actions/runs/<id>
+canonical_tag:             ghcr.io/sum-innovation/sum-chain:<commit>
+canonical_digest:          sha256:<canonical>
+canonical_reference:       ghcr.io/sum-innovation/sum-chain@sha256:<canonical>
+linux_amd64_digest:        sha256:<child>
+linux_amd64_binary_sha256: <64-hex>
+linux_amd64_version:       sumchain <commit>
+linux_amd64_sbom:          <statement digest> SPDX-2.3 <n> packages
+linux_amd64_provenance:    <statement digest> https://slsa.dev/provenance/v1 builder <run> vcs <repo>@<commit> dockerfile Dockerfile
+linux_amd64_smoke:         health, ready, metrics OK
+linux_arm64_…              (the same six lines)
+attestation:               verified for the canonical index and both children: …
+```
 
-## 4. Publishing, once the repair PR is approved and merged
+The per-platform lines are release metadata. No operator uses them to choose
+anything: the rollout approves `canonical_digest`, and the checker maps
+whatever child a node pulled back to this record (§5).
+
+## 4. CI (`.github/workflows/docker-image.yml`)
+
+On every relevant PR and `main` push, CI runs the release path end to end,
+with the real Dockerfile and the release tools:
+
+- **`build`, per platform, natively:** `build-child.sh`, including the smoke
+  test. The amd64 leg also checks that the build refuses to run without
+  `GIT_HASH`.
+- **`assemble-verify`, per platform, natively:** pushes both layouts by
+  digest to a throwaway `registry:2` on the runner, and joins them into the
+  canonical index. Then:
+  - `verify-release.py` accepts the index;
+  - its own platform's child is run by digest with `verify-child-runtime.sh`,
+    and its binary must hash as built.
+- **Refusals, against the real registry (amd64 leg):** the tools must refuse
+  an existing tag, a release missing a platform, `latest`, a substituted child,
+  verification by tag, the wrong platform's child, and a moved tag.
+
+The GitHub attestation step cannot run outside a release, since it needs the
+signed workflow on `main`. `verify-attestation-test.sh` covers the policy with
+a recording `gh` stub (30 cases). `release-test.py` covers the registry-level
+rules against a fake registry (50 cases). `release-workflow-test.py` checks
+the workflow's structure (16 checks).
+
+## 5. Rolling out a release
+
+1. Take `canonical_digest` from the release record of the run, and verify it
+   (§2a, §2b). That digest is what gets approved.
+2. The StatefulSets reference `ghcr.io/sum-innovation/sum-chain@sha256:<canonical>`.
+   Each node's runtime pulls the child for its own platform.
+3. After start, record evidence and run:
+   ```bash
+   python3 tools/lane-b/rollout-check.py --release-record release-record.txt \
+     --expected-commit <commit> --expected-image-digest sha256:<canonical> …
+   ```
+   For each validator it proves:
+   - `image_id` is the canonical manifest or one of its two children;
+   - the running binary is the binary of a child of that manifest, and of
+     *that* child when `image_id` names a child;
+   - `--version` reports the release commit.
+
+   Validators on different platforms are fine as long as both run children
+   of the same manifest. `node_architecture` is recorded when available,
+   purely as a diagnostic; its absence never blocks anything.
+
+## 6. Publishing, after the change is approved and merged
 
 Do not dispatch until the merge is verified on `main` and the owner has
-authorized publication:
+authorized publication naming the commit and tag. The dispatcher must not be
+Mike-Mans (self-review is prevented):
 
 ```bash
-C=<merged commit, from: git rev-parse origin/main>
-gh workflow run release-image.yml -R SUM-INNOVATION/sum-chain --ref main \
-  -f commit="$C" -f platform=linux/amd64
+C=$(git rev-parse origin/main)       # must be the head of main when dispatched
+gh workflow run release-image.yml -R SUM-INNOVATION/sum-chain --ref main -f commit="$C"
 gh run list -R SUM-INNOVATION/sum-chain --workflow release-image.yml -L 1
 ```
 
-The run's release record supplies three values for the rollout:
-- `--expected-commit` and `--expected-image-digest` for
-  `tools/lane-b/rollout-check.py`;
-- `--new-image-digest` for `tools/lane-b/rollout-preflight.py`;
-- `--expected-binary-sha256` for `rollout-check.py`.
+The run pauses at `publish` until Mike-Mans approves it. Nothing is written
+to GHCR before that approval.

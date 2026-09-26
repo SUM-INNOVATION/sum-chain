@@ -79,6 +79,12 @@ and nothing else (`production-checklist.md` item 5, §9 below).
 | manifests' image | `sumchain/node:latest` — mutable, and absent from Docker Hub | VERIFIED |
 | private registry (GHCR) | could not check: `gh` lacks `read:packages` | UNVERIFIED — needs access |
 
+The rows above describe `8954b0d` as found. The release is now ONE canonical
+OCI manifest for linux/amd64 and linux/arm64, published by
+`release-image.yml` with SBOM, provenance and attestations for both children,
+and approved by its canonical digest; see [release-image.md](release-image.md).
+Production's architecture is not an input to publication or rollout.
+
 **Repair, in this PR:** `FROM rust:1.88.0-slim-bookworm@sha256:38bc5a86…d89`
 (resolved read-only from the registry) and `--locked`. The image now
 **refuses to build without the full 40-hex `GIT_HASH`** instead of falling back
