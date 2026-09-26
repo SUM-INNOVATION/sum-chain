@@ -41,7 +41,7 @@ Error: RocksDB error: Invalid argument: Column families not opened: application_
    meta identical rows=6
    state identical rows=5
    state_diffs identical rows=30
-  lost/: 000028.log MANIFEST-000001 MANIFEST-000003 MANIFEST-000029 
+  lost/: 000028.log MANIFEST-000001 MANIFEST-000003 MANIFEST-000029
   d40d2db started a second time on the repaired copy:
    exit status 1
 2026-09-26T05:09:53.293342Z  WARN sumchain_storage::db: Database appears corrupted, attempting repair...
