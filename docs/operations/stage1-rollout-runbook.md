@@ -1,5 +1,13 @@
 # Stage 1 rollout runbook — binary rollout with every activation gate UNSET
 
+> **Not the production procedure.** A read-only inspection on 2026-09-26
+> found production is a native binary under systemd: no Kubernetes, no
+> containers. Use [stage1-native-runbook.md](stage1-native-runbook.md). The
+> analysis below still applies (the database-open hazard, SIGTERM, halts,
+> genesis), but its `kubectl` commands and its fixed dialer/listener
+> assignment do not. The inspection found 7jUZ… is the **dialer**, not the
+> listener. Roles are now derived from each host's configuration.
+
 > **Status:** preparation. Nothing in this document has been executed against
 > production. It was written from the repository at `8954b0d0`, the node source,
 > and the public read-only endpoint `https://rpc.sumchain.io`. The author had

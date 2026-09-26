@@ -33,6 +33,22 @@ something a test assumed.
 
 ---
 
+## Measuring it on a virtual machine
+
+On a VM or bare-metal host with no cgroup limit, the floor is the memory
+**installed**: "Total online memory" from `lsmem`.
+- **Not `MemTotal`.** `free` and `/proc/meminfo` report installed memory
+  minus what the kernel reserves for itself (kernel image, page tables and,
+  on Ubuntu, a crash-kernel reservation).
+- **What that means in numbers:** a 4 GiB machine typically reports
+  3.6–3.8 GiB there. A `MemTotal` below 4 GiB therefore neither proves nor
+  disproves compliance.
+- **The native preflight** (`tools/lane-b/native-preflight.py`) requires
+  installed memory of at least 4 GiB, and refuses when it cannot measure it.
+  It also refuses a unit `MemoryMax` below 4 GiB.
+
+The floor is not lowered to fit a host.
+
 ## What the floor is, precisely
 
 | property | value |

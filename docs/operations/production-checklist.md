@@ -198,6 +198,12 @@ that validator's block slots until it rejoins, so coordinate restarts.
    height below its own finalized height and produced a different block at
    the next height (stage1-local-evidence.md §1.2). Either outcome is silent.
 
+   Against the DEPLOYED revision `d40d2db` (five families short), the old binary
+   repairs, fails again, and exits 1 on every start: a crash loop under
+   systemd. No rows were lost, but it cannot run
+   (evidence/stage1-downgrade-d40d2db-2026-09-26/). Production is a native
+   systemd service; its procedure is stage1-native-runbook.md.
+
    The rollback target is therefore the pre-upgrade snapshot, restored into a
    NEW volume, running the EXACT old image digest. The Stage 1 rollout does not
    start until `tools/lane-b/rollout-preflight.py` prints `PREFLIGHT COMPLETE`

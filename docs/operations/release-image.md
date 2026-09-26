@@ -1,6 +1,89 @@
-# Release image: how one is published, and how it is verified
+# Releases: the native production release, and the optional container image
 
-The node's release artifact is one container image in GHCR, addressed by
+## 0. Production: native Linux archives (`.github/workflows/release-native.yml`)
+
+**Production runs a native binary under systemd**
+([stage1-native-runbook.md](stage1-native-runbook.md) §1). The production
+release is the GitHub Release `release-<40-hex commit>`:
+
+| asset | what it is |
+|---|---|
+| `sumchain-<commit>-x86_64-unknown-linux-gnu.tar.gz` | `sumchain` and `sumchain-wallet` for x86_64 Linux |
+| `sumchain-<commit>-aarch64-unknown-linux-gnu.tar.gz` | the same for aarch64 Linux |
+| `*.spdx.json` | the SPDX SBOM of each build (the builder stage, which catalogs `Cargo.lock`) |
+| `*.provenance.json` | BuildKit SLSA v1 provenance of each build |
+| `SHA256SUMS` | every asset above and the record |
+| `release-record.txt` | commit, PR, approver, run; each archive's, binary's, wallet's, SBOM's and provenance's sha256 |
+
+- **Built natively, never on a validator.** Each archive is built on
+  GitHub's runner of its own architecture (`ubuntu-24.04`, `ubuntu-24.04-arm`),
+  inside `tools/release/native.Dockerfile`. That file is a build
+  environment only:
+  - the pinned `rust:1.88.0-slim-bookworm@sha256:38bc5a86…` image;
+  - the repository's `rust-toolchain.toml`;
+  - `--locked`, and `GIT_HASH` = the commit.
+
+  Nothing from it runs in production: only the two executables leave it.
+  The Debian build packages are not pinned to a snapshot.
+- **Proven before publication** (`tools/release/build-native.sh`), on each
+  architecture:
+  - `--version` reports the commit;
+  - the ELF machine matches, and no shared library is missing;
+  - `tools/release/smoke-native.sh` passes: `/health`, `/ready`, a complete
+    `/metrics` on loopback, then SIGTERM → exit 0 and an immediate database
+    reopen.
+- **Published only by the protected job.** `publish` runs in environment
+  `release` and is the only job that can write. In order, it:
+  1. writes the record and `SHA256SUMS`, and verifies every asset
+     (`tools/release/native-release.py verify`);
+  2. refuses an existing tag or release;
+  3. attests every asset and both binaries;
+  4. creates the release, with no overwrite and not marked latest;
+  5. downloads it back and verifies it again, attestations included.
+- **The gate** is the same as for images: dispatched from `main`, the commit
+  is the head of `main`, and it is an approved, merged PR head.
+- **Verified after publication.** On each native runner, the `verify` job
+  installs the release with `install-native.sh --verify-attestation` and
+  smoke-tests the installed binary.
+- **Installation needs no architecture from anyone.**
+  `tools/release/install-native.sh` picks the archive from `uname -m` and
+  checks:
+  - `SHA256SUMS`, by attestation or by an attestation-verified hash;
+  - the archive, the record and the binary hash;
+  - `--version` and the shared libraries.
+
+  It installs side by side into `<prefix>/releases/<commit>/`, never over an
+  existing install, and never touches systemd.
+- **Attestation policy for files:** `verify-attestation.sh --file <asset> <commit>`.
+  Same fixed policy as §2a below, with the signer
+  `.github/workflows/release-native.yml@refs/heads/main`. With the commit
+  given, it also checks the signed provenance's workflow repository, path and
+  ref, and the source commit.
+- **CI:** `native-release-ci.yml` builds both architectures natively on
+  every relevant PR, assembles and verifies the asset set, requires a
+  tampered archive to be refused, and installs and runs the result on each
+  architecture. Nothing is published.
+- **Recommended repository settings:**
+  - enable **immutable releases**;
+  - add a tag ruleset protecting `release-*` from update and deletion.
+
+  Neither is configured by this change.
+
+Dispatch, only after the change is merged and publication is authorized
+naming the commit (the dispatcher must not be Mike-Mans):
+
+```bash
+gh workflow run release-native.yml -R SUM-INNOVATION/sum-chain --ref main -f commit="$(git rev-parse origin/main)"
+```
+
+---
+
+**Everything below is the optional container image** (`release-image.yml`,
+GHCR). It is kept as CI and devnet packaging. **It is not the production
+release, and production cannot consume it**: production runs no container
+runtime.
+
+The container image is addressed by
 digest:
 
     ghcr.io/sum-innovation/sum-chain:<40-hex commit>-<arch>   ->   sha256:<digest>
@@ -63,26 +146,16 @@ tags:
 | actions/attest-build-provenance | v4.2.2 | `4d101475d8b20a2381f78447822ac1eab6504dd8` |
 | actions/upload-artifact | v7.0.1 | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` |
 
-### Environment protection: required, and NOT configured today
+### Environment protection (configured 2026-09-25, read back through the API)
 
-Checked 2026-09-25: `GET /repos/SUM-INNOVATION/sum-chain/environments`
-returned `total_count: 0`, and `GET .../environments/release` returned 404.
-**There is no `release` environment.** GitHub creates a missing environment
-automatically on first use, *with no protection rules*. Until an admin
-configures it, a dispatch by anyone with write access would publish **without
-any environment approval**. The gate job's merged-and-approved-PR check would
-be the only barrier.
+Environment `release`:
+- Mike-Mans is the required reviewer;
+- self-review is prevented;
+- deployment branches are limited to `main`;
+- admin bypass is disabled;
+- it holds no secrets.
 
-So publication does **not** require environment approval today. Before the
-first dispatch, an admin must:
-1. Create environment `release`.
-2. Add required reviewers.
-3. Restrict its deployment branches to `main`.
-4. Confirm the result:
-   `gh api repos/SUM-INNOVATION/sum-chain/environments/release --jq '.protection_rules'`
-   must list a `required_reviewers` rule.
-
-A publication authorization should name that confirmed state.
+It protects both `release-native.yml`'s `publish` job and this workflow's.
 
 ### Permissions the repository needs
 
