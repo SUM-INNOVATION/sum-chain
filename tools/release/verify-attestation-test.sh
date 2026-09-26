@@ -122,6 +122,53 @@ check "no attestation at all" 1 "does not match the release policy" $rc "$o"
 o=$(run "$GOOD" STUB_EXIT=1); rc=$?
 check "gh itself rejects" 1 "rejected" $rc "$o"
 
+echo "file mode: native release archives, signed by release-native.yml on main"
+COMMIT=$(printf 'c%.0s' {1..40})                               # NONPRODUCTION
+NID="https://github.com/$REPO/.github/workflows/release-native.yml@refs/heads/main"
+ART="$T/sumchain-$COMMIT-x86_64-unknown-linux-gnu.tar.gz"
+printf 'NONPRODUCTION archive bytes\n' > "$ART"
+AHEX=$( (command -v sha256sum >/dev/null && sha256sum "$ART" || shasum -a 256 "$ART") | cut -d' ' -f1)
+# fresult <san> <signer> <ref> <source-uri> <subject-hex> <wf-repo> <wf-path> <wf-ref> <git-commit>
+fresult() {
+  jq -n --arg san "$1" --arg signer "$2" --arg ref "$3" --arg uri "$4" --arg hex "$5" \
+        --arg wrepo "$6" --arg wpath "$7" --arg wref "$8" --arg git "$9" '
+    [{attestation: {}, verificationResult: {
+       statement: {subject: [{name: "archive", digest: {sha256: $hex}}],
+                   predicateType: "https://slsa.dev/provenance/v1",
+                   predicate: {buildDefinition: {buildType: "https://actions.github.io/buildtypes/workflow/v1",
+                     externalParameters: {workflow: {repository: $wrepo, path: $wpath, ref: $wref}},
+                     resolvedDependencies: [{uri: "git+\($wrepo)@\($wref)", digest: {gitCommit: $git}}]}}},
+       signature: {certificate: {subjectAlternativeName: $san, buildSignerURI: $signer,
+                                 sourceRepositoryRef: $ref, sourceRepositoryURI: $uri}}}}]'
+}
+U="https://github.com/$REPO"
+FGOOD=$(fresult "$NID" "$NID" refs/heads/main "$U" "$AHEX" "$U" .github/workflows/release-native.yml refs/heads/main "$COMMIT")
+ARGS=(--file "$ART" "$COMMIT")
+o=$(run "$FGOOD"); rc=$?
+check "file: a release archive attested by release-native.yml is accepted" 0 "ATTESTATION OK" $rc "$o"
+argv_case "file: signer identity is exactly release-native.yml at main" --cert-identity "$NID"
+argv_case "file: source ref is enforced" --source-ref refs/heads/main
+n=$((n+1))
+if [[ $(sed -n 3p "$T/argv") == "$ART" ]]; then printf '  ok    %-62s\n' "file: the subject is the file itself"
+else printf '  FAIL  %-62s\n' "file: the subject is the file itself"; fail=$((fail+1)); fi
+OID="https://github.com/$REPO/.github/workflows/release-image.yml@refs/heads/main"
+o=$(run "$(fresult "$OID" "$OID" refs/heads/main "$U" "$AHEX" "$U" .github/workflows/release-image.yml refs/heads/main "$COMMIT")"); rc=$?
+check "file: signed by the OCI workflow, not the native one" 1 "does not match the release policy" $rc "$o"
+o=$(run "$(fresult "$NID" "$NID" refs/heads/main "$U" "$AHEX" "$U" .github/workflows/other.yml refs/heads/main "$COMMIT")"); rc=$?
+check "file: provenance names another workflow" 1 "signed provenance" $rc "$o"
+o=$(run "$(fresult "$NID" "$NID" refs/heads/main "$U" "$AHEX" "$U" .github/workflows/release-native.yml refs/heads/feature "$COMMIT")"); rc=$?
+check "file: provenance names another branch" 1 "signed provenance" $rc "$o"
+o=$(run "$(fresult "$NID" "$NID" refs/heads/main "$U" "$AHEX" "https://github.com/someone/sum-chain" .github/workflows/release-native.yml refs/heads/main "$COMMIT")"); rc=$?
+check "file: provenance names another repository" 1 "signed provenance" $rc "$o"
+o=$(run "$(fresult "$NID" "$NID" refs/heads/main "$U" "$AHEX" "$U" .github/workflows/release-native.yml refs/heads/main "$(printf 'd%.0s' {1..40})")"); rc=$?
+check "file: provenance names another source commit" 1 "signed provenance" $rc "$o"
+o=$(run "$(fresult "$NID" "$NID" refs/heads/main "$U" "$(printf 'b%.0s' {1..64})" "$U" .github/workflows/release-native.yml refs/heads/main "$COMMIT")"); rc=$?
+check "file: attestation is for another file's digest" 1 "does not match the release policy" $rc "$o"
+ln -s "$ART" "$T/link.tar.gz"; ARGS=(--file "$T/link.tar.gz" "$COMMIT"); o=$(run "$FGOOD"); rc=$?
+check "file: a symlink is refused" 1 "is not a regular file" $rc "$o"
+ARGS=(--file "$ART"); o=$(run "$FGOOD"); rc=$?
+check "file: the commit is required" 2 "usage" $rc "$o"
+
 echo "wiring: the release workflow and verify-image.sh use this policy"
 WF="$HERE/../../.github/workflows/release-image.yml"
 VI="$HERE/verify-image.sh"
