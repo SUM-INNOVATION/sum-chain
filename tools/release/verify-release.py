@@ -44,6 +44,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+# No __pycache__ beside the tools: CI requires the tree to stay clean.
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import oci  # noqa: E402
 

@@ -31,6 +31,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
+# No __pycache__ beside the tools: CI requires the tree to stay clean.
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(HERE))
 import oci  # noqa: E402
 
