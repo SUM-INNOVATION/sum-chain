@@ -1,0 +1,5 @@
+  Latest height: 30
+  Latest hash:   0x980feca2a9d3268213d4a4ab84da1ed711a62226e01d63d8d31f4174da824151
+  State root:    0xd59342beeb9c5ae8f55d9565a6d6e4599b55b7d7b4c100bf9a94822572b19778
+  Finalized height: 27
+  Finalized hash:   0x94bbdbc9354feb03e0095520391bd5980ebe26b20d2559bf3621212509a2444e

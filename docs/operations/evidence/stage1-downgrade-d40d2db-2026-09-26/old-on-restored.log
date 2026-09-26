@@ -1,0 +1,41 @@
+# d40d2db on the snapshot restored into a new directory (first 40 lines)
+2026-09-26T05:10:01.524218Z  INFO sumchain: ================================================
+2026-09-26T05:10:01.524246Z  INFO sumchain:   SUM Chain Node v0.2.0
+2026-09-26T05:10:01.524251Z  INFO sumchain:   Commit: unknown
+2026-09-26T05:10:01.524253Z  INFO sumchain: ================================================
+2026-09-26T05:10:01.524256Z  INFO sumchain: Loaded configuration from "<run>/restored.toml"
+2026-09-26T05:10:01.524297Z  INFO sumchain: Loaded genesis for chain 1337
+2026-09-26T05:10:01.524337Z  INFO sumchain_storage::db: Opening database at <run>/restored
+2026-09-26T05:10:01.567440Z  INFO sumchain::node: Starting node
+2026-09-26T05:10:01.567460Z  INFO sumchain_consensus::poa: Loaded chain at height 30 (0x980feca2a9d3268213d4a4ab84da1ed711a62226e01d63d8d31f4174da824151)
+2026-09-26T05:10:01.567467Z  INFO sumchain_consensus::poa: Restored finality state: height 27 finalized
+2026-09-26T05:10:01.567478Z  INFO sumchain::node: Loaded existing chain at height 30
+2026-09-26T05:10:01.567481Z  INFO sumchain_consensus::poa: PoA consensus engine started
+2026-09-26T05:10:01.567487Z  INFO sumchain_rpc::server: Starting RPC server on 127.0.0.1:52875
+2026-09-26T05:10:01.567489Z  INFO sumchain_rpc::server: RPC authentication is DISABLED (all requests allowed)
+2026-09-26T05:10:01.567491Z  INFO sumchain_rpc::server: RPC rate limiting is DISABLED
+2026-09-26T05:10:01.567493Z  INFO sumchain_rpc::server: RPC timeouts: request=30s, max_connections=100
+2026-09-26T05:10:01.567555Z  INFO sumchain_rpc::server: RPC server started
+2026-09-26T05:10:01.567558Z  INFO sumchain::node: RPC server listening on 127.0.0.1:52875
+2026-09-26T05:10:01.567567Z  INFO sumchain::node: Node running. Press Ctrl+C to stop.
+2026-09-26T05:10:01.567578Z  INFO sumchain_p2p::network: Starting P2P network service
+2026-09-26T05:10:01.567887Z  INFO sumchain_p2p::node_key: Loaded node key from "<run>/restored/node.key"
+2026-09-26T05:10:01.567899Z  INFO sumchain_p2p::network: Local peer ID: 12D3KooWSfRDLg7iDPDqyiSajUGPJk24zvoM6cbbs3uaSVWbZRxX
+2026-09-26T05:10:01.568174Z  INFO sumchain_p2p::network: Listening on /ip4/127.0.0.1/tcp/52874
+2026-09-26T05:10:01.568309Z  INFO sumchain_p2p::network: Listening on: /ip4/127.0.0.1/tcp/52874
+2026-09-26T05:10:06.569786Z  INFO sumchain_consensus::poa: Block producer started with 1000ms block time
+2026-09-26T05:10:06.570972Z  INFO sumchain_consensus::poa: Our turn to propose block 31
+2026-09-26T05:10:06.571025Z  INFO sumchain_state::executor: Executing block 31 with 0 transactions
+2026-09-26T05:10:06.571111Z  INFO sumchain_state::executor: Block 31 executed, new state root: 0xf230c9476f19a0f648eaaa6e5f21d83afcd2419d4a4c08b35bcec83f77d17978
+2026-09-26T05:10:06.571389Z  INFO sumchain_consensus::poa: Created block 0x9707da954b011a5ef55462b1abc80e26d2ae885ecb8013c2a4fdf9f07204a90a at height 31 with 0 txs
+2026-09-26T05:10:06.571511Z  INFO sumchain_consensus::poa: Finality checkpoint: height 28 (current: 31, depth: 3)
+2026-09-26T05:10:06.571522Z  INFO sumchain_consensus::poa: Produced block 0x9707da954b011a5ef55462b1abc80e26d2ae885ecb8013c2a4fdf9f07204a90a at height 31
+2026-09-26T05:10:06.571545Z  INFO sumchain::node: Produced block 0x9707da954b011a5ef55462b1abc80e26d2ae885ecb8013c2a4fdf9f07204a90a at height 31
+2026-09-26T05:10:06.571654Z  WARN sumchain_p2p::network: Failed to publish block 0x9707da954b011a5ef55462b1abc80e26d2ae885ecb8013c2a4fdf9f07204a90a (height 31): InsufficientPeers
+2026-09-26T05:10:07.571115Z  INFO sumchain_consensus::poa: Our turn to propose block 32
+2026-09-26T05:10:07.571257Z  INFO sumchain_state::executor: Executing block 32 with 0 transactions
+2026-09-26T05:10:07.571350Z  INFO sumchain_state::executor: Block 32 executed, new state root: 0xaed70825af7cb86595fbce040d6c41ebce907325b5983185f43c6f4f9b06d24d
+2026-09-26T05:10:07.571709Z  INFO sumchain_consensus::poa: Created block 0x9a516ad43c1fdc3ed14a9745febf52f18a2137be8b1ce8e279d7a59ab18783f5 at height 32 with 0 txs
+2026-09-26T05:10:07.571830Z  INFO sumchain_consensus::poa: Finality checkpoint: height 29 (current: 32, depth: 3)
+2026-09-26T05:10:07.571904Z  INFO sumchain_consensus::poa: Produced block 0x9a516ad43c1fdc3ed14a9745febf52f18a2137be8b1ce8e279d7a59ab18783f5 at height 32
+2026-09-26T05:10:07.571921Z  INFO sumchain::node: Produced block 0x9a516ad43c1fdc3ed14a9745febf52f18a2137be8b1ce8e279d7a59ab18783f5 at height 32

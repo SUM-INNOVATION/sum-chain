@@ -1,0 +1,68 @@
+old binary sha256 beadcace0f349a77590c2928ca70a20e6e22e139640eeef3490cf4cec17e85d2  (d40d2db20a74746ac4c9239783614684c6e7a417, rustc 1.85.0, local macOS arm64 build)
+new binary sha256 2fad5231b30e287add9d33e2e4a827403117c119b11501f322a3e5e2431ce815  (Stage 1 = 6620e4e598c0f9f5bda8765e104f7e0ba731f7bd, --version: sumchain unknown)
+== 1. d40d2db seeds a chain to height 30 (stopped with SIGINT: d40d2db handles only SIGINT)
+  1-seed-old.log: stopped with SIGINT, exit status 0
+# families=184 nonempty=8 rows=133
+  Latest height: 30
+  Latest hash:   0x980feca2a9d3268213d4a4ab84da1ed711a62226e01d63d8d31f4174da824151
+  State root:    0xd59342beeb9c5ae8f55d9565a6d6e4599b55b7d7b4c100bf9a94822572b19778
+  Finalized height: 27
+  Finalized hash:   0x94bbdbc9354feb03e0095520391bd5980ebe26b20d2559bf3621212509a2444e
+== 2. snapshot (cp -Rp), before any Stage 1 open
+  snapshot seconds 0.019, size 2144 KiB
+  snapshot inventory identical to the seed
+== 3. Stage 1 opens the database and advances to height 45 (stopped with SIGTERM)
+  3-stage1.log: stopped with SIGTERM, exit status 0
+# families=189 nonempty=9 rows=180
+  Latest height: 45
+  Latest hash:   0xb2301fb96d4866d97a07b58e05a86331a0957a970253318e813c9fcfa11541c3
+  State root:    0xfeb6c312b8a900051582210f60d361950bada6007c8b948a104cd86db7fd7ac8
+  Finalized height: 42
+  Finalized hash:   0xc6e21adbf5ff4e414deee600b304ebc51132c61283e3d3fd31ea8db072195f66
+== 4. d40d2db on a COPY of the Stage-1 database
+  (4-old-on-stage1.log: process exited by itself)
+  4-old-on-stage1.log: stopped with SIGINT, exit status 1
+2026-09-26T05:09:52.205046Z ERROR sumchain_storage::db: Failed to open database: Invalid argument: Column families not opened: application_journal, beacon_state_diffs, beacon_state, compute_pool_state_diffs, compute_pool
+2026-09-26T05:09:52.205061Z  WARN sumchain_storage::db: Database appears corrupted, attempting repair...
+2026-09-26T05:09:52.205063Z  INFO sumchain_storage::db: Attempting to repair database at <run>/post1
+2026-09-26T05:09:52.208303Z  INFO sumchain_storage::db: Database repair completed for <run>/post1
+2026-09-26T05:09:52.208310Z  INFO sumchain_storage::db: Database repair completed, retrying open...
+Error: RocksDB error: Invalid argument: Column families not opened: application_journal
+    Invalid argument: Column families not opened: application_journal
+# families=10 nonempty=9 rows=180
+  heights produced by BOTH Stage 1 and d40d2db-after-repair, with different hashes:
+  row digests of every non-empty family, Stage 1 vs after the d40d2db repair:
+   active_archive_nodes_history identical rows=1
+   application_journal identical rows=15
+   block_height identical rows=46
+   blocks identical rows=46
+   contract_state_diffs identical rows=30
+   messaging_config identical rows=1
+   meta identical rows=6
+   state identical rows=5
+   state_diffs identical rows=30
+  lost/: 000028.log MANIFEST-000001 MANIFEST-000003 MANIFEST-000029 
+  d40d2db started a second time on the repaired copy:
+   exit status 1
+2026-09-26T05:09:53.293342Z  WARN sumchain_storage::db: Database appears corrupted, attempting repair...
+2026-09-26T05:09:53.297703Z  INFO sumchain_storage::db: Database repair completed, retrying open...
+Error: RocksDB error: Invalid argument: Column families not opened: application_journal
+  the Stage 1 binary on a copy of the repaired database (info only):
+  Latest height: 45
+  Latest hash:   0xb2301fb96d4866d97a07b58e05a86331a0957a970253318e813c9fcfa11541c3
+  State root:    0xfeb6c312b8a900051582210f60d361950bada6007c8b948a104cd86db7fd7ac8
+  Finalized height: 42
+  Finalized hash:   0xc6e21adbf5ff4e414deee600b304ebc51132c61283e3d3fd31ea8db072195f66
+== 5. restore the snapshot into a NEW directory; d40d2db on it
+  restore seconds 0.021
+  restored inventory identical to the seed, before any open
+  5-old-on-restored.log: stopped with SIGINT, exit status 0
+2026-09-26T05:10:01.567467Z  INFO sumchain_consensus::poa: Restored finality state: height 27 finalized
+2026-09-26T05:10:01.567478Z  INFO sumchain::node: Loaded existing chain at height 30
+# families=184 nonempty=8 rows=157
+  Latest height: 36
+  Latest hash:   0xb1f8a178e816db3f65e561f0c051cf517d62462b1cb794d8ffc55ab4ede4d216
+  State root:    0xa39e43e9aacb74f846dba4dffab1f32fde3f238ba29338a904b522bbac9ca20f
+  Finalized height: 33
+  Finalized hash:   0x1af63d758a799d3b1ceb3343c53c4c4cc0759efe5dcb3a6b945682a51276c42a
+== done

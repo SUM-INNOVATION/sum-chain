@@ -1,0 +1,34 @@
+# d40d2db on a COPY of the Stage-1 database: every line of the run (ANSI stripped, paths replaced)
+2026-09-26T05:09:52.200431Z  INFO sumchain: ================================================
+2026-09-26T05:09:52.200460Z  INFO sumchain:   SUM Chain Node v0.2.0
+2026-09-26T05:09:52.200464Z  INFO sumchain:   Commit: unknown
+2026-09-26T05:09:52.200466Z  INFO sumchain: ================================================
+2026-09-26T05:09:52.200469Z  INFO sumchain: Loaded configuration from "<run>/post1.toml"
+2026-09-26T05:09:52.200509Z  INFO sumchain: Loaded genesis for chain 1337
+2026-09-26T05:09:52.200545Z  INFO sumchain_storage::db: Opening database at <run>/post1
+2026-09-26T05:09:52.205046Z ERROR sumchain_storage::db: Failed to open database: Invalid argument: Column families not opened: application_journal, beacon_state_diffs, beacon_state, compute_pool_state_diffs, compute_pool_state
+2026-09-26T05:09:52.205061Z  WARN sumchain_storage::db: Database appears corrupted, attempting repair...
+2026-09-26T05:09:52.205063Z  INFO sumchain_storage::db: Attempting to repair database at <run>/post1
+2026-09-26T05:09:52.208303Z  INFO sumchain_storage::db: Database repair completed for <run>/post1
+2026-09-26T05:09:52.208310Z  INFO sumchain_storage::db: Database repair completed, retrying open...
+Error: RocksDB error: Invalid argument: Column families not opened: application_journal
+
+Caused by:
+    Invalid argument: Column families not opened: application_journal
+# second start
+2026-09-26T05:09:53.290288Z  INFO sumchain: ================================================
+2026-09-26T05:09:53.290322Z  INFO sumchain:   SUM Chain Node v0.2.0
+2026-09-26T05:09:53.290327Z  INFO sumchain:   Commit: unknown
+2026-09-26T05:09:53.290330Z  INFO sumchain: ================================================
+2026-09-26T05:09:53.290333Z  INFO sumchain: Loaded configuration from "post1b.toml"
+2026-09-26T05:09:53.290374Z  INFO sumchain: Loaded genesis for chain 1337
+2026-09-26T05:09:53.290410Z  INFO sumchain_storage::db: Opening database at <run>/post1b
+2026-09-26T05:09:53.293333Z ERROR sumchain_storage::db: Failed to open database: Invalid argument: Column families not opened: application_journal
+2026-09-26T05:09:53.293342Z  WARN sumchain_storage::db: Database appears corrupted, attempting repair...
+2026-09-26T05:09:53.293344Z  INFO sumchain_storage::db: Attempting to repair database at <run>/post1b
+2026-09-26T05:09:53.297696Z  INFO sumchain_storage::db: Database repair completed for <run>/post1b
+2026-09-26T05:09:53.297703Z  INFO sumchain_storage::db: Database repair completed, retrying open...
+Error: RocksDB error: Invalid argument: Column families not opened: application_journal
+
+Caused by:
+    Invalid argument: Column families not opened: application_journal

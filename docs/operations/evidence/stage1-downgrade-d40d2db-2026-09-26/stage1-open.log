@@ -1,0 +1,10 @@
+# Stage 1 opening the seeded database (activation / journal / shutdown lines)
+2026-09-26T05:09:32.258698Z  INFO sumchain_storage::db: Opening database at <run>/data
+2026-09-26T05:09:32.301974Z  INFO sumchain::node: Application journal format: binary v1, stamped None, records None, revert boundary None
+2026-09-26T05:09:32.301987Z  INFO sumchain::node: Usable reorg depth: 0 block(s) (engine limit 4096, head 30, journal boundary \
+2026-09-26T05:09:32.302036Z  INFO sumchain::node: Genesis activation digest 0x131104a595d6330a59687284483171767b981da59649de6c8d05672deead4b52 (chain 1337, height 30, 0 gates set: )
+2026-09-26T05:09:32.302041Z  INFO sumchain::node: Activation heights recorded for the first time on this database
+2026-09-26T05:09:32.302117Z  INFO sumchain::node: Protocol digest (activation heights + consensus constants): 0x251c6d0cf1f2b78909d102709157c851497a2fd096ee1108024420fd6187c92b
+2026-09-26T05:09:51.492038Z  INFO sumchain::node: Shutdown signal received (SIGTERM)
+2026-09-26T05:09:51.993692Z  INFO sumchain::node: Flushing database...
+2026-09-26T05:09:51.993864Z  INFO sumchain::node: Node shutdown complete

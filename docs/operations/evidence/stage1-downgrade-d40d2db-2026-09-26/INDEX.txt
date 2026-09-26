@@ -1,0 +1,14 @@
+Downgrade reproduction against the DEPLOYED revision d40d2db20a74746ac4c9239783614684c6e7a417, 2026-09-26 (UTC).
+NONPRODUCTION: disposable local databases, a fixture key, chain 1337, five funded fixture accounts.
+Binaries: d40d2db built locally from that exact revision with its own rust-toolchain.toml (rustc 1.85.0);
+Stage 1 = rollout/native-stage1-release 6620e4e5 (includes the SIGTERM fix). Both are local macOS arm64
+builds: the same source as production's binary, not its bytes (production's is an x86_64 build, sha256
+d832bbde...84f7). RocksDB behaviour is the library's and does not depend on the CPU.
+
+steps.txt              every step, with the observed result
+inv-*.txt              read-only inventory per step: column family, rows, sha256 over its keys and values
+info-*.txt             `sumchain info`: latest height, hash, state root, finalized height and hash
+blocks-3-stage1.txt    blocks Stage 1 produced
+stage1-open.log        what Stage 1 logs when it opens the seeded database, and its SIGTERM shutdown
+old-on-stage1.log      d40d2db on a copy of the Stage-1 database, twice
+old-on-restored.log    d40d2db on the snapshot restored into a new directory
