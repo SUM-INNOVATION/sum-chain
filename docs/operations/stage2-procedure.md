@@ -21,9 +21,9 @@ rules) and §0.9 (deployment).
    ```bash
    python3 tools/lane-b/rollout-check.py \
      --validators <N> \
-     --expected-binary-sha256 <binary_sha256 from the release record> \
+     --release-record <release-record.txt from the release workflow run> \
      --expected-commit <40-hex release commit> \
-     --expected-image-digest <sha256:... registry digest from the release record> \
+     --expected-image-digest <sha256:... the approved CANONICAL manifest digest> \
      --expected-chain-id <chain id> \
      --expected-validator <64-hex public key of validator 1> \
      --expected-validator <64-hex public key of validator 2> \
@@ -48,7 +48,7 @@ rules) and §0.9 (deployment).
 | | |
 |---|---|
 | name | `activation/stage2-heights` |
-| base | `origin/main` **at the moment of recalculation**, which must contain the Stage 1 release commit whose binary sha256 is the `--expected-binary-sha256` above |
+| base | `origin/main` **at the moment of recalculation**, which must contain the Stage 1 release commit named by `--expected-commit` and the release record above |
 | contents | `genesis.json` heights, plus nothing else except the record of how they were derived (the PR body). No source change and no tooling change. Do not edit `ACTIVATION-PROPOSAL.json`: it stays symbolic, and `activation-proposal.py` must still pass on the branch (§4.4) |
 
 ```bash

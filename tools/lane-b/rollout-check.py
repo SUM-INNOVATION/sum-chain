@@ -3,9 +3,9 @@
 
     python3 tools/lane-b/rollout-check.py \\
         --validators N \\
-        --expected-binary-sha256 <sha256 of the release binary file> \\
+        --release-record <release-record.txt from the release workflow run> \\
         --expected-commit <40-hex release commit> \\
-        --expected-image-digest sha256:<release image registry digest> \\
+        --expected-image-digest sha256:<the approved CANONICAL manifest digest> \\
         --expected-chain-id <chain id> \\
         --expected-validator <64-hex public key>   (once per validator) \\
         --expected-genesis-sha256 <sha256 of the PRODUCTION genesis bytes> \\
@@ -27,9 +27,16 @@ admitted, so an absent handshake line means the exchange did not happen, not
 that it passed.
 
 Per validator, required and checked:
-  * binary_sha256      equal to --expected-binary-sha256.
+  * image_id           pinned by digest to the approved canonical manifest
+                       (--expected-image-digest), or to one of its two children
+                       as the release record lists them. The container runtime
+                       pulls the child for the node's own platform; nobody has
+                       to say which platform that is.
+  * binary_sha256      the binary of a child of that manifest, per the release
+                       record. When image_id names a child, it must be THAT
+                       child's binary (a swapped binary fails).
   * binary_version     exactly "sumchain <--expected-commit>".
-  * image_id           ends in @<--expected-image-digest>.
+  * node_architecture  optional diagnostic only; never required, never checked.
   * activation_digest  present, not "unavailable", identical on every validator.
   * protocol_digest    present, not "unavailable", identical on every validator.
   * chain_id           equal to --expected-chain-id.
@@ -89,6 +96,7 @@ FIELD = re.compile(r"\b(peer|digest)=(\S+)")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+RELEASE_PLATFORMS = ("linux/amd64", "linux/arm64")
 
 # The four gates production's genesis carries, at the heights live
 # chain_getChainParams reported on 2026-09-23 (docs/operations/
@@ -179,7 +187,38 @@ def parse_gates(gs: str) -> dict[str, int] | str:
     return out
 
 
-def check(evidence: Path, n: int, expected_sha: str, expected_chain: str,
+def load_release(path: Path, commit: str, canonical: str) -> tuple[dict, list[str]]:
+    """The release record, as tools/release/release-record.py writes it, checked
+    against the commit and canonical digest the operator approved.
+
+    Returns ({"canonical": digest, "children": {digest: (platform, binary sha256)}}, problems).
+    """
+    if not path.is_file():
+        return {}, [f"release record {path} does not exist"]
+    rec = parse_record(path)
+    problems = []
+    if rec.get("release_commit", "").lower() != commit.lower():
+        problems.append(f"RELEASE RECORD MISMATCH: it is for commit {rec.get('release_commit')!r}, "
+                        f"not {commit.lower()}")
+    if rec.get("canonical_digest", "").lower() != canonical.lower():
+        problems.append(f"RELEASE RECORD MISMATCH: its canonical digest is {rec.get('canonical_digest')!r}, "
+                        f"the approved one is {canonical.lower()}")
+    children: dict[str, tuple[str, str]] = {}
+    for p in RELEASE_PLATFORMS:
+        k = p.replace("/", "_")
+        d, b = rec.get(f"{k}_digest", "").lower(), rec.get(f"{k}_binary_sha256", "").lower()
+        if not DIGEST.match(d) or not HEX64.match(b):
+            problems.append(f"release record lacks a valid {p} child digest and binary sha256")
+            continue
+        children[d] = (p, b)
+    if len(children) == 2:
+        ds, bs = list(children), [b for _, b in children.values()]
+        if canonical.lower() in ds or len(set(bs)) != 2:
+            problems.append("release record children are not distinct from each other and the manifest")
+    return {"canonical": canonical.lower(), "children": children}, problems
+
+
+def check(evidence: Path, n: int, release: dict, expected_chain: str,
           expected_validators: list[str] | None = None,
           expected_genesis: str | None = None,
           expected_commit: str | None = None,
@@ -208,13 +247,25 @@ def check(evidence: Path, n: int, expected_sha: str, expected_chain: str,
         for key in REQUIRED:
             if not rec.get(key):
                 failures.append(f"{name}: MISSING FIELD {key}")
+        # The image: the approved canonical manifest, or one of its children.
+        # Which child a node runs follows from its platform, which nobody has to
+        # supply: the runtime chose it, and the binary hash identifies it.
+        children = release["children"]
+        img = rec.get("image_id", "").lower()
+        pulled = img.rsplit("@", 1)[1] if "@" in img else ""
+        if img and pulled != release["canonical"] and pulled not in children:
+            failures.append(f"{name}: IMAGE NOT FROM THE APPROVED MANIFEST image_id {img!r} is neither "
+                            f"@{release['canonical']} nor one of its children {sorted(children)}")
         sha = rec.get("binary_sha256", "").lower()
+        by_bin = {b: (p, d) for d, (p, b) in children.items()}
         if sha and not HEX64.match(sha):
             failures.append(f"{name}: binary_sha256 {sha!r} is not a sha256")
-        elif sha and sha != expected_sha.lower():
-            failures.append(
-                f"{name}: BINARY MISMATCH binary_sha256 {sha} != expected {expected_sha.lower()}"
-            )
+        elif sha and sha not in by_bin:
+            failures.append(f"{name}: BINARY MISMATCH binary_sha256 {sha} is not the binary of either child "
+                            f"of the approved manifest")
+        elif sha and pulled in children and children[pulled][1] != sha:
+            failures.append(f"{name}: BINARY MISMATCH image_id is the {children[pulled][0]} child, but "
+                            f"binary_sha256 {sha} is the {by_bin[sha][0]} child's binary")
         for key in ("activation_digest", "protocol_digest"):
             if rec.get(key, "").startswith("unavailable"):
                 failures.append(f"{name}: {key} is unavailable: {rec[key]}")
@@ -256,9 +307,6 @@ def check(evidence: Path, n: int, expected_sha: str, expected_chain: str,
         if ver and expected_commit is not None and ver != f"sumchain {expected_commit.lower()}":
             failures.append(f"{name}: COMMIT MISMATCH binary_version {ver!r} != "
                             f"'sumchain {expected_commit.lower()}'")
-        img = rec.get("image_id", "")
-        if img and expected_image_digest is not None and not img.endswith("@" + expected_image_digest.lower()):
-            failures.append(f"{name}: IMAGE MISMATCH image_id {img!r} is not @{expected_image_digest.lower()}")
 
     # The public validator identity, proven by possession: the recorder takes it
     # from a block this workload's own log says it produced. Two records naming
@@ -338,14 +386,16 @@ def check(evidence: Path, n: int, expected_sha: str, expected_chain: str,
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--validators", type=int, required=True)
-    ap.add_argument("--expected-binary-sha256", required=True)
+    ap.add_argument("--release-record", type=Path,
+                    help="release-record.txt from the release workflow run that published the manifest")
     ap.add_argument("--expected-chain-id", required=True)
     ap.add_argument("--expected-validator", action="append", default=[],
                     help="a validator public key, 64-hex; give it once per validator")
     ap.add_argument("--expected-genesis-sha256",
                     help="sha256 of the PRODUCTION genesis bytes, supplied by the owner")
     ap.add_argument("--expected-commit", help="the 40-hex commit the release image was built from")
-    ap.add_argument("--expected-image-digest", help="sha256:<64-hex> registry digest of the release image")
+    ap.add_argument("--expected-image-digest",
+                    help="sha256:<64-hex> digest of the approved CANONICAL manifest (never a tag, never a platform)")
     ap.add_argument("--predecessor-gate", action="append", default=None, metavar="NAME=HEIGHT",
                     help="NONPRODUCTION networks only: replace the production predecessor gates")
     ap.add_argument("evidence", type=Path)
@@ -367,8 +417,18 @@ def main(argv: list[str]) -> int:
         print("STOP: --expected-commit must be the full 40-hex release commit.")
         return 1
     if not args.expected_image_digest or not DIGEST.match(args.expected_image_digest.lower()):
-        print("STOP: --expected-image-digest must be the release image's sha256:<64-hex> "
-              "registry digest, never a tag.")
+        print("STOP: --expected-image-digest must be the approved canonical manifest's "
+              "sha256:<64-hex> digest, never a tag.")
+        return 1
+    if args.release_record is None:
+        print("STOP: no --release-record. The approved manifest's children and their binaries are")
+        print("      read from the release record of the run that published it.")
+        return 1
+    release, problems = load_release(args.release_record, args.expected_commit, args.expected_image_digest)
+    if problems:
+        for pr in problems:
+            print(f"FAIL: {pr}")
+        print("STAGE 1 NOT COMPLETE: the release record does not describe the approved manifest.")
         return 1
     predecessors = None
     if args.predecessor_gate is not None:
@@ -384,7 +444,7 @@ def main(argv: list[str]) -> int:
         return 1
 
     failures = check(
-        args.evidence, args.validators, args.expected_binary_sha256, args.expected_chain_id,
+        args.evidence, args.validators, release, args.expected_chain_id,
         args.expected_validator, args.expected_genesis_sha256,
         args.expected_commit, args.expected_image_digest, predecessors,
     )
@@ -396,7 +456,7 @@ def main(argv: list[str]) -> int:
     n = args.validators
     print(
         f"STAGE 1 ROLLOUT EVIDENCE COMPLETE: {n} validators with the expected public "
-        f"identities, release commit, image digest, identical binary, genesis, "
+        f"identities, release commit, children of the approved manifest, genesis, "
         f"predecessor gates, digests and chain id, "
         f"{n * (n - 1)}/{n * (n - 1)} directed handshakes, 0 refusals."
     )

@@ -26,7 +26,7 @@ Let `$V` be the validator's RPC base URL and `$POD` its pod name.
 
 | # | record | how |
 |---|---|---|
-| 1 | **binary sha256** | `kubectl -n sumchain exec $POD -- sha256sum /usr/local/bin/sumchain` — the path the `Dockerfile` installs the node at (`COPY --from=builder /build/target/release/sumchain /usr/local/bin/`, `ENTRYPOINT ["sumchain"]`); `tools/lane-b/rollout-check-test.py` derives it from the Dockerfile and fails if this document hashes anything else — **and** the image digest, `kubectl -n sumchain get pod $POD -o jsonpath='{.status.containerStatuses[0].imageID}'`. The image digest is what Kubernetes actually pulled; the file hash is what is running. Record both, because a mutable tag makes them able to disagree. **Three identities, all compared:** the file hash against the sha256 of the release binary; the image digest against the release image's registry digest; and `sumchain --version` against `sumchain <release commit>`. Since PR #259 the release Dockerfile refuses to build without a full 40-hex `GIT_HASH` and the binary reports it; 0.2.0 has no `--version` and cannot be recorded. The self-report is never the only identity: the file hash and the digest do not depend on anything the node says. |
+| 1 | **binary sha256** | `kubectl -n sumchain exec $POD -- sha256sum /usr/local/bin/sumchain` — the path the `Dockerfile` installs the node at (`COPY --from=builder /build/target/release/sumchain /usr/local/bin/`, `ENTRYPOINT ["sumchain"]`); `tools/lane-b/rollout-check-test.py` derives it from the Dockerfile and fails if this document hashes anything else — **and** the image digest, `kubectl -n sumchain get pod $POD -o jsonpath='{.status.containerStatuses[0].imageID}'`. The image digest is what Kubernetes actually pulled; the file hash is what is running. Record both, because a mutable tag makes them able to disagree. **Three identities, all compared:** the image digest against the approved canonical manifest or one of its two children; the file hash against the binary of a child of that manifest, as the release record lists them (and against THAT child's binary when the image digest names a child); and `sumchain --version` against `sumchain <release commit>`. The node's platform is never an input: the container runtime pulled the child for its own platform, and the binary hash shows which one it was. Since PR #259 the release Dockerfile refuses to build without a full 40-hex `GIT_HASH` and the binary reports it; 0.2.0 has no `--version` and cannot be recorded. The self-report is never the only identity: the file hash and the digest do not depend on anything the node says. |
 | 2 | **activation digest** | `chain_getActivationStatus` → `digest` **and** `protocol_digest`. `digest` answers "do our genesis files agree"; `protocol_digest` answers "do our binaries enforce the same rules", and it is the one peers compare at the handshake. Two binaries from different commits can share a `digest` and differ in `protocol_digest`. |
 | 3 | **chain id** | `chain_getActivationStatus` → `chain_id`. |
 | 4 | **current height** | `chain_getActivationStatus` → `current_height`. Carried in the same response as 2 and 3 deliberately: a digest recorded without the height it was read at cannot be placed in time. |
@@ -114,6 +114,14 @@ gen=$(kubectl -n "$NS" exec "$POD" -- sha256sum "$GENESIS_PATH") \
 gen=${gen%% *}
 [[ $gen =~ ^[0-9a-f]{64}$ ]] || fail "genesis_sha256 '$gen' is not a sha256"
 
+# Diagnostic only, never required: the architecture of the node the pod runs
+# on. The runtime chose the matching child of the approved manifest by itself,
+# and the checker identifies it from the binary hash; missing information here
+# never blocks a record.
+node=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.spec.nodeName}' 2>/dev/null) || node=""
+arch=$( [[ -n $node ]] && kubectl get node "$node" -o jsonpath='{.status.nodeInfo.architecture}' 2>/dev/null ) || arch=""
+[[ $arch =~ ^[a-z0-9_]+$ ]] || arch=unavailable
+
 # Stage 1 requires the telemetry to already be present.
 tools/lane-b/wave1-monitor.sh verify "$METRICS" >&2 || fail "telemetry verify failed"
 
@@ -131,6 +139,7 @@ echo "gates_set:         $gates"
 echo "local_peer_id:  $peer"
 echo "validator_pubkey: $vpk"
 echo "genesis_sha256: $gen"
+echo "node_architecture: $arch"
 echo "telemetry:      OK"
 } > "$tmp"
 mv "$tmp" "$OUT/$POD.record"
@@ -142,9 +151,9 @@ Nothing in this section is read by eye:
 ```bash
 python3 tools/lane-b/rollout-check.py \
   --validators <N> \
-  --expected-binary-sha256 <binary_sha256 from the release record> \
+  --release-record <release-record.txt from the release workflow run> \
   --expected-commit <40-hex release commit> \
-  --expected-image-digest <sha256:... registry digest from the release record> \
+  --expected-image-digest <sha256:... the approved CANONICAL manifest digest> \
   --expected-chain-id <chain id> \
   --expected-validator <64-hex public key of validator 1> \
   --expected-validator <64-hex public key of validator 2> \
@@ -154,9 +163,13 @@ python3 tools/lane-b/rollout-check.py \
 
 It exits 0 only when:
 - every validator has a complete record;
-- `binary_sha256` equals the release record's;
+- the release record is for the release commit and the approved canonical
+  manifest, and lists both children with their binaries;
+- `image_id` is pinned to the approved canonical manifest, or to one of its
+  two children;
+- `binary_sha256` is the binary of a child of that manifest, and when
+  `image_id` names a child, it is that child's binary;
 - `binary_version` is `sumchain <release commit>`;
-- `image_id` is pinned at the release digest;
 - `activation_digest` and `protocol_digest` are the same on every validator;
 - `chain_id` is the expected one, and `current_height` is above 0;
 - `gates_set` is exactly the four production predecessor gates at their live
