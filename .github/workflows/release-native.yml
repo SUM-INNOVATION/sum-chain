@@ -1,0 +1,255 @@
+name: release-native
+
+# THE PRODUCTION RELEASE. Publishes the native Linux release of one commit at
+# the head of main, as an immutable GitHub Release. Manually triggered only.
+#
+#   tag release-<40-hex commit>, assets:
+#     sumchain-<commit>-x86_64-unknown-linux-gnu.tar.gz   (+ .spdx.json, .provenance.json)
+#     sumchain-<commit>-aarch64-unknown-linux-gnu.tar.gz  (+ .spdx.json, .provenance.json)
+#     SHA256SUMS, release-record.txt
+#
+# Production runs this binary natively under systemd; nothing is compiled on a
+# validator. tools/release/install-native.sh picks the archive from
+# `uname -m`, so no operator names an architecture.
+#
+#   gate     read-only. Dispatched from main; the commit is a full sha that IS
+#            the head of main (so GitHub's signed provenance names the built
+#            commit); it is the head or merge result of a merged PR whose head
+#            carries an APPROVED review.
+#   build    read-only, no credential. One NATIVE job per architecture
+#            (ubuntu-24.04, ubuntu-24.04-arm) runs tools/release/build-native.sh:
+#            pinned build environment, pinned toolchain, --locked, GIT_HASH,
+#            --version, ELF, libraries, the native smoke test (health,
+#            readiness, metrics, graceful SIGTERM), deterministic archive.
+#   publish  environment `release` (Mike-Mans, self-review prevented, main
+#            only, admin bypass off) -- the ONLY job that writes anything.
+#            Writes the record and SHA256SUMS, verifies every asset, refuses an
+#            existing tag or release, attests every asset and both binaries,
+#            creates the release, then downloads it back and verifies it again,
+#            attestations included.
+#   verify   read-only. One NATIVE job per architecture downloads the
+#            published release, installs it with install-native.sh
+#            --verify-attestation, and smoke-tests the installed binary.
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: 'Full 40-hex commit: the current head of main (an approved, merged PR head)'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-native-${{ inputs.commit }}
+  cancel-in-progress: false
+
+env:
+  COMMIT: ${{ inputs.commit }}
+
+jobs:
+  gate:
+    name: refuse unmerged, unapproved or stale commits
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      pr: ${{ steps.approval.outputs.pr }}
+      approved_by: ${{ steps.approval.outputs.approved_by }}
+    steps:
+      - name: Dispatched from main, for the head of main
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::dispatch from main only (got $GITHUB_REF)"; exit 1; }
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit must be a full 40-hex sha"; exit 1; }
+          [[ "$COMMIT" == "$GITHUB_SHA" ]] \
+            || { echo "::error::$COMMIT is not the head of main ($GITHUB_SHA); dispatch while it is"; exit 1; }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The commit is on main
+        run: |
+          set -euo pipefail
+          git cat-file -e "$COMMIT^{commit}" || { echo "::error::$COMMIT does not exist"; exit 1; }
+          git merge-base --is-ancestor "$COMMIT" origin/main \
+            || { echo "::error::$COMMIT is not on main; unmerged commits are never published"; exit 1; }
+
+      - name: The commit is an approved, merged pull request
+        id: approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$COMMIT/pulls" --jq \
+            "[.[] | select(.merged_at != null and .base.ref == \"main\"
+                           and (.head.sha == \"$COMMIT\" or .merge_commit_sha == \"$COMMIT\"))][0] // empty")
+          [[ -n $pr ]] || { echo "::error::$COMMIT is not the head or merge commit of a merged PR into main"; exit 1; }
+          num=$(jq -r .number <<<"$pr"); head=$(jq -r .head.sha <<<"$pr")
+          approved=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$num/reviews" --jq \
+            "[.[] | select(.state == \"APPROVED\" and .commit_id == \"$head\") | .user.login] | unique | join(\",\")")
+          [[ -n $approved ]] || { echo "::error::PR #$num has no APPROVED review on its head $head"; exit 1; }
+          echo "PR #$num merged, head $head approved by $approved"
+          { echo "pr=$num"; echo "approved_by=$approved"; } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build ${{ matrix.arch }} (native, no credentials)
+    needs: gate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build, smoke-test and archive ${{ matrix.arch }}
+        run: >-
+          bash tools/release/build-native.sh "${{ matrix.arch }}" "$COMMIT" "$RUNNER_TEMP/out"
+          "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-${{ matrix.arch }}
+          path: ${{ runner.temp }}/out/
+          retention-days: 3
+          if-no-files-found: error
+
+  publish:
+    name: publish the GitHub Release (protected)
+    needs: [gate, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Environment "release": Mike-Mans must approve, and cannot approve a run he
+    # dispatched; main only; admin bypass disabled. The only job that writes.
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: release-${{ inputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/build
+
+      - name: Write the record and SHA256SUMS; verify every asset
+        run: |
+          set -euo pipefail
+          b="$RUNNER_TEMP/build" r="$RUNNER_TEMP/release"
+          python3 tools/release/native-release.py record "$b" --commit "$COMMIT" \
+            --pr "${{ needs.gate.outputs.pr }}" --approved-by "${{ needs.gate.outputs.approved_by }}" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          mkdir -p "$r"
+          for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            n="sumchain-$COMMIT-$t"; cp "$b/$n.tar.gz" "$b/$n.spdx.json" "$b/$n.provenance.json" "$r/"
+          done
+          cp "$b/SHA256SUMS" "$b/release-record.txt" "$r/"
+          python3 tools/release/native-release.py verify "$r" --commit "$COMMIT"
+          mkdir -p "$RUNNER_TEMP/bins"
+          for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            mkdir -p "$RUNNER_TEMP/bins/$t"
+            tar -xzf "$r/sumchain-$COMMIT-$t.tar.gz" -C "$RUNNER_TEMP/bins/$t" --strip-components=1
+          done
+
+      - name: Refuse an existing tag or release (both are immutable)
+        run: |
+          set -euo pipefail
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::tag $TAG already exists; it is never moved or reused"; exit 1
+          fi
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release $TAG already exists; its assets are never overwritten"; exit 1
+          fi
+
+      - name: Attest every asset and both binaries
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/release/*.tar.gz
+            ${{ runner.temp }}/release/*.spdx.json
+            ${{ runner.temp }}/release/*.provenance.json
+            ${{ runner.temp }}/release/SHA256SUMS
+            ${{ runner.temp }}/release/release-record.txt
+            ${{ runner.temp }}/bins/*/sumchain
+            ${{ runner.temp }}/bins/*/sumchain-wallet
+
+      - name: Create the release (no overwrite)
+        run: |
+          set -euo pipefail
+          r="$RUNNER_TEMP/release"
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$COMMIT" \
+            --title "sumchain $COMMIT" --notes-file "$r/release-record.txt" --latest=false \
+            "$r"/*
+
+      - name: Download it back and verify it, attestations included
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/readback"
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D "$d"
+          python3 tools/release/native-release.py verify "$d" --commit "$COMMIT"
+          for f in "$d"/*; do bash tools/release/verify-attestation.sh --file "$f" "$COMMIT"; done
+          for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            for b in sumchain sumchain-wallet; do
+              bash tools/release/verify-attestation.sh --file "$RUNNER_TEMP/bins/$t/$b" "$COMMIT"
+            done
+          done
+          { echo '```'; cat "$d/release-record.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  verify:
+    name: install and run ${{ matrix.arch }} from the release (native, read-only)
+    needs: publish
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+
+      - name: Download, verify, install (architecture from uname -m), smoke-test
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/release"
+          gh release download "release-$COMMIT" -R "$GITHUB_REPOSITORY" -D "$d"
+          python3 tools/release/native-release.py verify "$d" --commit "$COMMIT"
+          bash tools/release/install-native.sh --release-dir "$d" --commit "$COMMIT" \
+            --prefix "$RUNNER_TEMP/opt" --verify-attestation
+          bin="$RUNNER_TEMP/opt/releases/$COMMIT/sumchain"
+          bash tools/release/verify-attestation.sh --file "$bin" "$COMMIT"
+          bash tools/release/smoke-native.sh "$bin" "$COMMIT"

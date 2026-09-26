@@ -1,0 +1,143 @@
+name: native-release-ci
+
+# Exercises the production release path on every relevant PR and main push,
+# end to end, with nothing published:
+#   build    one NATIVE job per architecture runs tools/release/build-native.sh
+#            (the real build environment, --locked, GIT_HASH, --version, ELF,
+#            libraries, native smoke test incl. graceful SIGTERM, archive).
+#   assemble writes SHA256SUMS and the release record exactly as the release
+#            does, verifies the asset set with native-release.py, and requires
+#            a tampered archive to be refused.
+#   install  one NATIVE job per architecture installs the assembled release
+#            with install-native.sh (architecture from uname -m), then runs the
+#            installed binary through the smoke test.
+# GitHub attestations exist only for a published release; their policy is
+# covered by tools/release/verify-attestation-test.sh in rollout-tooling.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'crates/**'
+      - 'scripts/**'
+      - 'tools/release/**'
+      - 'tools/lane-b/wave1-monitor.sh'
+      - '.github/workflows/native-release-ci.yml'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: native ${{ matrix.arch }} archive
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Commit being built
+        id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build, smoke-test and archive
+        run: >-
+          bash tools/release/build-native.sh "${{ matrix.arch }}" "${{ steps.commit.outputs.sha }}"
+          "$RUNNER_TEMP/out" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-${{ matrix.arch }}
+          path: ${{ runner.temp }}/out/
+          retention-days: 3
+          if-no-files-found: error
+
+  assemble:
+    name: release assets assembled and verified
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Commit being built
+        id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/build
+
+      - name: Record, SHA256SUMS, verify; a tampered archive is refused
+        run: |
+          set -euo pipefail
+          c="${{ steps.commit.outputs.sha }}" b="$RUNNER_TEMP/build" r="$RUNNER_TEMP/release"
+          python3 tools/release/native-release.py record "$b" --commit "$c" --pr ci --approved-by ci \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          mkdir -p "$r"
+          for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            n="sumchain-$c-$t"; cp "$b/$n.tar.gz" "$b/$n.spdx.json" "$b/$n.provenance.json" "$r/"
+          done
+          cp "$b/SHA256SUMS" "$b/release-record.txt" "$r/"
+          python3 tools/release/native-release.py verify "$r" --commit "$c"
+          cat "$r/release-record.txt"
+          cp -R "$r" "$RUNNER_TEMP/tampered"
+          printf '\0' >> "$RUNNER_TEMP/tampered/sumchain-$c-aarch64-unknown-linux-gnu.tar.gz"
+          if python3 tools/release/native-release.py verify "$RUNNER_TEMP/tampered" --commit "$c" 2>err.txt; then
+            echo "::error::a tampered archive verified"; exit 1
+          fi
+          grep -q 'SHA256SUMS MISMATCH' err.txt && rm -f err.txt && echo "refused as required: tampered archive"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/release/
+          retention-days: 3
+          if-no-files-found: error
+
+  install:
+    name: install ${{ matrix.arch }} by uname -m, run it
+    needs: assemble
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Commit being built
+        id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/release
+
+      - name: install-native.sh picks this runner's archive; the installed binary passes the smoke test
+        run: |
+          set -euo pipefail
+          c="${{ steps.commit.outputs.sha }}" d="$RUNNER_TEMP/release"
+          [[ $(uname -m) == "${{ matrix.arch }}" ]]
+          bash tools/release/install-native.sh --release-dir "$d" --commit "$c" --prefix "$RUNNER_TEMP/opt" \
+            --sums-sha256 "$(sha256sum "$d/SHA256SUMS" | cut -d' ' -f1)"
+          want=$(awk '$1=="${{ matrix.arch }}_binary_sha256:" {print $2}' "$d/release-record.txt")
+          [[ $(sha256sum "$RUNNER_TEMP/opt/releases/$c/sumchain" | cut -d' ' -f1) == "$want" ]]
+          bash tools/release/smoke-native.sh "$RUNNER_TEMP/opt/releases/$c/sumchain" "$c"

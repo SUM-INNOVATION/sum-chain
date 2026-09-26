@@ -6,6 +6,7 @@ name: rollout-tooling
 #   * rollback preflight recorder + checker (fixture battery)
 #   * wave1-monitor.sh (fixture battery)
 #   * release attestation policy (verify-attestation.sh, fixture battery)
+#   * native release archives, installer and workflow structure
 #   * scrape configuration points at the port /metrics is served on
 #   * no activation height baked into tracked genesis
 #   * git diff --check, no AI attribution in commit messages, clean tree
@@ -43,6 +44,12 @@ jobs:
 
       - name: Release attestation policy
         run: bash tools/release/verify-attestation-test.sh
+
+      - name: Native release archives and installer
+        run: python3 tools/release/native-release-test.py
+
+      - name: Native release workflow structure
+        run: python3 tools/release/release-native-workflow-test.py
 
       - name: No activation height baked into tracked genesis
         run: python3 tools/release/check-genesis-gates.py --commit "$(git rev-parse HEAD)"
