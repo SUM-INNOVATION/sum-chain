@@ -647,11 +647,31 @@ impl<'db, 'a> AcceptedCandidate<'db, 'a> {
         for (cf_name, record) in [
             (cf::STATE_DIFFS, &self.journals.account),
             (cf::CONTRACT_STATE_DIFFS, &self.journals.contract),
-            (cf::COMPUTE_POOL_STATE_DIFFS, &self.journals.compute_pool),
-            (cf::BEACON_STATE_DIFFS, &self.journals.beacon),
         ] {
             if let JournalRecord::Recorded(bytes) = record {
                 self.overlay.put(cf_name, &jkey, bytes)?;
+            }
+        }
+        // The compute-pool and beacon records are sealed with the identity of
+        // the block they undo (#253), here because this is the first point at
+        // which the block hash is final. Readers open them against the block
+        // they were asked to revert and refuse any other.
+        for (cf_name, family, record) in [
+            (
+                cf::COMPUTE_POOL_STATE_DIFFS,
+                crate::subsystem_journal::Family::ComputePool,
+                &self.journals.compute_pool,
+            ),
+            (
+                cf::BEACON_STATE_DIFFS,
+                crate::subsystem_journal::Family::Beacon,
+                &self.journals.beacon,
+            ),
+        ] {
+            if let JournalRecord::Recorded(payload) = record {
+                let sealed = crate::subsystem_journal::seal(family, height, &block_hash, payload)
+                    .map_err(|e| StorageError::InvalidData(e.to_string()))?;
+                self.overlay.put(cf_name, &jkey, &sealed)?;
             }
         }
 

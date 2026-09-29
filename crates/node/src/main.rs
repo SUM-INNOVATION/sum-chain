@@ -874,6 +874,7 @@ async fn main() -> Result<()> {
             use sumchain_state::reorg_undo::ActivatedJournal;
             use sumchain_state::StateManager;
             use sumchain_storage::journal::ActivationSource;
+            use sumchain_storage::subsystem_journal::SubsystemGates;
             use sumchain_storage::schema::BlockStore;
 
             init_logging("info", false)?;
@@ -892,12 +893,18 @@ async fn main() -> Result<()> {
             // genesis document when one is supplied, so a pinned gate is honoured
             // exactly; otherwise observed from the journal history on disk, which
             // is the production `None` rule.
-            let source = match &genesis {
+            let (source, gates) = match &genesis {
                 Some(path) => {
                     let g = sumchain_genesis::Genesis::from_file(path)
                         .with_context(|| format!("failed to load genesis from {:?}", path))?;
-                    ActivationSource::from_configured_height(
-                        g.params.application_journal_enabled_from_height,
+                    (
+                        ActivationSource::from_configured_height(
+                            g.params.application_journal_enabled_from_height,
+                        ),
+                        SubsystemGates {
+                            compute_pool: g.params.compute_pool_enabled_from_height,
+                            beacon: g.params.beacon_enabled_from_height,
+                        },
                     )
                 }
                 None => {
@@ -908,7 +915,12 @@ async fn main() -> Result<()> {
                          tool uses the same boundary the node does.",
                         format.observed_boundary
                     );
-                    ActivationSource::ObservedFromChain
+                    // Without genesis the subsystem gates are unknown, so they
+                    // are taken as dormant: any compute-pool or beacon undo
+                    // record then REFUSES the rollback rather than being
+                    // replayed on a guess (#253). Pass --genesis on a chain
+                    // that has activated either subsystem.
+                    (ActivationSource::ObservedFromChain, SubsystemGates::DORMANT)
                 }
             };
 
@@ -927,7 +939,7 @@ async fn main() -> Result<()> {
                     floor + 1
                 );
             }
-            let journals = ActivatedJournal::resolve(&db, source)
+            let journals = ActivatedJournal::resolve(&db, source, gates)
                 .map_err(|e| anyhow::anyhow!("cannot resolve the journal boundary: {}", e))?;
 
             let block_store = BlockStore::new(&db);

@@ -23,6 +23,7 @@ pub mod policy_account_store;
 pub mod property_store;
 pub mod pruner;
 pub mod schema;
+pub mod subsystem_journal;
 pub mod tax_store;
 
 pub use db::{cf, BackupInfo, Database, DatabaseConfig};

@@ -175,7 +175,13 @@ impl<'a> BeaconManager<'a> {
     pub fn revert_block(&mut self, height: BlockHeight, block_hash: &Hash) -> Result<()> {
         {
             let store = BeaconStore::new(self.db);
-            store.revert_block(height, block_hash)?;
+            // The gate decides whether this block published a record, so it
+            // decides whether one must be there to replay.
+            let expect = sumchain_storage::subsystem_journal::Expectation::at(
+                self.params.beacon_enabled_from_height,
+                height,
+            );
+            store.revert_block(height, block_hash, expect)?;
         }
         if let Some(prev) = self.undo.remove(&height) {
             self.working = prev;
@@ -460,14 +466,21 @@ mod tests {
                 new,
             });
         }
-        if !diff.records.is_empty() {
-            diff.records.sort_by(|a, b| a.key.cmp(&b.key));
-            batch.put(
-                cf::BEACON_STATE_DIFFS,
-                &sumchain_storage::schema::journal_key(height, &bh(height)),
-                &diff.encode()?,
-            )?;
-        }
+        // As the publisher does with the gate open (#253): a sealed record for
+        // every block, empty when it changed nothing.
+        diff.records.sort_by(|a, b| a.key.cmp(&b.key));
+        let sealed = sumchain_storage::subsystem_journal::seal(
+            sumchain_storage::subsystem_journal::Family::Beacon,
+            height,
+            &bh(height),
+            &diff.encode()?,
+        )
+        .map_err(|e| StateError::InvalidOperation(e.to_string()))?;
+        batch.put(
+            cf::BEACON_STATE_DIFFS,
+            &sumchain_storage::schema::journal_key(height, &bh(height)),
+            &sealed,
+        )?;
         batch.commit()?;
         Ok(())
     }

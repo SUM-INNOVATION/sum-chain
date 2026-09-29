@@ -20,6 +20,7 @@ use sumchain_state::compute_pool_store::{ComputePoolStateDiff, ComputePoolStore}
 use sumchain_storage::candidate::JournalRecord;
 use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::overlay::ApplicationOverlay;
+use sumchain_storage::subsystem_journal::Expectation;
 use sumchain_storage::{cf, Database};
 
 const LIMIT: u64 = 1 << 20;
@@ -321,7 +322,9 @@ fn a_height_only_journal_refuses_rather_than_guessing_which_block_it_undoes() {
         ("load_journal", store.load_journal(HEIGHT, &block_hash(0)).err()),
         (
             "revert_block",
-            store.revert_block(HEIGHT, &block_hash(0)).err(),
+            store
+                .revert_block(HEIGHT, &block_hash(0), Expectation::Required)
+                .err(),
         ),
     ] {
         let err = result.unwrap_or_else(|| panic!("{label} must refuse a height-only journal"));

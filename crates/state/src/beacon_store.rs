@@ -63,6 +63,7 @@ fn from_stored_ref(s: &StoredSignedRef) -> SignedRecordRef {
 use sumchain_primitives::{BlockHeight, Hash};
 use sumchain_storage::candidate::JournalRecord;
 use sumchain_storage::exec_view::ExecutionView;
+use sumchain_storage::subsystem_journal::{self, Expectation, Family};
 use sumchain_storage::{cf, Database};
 
 use crate::{Result, StateError};
@@ -940,15 +941,59 @@ impl<'a> BeaconStore<'a> {
     /// Load + canonically decode the revert journal published for
     /// `(height, block_hash)` (`None` if absent — always under the dormant gate,
     /// which produces no journal).
+    ///
+    /// A present row is opened against that block first
+    /// ([`sumchain_storage::subsystem_journal::open`]), so a record sealed for
+    /// any other block, height or family is refused, never decoded.
     pub fn load_journal(
         &self,
         height: BlockHeight,
         block_hash: &Hash,
     ) -> Result<Option<BeaconStateDiff>> {
         match self.journal_bytes(height, block_hash)? {
-            Some(bytes) => Ok(Some(beacon_decode(&bytes)?)),
+            Some(bytes) => Ok(Some(Self::open_sealed(&bytes, height, block_hash)?)),
             None => Ok(None),
         }
+    }
+
+    /// The journal a revert of `(height, block_hash)` must replay, under the
+    /// gate's rule for whether one exists. Same rule, same reasons, as
+    /// `ComputePoolStore::journal_for_revert`: absence where the gate was open
+    /// is a lost record, presence where it was closed is a record no binary
+    /// should have written, and both halt.
+    fn journal_for_revert(
+        &self,
+        height: BlockHeight,
+        block_hash: &Hash,
+        expect: Expectation,
+    ) -> Result<Option<BeaconStateDiff>> {
+        match (self.journal_bytes(height, block_hash)?, expect) {
+            (None, Expectation::Absent) => Ok(None),
+            (None, Expectation::Required) => Err(StateError::InvalidOperation(format!(
+                "beacon revert: no journal for block {block_hash} at height {height}, \
+                 although the beacon gate was open there and every such block publishes \
+                 one. Refusing to revert past a lost undo record."
+            ))),
+            (Some(_), Expectation::Absent) => Err(StateError::InvalidOperation(format!(
+                "beacon revert: a journal exists for block {block_hash} at height \
+                 {height}, where the beacon gate was closed and nothing is published. \
+                 Refusing to apply a record no binary should have written."
+            ))),
+            (Some(bytes), Expectation::Required) => {
+                Ok(Some(Self::open_sealed(&bytes, height, block_hash)?))
+            }
+        }
+    }
+
+    /// Open a sealed row against the block it was read for, then decode it.
+    fn open_sealed(
+        bytes: &[u8],
+        height: BlockHeight,
+        block_hash: &Hash,
+    ) -> Result<BeaconStateDiff> {
+        let payload = subsystem_journal::open(bytes, Family::Beacon, height, block_hash)
+            .map_err(|e| StateError::InvalidOperation(format!("beacon revert: {e}")))?;
+        beacon_decode(payload)
     }
 
     /// The raw journal row published for `(height, block_hash)`.
@@ -1148,11 +1193,11 @@ impl<'a> BeaconStore<'a> {
         batch: &mut sumchain_storage::db::WriteBatch<'_>,
         height: BlockHeight,
         block_hash: &Hash,
+        expect: Expectation,
     ) -> Result<bool> {
-        let Some(bytes) = self.journal_bytes(height, block_hash)? else {
-            return Ok(false);
+        let Some(diff) = self.journal_for_revert(height, block_hash, expect)? else {
+            return Ok(false); // gate closed at this height: nothing was published
         };
-        let diff: BeaconStateDiff = beacon_decode(&bytes)?;
         for record in diff.records.iter().rev() {
             if !is_beacon_domain(&record.key) {
                 return Err(StateError::InvalidOperation(format!(
@@ -1178,9 +1223,14 @@ impl<'a> BeaconStore<'a> {
     /// (its own [`Database::batch`]). Thin wrapper over [`stage_block_revert`](Self::
     /// stage_block_revert); retained for the standalone store tests. The LIVE reorg
     /// path drives `stage_block_revert` into the unified batch instead.
-    pub fn revert_block(&self, height: BlockHeight, block_hash: &Hash) -> Result<()> {
+    pub fn revert_block(
+        &self,
+        height: BlockHeight,
+        block_hash: &Hash,
+        expect: Expectation,
+    ) -> Result<()> {
         let mut batch = self.db.batch();
-        if self.stage_block_revert(&mut batch, height, block_hash)? {
+        if self.stage_block_revert(&mut batch, height, block_hash, expect)? {
             batch.commit()?;
         }
         Ok(())
@@ -1244,15 +1294,15 @@ mod tests {
                 new,
             });
         }
-        if diff.records.is_empty() {
-            batch.commit()?;
-            return Ok(0);
-        }
+        // As the publisher does with the gate open (#253): every block gets a
+        // record sealed with its identity, empty when it changed nothing.
         diff.records.sort_by(|a, b| a.key.cmp(&b.key));
+        let sealed = subsystem_journal::seal(Family::Beacon, height, block_hash, &diff.encode()?)
+            .map_err(|e| StateError::InvalidOperation(e.to_string()))?;
         batch.put(
             cf::BEACON_STATE_DIFFS,
             &sumchain_storage::schema::journal_key(height, block_hash),
-            &diff.encode()?,
+            &sealed,
         )?;
         let mutated = diff.records.len();
         batch.commit()?;
@@ -1331,7 +1381,9 @@ mod tests {
         let committed = store.state_digest().unwrap();
 
         // Revert restores the empty predecessor.
-        store.revert_block(1, &bh(1, 0)).unwrap();
+        store
+            .revert_block(1, &bh(1, 0), Expectation::Required)
+            .unwrap();
         assert!(store.load_state_map().unwrap().is_empty());
         assert_eq!(
             store.state_digest().unwrap(),

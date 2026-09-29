@@ -332,12 +332,14 @@ fn a_post_activation_block_cannot_be_named_to_the_legacy_revert_path() {
     state
         .revert_pre_activation_block_state_diffs(
             &PreActivationBlock::classify(&pre, 9, absent).expect("below the boundary"),
+            sumchain_storage::subsystem_journal::SubsystemGates::DORMANT,
         )
         .expect("pre-activation absence is Ok(()), which is the only place it is");
 
     state
         .revert_pre_activation_block_state_diffs(
             &PreActivationBlock::classify(&pre, 1, hash).expect("below the boundary"),
+            sumchain_storage::subsystem_journal::SubsystemGates::DORMANT,
         )
         .expect("pre-activation revert from the legacy diffs is unchanged");
     assert!(db

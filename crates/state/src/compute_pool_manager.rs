@@ -233,7 +233,13 @@ impl<'a> ComputePoolManager<'a> {
     pub fn revert_block(&mut self, height: BlockHeight, block_hash: &Hash) -> Result<()> {
         {
             let store = ComputePoolStore::new(self.db);
-            store.revert_block(height, block_hash)?;
+            // The gate decides whether this block published a record, so it
+            // decides whether one must be there to replay.
+            let expect = sumchain_storage::subsystem_journal::Expectation::at(
+                self.params.compute_pool_enabled_from_height,
+                height,
+            );
+            store.revert_block(height, block_hash, expect)?;
         }
         if let Some(prev) = self.undo.remove(&height) {
             self.model = prev;
@@ -345,14 +351,21 @@ mod tests {
                 new,
             });
         }
-        if !diff.is_empty() {
-            diff.sort();
-            batch.put(
-                cf::COMPUTE_POOL_STATE_DIFFS,
-                &sumchain_storage::schema::journal_key(height, &bh(height)),
-                &diff.encode()?,
-            )?;
-        }
+        // As the publisher does with the gate open (#253): a sealed record for
+        // every block, empty when it changed nothing.
+        diff.sort();
+        let sealed = sumchain_storage::subsystem_journal::seal(
+            sumchain_storage::subsystem_journal::Family::ComputePool,
+            height,
+            &bh(height),
+            &diff.encode()?,
+        )
+        .map_err(|e| StateError::InvalidOperation(e.to_string()))?;
+        batch.put(
+            cf::COMPUTE_POOL_STATE_DIFFS,
+            &sumchain_storage::schema::journal_key(height, &bh(height)),
+            &sealed,
+        )?;
         batch.commit()?;
         Ok(())
     }
@@ -635,19 +648,27 @@ mod tests {
         assert!(!mgr.has_pending_undo(6), "no undo entry on failed op");
     }
 
-    // ---- a genuine no-op transition writes no journal / undo entry ----
+    // ---- a genuine no-op transition: an empty record, no undo entry ----
 
     #[test]
-    fn noop_transition_records_no_journal_or_undo() {
+    fn noop_transition_publishes_an_empty_record_and_no_undo() {
         let (db, _d) = open_db();
         let mut mgr = ComputePoolManager::new_enabled(&db, &params_enabled_from(5), 5).unwrap();
         apply_and_seed(&db, &mut mgr, 5, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
             .unwrap();
+        let rows_after_5 = mgr.store().load_state_map().unwrap();
 
-        // Height 6 applies no mutation => zero mutated rows, no journal, no undo.
+        // Height 6 applies no mutation => zero mutated rows and no in-memory undo
+        // entry, but a PUBLISHED record: the gate is open, so the block states
+        // "nothing to undo" positively rather than by absence (#253).
         let mutated = apply_and_seed(&db, &mut mgr, 6, |_m| Ok(())).unwrap();
         assert_eq!(mutated, 0);
-        assert!(!mgr.store().has_journal(6, &bh(6)).unwrap());
         assert!(!mgr.has_pending_undo(6));
+        assert!(mgr.store().load_journal(6, &bh(6)).unwrap().unwrap().is_empty());
+
+        // Reverting it consumes that record and changes nothing else.
+        mgr.revert_block(6, &bh(6)).unwrap();
+        assert!(!mgr.store().has_journal(6, &bh(6)).unwrap());
+        assert_eq!(mgr.store().load_state_map().unwrap(), rows_after_5);
     }
 }

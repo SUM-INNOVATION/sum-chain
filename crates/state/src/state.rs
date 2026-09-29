@@ -397,10 +397,17 @@ impl StateManager {
     /// `crates/state/tests/application_journal.rs`'s
     /// `the_legacy_revert_path_has_no_production_caller_and_the_rollback_cli_has_its_own`
     /// scans for that and fails if it changes.
+    ///
+    /// `gates` are the chain's compute-pool and beacon activation heights. A
+    /// block with a gate open published that subsystem's record, empty or not,
+    /// so its absence halts the revert; a block with the gate closed published
+    /// none, so a record there halts it too (#253).
     pub fn revert_pre_activation_block_state_diffs(
         &self,
         block: &crate::reorg_undo::PreActivationBlock,
+        gates: sumchain_storage::subsystem_journal::SubsystemGates,
     ) -> Result<()> {
+        use sumchain_storage::subsystem_journal::{Expectation, Family};
         use sumchain_storage::{cf, ContractStateDiff};
 
         let height = block.height();
@@ -437,10 +444,16 @@ impl StateManager {
         // there is nothing to revert and the dormant path is byte-for-byte unchanged.
         let beacon_store = crate::beacon_store::BeaconStore::new(&self.db);
         let has_beacon_journal = beacon_store.has_journal(height, block_hash)?;
+        let cp_expect = gates.expectation(Family::ComputePool, height);
+        let beacon_expect = gates.expectation(Family::Beacon, height);
+        // Nothing recorded AND nothing required. A required-but-missing record
+        // does not return here: it reaches `stage_block_revert`, which refuses.
         if account_diff.is_none()
             && contract_diff.is_none()
             && !has_cp_journal
             && !has_beacon_journal
+            && cp_expect == Expectation::Absent
+            && beacon_expect == Expectation::Absent
         {
             return Ok(());
         }
@@ -503,14 +516,14 @@ impl StateManager {
         // are validated here BEFORE commit, so a corrupt C1 journal aborts the
         // WHOLE revert (nothing applied, every diff preserved for retry) — exactly
         // like the unknown-`cf_kind` guard above. No-op when no C1 journal exists.
-        cp_store.stage_block_revert(&mut batch, height, block_hash)?;
+        cp_store.stage_block_revert(&mut batch, height, block_hash, cp_expect)?;
 
         // BR1 beacon restores (reverse-replay of this block's journal) + the
         // journal's own deletion, staged into the SAME batch. Domain prefixes are
         // validated BEFORE commit, so a corrupt beacon journal aborts the WHOLE
         // revert (nothing applied, every diff preserved for retry). No-op when no
         // beacon journal exists (always, under the dormant gate).
-        beacon_store.stage_block_revert(&mut batch, height, block_hash)?;
+        beacon_store.stage_block_revert(&mut batch, height, block_hash, beacon_expect)?;
 
         // Delete both diff records in the SAME batch — applied only on commit.
         // Both the #253 key and the pre-#253 height-only key are removed, so a

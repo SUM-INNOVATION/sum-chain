@@ -25,6 +25,23 @@ fn encode_journal(diff: &StateDiff) -> Result<JournalRecord> {
     )?))
 }
 
+/// The compute-pool or beacon journal of a block whose gate is OPEN.
+///
+/// Such a block always publishes a record, an empty one when it changed nothing
+/// (#253). Otherwise "changed nothing" and "record lost" are the same absent
+/// row, and a revert could not tell a block with nothing to undo from one whose
+/// undo record is gone. Readers require a record exactly where the gate is open,
+/// so this is the producer half of that rule.
+fn gate_open_journal(
+    journal: JournalRecord,
+    empty: impl FnOnce() -> Result<Vec<u8>>,
+) -> Result<JournalRecord> {
+    match journal {
+        JournalRecord::NothingToUndo => Ok(JournalRecord::Recorded(empty()?)),
+        recorded => Ok(recorded),
+    }
+}
+
 /// Encode a contract undo journal, or state that there is nothing to undo.
 fn encode_contract_journal(diff: &ContractStateDiff) -> Result<JournalRecord> {
     if diff.records.is_empty() {
@@ -3923,7 +3940,9 @@ impl BlockExecutor {
     {
         if let Some(mut manager) = ComputePoolManager::new_enabled(&self.db, &self.params, height) {
             let (_mutated, journal) = manager.apply_block(view, height, ops)?;
-            return Ok(journal);
+            return gate_open_journal(journal, || {
+                crate::compute_pool_store::ComputePoolStateDiff::new().encode()
+            });
         }
         // Gate closed: the manager is never constructed, so there is no
         // transition and nothing to undo. `NothingToUndo` states that
@@ -4151,15 +4170,21 @@ impl BlockExecutor {
     fn apply_beacon_transitions(
         &self,
         view: &mut ExecutionView<'_, '_>,
-        _height: BlockHeight,
+        height: BlockHeight,
     ) -> Result<JournalRecord> {
         let acc = self.beacon_block.lock().take();
-        match acc {
-            Some(acc) => {
-                let (_mutated, journal) = acc.stage(view)?;
-                Ok(journal)
-            }
-            None => Ok(JournalRecord::NothingToUndo),
+        let journal = match acc {
+            Some(acc) => acc.stage(view)?.1,
+            None => JournalRecord::NothingToUndo,
+        };
+        // Keyed on the gate, not on the accumulator: the readers decide whether
+        // a record must exist from the gate, so the producer uses the same rule.
+        if crate::beacon_executor::beacon_gate_open(&self.params, height) {
+            gate_open_journal(journal, || {
+                crate::beacon_store::BeaconStateDiff::default().encode()
+            })
+        } else {
+            Ok(journal)
         }
     }
 
@@ -4599,6 +4624,16 @@ mod tests {
     /// `PreActivationBlock` has no other constructor: the classification has to
     /// happen, and these fixtures are about the pre-activation path, so they
     /// declare that rather than passing a flag.
+    /// The subsystem gates a revert must be told, taken from the params the
+    /// test's executor ran under, so the revert expects exactly the records
+    /// that execution published.
+    fn gates_of(params: &ChainParams) -> sumchain_storage::subsystem_journal::SubsystemGates {
+        sumchain_storage::subsystem_journal::SubsystemGates {
+            compute_pool: params.compute_pool_enabled_from_height,
+            beacon: params.beacon_enabled_from_height,
+        }
+    }
+
     fn pre_activation_witness(
         height: sumchain_primitives::BlockHeight,
         block_hash: Hash,
@@ -8141,7 +8176,10 @@ mod tests {
         // The unified reorg-revert path is a clean no-op under the dormant gate
         // (no account/contract/C1 diff at this height).
         state
-            .revert_pre_activation_block_state_diffs(&pre_activation_witness(1, Hash::ZERO))
+            .revert_pre_activation_block_state_diffs(
+                &pre_activation_witness(1, Hash::ZERO),
+                gates_of(&ChainParams::default()),
+            )
             .unwrap();
         assert!(
             store.load_state_map().unwrap().is_empty(),
@@ -8376,11 +8414,19 @@ mod tests {
                 new: Some(v.clone()),
             });
         }
+        // Sealed exactly as the publisher seals it (#253).
+        let sealed = sumchain_storage::subsystem_journal::seal(
+            sumchain_storage::subsystem_journal::Family::ComputePool,
+            height,
+            &Hash::ZERO,
+            &diff.encode().unwrap(),
+        )
+        .unwrap();
         batch
             .put(
                 cf::COMPUTE_POOL_STATE_DIFFS,
                 &sumchain_storage::schema::journal_key(height, &Hash::ZERO),
-                &diff.encode().unwrap(),
+                &sealed,
             )
             .unwrap();
         batch.commit().unwrap();
@@ -8828,7 +8874,10 @@ mod tests {
         // The journal is keyed by the PUBLISHED block, so the revert must name it.
         // `Hash::ZERO` was the pre-publication header root, not a block hash.
         state
-            .revert_pre_activation_block_state_diffs(&pre_activation_witness(1, blk.hash()))
+            .revert_pre_activation_block_state_diffs(
+                &pre_activation_witness(1, blk.hash()),
+                gates_of(&beacon_open_params()),
+            )
             .unwrap();
         assert!(
             store.load_state_map().unwrap().is_empty(),
@@ -8903,7 +8952,10 @@ mod tests {
         assert!(r1[0].is_success());
 
         state
-            .revert_pre_activation_block_state_diffs(&pre_activation_witness(1, blk.hash()))
+            .revert_pre_activation_block_state_diffs(
+                &pre_activation_witness(1, blk.hash()),
+                gates_of(&beacon_open_params()),
+            )
             .unwrap();
         // A fresh executor replays the identical block.
         let ex2 = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
@@ -9166,7 +9218,7 @@ mod tests {
             assert_eq!(snap, Some(pubs.clone()));
             let witness = pre_activation_witness(1, boundary.hash());
             state
-                .revert_pre_activation_block_state_diffs(&witness)
+                .revert_pre_activation_block_state_diffs(&witness, gates_of(&beacon_open_params()))
                 .unwrap();
             assert_eq!(
                 store.get_membership(0).unwrap(),
@@ -9269,7 +9321,13 @@ mod tests {
 
         // ONE call reverts BOTH families atomically.
         state
-            .revert_pre_activation_block_state_diffs(&pre_activation_witness(height, Hash::ZERO))
+            .revert_pre_activation_block_state_diffs(
+                &pre_activation_witness(height, Hash::ZERO),
+                sumchain_storage::subsystem_journal::SubsystemGates {
+                    compute_pool: Some(0),
+                    beacon: None,
+                },
+            )
             .unwrap();
 
         assert_eq!(
@@ -9337,26 +9395,35 @@ mod tests {
         let store = ComputePoolStore::new(&db);
         assert!(store.has_journal(height, &Hash::ZERO).unwrap());
 
-        // Force a C1 revert failure: overwrite the journal with undecodable bytes
-        // (too short for the fixint length prefix -> c1_decode errors in
-        // stage_block_revert, before anything is committed). Under the
-        // publisher's key, so the DECODE failure is what aborts the revert — a
-        // height-only key is refused earlier, and this test would then pass for
-        // a reason it is not about.
+        // Force a C1 revert failure: overwrite the journal with an undecodable
+        // PAYLOAD (too short for the fixint length prefix -> c1_decode errors in
+        // stage_block_revert, before anything is committed). Correctly sealed
+        // for this block and under the publisher's key, so the DECODE failure is
+        // what aborts the revert — an envelope or height-only refusal happens
+        // earlier, and this test would then pass for a reason it is not about.
         db.put(
             cf::COMPUTE_POOL_STATE_DIFFS,
             &sumchain_storage::schema::journal_key(height, &Hash::ZERO),
-            &[0xFFu8; 4],
+            &sumchain_storage::subsystem_journal::seal(
+                sumchain_storage::subsystem_journal::Family::ComputePool,
+                height,
+                &Hash::ZERO,
+                &[0xFFu8; 4],
+            )
+            .unwrap(),
         )
         .unwrap();
 
         // The unified revert MUST abort — nothing committed.
         assert!(
             state
-                .revert_pre_activation_block_state_diffs(&pre_activation_witness(
-                    height,
-                    Hash::ZERO
-                ))
+                .revert_pre_activation_block_state_diffs(
+                    &pre_activation_witness(height, Hash::ZERO),
+                    sumchain_storage::subsystem_journal::SubsystemGates {
+                        compute_pool: Some(0),
+                        beacon: None,
+                    },
+                )
                 .is_err(),
             "corrupt C1 journal aborts the unified revert before commit"
         );

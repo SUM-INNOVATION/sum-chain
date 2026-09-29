@@ -27,6 +27,7 @@ use sumchain_state::state::StateManager;
 use sumchain_storage::candidate::JournalRecord;
 use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::overlay::ApplicationOverlay;
+use sumchain_storage::subsystem_journal::Expectation;
 use sumchain_storage::{cf, Database};
 
 use common::setup_with_params;
@@ -396,14 +397,19 @@ fn a_height_only_journal_refuses_rather_than_guessing_which_block_it_undoes() {
 
     let store = BeaconStore::new(&db);
     for (label, err) in [
-        ("has_journal", store.has_journal(BOUNDARY, &blk.hash()).err()),
+        (
+            "has_journal",
+            store.has_journal(BOUNDARY, &blk.hash()).err(),
+        ),
         (
             "load_journal",
             store.load_journal(BOUNDARY, &blk.hash()).err(),
         ),
         (
             "revert_block",
-            store.revert_block(BOUNDARY, &blk.hash()).err(),
+            store
+                .revert_block(BOUNDARY, &blk.hash(), Expectation::Required)
+                .err(),
         ),
     ] {
         let err = err.unwrap_or_else(|| panic!("{label} must refuse a height-only journal"));

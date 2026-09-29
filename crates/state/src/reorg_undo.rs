@@ -97,6 +97,7 @@ use sumchain_storage::journal::{
     ActivationSource, JournalActivation, JournalRequirement, Preimage as StoragePreimage,
 };
 use sumchain_storage::schema::{ContractStateDiff, StateStore};
+use sumchain_storage::subsystem_journal::{self, Expectation, Family, SubsystemGates};
 use sumchain_storage::{cf, StorageError};
 
 /// What the journal says the block LEFT at a key, in whichever form its producer
@@ -928,14 +929,86 @@ pub fn stage_head_reset(batch: &mut WriteBatch<'_>, ancestor: &Block) -> Result<
 /// Absence is per-family: a block that touched only accounts has no contract
 /// journal, and that is [`JournalLookup::Present`] with the account records, not
 /// [`JournalLookup::Absent`]. `Absent` here means no family had one.
+///
+/// The compute-pool and beacon families are the exception (#253). Their records
+/// are sealed with the identity of the block they undo, and a block with that
+/// subsystem's gate open always publishes one. So for those two, `gates` decide:
+/// a missing record where the gate was open, a record where it was closed, and a
+/// record sealed for any other block are all [`JournalLookup::Unreadable`], a
+/// halt, never a silent skip.
 pub struct SubsystemJournals<'a> {
     db: &'a Database,
+    gates: SubsystemGates,
 }
 
 impl<'a> SubsystemJournals<'a> {
-    pub fn new(db: &'a Database) -> Self {
-        Self { db }
+    pub fn new(db: &'a Database, gates: SubsystemGates) -> Self {
+        Self { db, gates }
     }
+}
+
+/// `(key, before, after)` for one record of a gated family's journal.
+type GatedRecord = (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// One gated family's contribution to [`SubsystemJournals::lookup`]: its records
+/// when it has any, nothing when its gate was closed, or the reason to halt.
+fn gated_family_records(
+    db: &Database,
+    family: Family,
+    expect: Expectation,
+    height: BlockHeight,
+    block_hash: &Hash,
+) -> std::result::Result<Option<Vec<UndoRecord>>, String> {
+    let (diffs_cf, state_cf) = match family {
+        Family::ComputePool => (cf::COMPUTE_POOL_STATE_DIFFS, cf::COMPUTE_POOL_STATE),
+        Family::Beacon => (cf::BEACON_STATE_DIFFS, cf::BEACON_STATE),
+    };
+    let row = db
+        .get(diffs_cf, &journal_row_key(height, block_hash))
+        .map_err(|e| format!("{family} journal: {e}"))?;
+    let bytes = match (row, expect) {
+        (None, Expectation::Absent) => return Ok(None),
+        (None, Expectation::Required) => {
+            return Err(format!(
+                "{family} journal: missing for block {block_hash} at height {height}, \
+                 where the {family} gate was open and every block publishes one"
+            ))
+        }
+        (Some(_), Expectation::Absent) => {
+            return Err(format!(
+                "{family} journal: present for block {block_hash} at height {height}, \
+                 where the {family} gate was closed and nothing is published"
+            ))
+        }
+        (Some(bytes), Expectation::Required) => bytes,
+    };
+    let payload = subsystem_journal::open(&bytes, family, height, block_hash)
+        .map_err(|e| format!("{family} journal: {e}"))?;
+    let records: Vec<GatedRecord> = match family {
+        Family::ComputePool => crate::compute_pool_store::ComputePoolStateDiff::decode(payload)
+            .map_err(|e| format!("{family} journal: {e}"))?
+            .records
+            .into_iter()
+            .map(|r| (r.key, r.old, r.new))
+            .collect(),
+        Family::Beacon => crate::beacon_store::BeaconStateDiff::decode(payload)
+            .map_err(|e| format!("{family} journal: {e}"))?
+            .records
+            .into_iter()
+            .map(|r| (r.key, r.old, r.new))
+            .collect(),
+    };
+    Ok(Some(
+        records
+            .into_iter()
+            .map(|(key, before, after)| UndoRecord {
+                cf: state_cf.to_string(),
+                key,
+                before,
+                after: ExpectedAfter::Exact(after),
+            })
+            .collect(),
+    ))
 }
 
 impl BranchJournal for SubsystemJournals<'_> {
@@ -1004,67 +1077,29 @@ impl BranchJournal for SubsystemJournals<'_> {
             }
         }
 
-        // ── compute pool (dormant) ──────────────────────────────────────────
-        match self.db.get(
-            cf::COMPUTE_POOL_STATE_DIFFS,
-            &journal_row_key(height, block_hash),
-        ) {
-            Err(e) => return JournalLookup::Unreadable(format!("compute-pool journal: {e}")),
-            Ok(None) => {}
-            Ok(Some(bytes)) => {
-                match crate::compute_pool_store::ComputePoolStateDiff::decode(&bytes) {
-                    Err(e) => {
-                        return JournalLookup::Unreadable(format!("compute-pool journal: {e}"))
-                    }
-                    Ok(diff) => {
-                        any = true;
-                        for record in &diff.records {
-                            out.push(UndoRecord {
-                                cf: cf::COMPUTE_POOL_STATE.to_string(),
-                                key: record.key.clone(),
-                                before: record.old.clone(),
-                                after: ExpectedAfter::Exact(record.new.clone()),
-                            });
-                        }
-                    }
+        // ── compute pool and beacon (dormant): sealed, and gated (#253) ──────
+        for family in [Family::ComputePool, Family::Beacon] {
+            let expect = self.gates.expectation(family, height);
+            match gated_family_records(self.db, family, expect, height, block_hash) {
+                Err(reason) => return JournalLookup::Unreadable(reason),
+                Ok(None) => {}
+                Ok(Some(records)) => {
+                    any = true;
+                    out.extend(records);
                 }
             }
-        }
-
-        // ── beacon (dormant) ────────────────────────────────────────────────
-        match self
-            .db
-            .get(cf::BEACON_STATE_DIFFS, &journal_row_key(height, block_hash))
-        {
-            Err(e) => return JournalLookup::Unreadable(format!("beacon journal: {e}")),
-            Ok(None) => {}
-            Ok(Some(bytes)) => match crate::beacon_store::BeaconStateDiff::decode(&bytes) {
-                Err(e) => return JournalLookup::Unreadable(format!("beacon journal: {e}")),
-                Ok(diff) => {
-                    any = true;
-                    for record in &diff.records {
-                        out.push(UndoRecord {
-                            cf: cf::BEACON_STATE.to_string(),
-                            key: record.key.clone(),
-                            before: record.old.clone(),
-                            after: ExpectedAfter::Exact(record.new.clone()),
-                        });
-                    }
-                }
-            },
         }
 
         if any {
             JournalLookup::Present {
                 // Echoed from the KEY, not read back from the record.
                 //
-                // The four per-subsystem journals carry no identity and no
+                // The account and contract journals carry no identity and no
                 // version on the wire: `(height, block_hash)` lives only in the
-                // row key, so this adapter can only report what it looked up,
-                // and the identity check in `stage_branch_unwind` is a tautology
-                // for this producer. Saying that here is the point — the check
-                // is real for any producer that puts the fields IN the record,
-                // and this one is declared as not yet doing so.
+                // row key, so for those two the identity check in
+                // `stage_branch_unwind` is a tautology. The compute-pool and
+                // beacon records DO carry it, and were opened against this
+                // block in `gated_family_records` before reaching here.
                 header: JournalHeader {
                     height,
                     block_hash: *block_hash,
@@ -1278,18 +1313,28 @@ pub struct ActivatedJournal<'a> {
 }
 
 impl<'a> ActivatedJournal<'a> {
-    pub fn new(db: &'a Database, activation: JournalActivation) -> Self {
+    /// `gates` are the chain's compute-pool and beacon activation heights, which
+    /// decide below the boundary whether those subsystems' records must exist.
+    pub fn new(db: &'a Database, activation: JournalActivation, gates: SubsystemGates) -> Self {
         Self {
             application: ApplicationJournalReader::new(db, activation),
-            legacy: SubsystemJournals::new(db),
+            legacy: SubsystemJournals::new(db, gates),
             activation,
         }
     }
 
     /// Resolve the boundary against `db` and build the journal, from the chain's
-    /// own configured activation rule.
-    pub fn resolve(db: &'a Database, source: ActivationSource) -> Result<Self, StorageError> {
-        Ok(Self::new(db, JournalActivation::resolve(db, source)?))
+    /// own configured activation rule and subsystem gates.
+    pub fn resolve(
+        db: &'a Database,
+        source: ActivationSource,
+        gates: SubsystemGates,
+    ) -> Result<Self, StorageError> {
+        Ok(Self::new(
+            db,
+            JournalActivation::resolve(db, source)?,
+            gates,
+        ))
     }
 
     pub fn activation(&self) -> JournalActivation {

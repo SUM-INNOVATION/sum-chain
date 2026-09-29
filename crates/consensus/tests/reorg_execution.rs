@@ -47,6 +47,7 @@ use sumchain_state::reorg_undo::{
 use sumchain_state::state::StateManager;
 use sumchain_storage::journal::{ActivationSource, JournalActivation, JournalRequirement};
 use sumchain_storage::schema::BlockStore;
+use sumchain_storage::subsystem_journal::SubsystemGates;
 use sumchain_storage::{cf, Database};
 use tempfile::TempDir;
 
@@ -502,7 +503,7 @@ impl Node {
     /// everything a block writes and the convergence tests would then be
     /// measuring the producer instead of the unwind.
     fn subsystem_journals(&self) -> SubsystemJournals<'_> {
-        SubsystemJournals::new(&self.db)
+        SubsystemJournals::new(&self.db, SubsystemGates::DORMANT)
     }
 
     /// The REAL journal: the encoded records this node's publisher wrote, read
@@ -522,8 +523,12 @@ impl Node {
     /// order and framing, and the after-images are 8-byte tags recomputed
     /// against committed rows rather than values copied from a snapshot.
     fn real_journal(&self) -> ActivatedJournal<'_> {
-        ActivatedJournal::resolve(&self.db, ActivationSource::ObservedFromChain)
-            .expect("resolve the journal activation boundary")
+        ActivatedJournal::resolve(
+            &self.db,
+            ActivationSource::ObservedFromChain,
+            SubsystemGates::DORMANT,
+        )
+        .expect("resolve the journal activation boundary")
     }
 }
 
@@ -3639,7 +3644,7 @@ fn a_reorg_crossing_the_journal_activation_boundary_is_refused_whole() {
     let activation =
         JournalActivation::resolve(&node.db, ActivationSource::Pinned(BOUNDARY)).expect("resolve");
     assert_eq!(activation.boundary(), Some(BOUNDARY));
-    let journal = ActivatedJournal::new(&node.db, activation);
+    let journal = ActivatedJournal::new(&node.db, activation, SubsystemGates::DORMANT);
     assert_eq!(
         journal.policy(),
         MissingJournalPolicy::RequiredFrom(BOUNDARY),
@@ -3793,6 +3798,7 @@ fn the_activation_boundary_decides_whether_an_absence_halts() {
     let below = ActivatedJournal::new(
         &node.db,
         JournalActivation::resolve(&node.db, ActivationSource::Pinned(100)).expect("resolve"),
+        SubsystemGates::DORMANT,
     );
     let mut batch = node.db.batch();
     let report = stage_branch_unwind(&node.db, &mut batch, &branch, &below, below.policy())
@@ -3805,6 +3811,7 @@ fn the_activation_boundary_decides_whether_an_absence_halts() {
     let at = ActivatedJournal::new(
         &node.db,
         JournalActivation::resolve(&node.db, ActivationSource::Pinned(1)).expect("resolve"),
+        SubsystemGates::DORMANT,
     );
     let mut batch = node.db.batch();
     let err = stage_branch_unwind(&node.db, &mut batch, &branch, &at, at.policy())
@@ -4358,6 +4365,7 @@ fn a_reorg_crossing_the_checkpoint_is_refused_by_the_real_reorg_driver() {
     let journal = ActivatedJournal::new(
         &a.db,
         JournalActivation::resolve(&a.db, ActivationSource::Pinned(BOUNDARY)).expect("resolve"),
+        SubsystemGates::DORMANT,
     );
     assert_eq!(
         journal.policy(),
@@ -4399,6 +4407,7 @@ fn a_reorg_crossing_the_checkpoint_is_refused_by_the_real_reorg_driver() {
     let journal = ActivatedJournal::new(
         &a.db,
         JournalActivation::resolve(&a.db, ActivationSource::Pinned(1)).expect("resolve"),
+        SubsystemGates::DORMANT,
     );
     let outcome = execute_reorg(
         &a.db,
@@ -4456,6 +4465,7 @@ fn a_reorg_wholly_below_the_boundary_is_not_a_crossing() {
     let journal = ActivatedJournal::new(
         &node.db,
         JournalActivation::resolve(&node.db, ActivationSource::Pinned(100)).expect("resolve"),
+        SubsystemGates::DORMANT,
     );
     assert!(
         sumchain_state::reorg_undo::crosses_activation_checkpoint(&branch, journal.policy())
@@ -5447,7 +5457,7 @@ fn a_switch_deeper_than_this_nodes_undo_history_is_refused_at_plan_time() {
     // The plan-time refusal and the unwind-time checkpoint agree by
     // construction: a branch deeper than `head - boundary + 1` is exactly a
     // branch reaching below `boundary`. Shown rather than argued.
-    let journal = ActivatedJournal::new(&a.db, restored);
+    let journal = ActivatedJournal::new(&a.db, restored, SubsystemGates::DORMANT);
     let plan = plan_reorg(&store, head, new_head, NO_FINALITY, DEEP).expect("plan");
     let mut batch = a.db.batch();
     let err = stage_branch_unwind(
@@ -5682,7 +5692,7 @@ fn a_snapshot_restored_node_refuses_a_switch_below_its_restore_point() {
 
     // And the unwind layer refuses the same branch independently, so the two
     // guards agree on a restored node exactly as they do on an activating one.
-    let journal = ActivatedJournal::new(&a.db, restored);
+    let journal = ActivatedJournal::new(&a.db, restored, SubsystemGates::DORMANT);
     let plan = plan_reorg(&store, head, new_head, NO_FINALITY, DEEP).expect("plan");
     let mut batch = a.db.batch();
     let refusal = stage_branch_unwind(
@@ -5865,7 +5875,7 @@ fn a_rollback_across_the_activation_checkpoint_is_refused() {
 
     // And the unwind layer refuses the crossing branch independently, so the
     // tool is not the only thing standing between an operator and it.
-    let journals = ActivatedJournal::new(&node.db, activation);
+    let journals = ActivatedJournal::new(&node.db, activation, SubsystemGates::DORMANT);
     let crossing: Vec<Block> = (1..=4)
         .map(|h| store.get_by_height(h).unwrap().unwrap())
         .collect();
@@ -6431,8 +6441,12 @@ fn a_rollback_restores_accounts_contracts_supply_and_an_indexed_subsystem() {
     let store = BlockStore::new(&db);
     assert_eq!(store.get_latest_height().unwrap(), Some(4));
 
-    let journals = ActivatedJournal::resolve(&db, ActivationSource::ObservedFromChain)
-        .expect("resolve the real journal");
+    let journals = ActivatedJournal::resolve(
+        &db,
+        ActivationSource::ObservedFromChain,
+        SubsystemGates::DORMANT,
+    )
+    .expect("resolve the real journal");
     assert_eq!(
         journals.activation().boundary(),
         Some(0),

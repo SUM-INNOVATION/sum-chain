@@ -64,6 +64,7 @@ use serde::{Deserialize, Serialize};
 use sumchain_primitives::{Address, BlockHeight, Hash};
 use sumchain_storage::candidate::JournalRecord;
 use sumchain_storage::exec_view::ExecutionView;
+use sumchain_storage::subsystem_journal::{self, Expectation, Family};
 use sumchain_storage::{cf, Database};
 
 use crate::compute_pool::{
@@ -860,16 +861,61 @@ impl<'a> ComputePoolStore<'a> {
 
     /// Load + canonically decode the revert journal published for
     /// `(height, block_hash)` (`None` if absent — always under the dormant gate,
-    /// which produces no journal).
+    /// which produces no journal). A present row is opened against that block
+    /// first ([`sumchain_storage::subsystem_journal::open`]), so a record sealed
+    /// for any other block, height or family is refused, never decoded.
     pub fn load_journal(
         &self,
         height: BlockHeight,
         block_hash: &Hash,
     ) -> Result<Option<ComputePoolStateDiff>> {
         match self.journal_bytes(height, block_hash)? {
-            Some(bytes) => Ok(Some(c1_decode(&bytes)?)),
+            Some(bytes) => Ok(Some(Self::open_sealed(&bytes, height, block_hash)?)),
             None => Ok(None),
         }
+    }
+
+    /// The journal a revert of `(height, block_hash)` must replay, under the
+    /// gate's rule for whether one exists.
+    ///
+    /// A block with the gate open always published a record, empty when it
+    /// changed nothing, so absence there is a LOST record: reverting past it
+    /// would leave the abandoned block's rows applied under a chain that no
+    /// longer contains it. A block with the gate closed published none, so a
+    /// record there is one no binary following these rules wrote. Both halt.
+    fn journal_for_revert(
+        &self,
+        height: BlockHeight,
+        block_hash: &Hash,
+        expect: Expectation,
+    ) -> Result<Option<ComputePoolStateDiff>> {
+        match (self.journal_bytes(height, block_hash)?, expect) {
+            (None, Expectation::Absent) => Ok(None),
+            (None, Expectation::Required) => Err(StateError::InvalidOperation(format!(
+                "C1 revert: no journal for block {block_hash} at height {height}, although \
+                 the compute-pool gate was open there and every such block publishes one. \
+                 Refusing to revert past a lost undo record."
+            ))),
+            (Some(_), Expectation::Absent) => Err(StateError::InvalidOperation(format!(
+                "C1 revert: a journal exists for block {block_hash} at height {height}, \
+                 where the compute-pool gate was closed and nothing is published. \
+                 Refusing to apply a record no binary should have written."
+            ))),
+            (Some(bytes), Expectation::Required) => {
+                Ok(Some(Self::open_sealed(&bytes, height, block_hash)?))
+            }
+        }
+    }
+
+    /// Open a sealed row against the block it was read for, then decode it.
+    fn open_sealed(
+        bytes: &[u8],
+        height: BlockHeight,
+        block_hash: &Hash,
+    ) -> Result<ComputePoolStateDiff> {
+        let payload = subsystem_journal::open(bytes, Family::ComputePool, height, block_hash)
+            .map_err(|e| StateError::InvalidOperation(format!("C1 revert: {e}")))?;
+        c1_decode(payload)
     }
 
     /// The raw journal row published for `(height, block_hash)`.
@@ -1083,11 +1129,11 @@ impl<'a> ComputePoolStore<'a> {
         batch: &mut sumchain_storage::db::WriteBatch<'_>,
         height: BlockHeight,
         block_hash: &Hash,
+        expect: Expectation,
     ) -> Result<bool> {
-        let Some(bytes) = self.journal_bytes(height, block_hash)? else {
-            return Ok(false); // nothing to revert
+        let Some(diff) = self.journal_for_revert(height, block_hash, expect)? else {
+            return Ok(false); // gate closed at this height: nothing was published
         };
-        let diff: ComputePoolStateDiff = c1_decode(&bytes)?;
 
         for record in diff.records.iter().rev() {
             // Validate the key domain before staging (corruption guard).
@@ -1133,9 +1179,14 @@ impl<'a> ComputePoolStore<'a> {
     /// retry. Retained for the standalone store/manager tests; the LIVE reorg
     /// path drives `stage_block_revert` into the unified account+contract+C1
     /// batch instead (one commit, crash-consistent across all families).
-    pub fn revert_block(&self, height: BlockHeight, block_hash: &Hash) -> Result<()> {
+    pub fn revert_block(
+        &self,
+        height: BlockHeight,
+        block_hash: &Hash,
+        expect: Expectation,
+    ) -> Result<()> {
         let mut batch = self.db.batch();
-        if self.stage_block_revert(&mut batch, height, block_hash)? {
+        if self.stage_block_revert(&mut batch, height, block_hash, expect)? {
             batch.commit()?; // single atomic commit
         }
         Ok(())
@@ -1319,15 +1370,16 @@ mod tests {
                 new,
             });
         }
-        if diff.is_empty() {
-            batch.commit()?;
-            return Ok(0);
-        }
+        // As the publisher does with the gate open (#253): every block gets a
+        // record sealed with its identity, empty when it changed nothing.
         diff.sort();
+        let sealed =
+            subsystem_journal::seal(Family::ComputePool, height, block_hash, &diff.encode()?)
+                .map_err(|e| StateError::InvalidOperation(e.to_string()))?;
         batch.put(
             cf::COMPUTE_POOL_STATE_DIFFS,
             &sumchain_storage::schema::journal_key(height, block_hash),
-            &diff.encode()?,
+            &sealed,
         )?;
         let mutated = diff.records.len();
         batch.commit()?;
@@ -1614,9 +1666,16 @@ mod tests {
         let store = ComputePoolStore::new(&db);
         let m = full_model();
         seed_transition(&db, None, &m, 1, &bh(1, 0)).unwrap();
-        // before == after => zero mutations, no journal written.
+        // before == after => zero mutations. With the gate open the block still
+        // publishes a record, and it is the positive "nothing to undo": present,
+        // sealed for block 2, and empty (#253).
         assert_eq!(seed_transition(&db, Some(&m), &m, 2, &bh(2, 0)).unwrap(), 0);
-        assert!(!store.has_journal(2, &bh(2, 0)).unwrap());
+        assert!(store.has_journal(2, &bh(2, 0)).unwrap());
+        assert!(store
+            .load_journal(2, &bh(2, 0))
+            .unwrap()
+            .unwrap()
+            .is_empty());
     }
 
     // ---- key identity: collision resistance, generation, prefix/type confusion ----
@@ -1834,7 +1893,9 @@ mod tests {
         assert!(store.has_journal(10, &bh(10, 0)).unwrap());
 
         // Revert the whole block: every record disappears together.
-        store.revert_block(10, &bh(10, 0)).unwrap();
+        store
+            .revert_block(10, &bh(10, 0), Expectation::Required)
+            .unwrap();
         assert!(store.load_state_map().unwrap().is_empty());
         assert!(
             !store.has_journal(10, &bh(10, 0)).unwrap(),
@@ -1871,7 +1932,9 @@ mod tests {
                 .accepted_bytes,
             100
         );
-        store.revert_block(5, &bh(5, 0)).unwrap();
+        store
+            .revert_block(5, &bh(5, 0), Expectation::Required)
+            .unwrap();
         assert!(
             store.get_accepted_leaf(&key).unwrap().is_none(),
             "leaf gone after revert"
@@ -1920,7 +1983,9 @@ mod tests {
         );
 
         // Roll back block 2: the one-active-offer index is restored to A.
-        store.revert_block(2, &bh(2, 0)).unwrap();
+        store
+            .revert_block(2, &bh(2, 0), Expectation::Required)
+            .unwrap();
         assert_eq!(
             store.active_offer_of(&identity).unwrap(),
             Some(oid(0xAA)),
@@ -1950,18 +2015,27 @@ mod tests {
             old: Some(vec![9, 9, 9]),
             new: None,
         });
-        // Under the publisher's key, so the CORRUPTION is what the revert
-        // trips over. A height-only key would be refused first, and the test
-        // would pass for the wrong reason.
+        // Under the publisher's key and correctly sealed for block 2, so the
+        // CORRUPTION is what the revert trips over. A height-only key or a bad
+        // envelope would be refused first, and the test would pass for the
+        // wrong reason.
         db.put(
             cf::COMPUTE_POOL_STATE_DIFFS,
             &sumchain_storage::schema::journal_key(2, &bh(2, 0)),
-            &c1_encode(&diff).unwrap(),
+            &subsystem_journal::seal(
+                Family::ComputePool,
+                2,
+                &bh(2, 0),
+                &c1_encode(&diff).unwrap(),
+            )
+            .unwrap(),
         )
         .unwrap();
 
         assert!(
-            store.revert_block(2, &bh(2, 0)).is_err(),
+            store
+                .revert_block(2, &bh(2, 0), Expectation::Required)
+                .is_err(),
             "corrupt journal aborts revert"
         );
         assert_eq!(
@@ -2059,7 +2133,9 @@ mod tests {
         );
 
         // And block A's preserved journal still rolls block A back exactly.
-        store.revert_block(7, &bh(7, 0)).unwrap();
+        store
+            .revert_block(7, &bh(7, 0), Expectation::Required)
+            .unwrap();
     }
 
     // ---- stale-predecessor rejection ----

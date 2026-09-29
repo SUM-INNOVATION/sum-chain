@@ -236,6 +236,24 @@ pub fn publish_block(
     txs: Vec<SignedTransaction>,
     validators: &[[u8; 32]],
 ) -> Vec<sumchain_primitives::Receipt> {
+    publish_block_returning(state, executor, height, proposer_pubkey, txs, validators).0
+}
+
+/// [`publish_block`], also returning the block exactly as published. Its hash
+/// is what names the block's undo-journal rows, so a test about which block a
+/// record belongs to needs it.
+#[allow(dead_code)]
+pub fn publish_block_returning(
+    state: &Arc<sumchain_state::state::StateManager>,
+    executor: &BlockExecutor,
+    height: u64,
+    proposer_pubkey: &[u8; 32],
+    txs: Vec<SignedTransaction>,
+    validators: &[[u8; 32]],
+) -> (
+    Vec<sumchain_primitives::Receipt>,
+    sumchain_primitives::Block,
+) {
     use sumchain_primitives::{Block, BlockHeader, Hash};
 
     let header = BlockHeader::new(
@@ -263,7 +281,20 @@ pub fn publish_block(
     // which is what the producer does — and it must, or the next block chains
     // from a root that was never published.
     state.set_state_root(accumulator);
-    receipts
+    (receipts, block)
+}
+
+/// Reopen the database at `dir` after every handle to it has been dropped, as a
+/// restarted node does, with fresh state and executor handles over it.
+#[allow(dead_code)]
+pub fn reopen(
+    dir: &TempDir,
+    params: ChainParams,
+) -> (Arc<StateManager>, Arc<Database>, BlockExecutor) {
+    let db = Arc::new(Database::open_default(dir.path()).unwrap());
+    let state = Arc::new(StateManager::new(db.clone(), CHAIN_ID));
+    let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+    (state, db, executor)
 }
 
 /// Publish one EMPTY block at `height`, the way a proposer does.

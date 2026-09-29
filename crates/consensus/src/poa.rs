@@ -22,6 +22,7 @@ use sumchain_primitives::{
 use sumchain_state::reorg_undo::ActivatedJournal;
 use sumchain_state::{BlockExecutor, Mempool, StateManager};
 use sumchain_storage::journal::ActivationSource;
+use sumchain_storage::subsystem_journal::SubsystemGates;
 use sumchain_storage::{
     BlockStore, Database, DelegationStore, StakingStore, TxStore, ValidatorSetStore,
 };
@@ -1623,6 +1624,12 @@ impl PoAEngine {
             ActivationSource::from_configured_height(
                 self.params.application_journal_enabled_from_height,
             ),
+            // Below the boundary these decide whether a compute-pool or beacon
+            // record must exist for a block (#253).
+            SubsystemGates {
+                compute_pool: self.params.compute_pool_enabled_from_height,
+                beacon: self.params.beacon_enabled_from_height,
+            },
         )
         .map_err(|e| {
             ConsensusError::InvalidBlock(format!(
