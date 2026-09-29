@@ -928,6 +928,40 @@ is separate from public token-holder voting.
 | `gov_buildCastEquityVote` | **Governance v2 (#92)** unsigned builder — controller-attested equity vote carrying `holder_commitment` / `shares` / `merkle_path` / `controller_pubkey` / `controller_sig` as **data** (no keys). |
 | `gov_getEquityClassVoting(class_id)` → `{ balances_root, votes_per_share, voting }` | **Governance v2 (#92)** read — chain-derived balances root + params only; **never** a holder→balance table. |
 
+### Registry candidate dry run (`registry_dryRunAdmit`) — read-only (issue #238)
+
+Validates a candidate `RegistryRecordV1` against the registry's admission rules and returns a typed verdict. **Read-only:** it writes nothing, builds or submits no transaction, admits nothing and changes no registry status. A refused candidate never becomes registry state, so the refusal exists only in this response. No registry ingress exists yet (#242); this method does not create one.
+
+Request: `registry_dryRunAdmit({ "record": "0x<hex of the 154-byte record>" })` — the `0x` prefix is optional; unknown fields are rejected. Invalid hex is `-32602`. Bytes that are not a well-formed record are **not** an error: they return a `malformed_record` refusal.
+
+Response:
+
+```json
+{
+  "admissible": false,
+  "refusals": [{ "reason": "unknown_proof_system", "proof_system_id": 1 }],
+  "evaluated_at_height": 1000,
+  "admitted_proof_systems": [2],
+  "candidate": {
+    "id": "0x…", "proof_system_id": 1,
+    "audit_commitment": "0x…", "source_commitment": "0x…", "ceremony_commitment": "0x…",
+    "verifier_binary_version": 3, "activation_height": 1500,
+    "status": "enabled", "approval_threshold_bps": 6667
+  }
+}
+```
+
+| `reason` | payload | refused when |
+|---|---|---|
+| `malformed_record` | `kind` (decoder class: `bad_tag`, `truncated`, `trailing_bytes`, `bad_value`, …), `detail` | the bytes do not decode; no other check runs and `candidate` is `null` |
+| `unknown_proof_system` | `proof_system_id` | not in `admitted_proof_systems` — B0-FINAL's selected system (`Risc0` = 2) |
+| `threshold_out_of_range` | `approval_threshold_bps` | outside `1..=10000`, the range the canonical validator-quorum check accepts (zero included; not a ratified default, #212) |
+| `commitment_unset` | `which` | an all-zero audit, source or ceremony commitment |
+| `not_admissible_status` | `status` | the record's own status byte is `disabled` |
+| `activation_height_not_future` | `activation_height`, `chain_height` | not above `evaluated_at_height` (no timelock floor is assumed, #212) |
+
+All refusals are returned together, in the fixed order above. **Stability:** `admissible`, each `reason` tag and its typed payload fields, `evaluated_at_height`, `admitted_proof_systems` and the `candidate` field names are the contract; `detail` is human-facing and may change. New tags may be added — treat an unknown tag as a refusal. A refusal is never reported as `disabled`: `candidate.status` is the record's own byte.
+
 ### No-key unsigned-tx family builders (issue #89)
 
 One builder per family, each taking a tagged operation request `{from, fee?, nonce?, chain_id?, <envelope ids>, op}`. **No-key** — no private keys, no signing, no submit, no execution, no authorization: the builder only assembles an unsigned `TransactionV2`. All return the shared shape `{unsigned_tx, signing_hash, from, nonce, fee, chain_id}`. `nonce`/`chain_id` are fetched from state when omitted. The client signs `signing_hash` locally and broadcasts via `sum_sendRawTransaction`; the executor stays authoritative for all authority/gate/lifecycle checks.

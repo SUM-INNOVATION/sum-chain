@@ -32,6 +32,18 @@ pub enum QuorumError {
     ThresholdNotMet { required: u32, got: u32 },
 }
 
+/// The threshold rule every validator-quorum check applies: `threshold_bps`
+/// must be `1..=10000`. Zero would authorize with no approvals at all.
+///
+/// Public so a read-only caller that judges a threshold in advance (the
+/// registry dry run, #238) applies exactly this bound instead of restating it.
+pub fn check_threshold_bps(threshold_bps: u16) -> Result<(), QuorumError> {
+    if !(1..=10000).contains(&threshold_bps) {
+        return Err(QuorumError::InvalidThreshold);
+    }
+    Ok(())
+}
+
 /// Verify that `approvals` form a valid validator quorum over `signing_bytes`,
 /// evaluated against the supplied active PoA validator set.
 ///
@@ -50,9 +62,7 @@ pub fn verify_validator_quorum(
     active_validator_pubkeys: &[[u8; 32]],
     threshold_bps: u16,
 ) -> Result<(), QuorumError> {
-    if !(1..=10000).contains(&threshold_bps) {
-        return Err(QuorumError::InvalidThreshold);
-    }
+    check_threshold_bps(threshold_bps)?;
     let active_count = active_validator_pubkeys.len() as u32;
     if active_count == 0 {
         return Err(QuorumError::EmptyValidatorSet);

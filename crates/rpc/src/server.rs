@@ -5714,6 +5714,26 @@ impl SumChainApiServer for RpcServer {
         Ok(active.iter().map(GovProposalInfo::from).collect())
     }
 
+    async fn registry_dry_run_admit(
+        &self,
+        request: crate::registry_types::RegistryDryRunRequest,
+    ) -> std::result::Result<
+        crate::registry_types::RegistryDryRunResponse,
+        jsonrpsee::types::ErrorObjectOwned,
+    > {
+        // Two reads and a pure function: the request's bytes, the latest
+        // height, and `registry_types::dry_run_response`, which applies the
+        // canonical `dry_run_admit`. No store is opened for writing, no
+        // transaction is built or submitted, and no registry status changes.
+        let record = crate::registry_types::parse_record_hex(&request.record)
+            .map_err(RpcError::InvalidParams)?;
+        let chain_height = BlockStore::new(&self.db)
+            .get_latest_height()
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+            .unwrap_or(0);
+        Ok(crate::registry_types::dry_run_response(&record, chain_height))
+    }
+
     async fn gov_get_tally(
         &self,
         proposal_id: String,
@@ -13654,5 +13674,483 @@ mod address_label_tests {
         for forbidden in ["commitment", "attributes_hash", "policy_id", "jurisdiction", "holder", "stake", "private", "mnemonic", "seed"] {
             assert!(!json.contains(forbidden), "leaked private field: {forbidden}");
         }
+    }
+}
+
+#[cfg(test)]
+mod registry_dry_run_rpc_tests {
+    //! Issue #238: `registry_dryRunAdmit` over a real `RpcServer` and RocksDB,
+    //! through jsonrpsee's JSON path. The verdict must be exactly the canonical
+    //! `dry_run_admit`'s, and a call must leave every byte on disk unchanged.
+    use super::*;
+    use crate::registry_types::{dry_run_admit, dry_run_response, DryRunContext, RefusalReason};
+    use std::collections::{BTreeMap, HashMap};
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_state::MempoolConfig;
+    use sumchain_wire::registry_wire::{RegistryRecordV1, RegistryStatus};
+    use tempfile::TempDir;
+
+    fn server_over(dir: &TempDir) -> (RpcServer, Arc<Database>, Arc<StateManager>) {
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::from_bytes([7u8; 32]);
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1u128)]),
+            ChainParams::default(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(
+                db.clone(),
+                state.clone(),
+                mempool.clone(),
+                &genesis,
+                Some(validator),
+            )
+            .unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(8);
+        let srv = RpcServer::new(
+            db.clone(),
+            state.clone(),
+            mempool,
+            engine,
+            tx_sender,
+            Arc::new(|| 0usize),
+        );
+        (srv, db, state)
+    }
+
+    /// A record every rule admits, given the chain height it is evaluated at.
+    fn admissible(chain_height: u64) -> RegistryRecordV1 {
+        RegistryRecordV1 {
+            id: [0x11; 32],
+            proof_system_id: 2, // B0-FINAL: Risc0
+            audit_commitment: [0xAA; 32],
+            source_commitment: [0xBB; 32],
+            ceremony_commitment: [0xCC; 32],
+            verifier_binary_version: 3,
+            activation_height: chain_height + 1,
+            status: RegistryStatus::Enabled,
+            approval_threshold_bps: 6_667,
+        }
+    }
+
+    fn hex_of(r: &RegistryRecordV1) -> String {
+        format!("0x{}", hex::encode(r.try_encode().unwrap()))
+    }
+
+    /// Call the method the way a client does: JSON in, JSON out.
+    async fn call_json(srv: RpcServer, params: serde_json::Value) -> serde_json::Value {
+        let module = srv.into_rpc();
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "registry_dryRunAdmit", "params": [params]
+        })
+        .to_string();
+        let (resp, _rx) = module.raw_json_request(&req, 1).await.unwrap();
+        serde_json::from_str(resp.get()).unwrap()
+    }
+
+    async fn call(
+        srv: RpcServer,
+        record_hex: &str,
+    ) -> crate::registry_types::RegistryDryRunResponse {
+        let v = call_json(srv, serde_json::json!({ "record": record_hex })).await;
+        assert!(v.get("error").is_none(), "unexpected error: {v}");
+        serde_json::from_value(v["result"].clone()).unwrap()
+    }
+
+    fn tags(r: &crate::registry_types::RegistryDryRunResponse) -> Vec<&str> {
+        r.refusals.iter().map(|x| x.tag()).collect()
+    }
+
+    /// Every row in every column family, to prove a call leaves disk unchanged.
+    fn snapshot(db: &Database) -> BTreeMap<(&'static str, Vec<u8>), Vec<u8>> {
+        let mut out = BTreeMap::new();
+        for cf in sumchain_storage::db::ALL_CFS {
+            for (k, v) in db.full_iter(cf).unwrap() {
+                out.insert((*cf, k.to_vec()), v.to_vec());
+            }
+        }
+        out
+    }
+
+    async fn height(dir: &TempDir) -> u64 {
+        let (srv, _, _) = server_over(dir);
+        call(srv, &hex_of(&admissible(0))).await.evaluated_at_height
+    }
+
+    #[tokio::test]
+    async fn an_admissible_candidate_is_admitted_and_echoed_without_being_stored() {
+        let dir = TempDir::new().unwrap();
+        let h = height(&dir).await;
+        let r = admissible(h);
+        let (srv, _, _) = server_over(&dir);
+        let out = call(srv, &hex_of(&r)).await;
+        assert!(out.admissible, "{:?}", out.refusals);
+        assert!(out.refusals.is_empty());
+        assert_eq!(out.admitted_proof_systems, vec![2]);
+        let c = out.candidate.expect("decodable candidate is echoed");
+        assert_eq!(c.id, format!("0x{}", "11".repeat(32)));
+        assert_eq!(
+            (c.proof_system_id, c.activation_height, c.status.as_str()),
+            (2, h + 1, "enabled")
+        );
+    }
+
+    #[tokio::test]
+    async fn every_typed_refusal_is_returned_as_its_tag_through_json() {
+        let dir = TempDir::new().unwrap();
+        let h = height(&dir).await;
+        let base = admissible(h);
+        let cases: Vec<(RegistryRecordV1, &str)> = vec![
+            (
+                RegistryRecordV1 {
+                    proof_system_id: 1,
+                    ..base.clone()
+                },
+                "unknown_proof_system",
+            ),
+            (
+                RegistryRecordV1 {
+                    approval_threshold_bps: 10_001,
+                    ..base.clone()
+                },
+                "threshold_out_of_range",
+            ),
+            (
+                RegistryRecordV1 {
+                    approval_threshold_bps: 0,
+                    ..base.clone()
+                },
+                "threshold_out_of_range",
+            ),
+            (
+                RegistryRecordV1 {
+                    audit_commitment: [0; 32],
+                    ..base.clone()
+                },
+                "commitment_unset",
+            ),
+            (
+                RegistryRecordV1 {
+                    source_commitment: [0; 32],
+                    ..base.clone()
+                },
+                "commitment_unset",
+            ),
+            (
+                RegistryRecordV1 {
+                    ceremony_commitment: [0; 32],
+                    ..base.clone()
+                },
+                "commitment_unset",
+            ),
+            (
+                RegistryRecordV1 {
+                    status: RegistryStatus::Disabled,
+                    ..base.clone()
+                },
+                "not_admissible_status",
+            ),
+            (
+                RegistryRecordV1 {
+                    activation_height: h,
+                    ..base.clone()
+                },
+                "activation_height_not_future",
+            ),
+        ];
+        for (r, want) in cases {
+            let (srv, _, _) = server_over(&dir);
+            let out = call(srv, &hex_of(&r)).await;
+            assert!(!out.admissible, "{want}");
+            assert_eq!(tags(&out), vec![want], "exactly one, typed reason");
+            assert!(
+                out.candidate.is_some(),
+                "a refused but decodable candidate is still observable"
+            );
+        }
+
+        // malformed_record, with the decoder's own classification.
+        let good = base.try_encode().unwrap();
+        let mut bad_tag = good.clone();
+        bad_tag[0] ^= 0xFF;
+        let mut bad_enum = good.clone();
+        let status_at = good.len() - 3; // `status` (u8) precedes the trailing u16 threshold
+        assert_eq!(
+            bad_enum[status_at], 0,
+            "layout assumption: Enabled = 0 at this offset"
+        );
+        // No third RegistryStatus. The frozen decoder classifies an unknown
+        // status byte as `BadValue` (`RegistryStatus::from_u8`); that is the
+        // behaviour preserved here, not re-decided.
+        bad_enum[status_at] = 2;
+        let malformed: Vec<(Vec<u8>, &str)> = vec![
+            (bad_tag, "bad_tag"),
+            (good[..good.len() - 1].to_vec(), "truncated"),
+            ([good.as_slice(), &[0u8][..]].concat(), "trailing_bytes"),
+            (bad_enum, "bad_value"),
+            (vec![], "truncated"),
+        ];
+        for (bytes, kind) in malformed {
+            let (srv, _, _) = server_over(&dir);
+            let out = call(srv, &format!("0x{}", hex::encode(&bytes))).await;
+            assert!(!out.admissible);
+            assert!(out.candidate.is_none(), "{kind}: nothing decodable to echo");
+            match out.refusals.as_slice() {
+                [RefusalReason::MalformedRecord { kind: k, .. }] => assert_eq!(k, kind),
+                other => panic!("{kind}: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_proof_systems_and_status_values_are_refused_never_admitted() {
+        let dir = TempDir::new().unwrap();
+        let h = height(&dir).await;
+        for id in [0u16, 1, 3, 99, u16::MAX] {
+            let (srv, _, _) = server_over(&dir);
+            let out = call(
+                srv,
+                &hex_of(&RegistryRecordV1 {
+                    proof_system_id: id,
+                    ..admissible(h)
+                }),
+            )
+            .await;
+            assert!(!out.admissible, "proof system {id}");
+            assert!(out.refusals.contains(&RefusalReason::UnknownProofSystem {
+                proof_system_id: id
+            }));
+        }
+        assert!(RegistryStatus::from_u8(2, "t").is_err(), "no third status");
+    }
+
+    #[tokio::test]
+    async fn boundary_values() {
+        let dir = TempDir::new().unwrap();
+        let h = height(&dir).await;
+        // The first future height is admitted; the current one is not.
+        let (srv, _, _) = server_over(&dir);
+        assert!(call(srv, &hex_of(&admissible(h))).await.admissible);
+        let (srv, _, _) = server_over(&dir);
+        let at = call(
+            srv,
+            &hex_of(&RegistryRecordV1 {
+                activation_height: h,
+                ..admissible(h)
+            }),
+        )
+        .await;
+        assert_eq!(tags(&at), vec!["activation_height_not_future"]);
+        // The basis-point range is inclusive at 10_000.
+        for (bps, ok) in [
+            // Zero is refused: the canonical validator-quorum rule rejects it.
+            (0u16, false),
+            (1, true),
+            (10_000, true),
+            (10_001, false),
+            (u16::MAX, false),
+        ] {
+            let (srv, _, _) = server_over(&dir);
+            let out = call(
+                srv,
+                &hex_of(&RegistryRecordV1 {
+                    approval_threshold_bps: bps,
+                    ..admissible(h)
+                }),
+            )
+            .await;
+            assert_eq!(out.admissible, ok, "bps {bps}");
+        }
+        // Largest activation height and the extreme ids still evaluate normally.
+        let (srv, _, _) = server_over(&dir);
+        let r = RegistryRecordV1 {
+            activation_height: u64::MAX,
+            id: [0xFF; 32],
+            ..admissible(h)
+        };
+        assert!(call(srv, &hex_of(&r)).await.admissible);
+    }
+
+    #[tokio::test]
+    async fn malformed_requests_are_invalid_params_not_refusals() {
+        let dir = TempDir::new().unwrap();
+        for bad in ["0xzz", "abc", "0x1"] {
+            let (srv, _, _) = server_over(&dir);
+            let v = call_json(srv, serde_json::json!({ "record": bad })).await;
+            assert_eq!(v["error"]["code"], -32602, "{bad}: {v}");
+        }
+        // Unknown and missing request fields are rejected rather than ignored.
+        for params in [
+            serde_json::json!({ "record": "0x00", "chain_height": 5 }),
+            serde_json::json!({ "allowed_proof_systems": [1] }),
+            serde_json::json!("0x00"),
+        ] {
+            let (srv, _, _) = server_over(&dir);
+            let v = call_json(srv, params.clone()).await;
+            assert!(v.get("error").is_some(), "{params}: {v}");
+            assert!(v.get("result").is_none());
+        }
+        // Bare hex without the prefix is accepted.
+        let (srv, _, _) = server_over(&dir);
+        let bare = hex::encode(admissible(0).try_encode().unwrap());
+        assert!(call(srv, &bare).await.candidate.is_some());
+    }
+
+    #[tokio::test]
+    async fn repeated_calls_agree_with_each_other_and_with_the_canonical_function() {
+        let dir = TempDir::new().unwrap();
+        let h = height(&dir).await;
+        let inputs: Vec<RegistryRecordV1> = vec![
+            admissible(h),
+            RegistryRecordV1 {
+                proof_system_id: 9,
+                approval_threshold_bps: u16::MAX,
+                audit_commitment: [0; 32],
+                status: RegistryStatus::Disabled,
+                activation_height: 0,
+                ..admissible(h)
+            },
+        ];
+        for r in inputs {
+            let bytes = r.try_encode().unwrap();
+            let mut seen = Vec::new();
+            for _ in 0..3 {
+                let (srv, _, _) = server_over(&dir);
+                seen.push(call(srv, &hex_of(&r)).await);
+            }
+            assert!(seen.windows(2).all(|w| w[0] == w[1]), "deterministic");
+            assert_eq!(seen[0], dry_run_response(&bytes, h));
+            let canonical = dry_run_admit(
+                &bytes,
+                DryRunContext {
+                    chain_height: h,
+                    allowed_proof_systems: &[2],
+                },
+            );
+            assert_eq!(
+                (seen[0].admissible, &seen[0].refusals),
+                (canonical.admissible, &canonical.refusals)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_call_changes_nothing_on_disk_and_a_reopened_node_answers_the_same() {
+        let dir = TempDir::new().unwrap();
+        let h = height(&dir).await;
+        let requests = [
+            hex_of(&admissible(h)),
+            hex_of(&RegistryRecordV1 {
+                approval_threshold_bps: 0,
+                ..admissible(h)
+            }),
+            hex_of(&RegistryRecordV1 {
+                proof_system_id: 1,
+                ..admissible(h)
+            }),
+            hex_of(&RegistryRecordV1 {
+                status: RegistryStatus::Disabled,
+                ..admissible(h)
+            }),
+            "0x".to_string(),
+        ];
+        let mut first = Vec::new();
+        {
+            let (_, db, state) = server_over(&dir);
+            // Every server is built BEFORE the snapshot, so only the calls
+            // themselves fall between the two snapshots.
+            let servers: Vec<RpcServer> = requests
+                .iter()
+                .map(|_| server_over_shared(&db, &state).0)
+                .collect();
+            let before = snapshot(&db);
+            let root = state.state_root();
+            for (srv, req) in servers.into_iter().zip(&requests) {
+                first.push(call(srv, req).await);
+            }
+            assert_eq!(snapshot(&db), before, "no row written, changed or deleted");
+            assert_eq!(state.state_root(), root, "state root unchanged");
+        }
+        // Restart: every handle above dropped; RocksDB reopened from disk.
+        for (req, want) in requests.iter().zip(&first) {
+            let (srv, _, _) = server_over(&dir);
+            assert_eq!(&call(srv, req).await, want);
+        }
+    }
+
+    /// A second server over the SAME open database, as concurrent requests see it.
+    fn server_over_shared(db: &Arc<Database>, state: &Arc<StateManager>) -> (RpcServer, (), ()) {
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::from_bytes([7u8; 32]);
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1u128)]),
+            ChainParams::default(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(
+                db.clone(),
+                state.clone(),
+                mempool.clone(),
+                &genesis,
+                Some(validator),
+            )
+            .unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(8);
+        (
+            RpcServer::new(
+                db.clone(),
+                state.clone(),
+                mempool,
+                engine,
+                tx_sender,
+                Arc::new(|| 0usize),
+            ),
+            (),
+            (),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_refused_candidate_is_observably_different_from_a_disabled_one() {
+        let dir = TempDir::new().unwrap();
+        let h = height(&dir).await;
+        let (srv, _, _) = server_over(&dir);
+        let refused = call(
+            srv,
+            &hex_of(&RegistryRecordV1 {
+                proof_system_id: 1,
+                ..admissible(h)
+            }),
+        )
+        .await;
+        let (srv, _, _) = server_over(&dir);
+        let disabled = call(
+            srv,
+            &hex_of(&RegistryRecordV1 {
+                status: RegistryStatus::Disabled,
+                ..admissible(h)
+            }),
+        )
+        .await;
+
+        // Both are refused, for different typed reasons, and the record's own
+        // status is reported as it is — never rewritten to `disabled`.
+        assert_eq!(tags(&refused), vec!["unknown_proof_system"]);
+        assert_eq!(refused.candidate.as_ref().unwrap().status, "enabled");
+        assert_eq!(tags(&disabled), vec!["not_admissible_status"]);
+        assert_eq!(disabled.candidate.as_ref().unwrap().status, "disabled");
+        assert_ne!(refused.refusals, disabled.refusals);
     }
 }

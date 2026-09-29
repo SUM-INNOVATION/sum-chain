@@ -13,14 +13,16 @@
 //!   consensus state at all.
 //! * It does not invent governance values. `approval_threshold_bps`' mainnet
 //!   default and the minimum activation timelock are **not ratified** (#212), so
-//!   nothing here assumes them: the only threshold check is the range the wire
-//!   type already implies, and height comparisons take the caller's chain height
-//!   rather than a governance floor.
+//!   nothing here assumes them: the only threshold check is the canonical
+//!   validator-quorum range (`1..=10000`, `validator_quorum::check_threshold_bps`),
+//!   and height comparisons take the caller's chain height rather than a
+//!   governance floor.
 //! * It writes nothing and allocates no record. `dry_run_admit` is a pure
 //!   function of its inputs.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sumchain_wire::b0::codec::DecodeError;
+use sumchain_wire::b0::enums::Candidate;
 use sumchain_wire::registry_wire::{RegistryRecordV1, RegistryStatus};
 
 /// Why a candidate profile would be refused admission.
@@ -28,9 +30,10 @@ use sumchain_wire::registry_wire::{RegistryRecordV1, RegistryStatus};
 /// The serialized representation is a stable `snake_case` tag plus a `detail`
 /// string. The **tag** is the contract — clients match on it; `detail` is
 /// human-facing and may gain precision without being a breaking change.
-// Serialize only: this is a server response shape, and the `&'static str`
-// discriminator fields cannot be deserialized into borrowed data.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// Owned strings, so the JSON-RPC client can deserialize what the server sends
+/// (`registry_dryRunAdmit`); the serialized form is the same as before.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum RefusalReason {
     /// The submitted bytes are not a well-formed `RegistryRecordV1`.
@@ -38,23 +41,27 @@ pub enum RefusalReason {
     /// `kind` is the decoder's own classification (`bad_tag`, `truncated`,
     /// `trailing_bytes`, …) so a client can distinguish "wrong type entirely"
     /// from "right type, malformed field" without parsing prose.
-    MalformedRecord { kind: &'static str, detail: String },
+    MalformedRecord { kind: String, detail: String },
 
     /// `proof_system_id` is not one this chain admits.
     UnknownProofSystem { proof_system_id: u16 },
 
-    /// `approval_threshold_bps` is outside the basis-point range `0..=10000`.
-    /// This is the range the unit implies, NOT a ratified governance default.
+    /// `approval_threshold_bps` is outside the range the canonical
+    /// validator-quorum rule accepts (`1..=10000`,
+    /// [`sumchain_state::validator_quorum::check_threshold_bps`]). Zero is
+    /// refused because that rule refuses it: a record whose threshold no quorum
+    /// check can ever evaluate is not admissible. This is a range, NOT a
+    /// ratified governance default (#212).
     ThresholdOutOfRange { approval_threshold_bps: u16 },
 
     /// A mandatory commitment is all-zero. All three are fixed-width and so
     /// always structurally present (#217 B1), which means an unset commitment
     /// shows up as zeroes rather than as an absent field — that would otherwise
     /// admit a record committing to nothing.
-    CommitmentUnset { which: &'static str },
+    CommitmentUnset { which: String },
 
     /// The record is not in an admissible status.
-    NotAdmissibleStatus { status: &'static str },
+    NotAdmissibleStatus { status: String },
 
     /// `activation_height` is not in the future relative to the caller-supplied
     /// chain height. Compared against actual chain height, not a governance
@@ -102,7 +109,7 @@ fn decode_kind(e: &DecodeError) -> &'static str {
 /// **in full** rather than first-only: an operator fixing one field at a time
 /// through repeated round trips is a worse experience than seeing every problem
 /// at once.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DryRunResult {
     pub admissible: bool,
     pub refusals: Vec<RefusalReason>,
@@ -141,7 +148,7 @@ pub fn dry_run_admit(bytes: &[u8], ctx: DryRunContext<'_>) -> DryRunResult {
             // A malformed record cannot be checked further: every subsequent
             // field would be a guess.
             return DryRunResult::refused(vec![RefusalReason::MalformedRecord {
-                kind: decode_kind(&e),
+                kind: decode_kind(&e).to_string(),
                 detail: e.to_string(),
             }]);
         }
@@ -155,7 +162,11 @@ pub fn dry_run_admit(bytes: &[u8], ctx: DryRunContext<'_>) -> DryRunResult {
         });
     }
 
-    if record.approval_threshold_bps > 10_000 {
+    // The authoritative rule, called rather than restated, so the dry run and
+    // the quorum check cannot disagree about which thresholds exist.
+    if sumchain_state::validator_quorum::check_threshold_bps(record.approval_threshold_bps)
+        .is_err()
+    {
         refusals.push(RefusalReason::ThresholdOutOfRange {
             approval_threshold_bps: record.approval_threshold_bps,
         });
@@ -168,12 +179,16 @@ pub fn dry_run_admit(bytes: &[u8], ctx: DryRunContext<'_>) -> DryRunResult {
         ("ceremony_commitment", &record.ceremony_commitment),
     ] {
         if commitment.iter().all(|&b| b == 0) {
-            refusals.push(RefusalReason::CommitmentUnset { which });
+            refusals.push(RefusalReason::CommitmentUnset {
+                which: which.to_string(),
+            });
         }
     }
 
     if record.status != RegistryStatus::Enabled {
-        refusals.push(RefusalReason::NotAdmissibleStatus { status: "disabled" });
+        refusals.push(RefusalReason::NotAdmissibleStatus {
+            status: "disabled".to_string(),
+        });
     }
 
     if record.activation_height <= ctx.chain_height {
@@ -188,6 +203,118 @@ pub fn dry_run_admit(bytes: &[u8], ctx: DryRunContext<'_>) -> DryRunResult {
     } else {
         DryRunResult::refused(refusals)
     }
+}
+
+/// The proof systems a registry record may name.
+///
+/// Not a choice made here. B0-FINAL fixed `proof_system_id` as the selected
+/// candidate: `docs/b0-final/b0-final-closure.v1.json` lists it as included
+/// constant `proof_system_id = Risc0` (discriminant 2), the unique qualifier under
+/// the frozen gates, and `crates/b0-final-closure-audit` machine-checks that
+/// record. SP1 (discriminant 1) is recorded there as disqualified. A test below
+/// reads the committed record, so this cannot drift from it silently.
+pub fn admitted_proof_systems() -> [u16; 1] {
+    [Candidate::Risc0.to_repr()]
+}
+
+/// `registry_dryRunAdmit` request.
+///
+/// `record` is the candidate's `RegistryRecordV1` encoding as hex, with or
+/// without a `0x` prefix. Unknown fields are rejected, so a client that sends a
+/// parameter this version does not understand is told so instead of having it
+/// ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryDryRunRequest {
+    pub record: String,
+}
+
+/// The candidate as decoded, echoed back so an observer can see exactly what
+/// was evaluated. Present only when the bytes decode; nothing here is stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryCandidateView {
+    /// `0x`-prefixed hex of the 32-byte id.
+    pub id: String,
+    pub proof_system_id: u16,
+    pub audit_commitment: String,
+    pub source_commitment: String,
+    pub ceremony_commitment: String,
+    pub verifier_binary_version: u32,
+    pub activation_height: u64,
+    /// `enabled` | `disabled` — the record's own status byte, reported as is.
+    pub status: String,
+    pub approval_threshold_bps: u16,
+}
+
+/// `registry_dryRunAdmit` response.
+///
+/// Stability: `admissible`, each refusal's `reason` tag and its typed payload
+/// fields, `evaluated_at_height`, `admitted_proof_systems` and the `candidate`
+/// field names are the contract. `detail` strings are human-facing and may gain
+/// precision. New refusal tags may be added; a client must treat an unknown
+/// tag as a refusal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryDryRunResponse {
+    pub admissible: bool,
+    pub refusals: Vec<RefusalReason>,
+    /// The chain height the activation-height check was made against.
+    pub evaluated_at_height: u64,
+    /// The admitted set the proof-system check used.
+    pub admitted_proof_systems: Vec<u16>,
+    /// `null` when the bytes do not decode as a `RegistryRecordV1`.
+    pub candidate: Option<RegistryCandidateView>,
+}
+
+fn hex0x(b: &[u8]) -> String {
+    format!("0x{}", hex::encode(b))
+}
+
+/// The whole of `registry_dryRunAdmit` except the two reads it needs (the
+/// request bytes and the chain height), as a pure function.
+///
+/// The verdict is exactly [`dry_run_admit`]'s over the admitted proof systems:
+/// nothing here re-implements or overrides a rule. The candidate view uses the
+/// same decoder, only to report what was evaluated.
+pub fn dry_run_response(record: &[u8], chain_height: u64) -> RegistryDryRunResponse {
+    let admitted = admitted_proof_systems();
+    let result = dry_run_admit(
+        record,
+        DryRunContext {
+            chain_height,
+            allowed_proof_systems: &admitted,
+        },
+    );
+    let candidate = RegistryRecordV1::decode_exact(record)
+        .ok()
+        .map(|r| RegistryCandidateView {
+            id: hex0x(&r.id),
+            proof_system_id: r.proof_system_id,
+            audit_commitment: hex0x(&r.audit_commitment),
+            source_commitment: hex0x(&r.source_commitment),
+            ceremony_commitment: hex0x(&r.ceremony_commitment),
+            verifier_binary_version: r.verifier_binary_version,
+            activation_height: r.activation_height,
+            status: match r.status {
+                RegistryStatus::Enabled => "enabled",
+                RegistryStatus::Disabled => "disabled",
+            }
+            .to_string(),
+            approval_threshold_bps: r.approval_threshold_bps,
+        });
+    RegistryDryRunResponse {
+        admissible: result.admissible,
+        refusals: result.refusals,
+        evaluated_at_height: chain_height,
+        admitted_proof_systems: admitted.to_vec(),
+        candidate,
+    }
+}
+
+/// Parse the request's hex. Malformed hex is an invalid PARAMETER (the request
+/// itself is wrong); well-formed hex that is not a record is a typed refusal.
+pub fn parse_record_hex(s: &str) -> Result<Vec<u8>, String> {
+    let body = s.strip_prefix("0x").unwrap_or(s);
+    hex::decode(body).map_err(|e| format!("record is not valid hex: {e}"))
 }
 
 #[cfg(test)]
@@ -235,7 +362,7 @@ mod tests {
         assert_eq!(out.refusals.len(), 1, "must not guess at further fields");
         assert_eq!(out.refusals[0].tag(), "malformed_record");
         match &out.refusals[0] {
-            RefusalReason::MalformedRecord { kind, .. } => assert_eq!(*kind, "bad_tag"),
+            RefusalReason::MalformedRecord { kind, .. } => assert_eq!(kind, "bad_tag"),
             other => panic!("{other:?}"),
         }
 
@@ -243,14 +370,14 @@ mod tests {
         let mut t = good_record().try_encode().unwrap();
         t.push(0);
         match &dry_run_admit(&t, ctx()).refusals[0] {
-            RefusalReason::MalformedRecord { kind, .. } => assert_eq!(*kind, "trailing_bytes"),
+            RefusalReason::MalformedRecord { kind, .. } => assert_eq!(kind, "trailing_bytes"),
             other => panic!("{other:?}"),
         }
 
         // Truncation.
         let s = good_record().try_encode().unwrap();
         match &dry_run_admit(&s[..s.len() - 1], ctx()).refusals[0] {
-            RefusalReason::MalformedRecord { kind, .. } => assert_eq!(*kind, "truncated"),
+            RefusalReason::MalformedRecord { kind, .. } => assert_eq!(kind, "truncated"),
             other => panic!("{other:?}"),
         }
     }
@@ -278,7 +405,9 @@ mod tests {
             }
             let out = run(&r);
             assert!(!out.admissible, "{which} all-zero must refuse");
-            assert!(out.refusals.contains(&RefusalReason::CommitmentUnset { which }));
+            assert!(out.refusals.contains(&RefusalReason::CommitmentUnset {
+                which: which.to_string()
+            }));
         }
     }
 
@@ -312,32 +441,33 @@ mod tests {
         assert!(run(&r).admissible);
     }
 
-    /// `approval_threshold_bps` is range-checked against what the basis-point
-    /// unit implies (`0..=10000`), NOT against a ratified mainnet default —
-    /// that value is #212's to decide. The boundary is inclusive at 10000.
+    /// `approval_threshold_bps` is range-checked against the canonical
+    /// validator-quorum rule (`1..=10000`), NOT against a ratified mainnet
+    /// default — that value is #212's to decide. Inclusive at 1 and 10000.
     ///
     /// The wire decoder accepts any `u16` here, so this branch is reachable
     /// with real encoded bytes rather than only via a constructed struct.
     #[test]
     fn threshold_boundaries() {
         // In range: admitted (nothing else about the record is wrong).
-        for bps in [0u16, 1, 5_000, 9_999, 10_000] {
+        for bps in [1u16, 2, 5_000, 9_999, 10_000] {
             let mut r = good_record();
             r.approval_threshold_bps = bps;
             let out = run(&r);
             assert!(
                 out.admissible,
-                "bps {bps} is within 0..=10000 and must be admitted, got {:?}",
+                "bps {bps} is within 1..=10000 and must be admitted, got {:?}",
                 out.refusals
             );
         }
 
-        // Out of range: refused, with the offending value echoed back.
-        for bps in [10_001u16, 20_000, u16::MAX] {
+        // Out of range: refused, with the offending value echoed back. Zero
+        // included — the quorum rule refuses it, so the dry run does too.
+        for bps in [0u16, 10_001, 20_000, u16::MAX] {
             let mut r = good_record();
             r.approval_threshold_bps = bps;
             let out = run(&r);
-            assert!(!out.admissible, "bps {bps} exceeds 10000 and must refuse");
+            assert!(!out.admissible, "bps {bps} is outside 1..=10000 and must refuse");
             assert!(
                 out.refusals.contains(&RefusalReason::ThresholdOutOfRange {
                     approval_threshold_bps: bps
@@ -406,7 +536,7 @@ mod tests {
             .refusals
             .iter()
             .filter_map(|x| match x {
-                RefusalReason::CommitmentUnset { which } => Some(*which),
+                RefusalReason::CommitmentUnset { which } => Some(which.as_str()),
                 _ => None,
             })
             .collect();
@@ -426,7 +556,7 @@ mod tests {
     #[test]
     fn every_refusal_variant_serializes_with_its_exact_tag_and_payload() {
         let malformed = serde_json::to_value(RefusalReason::MalformedRecord {
-            kind: "truncated",
+            kind: "truncated".to_string(),
             detail: "some decoder message".to_string(),
         })
         .unwrap();
@@ -447,14 +577,14 @@ mod tests {
         assert_eq!(threshold["approval_threshold_bps"], u16::MAX);
 
         let commitment = serde_json::to_value(RefusalReason::CommitmentUnset {
-            which: "audit_commitment",
+            which: "audit_commitment".to_string(),
         })
         .unwrap();
         assert_eq!(commitment["reason"], "commitment_unset");
         assert_eq!(commitment["which"], "audit_commitment");
 
         let status =
-            serde_json::to_value(RefusalReason::NotAdmissibleStatus { status: "disabled" })
+            serde_json::to_value(RefusalReason::NotAdmissibleStatus { status: "disabled".to_string() })
                 .unwrap();
         assert_eq!(status["reason"], "not_admissible_status");
         assert_eq!(status["status"], "disabled");
@@ -475,7 +605,7 @@ mod tests {
     fn refusal_variant_tags_are_exactly_the_six_documented_ones() {
         let all = [
             RefusalReason::MalformedRecord {
-                kind: "bad_tag",
+                kind: "bad_tag".to_string(),
                 detail: String::new(),
             },
             RefusalReason::UnknownProofSystem { proof_system_id: 0 },
@@ -483,9 +613,9 @@ mod tests {
                 approval_threshold_bps: 0,
             },
             RefusalReason::CommitmentUnset {
-                which: "audit_commitment",
+                which: "audit_commitment".to_string(),
             },
-            RefusalReason::NotAdmissibleStatus { status: "disabled" },
+            RefusalReason::NotAdmissibleStatus { status: "disabled".to_string() },
             RefusalReason::ActivationHeightNotFuture {
                 activation_height: 0,
                 chain_height: 0,
@@ -553,6 +683,165 @@ mod tests {
         assert_eq!(before.len(), RegistryRecordV1::LEN);
     }
 
+    /// The admitted set is B0-FINAL's committed selection, read from the
+    /// committed record rather than restated: if the record ever names another
+    /// candidate, this fails instead of the RPC quietly disagreeing with it.
+    #[test]
+    fn the_admitted_proof_systems_are_the_committed_b0_final_selection() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/b0-final/b0-final-closure.v1.json"
+        );
+        let record: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("committed closure record"))
+                .unwrap();
+        let included = record["included_constants"].as_array().unwrap();
+        let entry = included
+            .iter()
+            .find(|c| c["name"] == "proof_system_id")
+            .expect("proof_system_id is an included constant");
+        assert_eq!(entry["value"], "Risc0");
+        assert_eq!(record["selection"]["selected"], "Risc0");
+        assert_eq!(admitted_proof_systems(), [Candidate::Risc0.to_repr()]);
+        assert_eq!(admitted_proof_systems(), [2]);
+    }
+
+    /// The JSON the method returns, field for field. These names are the
+    /// contract documented on `RegistryDryRunResponse`.
+    #[test]
+    fn the_response_shape_is_pinned() {
+        let bytes = good_record().try_encode().unwrap();
+        let v = serde_json::to_value(dry_run_response(&bytes, 100)).unwrap();
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "admissible",
+                "admitted_proof_systems",
+                "candidate",
+                "evaluated_at_height",
+                "refusals"
+            ]
+        );
+        let c = v["candidate"].as_object().unwrap();
+        let ck: Vec<&str> = c.keys().map(|k| k.as_str()).collect();
+        assert_eq!(
+            ck,
+            vec![
+                "activation_height",
+                "approval_threshold_bps",
+                "audit_commitment",
+                "ceremony_commitment",
+                "id",
+                "proof_system_id",
+                "source_commitment",
+                "status",
+                "verifier_binary_version"
+            ]
+        );
+        assert_eq!(v["evaluated_at_height"], 100);
+        // Round-trips through the client-side type unchanged.
+        let back: RegistryDryRunResponse = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(serde_json::to_value(back).unwrap(), v);
+
+        let undecodable = serde_json::to_value(dry_run_response(b"", 0)).unwrap();
+        assert!(undecodable["candidate"].is_null());
+        assert_eq!(undecodable["refusals"][0]["reason"], "malformed_record");
+    }
+
+    #[test]
+    fn the_request_rejects_unknown_and_missing_fields() {
+        assert!(serde_json::from_value::<RegistryDryRunRequest>(
+            serde_json::json!({"record": "0x00"})
+        )
+        .is_ok());
+        for bad in [
+            serde_json::json!({"record": "0x00", "chain_height": 1}),
+            serde_json::json!({"record": "0x00", "allowed_proof_systems": [1]}),
+            serde_json::json!({}),
+            serde_json::json!({"record": 5}),
+        ] {
+            assert!(
+                serde_json::from_value::<RegistryDryRunRequest>(bad.clone()).is_err(),
+                "{bad}"
+            );
+        }
+        assert_eq!(parse_record_hex("0xab").unwrap(), vec![0xab]);
+        assert_eq!(parse_record_hex("ab").unwrap(), vec![0xab]);
+        assert_eq!(parse_record_hex("").unwrap(), Vec::<u8>::new());
+        for bad in ["0xzz", "abc", "0x0"] {
+            assert!(parse_record_hex(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// A golden `RegistryRecordV1` encoding, pinned here as well as in the wire
+    /// crate: this change must not move a single frozen byte.
+    #[test]
+    fn the_frozen_record_bytes_are_unchanged() {
+        let bytes = good_record().try_encode().unwrap();
+        assert_eq!(bytes.len(), 154);
+        assert_eq!(RegistryRecordV1::LEN, 154);
+        assert_eq!(hex::encode(&bytes), GOLDEN_GOOD_RECORD);
+        assert_eq!(
+            RegistryRecordV1::decode_exact(&bytes).unwrap(),
+            good_record()
+        );
+    }
+
+    const GOLDEN_GOOD_RECORD: &str = "52524547763100010011111111111111111111111111111111111111111111111111111111111111110100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc03000000c800000000000000000b1a";
+    /// The dry run and the authoritative validator-quorum check agree on every
+    /// threshold, including both boundaries and zero: a record the dry run
+    /// admits has a threshold a quorum check can evaluate, and one it refuses
+    /// for its threshold has one the quorum check rejects as `InvalidThreshold`.
+    #[test]
+    fn the_dry_run_and_the_quorum_check_agree_on_every_threshold() {
+        use sumchain_state::validator_quorum::{
+            check_threshold_bps, verify_validator_quorum, QuorumError,
+        };
+        let active = [[7u8; 32]];
+        for bps in [0u16, 1, 2, 6_667, 9_999, 10_000, 10_001, 20_000, u16::MAX] {
+            let mut r = good_record();
+            r.approval_threshold_bps = bps;
+            let refused_for_threshold =
+                run(&r)
+                    .refusals
+                    .contains(&RefusalReason::ThresholdOutOfRange {
+                        approval_threshold_bps: bps,
+                    });
+            let quorum_rejects = verify_validator_quorum(&[], b"m", &active, bps)
+                == Err(QuorumError::InvalidThreshold);
+            assert_eq!(refused_for_threshold, quorum_rejects, "bps {bps}");
+            assert_eq!(
+                refused_for_threshold,
+                check_threshold_bps(bps).is_err(),
+                "bps {bps}"
+            );
+        }
+    }
+
+    /// A zero threshold alongside other defects keeps the fixed refusal order.
+    #[test]
+    fn a_zero_threshold_keeps_the_refusal_order_stable() {
+        let mut r = good_record();
+        r.proof_system_id = 99;
+        r.approval_threshold_bps = 0;
+        r.ceremony_commitment = [0; 32];
+        r.status = RegistryStatus::Disabled;
+        r.activation_height = 1;
+        let out = run(&r);
+        let tags: Vec<&str> = out.refusals.iter().map(|x| x.tag()).collect();
+        assert_eq!(
+            tags,
+            vec![
+                "unknown_proof_system",
+                "threshold_out_of_range",
+                "commitment_unset",
+                "not_admissible_status",
+                "activation_height_not_future",
+            ]
+        );
+        assert_eq!(run(&r), out, "deterministic");
+    }
     /// `RegistryStatus` must remain exactly two discriminants — the ruling that
     /// replaced the stored-`CandidateRefused` proposal. Fails if a third is added.
     #[test]

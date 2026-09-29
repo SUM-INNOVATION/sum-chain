@@ -1609,6 +1609,22 @@ pub trait SumChainApi {
         &self,
     ) -> Result<Vec<GovProposalInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Dry-run a candidate `RegistryRecordV1` against the registry's admission
+    /// rules (#238). READ-ONLY: it writes nothing, submits nothing and admits
+    /// nothing — a refused candidate never becomes registry state, so the
+    /// refusal is returned here as a typed reason rather than stored.
+    ///
+    /// Request `{ "record": "0x<hex of the record bytes>" }`. Invalid hex is
+    /// `-32602`; bytes that are not a well-formed record are a typed
+    /// `malformed_record` refusal, not an error. See
+    /// [`crate::registry_types::RegistryDryRunResponse`] for the response and
+    /// its stability boundary.
+    #[method(name = "registry_dryRunAdmit")]
+    async fn registry_dry_run_admit(
+        &self,
+        request: crate::registry_types::RegistryDryRunRequest,
+    ) -> Result<crate::registry_types::RegistryDryRunResponse, jsonrpsee::types::ErrorObjectOwned>;
+
     /// Tally a proposal from its frozen snapshot + cast votes.
     #[method(name = "gov_getTally")]
     async fn gov_get_tally(
