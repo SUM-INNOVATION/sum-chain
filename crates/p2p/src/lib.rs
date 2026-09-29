@@ -68,4 +68,14 @@ pub mod topics {
     pub const BFT_PROPOSALS: &str = "sumchain/bft/proposal/1";
     pub const BFT_PREVOTES: &str = "sumchain/bft/prevote/1";
     pub const BFT_PRECOMMITS: &str = "sumchain/bft/precommit/1";
+
+    /// The topics a node subscribes to, and the only ones whose messages it
+    /// routes.
+    ///
+    /// The three BFT topics are deliberately absent. The BFT engine is refused
+    /// at startup pending the certified-finality protocol (#270), so no node
+    /// has a use for its votes; subscribing would join those meshes and hand
+    /// peer-supplied vote traffic to a node that can only discard it. The
+    /// constants stay for the engine's own tests and for the redesign.
+    pub const SUBSCRIBED: [&str; 2] = [TRANSACTIONS, BLOCKS];
 }

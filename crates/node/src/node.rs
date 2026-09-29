@@ -180,6 +180,15 @@ impl Node {
         rpc_rate_limit_config: RateLimitConfig,
         consensus_config: crate::config::ConsensusSettings,
     ) -> Result<Self> {
+        // ── the consensus engine, before anything touches disk ──────────────
+        //
+        // First of all, before the data directory is created, the database
+        // opened or a network socket exists. A node configured for an engine it
+        // may not run has nothing to do, and must not leave a directory or a
+        // database behind as evidence that it tried. The refusal is final: there
+        // is no fallback to PoA (see `ConsensusSettings::production_engine`).
+        let production_engine = consensus_config.production_engine()?;
+
         // Create data directory
         std::fs::create_dir_all(&data_dir)?;
 
@@ -358,28 +367,17 @@ impl Node {
             .with_education_admission(education_admission),
         );
 
-        // Create consensus engine based on config
-        use crate::config::ConsensusEngine as ConsensusEngineType;
-        let consensus = match consensus_config.engine {
-            ConsensusEngineType::Poa => ConsensusWrapper::new_poa(
+        // Create the consensus engine. `ProductionEngine` names only the
+        // engines a production node may build, so this match has no arm that
+        // could construct anything else.
+        let consensus = match production_engine {
+            crate::config::ProductionEngine::Poa => ConsensusWrapper::new_poa(
                 db.clone(),
                 state.clone(),
                 mempool.clone(),
                 &genesis,
                 validator_key,
             )?,
-            ConsensusEngineType::Bft => {
-                if validator_key.is_none() {
-                    return Err(anyhow::anyhow!("BFT consensus requires validator key"));
-                }
-                ConsensusWrapper::new_bft(
-                    db.clone(),
-                    state.clone(),
-                    mempool.clone(),
-                    &genesis,
-                    validator_key,
-                )?
-            }
         };
 
         // Create network service
@@ -1906,3 +1904,10 @@ mod activation_boot_tests;
 #[cfg(test)]
 #[path = "../tests/unit/peer_block_admission_tests.rs"]
 mod peer_block_admission_tests;
+
+/// Which consensus engine `Node::with_rpc_config` will build, and that it
+/// refuses the experimental BFT engine before anything is opened (#270). A
+/// unit-test module for the same reason as the two above.
+#[cfg(test)]
+#[path = "../tests/unit/consensus_engine_refusal_tests.rs"]
+mod consensus_engine_refusal_tests;

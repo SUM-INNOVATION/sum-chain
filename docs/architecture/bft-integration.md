@@ -1,7 +1,10 @@
 # BFT Consensus Integration Guide
 
-> **Status: EXPERIMENTAL / NOT PRODUCTION-READY**
-> The BFT module exists in the codebase but `propose_block()` returns `NotImplemented`. SUM Chain currently uses **Proof of Authority (PoA)** as its production consensus engine. This guide describes the planned BFT integration for future activation.
+> **Status: REJECTED. Not deployable.**
+> A node configured with `engine = "bft"` refuses to start: the experimental BFT engine is
+> unavailable pending the certified-finality protocol (#270), and there is no fallback to
+> another engine. SUM Chain runs **Proof of Authority (PoA)**. This guide is kept as a
+> record of the prototype; any configuration or rollout steps in it do not work.
 
 This guide explains how to integrate BFT consensus into a running SUM Chain network.
 

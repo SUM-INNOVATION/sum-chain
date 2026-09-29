@@ -1073,6 +1073,18 @@ impl NetworkService {
     fn handle_gossip_message(&self, topic: &gossipsub::TopicHash, data: &[u8], source: PeerId) {
         let topic_str = topic.to_string();
 
+        // Only topics this node subscribed to are routed. Gossipsub should not
+        // deliver anything else, but the branches below match by substring, so
+        // this makes "not subscribed" mean "not processed" here as well — in
+        // particular for the BFT vote topics (#270).
+        if !is_routed_topic(&topic_str) {
+            debug!(
+                "Dropping gossip on unsubscribed topic {} from {}",
+                topic_str, source
+            );
+            return;
+        }
+
         if topic_str.contains(topics::TRANSACTIONS) {
             // Apply rate limiting for transactions
             if !self.rate_limiter.check_rate_limit(source, MessageType::Transaction) {
@@ -1188,5 +1200,56 @@ impl NetworkService {
         } else {
             debug!("Published BFT message to {}", topic_name);
         }
+    }
+}
+
+/// Whether gossip on `topic` is routed to the node at all: exactly the topics
+/// in [`topics::SUBSCRIBED`], compared whole rather than by substring.
+fn is_routed_topic(topic: &str) -> bool {
+    topics::SUBSCRIBED.contains(&topic)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Block and transaction gossip is routed; BFT vote gossip is not (#270),
+    /// and neither is a topic that merely contains a routed name.
+    #[test]
+    fn only_subscribed_topics_are_routed() {
+        assert!(is_routed_topic(topics::TRANSACTIONS));
+        assert!(is_routed_topic(topics::BLOCKS));
+        for bft in [
+            topics::BFT_PROPOSALS,
+            topics::BFT_PREVOTES,
+            topics::BFT_PRECOMMITS,
+        ] {
+            assert!(!is_routed_topic(bft), "{bft} must not be routed");
+        }
+        assert!(!is_routed_topic("sumchain/block/1/bft/proposal"));
+        assert!(!is_routed_topic(""));
+    }
+
+    /// BFT vote gossip that reaches the router anyway is dropped there: no
+    /// `Bft*Received` event, whatever the payload.
+    #[test]
+    fn bft_gossip_is_not_turned_into_events() {
+        let (service, _commands) = NetworkService::new(NetworkConfig::default());
+        let mut events = service.subscribe();
+        let source = PeerId::random();
+        for bft in [
+            topics::BFT_PROPOSALS,
+            topics::BFT_PREVOTES,
+            topics::BFT_PRECOMMITS,
+        ] {
+            service.handle_gossip_message(&gossipsub::TopicHash::from_raw(bft), b"vote", source);
+        }
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "BFT gossip must not reach the node"
+        );
     }
 }

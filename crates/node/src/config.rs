@@ -77,15 +77,9 @@ data_dir = "data"
 # validator_key = "validator.key"
 
 [consensus]
-# Consensus engine: "poa" or "bft"
+# Consensus engine. Only "poa" is accepted. "bft" is refused at startup: the
+# experimental BFT engine is unavailable pending the certified-finality protocol.
 engine = "poa"
-
-# BFT consensus settings (only used if engine = "bft")
-[consensus.bft]
-propose_timeout_ms = 3000
-prevote_timeout_ms = 1000
-precommit_timeout_ms = 1000
-timeout_multiplier = 1.5
 
 [network]
 # P2P listen address
@@ -257,8 +251,32 @@ impl Default for LoggingSettings {
 pub enum ConsensusEngine {
     /// Proof of Authority (simple round-robin)
     Poa,
-    /// Byzantine Fault Tolerant consensus
+    /// The experimental BFT engine. Still parsed, so that a config naming it
+    /// gets the refusal below rather than a generic "unknown variant" error,
+    /// and never run: see [`ConsensusSettings::production_engine`].
     Bft,
+}
+
+/// Why a node configured with `engine = "bft"` does not start.
+///
+/// The BFT engine under `crates/consensus/src/bft` is a prototype and does not
+/// provide the guarantees the certified-finality protocol will (#270). It is
+/// refused outright rather than downgraded: an operator who asked for BFT and
+/// silently got PoA would believe the chain has finality it does not have.
+pub const BFT_ENGINE_UNAVAILABLE: &str = "consensus engine \"bft\" is refused: the experimental \
+     BFT engine is unavailable pending the certified-finality protocol (#270). This node does \
+     not fall back to another engine; set `[consensus] engine = \"poa\"` or remove the line";
+
+/// The engines a production node may construct.
+///
+/// Deliberately narrower than [`ConsensusEngine`]: `Node::with_rpc_config`
+/// can only build what this enum names, so an engine that is not here cannot
+/// be instantiated by a production entry point at all, whatever the config
+/// says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductionEngine {
+    /// Proof of Authority (simple round-robin)
+    Poa,
 }
 
 impl Default for ConsensusEngine {
@@ -282,6 +300,19 @@ impl Default for ConsensusSettings {
         Self {
             engine: ConsensusEngine::Poa,
             bft: BftSettings::default(),
+        }
+    }
+}
+
+impl ConsensusSettings {
+    /// The engine this node will run, or the reason it will not start.
+    ///
+    /// The only way from a configured engine to a constructed one. There is
+    /// no fallback: `Bft` is an error, never `Poa`.
+    pub fn production_engine(&self) -> Result<ProductionEngine> {
+        match self.engine {
+            ConsensusEngine::Poa => Ok(ProductionEngine::Poa),
+            ConsensusEngine::Bft => Err(anyhow::anyhow!(BFT_ENGINE_UNAVAILABLE)),
         }
     }
 }
@@ -369,6 +400,124 @@ addr = "0.0.0.0:8545"
     fn test_parse_example_config() {
         let example = NodeConfig::example_config();
         let _config: NodeConfig = toml::from_str(&example).unwrap();
+    }
+
+    fn engine_config(value: &str) -> String {
+        format!("[consensus]\nengine = {value}\n")
+    }
+
+    #[test]
+    fn default_engine_is_poa() {
+        assert_eq!(ConsensusEngine::default(), ConsensusEngine::Poa);
+        assert_eq!(ConsensusSettings::default().engine, ConsensusEngine::Poa);
+        assert_eq!(NodeConfig::default().consensus.engine, ConsensusEngine::Poa);
+        let omitted: NodeConfig = toml::from_str("[rpc]\naddr = \"0.0.0.0:9000\"\n").unwrap();
+        assert_eq!(omitted.consensus.engine, ConsensusEngine::Poa);
+        assert_eq!(
+            omitted.consensus.production_engine().unwrap(),
+            ProductionEngine::Poa
+        );
+    }
+
+    #[test]
+    fn explicit_poa_is_accepted() {
+        let config: NodeConfig = toml::from_str(&engine_config("\"poa\"")).unwrap();
+        assert_eq!(config.consensus.engine, ConsensusEngine::Poa);
+        assert_eq!(
+            config.consensus.production_engine().unwrap(),
+            ProductionEngine::Poa
+        );
+    }
+
+    /// Parsed, then refused, with the reason and no fallback.
+    #[test]
+    fn bft_is_refused_not_downgraded() {
+        let config: NodeConfig = toml::from_str(&engine_config("\"bft\"")).unwrap();
+        assert_eq!(config.consensus.engine, ConsensusEngine::Bft);
+        let err = config
+            .consensus
+            .production_engine()
+            .expect_err("BFT must be refused, not mapped to another engine")
+            .to_string();
+        assert_eq!(err, BFT_ENGINE_UNAVAILABLE);
+        assert!(err.contains("unavailable pending the certified-finality protocol"));
+        assert!(err.contains("does not fall back"));
+    }
+
+    /// Every spelling that is not exactly `poa` or `bft` fails to load, so none
+    /// can reach a node as either engine — in particular not as the default.
+    #[test]
+    fn malformed_engine_values_fail_to_load() {
+        let dir = TempDir::new().unwrap();
+        for value in [
+            "\"BFT\"",
+            "\"Bft\"",
+            "\"bFt\"",
+            "\" bft\"",
+            "\"bft \"",
+            "\"bft\\u0000\"",
+            "\"POA\"",
+            "\"Poa\"",
+            "\"\"",
+            "\"tendermint\"",
+            "1",
+            "true",
+            "[\"bft\"]",
+            "{ bft = true }",
+        ] {
+            let text = engine_config(value);
+            assert!(
+                toml::from_str::<NodeConfig>(&text).is_err(),
+                "engine = {value} must not parse"
+            );
+            let path = dir.path().join("config.toml");
+            std::fs::write(&path, &text).unwrap();
+            assert!(
+                NodeConfig::from_file(&path).is_err(),
+                "engine = {value} must not load"
+            );
+        }
+    }
+
+    /// The example `sumchain-node` writes for operators names PoA and does
+    /// not present BFT as an option.
+    #[test]
+    fn example_config_does_not_offer_bft() {
+        let example = NodeConfig::example_config();
+        let config: NodeConfig = toml::from_str(&example).unwrap();
+        assert_eq!(
+            config.consensus.production_engine().unwrap(),
+            ProductionEngine::Poa
+        );
+        assert!(!example.contains("[consensus.bft]"));
+        assert!(!example.contains("\"poa\" or \"bft\""));
+    }
+
+    /// No config shipped in the repository selects the BFT engine.
+    #[test]
+    fn no_shipped_config_selects_bft() {
+        let configs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs");
+        let mut stack = vec![configs];
+        let mut seen = 0;
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                seen += 1;
+                let text = std::fs::read_to_string(&path).unwrap().to_lowercase();
+                let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+                assert!(
+                    !squeezed.contains("engine=\"bft\"")
+                        && !squeezed.contains("\"engine\":\"bft\""),
+                    "{} selects the BFT engine",
+                    path.display()
+                );
+            }
+        }
+        assert!(seen > 0, "the configs directory was not found");
     }
 
     #[test]

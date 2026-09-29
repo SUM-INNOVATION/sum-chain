@@ -134,7 +134,7 @@ mod bootnode_reachability_tests {
     }
 
     /// A `/p2p/` suffix whose PeerId is a placeholder does not parse, so the
-    /// whole entry is unusable. `configs/bft-config.toml` ships exactly that
+    /// whole entry is unusable. A shipped example config once had exactly that
     /// shape; before this it disappeared without a word.
     #[test]
     fn placeholder_peer_id_is_reported_not_silently_dropped() {

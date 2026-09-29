@@ -195,19 +195,13 @@ impl SumChainBehaviour {
         })
     }
 
-    /// Subscribe to all SUM Chain topics
+    /// Subscribe to the SUM Chain topics in [`topics::SUBSCRIBED`]
+    ///
+    /// Not the BFT vote topics: see [`topics::SUBSCRIBED`] for why.
     pub fn subscribe_topics(&mut self) -> Result<(), gossipsub::SubscriptionError> {
-        let tx_topic = IdentTopic::new(topics::TRANSACTIONS);
-        let block_topic = IdentTopic::new(topics::BLOCKS);
-        let proposal_topic = IdentTopic::new(topics::BFT_PROPOSALS);
-        let prevote_topic = IdentTopic::new(topics::BFT_PREVOTES);
-        let precommit_topic = IdentTopic::new(topics::BFT_PRECOMMITS);
-
-        self.gossipsub.subscribe(&tx_topic)?;
-        self.gossipsub.subscribe(&block_topic)?;
-        self.gossipsub.subscribe(&proposal_topic)?;
-        self.gossipsub.subscribe(&prevote_topic)?;
-        self.gossipsub.subscribe(&precommit_topic)?;
+        for topic in topics::SUBSCRIBED {
+            self.gossipsub.subscribe(&IdentTopic::new(topic))?;
+        }
 
         Ok(())
     }
@@ -327,6 +321,40 @@ impl SumChainBehaviour {
             accept_px_threshold: 100.0,
             // Peers with this score can give peer exchange info
             opportunistic_graft_threshold: 5.0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A node joins the block and transaction meshes and nothing else: in
+    /// particular, not the BFT proposal, prevote or precommit topics (#270).
+    #[test]
+    fn subscribes_to_block_and_transaction_topics_only() {
+        let mut behaviour = SumChainBehaviour::new().unwrap();
+        behaviour.subscribe_topics().unwrap();
+
+        let mut subscribed: Vec<String> = behaviour
+            .gossipsub
+            .topics()
+            .map(|t| t.to_string())
+            .collect();
+        subscribed.sort();
+        let mut expected = vec![topics::BLOCKS.to_string(), topics::TRANSACTIONS.to_string()];
+        expected.sort();
+        assert_eq!(subscribed, expected);
+
+        for bft in [
+            topics::BFT_PROPOSALS,
+            topics::BFT_PREVOTES,
+            topics::BFT_PRECOMMITS,
+        ] {
+            assert!(
+                !subscribed.iter().any(|t| t == bft),
+                "{bft} must not be subscribed"
+            );
         }
     }
 }

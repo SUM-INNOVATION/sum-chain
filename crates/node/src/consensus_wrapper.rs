@@ -17,7 +17,12 @@ use sumchain_storage::Database;
 pub enum ConsensusWrapper {
     /// Proof of Authority consensus
     Poa(Arc<PoAEngine>),
-    /// Byzantine Fault Tolerant consensus
+    /// The experimental BFT engine. Nothing in this crate constructs it:
+    /// `Node::with_rpc_config` builds only what `config::ProductionEngine`
+    /// names, and a config asking for BFT is refused at startup (#270). The
+    /// variant and its arms stay so the engine remains auditable in place and
+    /// the consensus sinks `consensus_participation_guard` derives from this
+    /// impl are unchanged until the certified-finality protocol replaces it.
     Bft(Arc<BftEngine>),
 }
 
@@ -32,18 +37,6 @@ impl ConsensusWrapper {
     ) -> Result<Self> {
         let engine = PoAEngine::new(db, state, mempool, genesis, validator_key)?;
         Ok(Self::Poa(Arc::new(engine)))
-    }
-
-    /// Create BFT consensus engine
-    pub fn new_bft(
-        db: Arc<Database>,
-        state: Arc<StateManager>,
-        mempool: Arc<Mempool>,
-        genesis: &Genesis,
-        validator_key: Option<KeyPair>,
-    ) -> Result<Self> {
-        let engine = BftEngine::new(db, state, mempool, genesis, validator_key)?;
-        Ok(Self::Bft(Arc::new(engine)))
     }
 
     /// Handle BFT proposal (BFT only)
