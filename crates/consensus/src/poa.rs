@@ -3,10 +3,12 @@
 //! Validators take turns proposing blocks in round-robin order.
 //! The proposer for height H is validators[H % N] where N is validator count.
 //!
-//! Supports dynamic validator sets with epoch-based transitions:
-//! - Validator set is recalculated at each epoch boundary
-//! - Active validators are selected by stake (self-stake + delegations)
-//! - Proposer selection can be round-robin or stake-weighted
+//! Protocol v1 (#267): the validator set is the static genesis list and the
+//! proposer is `sumchain_primitives::proposer::round_robin_proposer`, the one
+//! function production, validation, import, screening and reorg all use.
+//! Stake-weighted selection and dynamic staking epochs are refused at genesis
+//! validation and again by [`PoAEngine::new`]; the epoch machinery below stays
+//! inert until canonical validator-set history exists (#266).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,7 +35,7 @@ use tracing::{debug, info, warn};
 use crate::engine::{
     ConsensusEngine, ConsensusEvent, ConsensusQuery, ForkChoice, LongestChainForkChoice,
 };
-use crate::reorg::{execute_reorg, plan_reorg_within_undo_history};
+use crate::reorg::{execute_reorg, plan_reorg_within_undo_history, validate_branch};
 use crate::{ConsensusError, Result};
 
 /// Proof of Authority consensus engine
@@ -115,6 +117,31 @@ pub struct PoAEngine {
     proposal_executions: std::sync::atomic::AtomicU64,
 }
 
+/// Refuse a genesis protocol v1 cannot run: stake-weighted proposer selection,
+/// dynamic staking epochs, or a validator set that is empty or lists a validator
+/// twice.
+///
+/// Called by [`PoAEngine::new`], and by the node before it creates its data
+/// directory, so a caller that built its `Genesis` with `Genesis::new` (which
+/// does not validate) still cannot get an engine that proposes by stake,
+/// changes membership at an epoch boundary, or rotates over a bad set. The
+/// staking rule is `StakingParams::check_protocol_v1` and the set rule is
+/// `proposer::check_validator_set` — the functions `Genesis::validate` uses —
+/// so the two checkpoints cannot disagree. Nothing is coerced: an unsafe value
+/// is an error, never replaced by a safe one.
+pub fn check_protocol_v1(genesis: &Genesis) -> Result<()> {
+    if let Some(staking) = &genesis.params.staking {
+        staking
+            .check_protocol_v1()
+            .map_err(|e| ConsensusError::Genesis(e.to_string()))?;
+    }
+    let validators = genesis
+        .validator_pubkeys()
+        .map_err(|e| ConsensusError::Genesis(e.to_string()))?;
+    sumchain_primitives::proposer::check_validator_set(&validators)
+        .map_err(|e| ConsensusError::Genesis(format!("invalid genesis validator set: {e}")))
+}
+
 impl PoAEngine {
     /// Create a new PoA consensus engine
     pub fn new(
@@ -127,6 +154,10 @@ impl PoAEngine {
         let genesis_validators = genesis
             .validator_pubkeys()
             .map_err(|e| ConsensusError::Genesis(e.to_string()))?;
+
+        // Checked again here rather than trusted to genesis loading:
+        // `Genesis::new` builds a genesis without validating it.
+        check_protocol_v1(genesis)?;
 
         let executor = Arc::new(BlockExecutor::new(state.clone(), db.clone(), genesis.params.clone()));
         let (event_tx, _) = broadcast::channel(100);
@@ -233,6 +264,11 @@ impl PoAEngine {
     }
 
     /// Update the validator set if at an epoch boundary
+    ///
+    /// Inert in protocol v1: the constructor refuses `staking.epoch_length != 0`,
+    /// so the early return below is always taken. Kept for the canonical
+    /// validator-set history work (#266), which has to replace its direct,
+    /// unjournaled write before epochs can be enabled.
     fn maybe_update_validator_set(&self, height: BlockHeight, block_hash: &Hash) {
         let epoch_length = self.params.staking.as_ref()
             .map(|s| s.epoch_length)
@@ -281,45 +317,49 @@ impl PoAEngine {
         }
     }
 
-    /// Get the proposer for a given height
+    /// The protocol v1 proposer for `height`: round robin over the active
+    /// validator set, which is the static genesis list in v1.
+    ///
+    /// The same set `do_import_block` validates against and the same function
+    /// `BlockExecutor::validate_header` checks with, so this node proposes
+    /// exactly when its peers will accept it. Stake-weighted selection is not
+    /// reachable: the constructor refuses it and nothing here reads it.
+    ///
+    /// The constructor refuses an empty or duplicated set, so the error arm is
+    /// unreachable; if it were reached, no key matches the zero key, so the node
+    /// proposes nothing rather than guessing.
     fn compute_proposer(&self, height: BlockHeight) -> [u8; 32] {
-        let use_stake_weighted = self.params.staking.as_ref()
-            .map(|s| s.stake_weighted_selection)
-            .unwrap_or(false);
-
-        // Check if we have an active validator set
-        if let Some(set) = self.active_validator_set.read().as_ref() {
-            if use_stake_weighted {
-                if let Some(proposer) = set.get_stake_weighted_proposer(height) {
-                    return proposer;
-                }
-            } else {
-                if let Some(proposer) = set.get_round_robin_proposer(height) {
-                    return proposer;
-                }
-            }
-        }
-
-        // Fall back to genesis validators with round-robin
-        let validators = &self.genesis_validators;
-        if validators.is_empty() {
-            return [0u8; 32];
-        }
-        let idx = (height as usize) % validators.len();
-        validators[idx]
+        sumchain_primitives::proposer::round_robin_proposer(
+            height,
+            &self.get_active_validator_set(),
+        )
+        .unwrap_or_else(|e| {
+            warn!("no proposer for height {height}: {e}");
+            [0u8; 32]
+        })
     }
 
-    /// Load or initialize the active validator set from storage
+    /// Check the stored validator-set history at startup.
+    ///
+    /// Protocol v1 membership is the static genesis list, so there is nothing
+    /// to load: a stored epoch set is refused (below), and so is a store that
+    /// cannot be read.
     fn load_active_validator_set(&self) -> Result<()> {
         let set_store = ValidatorSetStore::new(&self.db);
 
-        // Try to load the current validator set
+        // A stored epoch set is dynamic membership history. Protocol v1 runs the
+        // static genesis set only, and neither adopting that history nor quietly
+        // ignoring it is safe: adopting it validates with a set peers may not
+        // hold, and ignoring it pretends membership never changed. Refused until
+        // canonical validator-set history exists (#266).
         if let Some(current_set) = set_store.get_current_validator_set()? {
-            info!(
-                "Loaded validator set for epoch {} ({} validators)",
-                current_set.epoch, current_set.len()
-            );
-            *self.active_validator_set.write() = Some(current_set);
+            return Err(ConsensusError::Genesis(format!(
+                "this database holds a stored validator set for epoch {} ({} validators): dynamic \
+                 staking epochs are unavailable until canonical validator-set history exists \
+                 (#266), and this node will neither adopt that set nor ignore it",
+                current_set.epoch,
+                current_set.len()
+            )));
         }
 
         Ok(())
@@ -362,6 +402,12 @@ impl PoAEngine {
 
         match block_store.get_latest()? {
             Some(block) => {
+                // Membership first, before any in-memory state is restored: a
+                // database this binary cannot run under protocol v1 is refused
+                // outright, and a row it cannot read is not taken to mean
+                // "static".
+                self.load_active_validator_set()?;
+
                 info!(
                     "Loaded chain at height {} ({})",
                     block.height(),
@@ -382,11 +428,6 @@ impl PoAEngine {
                         "Restored finality state: height {} finalized",
                         finalized_height
                     );
-                }
-
-                // Load active validator set
-                if let Err(e) = self.load_active_validator_set() {
-                    warn!("Failed to load validator set: {}", e);
                 }
 
                 Ok(Some(block))
@@ -1655,6 +1696,12 @@ impl PoAEngine {
         // is. A missing record at or above it HALTS the reorg; below it, absence
         // is pre-journal history and is counted and logged.
         let missing = journals.policy();
+
+        // Every block of the replacement branch, re-validated against its own
+        // parent with the round-robin proposer rule, before the unwind below
+        // commits anything.
+        validate_branch(&self.db, &self.executor, &plan, active_validators)?;
+
         let outcome = execute_reorg(
             &self.db,
             &self.state,

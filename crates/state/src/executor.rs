@@ -4551,9 +4551,12 @@ impl BlockExecutor {
             ));
         }
 
-        // Validate proposer is in validator set
-        let proposer_idx = (header.height as usize) % validators.len();
-        let expected_proposer = validators[proposer_idx];
+        // The protocol v1 proposer: round robin over the canonical set, through
+        // the one function block production also uses. An empty or duplicated
+        // set is refused rather than dividing by zero or granting extra turns.
+        let expected_proposer =
+            sumchain_primitives::proposer::round_robin_proposer(header.height, validators)
+                .map_err(|e| StateError::BlockValidation(format!("no proposer: {e}")))?;
 
         if header.proposer_pubkey != expected_proposer {
             return Err(StateError::BlockValidation(format!(

@@ -1272,19 +1272,28 @@ impl SumChainApiServer for RpcServer {
     async fn get_validators(&self) -> std::result::Result<ValidatorSetInfo, jsonrpsee::types::ErrorObjectOwned> {
         let validators = self.consensus.validators();
         let current_height = self.consensus.current_height();
-        let proposer_index = (current_height as usize) % validators.len();
+        // The same round-robin rule consensus uses, rather than a copy of it. An
+        // empty or duplicated set (which the engine refuses) is an error here
+        // instead of a division by zero.
+        let current_proposer =
+            sumchain_primitives::proposer::round_robin_proposer(current_height, &validators)
+                .map_err(|e| RpcError::Internal(e.to_string()))?;
+        // Present by construction: the proposer is drawn from `validators`.
+        let proposer_index = validators
+            .iter()
+            .position(|v| *v == current_proposer)
+            .unwrap_or_default();
 
         let validator_infos: Vec<ValidatorInfo> = validators
             .iter()
-            .enumerate()
-            .map(|(idx, pubkey)| {
+            .map(|pubkey| {
                 // Address is the 20-byte derived address
                 let address = Address::from_public_key(pubkey);
                 // Public key displayed as base58 (same format as in genesis)
                 ValidatorInfo {
                     public_key: bs58::encode(pubkey).into_string(),
                     address: address.to_base58(),
-                    is_current_proposer: idx == proposer_index,
+                    is_current_proposer: *pubkey == current_proposer,
                 }
             })
             .collect();
@@ -3301,7 +3310,10 @@ impl SumChainApiServer for RpcServer {
         // Get staking params - use defaults for now
         // In production, this would come from genesis/state
         let epoch_length: u64 = 14400; // ~24 hours at 6s blocks
-        let stake_weighted_selection = true;
+                                       // Protocol v1 selects proposers round robin; a node configured for
+                                       // stake-weighted selection refuses to start, so a node answering this
+                                       // call is never running it.
+        let stake_weighted_selection = false;
 
         let current_epoch = current_height / epoch_length;
         let epoch_start_height = current_epoch * epoch_length;

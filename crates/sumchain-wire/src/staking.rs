@@ -642,10 +642,42 @@ pub struct StakingParams {
     pub downtime_jail_duration: BlockHeight,
     /// Number of missed blocks before downtime slash
     pub downtime_threshold: u64,
-    /// Epoch length in blocks (validator set updates at epoch boundaries)
+    /// Epoch length in blocks (validator set updates at epoch boundaries).
+    ///
+    /// `0` means epoch transitions are disabled and membership is the static
+    /// genesis validator list. Protocol v1 requires `0`: dynamic epochs are
+    /// refused until canonical validator-set history exists (#266). See
+    /// [`StakingParams::check_protocol_v1`].
     pub epoch_length: BlockHeight,
-    /// Enable stake-weighted proposer selection (vs round-robin)
+    /// Stake-weighted proposer selection. Protocol v1 requires `false`: the
+    /// proposer is always round robin ([`crate::proposer::round_robin_proposer`]),
+    /// and `true` is refused, never ignored (#267).
     pub stake_weighted_selection: bool,
+}
+
+/// Why a staking configuration is refused by protocol v1.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StakingV1Refusal {
+    /// `stake_weighted_selection = true`.
+    #[error(
+        "staking.stake_weighted_selection = true is refused: stake-weighted proposer selection \
+         is unavailable in protocol v1, which selects proposers round robin \
+         (proposer(height) = validators[height mod n]). The node does not fall back to round \
+         robin silently; set stake_weighted_selection = false"
+    )]
+    StakeWeightedSelection,
+    /// `epoch_length != 0`, which would change validator membership at epoch
+    /// boundaries.
+    #[error(
+        "staking.epoch_length = {epoch_length} is refused: dynamic staking epochs, which change \
+         validator membership at epoch boundaries, are unavailable until canonical validator-set \
+         history exists (#266). The node does not disable epochs silently; set epoch_length = 0 \
+         to keep the static genesis validator set"
+    )]
+    DynamicEpochs {
+        /// The configured epoch length.
+        epoch_length: BlockHeight,
+    },
 }
 
 impl Default for StakingParams {
@@ -660,13 +692,33 @@ impl Default for StakingParams {
             double_sign_jail_duration: 14400, // ~24 hours
             downtime_jail_duration: 2400, // ~4 hours
             downtime_threshold: 500, // 500 missed blocks
-            epoch_length: 14400, // ~24 hours at 6s blocks
-            stake_weighted_selection: true, // Use stake-weighted selection by default
+            // Static membership: protocol v1 refuses anything else (#266).
+            epoch_length: 0,
+            // Round robin: protocol v1 refuses stake-weighted selection (#267).
+            stake_weighted_selection: false,
         }
     }
 }
 
 impl StakingParams {
+    /// Refuse a staking configuration protocol v1 cannot run.
+    ///
+    /// The one definition of the rule, called by genesis validation and again by
+    /// the consensus engine's constructor, so the two cannot disagree. Checked
+    /// in this order, so a configuration with both problems reports the
+    /// proposer rule first.
+    pub fn check_protocol_v1(&self) -> Result<(), StakingV1Refusal> {
+        if self.stake_weighted_selection {
+            return Err(StakingV1Refusal::StakeWeightedSelection);
+        }
+        if self.epoch_length != 0 {
+            return Err(StakingV1Refusal::DynamicEpochs {
+                epoch_length: self.epoch_length,
+            });
+        }
+        Ok(())
+    }
+
     /// Get the epoch number for a given block height
     pub fn epoch_for_height(&self, height: BlockHeight) -> u64 {
         if self.epoch_length == 0 {
@@ -731,7 +783,10 @@ pub struct ValidatorSet {
     pub validators: Vec<ValidatorSetEntry>,
     /// Total voting power in this set
     pub total_voting_power: Balance,
-    /// Proposer selection seed (hash of previous epoch's last block)
+    /// Proposer selection seed (hash of previous epoch's last block).
+    ///
+    /// Read by nothing in protocol v1, whose proposer selection is round robin
+    /// and takes no seed. Kept because stored sets are bincode-encoded with it.
     pub proposer_seed: [u8; 32],
 }
 
@@ -773,48 +828,14 @@ impl ValidatorSet {
         self.validators.iter().find(|v| &v.pubkey == pubkey)
     }
 
-    /// Get the proposer for a given height using stake-weighted selection
-    pub fn get_stake_weighted_proposer(&self, height: BlockHeight) -> Option<[u8; 32]> {
-        if self.validators.is_empty() || self.total_voting_power == 0 {
-            return None;
-        }
-
-        // Combine proposer seed with height for deterministic but varying selection
-        let mut seed_input = [0u8; 40];
-        seed_input[..32].copy_from_slice(&self.proposer_seed);
-        seed_input[32..40].copy_from_slice(&height.to_le_bytes());
-
-        // Simple hash to get a selection point
-        let hash = blake3::hash(&seed_input);
-        let hash_bytes = hash.as_bytes();
-
-        // Convert first 16 bytes to u128 for selection
-        let selection_bytes: [u8; 16] = hash_bytes[..16].try_into().unwrap();
-        let selection_value = u128::from_le_bytes(selection_bytes);
-
-        // Map to range [0, total_voting_power)
-        let selection_point = selection_value % self.total_voting_power;
-
-        // Select proposer based on cumulative voting power
-        let mut cumulative = 0u128;
-        for validator in &self.validators {
-            cumulative += validator.voting_power;
-            if selection_point < cumulative {
-                return Some(validator.pubkey);
-            }
-        }
-
-        // Fallback to first validator (shouldn't happen)
-        Some(self.validators[0].pubkey)
-    }
-
-    /// Get the proposer for a given height using round-robin selection
+    /// Get the proposer for a given height: protocol v1 round robin, through
+    /// the shared [`crate::proposer::round_robin_proposer`]. `None` for a set
+    /// that is empty or lists a validator twice.
+    ///
+    /// Stake-weighted selection was removed from this type: it is not part of
+    /// protocol v1 and has no caller (#267).
     pub fn get_round_robin_proposer(&self, height: BlockHeight) -> Option<[u8; 32]> {
-        if self.validators.is_empty() {
-            return None;
-        }
-        let idx = (height as usize) % self.validators.len();
-        Some(self.validators[idx].pubkey)
+        crate::proposer::round_robin_proposer(height, &self.pubkeys()).ok()
     }
 
     /// Get the voting power for a validator

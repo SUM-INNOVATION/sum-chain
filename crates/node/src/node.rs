@@ -180,14 +180,23 @@ impl Node {
         rpc_rate_limit_config: RateLimitConfig,
         consensus_config: crate::config::ConsensusSettings,
     ) -> Result<Self> {
-        // ── the consensus engine, before anything touches disk ──────────────
+        // ── startup safety checks, before anything touches disk ─────────────
         //
         // First of all, before the data directory is created, the database
-        // opened or a network socket exists. A node configured for an engine it
-        // may not run has nothing to do, and must not leave a directory or a
-        // database behind as evidence that it tried. The refusal is final: there
-        // is no fallback to PoA (see `ConsensusSettings::production_engine`).
+        // opened or a network socket exists. A node that may not run has nothing
+        // to do, and must not leave a directory or a database behind as evidence
+        // that it tried. Each refusal is final, never a fallback, and they run in
+        // this order:
+        //
+        // 1. The consensus engine. `engine = "bft"` is refused; there is no
+        //    fallback to PoA (see `ConsensusSettings::production_engine`).
         let production_engine = consensus_config.production_engine()?;
+        // 2-4. Protocol v1 proposer and membership rules: stake-weighted
+        //    proposer selection, then dynamic staking epochs, then a validator
+        //    set that is empty or lists a validator twice. Nothing is rewritten
+        //    to a safe value. The engine constructor checks the same rules
+        //    again, through the same function.
+        sumchain_consensus::poa::check_protocol_v1(&genesis)?;
 
         // Create data directory
         std::fs::create_dir_all(&data_dir)?;
@@ -1911,3 +1920,10 @@ mod peer_block_admission_tests;
 #[cfg(test)]
 #[path = "../tests/unit/consensus_engine_refusal_tests.rs"]
 mod consensus_engine_refusal_tests;
+
+/// Protocol v1 proposer and membership rules through the real boot: refused
+/// before anything is opened, static membership unchanged (#267). A unit-test
+/// module for the same reason as the two above.
+#[cfg(test)]
+#[path = "../tests/unit/protocol_v1_boot_tests.rs"]
+mod protocol_v1_boot_tests;

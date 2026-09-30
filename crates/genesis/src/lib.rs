@@ -53,6 +53,17 @@ pub enum GenesisError {
     #[error("invalid beacon_params: {reason}")]
     InvalidBeaconParams { reason: &'static str },
 
+    /// A staking configuration protocol v1 cannot run: stake-weighted proposer
+    /// selection, or dynamic epochs that would change validator membership.
+    /// Refused at load, never coerced into round robin or static membership.
+    #[error("{0}")]
+    StakingProtocolV1(sumchain_primitives::staking::StakingV1Refusal),
+
+    /// The genesis validator list cannot serve as the canonical round-robin
+    /// set (it lists a validator twice).
+    #[error("invalid genesis validator set: {0}")]
+    InvalidValidatorSet(sumchain_primitives::proposer::ProposerSelectionError),
+
     /// `account_root_enabled_from_height` is `Some(_)` while
     /// `application_journal_enabled_from_height` is `None`.
     ///
@@ -3042,6 +3053,17 @@ impl ChainParams {
     /// [`Genesis::validate`] calls this, so every genesis admitted through the
     /// authoritative loader rejects any `Some(_)` for these gates.
     pub fn validate(&self) -> Result<()> {
+        // ── protocol v1 proposer and membership rules, first ────────────────
+        //
+        // Round-robin proposers over the static genesis validator set. A
+        // stake-weighted or dynamic-epoch staking section is refused here, and
+        // again by the consensus engine's constructor, through the same
+        // `StakingParams::check_protocol_v1`.
+        if let Some(staking) = &self.staking {
+            staking
+                .check_protocol_v1()
+                .map_err(GenesisError::StakingProtocolV1)?;
+        }
         if self.compute_pool_enabled_from_height.is_some() {
             return Err(GenesisError::IncompleteSubsystemActivation {
                 gate: "compute_pool_enabled_from_height",
@@ -3955,6 +3977,11 @@ impl Genesis {
                 .map_err(|_| GenesisError::InvalidValidator(format!("validator[{}]: {}", i, v)))?;
         }
 
+        // The declared order is the canonical round-robin order, so a validator
+        // listed twice would get extra turns. Refused, not deduplicated.
+        sumchain_primitives::proposer::check_validator_set(&self.validator_pubkeys()?)
+            .map_err(GenesisError::InvalidValidatorSet)?;
+
         // Validate all addresses in alloc
         for addr in self.alloc.keys() {
             Address::from_base58(addr)
@@ -3981,10 +4008,12 @@ impl Genesis {
             .collect()
     }
 
-    /// Get the first validator (proposer of genesis block)
+    /// The proposer of the genesis block: the round-robin proposer of height 0,
+    /// which is the first declared validator.
     pub fn genesis_proposer(&self) -> Result<[u8; 32]> {
         let pubkeys = self.validator_pubkeys()?;
-        Ok(pubkeys[0])
+        sumchain_primitives::proposer::round_robin_proposer(0, &pubkeys)
+            .map_err(GenesisError::InvalidValidatorSet)
     }
 
     /// Parse allocations into addresses and balances

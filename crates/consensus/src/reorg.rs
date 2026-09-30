@@ -430,6 +430,54 @@ pub fn execute_reorg(
     Ok(outcome)
 }
 
+/// Validate every block of the replacement branch, in order, against its own
+/// parent — BEFORE anything is unwound.
+///
+/// Each block's header (parent link, height, timestamp, round-robin proposer,
+/// proposer signature) and body limits go through `BlockExecutor::validate_block`,
+/// the same check `PoAEngine::do_import_block` applies to an arriving block, so
+/// the proposer rule a reorg enforces is the one import enforces:
+/// `sumchain_primitives::proposer::round_robin_proposer`. Every interior block
+/// was checked once when it arrived; checking the whole branch again here means
+/// a switch never commits the unwind on the strength of a block it has not
+/// just re-checked.
+///
+/// `validators` is one set for the whole branch. That is correct only because
+/// protocol v1 membership is the static genesis list; it is one reason dynamic
+/// epochs stay refused until #266. This does not execute anything and does not
+/// address the parent-state defect in #269: blocks are still executed against
+/// the post-unwind state in `apply_branch`.
+pub fn validate_branch(
+    db: &Database,
+    executor: &BlockExecutor,
+    plan: &ReorgPlan,
+    validators: &[[u8; 32]],
+) -> Result<()> {
+    let block_store = BlockStore::new(db);
+    let mut parent = block_store
+        .get_by_hash(&plan.ancestor_hash)?
+        .ok_or_else(|| {
+            ConsensusError::InvalidBlock(format!(
+                "reorg cannot be validated: the common ancestor {} named by the plan is not \
+                 in the block store",
+                plan.ancestor_hash
+            ))
+        })?;
+    for block in &plan.new_branch {
+        executor
+            .validate_block(block, Some(&parent), validators)
+            .map_err(|e| {
+                ConsensusError::InvalidBlock(format!(
+                    "reorg refused before unwinding: block {} at height {}: {e}",
+                    block.hash(),
+                    block.height()
+                ))
+            })?;
+        parent = block.clone();
+    }
+    Ok(())
+}
+
 /// Apply `branch` (ancestor-to-head order) through the ordinary publication
 /// path, skipping any prefix already published.
 ///

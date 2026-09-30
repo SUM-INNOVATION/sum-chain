@@ -19,8 +19,8 @@ pub mod tx_error_metrics;
 pub use sumchain_wire::{
     address, agreement, beacon_schedule, beacon_wire, docclass, education, employment, equity,
     finance, governance, hash, healthcare, inference_settlement, legal, messaging, node_registry,
-    policy_account, property, staking, storage_metadata, supply, tax, token_ops, transaction,
-    validator_authority,
+    policy_account, property, proposer, staking, storage_metadata, supply, tax, token_ops,
+    transaction, validator_authority,
 };
 
 pub use address::Address;
