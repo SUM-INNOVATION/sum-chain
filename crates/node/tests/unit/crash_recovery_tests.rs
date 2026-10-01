@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sumchain_consensus::branch_switch::failpoints::{Failpoint, BARRIER_AT_ENV, BARRIER_FILE_ENV};
-use sumchain_consensus::{ConsensusEngine, ConsensusQuery, PoAEngine};
+use sumchain_consensus::PoAEngine;
 use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::{ChainParams, Genesis};
 use sumchain_primitives::{Block, BlockHeader, Hash, SignedTransaction, Transaction};
