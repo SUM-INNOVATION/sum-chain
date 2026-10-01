@@ -4,6 +4,7 @@
 //! Provides schemas for blocks, state, transactions, and receipts.
 
 pub mod agreement_store;
+pub mod branch;
 pub mod db;
 pub mod docclass_store;
 pub mod employment_store;
@@ -135,6 +136,21 @@ pub enum StorageError {
          the candidate branch is too large to evaluate in memory"
     )]
     OverlayLimitExceeded { limit: u64, would_reach: u64 },
+
+    /// A replacement branch's reconstructed parent state and speculative writes
+    /// outgrew this node's local budget for holding them.
+    ///
+    /// A statement about THIS NODE's resources, never about the branch: the
+    /// same branch may be perfectly valid. A caller must therefore not treat it
+    /// as a reason to reject the branch — doing so would give a different
+    /// consensus answer than a node with more memory — but as a local
+    /// fail-stop. See [`crate::branch`].
+    #[error(
+        "replacement branch state exceeded this node's local budget of {limit} bytes \
+         (would reach {would_reach}); this is a local resource limit, not a verdict on \
+         the branch"
+    )]
+    BranchStateLimitExceeded { limit: u64, would_reach: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;

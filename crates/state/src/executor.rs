@@ -452,6 +452,12 @@ impl<'db> BlockExecution<'db> {
 /// The identity check stays as the backstop for callers that have no block
 /// boundary to hook — mempool validation and the reorg paths call `execute_tx`
 /// directly.
+/// The replacement-branch context for one block execution (#269).
+struct BranchExecution {
+    layer: Arc<sumchain_storage::branch::BranchState>,
+    parent_accumulator: Hash,
+}
+
 struct ContractBlockScope<'a> {
     contracts: &'a ContractExecutorState,
 }
@@ -3226,14 +3232,63 @@ impl BlockExecutor {
         // guard. Expressed as an error rather than an `expect` so that a future
         // edit which breaks the invariant costs a refused block rather than a
         // panic inside a validator.
-        self.execute_or_screen(block, parent_state_root, active_validator_pubkeys, None)?
-            .ok_or_else(|| {
-                StateError::BlockValidation(
-                    "execute_block was handed no screening and still produced none of a \
+        self.execute_or_screen(
+            block,
+            parent_state_root,
+            active_validator_pubkeys,
+            None,
+            None,
+        )?
+        .ok_or_else(|| {
+            StateError::BlockValidation(
+                "execute_block was handed no screening and still produced none of a \
                      block; this is a bug in execute_or_screen, not in the block"
-                        .to_string(),
-                )
-            })
+                    .to_string(),
+            )
+        })
+    }
+
+    /// Execute one block of a REPLACEMENT branch (#269) against `branch` — the
+    /// reconstructed fork parent with the branch's earlier blocks absorbed —
+    /// rather than against the canonical head.
+    ///
+    /// Two inputs differ from [`Self::execute_block`], and both are the point:
+    ///
+    /// * every application read falls through `branch` before the database,
+    ///   including the contract runtime's backend reads and the overlay's own
+    ///   pre-image capture, so the block sees its parent's state and its
+    ///   journal records its parent's values;
+    /// * the state root chains from `parent_accumulator` — the parent block's
+    ///   published accumulator — and not from the in-memory head accumulator,
+    ///   which belongs to a different block.
+    ///
+    /// The result can be accepted but not published on its own: its overlay
+    /// refuses to become a batch. See `sumchain_storage::candidate::build_adoption_batch`.
+    pub fn execute_block_on_branch(
+        &self,
+        block: &Block,
+        parent_accumulator: Hash,
+        active_validator_pubkeys: &[[u8; 32]],
+        branch: Arc<sumchain_storage::branch::BranchState>,
+    ) -> Result<BlockExecution<'_>> {
+        let on_branch = BranchExecution {
+            layer: branch,
+            parent_accumulator,
+        };
+        self.execute_or_screen(
+            block,
+            parent_accumulator,
+            active_validator_pubkeys,
+            None,
+            Some(on_branch),
+        )?
+        .ok_or_else(|| {
+            StateError::BlockValidation(
+                "execute_block_on_branch was handed no screening and still produced none of \
+                 a block; this is a bug in execute_or_screen, not in the block"
+                    .to_string(),
+            )
+        })
     }
 
     /// PROPOSER-LOCAL: execute a candidate proposal for its VERDICTS instead of
@@ -3303,6 +3358,7 @@ impl BlockExecutor {
             parent_state_root,
             active_validator_pubkeys,
             Some(&mut screening),
+            None,
         )?;
         debug_assert!(
             produced.is_none(),
@@ -3327,7 +3383,19 @@ impl BlockExecutor {
         // consensus engine). Forwarded per-tx to the validator-quorum authority.
         active_validator_pubkeys: &[[u8; 32]],
         mut screening: Option<&mut ProposalScreening>,
+        // `Some` when this block belongs to a replacement branch: its reads go
+        // through the branch layer and its root chains from the parent's
+        // accumulator. `None` is canonical execution, unchanged.
+        on_branch: Option<BranchExecution>,
     ) -> Result<Option<BlockExecution<'_>>> {
+        // The accumulator this block's root chains from. Canonically that is
+        // the in-memory head accumulator, which IS the parent's, because a
+        // canonical block extends the head. On a replacement branch the head
+        // is a different block, so the parent's accumulator is passed in.
+        let parent_accumulator = match &on_branch {
+            Some(b) => b.parent_accumulator,
+            None => self.state.state_root(),
+        };
         info!(
             "Executing block {} with {} transactions",
             block.height(),
@@ -3368,7 +3436,12 @@ impl BlockExecutor {
         // holding different values produce different digests. The derivation,
         // with every measured figure separated from every assumed one, is on the
         // constant.
-        let mut candidate = CandidateExecution::new(&self.db, crate::MAX_BLOCK_WRITE_SET_BYTES);
+        let mut candidate = match on_branch {
+            Some(b) => {
+                CandidateExecution::on_branch(&self.db, b.layer, crate::MAX_BLOCK_WRITE_SET_BYTES)
+            }
+            None => CandidateExecution::new(&self.db, crate::MAX_BLOCK_WRITE_SET_BYTES),
+        };
 
         {
             // Slashing here forfeits locked grants, which are supply writes and
@@ -3846,7 +3919,13 @@ impl BlockExecutor {
         // gate is open — see compute_block_state_root).
         let state_root = {
             let view = candidate.view();
-            self.compute_block_state_root(&view, block, &receipts, &contract_diff)?
+            self.compute_block_state_root(
+                &view,
+                block,
+                &receipts,
+                &contract_diff,
+                parent_accumulator,
+            )?
         };
 
         // The in-memory accumulator is NOT advanced here.
@@ -4195,6 +4274,7 @@ impl BlockExecutor {
         block: &Block,
         receipts: &[Receipt],
         contract_diff: &ContractStateDiff,
+        parent_accumulator: Hash,
     ) -> Result<Hash> {
         // Simplified state root computation
         // In production, this would be a proper MPT root
@@ -4289,8 +4369,8 @@ impl BlockExecutor {
             data.extend_from_slice(account_digest.as_bytes());
         }
 
-        // Mix with previous state root (from before this block's execution)
-        data.extend_from_slice(self.state.state_root().as_bytes());
+        // Mix with the parent's accumulator (from before this block's execution).
+        data.extend_from_slice(parent_accumulator.as_bytes());
 
         Ok(Hash::hash(&data))
     }
@@ -8290,7 +8370,13 @@ mod tests {
         let mut ov = sumchain_storage::overlay::ApplicationOverlay::new(db, 1 << 30);
         let view = ExecutionView::new(&mut ov);
         executor
-            .compute_block_state_root(&view, blk, receipts, contract_diff)
+            .compute_block_state_root(
+                &view,
+                blk,
+                receipts,
+                contract_diff,
+                executor.state.state_root(),
+            )
             .unwrap()
     }
 

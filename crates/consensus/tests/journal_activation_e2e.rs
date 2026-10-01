@@ -341,14 +341,19 @@ async fn a_pinned_activation_height_is_accepted_and_journals_are_written_from_it
 /// number alone, reaching two different outcomes.
 ///
 /// Both runs delete the generic record for the block being abandoned. With the
-/// boundary pinned AT that height the record is mandatory and the switch must
-/// HALT; with it pinned ABOVE, the block is pre-journal history, the legacy
-/// per-subsystem diffs are the fallback, and the switch proceeds.
+/// boundary pinned AT that height the record is mandatory, and its absence is a
+/// missing required record. With it pinned ABOVE, the block is pre-journal
+/// history — and since #269 that is refused too, for a different reason: a
+/// switch executes the replacement against its fork parent, reconstructed from
+/// the abandoned blocks' generic journals, and the legacy per-subsystem diffs
+/// cover only four families, so the parent cannot be reconstructed exactly.
+/// Two refusals that name different causes are what show the pinned number is
+/// read. Either way the node stays on its branch and writes nothing.
 ///
 /// Nothing else differs — same genesis except that one field, same validator,
 /// same transactions, same fork.
 #[tokio::test]
-async fn the_pinned_height_decides_whether_a_reorg_halts_or_falls_back() {
+async fn the_pinned_height_decides_which_refusal_a_reorg_names() {
     for (pinned, must_halt) in [(1u64, true), (5u64, false)] {
         let mut settled = false;
         for attempt in 0..MAX_ATTEMPTS {
@@ -429,19 +434,29 @@ async fn the_pinned_height_decides_whether_a_reorg_halts_or_falls_back() {
                     "and writes nothing"
                 );
             } else {
-                result.expect(
+                let err = result.expect_err(
                     "with the boundary pinned above the branch, the block is pre-journal \
-                     history and the legacy diffs are the fallback",
+                     history, which cannot reconstruct the fork parent exactly",
                 );
-                assert_eq!(
-                    node_a.head_height(),
-                    1,
-                    "the switch adopted B's height-1 block"
+                let rendered = err.to_string();
+                assert!(
+                    rendered.contains("has no generic application journal"),
+                    "the refusal must name the unreconstructable parent: {rendered}"
+                );
+                assert!(
+                    !rendered.contains("no application journal for block"),
+                    "below the pin the record is not REQUIRED, so the refusal is not the \
+                     missing-record one: {rendered}"
                 );
                 assert_eq!(
                     node_a.consensus.get_block_by_height(1).map(|b| b.hash()),
-                    Some(block_b.hash()),
-                    "the adopted block must be B's, not A's"
+                    Some(block_a.hash()),
+                    "the node stays on A's block"
+                );
+                assert_eq!(
+                    node_a.balance(&alice.address()),
+                    alice_on_a,
+                    "and writes nothing"
                 );
             }
             break;

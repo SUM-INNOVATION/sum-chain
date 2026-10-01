@@ -29,5 +29,12 @@ hex = { workspace = true }
 # behind it (`sumchain-state`, `sumchain-consensus`).
 activation-fixtures = []
 
+# A per-thread override of the legacy root-compatibility window, for tests that
+# must see a state-root mismatch REFUSED at heights a test chain can reach (the
+# window covers every height up to 496,720). OFF in every production build, and
+# inert unless a test sets it on its own thread. Enabled through
+# dev-dependencies by `sumchain-consensus`.
+test-hooks = []
+
 [dev-dependencies]
 tempfile = "3.10"

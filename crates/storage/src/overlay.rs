@@ -135,6 +135,7 @@
 use std::collections::{btree_map, BTreeMap, HashMap};
 use std::sync::OnceLock;
 
+use crate::branch::BranchState;
 use crate::db::{Database, WriteBatch};
 use crate::{Result, StorageError};
 
@@ -227,6 +228,23 @@ fn try_copy(src: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// A pre-image as first read: pinned in the database's block cache, or borrowed
+/// from the branch layer. Either way its length is known before any copy of it
+/// is made, which is what lets `stage` refuse an unaffordable value first.
+enum Prior<'x> {
+    Pinned(rocksdb::DBPinnableSlice<'x>),
+    Layer(&'x [u8]),
+}
+
+impl Prior<'_> {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Prior::Pinned(p) => p.as_ref(),
+            Prior::Layer(b) => b,
+        }
+    }
+}
+
 /// What one [`ApplicationOverlay::stage`] call displaced, so that the
 /// transaction which made it can be undone without re-reading the database.
 ///
@@ -265,6 +283,16 @@ struct TxScope {
 /// Buffered writes over a [`Database`], with overlay-first reads.
 pub struct ApplicationOverlay<'a> {
     db: &'a Database,
+    /// The replacement-branch layer reads fall through to before the database,
+    /// when this overlay executes a block of a branch that forks below the
+    /// canonical head (#269). `None` for every canonical execution, which then
+    /// behaves exactly as it did before branch layers existed.
+    ///
+    /// Shared rather than borrowed so the contract runtime's storage backend,
+    /// which is a long-lived `'static` object, can read through the same layer
+    /// for the duration of the candidate. An overlay with a layer can never be
+    /// converted into a batch: see [`Self::into_batch`].
+    branch: Option<std::sync::Arc<BranchState>>,
     /// Per-CF buffered writes, ordered so iteration can merge against RocksDB's
     /// own ordering without an extra sort.
     writes: HashMap<String, BTreeMap<Vec<u8>, Op>>,
@@ -358,8 +386,25 @@ impl<'a> ApplicationOverlay<'a> {
     /// write sets — not invented here. Production construction must pass the
     /// consensus value; tests pass an explicit fixture.
     pub fn new(db: &'a Database, limit: u64) -> Self {
+        Self::with_branch(db, None, limit)
+    }
+
+    /// An overlay whose reads fall through to `branch` before the database:
+    /// the execution context for one block of a replacement branch. See
+    /// [`crate::branch`]. Such an overlay is speculative by construction — it
+    /// cannot become a batch.
+    pub fn on_branch(db: &'a Database, branch: std::sync::Arc<BranchState>, limit: u64) -> Self {
+        Self::with_branch(db, Some(branch), limit)
+    }
+
+    fn with_branch(
+        db: &'a Database,
+        branch: Option<std::sync::Arc<BranchState>>,
+        limit: u64,
+    ) -> Self {
         Self {
             db,
+            branch,
             writes: HashMap::new(),
             preimages: HashMap::new(),
             logical_bytes: 0,
@@ -410,15 +455,20 @@ impl<'a> ApplicationOverlay<'a> {
         // borrowed from RocksDB's block cache, so its length is known before
         // any copy of it exists. Reading it with `get` would allocate the whole
         // value first and only then ask whether it was affordable.
-        let pinned = if needs_preimage {
-            Some(self.db.get_pinned(cf, key)?)
+        let pinned: Option<Option<Prior<'_>>> = if needs_preimage {
+            Some(
+                match self.branch.as_deref().and_then(|b| b.get_override(cf, key)) {
+                    Some(layered) => layered.map(Prior::Layer),
+                    None => self.db.get_pinned(cf, key)?.map(Prior::Pinned),
+                },
+            )
         } else {
             None
         };
 
         let mut next = self.logical_bytes;
         if let Some(pin) = &pinned {
-            let prior_len = to_u64(pin.as_ref().map_or(0, |p| p.len()))?;
+            let prior_len = to_u64(pin.as_ref().map_or(0, |p| p.bytes().len()))?;
             next = add(next, add(key_len, prior_len)?)?;
         }
         match self.writes.get(cf).and_then(|m| m.get(key)) {
@@ -467,7 +517,7 @@ impl<'a> ApplicationOverlay<'a> {
         // pinned slice is copied here and dropped immediately after, so the
         // cache block is not held beyond the copy.
         let owned_preimage: Option<Option<Vec<u8>>> = match &pinned {
-            Some(Some(p)) => Some(Some(try_copy(p)?)),
+            Some(Some(p)) => Some(Some(try_copy(p.bytes())?)),
             Some(None) => Some(None),
             None => None,
         };
@@ -696,8 +746,35 @@ impl<'a> ApplicationOverlay<'a> {
         match self.writes.get(cf).and_then(|m| m.get(key)) {
             Some(Op::Put(v)) => Ok(Some(v.clone())),
             Some(Op::Delete) => Ok(None),
-            None => self.db.get(cf, key),
+            None => match &self.branch {
+                Some(b) => b.get(self.db, cf, key),
+                None => self.db.get(cf, key),
+            },
         }
+    }
+
+    /// The branch layer this overlay reads through, if it executes a block of a
+    /// replacement branch.
+    pub fn branch(&self) -> Option<&std::sync::Arc<BranchState>> {
+        self.branch.as_ref()
+    }
+
+    /// Every buffered write, net — the value each written key holds at the end
+    /// of the block (`None` deleted) — in column-family-name then key order.
+    pub(crate) fn net_writes(&self) -> Vec<crate::branch::LayerEntry<'_>> {
+        let mut cfs: Vec<&String> = self.writes.keys().collect();
+        cfs.sort();
+        let mut out = Vec::new();
+        for cf in cfs {
+            for (k, op) in &self.writes[cf] {
+                let v = match op {
+                    Op::Put(v) => Some(v.as_slice()),
+                    Op::Delete => None,
+                };
+                out.push((cf.as_str(), k.as_slice(), v));
+            }
+        }
+        out
     }
 
     /// Whether `key` is present, honouring buffered deletes.
@@ -787,7 +864,10 @@ impl<'a> ApplicationOverlay<'a> {
     }
 
     fn merged<'o>(&'o self, cf: &str, start: Option<&[u8]>) -> Result<MergedIter<'o>> {
-        let base = self.db.iter_checked_from(cf, start)?;
+        let base = match &self.branch {
+            Some(b) => b.iter_checked_from(self.db, cf, start)?,
+            None => self.db.iter_checked_from(cf, start)?,
+        };
         // The closure is NOT redundant, whatever clippy says: `empty_writes`
         // returns `&'static`, and passing the function item makes
         // `unwrap_or_else` unify the borrow with `'static`, forcing `'o:
@@ -825,6 +905,18 @@ impl<'a> ApplicationOverlay<'a> {
     /// overlay buffered has touched canonical state, so abandoning the overlay
     /// is a complete and side-effect-free rollback of the candidate branch.
     pub(crate) fn into_batch(self) -> Result<WriteBatch<'a>> {
+        // A branch overlay's writes are relative to a reconstructed parent the
+        // database does not hold, and its pre-images were read from that
+        // parent. Committing them directly would write one block of a branch
+        // onto the wrong state. The only way a replacement branch reaches the
+        // database is the single adoption batch (`crate::candidate::adoption`).
+        if self.branch.is_some() {
+            return Err(StorageError::InvalidData(
+                "a speculative branch overlay cannot be converted into a batch; a \
+                 replacement branch is committed only by its adoption batch"
+                    .to_string(),
+            ));
+        }
         let mut batch = self.db.batch();
         // Deterministic order: column families sorted by name, keys in order
         // within each. The resulting batch is then a pure function of the
@@ -990,6 +1082,49 @@ mod tests {
 
     fn collect(it: MergedIter<'_>) -> Vec<(Vec<u8>, Vec<u8>)> {
         it.map(|r| r.expect("no read error")).collect()
+    }
+
+    /// A branch overlay reads, scans and captures pre-images through its layer
+    /// — tombstones included — and can never become a batch.
+    #[test]
+    fn a_branch_overlay_reads_and_scans_through_its_layer_and_never_commits() {
+        let (db, _d) = db();
+        db.put(cf::STATE, b"a", b"db").unwrap();
+        db.put(cf::STATE, b"b", b"db").unwrap();
+        let mut layer = crate::branch::BranchState::new(1 << 20);
+        layer
+            .absorb_net_writes(vec![
+                (cf::STATE, &b"a"[..], None),
+                (cf::STATE, &b"c"[..], Some(&b"layer"[..])),
+            ])
+            .unwrap();
+        let mut ov = ApplicationOverlay::on_branch(&db, std::sync::Arc::new(layer), 1 << 20);
+        ov.put(cf::STATE, b"d", b"ov").unwrap();
+        ov.put(cf::STATE, b"c", b"ov2").unwrap();
+        assert_eq!(
+            ov.get(cf::STATE, b"a").unwrap(),
+            None,
+            "the layer's tombstone hides a"
+        );
+        assert_eq!(ov.get(cf::STATE, b"b").unwrap(), Some(b"db".to_vec()));
+        assert_eq!(
+            collect(ov.iter(cf::STATE).unwrap()),
+            vec![
+                (b"b".to_vec(), b"db".to_vec()),
+                (b"c".to_vec(), b"ov2".to_vec()),
+                (b"d".to_vec(), b"ov".to_vec()),
+            ]
+        );
+        assert_eq!(
+            ov.preimage(cf::STATE, b"c"),
+            Some(&Some(b"layer".to_vec())),
+            "the pre-image is the layer's value, not the database's"
+        );
+        assert!(
+            ov.into_batch().is_err(),
+            "a branch overlay never becomes a batch"
+        );
+        assert_eq!(db.get(cf::STATE, b"a").unwrap(), Some(b"db".to_vec()));
     }
 
     #[test]

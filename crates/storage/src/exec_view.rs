@@ -98,6 +98,10 @@ impl<'v, 'db> ExecutionView<'v, 'db> {
     ///
     /// For components that cache per-candidate state and must drop it when the
     /// candidate changes. See `ApplicationOverlay::id`.
+    pub fn branch(&self) -> Option<&std::sync::Arc<crate::branch::BranchState>> {
+        self.overlay.branch()
+    }
+
     pub fn candidate_id(&self) -> u64 {
         self.overlay.id()
     }

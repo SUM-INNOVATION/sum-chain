@@ -4450,6 +4450,7 @@ dependencies = [
  "hex",
  "parking_lot",
  "serde",
+ "sumchain-consensus",
  "sumchain-crypto",
  "sumchain-genesis",
  "sumchain-primitives",
@@ -4459,6 +4460,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "wat",
 ]
 
 [[package]]

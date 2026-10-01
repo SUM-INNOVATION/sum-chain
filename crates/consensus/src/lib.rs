@@ -45,6 +45,7 @@
 
 pub mod reorg;
 pub mod bft;
+pub mod branch_switch;
 pub mod engine;
 pub mod poa;
 
@@ -92,6 +93,13 @@ pub enum ConsensusError {
 
     #[error("Not implemented")]
     NotImplemented,
+
+    /// This node has stopped: a local condition — a resource budget, its own
+    /// undo records, or a failure to reconcile memory with a committed chain
+    /// switch — means it cannot continue with an answer it can stand behind.
+    /// Refused until restart, which reloads from the committed database.
+    #[error("node fail-stopped: {0}")]
+    LocalFailStop(String),
 }
 
 pub type Result<T> = std::result::Result<T, ConsensusError>;

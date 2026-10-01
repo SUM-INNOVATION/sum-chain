@@ -32,10 +32,11 @@ use tokio::sync::broadcast;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
+use crate::branch_switch::{adoption_batch, validate_replacement, BranchLimits, SwitchError};
 use crate::engine::{
     ConsensusEngine, ConsensusEvent, ConsensusQuery, ForkChoice, LongestChainForkChoice,
 };
-use crate::reorg::{execute_reorg, plan_reorg_within_undo_history, validate_branch};
+use crate::reorg::plan_reorg_within_undo_history;
 use crate::{ConsensusError, Result};
 
 /// Proof of Authority consensus engine
@@ -115,6 +116,20 @@ pub struct PoAEngine {
     /// `crates/consensus/tests/proposer_invalid_tx_liveness.rs`. Relaxed
     /// ordering: nothing branches on it.
     proposal_executions: std::sync::atomic::AtomicU64,
+    /// Serializes every block execution this engine performs — production
+    /// (including its screening pass) and import (including a chain switch's
+    /// speculative branch). The executor's contract runtime, beacon slot and
+    /// the in-memory head are shared, so two executions interleaving could read
+    /// each other's per-candidate state; and a chain switch must not race a
+    /// publish on the head it is replacing. It also bounds competing branch
+    /// views to one (#269).
+    exec_lock: parking_lot::Mutex<()>,
+    /// `Some(reason)` once this engine has fail-stopped. Every production and
+    /// import is then refused until restart, which reloads the committed
+    /// database. See [`ConsensusError::LocalFailStop`].
+    halted: RwLock<Option<String>>,
+    /// Local bounds on one chain switch (#269). Consensus-neutral.
+    branch_limits: RwLock<BranchLimits>,
 }
 
 /// Refuse a genesis protocol v1 cannot run: stake-weighted proposer selection,
@@ -183,7 +198,58 @@ impl PoAEngine {
             last_finalized_height: RwLock::new(0),
             last_finalized_hash: RwLock::new(Hash::ZERO),
             proposal_executions: std::sync::atomic::AtomicU64::new(0),
+            exec_lock: parking_lot::Mutex::new(()),
+            halted: RwLock::new(None),
+            branch_limits: RwLock::new(BranchLimits::PRODUCTION),
         })
+    }
+
+    /// Stop this engine: record why, log it, and return the error every later
+    /// production and import will also see. Restart reloads the committed
+    /// database, which is the only state this node then trusts.
+    fn fail_stop(&self, reason: impl Into<String>) -> ConsensusError {
+        let reason = reason.into();
+        tracing::error!(%reason, "consensus engine fail-stopped; restart to reload the committed chain");
+        let mut halted = self.halted.write();
+        if halted.is_none() {
+            *halted = Some(reason.clone());
+        }
+        ConsensusError::LocalFailStop(halted.clone().unwrap_or(reason))
+    }
+
+    fn check_not_halted(&self) -> Result<()> {
+        match self.halted.read().as_ref() {
+            Some(reason) => Err(ConsensusError::LocalFailStop(reason.clone())),
+            None => Ok(()),
+        }
+    }
+
+    /// Why this engine fail-stopped, if it has.
+    pub fn halted_reason(&self) -> Option<String> {
+        self.halted.read().clone()
+    }
+
+    /// Replace the local chain-switch bounds. Test-only: compiled solely under
+    /// the `failpoints` feature.
+    #[cfg(feature = "failpoints")]
+    pub fn set_branch_limits_for_tests(&self, limits: BranchLimits) {
+        *self.branch_limits.write() = limits;
+    }
+
+    /// Rebuild everything this engine holds in memory from what the database
+    /// commits to: the head, the accumulator, and the mempool revalidated
+    /// against the committed state. Used after a committed chain switch whose
+    /// memory reconciliation did not complete, so stale memory is never what
+    /// the node continues from.
+    fn reconstruct_memory_from_db(&self) -> Result<()> {
+        let latest = BlockStore::new(&self.db).get_latest()?.ok_or_else(|| {
+            ConsensusError::InvalidBlock("the committed database names no head".to_string())
+        })?;
+        self.state
+            .set_state_root(crate::reorg::accumulator_of(&latest));
+        *self.best_block.write() = Some(latest);
+        self.mempool.revalidate(&self.state, self.state.chain_id());
+        Ok(())
     }
 
     /// How many full candidate executions this node has spent PROPOSING.
@@ -698,6 +764,8 @@ impl PoAEngine {
     /// gate, for the same reason `MAX_BLOCK_FIT_ATTEMPTS` is not in the protocol
     /// digest.
     fn create_block(&self, transactions: Vec<SignedTransaction>) -> Result<Block> {
+        self.check_not_halted()?;
+        let _exec = self.exec_lock.lock();
         // ── one screening pass, BEFORE the fitting loop ─────────────────────
         //
         // The loop below learns about exactly ONE refusing transaction per
@@ -1372,6 +1440,10 @@ impl PoAEngine {
 
     /// Validate and import a block
     async fn do_import_block(&self, block: Block) -> Result<()> {
+        self.check_not_halted()?;
+        // Held for the whole import; this function never awaits, so the guard
+        // is never held across a suspension point.
+        let _exec = self.exec_lock.lock();
         let hash = block.hash();
         let height = block.height();
 
@@ -1456,30 +1528,17 @@ impl PoAEngine {
                 // A block that loses fork choice must not reach the canonical
                 // publisher: no state, no journals, no height index, no head.
                 //
-                // It is still executed, because validity is not yet decidable
-                // without executing — and that execution still writes canonical
-                // state directly through the 36 unmigrated sites. That is a
-                // KNOWN and UNFIXED hole: until the ratchet reaches zero, a side
-                // block dirties canonical state even though it publishes
-                // nothing. Recording it here rather than implying the publisher
-                // closes it.
-                let execution = self.executor.execute_block(
-                    &block,
-                    self.state.state_root(),
-                    &active_validators,
-                )?;
-                let (executed, _state_diff, _contract_diff) = execution.into_parts();
-                // Acceptance still runs, so an invalid side block is refused on
-                // the same terms as a canonical one.
-                let _ = executed.accept_imported(&block).map_err(|e| {
-                    ConsensusError::InvalidBlock(format!(
-                        "side block {hash} at height {height} rejected: {e}"
-                    ))
-                })?;
-
+                // Nor is it executed (#269). Its parent is not the canonical
+                // head, so executing it here would read the head's state — the
+                // wrong state — and its verdict would mean nothing. Its header,
+                // proposer, signature, transaction root and size limits were
+                // checked above by `validate_block`; its execution is decided
+                // only if its branch ever wins fork choice, and then against its
+                // own reconstructed parent (see `import_reorg`).
                 self.archive_noncanonical(&block)?;
                 debug!(
-                    "Block {} at height {} lost fork choice; archived without publishing",
+                    "Block {} at height {} lost fork choice; archived without executing \
+                     or publishing",
                     hash, height
                 );
             }
@@ -1579,38 +1638,29 @@ impl PoAEngine {
 
     /// Switch to a branch that wins fork choice but does not extend the head.
     ///
-    /// A reorg is ONE decision over a whole branch, and the one-block publisher
-    /// cannot express it: publishing the new head alone leaves the abandoned
-    /// branch's state applied beneath it.
+    /// The replacement branch is executed and validated IN FULL against its own
+    /// parent state before anything canonical changes, and adopted in ONE batch
+    /// (#269). In order:
     ///
-    /// The sequence this replaces did exactly that, and worse. It executed the
-    /// arriving block and then DROPPED the candidate — no acceptance, no
-    /// publication — so since execution moved behind the overlay the adopted
-    /// block's state was never committed at all; only its journal, block row,
-    /// transactions and receipts were. It then reverted the abandoned branch
-    /// oldest-first, which leaves the intermediate value for any key more than
-    /// one block touched, through an ancestor walk that did not terminate on a
-    /// missing parent. Its own comment — "new chain blocks are already applied
-    /// during import" — had stopped being true.
+    /// 1. Retain the arriving block (content-addressed rows only) so the
+    ///    ancestor walk can see it.
+    /// 2. [`plan_reorg_within_undo_history`] resolves the fork by hash and
+    ///    refuses a gap, a switch below finality, a walk past the engine's
+    ///    bound, or a depth this node holds no undo history for.
+    /// 3. [`validate_replacement`]: local bounds; every block's header, proposer
+    ///    and signature; the fork parent reconstructed exactly from validated
+    ///    journals; every block executed on its parent and accepted.
+    ///    Nothing is written. A branch that fails is refused with the database,
+    ///    the head, the accumulator and the mempool exactly as they were.
+    /// 4. [`adoption_batch`] and ONE commit: the unwind, the replacement state,
+    ///    every replacement block's publication and the head. The database holds
+    ///    the complete old chain or the complete new one, never a shorter chain.
+    /// 5. Only after the commit: accumulator, head, mempool, events. If that
+    ///    fails, memory is reloaded from the committed database and the engine
+    ///    fail-stops rather than continuing from stale memory.
     ///
-    /// What happens instead, in order:
-    ///
-    /// 1. Retain the arriving block, so the ancestor walk can see it.
-    /// 2. [`crate::reorg::plan_reorg`] resolves the fork BY HASH and refuses a gap, a switch
-    ///    below finality, or a walk past the allocation bound — before anything
-    ///    is written.
-    /// 3. [`execute_reorg`] unwinds the abandoned branch newest-first from its
-    ///    per-block journals — the REAL encoded application journal at and above
-    ///    this chain's activation boundary, decoded and validated on the way in,
-    ///    and the legacy per-subsystem diffs below it — checking each row against
-    ///    the value the journal says the block left, in ONE batch that also
-    ///    carries the journal deletions, the de-indexing and the head reset;
-    ///    restores the accumulator from the ancestor's header; and applies the
-    ///    adopted branch through the ordinary publication path, one atomic batch
-    ///    per block.
-    ///
-    /// Nothing outside this arm changes. A block that extends the head or loses
-    /// fork choice takes the same path it did before.
+    /// A local condition — a resource budget, or this node's own undo records —
+    /// is a fail-stop, never a rejection: the branch may be valid.
     fn import_reorg(
         &self,
         block: Block,
@@ -1620,53 +1670,26 @@ impl PoAEngine {
         let hash = block.hash();
         let height = block.height();
 
-        // The ancestor walk reads `BLOCKS`, so the arriving block has to be
-        // there before `plan_reorg` runs. `publish` writes the same row again
-        // when the branch is adopted.
-        //
-        // Through `archive_noncanonical`, NOT `BlockStore::put`. `put` also
-        // writes `BLOCK_HEIGHT[height] = hash`, which is keyed by height alone
-        // and carries no branch identity — so retaining the arriving block that
-        // way pointed the CANONICAL height index at a block that had not been
-        // adopted, and left it pointing there if the switch was then refused.
-        // The comment this replaces claimed the row "cannot shadow anything"
-        // because it is keyed by the block's own hash; that was true of the
-        // `BLOCKS` row and false of the height index written beside it.
-        //
-        // `archive_noncanonical` writes exactly the branch-safe,
-        // content-addressed rows — `BLOCKS` and `TRANSACTIONS` — and
-        // deliberately not the height index, which is what this needs. It also
-        // preflights both against any bytes already stored under those hashes,
-        // so a collision is refused before anything is written.
+        // Through `archive_noncanonical`, never `BlockStore::put`: only the
+        // content-addressed `BLOCKS` and `TRANSACTIONS` rows, never the height
+        // index, so a refused switch leaves the canonical index untouched.
         self.archive_noncanonical(&block)?;
 
-        let old_head = self
-            .best_block
-            .read()
-            .clone()
-            .ok_or_else(|| ConsensusError::InvalidBlock(
-                "classified as a reorg with no current best block;                  a switch needs something to switch away from".to_string(),
-            ))?;
-
+        let old_head = self.best_block.read().clone().ok_or_else(|| {
+            ConsensusError::InvalidBlock(
+                "classified as a reorg with no current best block; a switch needs something \
+                 to switch away from"
+                    .to_string(),
+            )
+        })?;
         let finalized = block_store.get_finalized_height()?.unwrap_or(0);
-
-        // The journal this node reverts from, resolved per block against its own
-        // activation boundary: the generic application journal at and above it,
-        // the four legacy per-subsystem journals below it, never both for one
-        // block. See `sumchain_state::reorg_undo::ActivatedJournal`.
-        //
-        // The boundary comes from this chain's OWN gate,
-        // `application_journal_enabled_from_height` — `None` observes it from
-        // the journal history this database holds, `Some(h)` pins it. Neither
-        // position disables anything: the write side is ungated, so a node that
-        // has published a block has journal history and a boundary.
-        let journals = ActivatedJournal::resolve(
+        // The journal boundary this database establishes, resolved through the
+        // same entry point the unwinding paths use.
+        let activation = ActivatedJournal::resolve(
             &self.db,
             ActivationSource::from_configured_height(
                 self.params.application_journal_enabled_from_height,
             ),
-            // Below the boundary these decide whether a compute-pool or beacon
-            // record must exist for a block (#253).
             SubsystemGates {
                 compute_pool: self.params.compute_pool_enabled_from_height,
                 beacon: self.params.beacon_enabled_from_height,
@@ -1676,98 +1699,180 @@ impl PoAEngine {
             ConsensusError::InvalidBlock(format!(
                 "cannot resolve the application-journal activation boundary: {e}"
             ))
-        })?;
-
-        // Planned against the undo history this node actually HOLDS, not only
-        // against the engine's walk limit. A node restored from a snapshot has
-        // canonical state and no journals, so its usable depth starts at zero and
-        // rebuilds one block per publish; `MAX_REORG_WALK` is what the engine
-        // will walk, never a claim about what this database can reverse.
+        })?
+        .activation();
         let plan = plan_reorg_within_undo_history(
             block_store,
             &old_head,
             &block,
             finalized,
             MAX_REORG_WALK,
-            &journals.activation(),
+            &activation,
         )?;
-        // Derived from the same `JournalActivation` the journal itself holds, so
-        // the policy and the journal cannot disagree about where the boundary
-        // is. A missing record at or above it HALTS the reorg; below it, absence
-        // is pre-journal history and is counted and logged.
-        let missing = journals.policy();
+        let limits = *self.branch_limits.read();
 
-        // Every block of the replacement branch, re-validated against its own
-        // parent with the round-robin proposer rule, before the unwind below
-        // commits anything.
-        validate_branch(&self.db, &self.executor, &plan, active_validators)?;
-
-        let outcome = execute_reorg(
+        // ── validate the whole branch, writing nothing ──────────────────────
+        let validated = match validate_replacement(
             &self.db,
-            &self.state,
             &self.executor,
             &plan,
+            &activation,
             active_validators,
-            &journals,
-            missing,
-        )?;
+            &limits,
+        ) {
+            Ok(v) => v,
+            Err(SwitchError::Rejected(r)) => return Err(ConsensusError::InvalidBlock(r)),
+            Err(SwitchError::Local(r)) => return Err(self.fail_stop(r)),
+        };
+        let (batch, report) = match adoption_batch(&self.db, &plan, &validated, &limits) {
+            Ok(x) => x,
+            Err(SwitchError::Rejected(r)) => return Err(ConsensusError::InvalidBlock(r)),
+            Err(SwitchError::Local(r)) => return Err(self.fail_stop(r)),
+        };
 
-        // Only after the switch is durable.
-        for abandoned in &plan.old_branch {
-            for tx in &abandoned.transactions {
-                let _ = self.mempool.add(tx.clone());
+        // ── the one commit ──────────────────────────────────────────────────
+        #[cfg(feature = "failpoints")]
+        {
+            use crate::branch_switch::failpoints::{hit, Failpoint};
+            if hit(Failpoint::BeforeCommit) {
+                return Err(ConsensusError::Storage(
+                    sumchain_storage::StorageError::InvalidData(
+                        "injected database failure before the adoption commit".to_string(),
+                    ),
+                ));
+            }
+            if hit(Failpoint::CommitFails) {
+                drop(batch);
+                return Err(ConsensusError::Storage(
+                    sumchain_storage::StorageError::InvalidData(
+                        "injected failure of the adoption commit".to_string(),
+                    ),
+                ));
+            }
+            if hit(Failpoint::CrashBeforeCommit) {
+                drop(batch);
+                return Err(self.fail_stop("injected crash immediately before the adoption commit"));
             }
         }
-        *self.best_block.write() = Some(block.clone());
-        let tx_hashes: Vec<Hash> = plan
-            .new_branch
-            .iter()
-            .flat_map(|b| b.transactions.iter().map(|tx| tx.hash()))
-            .collect();
-        self.mempool.remove_batch(&tx_hashes);
+        // A failed commit applies nothing, and nothing in memory has moved yet.
+        batch.commit()?;
 
+        // ── only after a durable commit ─────────────────────────────────────
+        #[cfg(feature = "failpoints")]
+        if crate::branch_switch::failpoints::hit(
+            crate::branch_switch::failpoints::Failpoint::CrashAfterCommit,
+        ) {
+            return Err(self.fail_stop("injected crash immediately after the adoption commit"));
+        }
+        self.state.set_state_root(validated.tip_accumulator());
+        *self.best_block.write() = Some(block.clone());
+
+        if let Err(e) = self
+            .reconcile_mempool_after_switch(&plan)
+            .and_then(|()| self.emit_switch_events(&plan, &old_head, &block))
+        {
+            // The database committed the new chain. Whatever memory holds now is
+            // not trusted: reload it from the database, then stop.
+            let reloaded = self.reconstruct_memory_from_db();
+            return Err(self.fail_stop(format!(
+                "a committed chain switch to {hash} could not be reconciled in memory ({e}); \
+                 memory {} from the committed database",
+                if reloaded.is_ok() {
+                    "was reloaded"
+                } else {
+                    "could NOT be reloaded"
+                }
+            )));
+        }
+
+        for (h, b, computed, header) in &report.legacy_adoptions {
+            warn!(
+                height = h,
+                block = %b,
+                computed_root = %computed,
+                published_root = %header,
+                cutoff = sumchain_storage::candidate::LEGACY_ROOT_COMPATIBILITY_HEIGHT,
+                "adopted a replacement block whose computed root does not match its header, \
+                 under the historical compatibility allowance; its state is NOT verified"
+            );
+        }
         warn!(
             depth = plan.depth(),
-            applied = outcome.applied,
-            verified = outcome.verified,
-            force_adopted = outcome.force_adopted,
+            adopted = plan.new_branch.len(),
+            abandoned = plan.old_branch.len(),
+            restored_bytes = validated.restored_bytes(),
+            adoption_bytes = report.logical_bytes,
             ancestor = %plan.ancestor_hash,
             old_head = %old_head.hash(),
             new_head = %hash,
             "chain reorganization"
         );
-        if outcome.unwound.tolerated_absences > 0 {
-            warn!(
-                count = outcome.unwound.tolerated_absences,
-                "the reorg unwound past {} block(s) with no undo journal; their effects on \
-                 state were NOT reverted and remain applied under a chain that no longer \
-                 contains them",
-                outcome.unwound.tolerated_absences
-            );
-        }
-        if outcome.force_adopted > 0 {
-            // Said separately, and loudly. A block adopted under the historical
-            // compatibility window had its header root published despite the
-            // replay computing a different one, so the state this node now holds
-            // is NOT the state the branch commits to. That is a different claim
-            // from "the reorg succeeded", and collapsing the two would hide it.
-            warn!(
-                count = outcome.force_adopted,
-                cutoff = sumchain_storage::candidate::LEGACY_ROOT_COMPATIBILITY_HEIGHT,
-                "the reorg published {} block(s) whose replayed root did not match their \
-                 header, under the historical compatibility allowance; this branch's state \
-                 is NOT verified",
-                outcome.force_adopted
-            );
-        }
+        info!("Reorged to block {} at height {}", hash, height);
+        Ok(())
+    }
 
+    /// Mempool reconciliation after a COMMITTED chain switch:
+    ///
+    /// * transactions from abandoned blocks are offered back, in chain order,
+    ///   unless the new branch includes them;
+    /// * every transaction the new branch includes is removed;
+    /// * then everything is revalidated against the new state, which drops an
+    ///   abandoned transaction the new branch made invalid (a spent nonce).
+    ///
+    /// Never called for a refused switch, which leaves the mempool untouched.
+    fn reconcile_mempool_after_switch(&self, plan: &crate::reorg::ReorgPlan) -> Result<()> {
+        #[cfg(feature = "failpoints")]
+        if crate::branch_switch::failpoints::hit(
+            crate::branch_switch::failpoints::Failpoint::MempoolReconcile,
+        ) {
+            return Err(ConsensusError::InvalidBlock(
+                "injected mempool reconciliation failure".to_string(),
+            ));
+        }
+        let adopted: std::collections::HashSet<Hash> = plan
+            .new_branch
+            .iter()
+            .flat_map(|b| b.transactions.iter().map(|tx| tx.hash()))
+            .collect();
+        for abandoned in &plan.old_branch {
+            for tx in &abandoned.transactions {
+                if !adopted.contains(&tx.hash()) {
+                    let _ = self.mempool.add(tx.clone());
+                }
+            }
+        }
+        let mut included: Vec<Hash> = adopted.into_iter().collect();
+        included.sort();
+        self.mempool.remove_batch(&included);
+        self.mempool.revalidate(&self.state, self.state.chain_id());
+        Ok(())
+    }
+
+    /// Canonical events for a committed switch. Best-effort delivery (a channel
+    /// with no subscriber is not a failure), but emitted only after the commit
+    /// and the memory update.
+    fn emit_switch_events(
+        &self,
+        plan: &crate::reorg::ReorgPlan,
+        old_head: &Block,
+        tip: &Block,
+    ) -> Result<()> {
+        #[cfg(feature = "failpoints")]
+        if crate::branch_switch::failpoints::hit(
+            crate::branch_switch::failpoints::Failpoint::EventEmission,
+        ) {
+            return Err(ConsensusError::InvalidBlock(
+                "injected event emission failure".to_string(),
+            ));
+        }
         let _ = self.event_tx.send(ConsensusEvent::Reorg {
             old_head: old_head.hash(),
-            new_head: hash,
+            new_head: tip.hash(),
             depth: plan.depth(),
         });
-        let _ = self.event_tx.send(ConsensusEvent::BlockImported(block));
-        info!("Reorged to block {} at height {}", hash, height);
+        let _ = self
+            .event_tx
+            .send(ConsensusEvent::BlockImported(tip.clone()));
         Ok(())
     }
 

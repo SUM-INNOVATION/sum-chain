@@ -356,6 +356,14 @@ pub fn recorded_head(block_store: &BlockStore) -> Result<Option<Block>> {
 
 /// Unwind the abandoned branch, then apply the adopted one.
 ///
+/// **Not the engine's chain-switch path (#269).** This unwinds the old branch
+/// in one commit and then applies the new one block by block, so a replacement
+/// block that fails after the unwind leaves the database on a shorter chain.
+/// `PoAEngine` switches through [`crate::branch_switch`] instead: the whole
+/// replacement is executed and validated against its reconstructed parent
+/// first, and adopted in one batch. This function, [`apply_branch`] and
+/// [`resume`] remain for the tests that pin their crash-recovery semantics.
+///
 /// # Order, and why it is not negotiable
 ///
 /// 1. **Unwind, newest-first, as one atomic batch**, including the head reset to

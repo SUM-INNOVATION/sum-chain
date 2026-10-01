@@ -63,6 +63,9 @@ pub struct ContractEvent {
 pub struct ContractExecutorState {
     /// WASM runtime executor
     wasm_executor: Arc<WasmExecutor>,
+    /// The runtime's persistent backend, kept so each candidate can point its
+    /// reads at the candidate's own branch layer (#269).
+    backend: Arc<RocksDbStorage>,
     /// Database reference
     db: Arc<Database>,
     /// Chain parameters
@@ -116,6 +119,14 @@ impl ContractExecutorState {
     /// the normal and the error path both.
     pub fn clear_block(&self) {
         self.wasm_executor.clear_block();
+        self.backend.set_branch(None);
+    }
+
+    /// Bind the runtime to the candidate `view` belongs to: its caches, and
+    /// the branch layer its backend reads fall through to.
+    fn bind_candidate(&self, view: &ExecutionView<'_, '_>) {
+        self.wasm_executor.begin_candidate(view.candidate_id());
+        self.backend.set_branch(view.branch().cloned());
     }
 
     /// Stage the runtime's queued contract-CF writes into the block's candidate.
@@ -170,11 +181,12 @@ impl ContractExecutorState {
         // Persistent contract storage backed by RocksDB: code, storage, and
         // metadata live in dedicated CFs and survive restarts.
         let backend = Arc::new(RocksDbStorage::new(db.clone()));
-        let storage = Arc::new(ContractStorage::new(backend));
+        let storage = Arc::new(ContractStorage::new(backend.clone()));
         let wasm_executor = Arc::new(WasmExecutor::new(storage));
 
         Self {
             wasm_executor,
+            backend,
             db,
             params,
         }
@@ -195,7 +207,7 @@ impl ContractExecutorState {
         // Bind the runtime to this candidate before anything else. It is a
         // long-lived object and its caches are per-candidate; this is what stops
         // an abandoned block's contract rows reaching the block after it.
-        self.wasm_executor.begin_candidate(view.candidate_id());
+        self.bind_candidate(view);
 
         info!(
             "Deploying contract from {} with {} bytes of code",
@@ -333,7 +345,7 @@ impl ContractExecutorState {
         block_timestamp: u64,
     ) -> Result<ContractCallResult> {
         // See `deploy`: bind before use.
-        self.wasm_executor.begin_candidate(view.candidate_id());
+        self.bind_candidate(view);
 
         debug!(
             "Calling contract {} method {} from {}",

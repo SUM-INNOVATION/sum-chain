@@ -610,12 +610,40 @@ const CF_CONTRACT_METADATA: &str = sumchain_storage::cf::CONTRACT_METADATA;
 /// Storage adapter for RocksDB backend
 pub struct RocksDbStorage {
     db: Arc<sumchain_storage::Database>,
+    /// The replacement-branch layer the current candidate executes on, if any
+    /// (#269). Reads consult it before the database, so a contract executing
+    /// in a block of a branch that forks below the canonical head sees the
+    /// fork parent's rows rather than the head's. Set per candidate from the
+    /// candidate's own view and cleared at the block boundary; `None` for every
+    /// canonical execution.
+    branch: std::sync::RwLock<Option<Arc<sumchain_storage::branch::BranchState>>>,
 }
 
 impl RocksDbStorage {
     /// Create a new RocksDB storage adapter
     pub fn new(db: Arc<sumchain_storage::Database>) -> Self {
-        Self { db }
+        Self {
+            db,
+            branch: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// Read through `branch` (or the database alone, for `None`) until changed.
+    pub fn set_branch(&self, branch: Option<Arc<sumchain_storage::branch::BranchState>>) {
+        *self.branch.write().unwrap_or_else(|p| p.into_inner()) = branch;
+    }
+
+    fn layered_get(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let branch = self
+            .branch
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        match branch {
+            Some(b) => b.get(&self.db, cf, key),
+            None => self.db.get(cf, key),
+        }
+        .map_err(|e| RuntimeError::Storage(e.to_string()))
     }
 
     fn make_key(&self, contract: &ContractAddress, key: &[u8]) -> Vec<u8> {
@@ -630,9 +658,7 @@ impl RocksDbStorage {
 impl ContractStorageBackend for RocksDbStorage {
     fn read(&self, contract: &ContractAddress, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let full_key = self.make_key(contract, key);
-        self.db
-            .get(CF_CONTRACT_STORAGE, &full_key)
-            .map_err(|e| RuntimeError::Storage(e.to_string()))
+        self.layered_get(CF_CONTRACT_STORAGE, &full_key)
     }
 
     fn write(&self, contract: &ContractAddress, key: &[u8], value: &[u8]) -> Result<()> {
@@ -654,9 +680,7 @@ impl ContractStorageBackend for RocksDbStorage {
     }
 
     fn get_code(&self, contract: &ContractAddress) -> Result<Option<Vec<u8>>> {
-        self.db
-            .get(CF_CONTRACT_CODE, contract.as_bytes())
-            .map_err(|e| RuntimeError::Storage(e.to_string()))
+        self.layered_get(CF_CONTRACT_CODE, contract.as_bytes())
     }
 
     fn store_code(&self, contract: &ContractAddress, code: &[u8]) -> Result<()> {
@@ -672,9 +696,7 @@ impl ContractStorageBackend for RocksDbStorage {
     }
 
     fn get_metadata(&self, contract: &ContractAddress) -> Result<Option<Vec<u8>>> {
-        self.db
-            .get(CF_CONTRACT_METADATA, contract.as_bytes())
-            .map_err(|e| RuntimeError::Storage(e.to_string()))
+        self.layered_get(CF_CONTRACT_METADATA, contract.as_bytes())
     }
 
     fn store_metadata(&self, contract: &ContractAddress, bytes: &[u8]) -> Result<()> {

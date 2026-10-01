@@ -20,9 +20,19 @@ tracing = { workspace = true }
 parking_lot = { workspace = true }
 async-trait = { workspace = true }
 
+[features]
+# Deterministic failure injection on the chain-switch path (#269), plus the
+# storage crate's per-thread legacy-window override the branch-switch tests use
+# to see a state-root mismatch refused at reachable heights. OFF in every
+# production build; enabled for this crate's own tests through the
+# dev-dependency on itself below.
+failpoints = ["sumchain-storage/test-hooks"]
+
 [dev-dependencies]
 # `JournalActivation::pinned` is feature-gated OFF in production builds, so it
 # exists only for test targets that need a boundary with no database behind it.
 sumchain-storage = { path = "../storage", features = ["activation-fixtures"] }
+sumchain-consensus = { path = ".", features = ["failpoints"] }
 tempfile = "3.10"
 hex = { workspace = true }
+wat = "1"

@@ -100,6 +100,135 @@ pub fn stage_deindex(batch: &mut WriteBatch<'_>, block: &Block) -> Result<()> {
     Ok(())
 }
 
+/// Stage every canonical record [`AcceptedCandidate::publish`] writes for one
+/// block — block by hash and by height, transactions, address indexes,
+/// receipts, the four legacy journals, the generic application journal, the
+/// format watermark and the head pointer — into `overlay`.
+///
+/// One function for both publication paths, so a single-block publish and a
+/// branch adoption cannot disagree about what a published block consists of.
+fn stage_publication(
+    overlay: &mut ApplicationOverlay<'_>,
+    block: &Block,
+    receipts: &[Receipt],
+    journals: &BlockJournals,
+    application_journal_bytes: &[u8],
+) -> Result<()> {
+    let block_hash = block.hash();
+    let height = block.height();
+
+    overlay.put(cf::BLOCKS, block_hash.as_bytes(), &block.to_bytes())?;
+    overlay.put(
+        cf::BLOCK_HEIGHT,
+        &height.to_be_bytes(),
+        block_hash.as_bytes(),
+    )?;
+
+    for (tx_index, tx) in block.transactions.iter().enumerate() {
+        let tx_index = u32::try_from(tx_index)
+            .map_err(|_| StorageError::InvalidData("transaction index exceeds u32".to_string()))?;
+        let tx_hash = tx.hash();
+        overlay.put(cf::TRANSACTIONS, tx_hash.as_bytes(), &tx.to_bytes())?;
+        overlay.put(
+            cf::TX_BY_SENDER,
+            &crate::schema::TxIndexStore::sender_key(&tx.sender(), height, tx_index),
+            tx_hash.as_bytes(),
+        )?;
+        // Conditional, matching `index_transaction`'s own `if let Some`.
+        if let Some(recipient) = tx.recipient() {
+            overlay.put(
+                cf::TX_BY_RECIPIENT,
+                &crate::schema::TxIndexStore::recipient_key(&recipient, height, tx_index),
+                tx_hash.as_bytes(),
+            )?;
+        }
+    }
+
+    // `Receipt::to_bytes`, the same call `ReceiptStore::put` makes.
+    // Re-deriving the encoding would duplicate the contract and let the two
+    // drift apart silently.
+    for receipt in receipts {
+        overlay.put(
+            cf::RECEIPTS,
+            receipt.tx_hash.as_bytes(),
+            &receipt.to_bytes(),
+        )?;
+    }
+
+    let jkey = crate::schema::journal_key(height, &block_hash);
+    for (cf_name, record) in [
+        (cf::STATE_DIFFS, &journals.account),
+        (cf::CONTRACT_STATE_DIFFS, &journals.contract),
+    ] {
+        if let JournalRecord::Recorded(bytes) = record {
+            overlay.put(cf_name, &jkey, bytes)?;
+        }
+    }
+    // The compute-pool and beacon records are sealed with the identity of
+    // the block they undo (#253), here because this is the first point at
+    // which the block hash is final. Readers open them against the block
+    // they were asked to revert and refuse any other.
+    for (cf_name, family, record) in [
+        (
+            cf::COMPUTE_POOL_STATE_DIFFS,
+            crate::subsystem_journal::Family::ComputePool,
+            &journals.compute_pool,
+        ),
+        (
+            cf::BEACON_STATE_DIFFS,
+            crate::subsystem_journal::Family::Beacon,
+            &journals.beacon,
+        ),
+    ] {
+        if let JournalRecord::Recorded(payload) = record {
+            let sealed = crate::subsystem_journal::seal(family, height, &block_hash, payload)
+                .map_err(|e| StorageError::InvalidData(e.to_string()))?;
+            overlay.put(cf_name, &jkey, &sealed)?;
+        }
+    }
+
+    // The generic journal is staged like everything else, so its bytes are
+    // charged against the SAME ceiling as execution's writes and the block's
+    // derived records. A block cannot buy unbounded undo data for free: if
+    // the journal does not fit, `stage` refuses here, `publish` returns the
+    // error, and `into_batch` below is never reached — so nothing canonical
+    // moves.
+    //
+    // Unconditional, including for a block that wrote nothing. An empty
+    // journal is the positive statement "this block touched no application
+    // row"; a MISSING row cannot be told apart from a block published by a
+    // binary that wrote no journal at all.
+    overlay.put(cf::APPLICATION_JOURNAL, &jkey, application_journal_bytes)?;
+
+    // The record format watermark, stamped in the SAME batch as the block.
+    //
+    // The scan over the journal family is exact only while the records are
+    // there, and pruning removes them. This row does not get pruned, so a
+    // node whose newer records have aged out still refuses a downgrade to a
+    // binary that cannot read the format it published under. Writing it on
+    // every publish rather than once keeps it exactly as durable as the
+    // chain — there is no window in which a block exists under a format the
+    // watermark does not cover.
+    overlay.put(
+        cf::META,
+        crate::journal::FORMAT_HIGH_WATER_META_KEY,
+        &crate::journal::format_high_water_stamp(),
+    )?;
+
+    overlay.put(
+        cf::META,
+        crate::schema::meta_keys::LATEST_BLOCK_HASH,
+        block_hash.as_bytes(),
+    )?;
+    overlay.put(
+        cf::META,
+        crate::schema::meta_keys::LATEST_BLOCK_HEIGHT,
+        &height.to_be_bytes(),
+    )?;
+
+    Ok(())
+}
+
 /// A block being executed against buffered state. Nothing here has touched the
 /// database.
 pub struct CandidateExecution<'db> {
@@ -116,6 +245,22 @@ impl<'db> CandidateExecution<'db> {
     pub fn new(db: &'db Database, limit: u64) -> Self {
         Self {
             overlay: ApplicationOverlay::new(db, limit),
+        }
+    }
+
+    /// Begin executing one block of a REPLACEMENT branch: reads fall through to
+    /// `branch` — the reconstructed fork parent plus the branch's earlier
+    /// blocks — before the database. Same `limit` as [`Self::new`]; the ceiling
+    /// is a consensus parameter and does not change because the block is on a
+    /// branch. Such a candidate can be accepted but never published on its own:
+    /// see [`AcceptedCandidate::into_speculative`] and [`build_adoption_batch`].
+    pub fn on_branch(
+        db: &'db Database,
+        branch: std::sync::Arc<crate::branch::BranchState>,
+        limit: u64,
+    ) -> Self {
+        Self {
+            overlay: ApplicationOverlay::on_branch(db, branch, limit),
         }
     }
 
@@ -322,7 +467,7 @@ impl<'db> ExecutedCandidate<'db> {
         if computed == header {
             return Ok(self.into_accepted(block, computed, Acceptance::ExactRoot));
         }
-        if height <= LEGACY_ROOT_COMPATIBILITY_HEIGHT {
+        if height <= legacy_cutoff() {
             // Adopt the header's root so the accumulator stays aligned for the
             // next block, exactly as the existing PoA path does. NOT a
             // verification.
@@ -460,6 +605,30 @@ impl ExecutionSubject {
 /// records. Until that lands, removing or widening it here would be a consensus
 /// change.
 pub const LEGACY_ROOT_COMPATIBILITY_HEIGHT: BlockHeight = 496_720;
+
+#[cfg(feature = "test-hooks")]
+thread_local! {
+    static LEGACY_CUTOFF_OVERRIDE: std::cell::Cell<Option<BlockHeight>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Set (or clear) this thread's override of the legacy compatibility window.
+/// Test-only: compiled solely under the `test-hooks` feature, which no
+/// production build enables.
+#[cfg(feature = "test-hooks")]
+pub fn set_legacy_cutoff_for_tests(cutoff: Option<BlockHeight>) {
+    LEGACY_CUTOFF_OVERRIDE.with(|c| c.set(cutoff));
+}
+
+/// The legacy window's upper height: [`LEGACY_ROOT_COMPATIBILITY_HEIGHT`] in
+/// every production build.
+fn legacy_cutoff() -> BlockHeight {
+    #[cfg(feature = "test-hooks")]
+    if let Some(h) = LEGACY_CUTOFF_OVERRIDE.with(|c| c.get()) {
+        return h;
+    }
+    LEGACY_ROOT_COMPATIBILITY_HEIGHT
+}
 
 /// Why a candidate was accepted. Distinct variants because they are not the same
 /// claim, and collapsing them would let a force-adopted mismatch be reported as
@@ -601,118 +770,12 @@ impl<'db, 'a> AcceptedCandidate<'db, 'a> {
         )?;
         let application_journal_bytes = application_journal.encode()?;
 
-        // ── stage every canonical record through the overlay ────────────────
-        self.overlay
-            .put(cf::BLOCKS, block_hash.as_bytes(), &block.to_bytes())?;
-        self.overlay.put(
-            cf::BLOCK_HEIGHT,
-            &height.to_be_bytes(),
-            block_hash.as_bytes(),
-        )?;
-
-        for (tx_index, tx) in block.transactions.iter().enumerate() {
-            let tx_index = u32::try_from(tx_index).map_err(|_| {
-                StorageError::InvalidData("transaction index exceeds u32".to_string())
-            })?;
-            let tx_hash = tx.hash();
-            self.overlay
-                .put(cf::TRANSACTIONS, tx_hash.as_bytes(), &tx.to_bytes())?;
-            self.overlay.put(
-                cf::TX_BY_SENDER,
-                &crate::schema::TxIndexStore::sender_key(&tx.sender(), height, tx_index),
-                tx_hash.as_bytes(),
-            )?;
-            // Conditional, matching `index_transaction`'s own `if let Some`.
-            if let Some(recipient) = tx.recipient() {
-                self.overlay.put(
-                    cf::TX_BY_RECIPIENT,
-                    &crate::schema::TxIndexStore::recipient_key(&recipient, height, tx_index),
-                    tx_hash.as_bytes(),
-                )?;
-            }
-        }
-
-        // `Receipt::to_bytes`, the same call `ReceiptStore::put` makes.
-        // Re-deriving the encoding would duplicate the contract and let the two
-        // drift apart silently.
-        for receipt in &self.receipts {
-            self.overlay.put(
-                cf::RECEIPTS,
-                receipt.tx_hash.as_bytes(),
-                &receipt.to_bytes(),
-            )?;
-        }
-
-        let jkey = crate::schema::journal_key(height, &block_hash);
-        for (cf_name, record) in [
-            (cf::STATE_DIFFS, &self.journals.account),
-            (cf::CONTRACT_STATE_DIFFS, &self.journals.contract),
-        ] {
-            if let JournalRecord::Recorded(bytes) = record {
-                self.overlay.put(cf_name, &jkey, bytes)?;
-            }
-        }
-        // The compute-pool and beacon records are sealed with the identity of
-        // the block they undo (#253), here because this is the first point at
-        // which the block hash is final. Readers open them against the block
-        // they were asked to revert and refuse any other.
-        for (cf_name, family, record) in [
-            (
-                cf::COMPUTE_POOL_STATE_DIFFS,
-                crate::subsystem_journal::Family::ComputePool,
-                &self.journals.compute_pool,
-            ),
-            (
-                cf::BEACON_STATE_DIFFS,
-                crate::subsystem_journal::Family::Beacon,
-                &self.journals.beacon,
-            ),
-        ] {
-            if let JournalRecord::Recorded(payload) = record {
-                let sealed = crate::subsystem_journal::seal(family, height, &block_hash, payload)
-                    .map_err(|e| StorageError::InvalidData(e.to_string()))?;
-                self.overlay.put(cf_name, &jkey, &sealed)?;
-            }
-        }
-
-        // The generic journal is staged like everything else, so its bytes are
-        // charged against the SAME ceiling as execution's writes and the block's
-        // derived records. A block cannot buy unbounded undo data for free: if
-        // the journal does not fit, `stage` refuses here, `publish` returns the
-        // error, and `into_batch` below is never reached — so nothing canonical
-        // moves.
-        //
-        // Unconditional, including for a block that wrote nothing. An empty
-        // journal is the positive statement "this block touched no application
-        // row"; a MISSING row cannot be told apart from a block published by a
-        // binary that wrote no journal at all.
-        self.overlay
-            .put(cf::APPLICATION_JOURNAL, &jkey, &application_journal_bytes)?;
-
-        // The record format watermark, stamped in the SAME batch as the block.
-        //
-        // The scan over the journal family is exact only while the records are
-        // there, and pruning removes them. This row does not get pruned, so a
-        // node whose newer records have aged out still refuses a downgrade to a
-        // binary that cannot read the format it published under. Writing it on
-        // every publish rather than once keeps it exactly as durable as the
-        // chain — there is no window in which a block exists under a format the
-        // watermark does not cover.
-        self.overlay.put(
-            cf::META,
-            crate::journal::FORMAT_HIGH_WATER_META_KEY,
-            &crate::journal::format_high_water_stamp(),
-        )?;
-
-        self.overlay.put(
-            cf::META,
-            crate::schema::meta_keys::LATEST_BLOCK_HASH,
-            block_hash.as_bytes(),
-        )?;
-        self.overlay.put(
-            cf::META,
-            crate::schema::meta_keys::LATEST_BLOCK_HEIGHT,
-            &height.to_be_bytes(),
+        stage_publication(
+            &mut self.overlay,
+            block,
+            &self.receipts,
+            &self.journals,
+            &application_journal_bytes,
         )?;
 
         self.overlay.into_batch()?.commit()?;
@@ -739,4 +802,204 @@ impl<'db, 'a> AcceptedCandidate<'db, 'a> {
         }
         Ok(())
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// REPLACEMENT BRANCHES (#269)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// One accepted block of a replacement branch, with everything its publication
+/// will need, owned — so the overlay it executed in can be dropped and its net
+/// writes absorbed into the branch layer before the next block runs.
+///
+/// Holds no database handle and cannot publish anything. The only consumer is
+/// [`build_adoption_batch`], which runs once the whole branch is accepted.
+#[derive(Debug)]
+pub struct SpeculativeBlock {
+    block: Block,
+    accumulator: Hash,
+    acceptance: Acceptance,
+    receipts: Vec<Receipt>,
+    journals: BlockJournals,
+    /// This block's generic undo record. Its pre-images were read from the
+    /// branch layer — the state this block actually executed on — so it undoes
+    /// this block on THIS branch, which is the only chain it will ever be on.
+    application_journal: crate::journal::ApplicationJournal,
+    /// The value each key this block wrote holds after it (`None` deleted).
+    net_writes: Vec<(String, Vec<u8>, Option<Vec<u8>>)>,
+}
+
+impl SpeculativeBlock {
+    pub fn block(&self) -> &Block {
+        &self.block
+    }
+
+    /// The accumulator the next block of the branch chains from.
+    pub fn accumulator(&self) -> Hash {
+        self.accumulator
+    }
+
+    pub fn acceptance(&self) -> &Acceptance {
+        &self.acceptance
+    }
+
+    pub fn receipts(&self) -> &[Receipt] {
+        &self.receipts
+    }
+
+    /// Key-plus-value bytes of the net write set.
+    pub fn write_bytes(&self) -> u64 {
+        self.net_writes
+            .iter()
+            .map(|(_, k, v)| k.len() as u64 + v.as_ref().map_or(0, |v| v.len() as u64))
+            .sum()
+    }
+
+    /// The net write set, for absorbing into the branch layer.
+    pub fn net_writes(&self) -> impl Iterator<Item = (&str, &[u8], Option<&[u8]>)> {
+        self.net_writes
+            .iter()
+            .map(|(c, k, v)| (c.as_str(), k.as_slice(), v.as_deref()))
+    }
+}
+
+impl AcceptedCandidate<'_, '_> {
+    /// Keep this accepted block as one step of a replacement branch instead of
+    /// publishing it.
+    ///
+    /// Derives the generic journal exactly as [`Self::publish`] does — from the
+    /// overlay's pre-images, before anything else is staged — and takes the net
+    /// write set, so the overlay (and the branch layer it holds) can be released.
+    pub fn into_speculative(self) -> Result<SpeculativeBlock> {
+        let application_journal = crate::journal::ApplicationJournal::bind(
+            self.block.height(),
+            self.block.hash(),
+            self.overlay.journal_entries()?,
+        )?;
+        let net_writes = self
+            .overlay
+            .net_writes()
+            .into_iter()
+            .map(|(c, k, v)| (c.to_string(), k.to_vec(), v.map(<[u8]>::to_vec)))
+            .collect();
+        Ok(SpeculativeBlock {
+            block: self.block.clone(),
+            accumulator: self.accumulator,
+            acceptance: self.acceptance,
+            receipts: self.receipts,
+            journals: self.journals,
+            application_journal,
+            net_writes,
+        })
+    }
+}
+
+/// [`stage_deindex`], into an overlay rather than a batch, so it composes with
+/// the adopted branch's publication in one buffered write set.
+fn stage_deindex_into(overlay: &mut ApplicationOverlay<'_>, block: &Block) -> Result<()> {
+    let height = block.height();
+    overlay.delete(cf::BLOCK_HEIGHT, &height.to_be_bytes())?;
+    for (tx_index, tx) in block.transactions.iter().enumerate() {
+        let tx_index = u32::try_from(tx_index)
+            .map_err(|_| StorageError::InvalidData("transaction index exceeds u32".to_string()))?;
+        overlay.delete(cf::RECEIPTS, tx.hash().as_bytes())?;
+        overlay.delete(
+            cf::TX_BY_SENDER,
+            &crate::schema::TxIndexStore::sender_key(&tx.sender(), height, tx_index),
+        )?;
+        if let Some(recipient) = tx.recipient() {
+            overlay.delete(
+                cf::TX_BY_RECIPIENT,
+                &crate::schema::TxIndexStore::recipient_key(&recipient, height, tx_index),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// What a branch adoption committed, for reporting after the commit.
+#[derive(Debug, Clone, Default)]
+pub struct AdoptionReport {
+    /// Logical bytes the adoption write set charged.
+    pub logical_bytes: u64,
+    /// Rows the batch writes or deletes.
+    pub rows: usize,
+    /// Adopted blocks force-adopted under the legacy compatibility window, with
+    /// both roots, to be reported once the commit is durable.
+    pub legacy_adoptions: Vec<(BlockHeight, Hash, Hash, Hash)>,
+}
+
+/// Build the ONE batch that switches the canonical chain from an abandoned
+/// suffix to a fully validated replacement branch.
+///
+/// Everything the switch changes is in it, so the database holds either the
+/// complete old chain or the complete new one and never anything between:
+///
+/// * every application row the abandoned suffix or the replacement touched, set
+///   to its value at the replacement's tip — read from `branch`, which holds the
+///   reconstructed fork parent with every replacement block absorbed on top;
+/// * the abandoned blocks' height-index, receipt and address-index rows removed,
+///   and their journal rows (`abandoned_journal_rows`) deleted;
+/// * every replacement block published exactly as [`AcceptedCandidate::publish`]
+///   would publish it, in order, ending with the head pointer at the tip.
+///
+/// Staged through an overlay over the committed database, so later stages win
+/// over earlier ones for the same key (a replacement block's height row over the
+/// abandoned block's deletion) and every byte is charged against `limit`. The
+/// limit is a LOCAL budget: exceeding it is
+/// [`StorageError::OverlayLimitExceeded`] from this function, which a caller
+/// must treat as a local fail-stop, not as a verdict on the branch.
+///
+/// Nothing is written until the caller commits the returned batch.
+pub fn build_adoption_batch<'db>(
+    db: &'db Database,
+    abandoned: &[Block],
+    abandoned_journal_rows: &[(String, Vec<u8>)],
+    branch: &crate::branch::BranchState,
+    adopted: &[SpeculativeBlock],
+    limit: u64,
+) -> Result<(WriteBatch<'db>, AdoptionReport)> {
+    if adopted.is_empty() {
+        return Err(StorageError::InvalidData(
+            "an adoption needs at least one replacement block".to_string(),
+        ));
+    }
+    let mut overlay = ApplicationOverlay::new(db, limit);
+
+    for (cf_name, key, value) in branch.entries() {
+        match value {
+            Some(v) => overlay.put(cf_name, key, v)?,
+            None => overlay.delete(cf_name, key)?,
+        }
+    }
+    for block in abandoned {
+        stage_deindex_into(&mut overlay, block)?;
+    }
+    for (cf_name, key) in abandoned_journal_rows {
+        overlay.delete(cf_name, key)?;
+    }
+
+    let mut report = AdoptionReport::default();
+    for spec in adopted {
+        let bytes = spec.application_journal.encode()?;
+        stage_publication(
+            &mut overlay,
+            &spec.block,
+            &spec.receipts,
+            &spec.journals,
+            &bytes,
+        )?;
+        if let Acceptance::LegacyCompatibility { computed, header } = &spec.acceptance {
+            report.legacy_adoptions.push((
+                spec.block.height(),
+                spec.block.hash(),
+                *computed,
+                *header,
+            ));
+        }
+    }
+
+    report.logical_bytes = overlay.logical_bytes();
+    report.rows = overlay.len();
+    Ok((overlay.into_batch()?, report))
 }
