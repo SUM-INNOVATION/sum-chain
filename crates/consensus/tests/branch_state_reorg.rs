@@ -1284,3 +1284,447 @@ async fn a_bad_signature_is_refused() {
     }
     assert_refused(&x, &forged, "signature").await;
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Execution-time scan isolation and historical-view equivalence (staking).
+//
+// `WithdrawUnbonded` is a real transaction path whose execution PREFIX-SCANS
+// `UNBONDING_DELEGATIONS` by delegator and deletes every completed entry it
+// finds (`StakingExecutor::v_get_unbondings_by_delegator`). `Undelegate`
+// inserts entries keyed `delegator ‖ completion height ‖ validator`, so two in
+// one block for one validator OVERWRITE the same key. Unbonding period 0: every
+// entry is complete from the block that made it.
+// ═════════════════════════════════════════════════════════════════════════════
+
+use sumchain_primitives::staking::{
+    CreateValidatorData, DelegateData, StakingOperation, StakingParams, StakingTxData,
+    UndelegateData, WithdrawUnbondedData,
+};
+
+fn staking_tx(
+    from: &KeyPair,
+    nonce: u64,
+    operation: StakingOperation,
+    data: Vec<u8>,
+) -> SignedTransaction {
+    let tx = TransactionV2::staking(
+        CHAIN_ID,
+        from.address(),
+        1_000,
+        nonce,
+        StakingTxData { operation, data },
+    );
+    let sig = sign(tx.signing_hash().as_bytes(), from.private_key());
+    SignedTransaction::new_v2(tx, *sig.as_bytes(), pk(from))
+}
+
+/// The staking executor's key for an address-registered validator.
+fn staking_validator_key(k: &KeyPair) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[..20].copy_from_slice(k.address().as_bytes());
+    out
+}
+
+fn create_validator(v: &KeyPair, nonce: u64) -> SignedTransaction {
+    let data = bincode::serialize(&CreateValidatorData {
+        stake: 10_000,
+        commission_bps: 0,
+        metadata: vec![],
+    })
+    .unwrap();
+    staking_tx(v, nonce, StakingOperation::CreateValidator, data)
+}
+
+fn delegate(d: &KeyPair, nonce: u64, v: &KeyPair, amount: u128) -> SignedTransaction {
+    let data = bincode::serialize(&DelegateData {
+        validator_pubkey: staking_validator_key(v),
+        amount,
+    })
+    .unwrap();
+    staking_tx(d, nonce, StakingOperation::Delegate, data)
+}
+
+fn undelegate(d: &KeyPair, nonce: u64, v: &KeyPair, amount: u128) -> SignedTransaction {
+    let data = bincode::serialize(&UndelegateData {
+        validator_pubkey: staking_validator_key(v),
+        amount,
+    })
+    .unwrap();
+    staking_tx(d, nonce, StakingOperation::Undelegate, data)
+}
+
+fn withdraw(d: &KeyPair, nonce: u64) -> SignedTransaction {
+    let data = bincode::serialize(&WithdrawUnbondedData {
+        validator_pubkey: None,
+    })
+    .unwrap();
+    staking_tx(d, nonce, StakingOperation::WithdrawUnbonded, data)
+}
+
+struct StakingWorld {
+    g: Genesis,
+    prefix: Vec<Block>,
+    canonical: Vec<Block>,
+    branch: Vec<Block>,
+    d: KeyPair,
+    d2: KeyPair,
+}
+
+/// Fork parent F = height 4:
+///
+/// * prefix: V registers; D and D2 delegate; D undelegates 10 (u_a, h3) and 20
+///   (u_b, h4); D2 undelegates 5 (a neighbouring delegator's row, at h3).
+/// * canonical suffix (abandoned): D withdraws (DELETES u_a, u_b), then
+///   undelegates 30 (u_c, h6: a canonical-only row).
+/// * replacement: D undelegates 40 (u_d, h5); undelegates 50 and 60 in one block
+///   (u_e, h6: one key OVERWRITTEN within the block); WITHDRAWS — which must see
+///   exactly u_a, u_b (restored), u_d, u_e (speculative) and not u_c; undelegates
+///   70 (u_f, h8); WITHDRAWS again — which must see only u_f, the earlier
+///   speculative deletions hidden.
+fn staking_world() -> StakingWorld {
+    let keys = vec![key(1), key(2)];
+    let v = key(0x71);
+    let d = key(0x72);
+    let d2 = key(0x73);
+    let params = ChainParams {
+        application_journal_enabled_from_height: Some(1),
+        finality_depth: 1_000_000,
+        staking: Some(StakingParams {
+            min_validator_stake: 1_000,
+            unbonding_period: 0,
+            ..StakingParams::default()
+        }),
+        ..ChainParams::with_contracts_enabled()
+    };
+    let mut alloc = HashMap::new();
+    for k in keys.iter().chain([&v, &d, &d2]) {
+        alloc.insert(k.address().to_base58(), 1_000_000_000u128);
+    }
+    let g = Genesis::new(
+        CHAIN_ID,
+        0,
+        keys.iter().map(|k| k.public_key().to_base58()).collect(),
+        alloc,
+        params,
+    );
+    let mut a = Builder::new(&g, &keys, 0);
+    let mut b = Builder::new(&g, &keys, 1);
+    let prefix = vec![
+        a.produce(vec![create_validator(&v, 0)]),
+        a.produce(vec![delegate(&d, 0, &v, 1_000), delegate(&d2, 0, &v, 500)]),
+        a.produce(vec![undelegate(&d, 1, &v, 10), undelegate(&d2, 1, &v, 5)]),
+        a.produce(vec![undelegate(&d, 2, &v, 20)]),
+    ];
+    for blk in &prefix {
+        b.follow(blk);
+    }
+    let canonical = vec![
+        a.produce(vec![withdraw(&d, 3)]),
+        a.produce(vec![undelegate(&d, 4, &v, 30)]),
+    ];
+    let branch = vec![
+        b.produce(vec![undelegate(&d, 3, &v, 40)]),
+        b.produce(vec![undelegate(&d, 4, &v, 50), undelegate(&d, 5, &v, 60)]),
+        b.produce(vec![withdraw(&d, 6)]),
+        b.produce(vec![undelegate(&d, 7, &v, 70)]),
+        b.produce(vec![withdraw(&d, 8)]),
+    ];
+    StakingWorld {
+        g,
+        prefix,
+        canonical,
+        branch,
+        d,
+        d2,
+    }
+}
+
+fn unbonding_keys(db: &Database) -> BTreeSet<Vec<u8>> {
+    db.iter_checked_from(cf::UNBONDING_DELEGATIONS, None)
+        .unwrap()
+        .map(|e| e.unwrap().0.into_vec())
+        .collect()
+}
+
+fn unbonding_key(delegator: &KeyPair, height: u64, validator: &KeyPair) -> Vec<u8> {
+    let mut k = Vec::with_capacity(72);
+    let mut d = [0u8; 32];
+    d[..20].copy_from_slice(delegator.address().as_bytes());
+    k.extend_from_slice(&d);
+    k.extend_from_slice(&height.to_be_bytes());
+    k.extend_from_slice(&staking_validator_key(validator));
+    k
+}
+
+#[tokio::test]
+async fn an_execution_time_scan_sees_exactly_the_fork_parent_plus_earlier_replacement_blocks() {
+    reset_hooks();
+    let w = staking_world();
+    let v = key(0x71);
+    let x = Node::new(&w.g);
+    for blk in w.prefix.iter().chain(&w.canonical) {
+        x.import(blk).await.unwrap();
+    }
+    // The canonical head: u_a, u_b withdrawn; u_c present; D2's row present.
+    let at_head = unbonding_keys(&x.db);
+    assert!(
+        at_head.contains(&unbonding_key(&w.d, 6, &v)),
+        "u_c exists on the canonical head"
+    );
+    assert!(
+        !at_head.contains(&unbonding_key(&w.d, 3, &v)),
+        "u_a was withdrawn on the canonical head"
+    );
+
+    for b in &w.branch[..w.branch.len() - 1] {
+        archive(&x.db, b);
+    }
+    x.import(w.branch.last().unwrap())
+        .await
+        .expect("the replacement is adopted");
+
+    // A node that followed the winner from genesis.
+    let winner = Node::new(&w.g);
+    for blk in w.prefix.iter().chain(&w.branch) {
+        winner.import(blk).await.unwrap();
+    }
+    assert_same_database(&x.db, &winner.db, &w.canonical, "staking fork");
+    // Both withdrawals succeeded, which they do only if the first scan found
+    // the restored and speculative rows and the second found u_f.
+    let receipts = sumchain_storage::ReceiptStore::new(&winner.db);
+    for idx in [2usize, 4] {
+        let tx = &w.branch[idx].transactions[0];
+        let r = receipts.get(&tx.hash()).unwrap().unwrap();
+        assert!(
+            r.is_success(),
+            "replacement withdrawal {idx} must succeed: {:?}",
+            r.status
+        );
+    }
+    // And they deleted exactly what they should: every D entry is gone, u_c
+    // never reappears, and D2's neighbouring row is untouched.
+    assert_eq!(
+        unbonding_keys(&x.db),
+        BTreeSet::from([unbonding_key(&w.d2, 3, &v)]),
+        "only the neighbouring delegator's row remains"
+    );
+}
+
+/// The consensus-readable state families: everything a block's execution can
+/// read. The rest are block, index, receipt and journal records written at
+/// publication, which execution never reads.
+fn state_families() -> Vec<&'static str> {
+    let publication = [
+        cf::BLOCKS,
+        cf::BLOCK_HEIGHT,
+        cf::TRANSACTIONS,
+        cf::TX_BY_SENDER,
+        cf::TX_BY_RECIPIENT,
+        cf::RECEIPTS,
+        cf::STATE_DIFFS,
+        cf::CONTRACT_STATE_DIFFS,
+        cf::COMPUTE_POOL_STATE_DIFFS,
+        cf::BEACON_STATE_DIFFS,
+        cf::APPLICATION_JOURNAL,
+    ];
+    ALL_CFS
+        .iter()
+        .copied()
+        .filter(|c| !publication.contains(c))
+        .collect()
+}
+
+/// `META` keys written by publication or startup rather than by execution.
+fn publication_meta(key: &[u8]) -> bool {
+    use sumchain_storage::schema::meta_keys;
+    [
+        meta_keys::LATEST_BLOCK_HASH,
+        meta_keys::LATEST_BLOCK_HEIGHT,
+        meta_keys::GENESIS_HASH,
+        meta_keys::CHAIN_ID,
+        meta_keys::FINALIZED_HEIGHT,
+        meta_keys::FINALIZED_HASH,
+        sumchain_storage::journal::FORMAT_HIGH_WATER_META_KEY,
+        sumchain_storage::journal::UNDO_HISTORY_FLOOR_META_KEY,
+    ]
+    .contains(&key)
+}
+
+fn reference_rows(db: &Database, cf_name: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
+    db.iter_checked_from(cf_name, None)
+        .unwrap()
+        .map(|e| {
+            let (k, v) = e.unwrap();
+            (k.into_vec(), v.into_vec())
+        })
+        .filter(|(k, _)| cf_name != cf::META || !publication_meta(k))
+        .collect()
+}
+
+/// The branch view over `db` presents exactly `reference` for every state
+/// family: every point read (keys from either side and from the layer, so
+/// absent, deleted and overwritten keys are all probed), a full scan, and a
+/// scan from every reference key.
+fn assert_view_equals(
+    layer: &sumchain_storage::branch::BranchState,
+    db: &Database,
+    reference: &Database,
+    what: &str,
+) {
+    for cf_name in state_families() {
+        let expect = reference_rows(reference, cf_name);
+        let mut keys: BTreeSet<Vec<u8>> = expect.iter().map(|(k, _)| k.clone()).collect();
+        for (k, _) in reference_rows(db, cf_name) {
+            keys.insert(k);
+        }
+        for (c, k, _) in layer.entries() {
+            if c == cf_name {
+                keys.insert(k.to_vec());
+            }
+        }
+        for k in &keys {
+            if cf_name == cf::META && publication_meta(k) {
+                continue;
+            }
+            assert_eq!(
+                layer.get(db, cf_name, k).unwrap(),
+                reference.get(cf_name, k).unwrap(),
+                "{what}: point read {cf_name} {}",
+                hex::encode(k)
+            );
+        }
+        let scanned = |start: Option<&[u8]>| -> Vec<(Vec<u8>, Vec<u8>)> {
+            layer
+                .iter_checked_from(db, cf_name, start)
+                .unwrap()
+                .map(|e| {
+                    let (k, v) = e.unwrap();
+                    (k.into_vec(), v.into_vec())
+                })
+                .filter(|(k, _)| cf_name != cf::META || !publication_meta(k))
+                .collect()
+        };
+        assert_eq!(scanned(None), expect, "{what}: full scan of {cf_name}");
+        for (i, (start, _)) in expect.iter().enumerate().step_by(3) {
+            assert_eq!(
+                scanned(Some(start)),
+                expect[i..].to_vec(),
+                "{what}: scan of {cf_name} from a key"
+            );
+        }
+    }
+}
+
+fn reconstruct(db: &Database, abandoned: &[Block]) -> sumchain_storage::branch::BranchState {
+    use sumchain_storage::journal::{ActivationSource, JournalActivation};
+    let act =
+        JournalActivation::resolve(db, ActivationSource::from_configured_height(Some(1))).unwrap();
+    let mut layer = sumchain_storage::branch::BranchState::new(1 << 30);
+    for b in abandoned.iter().rev() {
+        let j = act
+            .load_for_revert(db, b.height(), &b.hash())
+            .unwrap()
+            .unwrap();
+        layer.restore_parent(db, &j).unwrap();
+    }
+    layer
+}
+
+/// The reconstructed fork parent equals an INDEPENDENT database that never went
+/// past the fork parent — every state family, point reads and scans, including
+/// rows the canonical suffix created, deleted and overwrote — and still does
+/// after the database is reopened. Then, block by block, the view after each
+/// speculative replacement block equals a node that executed the same blocks
+/// for real.
+#[tokio::test]
+async fn the_historical_view_equals_an_independent_reference_database() {
+    reset_hooks();
+    let w = staking_world();
+    let x = Node::new(&w.g);
+    let reference = Node::new(&w.g);
+    for blk in &w.prefix {
+        x.import(blk).await.unwrap();
+        reference.import(blk).await.unwrap();
+    }
+    for blk in &w.canonical {
+        x.import(blk).await.unwrap();
+    }
+    let layer = reconstruct(&x.db, &w.canonical);
+    assert!(layer.restored_blocks() == 2 && !layer.is_empty());
+    assert_view_equals(&layer, &x.db, &reference.db, "fork parent");
+
+    // Reopen the canonical node's database and reconstruct again.
+    let x = x.restart(&w.g);
+    let layer = reconstruct(&x.db, &w.canonical);
+    assert_view_equals(&layer, &x.db, &reference.db, "fork parent after reopen");
+
+    // Each speculative block against a node that executed it for real.
+    let validators = w.g.validator_pubkeys().unwrap();
+    let executor = BlockExecutor::new(x.state.clone(), x.db.clone(), w.g.params.clone());
+    let mut layer = Arc::new(layer);
+    let mut accumulator = w.prefix.last().unwrap().header.state_root;
+    for (i, b) in w.branch.iter().enumerate() {
+        let spec = {
+            let exec = executor
+                .execute_block_on_branch(b, accumulator, &validators, layer.clone())
+                .unwrap();
+            let (executed, _, _) = exec.into_parts();
+            executed
+                .accept_imported(b)
+                .unwrap()
+                .into_speculative()
+                .unwrap()
+        };
+        Arc::get_mut(&mut layer)
+            .expect("no reference to the layer survives a block")
+            .absorb_net_writes(spec.net_writes())
+            .unwrap();
+        accumulator = spec.accumulator();
+        reference.import(b).await.unwrap();
+        assert_view_equals(
+            &layer,
+            &x.db,
+            &reference.db,
+            &format!("after replacement block {i}"),
+        );
+    }
+    // Nothing of this reached the canonical node's database.
+    assert_eq!(x.db_head().hash(), w.canonical.last().unwrap().hash());
+}
+
+/// The commit is pinned to the canonical head the branch was validated
+/// against: if the head moved meanwhile, nothing is applied and the refusal is
+/// a retry, not a rejection of the branch and not a fail-stop.
+#[tokio::test]
+async fn a_switch_validated_against_a_moved_head_is_not_applied() {
+    reset_hooks();
+    let w = world(2, 3, 4);
+    let x = w.canonical_node().await;
+    let head = x.db_head();
+    let before = digest_excluding(&x.db, &w.branch);
+    for b in &w.branch[..w.branch.len() - 1] {
+        archive(&x.db, b);
+    }
+    let db = x.db.clone();
+    let ancestor = w.prefix.last().unwrap().hash();
+    sumchain_consensus::branch_switch::failpoints::set_before_head_pin(Some(Box::new(move || {
+        BlockStore::new(&db).set_latest_hash(&ancestor).unwrap();
+    })));
+    let err = x
+        .import(w.branch.last().unwrap())
+        .await
+        .unwrap_err()
+        .to_string();
+    sumchain_consensus::branch_switch::failpoints::set_before_head_pin(None);
+    assert!(err.contains("canonical head moved"), "{err}");
+    assert!(
+        x.engine.halted_reason().is_none(),
+        "a moved head is not a fail-stop"
+    );
+    // Undo the simulated foreign write, then nothing else changed.
+    BlockStore::new(&x.db)
+        .set_latest_hash(&head.hash())
+        .unwrap();
+    assert_eq!(digest_excluding(&x.db, &w.branch), before);
+    assert_eq!(x.engine.best_block_hash(), head.hash());
+}

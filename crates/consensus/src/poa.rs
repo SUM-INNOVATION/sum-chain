@@ -1724,6 +1724,10 @@ impl PoAEngine {
             Err(SwitchError::Rejected(r)) => return Err(ConsensusError::InvalidBlock(r)),
             Err(SwitchError::Local(r)) => return Err(self.fail_stop(r)),
         };
+        #[cfg(feature = "failpoints")]
+        crate::branch_switch::failpoints::barrier(
+            crate::branch_switch::failpoints::Failpoint::AfterValidation,
+        );
         let (batch, report) = match adoption_batch(&self.db, &plan, &validated, &limits) {
             Ok(x) => x,
             Err(SwitchError::Rejected(r)) => return Err(ConsensusError::InvalidBlock(r)),
@@ -1753,9 +1757,41 @@ impl PoAEngine {
                 drop(batch);
                 return Err(self.fail_stop("injected crash immediately before the adoption commit"));
             }
+            // Lets a test move the head from outside, as a foreign writer would.
+            crate::branch_switch::failpoints::before_head_pin();
         }
+
+        // ── the canonical base the branch was validated against, pinned ────
+        //
+        // The branch was reconstructed from, and its unwind computed against,
+        // `old_head`. The execution lock means nothing in this engine moves the
+        // head meanwhile; this check is what proves it at the commit, so a
+        // future path that writes the head without the lock cannot make this
+        // batch unwind a chain it was not computed for. A moved head is not a
+        // verdict on the branch: the switch is refused for retry.
+        let head_now = BlockStore::new(&self.db).get_latest_hash()?;
+        let memory_head = self.best_block.read().as_ref().map(|b| b.hash());
+        if head_now != Some(old_head.hash()) || memory_head != Some(old_head.hash()) {
+            return Err(ConsensusError::StaleSwitch(format!(
+                "the canonical head moved from {} while the replacement branch ending at {hash} \
+                 was being validated (database head {:?}, memory head {:?}); the switch was not \
+                 applied and must be re-evaluated against the current head",
+                old_head.hash(),
+                head_now,
+                memory_head
+            )));
+        }
+
+        #[cfg(feature = "failpoints")]
+        crate::branch_switch::failpoints::barrier(
+            crate::branch_switch::failpoints::Failpoint::CrashBeforeCommit,
+        );
         // A failed commit applies nothing, and nothing in memory has moved yet.
         batch.commit()?;
+        #[cfg(feature = "failpoints")]
+        crate::branch_switch::failpoints::barrier(
+            crate::branch_switch::failpoints::Failpoint::CrashAfterCommit,
+        );
 
         // ── only after a durable commit ─────────────────────────────────────
         #[cfg(feature = "failpoints")]
@@ -1841,6 +1877,10 @@ impl PoAEngine {
                 }
             }
         }
+        #[cfg(feature = "failpoints")]
+        crate::branch_switch::failpoints::barrier(
+            crate::branch_switch::failpoints::Failpoint::MidReconcile,
+        );
         let mut included: Vec<Hash> = adopted.into_iter().collect();
         included.sort();
         self.mempool.remove_batch(&included);

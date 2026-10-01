@@ -367,6 +367,74 @@ pub mod failpoints {
         MempoolReconcile,
         /// F9: canonical-event emission fails after the commit.
         EventEmission,
+        /// The whole branch validated; the adoption batch is not yet built.
+        AfterValidation,
+        /// Part-way through post-commit mempool reconciliation.
+        MidReconcile,
+    }
+
+    impl Failpoint {
+        /// Stable name, for selecting a crash barrier from a child process.
+        pub fn name(self) -> String {
+            match self {
+                Failpoint::SpeculativeExecution(n) => format!("speculative-execution-{n}"),
+                Failpoint::BeforeCommit => "before-commit".into(),
+                Failpoint::CommitFails => "commit-fails".into(),
+                Failpoint::CrashBeforeCommit => "crash-before-commit".into(),
+                Failpoint::CrashAfterCommit => "crash-after-commit".into(),
+                Failpoint::MempoolReconcile => "mempool-reconcile".into(),
+                Failpoint::EventEmission => "event-emission".into(),
+                Failpoint::AfterValidation => "after-validation".into(),
+                Failpoint::MidReconcile => "mid-reconcile".into(),
+            }
+        }
+    }
+
+    thread_local! {
+        static BEFORE_HEAD_PIN: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Install (or with `None` remove) a hook run immediately before the
+    /// canonical-head pin is checked, on this thread. A test uses it to move the
+    /// head from outside the engine, the way a foreign writer would.
+    pub fn set_before_head_pin(hook: Option<Box<dyn FnMut()>>) {
+        BEFORE_HEAD_PIN.with(|h| *h.borrow_mut() = hook);
+    }
+
+    /// Run the hook installed by [`set_before_head_pin`], if any.
+    pub fn before_head_pin() {
+        BEFORE_HEAD_PIN.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                f();
+            }
+        });
+    }
+
+    /// Environment variable naming the crash barrier a child process stops at.
+    pub const BARRIER_AT_ENV: &str = "SUMCHAIN_CRASH_BARRIER_AT";
+    /// Environment variable naming the file the barrier creates on arrival.
+    pub const BARRIER_FILE_ENV: &str = "SUMCHAIN_CRASH_BARRIER_FILE";
+
+    /// A crash barrier for real-process crash tests.
+    ///
+    /// When this process was started with [`BARRIER_AT_ENV`] naming `fp`, it
+    /// announces its arrival by creating [`BARRIER_FILE_ENV`] and then blocks
+    /// forever, so the parent test can kill it with SIGKILL at exactly this
+    /// point — no unwinding, no destructors, no flush. Inert otherwise.
+    pub fn barrier(fp: Failpoint) {
+        let Ok(at) = std::env::var(BARRIER_AT_ENV) else {
+            return;
+        };
+        if at != fp.name() {
+            return;
+        }
+        let marker = std::env::var(BARRIER_FILE_ENV)
+            .expect("a crash barrier needs SUMCHAIN_CRASH_BARRIER_FILE");
+        std::fs::write(&marker, at.as_bytes()).expect("announce the crash barrier");
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
     }
 
     thread_local! {

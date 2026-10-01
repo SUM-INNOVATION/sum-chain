@@ -100,6 +100,11 @@ pub enum ConsensusError {
     /// Refused until restart, which reloads from the committed database.
     #[error("node fail-stopped: {0}")]
     LocalFailStop(String),
+
+    /// A chain switch was validated against a canonical head that is no longer
+    /// the head. Nothing was applied; not a verdict on the branch.
+    #[error("chain switch not applied, canonical head moved: {0}")]
+    StaleSwitch(String),
 }
 
 pub type Result<T> = std::result::Result<T, ConsensusError>;

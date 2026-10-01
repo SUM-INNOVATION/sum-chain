@@ -396,4 +396,158 @@ mod tests {
         assert!(b.set(cf::STATE, b"k", Some(b"12")).is_ok());
         assert_eq!(b.bytes(), 3);
     }
+
+    // ── reconstruction against an independent snapshot ───────────────────
+
+    use crate::candidate::{BlockJournals, CandidateExecution, ExecutionSubject, JournalRecord};
+    use sumchain_primitives::{Block, BlockHeader, Hash};
+
+    /// Execute and publish one block whose execution performs `ops` (`None`
+    /// deletes), exactly as the canonical path does: through a candidate, an
+    /// acceptance and `publish`, so its generic journal is the real one.
+    fn publish_block(
+        db: &Database,
+        parent: &Hash,
+        height: u64,
+        ops: &[(&[u8], Option<&[u8]>)],
+    ) -> Block {
+        let root = Hash::new([height as u8; 32]);
+        let mut block = Block::new(
+            BlockHeader::new(*parent, height, 1_000 + height, Hash::ZERO, root, [9u8; 32]),
+            Vec::new(),
+        );
+        block.header.tx_root = block.compute_tx_root();
+        let mut cand = CandidateExecution::new(db, 1 << 20);
+        {
+            let mut view = cand.view();
+            for (k, v) in ops {
+                match v {
+                    Some(v) => view.put(cf::STATE, k, v).unwrap(),
+                    None => view.delete(cf::STATE, k).unwrap(),
+                }
+            }
+        }
+        let executed = cand.finish_execution(
+            ExecutionSubject::of(&block).unwrap(),
+            root,
+            Vec::new(),
+            BlockJournals {
+                account: JournalRecord::NothingToUndo,
+                contract: JournalRecord::NothingToUndo,
+                compute_pool: JournalRecord::NothingToUndo,
+                beacon: JournalRecord::NothingToUndo,
+            },
+        );
+        executed.accept_produced(&block).unwrap().publish().unwrap();
+        block
+    }
+
+    fn state_rows(db: &Database) -> Vec<(Vec<u8>, Vec<u8>)> {
+        rows(db.iter_checked_from(cf::STATE, None).unwrap())
+    }
+
+    fn reconstruct(db: &Database, abandoned: &[Block]) -> BranchState {
+        let mut layer = BranchState::new(1 << 20);
+        for b in abandoned.iter().rev() {
+            let key = crate::schema::journal_key(b.height(), &b.hash());
+            let bytes = db.get(cf::APPLICATION_JOURNAL, &key).unwrap().unwrap();
+            let j = ApplicationJournal::decode_for(&bytes, b.height(), &b.hash()).unwrap();
+            layer.restore_parent(db, &j).unwrap();
+        }
+        layer
+    }
+
+    fn assert_matches_snapshot(
+        layer: &BranchState,
+        db: &Database,
+        snapshot: &[(Vec<u8>, Vec<u8>)],
+    ) {
+        let probe: [&[u8]; 6] = [b"k1", b"k2", b"k3", b"k4", b"k5", b"k6"];
+        for k in probe {
+            let expect = snapshot
+                .iter()
+                .find(|(sk, _)| sk.as_slice() == k)
+                .map(|(_, v)| v.clone());
+            assert_eq!(
+                layer.get(db, cf::STATE, k).unwrap(),
+                expect,
+                "point read {k:?}"
+            );
+        }
+        assert_eq!(
+            rows(layer.iter_checked_from(db, cf::STATE, None).unwrap()),
+            snapshot
+        );
+        assert_eq!(
+            rows(layer.iter_checked_from(db, cf::STATE, Some(b"k3")).unwrap()),
+            snapshot
+                .iter()
+                .filter(|(k, _)| k.as_slice() >= b"k3".as_slice())
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Absent, EMPTY, deleted, recreated and overwritten values all come back
+    /// exactly — an empty value is not confused with absence in either
+    /// direction — and the reconstruction is identical after the database is
+    /// closed and reopened.
+    #[test]
+    fn reconstruction_restores_absent_empty_deleted_and_overwritten_values_exactly() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        let (snapshot, abandoned) = {
+            let db = Database::open_default(&path).unwrap();
+            // Fork parent F = block 1: k1 = "v1", k2 = "" (empty), k3 = "v3", k6 = "".
+            let f = publish_block(
+                &db,
+                &Hash::ZERO,
+                1,
+                &[
+                    (b"k1", Some(b"v1")),
+                    (b"k2", Some(b"")),
+                    (b"k3", Some(b"v3")),
+                    (b"k6", Some(b"")),
+                ],
+            );
+            let snapshot = state_rows(&db);
+            // Block 2: overwrite k1, delete the EMPTY k2, create an empty k4,
+            // delete k3, set the empty k6 to a value.
+            let b2 = publish_block(
+                &db,
+                &f.hash(),
+                2,
+                &[
+                    (b"k1", Some(b"v1b")),
+                    (b"k2", None),
+                    (b"k4", Some(b"")),
+                    (b"k3", None),
+                    (b"k6", Some(b"now")),
+                ],
+            );
+            // Block 3: k1 to empty, create k5, recreate k3 with a new value,
+            // write k4 twice (the first pre-image must survive), delete k6.
+            let b3 = publish_block(
+                &db,
+                &b2.hash(),
+                3,
+                &[
+                    (b"k1", Some(b"")),
+                    (b"k5", Some(b"x")),
+                    (b"k3", Some(b"v3c")),
+                    (b"k4", Some(b"mid")),
+                    (b"k4", Some(b"end")),
+                    (b"k6", None),
+                ],
+            );
+            let layer = reconstruct(&db, &[b2.clone(), b3.clone()]);
+            assert_matches_snapshot(&layer, &db, &snapshot);
+            (snapshot, vec![b2, b3])
+        };
+        let db = Database::open_default(&path).unwrap();
+        let layer = reconstruct(&db, &abandoned);
+        assert_matches_snapshot(&layer, &db, &snapshot);
+        // Nothing was written by reconstructing.
+        assert_eq!(db.get(cf::STATE, b"k5").unwrap(), Some(b"x".to_vec()));
+    }
 }

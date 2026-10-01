@@ -1927,3 +1927,11 @@ mod consensus_engine_refusal_tests;
 #[cfg(test)]
 #[path = "../tests/unit/protocol_v1_boot_tests.rs"]
 mod protocol_v1_boot_tests;
+
+/// Chain-switch recovery after a real process crash (#269): a child process
+/// running this binary is killed at a crash barrier inside the switch, and the
+/// node is restarted through `with_rpc_config` + `init_chain`. A unit-test
+/// module for the same reason as the ones above.
+#[cfg(test)]
+#[path = "../tests/unit/crash_recovery_tests.rs"]
+mod crash_recovery_tests;
