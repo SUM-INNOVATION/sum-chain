@@ -1145,7 +1145,7 @@ impl BeaconFinalizeV1 {
     pub const BASE_LEN: usize = 7 + 2 + 8 + 8 + 8 + G2_LEN + 4; // 133
 
     /// Width of one witness element (`u32_le` contributor index).
-    const WITNESS_ELEM_LEN: usize = 4;
+    pub const WITNESS_ELEM_LEN: usize = 4;
 
     /// Encoded length of a finalize carrying `witness_count` contributor indices.
     pub const fn encoded_len(witness_count: usize) -> usize {

@@ -138,7 +138,7 @@ impl ProtocolReserve {
     /// the reserve is not an account).
     pub fn digest(&self) -> Hash {
         Hash::hash_many(&[
-            b"sumchain.protocol-reserve.v1",
+            PROTOCOL_RESERVE_DIGEST_DOMAIN,
             &self.validator_pool_remaining.to_be_bytes(),
             &self.archive_pool_remaining.to_be_bytes(),
             &self.compute_pool_remaining.to_be_bytes(),
@@ -188,7 +188,7 @@ impl SupplyLedger {
     /// Deterministic digest folded into the block state root.
     pub fn digest(&self) -> Hash {
         Hash::hash_many(&[
-            b"sumchain.supply-ledger.v1",
+            SUPPLY_LEDGER_DIGEST_DOMAIN,
             &self.initial_canonical_supply.to_be_bytes(),
             &self.total_minted_by_migration.to_be_bytes(),
             &self.total_minted_by_governance.to_be_bytes(),
@@ -420,16 +420,35 @@ pub fn split_grant(total: u128) -> (u128, u128) {
     (liquid, total.saturating_sub(liquid))
 }
 
+/// Domain of the protocol-reserve digest folded into the block state root.
+/// Named so the consensus configuration (#268) can commit to it.
+pub const PROTOCOL_RESERVE_DIGEST_DOMAIN: &[u8] = b"sumchain.protocol-reserve.v1";
+/// Domain of the supply-ledger digest folded into the block state root.
+pub const SUPPLY_LEDGER_DIGEST_DOMAIN: &[u8] = b"sumchain.supply-ledger.v1";
+/// Domain of the grants-aggregate digest folded into the block state root.
+pub const GRANTS_AGGREGATE_DIGEST_DOMAIN: &[u8] = b"sumchain.grants-aggregate.v1";
+
+/// Last cohort index (inclusive) and grant of each validator bootstrap cohort,
+/// as [`validator_cohort_grant`] applies them.
+pub const VALIDATOR_COHORT_1_LAST_INDEX: u32 = 9;
+pub const VALIDATOR_COHORT_1_GRANT: u128 = 5_000_000 * KOPPA;
+pub const VALIDATOR_COHORT_2_LAST_INDEX: u32 = 97;
+pub const VALIDATOR_COHORT_2_GRANT: u128 = 2_500_000 * KOPPA;
+pub const VALIDATOR_COHORT_3_LAST_INDEX: u32 = 997;
+pub const VALIDATOR_COHORT_3_GRANT: u128 = 1_000_000 * KOPPA;
+pub const VALIDATOR_COHORT_4_LAST_INDEX: u32 = 9_997;
+pub const VALIDATOR_COHORT_4_GRANT: u128 = 250_000 * KOPPA;
+
 /// Declining validator bootstrap cohorts. `index` is the 0-based count of
 /// validator grants issued so far (the two genesis validators are excluded
 /// before this counter is consulted). Total cost if fully exhausted ≈ 3.42B —
 /// far below the 80B validator pool.
 pub fn validator_cohort_grant(index: u32) -> Option<u128> {
     match index {
-        0..=9 => Some(5_000_000 * KOPPA),      // validators 3-12
-        10..=97 => Some(2_500_000 * KOPPA),    // validators 13-100
-        98..=997 => Some(1_000_000 * KOPPA),   // validators 101-1,000
-        998..=9_997 => Some(250_000 * KOPPA),  // validators 1,001-10,000
+        0..=VALIDATOR_COHORT_1_LAST_INDEX => Some(VALIDATOR_COHORT_1_GRANT), // validators 3-12
+        10..=VALIDATOR_COHORT_2_LAST_INDEX => Some(VALIDATOR_COHORT_2_GRANT), // validators 13-100
+        98..=VALIDATOR_COHORT_3_LAST_INDEX => Some(VALIDATOR_COHORT_3_GRANT), // validators 101-1,000
+        998..=VALIDATOR_COHORT_4_LAST_INDEX => Some(VALIDATOR_COHORT_4_GRANT), // validators 1,001-10,000
         _ => None, // beyond 10,000: no automatic grant unless governance changes the schedule
     }
 }
@@ -510,7 +529,7 @@ pub struct GrantsAggregate {
 impl GrantsAggregate {
     pub fn digest(&self) -> Hash {
         Hash::hash_many(&[
-            b"sumchain.grants-aggregate.v1",
+            GRANTS_AGGREGATE_DIGEST_DOMAIN,
             &self.outstanding_grant_unclaimed.to_be_bytes(),
             &self.total_granted.to_be_bytes(),
             &self.total_forfeited_to_reserve.to_be_bytes(),

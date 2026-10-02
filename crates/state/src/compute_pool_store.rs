@@ -116,7 +116,7 @@ fn frame_len(n: usize) -> Result<[u8; 4]> {
 
 /// 1-byte domain/type prefixes for the shared C1 keyspace. Distinct per record
 /// category, so two categories can never alias even at equal body length.
-mod domain {
+pub mod domain {
     pub const JOB: u8 = 0x01;
     pub const UNIT: u8 = 0x02;
     pub const OFFER: u8 = 0x03;

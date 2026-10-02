@@ -54,6 +54,10 @@ use sumchain_storage::messaging_store::{
 use crate::messaging_executor::MessagingExecutor;
 use crate::{Result, StateError};
 
+/// Sponsorship state when no configuration row exists.
+/// Named so the consensus configuration (#268) commits to it.
+pub const DEFAULT_SPONSORSHIP_ENABLED: bool = false;
+
 impl MessagingExecutor {
     // ── Config ──────────────────────────────────────────────────────────────
 
@@ -94,7 +98,7 @@ impl MessagingExecutor {
     pub fn v_is_sponsorship_enabled(view: &ExecutionView<'_, '_>) -> Result<bool> {
         Ok(Self::cfg(view, config_keys::SPONSORSHIP_ENABLED)?
             .map(|b| decode_bool(&b))
-            .unwrap_or(false))
+            .unwrap_or(DEFAULT_SPONSORSHIP_ENABLED))
     }
 
     pub fn v_set_sponsorship_enabled(

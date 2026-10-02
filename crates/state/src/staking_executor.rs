@@ -26,6 +26,10 @@ use tracing::{debug, info, warn};
 
 use crate::{Result, StateError, StateManager};
 
+/// Largest validator metadata an update may carry.
+/// Named so the consensus configuration (#268) commits to it.
+pub const MAX_VALIDATOR_METADATA_BYTES: usize = 256;
+
 /// Result of executing a staking operation
 #[derive(Debug)]
 pub struct StakingExecutionResult {
@@ -448,7 +452,7 @@ impl StakingExecutor {
         // Update metadata if provided
         if let Some(new_metadata) = update_data.metadata {
             // Validate metadata size (max 256 bytes)
-            if new_metadata.len() > 256 {
+            if new_metadata.len() > MAX_VALIDATOR_METADATA_BYTES {
                 return Ok(StakingExecutionResult::failure(
                     "Metadata exceeds maximum size of 256 bytes".to_string()
                 ));

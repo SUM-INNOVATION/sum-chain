@@ -137,6 +137,25 @@ const EXCLUDED: &[(&str, &str)] = &[
         "EXPECTED_HEIGHT",
         "test fixture inside a #[cfg(test)] module",
     ),
+    // ── Named by #268 from inline literals, values unchanged. Consensus-
+    //    relevant, and committed by ConsensusConfigV1 (`sumchain_consensus::
+    //    consensus_config`). Deliberately NOT folded here: this digest is what
+    //    peers compare at handshake today, and widening it would make every
+    //    running node refuse this binary. Its value set is unchanged.
+    ("SUPPLY_STATE_DIGEST_DOMAIN", "committed by ConsensusConfigV1; handshake digest left unchanged"),
+    ("EDU_CATALOG_BY_CODE_DOMAIN", "committed by ConsensusConfigV1; handshake digest left unchanged"),
+    ("EDU_CONTENT_ROOT_DOMAIN", "committed by ConsensusConfigV1; handshake digest left unchanged"),
+    ("EDU_ASSESSMENT_ROOT_DOMAIN", "committed by ConsensusConfigV1; handshake digest left unchanged"),
+    ("EDU_ENROLLMENT_ROOT_DOMAIN", "committed by ConsensusConfigV1; handshake digest left unchanged"),
+    ("STORAGE_CHALLENGE_SEED_DOMAIN", "committed by ConsensusConfigV1; handshake digest left unchanged"),
+    ("POR_SCHEDULE_SEED_DOMAIN", "committed by ConsensusConfigV1; handshake digest left unchanged"),
+    ("POR_SCHEDULE_FILE_TAG", "committed by ConsensusConfigV1; handshake digest left unchanged"),
+    ("POR_SCHEDULE_CHUNK_TAG", "committed by ConsensusConfigV1; handshake digest left unchanged"),
+    ("POR_SCHEDULE_PICK_TAG", "committed by ConsensusConfigV1; handshake digest left unchanged"),
+    ("MAX_VALIDATOR_METADATA_BYTES", "committed by ConsensusConfigV1; handshake digest left unchanged"),
+    ("MAX_TOKEN_NAME_BYTES", "committed by ConsensusConfigV1; handshake digest left unchanged"),
+    ("MAX_TOKEN_SYMBOL_BYTES", "committed by ConsensusConfigV1; handshake digest left unchanged"),
+    ("MAX_TOKEN_DECIMALS", "committed by ConsensusConfigV1; handshake digest left unchanged"),
 ];
 
 /// Names matching this shape are constants a reader would expect to find

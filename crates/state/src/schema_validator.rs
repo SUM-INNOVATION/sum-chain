@@ -66,6 +66,12 @@ impl ValidationResult {
     }
 }
 
+/// A name with at least this many digits is refused as a possible phone
+/// number. Named so the consensus configuration (#268) commits to it.
+pub const PHONE_LIKE_DIGIT_COUNT: usize = 10;
+/// Substrings that make a storage hint refused as carrying PII.
+pub const STORAGE_HINT_PII_PATTERNS: &[&str] = &["name=", "email=", "ssn=", "phone=", "dob="];
+
 /// Schema validation configuration
 #[derive(Debug, Clone)]
 pub struct SchemaValidatorConfig {
@@ -604,7 +610,7 @@ impl SchemaValidator {
 
         // Check for phone number patterns (simple check)
         let digit_count = name.chars().filter(|c| c.is_ascii_digit()).count();
-        if digit_count >= 10 {
+        if digit_count >= PHONE_LIKE_DIGIT_COUNT {
             return Err(format!(
                 "{} contains too many digits (possible phone number)",
                 field_name
@@ -629,9 +635,7 @@ impl SchemaValidator {
 
         // Check for obvious PII in URL parameters
         let hint_lower = hint.to_lowercase();
-        let pii_patterns = ["name=", "email=", "ssn=", "phone=", "dob="];
-
-        for pattern in &pii_patterns {
+        for pattern in STORAGE_HINT_PII_PATTERNS {
             if hint_lower.contains(pattern) {
                 return Err(format!(
                     "{} contains suspicious PII pattern: {}",

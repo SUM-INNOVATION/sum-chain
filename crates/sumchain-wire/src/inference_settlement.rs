@@ -21,10 +21,10 @@ use crate::Address;
 
 /// Domain for the per-session record key (32-byte point lookup). Distinct from
 /// the attestation key domains so the keyspaces never collide.
-const SESSION_KEY_DOMAIN: &[u8] = b"InferenceSettlementSessionV1";
+pub const SESSION_KEY_DOMAIN: &[u8] = b"InferenceSettlementSessionV1";
 /// Domain for the 16-byte session prefix used by the per-(session, verifier)
 /// claim and dispute CFs, so all claims/disputes for a session are prefix-scannable.
-const SESSION_INDEX_DOMAIN: &[u8] = b"InferenceSettlementSessionIndexV1";
+pub const SESSION_INDEX_DOMAIN: &[u8] = b"InferenceSettlementSessionIndexV1";
 
 /// Bytes of the session prefix embedded in claim/dispute keys.
 pub const SESSION_PREFIX_BYTES: usize = 16;
@@ -61,7 +61,7 @@ pub fn settlement_entry_key(session_id: &str, verifier: &Address) -> [u8; 36] {
 
 /// Domain for the per-verifier bond record key (issue #78). Distinct from the
 /// session/claim/dispute domains so the keyspaces never collide.
-const VERIFIER_KEY_DOMAIN: &[u8] = b"InferenceVerifierV1";
+pub const VERIFIER_KEY_DOMAIN: &[u8] = b"InferenceVerifierV1";
 
 /// Per-verifier bond record key for `INFERENCE_VERIFIERS`:
 /// `BLAKE3(VERIFIER_KEY_DOMAIN || verifier_address)` (32 bytes).

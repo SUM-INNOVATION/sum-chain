@@ -200,6 +200,14 @@ fn de<T: DeserializeOwned>(bytes: &[u8]) -> std::result::Result<T, u8> {
     bincode::deserialize::<T>(bytes).map_err(|_| F_MALFORMED)
 }
 
+/// Domain of the catalog by-code index key.
+/// Named so the consensus configuration (#268) commits to it.
+pub const EDU_CATALOG_BY_CODE_DOMAIN: &[u8] = b"SRC817-CATALOG-BY-CODE:v1:";
+/// Domains of the rolling roots an offering stores and later validation reads.
+pub const EDU_CONTENT_ROOT_DOMAIN: &[u8] = b"SRC818-CONTENT-ROOT:v1:";
+pub const EDU_ASSESSMENT_ROOT_DOMAIN: &[u8] = b"SRC818-ASSESS-ROOT:v1:";
+pub const EDU_ENROLLMENT_ROOT_DOMAIN: &[u8] = b"SRC818-ENROLL-ROOT:v1:";
+
 /// Order-sensitive rolling commitment over inserted child keys. Keeps
 /// the primary record bounded (one [u8;32], not a Vec). Length-safe:
 /// fixed-size inputs only. A full merkle tree can replace this later
@@ -217,7 +225,7 @@ fn by_code_hash(department: &str, course_code: &str) -> [u8; 32] {
     let inner = bincode::serialize(&(department, course_code))
         .expect("(&str,&str) is infallibly serializable");
     let mut buf = Vec::with_capacity(26 + inner.len());
-    buf.extend_from_slice(b"SRC817-CATALOG-BY-CODE:v1:");
+    buf.extend_from_slice(EDU_CATALOG_BY_CODE_DOMAIN);
     buf.extend_from_slice(&inner);
     *Hash::hash(&buf).as_bytes()
 }
@@ -1185,7 +1193,7 @@ impl EducationExecutor {
                     created_at_height: height,
                 };
                 off.content_count = off.content_count.saturating_add(1);
-                off.content_root = roll(b"SRC818-CONTENT-ROOT:v1:", &off.content_root, &ck);
+                off.content_root = roll(EDU_CONTENT_ROOT_DOMAIN, &off.content_root, &ck);
                 off.updated_at_height = height;
                 pb.put(cf::EDU_CONTENT_ITEMS, ck, ser(&item)?);
                 pb.put(cf::EDU_OFFERINGS, d.offering_id.to_vec(), ser(&off)?);
@@ -1223,7 +1231,7 @@ impl EducationExecutor {
                 };
                 off.assessment_count = off.assessment_count.saturating_add(1);
                 off.assessment_root =
-                    roll(b"SRC818-ASSESS-ROOT:v1:", &off.assessment_root, &ak);
+                    roll(EDU_ASSESSMENT_ROOT_DOMAIN, &off.assessment_root, &ak);
                 off.updated_at_height = height;
                 pb.put(cf::EDU_ASSESSMENTS, ak, ser(&a)?);
                 pb.put(cf::EDU_OFFERINGS, d.offering_id.to_vec(), ser(&off)?);
@@ -1372,7 +1380,7 @@ impl EducationExecutor {
                 let mut off2 = off;
                 off2.enrollment_count = off2.enrollment_count.saturating_add(1);
                 off2.enrollment_root =
-                    roll(b"SRC818-ENROLL-ROOT:v1:", &off2.enrollment_root, &lk);
+                    roll(EDU_ENROLLMENT_ROOT_DOMAIN, &off2.enrollment_root, &lk);
                 off2.updated_at_height = height;
                 pb.put(cf::EDU_ENROLLMENT_LINKS, lk, ser(&link)?);
                 pb.put(cf::EDU_OFFERINGS, d.offering_id.to_vec(), ser(&off2)?);

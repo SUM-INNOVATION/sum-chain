@@ -22,6 +22,16 @@ use tracing::{debug, warn};
 
 use crate::{Result, StateError, StateManager};
 
+/// Width of the daily-quota bucket, applied to the block timestamp.
+/// Named so the consensus configuration (#268) commits to it.
+pub const MESSAGING_DAY_SECONDS: u64 = 86400;
+/// Quota multiplier for a sender whose stake meets the trust minimum.
+pub const STAKED_SENDER_QUOTA_MULTIPLIER: u32 = 5;
+/// Added to the block timestamp to set a pending payment's expiry.
+pub const PENDING_PAYMENT_EXPIRY: u64 = 7 * 24 * 3600;
+/// Spam-score increment applied by one accepted report.
+pub const SPAM_REPORT_SCORE_INCREMENT: u32 = 5;
+
 /// Result of messaging execution
 #[derive(Debug)]
 pub struct MessagingExecutionResult {
@@ -215,7 +225,7 @@ impl MessagingExecutor {
 
     /// Calculate current day (for rate limiting)
     fn current_day(timestamp: u64) -> u32 {
-        (timestamp / 86400) as u32
+        (timestamp / MESSAGING_DAY_SECONDS) as u32
     }
 
     /// Check rate limit for sender
@@ -232,7 +242,7 @@ impl MessagingExecutor {
         let stake = Self::v_get_stake_balance(view, sender)?;
         let min_stake = Self::v_get_min_trust_stake(view)?;
         let effective_quota = if stake >= min_stake {
-            quota.saturating_mul(5)
+            quota.saturating_mul(STAKED_SENDER_QUOTA_MULTIPLIER)
         } else {
             quota
         };
@@ -513,7 +523,7 @@ impl MessagingExecutor {
         StateManager::v_credit(view, proposer, fee)?;
 
         // Escrow the payment (store as pending)
-        let expiry = block_timestamp + (7 * 24 * 3600); // 7 days expiry
+        let expiry = block_timestamp + PENDING_PAYMENT_EXPIRY; // 7 days expiry
         let pending = PendingPayment {
             recipient_hash: msg_data.recipient_hash,
             amount: msg_data.koppa_amount,
@@ -731,7 +741,7 @@ impl MessagingExecutor {
         }
 
         // Increment spammer's spam score
-        let new_score = Self::v_increment_spam_score(view, &report_data.spammer, 5)?;
+        let new_score = Self::v_increment_spam_score(view, &report_data.spammer, SPAM_REPORT_SCORE_INCREMENT)?;
 
         warn!(
             "Spam reported: {} reported {} for message {}, new score: {}",

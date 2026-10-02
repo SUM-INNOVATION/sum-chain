@@ -7,6 +7,11 @@
 use serde::{Deserialize, Serialize};
 use sumchain_primitives::{Address, Hash, Timestamp};
 
+/// Largest royalty a collection may set: 25%. Reached from execution through
+/// `CollectionConfig::validate`; named so the consensus configuration (#268)
+/// commits to it.
+pub const MAX_ROYALTY_BPS: u16 = 2500;
+
 /// Unique identifier for a collection (derived from creator + name + nonce)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CollectionId(pub [u8; 32]);
@@ -152,8 +157,11 @@ impl CollectionConfig {
     /// Validate the configuration
     pub fn validate(&self) -> Result<(), String> {
         // Maximum royalty is 25%
-        if self.royalty_bps > 2500 {
-            return Err(format!("Royalty too high: {}bps > 2500bps", self.royalty_bps));
+        if self.royalty_bps > MAX_ROYALTY_BPS {
+            return Err(format!(
+                "Royalty too high: {}bps > {}bps",
+                self.royalty_bps, MAX_ROYALTY_BPS
+            ));
         }
         if self.royalty_bps > 0 && self.royalty_recipient.is_zero() {
             return Err("Royalty recipient required when royalty > 0".to_string());

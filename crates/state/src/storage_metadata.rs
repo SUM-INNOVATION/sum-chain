@@ -59,6 +59,16 @@ pub const CF_CHALLENGEABLE_FILES_V2: &str = sumchain_storage::cf::CHALLENGEABLE_
 /// General meta CF (shared) — the #100 backfill stores its one-shot completion
 /// marker under [`POR_SCHEDULER_BACKFILL_MARKER`] here.
 pub const CF_META: &str = sumchain_storage::cf::META;
+/// Domain of the per-block storage-challenge seed.
+/// Named so the consensus configuration (#268) commits to it.
+pub const STORAGE_CHALLENGE_SEED_DOMAIN: &[u8] = b"storage_challenge";
+/// Domain of the assignment-aware PoR schedule seed, and the tags of the file,
+/// chunk and target draws derived from it.
+pub const POR_SCHEDULE_SEED_DOMAIN: &[u8] = b"snip.por.schedule.v1";
+pub const POR_SCHEDULE_FILE_TAG: &[u8] = b"file";
+pub const POR_SCHEDULE_CHUNK_TAG: &[u8] = b"chunk";
+pub const POR_SCHEDULE_PICK_TAG: &[u8] = b"pick";
+
 /// Key in [`CF_META`] recording that the #100 challengeable-index backfill has
 /// run. Its presence prevents any further full V2 scan.
 pub const POR_SCHEDULER_BACKFILL_MARKER: &[u8] = b"por_scheduler_index_backfilled";
@@ -1059,7 +1069,7 @@ impl StorageMetadataExecutor {
         // Both gate modes use the same seed material so selection is replayable.
         let seed = Hash::hash_many(&[
             parent_hash.as_bytes(),
-            b"storage_challenge",
+            STORAGE_CHALLENGE_SEED_DOMAIN,
             &height.to_be_bytes(),
         ]);
         let seed_bytes = seed.as_bytes();
@@ -1341,7 +1351,7 @@ impl StorageMetadataExecutor {
             return Ok(emitted);
         }
         let seed = Hash::hash_many(&[
-            b"snip.por.schedule.v1",
+            POR_SCHEDULE_SEED_DOMAIN,
             parent_hash.as_bytes(),
             &height.to_be_bytes(),
         ]);
@@ -1354,7 +1364,7 @@ impl StorageMetadataExecutor {
                 break;
             }
             // Seeded probe → first index entry at or after it (wrapping to start).
-            let probe = Hash::hash_many(&[seed.as_bytes(), b"file", &i.to_be_bytes()]);
+            let probe = Hash::hash_many(&[seed.as_bytes(), POR_SCHEDULE_FILE_TAG, &i.to_be_bytes()]);
             let hit = match view
                 .iter_from(CF_CHALLENGEABLE_FILES_V2, probe.as_bytes())
                 .map_err(StateError::Storage)?
@@ -1396,7 +1406,7 @@ impl StorageMetadataExecutor {
                 if emitted.len() as u32 >= max_emit {
                     break 'files;
                 }
-                let chunk_seed = Hash::hash_many(&[seed.as_bytes(), root.as_bytes(), b"chunk", &j.to_be_bytes()]);
+                let chunk_seed = Hash::hash_many(&[seed.as_bytes(), root.as_bytes(), POR_SCHEDULE_CHUNK_TAG, &j.to_be_bytes()]);
                 let chunk_index =
                     u32::from_be_bytes(chunk_seed.as_bytes()[0..4].try_into().unwrap()) % chunk_count;
                 if seen_pairs.iter().any(|(r, c)| r == &root_bytes && *c == chunk_index) {
@@ -1404,7 +1414,7 @@ impl StorageMetadataExecutor {
                 }
                 seen_pairs.push((root_bytes, chunk_index));
 
-                let pick = Hash::hash_many(&[seed.as_bytes(), root.as_bytes(), &chunk_index.to_be_bytes(), b"pick"]);
+                let pick = Hash::hash_many(&[seed.as_bytes(), root.as_bytes(), &chunk_index.to_be_bytes(), POR_SCHEDULE_PICK_TAG]);
                 let pick_seed = u64::from_be_bytes(pick.as_bytes()[0..8].try_into().unwrap());
                 let target = match Self::v_select_assigned_active_target(
                     view, &root, chunk_index, pick_seed, replication_factor,

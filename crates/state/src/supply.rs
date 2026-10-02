@@ -26,6 +26,10 @@ use sumchain_storage::{cf, Database, DelegationStore, StakingStore, StateStore};
 
 use crate::{Result, StateError};
 
+/// Domain of the supply digest folded into the block state root.
+/// Named so the consensus configuration (#268) commits to it.
+pub const SUPPLY_STATE_DIGEST_DOMAIN: &[u8] = b"sumchain.supply.v1";
+
 const LEDGER_KEY: &[u8] = b"ledger";
 const RESERVE_KEY: &[u8] = b"reserve";
 const AGGREGATE_KEY: &[u8] = b"aggregate";
@@ -252,7 +256,7 @@ impl SupplyStore {
         aggregate: &GrantsAggregate,
     ) -> Hash {
         Hash::hash_many(&[
-            b"sumchain.supply.v1",
+            SUPPLY_STATE_DIGEST_DOMAIN,
             ledger.digest().as_bytes(),
             reserve.digest().as_bytes(),
             aggregate.digest().as_bytes(),

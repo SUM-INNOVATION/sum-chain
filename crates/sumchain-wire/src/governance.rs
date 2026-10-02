@@ -506,6 +506,12 @@ pub fn equity_vote_signing_bytes(
 /// Domain separator for deterministic proposal-id derivation.
 pub const GOV_PROPOSAL_DOMAIN: &[u8] = b"SRC-GOV-PROPOSAL:v1:";
 
+/// Asset-kind prefixes [`generate_proposal_id`] hashes; named so the consensus
+/// configuration (#268) can commit to them.
+pub const GOV_ASSET_SRC20_PREFIX: &[u8] = b"src20:";
+pub const GOV_ASSET_NATIVE_ELIGIBILITY_PREFIX: &[u8] = b"native-eligibility:";
+pub const GOV_ASSET_EQUITY_CLASS_PREFIX: &[u8] = b"equity-class:";
+
 /// Deterministically derive a proposal id. Replay-safe: the outer tx `nonce`
 /// (already replay-protected at the tx layer) is mixed in, along with the
 /// proposer, asset, external-ref content hash, and creation height.
@@ -521,12 +527,12 @@ pub fn generate_proposal_id(
     hasher.update(proposer.as_ref());
     match asset {
         GovAssetKind::Src20Token(token_id) => {
-            hasher.update(b"src20:");
+            hasher.update(GOV_ASSET_SRC20_PREFIX);
             hasher.update(token_id)
         }
-        GovAssetKind::NativeEligibility => hasher.update(b"native-eligibility:"),
+        GovAssetKind::NativeEligibility => hasher.update(GOV_ASSET_NATIVE_ELIGIBILITY_PREFIX),
         GovAssetKind::EquityClass(class_id) => {
-            hasher.update(b"equity-class:");
+            hasher.update(GOV_ASSET_EQUITY_CLASS_PREFIX);
             hasher.update(class_id)
         }
     };

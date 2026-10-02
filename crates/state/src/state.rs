@@ -479,7 +479,7 @@ impl StateManager {
         if let Some(diff) = &account_diff {
             for (addr, old_state, _new) in &diff.changes {
                 let mut key = Vec::with_capacity(4 + 20);
-                key.extend_from_slice(b"acct");
+                key.extend_from_slice(ACCOUNT_KEY_PREFIX);
                 key.extend_from_slice(addr.as_bytes());
                 match old_state {
                     Some(state) => {

@@ -25,6 +25,12 @@ use tracing::{debug, info};
 
 use crate::{Result, StateError, StateManager};
 
+/// Token-creation bounds.
+/// Named so the consensus configuration (#268) commits to it.
+pub const MAX_TOKEN_NAME_BYTES: usize = 64;
+pub const MAX_TOKEN_SYMBOL_BYTES: usize = 16;
+pub const MAX_TOKEN_DECIMALS: u8 = 18;
+
 /// Result of executing a token operation
 #[derive(Debug)]
 pub struct TokenExecutionResult {
@@ -230,19 +236,19 @@ impl TokenExecutor {
             .map_err(|e| StateError::BlockValidation(format!("Invalid token creation data: {}", e)))?;
 
         // Validate parameters
-        if create_data.name.is_empty() || create_data.name.len() > 64 {
+        if create_data.name.is_empty() || create_data.name.len() > MAX_TOKEN_NAME_BYTES {
             return Ok(TokenExecutionResult::failure(
                 "Token name must be 1-64 characters".to_string(),
             ));
         }
 
-        if create_data.symbol.is_empty() || create_data.symbol.len() > 16 {
+        if create_data.symbol.is_empty() || create_data.symbol.len() > MAX_TOKEN_SYMBOL_BYTES {
             return Ok(TokenExecutionResult::failure(
                 "Token symbol must be 1-16 characters".to_string(),
             ));
         }
 
-        if create_data.decimals > 18 {
+        if create_data.decimals > MAX_TOKEN_DECIMALS {
             return Ok(TokenExecutionResult::failure(
                 "Decimals must be <= 18".to_string(),
             ));
