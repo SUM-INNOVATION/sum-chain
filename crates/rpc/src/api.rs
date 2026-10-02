@@ -607,6 +607,19 @@ pub trait SumChainApi {
         &self,
     ) -> Result<crate::types::SyncCapabilityInfo, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// The consensus configuration this node runs, and the baseline its
+    /// database recorded (#268).
+    ///
+    /// Read-only. Reports the schema, the recorded and running commitments, the
+    /// baseline height, the engine's rule codes by name, every committed field
+    /// (byte strings, lists and addresses as digests only) and the transition
+    /// history. The baseline is an unverified local record of what this node
+    /// runs; it is not evidence that any other node agrees.
+    #[method(name = "chain_getConsensusConfig")]
+    async fn chain_get_consensus_config(
+        &self,
+    ) -> Result<crate::types::ConsensusConfigInfo, jsonrpsee::types::ErrorObjectOwned>;
+
     #[method(name = "chain_getBlockHeight")]
     async fn chain_get_block_height(
         &self,

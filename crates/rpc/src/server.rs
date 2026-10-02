@@ -224,6 +224,10 @@ pub struct RpcServer {
     /// then be produced, and the RPC says so rather than returning a digest over
     /// defaults, which would compare EQUAL between two nodes that share nothing.
     genesis_identity: Option<GenesisIdentity>,
+    /// The consensus configuration this binary computes from the genesis it was
+    /// given, for `chain_getConsensusConfig`. `None` without a genesis, or if it
+    /// could not be computed — reported as absent rather than fabricated.
+    running_consensus_config: Option<sumchain_consensus::consensus_config::ConsensusConfig>,
     /// Contract executor for smart contract RPCs
     contract_executor: Option<Arc<sumchain_state::ContractExecutorState>>,
 }
@@ -377,6 +381,7 @@ impl RpcServer {
             contract_executor: None,
             chain_params: sumchain_genesis::ChainParams::default(),
             genesis_identity: None,
+            running_consensus_config: None,
         }
     }
 
@@ -398,6 +403,8 @@ impl RpcServer {
     /// compute it is carried as `None` — the RPC reports the digest unavailable,
     /// which is a true statement, where a fabricated one would not be.
     pub fn with_genesis(mut self, genesis: &sumchain_genesis::Genesis) -> Self {
+        self.running_consensus_config =
+            sumchain_consensus::consensus_config::build(genesis).ok();
         self.genesis_identity = genesis
             .activation_digest()
             .ok()
@@ -1683,6 +1690,89 @@ impl SumChainApiServer for RpcServer {
                     digest: seed.digest.clone(),
                 }
             }),
+        })
+    }
+
+    async fn chain_get_consensus_config(
+        &self,
+    ) -> std::result::Result<crate::types::ConsensusConfigInfo, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use sumchain_consensus::consensus_config as ccfg;
+
+        let record =
+            ccfg::read_record(&self.db).map_err(|e| RpcError::Internal(e.to_string()))?;
+        let transitions =
+            ccfg::read_transitions(&self.db).map_err(|e| RpcError::Internal(e.to_string()))?;
+        let running = self.running_consensus_config.as_ref();
+        // Describe the recorded baseline when there is one; before the first
+        // recording start, describe what this binary runs.
+        let described = record.as_ref().map(|r| &r.config).or(running);
+
+        let fields = described
+            .map(|c| {
+                c.fields()
+                    .iter()
+                    .map(|f| crate::types::ConsensusConfigFieldInfo {
+                        id: f.id,
+                        name: ccfg::fields::spec_for(f.id)
+                            .map(|s| s.name.to_string())
+                            .unwrap_or_default(),
+                        value: f.value.render(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(crate::types::ConsensusConfigInfo {
+            schema: ccfg::SCHEMA_V1,
+            status: record
+                .as_ref()
+                .map(|r| r.status.label().to_string())
+                .unwrap_or_else(|| "not-recorded".to_string()),
+            network_agreement: false,
+            commitment: record.as_ref().map(|r| r.commitment.to_string()),
+            baseline_height: record.as_ref().map(|r| r.baseline_height),
+            initial_commitment: record.as_ref().map(|r| r.initial_commitment.to_string()),
+            running_commitment: running.map(|c| c.commitment().to_string()),
+            matches_baseline: match (record.as_ref(), running) {
+                (Some(r), Some(c)) => Some(r.commitment == c.commitment()),
+                _ => None,
+            },
+            rules: {
+                let r = ccfg::fields::RuleNames::of(described);
+                crate::types::ConsensusRulesInfo {
+                    engine: r.engine,
+                    finality: r.finality,
+                    finality_depth: r.finality_depth,
+                    quorum: r.quorum,
+                    fork_choice: r.fork_choice,
+                    proposer: r.proposer,
+                    membership: r.membership,
+                    unfinalized_production: r.unfinalized_production,
+                    block_timestamp: r.block_timestamp,
+                    protocol_version: r.protocol_version,
+                }
+            },
+            fields,
+            transitions: transitions
+                .iter()
+                .map(|t| crate::types::ConsensusConfigTransitionInfo {
+                    seq: t.seq,
+                    kind: t.kind.label().to_string(),
+                    at_height: t.at_height,
+                    from: t.old_commitment.to_string(),
+                    to: t.new_commitment.to_string(),
+                    changed_fields: t
+                        .changed_ids
+                        .iter()
+                        .map(|id| {
+                            ccfg::fields::spec_for(*id)
+                                .map(|s| s.name.to_string())
+                                .unwrap_or_else(|| format!("{id:#06x}"))
+                        })
+                        .collect(),
+                })
+                .collect(),
         })
     }
 

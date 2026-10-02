@@ -1512,6 +1512,20 @@ impl<'a> WriteBatch<'a> {
         self.db.write(self.inner)?;
         Ok(())
     }
+
+    /// Commit the batch atomically and wait for the WAL to reach stable
+    /// storage before returning.
+    ///
+    /// For the few records whose loss after a reported success would be worse
+    /// than the cost of an fsync — a configuration baseline an operator was told
+    /// is recorded, an audit entry they were told is written. Block publication
+    /// keeps using [`WriteBatch::commit`].
+    pub fn commit_durable(self) -> Result<()> {
+        let mut opts = rocksdb::WriteOptions::default();
+        opts.set_sync(true);
+        self.db.write_opt(self.inner, &opts)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

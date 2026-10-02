@@ -1,0 +1,889 @@
+# file	name	verdict	category	reason
+crates/beacon-crypto/src/bls.rs	DST_DLEQ	COMMITTED	registry	0x2803
+crates/beacon-crypto/src/bls.rs	DST_POP	COMMITTED	registry	0x2802
+crates/beacon-crypto/src/bls.rs	DST_SIG	COMMITTED	registry	0x2801
+crates/beacon-crypto/src/bls.rs	G1_COMPRESSED_SIZE	EXCLUDE	algorithm-fixed	BLS12-381 encoding width; also beacon gate refused (genesis lib.rs:3072)
+crates/beacon-crypto/src/bls.rs	G2_COMPRESSED_SIZE	EXCLUDE	algorithm-fixed	BLS12-381 encoding width; also beacon gate refused (genesis lib.rs:3072)
+crates/beacon-crypto/src/bls.rs	SCALAR_SIZE	EXCLUDE	algorithm-fixed	BLS12-381 encoding width; also beacon gate refused (genesis lib.rs:3072)
+crates/beacon-crypto/src/bls.rs	THRESHOLD_T	COMMITTED	registry	0x2800
+crates/beacon-crypto/src/ecies.rs	AEAD_KEY_LEN	EXCLUDE	algorithm-fixed	AEAD key width
+crates/beacon-crypto/src/ecies.rs	AEAD_NONCE_LEN	EXCLUDE	algorithm-fixed	AEAD nonce width
+crates/beacon-crypto/src/ecies.rs	ECIES_AEAD_KEY_LABEL	COMMITTED	registry	0x2806
+crates/beacon-crypto/src/ecies.rs	ECIES_AEAD_NONCE_LABEL	COMMITTED	registry	0x2807
+crates/beacon-crypto/src/ecies.rs	ECIES_CTX_DST	COMMITTED	registry	0x2804
+crates/beacon-crypto/src/ecies.rs	ECIES_CT_LEN	EXCLUDE	algorithm-fixed	32-byte plaintext + 16-byte AEAD tag
+crates/beacon-crypto/src/ecies.rs	ECIES_HKDF_SALT	COMMITTED	registry	0x2805
+crates/beacon-crypto/src/ecies.rs	ECIES_PLAINTEXT_LEN	EXCLUDE	algorithm-fixed	scalar width
+crates/beacon-crypto/src/hash_to_scalar.rs	B_IN_BYTES	EXCLUDE	algorithm-fixed	RFC 9380 expand_message_xmd SHA-256 / BLS12-381 scalar params
+crates/beacon-crypto/src/hash_to_scalar.rs	L	EXCLUDE	algorithm-fixed	RFC 9380 expand_message_xmd SHA-256 / BLS12-381 scalar params
+crates/beacon-crypto/src/hash_to_scalar.rs	S_IN_BYTES	EXCLUDE	algorithm-fixed	RFC 9380 expand_message_xmd SHA-256 / BLS12-381 scalar params
+crates/beacon-crypto/src/vectors.rs	MSG	EXCLUDE	test-only-module	module compiled only under cfg(test)
+crates/beacon-crypto/src/vectors.rs	WRONG_MSG	EXCLUDE	test-only-module	module compiled only under cfg(test)
+crates/beacon-runtime/src/tests.rs	CHAIN_ID	EXCLUDE	test-only-module	module compiled only under cfg(test)
+crates/beacon-runtime/src/tests.rs	EPOCH	EXCLUDE	test-only-module	module compiled only under cfg(test)
+crates/beacon-runtime/src/tests.rs	N	EXCLUDE	test-only-module	module compiled only under cfg(test)
+crates/beacon-runtime/src/wire.rs	BEACON_GENESIS_DST	COMMITTED	registry	0x2880
+crates/beacon-runtime/src/wire.rs	BEACON_OUT_DST	COMMITTED	registry	0x2882
+crates/beacon-runtime/src/wire.rs	BEACON_ROUND_DST	COMMITTED	registry	0x2881
+crates/consensus/src/branch_switch.rs	ARMED	EXCLUDE	test-only-feature	failpoints-feature test hook (branch_switch.rs:349)
+crates/consensus/src/branch_switch.rs	BARRIER_AT_ENV	EXCLUDE	test-only-feature	in #[cfg(feature="failpoints")] mod (branch_switch.rs:349); feature enabled only by dev-dependency consensus/Cargo.toml:35
+crates/consensus/src/branch_switch.rs	BARRIER_FILE_ENV	EXCLUDE	test-only-feature	in #[cfg(feature="failpoints")] mod (branch_switch.rs:349); feature enabled only by dev-dependency consensus/Cargo.toml:35
+crates/consensus/src/branch_switch.rs	BEFORE_HEAD_PIN	EXCLUDE	test-only-feature	failpoints-feature test hook (branch_switch.rs:349)
+crates/consensus/src/branch_switch.rs	PRODUCTION	EXCLUDE	local-fail-stop	read via poa.rs:203/1712 into validate_replacement; exceeding yields SwitchError::Local -> fail_stop (poa.rs:1725,1734), not a verdict; UNCERTAIN: node with lower budget halts where peers reorg
+crates/consensus/src/consensus_config/codec.rs	COMMITMENT_DOMAIN	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/codec.rs	HEADER_LEN	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/codec.rs	MAGIC	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/codec.rs	MAX_ENCODING_BYTES	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/codec.rs	MAX_FIELD_VALUE_BYTES	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/codec.rs	MAX_LIST_ITEMS	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/codec.rs	SCHEMA_V1	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/fields.rs	ALLOC_DIGEST_DOMAIN	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/fields.rs	ENGINE_POA	COMMITTED	registry	committed as 0x0010 engine
+crates/consensus/src/consensus_config/fields.rs	EXCLUDED_PARAMETERS	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/fields.rs	FINALITY_LOCAL_DEPTH	COMMITTED	registry	committed as 0x0011 finality_rule
+crates/consensus/src/consensus_config/fields.rs	FORK_CHOICE_LONGEST_LOCAL_FINALITY	COMMITTED	registry	committed as 0x0013 fork_choice_rule
+crates/consensus/src/consensus_config/fields.rs	GATE_RANGE	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/fields.rs	MEMBERSHIP_STATIC_GENESIS	COMMITTED	registry	committed as 0x0015 membership_rule
+crates/consensus/src/consensus_config/fields.rs	PROPOSER_ROUND_ROBIN	COMMITTED	registry	committed as 0x0014 proposer_rule
+crates/consensus/src/consensus_config/fields.rs	PROTOCOL_VERSION	COMMITTED	registry	committed as 0x0018 protocol_version
+crates/consensus/src/consensus_config/fields.rs	QUORUM_NONE	COMMITTED	registry	committed as 0x0012 quorum_rule
+crates/consensus/src/consensus_config/fields.rs	SCHEMA_V1_FIELDS	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/fields.rs	TIMESTAMP_AFTER_PARENT	COMMITTED	registry	committed as 0x0017 timestamp_rule
+crates/consensus/src/consensus_config/fields.rs	UNFINALIZED_UNBOUNDED	COMMITTED	registry	committed as 0x0016 unfinalized_rule
+crates/consensus/src/consensus_config/record.rs	MAX_TRANSITIONS	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/record.rs	RECORD_KEY	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/record.rs	RECORD_VERSION	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/record.rs	TRANSITION_PREFIX	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/record.rs	TRANSITION_VERSION	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/poa.rs	MAX_BLOCK_FIT_ATTEMPTS	EXCLUDE	local-proposer	proposer packing retry budget; importers never read it (doc poa.rs:587-592)
+crates/consensus/src/poa.rs	MAX_PROPOSAL_REFUSAL_BYTES	EXCLUDE	local-proposer	screening-pass budget, proposer policy only (doc poa.rs:661-670); MAX_BLOCK_WRITE_SET_BYTES itself already committed 0x2004
+crates/consensus/src/poa.rs	MAX_REFUSED_TX_DROPS	EXCLUDE	local-proposer	proposer-only drop budget in create_block loop (poa.rs:830-839); not read on import
+crates/consensus/src/poa.rs	MAX_REORG_WALK	COMMITTED	registry	committed as 0x0200 max_reorg_walk
+crates/consensus/src/poa.rs	PROPOSAL_EXECUTION_SHARE_DIVISOR	EXCLUDE	local-proposer	proposer execution/publication headroom split; importer applies block against full ceiling
+crates/crypto/src/messaging.rs	LOW_ORDER_X25519_POINTS	COMMITTED	registry	0x2100
+crates/genesis/src/lib.rs	GATES_PREDATING_ACTIVATION_RECORDING	EXCLUDE	startup-config-check	read only by retroactive_gates_on_a_first_start lib.rs:3887 (node startup refusal)
+crates/genesis/src/lib.rs	GENESIS_ACTIVATION_DIGEST_DOMAIN	EXCLUDE	handshake-digest	folded into activation_digest lib.rs:4083 -> protocol_digest (state/protocol_digest.rs:376) compared at peer handshake + node startup record (node.rs:527); not in blocks/state; UNCERTAIN if handshake 
+crates/genesis/src/lib.rs	REMEDIATION_GATES	EXCLUDE	startup-config-check	only read by remediation_activation_floor lib.rs:3579 for genesis load ordering check (lib.rs:3122) re peer declaration; gate heights themselves committed 0x1000+
+crates/nft/src/collection.rs	MAX_ROYALTY_BPS	COMMITTED	registry	0x2600
+crates/nft/src/lib.rs	SUM721_VERSION	EXCLUDE	unused	no reader in workspace
+crates/nft/src/metadata.rs	MAX_ATTRIBUTES	EXCLUDE	unused	only Metadata::validate metadata.rs:193-270, never called from state nft_executor (uses params.validate_metadata_size nft_executor.rs:1010) or rpc
+crates/nft/src/metadata.rs	MAX_ATTRIBUTE_NAME_BYTES	EXCLUDE	unused	only Metadata::validate metadata.rs:193-270, never called from state nft_executor (uses params.validate_metadata_size nft_executor.rs:1010) or rpc
+crates/nft/src/metadata.rs	MAX_ATTRIBUTE_VALUE_BYTES	EXCLUDE	unused	only Metadata::validate metadata.rs:193-270, never called from state nft_executor (uses params.validate_metadata_size nft_executor.rs:1010) or rpc
+crates/nft/src/metadata.rs	MAX_DESCRIPTION_BYTES	EXCLUDE	unused	only Metadata::validate metadata.rs:193-270, never called from state nft_executor (uses params.validate_metadata_size nft_executor.rs:1010) or rpc
+crates/nft/src/metadata.rs	MAX_NAME_BYTES	EXCLUDE	unused	only Metadata::validate metadata.rs:193-270, never called from state nft_executor (uses params.validate_metadata_size nft_executor.rs:1010) or rpc
+crates/nft/src/metadata.rs	MAX_URI_BYTES	EXCLUDE	unused	only Metadata::validate metadata.rs:193-270, never called from state nft_executor (uses params.validate_metadata_size nft_executor.rs:1010) or rpc
+crates/primitives/src/tx_error_metrics.rs	COUNTS	EXCLUDE	metrics	Prometheus failed-receipt counter labels; observability only (tx_error_metrics.rs:1-40)
+crates/primitives/src/tx_error_metrics.rs	FAILURE_SERIES	EXCLUDE	metrics	Prometheus failed-receipt counter labels; observability only (tx_error_metrics.rs:1-40)
+crates/primitives/src/tx_error_metrics.rs	SERIES_COUNT	EXCLUDE	metrics	Prometheus failed-receipt counter labels; observability only (tx_error_metrics.rs:1-40)
+crates/primitives/src/tx_error_metrics.rs	STATUS_SERIES	EXCLUDE	metrics	Prometheus failed-receipt counter labels; observability only (tx_error_metrics.rs:1-40)
+crates/primitives/src/tx_error_metrics.rs	SUBSYSTEMS	EXCLUDE	metrics	Prometheus failed-receipt counter labels; observability only (tx_error_metrics.rs:1-40)
+crates/primitives/src/tx_error_metrics.rs	TX_EXECUTION_ERROR_LABEL_NAMES	EXCLUDE	metrics	Prometheus failed-receipt counter labels; observability only (tx_error_metrics.rs:1-40)
+crates/primitives/src/tx_error_metrics.rs	TX_EXECUTION_ERROR_METRIC	EXCLUDE	metrics	Prometheus failed-receipt counter labels; observability only (tx_error_metrics.rs:1-40)
+crates/primitives/src/tx_error_metrics.rs	UNATTRIBUTED	EXCLUDE	metrics	Prometheus failed-receipt counter labels; observability only (tx_error_metrics.rs:1-40)
+crates/primitives/src/tx_error_metrics.rs	UNATTRIBUTED_INDEX	EXCLUDE	metrics	Prometheus failed-receipt counter labels; observability only (tx_error_metrics.rs:1-40)
+crates/state/src/account_root.rs	ACCOUNT_ROW_ACT_THRESHOLD	EXCLUDE	telemetry	read only by node.rs:698-720 to log the account-row count; never on the execution path
+crates/state/src/account_root.rs	ACCOUNT_ROW_WARN_THRESHOLD	EXCLUDE	telemetry	read only by node.rs:698-720 to log the account-row count; never on the execution path
+crates/state/src/account_root.rs	ACCOUNT_STATE_DIGEST_DOMAIN	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/agreement_executor.rs	CLOSED	EXCLUDE	unused	no non-test reader in crates/*/src; production builds AgreementGates::from_params(agreement_executor.rs) from ChainParams heights
+crates/state/src/agreement_executor.rs	OPEN	EXCLUDE	unused	no non-test reader in crates/*/src; production builds AgreementGates::from_params(agreement_executor.rs) from ChainParams heights
+crates/state/src/beacon_executor.rs	BEACON_GENERIC_FAILURE	EXCLUDE	receipt-detail	beacon_executor.rs:225 Failed(code); state root folds only is_success+fee (executor.rs:4296-4299)
+crates/state/src/beacon_store.rs	ADJUDICATED	COMMITTED	registry	0x2509
+crates/state/src/beacon_store.rs	BEACON_DECODE_BYTE_LIMIT	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/beacon_store.rs	BEACON_RECORD_VERSION	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/beacon_store.rs	BEACON_STATE_DIGEST_DOMAIN	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/beacon_store.rs	CT_LEN	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/beacon_store.rs	DEAL	COMMITTED	registry	0x2503
+crates/state/src/beacon_store.rs	DEAL_EQUIV	COMMITTED	registry	0x250b
+crates/state/src/beacon_store.rs	FALSE_ACCUSER	COMMITTED	registry	0x2508
+crates/state/src/beacon_store.rs	G1_LEN	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/beacon_store.rs	G2_LEN	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/beacon_store.rs	KEY	COMMITTED	registry	0x2502
+crates/state/src/beacon_store.rs	KEY_EQUIV	COMMITTED	registry	0x250a
+crates/state/src/beacon_store.rs	MEMBERSHIP	COMMITTED	registry	0x2507
+crates/state/src/beacon_store.rs	OUTPUT	COMMITTED	registry	0x2506
+crates/state/src/beacon_store.rs	OUT_LEN	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/beacon_store.rs	ROUND	COMMITTED	registry	0x2505
+crates/state/src/beacon_store.rs	VERDICT	COMMITTED	registry	0x2504
+crates/state/src/compute_pool.rs	ASSIGN_SCORE_CONTEXT	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/compute_pool_store.rs	ACCEPTED_LEAF	COMMITTED	registry	0x2511
+crates/state/src/compute_pool_store.rs	ACTIVE_OFFER_INDEX	COMMITTED	registry	0x250f
+crates/state/src/compute_pool_store.rs	ASSIGNMENT	COMMITTED	registry	0x2512
+crates/state/src/compute_pool_store.rs	C1_DECODE_BYTE_LIMIT	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/compute_pool_store.rs	C1_SCHEMA_VERSION	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/compute_pool_store.rs	C1_STATE_DIGEST_DOMAIN	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/compute_pool_store.rs	ENTITLEMENT	COMMITTED	registry	0x2513
+crates/state/src/compute_pool_store.rs	JOB	COMMITTED	registry	0x250c
+crates/state/src/compute_pool_store.rs	OFFER	COMMITTED	registry	0x250e
+crates/state/src/compute_pool_store.rs	RESERVATION	COMMITTED	registry	0x2510
+crates/state/src/compute_pool_store.rs	UNIT	COMMITTED	registry	0x250d
+crates/state/src/docclass_executor.rs	CLOSED	EXCLUDE	unused	no non-test reader in crates/*/src; production builds DocClassGates::from_params(docclass_executor.rs) from ChainParams heights
+crates/state/src/docclass_executor.rs	DOCCLASS_STAKE_ESCROW_DOMAIN	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/docclass_executor.rs	OPEN	EXCLUDE	unused	no non-test reader in crates/*/src; production builds DocClassGates::from_params(docclass_executor.rs) from ChainParams heights
+crates/state/src/education_executor.rs	ASSESS_OPEN	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/state/src/education_executor.rs	CAT_ACTIVE	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/state/src/education_executor.rs	CAT_ARCHIVED	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/state/src/education_executor.rs	CAT_DEPRECATED	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/state/src/education_executor.rs	CAT_DRAFT	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/state/src/education_executor.rs	EDU_ASSESSMENT_ROOT_DOMAIN	COMMITTED	registry	0x2514
+crates/state/src/education_executor.rs	EDU_CATALOG_BY_CODE_DOMAIN	COMMITTED	registry	0x2515
+crates/state/src/education_executor.rs	EDU_CONTENT_ROOT_DOMAIN	COMMITTED	registry	0x2516
+crates/state/src/education_executor.rs	EDU_ENROLLMENT_ROOT_DOMAIN	COMMITTED	registry	0x2517
+crates/state/src/education_executor.rs	F_ASSESSMENT_NOT_FOUND	EXCLUDE	receipt-detail	returned as Err(code) by EducationExecutor::validate, mapped to TxStatus::Failed(code) at executor.rs:1946-1956; root folds only is_success+fee (executor.rs:4298)
+crates/state/src/education_executor.rs	F_ATTEMPTS_EXHAUSTED	EXCLUDE	receipt-detail	returned as Err(code) by EducationExecutor::validate, mapped to TxStatus::Failed(code) at executor.rs:1946-1956; root folds only is_success+fee (executor.rs:4298)
+crates/state/src/education_executor.rs	F_CATALOG_NOT_FOUND	EXCLUDE	receipt-detail	returned as Err(code) by EducationExecutor::validate, mapped to TxStatus::Failed(code) at executor.rs:1946-1956; root folds only is_success+fee (executor.rs:4298)
+crates/state/src/education_executor.rs	F_CATALOG_WRONG_STATE	EXCLUDE	receipt-detail	returned as Err(code) by EducationExecutor::validate, mapped to TxStatus::Failed(code) at executor.rs:1946-1956; root folds only is_success+fee (executor.rs:4298)
+crates/state/src/education_executor.rs	F_DUPLICATE	EXCLUDE	receipt-detail	returned as Err(code) by EducationExecutor::validate, mapped to TxStatus::Failed(code) at executor.rs:1946-1956; root folds only is_success+fee (executor.rs:4298)
+crates/state/src/education_executor.rs	F_INVALID_REFERENCE	EXCLUDE	receipt-detail	returned as Err(code) by EducationExecutor::validate, mapped to TxStatus::Failed(code) at executor.rs:1946-1956; root folds only is_success+fee (executor.rs:4298)
+crates/state/src/education_executor.rs	F_MALFORMED	EXCLUDE	receipt-detail	returned as Err(code) by EducationExecutor::validate, mapped to TxStatus::Failed(code) at executor.rs:1946-1956; root folds only is_success+fee (executor.rs:4298)
+crates/state/src/education_executor.rs	F_NOT_AUTHORIZED	EXCLUDE	receipt-detail	returned as Err(code) by EducationExecutor::validate, mapped to TxStatus::Failed(code) at executor.rs:1946-1956; root folds only is_success+fee (executor.rs:4298)
+crates/state/src/education_executor.rs	F_NOT_ENROLLED	EXCLUDE	receipt-detail	returned as Err(code) by EducationExecutor::validate, mapped to TxStatus::Failed(code) at executor.rs:1946-1956; root folds only is_success+fee (executor.rs:4298)
+crates/state/src/education_executor.rs	F_OFFERING_NOT_FOUND	EXCLUDE	receipt-detail	returned as Err(code) by EducationExecutor::validate, mapped to TxStatus::Failed(code) at executor.rs:1946-1956; root folds only is_success+fee (executor.rs:4298)
+crates/state/src/education_executor.rs	F_OFFERING_WRONG_STATE	EXCLUDE	receipt-detail	returned as Err(code) by EducationExecutor::validate, mapped to TxStatus::Failed(code) at executor.rs:1946-1956; root folds only is_success+fee (executor.rs:4298)
+crates/state/src/education_executor.rs	F_UNSUPPORTED	EXCLUDE	receipt-detail	returned as Err(code) by EducationExecutor::validate, mapped to TxStatus::Failed(code) at executor.rs:1946-1956; root folds only is_success+fee (executor.rs:4298)
+crates/state/src/education_executor.rs	F_WINDOW_CLOSED	EXCLUDE	receipt-detail	returned as Err(code) by EducationExecutor::validate, mapped to TxStatus::Failed(code) at executor.rs:1946-1956; root folds only is_success+fee (executor.rs:4298)
+crates/state/src/education_executor.rs	MAX_EDU_LIST_LIMIT	EXCLUDE	client-only	clamp in read-only list helpers (education_executor.rs:555) called from rpc/server.rs:2078-2189
+crates/state/src/education_executor.rs	OFF_ACTIVE	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/state/src/education_executor.rs	OFF_ARCHIVED	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/state/src/education_executor.rs	OFF_CANCELLED	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/state/src/education_executor.rs	OFF_COMPLETED	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/state/src/education_executor.rs	OFF_DRAFT	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/state/src/education_executor.rs	OFF_ENROLLMENT_CLOSED	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/state/src/education_executor.rs	OFF_SUSPENDED	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/state/src/employment_executor.rs	CLOSED	EXCLUDE	unused	no non-test reader in crates/*/src; production builds EmploymentGates::from_params(employment_executor.rs) from ChainParams heights
+crates/state/src/employment_executor.rs	OPEN	EXCLUDE	unused	no non-test reader in crates/*/src; production builds EmploymentGates::from_params(employment_executor.rs) from ChainParams heights
+crates/state/src/executor.rs	REFUSAL_FLOOR_BYTES	EXCLUDE	proposer-local	ProposalScreening::record_refusal (executor.rs:157) charges the proposer-supplied refusal budget; screening never decides validity
+crates/state/src/finance_executor.rs	CLOSED	EXCLUDE	unused	no non-test reader in crates/*/src; production builds FinanceGates::from_params(finance_executor.rs) from ChainParams heights
+crates/state/src/finance_executor.rs	OPEN	EXCLUDE	unused	no non-test reader in crates/*/src; production builds FinanceGates::from_params(finance_executor.rs) from ChainParams heights
+crates/state/src/governance_executor.rs	NATIVE_PASS_THRESHOLD_BPS	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/healthcare_executor.rs	CLOSED	EXCLUDE	unused	no non-test reader in crates/*/src; production builds HealthcareGates::from_params(healthcare_executor.rs) from ChainParams heights
+crates/state/src/healthcare_executor.rs	OPEN	EXCLUDE	unused	no non-test reader in crates/*/src; production builds HealthcareGates::from_params(healthcare_executor.rs) from ChainParams heights
+crates/state/src/legal_executor.rs	CLOSED	EXCLUDE	unused	no non-test reader in crates/*/src; production builds LegalGates::from_params(legal_executor.rs) from ChainParams heights
+crates/state/src/legal_executor.rs	OPEN	EXCLUDE	unused	no non-test reader in crates/*/src; production builds LegalGates::from_params(legal_executor.rs) from ChainParams heights
+crates/state/src/lib.rs	AGREEMENT_PARTY_AUTHORITY_UNSUPPORTED	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
+crates/state/src/lib.rs	AMBIGUOUS_POLICY_ID_UNRESOLVABLE	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
+crates/state/src/lib.rs	CONSENT_GRANT_REQUEST_REQUIRED	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
+crates/state/src/lib.rs	CONSENT_SUBJECT_KEY_MISMATCH	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
+crates/state/src/lib.rs	CONSENT_SUBJECT_SIGNATURE_INVALID	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
+crates/state/src/lib.rs	DOCCLASS_CREDENTIAL_VALIDITY_TOO_LONG	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
+crates/state/src/lib.rs	DOCCLASS_SIGNATURE_UNSUPPORTED	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
+crates/state/src/lib.rs	DOCCLASS_UNKNOWN_ATTRIBUTE_REFUSED	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
+crates/state/src/lib.rs	EQUITY_OWNERSHIP_PROOF_SUBMITTED	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
+crates/state/src/lib.rs	ISSUER_SELF_REGISTRATION_UNSUPPORTED	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
+crates/state/src/lib.rs	MAX_ACCUMULATING_ROW_BYTES	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/lib.rs	MAX_BLOCK_WRITE_SET_BYTES	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/lib.rs	MAX_INDEX_KEY_TEXT_BYTES	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/lib.rs	MAX_SUBSYSTEM_PAYLOAD_BYTES	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/lib.rs	MAX_TX_WRITE_SET_BYTES	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/lib.rs	PROOF_ID_BYTES	EXCLUDE	unused	no non-test reader in crates/*/src (doc at lib.rs:695-701 says no execution path reads it)
+crates/state/src/lib.rs	PROPERTY_PROOF_SUBMISSION_UNSUPPORTED	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
+crates/state/src/lib.rs	ROYALTY_OPERATION_UNSUPPORTED	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
+crates/state/src/lib.rs	TX_WRITE_SET_BOUND_RECEIPT_CODE	EXCLUDE	receipt-detail	code inside Failed(400) at executor.rs:3637; the bound itself (MAX_TX_WRITE_SET_BYTES) is folded, the code is not hashed (executor.rs:4298 folds is_success only)
+crates/state/src/lib.rs	UNNAMED_POLICY_ID	COMMITTED	registry	0x2518
+crates/state/src/lib.rs	UNPAYABLE_ROYALTY_UNSUPPORTED	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
+crates/state/src/lib.rs	VERIFY_PROOF_UNSUPPORTED	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
+crates/state/src/messaging_executor.rs	MESSAGING_DAY_SECONDS	COMMITTED	registry	0x2519
+crates/state/src/messaging_executor.rs	PENDING_PAYMENT_EXPIRY	COMMITTED	registry	0x251a
+crates/state/src/messaging_executor.rs	SPAM_REPORT_SCORE_INCREMENT	COMMITTED	registry	0x251b
+crates/state/src/messaging_executor.rs	STAKED_SENDER_QUOTA_MULTIPLIER	COMMITTED	registry	0x251c
+crates/state/src/messaging_view.rs	DEFAULT_SPONSORSHIP_ENABLED	COMMITTED	registry	0x251d
+crates/state/src/nft_executor.rs	CLOSED	EXCLUDE	unused	read only by NftExecutor::execute_with_gate (nft_executor.rs:572), which has no non-test caller; production gates come from NftGates::from_params
+crates/state/src/nft_executor.rs	MAX_NFT_BATCH_MINT_REQUESTS	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/nft_executor.rs	OPEN	EXCLUDE	unused	no non-test reader in crates/*/src; production builds NftGates::from_params(nft_executor.rs) from ChainParams heights
+crates/state/src/node_registry.rs	CF_ACCOUNT_ENCRYPTION_KEYS	EXCLUDE	storage-layout	private alias of a sumchain_storage::cf name used by node_registry.rs reads/writes; not hashed by any committed digest (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), 
+crates/state/src/node_registry.rs	CF_ACTIVE_ARCHIVE_NODES_HISTORY	EXCLUDE	storage-layout	private alias of a sumchain_storage::cf name used by node_registry.rs reads/writes; not hashed by any committed digest (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), 
+crates/state/src/node_registry.rs	CF_ARCHIVE_UNBONDING	EXCLUDE	storage-layout	private alias of a sumchain_storage::cf name used by node_registry.rs reads/writes; not hashed by any committed digest (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), 
+crates/state/src/node_registry.rs	CF_NODE_REGISTRY	EXCLUDE	storage-layout	private alias of a sumchain_storage::cf name used by node_registry.rs reads/writes; not hashed by any committed digest (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), 
+crates/state/src/node_registry.rs	MIN_ARCHIVE_STAKE	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/property_executor.rs	CLOSED	EXCLUDE	unused	no non-test reader in crates/*/src; production builds PropertyGates::from_params(property_executor.rs) from ChainParams heights
+crates/state/src/property_executor.rs	OPEN	EXCLUDE	unused	no non-test reader in crates/*/src; production builds PropertyGates::from_params(property_executor.rs) from ChainParams heights
+crates/state/src/protocol_digest.rs	PROTOCOL_DIGEST_DOMAIN	EXCLUDE	self-domain	protocol digest's own domain (protocol_digest.rs:381); pre-flight handshake value, not read by block validation
+crates/state/src/reorg_undo.rs	SUPPORTED_JOURNAL_VERSIONS	EXCLUDE	local	reorg_undo.rs:819 gates whether this node can decode its own undo journal; journals never hashed into a block
+crates/state/src/schema_validator.rs	MAX_ATTRIBUTE_VALUE_LENGTH	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/schema_validator.rs	MAX_CREDENTIAL_TYPE_LENGTH	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/schema_validator.rs	MAX_DATE_LENGTH	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/schema_validator.rs	MAX_HINT_LENGTH	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/schema_validator.rs	MAX_NAME_LENGTH	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/schema_validator.rs	MAX_PROGRAM_LENGTH	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/schema_validator.rs	MAX_TITLE_LENGTH	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/state/src/schema_validator.rs	PHONE_LIKE_DIGIT_COUNT	COMMITTED	registry	0x251e
+crates/state/src/schema_validator.rs	STORAGE_HINT_PII_PATTERNS	COMMITTED	registry	0x251f
+crates/state/src/snapshot.rs	MIN_SUPPORTED_SNAPSHOT_VERSION	EXCLUDE	local	node-local snapshot / fast-sync artefact (snapshot.rs); never hashed into a block
+crates/state/src/snapshot.rs	REQUIRED_FAST_SYNC_FAMILIES	EXCLUDE	local	node-local snapshot / fast-sync artefact (snapshot.rs); never hashed into a block
+crates/state/src/snapshot.rs	SNAPSHOT_CARRIES	EXCLUDE	local	node-local snapshot / fast-sync artefact (snapshot.rs); never hashed into a block
+crates/state/src/snapshot.rs	SNAPSHOT_MAGIC	EXCLUDE	local	node-local snapshot / fast-sync artefact (snapshot.rs); never hashed into a block
+crates/state/src/snapshot.rs	SNAPSHOT_VERSION	EXCLUDE	local	node-local snapshot / fast-sync artefact (snapshot.rs); never hashed into a block
+crates/state/src/staking_executor.rs	MAX_VALIDATOR_METADATA_BYTES	COMMITTED	registry	0x2520
+crates/state/src/storage_metadata.rs	CF_ACTIVE_CHALLENGES	EXCLUDE	storage-layout	alias of a sumchain_storage::cf name used by storage_metadata.rs; family not iterated/hashed by any committed digest
+crates/state/src/storage_metadata.rs	CF_ASSIGNMENT_ATTESTATIONS_V2	EXCLUDE	storage-layout	alias of a sumchain_storage::cf name used by storage_metadata.rs; family not iterated/hashed by any committed digest
+crates/state/src/storage_metadata.rs	CF_ASSIGNMENT_ATTESTATIONS_V2_EPOCH	EXCLUDE	storage-layout	alias of a sumchain_storage::cf name used by storage_metadata.rs; family not iterated/hashed by any committed digest
+crates/state/src/storage_metadata.rs	CF_CHALLENGEABLE_FILES_V2	EXCLUDE	storage-layout	alias of a sumchain_storage::cf name used by storage_metadata.rs; family not iterated/hashed by any committed digest
+crates/state/src/storage_metadata.rs	CF_FILE_REASSIGNMENTS	EXCLUDE	storage-layout	alias of a sumchain_storage::cf name used by storage_metadata.rs; family not iterated/hashed by any committed digest
+crates/state/src/storage_metadata.rs	CF_META	EXCLUDE	storage-layout	alias of a sumchain_storage::cf name used by storage_metadata.rs; family not iterated/hashed by any committed digest
+crates/state/src/storage_metadata.rs	CF_STORAGE_METADATA	EXCLUDE	storage-layout	alias of a sumchain_storage::cf name used by storage_metadata.rs; family not iterated/hashed by any committed digest
+crates/state/src/storage_metadata.rs	CF_STORAGE_METADATA_V2	EXCLUDE	storage-layout	alias of a sumchain_storage::cf name used by storage_metadata.rs; family not iterated/hashed by any committed digest
+crates/state/src/storage_metadata.rs	MAX_ASSIGNED_COUNT_CHUNK_COUNT	EXCLUDE	client-only	read only in epoch_coverage_from (storage_metadata.rs:2540) whose callers are the committed RPC path compute_coverage_v2 and #[cfg(test)] v_ variants (:2483, :2643)
+crates/state/src/storage_metadata.rs	POR_SCHEDULER_BACKFILL_MARKER	EXCLUDE	storage-layout	cf::META marker key read/written by execution (storage_metadata.rs:1276, :1313) to make an idempotent backfill one-shot; cf::META is not digested
+crates/state/src/storage_metadata.rs	POR_SCHEDULE_CHUNK_TAG	COMMITTED	registry	0x2521
+crates/state/src/storage_metadata.rs	POR_SCHEDULE_FILE_TAG	COMMITTED	registry	0x2522
+crates/state/src/storage_metadata.rs	POR_SCHEDULE_PICK_TAG	COMMITTED	registry	0x2523
+crates/state/src/storage_metadata.rs	POR_SCHEDULE_SEED_DOMAIN	COMMITTED	registry	0x2524
+crates/state/src/storage_metadata.rs	STORAGE_CHALLENGE_SEED_DOMAIN	COMMITTED	registry	0x2525
+crates/state/src/supply.rs	AGGREGATE_KEY	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/state/src/supply.rs	COHORT_KEY	EXCLUDE	storage-layout	cf::SUPPLY row key read back by execution (supply.rs:226, written :491) but not part of the supply digest (supply.rs:235-258)
+crates/state/src/supply.rs	LAST_WITHHELD_LOG_HEIGHT	EXCLUDE	telemetry	rate-limits a withheld-grant log line (supply.rs:1008-1010)
+crates/state/src/supply.rs	LEDGER_KEY	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/state/src/supply.rs	RESERVE_KEY	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/state/src/supply.rs	SUPPLY_STATE_DIGEST_DOMAIN	COMMITTED	registry	0x2526
+crates/state/src/supply.rs	WITHHELD_LOG_INTERVAL	EXCLUDE	telemetry	rate-limits a withheld-grant log line (supply.rs:1008-1010)
+crates/state/src/tax_executor.rs	CLOSED	EXCLUDE	unused	no non-test reader in crates/*/src; production builds TaxGates::from_params(tax_executor.rs) from ChainParams heights
+crates/state/src/tax_executor.rs	OPEN	EXCLUDE	unused	no non-test reader in crates/*/src; production builds TaxGates::from_params(tax_executor.rs) from ChainParams heights
+crates/state/src/token_executor.rs	MAX_TOKEN_DECIMALS	COMMITTED	registry	0x2527
+crates/state/src/token_executor.rs	MAX_TOKEN_NAME_BYTES	COMMITTED	registry	0x2528
+crates/state/src/token_executor.rs	MAX_TOKEN_SYMBOL_BYTES	COMMITTED	registry	0x2529
+crates/storage/src/branch.rs	EMPTY	EXCLUDE	local	process-local helper static (shared empty map / candidate id counter); no consensus value
+crates/storage/src/candidate.rs	LEGACY_CUTOFF_OVERRIDE	EXCLUDE	test-only-feature	exists only under the test-hooks feature, which no production build enables
+crates/storage/src/candidate.rs	LEGACY_ROOT_COMPATIBILITY_HEIGHT	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/storage/src/candidate.rs	SUBJECT_TX_DOMAIN	EXCLUDE	local	candidate.rs:557 intra-node ExecutionSubject self-check; never hashed into a header or sent to peers
+crates/storage/src/db.rs	ACCOUNT_ENCRYPTION_KEYS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	ACTIVE_ARCHIVE_NODES_HISTORY	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	ACTIVE_CHALLENGES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	AGREEMENT_ATTESTATIONS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	AGREEMENT_COMMITMENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	AGREEMENT_EVENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	AGREEMENT_EXECUTOR_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	AGREEMENT_EXECUTOR_LINKS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	AGREEMENT_IP_ACTIONS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	AGREEMENT_PARTY_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	AGREEMENT_PROOFS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	AGREEMENT_SIGNATURES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	ALL_CFS	EXCLUDE	local	list of families opened by Database::open; names locations, decides no rule
+crates/storage/src/db.rs	APPLICATION_JOURNAL	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	ARCHIVE_UNBONDING	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	ASSIGNMENT_ATTESTATIONS_V2	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	ASSIGNMENT_ATTESTATIONS_V2_EPOCH	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	BEACON_STATE	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/storage/src/db.rs	BEACON_STATE_DIFFS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	BLOCKS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	BLOCK_HEIGHT	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	CHALLENGEABLE_FILES_V2	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	COMPUTE_POOL_STATE	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/storage/src/db.rs	COMPUTE_POOL_STATE_DIFFS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	CONTRACT_CODE	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	CONTRACT_METADATA	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	CONTRACT_STATE_DIFFS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	CONTRACT_STORAGE	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	DELEGATIONS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	DELEGATION_VALIDATOR_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	DOCCLASS_CREDENTIALS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	DOCCLASS_ELIGIBILITY	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	DOCCLASS_EVENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	DOCCLASS_IDENTITY_ROOTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	DOCCLASS_ISSUERS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	DOCCLASS_ISSUER_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	DOCCLASS_REVOCATIONS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	DOCCLASS_SUBJECT_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_ASSESSMENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_CATALOG_ACCREDITATION	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_CATALOG_BY_CODE	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_CATALOG_BY_INSTITUTION	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_CATALOG_BY_STATUS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_CATALOG_CONTENT_ITEMS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_CATALOG_ENTRIES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_CATALOG_PREREQUISITES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_CONTENT_ITEMS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_ENROLLMENT_LINKS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_GRADES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_INSTRUCTOR_BINDINGS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_OFFERINGS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_OFFERING_BY_CATALOG	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_OFFERING_BY_STATUS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_SUBMISSIONS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EDU_SUBMISSION_BY_STUDENT_COMMITMENT	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EMPLOYMENT_CREDENTIALS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EMPLOYMENT_EMPLOYEE_ADDRESS_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EMPLOYMENT_EMPLOYEE_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EMPLOYMENT_EMPLOYER_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EMPLOYMENT_INCOME_ATTESTATIONS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EMPLOYMENT_INCOME_HOLDER_ADDRESS_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EMPLOYMENT_ISSUERS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EMPLOYMENT_PROOFS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EMPLOYMENT_SUBJECT_INCOME_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EMPLOYMENT_SYSTEM_EVENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EQUITY_BALANCES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EQUITY_CONTROLLERS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EQUITY_CORPORATE_ACTIONS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EQUITY_ENTITIES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EQUITY_ENTITY_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EQUITY_EVENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EQUITY_GOVERNANCE	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EQUITY_HOLDER_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EQUITY_PROOFS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EQUITY_SNAPSHOTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	EQUITY_TOKENS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	FILE_REASSIGNMENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	FINANCE_ADDRESS_PROOFS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	FINANCE_BANK_STANDINGS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	FINANCE_HOLDER_ADDRESS_PROOF_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	FINANCE_HOLDER_BANK_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	FINANCE_HOLDER_KYC_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	FINANCE_ISSUERS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	FINANCE_JURISDICTION_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	FINANCE_KYC_ATTESTATIONS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	FINANCE_PROOFS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	FINANCE_SUBJECT_ADDRESS_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	FINANCE_SUBJECT_BANK_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	FINANCE_SUBJECT_KYC_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	FINANCE_SYSTEM_EVENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	GB	EXCLUDE	local	unit for BackupInfo::size_human display (db.rs:26-35)
+crates/storage/src/db.rs	GOV_EQUITY_CLASS_ROOTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	GOV_EQUITY_USED_COMMITMENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	GOV_PROPOSALS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	GOV_PROPOSAL_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	GOV_QUALIFYING_ASSETS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	GOV_REGISTRY	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	GOV_SNAPSHOTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	GOV_VOTES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	HEALTHCARE_CONSENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	HEALTHCARE_MEMBERSHIPS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	HEALTHCARE_MEMBER_ADDRESS_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	HEALTHCARE_MEMBER_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	HEALTHCARE_PATIENT_ADDRESS_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	HEALTHCARE_PATIENT_RX_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	HEALTHCARE_PRESCRIBER_RX_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	HEALTHCARE_PRESCRIPTIONS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	HEALTHCARE_PROOFS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	HEALTHCARE_PROVIDERS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	HEALTHCARE_PROVIDER_NETWORK_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	HEALTHCARE_SUBJECT_ADDRESS_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	HEALTHCARE_SUBJECT_CONSENT_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	HEALTHCARE_SYSTEM_EVENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	INFERENCE_ATTESTATIONS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	INFERENCE_ATTESTATIONS_BY_SESSION	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	INFERENCE_ATTESTATION_SPONSORS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	INFERENCE_CLAIMS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	INFERENCE_DISPUTES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	INFERENCE_SESSIONS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	INFERENCE_VERIFIERS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	ISSUER_REGISTRY	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	KB	EXCLUDE	local	unit for BackupInfo::size_human display (db.rs:26-35)
+crates/storage/src/db.rs	LEGAL_BENEFITS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	LEGAL_CASES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	LEGAL_CASE_EVENT_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	LEGAL_CASE_ORDER_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	LEGAL_EVENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	LEGAL_JURISDICTION_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	LEGAL_ORDERS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	LEGAL_PROOFS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	LEGAL_SYSTEM_EVENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	MB	EXCLUDE	local	unit for BackupInfo::size_human display (db.rs:26-35)
+crates/storage/src/db.rs	MESSAGING_BLOCKED	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	MESSAGING_CONFIG	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	MESSAGING_CONTACTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	MESSAGING_DAILY_COUNTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	MESSAGING_EVENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	MESSAGING_INBOX_FILTERS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	MESSAGING_PAYMENTS_BY_RECIPIENT	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	MESSAGING_PENDING_PAYMENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	MESSAGING_PUBLIC_KEYS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	MESSAGING_SENDER_EVENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	MESSAGING_SENDER_NONCES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	MESSAGING_SPAM_SCORES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	MESSAGING_STAKES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	META	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	MISSED_BLOCKS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	NFT_COLLECTIONS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	NFT_COLLECTION_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	NFT_OWNER_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	NFT_TOKENS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	NODE_REGISTRY	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	POLICY_ACCOUNTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	POLICY_PROPOSALS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	PROPERTY_ASSETS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	PROPERTY_ASSET_COVERAGE_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	PROPERTY_ASSET_ENCUMBRANCE_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	PROPERTY_ASSET_TITLE_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	PROPERTY_CLAIMS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	PROPERTY_COVERAGE	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	PROPERTY_COVERAGE_CLAIM_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	PROPERTY_ENCUMBRANCES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	PROPERTY_JURISDICTION_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	PROPERTY_PROOFS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	PROPERTY_SYSTEM_EVENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	PROPERTY_TITLE_EVENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	RECEIPTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	SLASHING_RECORDS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	STATE	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/storage/src/db.rs	STATE_DIFFS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	STORAGE_METADATA	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	STORAGE_METADATA_V2	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	SUPPLY	EXCLUDE	storage-format	stored-record encoding or row/column naming; a change is a storage migration, not a consensus value
+crates/storage/src/db.rs	TAX_CLAIM_TYPES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	TAX_DISCLOSURES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	TAX_EVENTS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	TAX_ISSUERS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	TAX_ISSUER_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	TAX_POLICIES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	TAX_PROOFS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	TAX_SUBJECT_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	TOKENS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	TOKEN_ALLOWANCES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	TOKEN_BALANCES	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	TOKEN_HOLDER_INDEX	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	TRANSACTIONS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	TX_BY_RECIPIENT	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	TX_BY_SENDER	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	UNBONDING_DELEGATIONS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	VALIDATORS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	VALIDATOR_SETS	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/db.rs	VALIDATOR_SIGNING_INFO	EXCLUDE	storage-layout	column-family name; no committed digest iterates or hashes this family (digests folded into the block state root: account_root.rs:454 (cf::STATE/acct), supply.rs:235, compute_pool_store.rs:844, beacon
+crates/storage/src/docclass_store.rs	SUBJECT_IDENTITY_INDEX_TAG	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/storage/src/equity_store.rs	EQUITY_MERKLE_EMPTY_DOMAIN	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/storage/src/equity_store.rs	EQUITY_MERKLE_LEAF_DOMAIN	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/storage/src/equity_store.rs	EQUITY_MERKLE_NODE_DOMAIN	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/storage/src/journal.rs	AFTER_DOMAIN	EXCLUDE	local	node-local application undo journal (journal.rs; db.rs:579 "Never hashed into a block and never read by consensus")
+crates/storage/src/journal.rs	AFTER_TAG_LEN	EXCLUDE	local	node-local application undo journal (journal.rs; db.rs:579 "Never hashed into a block and never read by consensus")
+crates/storage/src/journal.rs	FORMAT_HIGH_WATER_META_KEY	EXCLUDE	local	node-local application undo journal (journal.rs; db.rs:579 "Never hashed into a block and never read by consensus")
+crates/storage/src/journal.rs	FORMAT_VERSION_V1	EXCLUDE	local	node-local application undo journal (journal.rs; db.rs:579 "Never hashed into a block and never read by consensus")
+crates/storage/src/journal.rs	MAGIC	EXCLUDE	local	node-local application undo journal (journal.rs; db.rs:579 "Never hashed into a block and never read by consensus")
+crates/storage/src/journal.rs	UNDO_HISTORY_FLOOR_META_KEY	EXCLUDE	local	node-local application undo journal (journal.rs; db.rs:579 "Never hashed into a block and never read by consensus")
+crates/storage/src/messaging_store.rs	DAILY_QUOTA	EXCLUDE	storage-layout	row key in cf::MESSAGING_CONFIG read/written via messaging_view.rs:61-137; the value is state, the key only names where; messaging families not digested
+crates/storage/src/messaging_store.rs	INDEX_BACKFILL_V1	EXCLUDE	local	committed-DB backfill marker (messaging_store.rs:715, :803), not on the execution path
+crates/storage/src/messaging_store.rs	INDEX_PRESENT	EXCLUDE	storage-layout	value of a presence/index row; execution only tests existence (messaging_view.rs:366 contains); messaging families not digested
+crates/storage/src/messaging_store.rs	MAX_MESSAGE_SIZE	EXCLUDE	storage-layout	row key in cf::MESSAGING_CONFIG read/written via messaging_view.rs:61-137; the value is state, the key only names where; messaging families not digested
+crates/storage/src/messaging_store.rs	MESSAGING_LIST_DEFAULT	EXCLUDE	client-only	clamp/default for committed list helpers (messaging_store.rs:657, rpc/server.rs:3659)
+crates/storage/src/messaging_store.rs	MESSAGING_LIST_MAX	EXCLUDE	client-only	clamp/default for committed list helpers (messaging_store.rs:657, rpc/server.rs:3659)
+crates/storage/src/messaging_store.rs	MIN_TRUST_STAKE	EXCLUDE	storage-layout	row key in cf::MESSAGING_CONFIG read/written via messaging_view.rs:61-137; the value is state, the key only names where; messaging families not digested
+crates/storage/src/messaging_store.rs	PRESENT	EXCLUDE	storage-layout	value of a presence/index row; execution only tests existence (messaging_view.rs:366 contains); messaging families not digested
+crates/storage/src/messaging_store.rs	REGISTRY_ADMIN	EXCLUDE	storage-layout	row key in cf::MESSAGING_CONFIG read/written via messaging_view.rs:61-137; the value is state, the key only names where; messaging families not digested
+crates/storage/src/messaging_store.rs	REGISTRY_SEED_DIGEST_CONTEXT	EXCLUDE	local	domain of operator-seed provenance digest (messaging_store.rs:1094); not read by the executor
+crates/storage/src/messaging_store.rs	REGISTRY_SEED_META_KEY	EXCLUDE	local	cf::META operator-seed provenance key (messaging_store.rs:1116, :1164); not read by the executor
+crates/storage/src/messaging_store.rs	SPAM_THRESHOLD	EXCLUDE	storage-layout	row key in cf::MESSAGING_CONFIG read/written via messaging_view.rs:61-137; the value is state, the key only names where; messaging families not digested
+crates/storage/src/messaging_store.rs	SPONSORSHIP_BALANCE	EXCLUDE	storage-layout	row key in cf::MESSAGING_CONFIG read/written via messaging_view.rs:61-137; the value is state, the key only names where; messaging families not digested
+crates/storage/src/messaging_store.rs	SPONSORSHIP_ENABLED	EXCLUDE	storage-layout	row key in cf::MESSAGING_CONFIG read/written via messaging_view.rs:61-137; the value is state, the key only names where; messaging families not digested
+crates/storage/src/messaging_store.rs	STAKE_COOLDOWN_BLOCKS	EXCLUDE	unused	no reader of config_keys::STAKE_COOLDOWN_BLOCKS in crates/*/src
+crates/storage/src/overlay.rs	EMPTY	EXCLUDE	local	process-local helper static (shared empty map / candidate id counter); no consensus value
+crates/storage/src/overlay.rs	NEXT	EXCLUDE	local	process-local helper static (shared empty map / candidate id counter); no consensus value
+crates/storage/src/page.rs	PAGE_DEFAULT	EXCLUDE	client-only	RPC pagination bound (rpc/src/pagination.rs:22-33; storage page.rs)
+crates/storage/src/page.rs	PAGE_MAX	EXCLUDE	client-only	RPC pagination bound (rpc/src/pagination.rs:22-33; storage page.rs)
+crates/storage/src/page.rs	PAGE_OFFSET_MAX	EXCLUDE	client-only	RPC pagination bound (rpc/src/pagination.rs:22-33; storage page.rs)
+crates/storage/src/pruner.rs	CAPACITY_STOP_PERCENT	EXCLUDE	local	node-local disk-capacity policy (pruner.rs:78-95); doc says not consensus
+crates/storage/src/pruner.rs	CAPACITY_WARN_PERCENT	EXCLUDE	local	node-local disk-capacity policy (pruner.rs:78-95); doc says not consensus
+crates/storage/src/pruner.rs	DISK_BUDGET_META_KEY	EXCLUDE	local	node-local disk-capacity policy (pruner.rs:78-95); doc says not consensus
+crates/storage/src/pruner.rs	GB	EXCLUDE	local	unit for format_bytes display (pruner.rs:517-530)
+crates/storage/src/pruner.rs	KB	EXCLUDE	local	unit for format_bytes display (pruner.rs:517-530)
+crates/storage/src/pruner.rs	MB	EXCLUDE	local	unit for format_bytes display (pruner.rs:517-530)
+crates/storage/src/pruner.rs	TB	EXCLUDE	local	unit for format_bytes display (pruner.rs:517-530)
+crates/storage/src/pruner.rs	UNDO_RETENTION_FLOOR	EXCLUDE	local	pruning floor + startup activation check (account_root.rs:339, snapshot.rs:818); mismatch stalls/refuses one node, does not fork; already committed separately by consensus_config fields.rs:681 (0x0201
+crates/storage/src/schema.rs	ACCOUNT_KEY_PREFIX	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/storage/src/schema.rs	CHAIN_ID	EXCLUDE	local	cf::META bookkeeping key for the node DB chain id (schema.rs:969, :984)
+crates/storage/src/schema.rs	CODE	COMMITTED	registry	0x2401
+crates/storage/src/schema.rs	CONTRACT_STATE_DIFF_DOMAIN	COMMITTED	consensus_limits	committed through consensus_limits()
+crates/storage/src/schema.rs	FINALIZED_HASH	EXCLUDE	local	node-local chain-tip bookkeeping key in cf::META (schema.rs:138-215)
+crates/storage/src/schema.rs	FINALIZED_HEIGHT	EXCLUDE	local	node-local chain-tip bookkeeping key in cf::META (schema.rs:138-215)
+crates/storage/src/schema.rs	GENESIS_HASH	EXCLUDE	unused	no non-test reader in crates/*/src (only consensus/tests/branch_state_reorg.rs:1543)
+crates/storage/src/schema.rs	IMPORT_BATCH_ACCOUNTS	EXCLUDE	local	write-batch size for snapshot account import (schema.rs:378-396)
+crates/storage/src/schema.rs	LATEST_BLOCK_HASH	EXCLUDE	local	node-local chain-tip bookkeeping key in cf::META (schema.rs:138-215)
+crates/storage/src/schema.rs	LATEST_BLOCK_HEIGHT	EXCLUDE	local	node-local chain-tip bookkeeping key in cf::META (schema.rs:138-215)
+crates/storage/src/schema.rs	METADATA	COMMITTED	registry	0x2402
+crates/storage/src/schema.rs	STORAGE	COMMITTED	registry	0x2400
+crates/storage/src/subsystem_journal.rs	DORMANT	EXCLUDE	local	used only by the offline journal CLI when no genesis is given (node/src/main.rs:923)
+crates/storage/src/subsystem_journal.rs	HEADER_LEN	EXCLUDE	local	framing of node-local sealed subsystem undo journals (subsystem_journal.rs); journals never hashed into a block
+crates/storage/src/subsystem_journal.rs	MAGIC	EXCLUDE	local	framing of node-local sealed subsystem undo journals (subsystem_journal.rs); journals never hashed into a block
+crates/storage/src/subsystem_journal.rs	VERSION	EXCLUDE	local	framing of node-local sealed subsystem undo journals (subsystem_journal.rs); journals never hashed into a block
+crates/sumc-runtime/src/lib.rs	ENGINE_IDENTITY	COMMITTED	registry	0x2713
+crates/sumc-runtime/src/storage.rs	CF_CONTRACT_CODE	EXCLUDE	local-storage	alias of sumchain_storage::cf column-family name (db.rs:304-308); diff uses cf_kind codes not names (schema.rs:650)
+crates/sumc-runtime/src/storage.rs	CF_CONTRACT_METADATA	EXCLUDE	local-storage	alias of sumchain_storage::cf column-family name (db.rs:304-308); diff uses cf_kind codes not names (schema.rs:650)
+crates/sumc-runtime/src/storage.rs	CF_CONTRACT_STORAGE	EXCLUDE	local-storage	alias of sumchain_storage::cf column-family name (db.rs:304-308); diff uses cf_kind codes not names (schema.rs:650)
+crates/sumc-runtime/src/types.rs	MAX_CALL_DEPTH	COMMITTED	registry	0x2715
+crates/sumc-runtime/src/types.rs	MAX_CODE_SIZE	COMMITTED	registry	0x2714
+crates/sumc-runtime/src/types.rs	MAX_EVENTS	EXCLUDE	unused	HostEnv::emit_event host.rs:158 never called: host_emit import is a stub executor.rs:864
+crates/sumc-runtime/src/types.rs	MAX_LOGS	EXCLUDE	unused	HostEnv::log host.rs:176 never called: host_log import is a stub executor.rs:868
+crates/sumc-runtime/src/types.rs	MAX_MEMORY_PAGES	EXCLUDE	unused	only MemoryManager memory.rs:18, never constructed outside tests; no wasmer memory limit enforced (gap: guest memory max unbounded by binary)
+crates/sumchain-wire/src/address.rs	SIZE	EXCLUDE	algorithm-fixed	Address is a [u8;20] newtype; SIZE only length-checks from_slice/base58 (address.rs:29,57); cannot differ without the type changing
+crates/sumchain-wire/src/address.rs	ZERO	COMMITTED	registry	0x2200
+crates/sumchain-wire/src/agreement.rs	AGREEMENT_COMMITMENT_SEP	EXCLUDE	unused	only read by AgreementCommitment::generate_commitment (agreement.rs:242), which has no non-test caller anywhere in crates/ (agreement executor takes ids/commitments from the payload)
+crates/sumchain-wire/src/agreement.rs	AGREEMENT_DOMAIN_SEP	EXCLUDE	unused	only read by AgreementCommitment::generate_id (agreement.rs:227), which has no non-test caller anywhere in crates/ (agreement executor takes ids/commitments from the payload)
+crates/sumchain-wire/src/agreement.rs	ATTESTATION_DOMAIN_SEP	EXCLUDE	unused	only read by AttestationPacket::generate_id (agreement.rs:456), which has no non-test caller anywhere in crates/ (agreement executor takes ids/commitments from the payload)
+crates/sumchain-wire/src/agreement.rs	EXECUTOR_LINK_DOMAIN_SEP	EXCLUDE	unused	only read by ExecutorLink::generate_id (agreement.rs:690), which has no non-test caller anywhere in crates/ (agreement executor takes ids/commitments from the payload)
+crates/sumchain-wire/src/agreement.rs	IP_ACTION_DOMAIN_SEP	EXCLUDE	unused	only read by IpRightsAction::generate_id (agreement.rs:600), which has no non-test caller anywhere in crates/ (agreement executor takes ids/commitments from the payload)
+crates/sumchain-wire/src/agreement.rs	IP_SCOPE_COMMITMENT_SEP	EXCLUDE	unused	only read by IpRightsAction::generate_scope_commitment (agreement.rs:617), which has no non-test caller anywhere in crates/ (agreement executor takes ids/commitments from the payload)
+crates/sumchain-wire/src/agreement.rs	NOTARY_COMMITMENT_SEP	EXCLUDE	unused	only read by AttestationPacket::generate_notary_commitment (agreement.rs:489), which has no non-test caller anywhere in crates/ (agreement executor takes ids/commitments from the payload)
+crates/sumchain-wire/src/agreement.rs	PARTY_COMMITMENT_SEP	EXCLUDE	unused	only read by PartyRef::generate_commitment (agreement.rs:69), which has no non-test caller anywhere in crates/ (agreement executor takes ids/commitments from the payload)
+crates/sumchain-wire/src/agreement.rs	PROOF_PROFILE_DOMAIN_SEP	EXCLUDE	unused	only read by AgreementProofEnvelope::generate_id (agreement.rs:783), which has no non-test caller anywhere in crates/ (agreement executor takes ids/commitments from the payload)
+crates/sumchain-wire/src/agreement.rs	SIGNATURE_DOMAIN_SEP	EXCLUDE	unused	only read by PartySignature::generate_id (agreement.rs:309), which has no non-test caller anywhere in crates/ (agreement executor takes ids/commitments from the payload)
+crates/sumchain-wire/src/agreement.rs	SIGNATURE_MESSAGE_SEP	EXCLUDE	unused	only read by PartySignature::generate_signing_message (agreement.rs:327), which has no non-test caller anywhere in crates/ (agreement executor takes ids/commitments from the payload)
+crates/sumchain-wire/src/agreement.rs	TERMS_COMMITMENT_SEP	EXCLUDE	unused	only read by ExecutorLink::generate_terms_commitment (agreement.rs:704), which has no non-test caller anywhere in crates/ (agreement executor takes ids/commitments from the payload)
+crates/sumchain-wire/src/b0/allowlist.rs	ARCH_ENTRY_LEN	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/allowlist.rs	ENTRY_FIXED_LEN	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/allowlist.rs	MAX_ARCHES	EXCLUDE	unwired	read only by b0 codec/hash code (b0/allowlist.rs:63/98). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensus
+crates/sumchain-wire/src/b0/allowlist.rs	MAX_ENTRIES	EXCLUDE	unwired	read only by b0 codec/hash code (b0/allowlist.rs:180/230; b0/verifier_material.rs:64/158). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0
+crates/sumchain-wire/src/b0/consts.rs	ALGORITHM_VERSION	EXCLUDE	unwired	read only by b0 codec/hash code (b0/statement.rs:260; b0/derived_input.rs:100). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; not
+crates/sumchain-wire/src/b0/consts.rs	D_MODEL	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	FFN_DIM	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	FIXED_POINT_SCALE_LOG2	EXCLUDE	unwired	read only by b0 codec/hash code (b0/statement.rs:251). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensus/s
+crates/sumchain-wire/src/b0/consts.rs	FIXED_POINT_VERSION	EXCLUDE	unwired	read only by b0 codec/hash code (b0/statement.rs:256; b0/derived_input.rs:93). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; noth
+crates/sumchain-wire/src/b0/consts.rs	HEAD_DIM	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	INPUT_MANIFEST_MAX_SLOTS	EXCLUDE	unwired	read only by b0 codec/hash code (b0/manifest.rs:287). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensus/st
+crates/sumchain-wire/src/b0/consts.rs	LOCAL_RESOURCE_BUDGET_DEFAULT_PERCENT	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	MAX_ACCEPTED_PROOFS_PER_BLOCK	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	MAX_CYCLES	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	MAX_D_MODEL	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	MAX_MANIFEST_SLOTS	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	MAX_OUTPUT_TOKENS	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	MAX_SEQ	EXCLUDE	unwired	read only by b0 codec/hash code (b0/workload.rs:99). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensus/sto
+crates/sumchain-wire/src/b0/consts.rs	MAX_SEQ_LEN	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	MAX_STATE_BYTES	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	N_HEADS	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	OFFICIAL_ITERATIONS_PER_CELL	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	OFFICIAL_MEASURED_PROOFS	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	OFFICIAL_PROOF_BYTES_SAMPLES	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	OFFICIAL_PROVENANCE_SNAPSHOTS	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	OFFICIAL_PROVE_TIME_SAMPLES	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	OFFICIAL_PROVING_RUN_RSS	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	OFFICIAL_SETUP_SAMPLES	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	OFFICIAL_VERIFY_BATCH_RSS	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	OFFICIAL_VERIFY_TIMING_SAMPLES	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	OUTPUT_MANIFEST_MAX_SLOTS	EXCLUDE	unwired	read only by b0 codec/hash code (b0/manifest.rs:166). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensus/st
+crates/sumchain-wire/src/b0/consts.rs	OUTPUT_MANIFEST_SCHEMA_VERSION	EXCLUDE	unwired	read only by b0 codec/hash code (b0/statement.rs:307). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensus/s
+crates/sumchain-wire/src/b0/consts.rs	SCHEMA_VERSION	EXCLUDE	unwired	read only by b0 codec/hash code (b0/statement.rs:223; b0/derived_input.rs:63; b0/allowlist.rs:223; b0/verifier_material.rs:149; b0/object_commitment.rs:123). No crate outside sumchain-wire (other than
+crates/sumchain-wire/src/b0/consts.rs	SOFTMAX_VARIANT_ID	EXCLUDE	unwired	read only by b0 codec/hash code (b0/statement.rs:263). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensus/s
+crates/sumchain-wire/src/b0/consts.rs	TOKEN_INPUT_SCHEME_ID	EXCLUDE	unwired	read only by b0 codec/hash code (b0/statement.rs:270). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensus/s
+crates/sumchain-wire/src/b0/consts.rs	VALIDATOR_AGGREGATE_VERIFY_BUDGET_NS_PER_BLOCK	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	VALIDATOR_VERIFY_REFERENCE_CORES	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	VALIDATOR_VERIFY_REFERENCE_RAM_BYTES	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	VOCAB_SIZE	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/consts.rs	WEIGHT_SCHEDULE_VERSION	EXCLUDE	unwired	read only by b0 codec/hash code (b0/statement.rs:246). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensus/s
+crates/sumchain-wire/src/b0/consts.rs	WORKLOAD_ARCH_ID	EXCLUDE	unwired	read only by b0 codec/hash code (b0/statement.rs:259; b0/derived_input.rs:107). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; not
+crates/sumchain-wire/src/b0/derived_input.rs	LEN	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/enums.rs	ALL	EXCLUDE	unused	frozen_enum! associated catalog consts (b0/enums.rs); read only by tests / protocol-artifact generation, no production reader. No crate outside sumchain-wire (other than rpc registry_types using b0::c
+crates/sumchain-wire/src/b0/enums.rs	CATALOG	EXCLUDE	unused	frozen_enum! associated catalog consts (b0/enums.rs); read only by tests / protocol-artifact generation, no production reader. No crate outside sumchain-wire (other than rpc registry_types using b0::c
+crates/sumchain-wire/src/b0/enums.rs	REPR_BITS	EXCLUDE	unused	frozen_enum! associated catalog consts (b0/enums.rs); read only by tests / protocol-artifact generation, no production reader. No crate outside sumchain-wire (other than rpc registry_types using b0::c
+crates/sumchain-wire/src/b0/enums.rs	RESERVED	EXCLUDE	unused	frozen_enum! associated catalog consts (b0/enums.rs); read only by tests / protocol-artifact generation, no production reader. No crate outside sumchain-wire (other than rpc registry_types using b0::c
+crates/sumchain-wire/src/b0/manifest.rs	MANIFEST_HEADER_LEN	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/manifest.rs	MANIFEST_VERSION	EXCLUDE	unwired	read only by b0 codec/hash code (b0/manifest.rs:159/280). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensu
+crates/sumchain-wire/src/b0/manifest.rs	SLOT_DESCRIPTOR_LEN	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/merkle.rs	CHUNK	EXCLUDE	unwired	read only by b0 codec/hash code (b0/merkle.rs:27/80). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensus/st
+crates/sumchain-wire/src/b0/object_commitment.rs	LEN	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/object_commitment.rs	SCHEMA_VERSION	EXCLUDE	unwired	read by b0 object_commitment.rs codec (Self::SCHEMA_VERSION); No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/cons
+crates/sumchain-wire/src/b0/partial_proof.rs	LEN	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/partial_proof.rs	MAGIC	EXCLUDE	unwired	read only by b0 codec/hash code (b0/partial_proof.rs:40; b0/proof_envelope.rs:53). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; 
+crates/sumchain-wire/src/b0/partial_proof.rs	SCHEMA_VERSION	EXCLUDE	unwired	read by b0 partial_proof.rs codec (Self::SCHEMA_VERSION); No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensu
+crates/sumchain-wire/src/b0/proof_envelope.rs	LEN	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/proof_envelope.rs	MAGIC	EXCLUDE	unwired	read only by b0 codec/hash code (b0/partial_proof.rs:40; b0/proof_envelope.rs:53). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; 
+crates/sumchain-wire/src/b0/proof_envelope.rs	SCHEMA_VERSION	EXCLUDE	unwired	read by b0 proof_envelope.rs codec (Self::SCHEMA_VERSION); No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consens
+crates/sumchain-wire/src/b0/statement.rs	LEN	EXCLUDE	unwired	read only by b0 statement materialize_final (statement.rs:399); No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/co
+crates/sumchain-wire/src/b0/statement.rs	SPEC_HASH_RANGE	EXCLUDE	unwired	read only by b0 codec/hash code (b0/statement.rs:405). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensus/s
+crates/sumchain-wire/src/b0/tags.rs	ARCHPROV_PREFIX	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	BENCH_RSS_TAG	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	BENCH_SAMPLE_TAG	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	BUILDCMD_PREFIX	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	CARGO_LOCK_TAG	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	CONTAINER_TAG	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	DATA_PREFIX	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	DERIVED_INPUT_TAG	EXCLUDE	unwired	read only by b0 codec/hash code (b0/derived_input.rs:57). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensu
+crates/sumchain-wire/src/b0/tags.rs	ENVCAP_PREFIX	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	ENVELOPE_TAG	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	EXP_CERT_TAG	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	EXP_TABLE_TAG	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	FIXTURE_PREFIX	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	GUESTSET_PREFIX	EXCLUDE	unwired	read only by b0 codec/hash code (b0/allowlist.rs:218). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensus/s
+crates/sumchain-wire/src/b0/tags.rs	GUESTSRC_PREFIX	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	HARNESS_PREFIX	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	ID_PREFIX	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	INPUT_MANIFEST_TAG	EXCLUDE	unwired	read only by b0 codec/hash code (b0/manifest.rs:274). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensus/st
+crates/sumchain-wire/src/b0/tags.rs	OBJECT_TAG	EXCLUDE	unwired	read only by b0 codec/hash code (b0/object_commitment.rs:117). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/con
+crates/sumchain-wire/src/b0/tags.rs	OUTPUT_MANIFEST_TAG	EXCLUDE	unwired	read only by b0 codec/hash code (b0/manifest.rs:153). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensus/st
+crates/sumchain-wire/src/b0/tags.rs	RESEARCH_CHAIN_TAG	EXCLUDE	unwired	read only by b0 codec/hash code (b0/statement.rs:226; b0/derived_input.rs:70). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; noth
+crates/sumchain-wire/src/b0/tags.rs	RESULTSET_PREFIX	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	RSSBUNDLE_PREFIX	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	SAMPLEBUNDLE_PREFIX	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	SPEC_PREFIX	EXCLUDE	unused	no non-test reader anywhere in crates/ (b0 benchmark/reference constant). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing i
+crates/sumchain-wire/src/b0/tags.rs	STATEMENT_TAG	EXCLUDE	unwired	read only by b0 codec/hash code (b0/statement.rs:218). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensus/s
+crates/sumchain-wire/src/b0/tags.rs	STMT_TEMPLATE_PREFIX	EXCLUDE	unwired	read only by b0 codec/hash code (b0/statement.rs:393). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/consensus/s
+crates/sumchain-wire/src/b0/tags.rs	VERIFIER_MATERIAL_TAG	EXCLUDE	unwired	read only by b0 codec/hash code (b0/verifier_material.rs:143). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/con
+crates/sumchain-wire/src/b0/verifier_material.rs	MAX_ENTRIES	EXCLUDE	unwired	read only by b0 codec/hash code (b0/allowlist.rs:180/230; b0/verifier_material.rs:64/158). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0
+crates/sumchain-wire/src/b0/verifier_material.rs	MAX_LABEL_LEN	EXCLUDE	unwired	read only by b0 codec/hash code (b0/verifier_material.rs:79/168). No crate outside sumchain-wire (other than rpc registry_types using b0::codec/enums::Candidate) references b0 types; nothing in state/
+crates/sumchain-wire/src/beacon_wire.rs	ALL	COMMITTED	registry	0x2203
+crates/sumchain-wire/src/beacon_wire.rs	BASE_LEN	EXCLUDE	unused	documentation length; only used by tests and by encoded_len (beacon_wire.rs:668/1152), which has no non-test caller; decoders read field-by-field
+crates/sumchain-wire/src/beacon_wire.rs	BASE_LEN	EXCLUDE	unused	documentation length; only used by tests and by encoded_len (beacon_wire.rs:668/1152), which has no non-test caller; decoders read field-by-field
+crates/sumchain-wire/src/beacon_wire.rs	BEACON_OP_NAMESPACE	EXCLUDE	unused	only feeds BeaconWireOp::to_repr/from_repr (beacon_wire.rs:429-447), which have no non-test caller; decode dispatches on 7-byte MAGIC (beacon_wire.rs:1366)
+crates/sumchain-wire/src/beacon_wire.rs	C1_COMPUTE_POOL_TXTYPE_RESERVED	EXCLUDE	unused	only re-exported (lib.rs:88); no reader
+crates/sumchain-wire/src/beacon_wire.rs	CT_LEN	EXCLUDE	algorithm-fixed	ChaCha20-Poly1305 32-byte share + 16-byte tag (48), beacon_wire.rs:800; algorithm-fixed
+crates/sumchain-wire/src/beacon_wire.rs	FR_MODULUS_BE	EXCLUDE	algorithm-fixed	BLS12-381 scalar field modulus r, beacon_wire.rs:272 scalar_is_canonical; curve-fixed
+crates/sumchain-wire/src/beacon_wire.rs	G1_COMPRESSION_FLAG	EXCLUDE	algorithm-fixed	BLS12-381 compressed-point flag bits (ZCash serialization), beacon_wire.rs:288/309; curve-fixed
+crates/sumchain-wire/src/beacon_wire.rs	G1_INFINITY_FLAG	EXCLUDE	algorithm-fixed	BLS12-381 compressed-point flag bits (ZCash serialization), beacon_wire.rs:288/309; curve-fixed
+crates/sumchain-wire/src/beacon_wire.rs	G1_LEN	EXCLUDE	algorithm-fixed	compressed BLS12-381 G1 width (48); read by beacon decoders (beacon_wire.rs:293) but curve-fixed
+crates/sumchain-wire/src/beacon_wire.rs	G2_LEN	EXCLUDE	algorithm-fixed	compressed G2 width (96); read by decoders (beacon_wire.rs:314) and beacon-runtime preimage capacity (crates/beacon-runtime/src/wire.rs:50); curve-fixed
+crates/sumchain-wire/src/beacon_wire.rs	LEN	EXCLUDE	unused	documentation length; only used by tests and by encoded_len (beacon_wire.rs:668/1152), which has no non-test caller; decoders read field-by-field
+crates/sumchain-wire/src/beacon_wire.rs	LEN	EXCLUDE	unused	documentation length; only used by tests and by encoded_len (beacon_wire.rs:668/1152), which has no non-test caller; decoders read field-by-field
+crates/sumchain-wire/src/beacon_wire.rs	LEN	EXCLUDE	unused	documentation length; only used by tests and by encoded_len (beacon_wire.rs:668/1152), which has no non-test caller; decoders read field-by-field
+crates/sumchain-wire/src/beacon_wire.rs	MAGIC	COMMITTED	registry	0x2204
+crates/sumchain-wire/src/beacon_wire.rs	MAGIC	COMMITTED	registry	0x2206
+crates/sumchain-wire/src/beacon_wire.rs	MAGIC	COMMITTED	registry	0x2208
+crates/sumchain-wire/src/beacon_wire.rs	MAGIC	COMMITTED	registry	0x220a
+crates/sumchain-wire/src/beacon_wire.rs	MAGIC	COMMITTED	registry	0x220c
+crates/sumchain-wire/src/beacon_wire.rs	OP_BEACON_FINALIZE	EXCLUDE	unused	only feeds BeaconWireOp::to_repr/from_repr (beacon_wire.rs:429-447), which have no non-test caller; decode dispatches on 7-byte MAGIC (beacon_wire.rs:1366)
+crates/sumchain-wire/src/beacon_wire.rs	OP_BEACON_PARTIAL	EXCLUDE	unused	only feeds BeaconWireOp::to_repr/from_repr (beacon_wire.rs:429-447), which have no non-test caller; decode dispatches on 7-byte MAGIC (beacon_wire.rs:1366)
+crates/sumchain-wire/src/beacon_wire.rs	OP_DKG_COMPLAINT	EXCLUDE	unused	only feeds BeaconWireOp::to_repr/from_repr (beacon_wire.rs:429-447), which have no non-test caller; decode dispatches on 7-byte MAGIC (beacon_wire.rs:1366)
+crates/sumchain-wire/src/beacon_wire.rs	OP_DKG_DEAL	EXCLUDE	unused	only feeds BeaconWireOp::to_repr/from_repr (beacon_wire.rs:429-447), which have no non-test caller; decode dispatches on 7-byte MAGIC (beacon_wire.rs:1366)
+crates/sumchain-wire/src/beacon_wire.rs	OP_REGISTER_BEACON_KEY	EXCLUDE	unused	only feeds BeaconWireOp::to_repr/from_repr (beacon_wire.rs:429-447), which have no non-test caller; decode dispatches on 7-byte MAGIC (beacon_wire.rs:1366)
+crates/sumchain-wire/src/beacon_wire.rs	POP_LEN	EXCLUDE	algorithm-fixed	compressed G2 PoP width (96), beacon_wire.rs:595; curve-fixed
+crates/sumchain-wire/src/beacon_wire.rs	SCALAR_LEN	EXCLUDE	algorithm-fixed	BLS12-381 F_r scalar width (32), beacon_wire.rs:323; curve-fixed
+crates/sumchain-wire/src/beacon_wire.rs	SCHEMA_VERSION	COMMITTED	registry	0x2205
+crates/sumchain-wire/src/beacon_wire.rs	SCHEMA_VERSION	COMMITTED	registry	0x2207
+crates/sumchain-wire/src/beacon_wire.rs	SCHEMA_VERSION	COMMITTED	registry	0x2209
+crates/sumchain-wire/src/beacon_wire.rs	SCHEMA_VERSION	COMMITTED	registry	0x220b
+crates/sumchain-wire/src/beacon_wire.rs	SCHEMA_VERSION	COMMITTED	registry	0x220d
+crates/sumchain-wire/src/beacon_wire.rs	W1B_BEACON_DKG_TXTYPE	COMMITTED	registry	0x2201
+crates/sumchain-wire/src/beacon_wire.rs	W1B_BEACON_SIGN_TXTYPE	COMMITTED	registry	0x2202
+crates/sumchain-wire/src/beacon_wire.rs	WITNESS_ELEM_LEN	COMMITTED	registry	0x220e
+crates/sumchain-wire/src/compute_pool_graph.rs	HEADER_LEN	EXCLUDE	unwired	GraphDefinitionV1/DependencyEdgeV1 codec only (compute_pool_graph.rs:256-427); no reader in state/consensus. ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/sr
+crates/sumchain-wire/src/compute_pool_graph.rs	LEN	EXCLUDE	unwired	GraphDefinitionV1/DependencyEdgeV1 codec only (compute_pool_graph.rs:256-427); no reader in state/consensus. ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/sr
+crates/sumchain-wire/src/compute_pool_graph.rs	MAGIC	EXCLUDE	unwired	GraphDefinitionV1/DependencyEdgeV1 codec only (compute_pool_graph.rs:256-427); no reader in state/consensus. ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/sr
+crates/sumchain-wire/src/compute_pool_graph.rs	MAX_EDGES_PER_UNIT	EXCLUDE	unwired	GraphDefinitionV1/DependencyEdgeV1 codec only (compute_pool_graph.rs:256-427); no reader in state/consensus. ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/sr
+crates/sumchain-wire/src/compute_pool_graph.rs	MAX_GRAPH_BYTES	EXCLUDE	unwired	GraphDefinitionV1/DependencyEdgeV1 codec only (compute_pool_graph.rs:256-427); no reader in state/consensus. ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/sr
+crates/sumchain-wire/src/compute_pool_graph.rs	MAX_TOTAL_EDGES	EXCLUDE	unwired	GraphDefinitionV1/DependencyEdgeV1 codec only (compute_pool_graph.rs:256-427); no reader in state/consensus. ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/sr
+crates/sumchain-wire/src/compute_pool_graph.rs	MAX_UNITS	EXCLUDE	unwired	GraphDefinitionV1/DependencyEdgeV1 codec only (compute_pool_graph.rs:256-427); no reader in state/consensus. ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/sr
+crates/sumchain-wire/src/compute_pool_graph.rs	PER_EDGE_LEN	EXCLUDE	unwired	GraphDefinitionV1/DependencyEdgeV1 codec only (compute_pool_graph.rs:256-427); no reader in state/consensus. ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/sr
+crates/sumchain-wire/src/compute_pool_graph.rs	PER_UNIT_LEN	EXCLUDE	unwired	GraphDefinitionV1/DependencyEdgeV1 codec only (compute_pool_graph.rs:256-427); no reader in state/consensus. ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/sr
+crates/sumchain-wire/src/compute_pool_graph.rs	POOL_GRAPHDEF_TAG	EXCLUDE	unwired	read only by compute_pool_graph job_id/unit_id/graph root helpers (compute_pool_graph.rs:60/71/81); no execution caller. ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: cra
+crates/sumchain-wire/src/compute_pool_graph.rs	POOL_JOB_TAG	EXCLUDE	unwired	read only by compute_pool_graph job_id/unit_id/graph root helpers (compute_pool_graph.rs:60/71/81); no execution caller. ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: cra
+crates/sumchain-wire/src/compute_pool_graph.rs	POOL_UNIT_TAG	EXCLUDE	unwired	read only by compute_pool_graph job_id/unit_id/graph root helpers (compute_pool_graph.rs:60/71/81); no execution caller. ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: cra
+crates/sumchain-wire/src/compute_pool_graph.rs	SCHEMA_VERSION	EXCLUDE	unwired	GraphDefinitionV1/DependencyEdgeV1 codec only (compute_pool_graph.rs:256-427); no reader in state/consensus. ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/sr
+crates/sumchain-wire/src/compute_pool_wire.rs	COMPUTE_POOL_OP_NAMESPACE	EXCLUDE	unwired	only ComputePoolOperation::op (compute_pool_wire.rs:527-534); ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:2073 returns Failed(0) without de
+crates/sumchain-wire/src/compute_pool_wire.rs	LEN	EXCLUDE	unwired	fixed-length doc const for ComputePool carriers; no non-test reader except other LEN consts; ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:20
+crates/sumchain-wire/src/compute_pool_wire.rs	LEN	EXCLUDE	unwired	fixed-length doc const for ComputePool carriers; no non-test reader except other LEN consts; ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:20
+crates/sumchain-wire/src/compute_pool_wire.rs	LEN	EXCLUDE	unwired	fixed-length doc const for ComputePool carriers; no non-test reader except other LEN consts; ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:20
+crates/sumchain-wire/src/compute_pool_wire.rs	LEN	EXCLUDE	unwired	fixed-length doc const for ComputePool carriers; no non-test reader except other LEN consts; ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:20
+crates/sumchain-wire/src/compute_pool_wire.rs	LEN	EXCLUDE	unwired	fixed-length doc const for ComputePool carriers; no non-test reader except other LEN consts; ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:20
+crates/sumchain-wire/src/compute_pool_wire.rs	LEN	EXCLUDE	unwired	fixed-length doc const for ComputePool carriers; no non-test reader except other LEN consts; ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:20
+crates/sumchain-wire/src/compute_pool_wire.rs	MAGIC	EXCLUDE	unwired	ComputePoolOperation codec (compute_pool_wire.rs:204/555-576) only via ComputePoolTxData::decode_operation, which execution never calls; ComputePool (TxType 27) op_bytes are opaque and never decoded b
+crates/sumchain-wire/src/compute_pool_wire.rs	MAGIC	EXCLUDE	unwired	ComputePoolOperation codec (compute_pool_wire.rs:204/555-576) only via ComputePoolTxData::decode_operation, which execution never calls; ComputePool (TxType 27) op_bytes are opaque and never decoded b
+crates/sumchain-wire/src/compute_pool_wire.rs	MAGIC	EXCLUDE	unwired	ComputePoolOperation codec (compute_pool_wire.rs:204/555-576) only via ComputePoolTxData::decode_operation, which execution never calls; ComputePool (TxType 27) op_bytes are opaque and never decoded b
+crates/sumchain-wire/src/compute_pool_wire.rs	MAGIC	EXCLUDE	unwired	ComputePoolOperation codec (compute_pool_wire.rs:204/555-576) only via ComputePoolTxData::decode_operation, which execution never calls; ComputePool (TxType 27) op_bytes are opaque and never decoded b
+crates/sumchain-wire/src/compute_pool_wire.rs	MAGIC	EXCLUDE	unwired	ComputePoolOperation codec (compute_pool_wire.rs:204/555-576) only via ComputePoolTxData::decode_operation, which execution never calls; ComputePool (TxType 27) op_bytes are opaque and never decoded b
+crates/sumchain-wire/src/compute_pool_wire.rs	OP_ACCEPT_UNIT	EXCLUDE	unwired	only ComputePoolOperation::op (compute_pool_wire.rs:527-534); ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:2073 returns Failed(0) without de
+crates/sumchain-wire/src/compute_pool_wire.rs	OP_ASSIGN_UNIT	EXCLUDE	unwired	only ComputePoolOperation::op (compute_pool_wire.rs:527-534); ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:2073 returns Failed(0) without de
+crates/sumchain-wire/src/compute_pool_wire.rs	OP_CANCEL_JOB	EXCLUDE	unwired	only ComputePoolOperation::op (compute_pool_wire.rs:527-534); ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:2073 returns Failed(0) without de
+crates/sumchain-wire/src/compute_pool_wire.rs	OP_CREATE_JOB	EXCLUDE	unwired	only ComputePoolOperation::op (compute_pool_wire.rs:527-534); ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:2073 returns Failed(0) without de
+crates/sumchain-wire/src/compute_pool_wire.rs	OP_DECLINE_UNIT	EXCLUDE	unwired	only ComputePoolOperation::op (compute_pool_wire.rs:527-534); ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:2073 returns Failed(0) without de
+crates/sumchain-wire/src/compute_pool_wire.rs	OP_EXPIRE_UNIT	EXCLUDE	unwired	only ComputePoolOperation::op (compute_pool_wire.rs:527-534); ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:2073 returns Failed(0) without de
+crates/sumchain-wire/src/compute_pool_wire.rs	OP_PUBLISH_OFFER	EXCLUDE	unwired	only ComputePoolOperation::op (compute_pool_wire.rs:527-534); ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:2073 returns Failed(0) without de
+crates/sumchain-wire/src/compute_pool_wire.rs	OP_REASSIGN_UNIT	EXCLUDE	unwired	only ComputePoolOperation::op (compute_pool_wire.rs:527-534); ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:2073 returns Failed(0) without de
+crates/sumchain-wire/src/compute_pool_wire.rs	SCHEMA_VERSION	EXCLUDE	unwired	ComputePoolOperation codec (compute_pool_wire.rs:204/555-576) only via ComputePoolTxData::decode_operation, which execution never calls; ComputePool (TxType 27) op_bytes are opaque and never decoded b
+crates/sumchain-wire/src/compute_pool_wire.rs	SCHEMA_VERSION	EXCLUDE	unwired	ComputePoolOperation codec (compute_pool_wire.rs:204/555-576) only via ComputePoolTxData::decode_operation, which execution never calls; ComputePool (TxType 27) op_bytes are opaque and never decoded b
+crates/sumchain-wire/src/compute_pool_wire.rs	SCHEMA_VERSION	EXCLUDE	unwired	ComputePoolOperation codec (compute_pool_wire.rs:204/555-576) only via ComputePoolTxData::decode_operation, which execution never calls; ComputePool (TxType 27) op_bytes are opaque and never decoded b
+crates/sumchain-wire/src/compute_pool_wire.rs	SCHEMA_VERSION	EXCLUDE	unwired	ComputePoolOperation codec (compute_pool_wire.rs:204/555-576) only via ComputePoolTxData::decode_operation, which execution never calls; ComputePool (TxType 27) op_bytes are opaque and never decoded b
+crates/sumchain-wire/src/compute_pool_wire.rs	SCHEMA_VERSION	EXCLUDE	unwired	ComputePoolOperation codec (compute_pool_wire.rs:204/555-576) only via ComputePoolTxData::decode_operation, which execution never calls; ComputePool (TxType 27) op_bytes are opaque and never decoded b
+crates/sumchain-wire/src/docclass.rs	AGE_ELIGIBILITY_SCHEMA	EXCLUDE	unused	docclass::schemas predefined hashes; no reader anywhere in crates/
+crates/sumchain-wire/src/docclass.rs	CITIZENSHIP_SCHEMA	EXCLUDE	unused	docclass::schemas predefined hashes; no reader anywhere in crates/
+crates/sumchain-wire/src/docclass.rs	COMMITMENT_DOMAIN_SEP	EXCLUDE	unused	only read by docclass::generate_commitment (docclass.rs:262); re-exported by primitives but no non-test caller
+crates/sumchain-wire/src/docclass.rs	DIPLOMA_SCHEMA	EXCLUDE	unused	docclass::schemas predefined hashes; no reader anywhere in crates/
+crates/sumchain-wire/src/docclass.rs	IDENTITY_ROOT_SCHEMA	EXCLUDE	unused	docclass::schemas predefined hashes; no reader anywhere in crates/
+crates/sumchain-wire/src/docclass.rs	LICENSE_SCHEMA	EXCLUDE	unused	docclass::schemas predefined hashes; no reader anywhere in crates/
+crates/sumchain-wire/src/docclass.rs	RESIDENCY_SCHEMA	EXCLUDE	unused	docclass::schemas predefined hashes; no reader anywhere in crates/
+crates/sumchain-wire/src/docclass.rs	TRANSCRIPT_SCHEMA	EXCLUDE	unused	docclass::schemas predefined hashes; no reader anywhere in crates/
+crates/sumchain-wire/src/education.rs	ADD_ASSESSMENT	COMMITTED	registry	0x2219
+crates/sumchain-wire/src/education.rs	ARCHIVE_CATALOG_ENTRY	COMMITTED	registry	0x2215
+crates/sumchain-wire/src/education.rs	ARCHIVE_OFFERING	COMMITTED	registry	0x2223
+crates/sumchain-wire/src/education.rs	CLOSE_ENROLLMENT	COMMITTED	registry	0x221c
+crates/sumchain-wire/src/education.rs	CREATE_CATALOG_ENTRY	COMMITTED	registry	0x2210
+crates/sumchain-wire/src/education.rs	CREATE_OFFERING	COMMITTED	registry	0x2216
+crates/sumchain-wire/src/education.rs	DEPRECATE_CATALOG_ENTRY	COMMITTED	registry	0x2213
+crates/sumchain-wire/src/education.rs	DOMAIN_CATALOG_ID	EXCLUDE	unused	only read by education::catalog_id/offering_id/student_commitment/submission_commitment/grade_commitment (education.rs:633-705); only callers are rpc tests (crates/rpc/src/server.rs:10337, #[cfg(test)
+crates/sumchain-wire/src/education.rs	DOMAIN_GRADE_COMMITMENT	EXCLUDE	unused	only read by education::catalog_id/offering_id/student_commitment/submission_commitment/grade_commitment (education.rs:633-705); only callers are rpc tests (crates/rpc/src/server.rs:10337, #[cfg(test)
+crates/sumchain-wire/src/education.rs	DOMAIN_OFFERING_ID	EXCLUDE	unused	only read by education::catalog_id/offering_id/student_commitment/submission_commitment/grade_commitment (education.rs:633-705); only callers are rpc tests (crates/rpc/src/server.rs:10337, #[cfg(test)
+crates/sumchain-wire/src/education.rs	DOMAIN_STUDENT_COMMITMENT	EXCLUDE	unused	only read by education::catalog_id/offering_id/student_commitment/submission_commitment/grade_commitment (education.rs:633-705); only callers are rpc tests (crates/rpc/src/server.rs:10337, #[cfg(test)
+crates/sumchain-wire/src/education.rs	DOMAIN_SUBMISSION_COMMITMENT	EXCLUDE	unused	only read by education::catalog_id/offering_id/student_commitment/submission_commitment/grade_commitment (education.rs:633-705); only callers are rpc tests (crates/rpc/src/server.rs:10337, #[cfg(test)
+crates/sumchain-wire/src/education.rs	FINALIZE_COURSE	COMMITTED	registry	0x2222
+crates/sumchain-wire/src/education.rs	FINALIZE_GRADE	COMMITTED	registry	0x2221
+crates/sumchain-wire/src/education.rs	GRADE_SUBMISSION	COMMITTED	registry	0x2220
+crates/sumchain-wire/src/education.rs	LINK_ENROLLMENT	COMMITTED	registry	0x221d
+crates/sumchain-wire/src/education.rs	MAX_COURSE_CODE_BYTES	EXCLUDE	unused	no reader anywhere in crates/
+crates/sumchain-wire/src/education.rs	MAX_DEPARTMENT_BYTES	EXCLUDE	unused	no reader anywhere in crates/
+crates/sumchain-wire/src/education.rs	MAX_EDU_OP_DATA_BYTES	COMMITTED	registry	0x220f
+crates/sumchain-wire/src/education.rs	MAX_MEMO_BYTES	EXCLUDE	unused	no reader anywhere in crates/
+crates/sumchain-wire/src/education.rs	MAX_SECTION_BYTES	EXCLUDE	unused	no reader anywhere in crates/
+crates/sumchain-wire/src/education.rs	MAX_TERM_BYTES	EXCLUDE	unused	no reader anywhere in crates/
+crates/sumchain-wire/src/education.rs	MAX_TITLE_BYTES	EXCLUDE	unused	no reader anywhere in crates/
+crates/sumchain-wire/src/education.rs	OPEN_ENROLLMENT	COMMITTED	registry	0x221b
+crates/sumchain-wire/src/education.rs	PUBLISH_CATALOG_CONTENT	COMMITTED	registry	0x2212
+crates/sumchain-wire/src/education.rs	PUBLISH_CONTENT	COMMITTED	registry	0x2218
+crates/sumchain-wire/src/education.rs	SUBMIT_ASSIGNMENT	COMMITTED	registry	0x221e
+crates/sumchain-wire/src/education.rs	SUBMIT_EXAM	COMMITTED	registry	0x221f
+crates/sumchain-wire/src/education.rs	SUPERSEDE_CATALOG_ENTRY	COMMITTED	registry	0x2214
+crates/sumchain-wire/src/education.rs	SUSPEND_OR_CANCEL_OFFERING	COMMITTED	registry	0x2224
+crates/sumchain-wire/src/education.rs	UPDATE_ASSESSMENT	COMMITTED	registry	0x221a
+crates/sumchain-wire/src/education.rs	UPDATE_CATALOG_ENTRY	COMMITTED	registry	0x2211
+crates/sumchain-wire/src/education.rs	UPDATE_OFFERING	COMMITTED	registry	0x2217
+crates/sumchain-wire/src/employment.rs	EMPLOYMENT_CREDENTIAL_DOMAIN_SEP	EXCLUDE	client-only	read by EmploymentCredential::generate_id (employment.rs:332), called only by RPC (crates/rpc/src/server.rs:6825/6901); executor takes the id from the payload
+crates/sumchain-wire/src/employment.rs	EMPLOYMENT_PROOF_DOMAIN_SEP	EXCLUDE	unused	only read by EmploymentProofEnvelope/EmploymentProofProfile::generate_id (employment.rs:668/722), which has no non-test caller in crates/
+crates/sumchain-wire/src/employment.rs	INCOME_ATTESTATION_DOMAIN_SEP	EXCLUDE	unused	only read by IncomeAttestation::generate_id (employment.rs:555), which has no non-test caller in crates/
+crates/sumchain-wire/src/employment.rs	INCOME_BRACKET_DOMAIN_SEP	EXCLUDE	unused	only read by IncomeAttestation::generate_threshold_commitment (employment.rs:587), which has no non-test caller in crates/
+crates/sumchain-wire/src/employment.rs	PERIOD_COMMITMENT_DOMAIN_SEP	EXCLUDE	unused	only read by IncomeAttestation::generate_period_commitment (employment.rs:571), which has no non-test caller in crates/
+crates/sumchain-wire/src/employment.rs	ROLE_COMMITMENT_DOMAIN_SEP	EXCLUDE	unused	only read by EmploymentCredential::generate_role_commitment (employment.rs:352), which has no non-test caller in crates/
+crates/sumchain-wire/src/employment.rs	TENURE_COMMITMENT_DOMAIN_SEP	EXCLUDE	unused	only read by EmploymentCredential::generate_tenure_commitment (employment.rs:343), which has no non-test caller in crates/
+crates/sumchain-wire/src/equity.rs	CORPORATE_ACTION_DOMAIN_SEP	EXCLUDE	unused	only read by CorporateAction::generate_action_id (equity.rs:1100), which has no non-test caller in crates/
+crates/sumchain-wire/src/equity.rs	ENTITY_DOMAIN_SEP	EXCLUDE	unused	only read by EntityProfile::generate_subject_id (equity.rs:249), which has no non-test caller in crates/
+crates/sumchain-wire/src/equity.rs	EQUITY_PROVE_MEMBERSHIP	EXCLUDE	unused	equity::proof_profiles string ids; no reader anywhere in crates/
+crates/sumchain-wire/src/equity.rs	EQUITY_PROVE_OWNERSHIP_THRESHOLD	EXCLUDE	unused	equity::proof_profiles string ids; no reader anywhere in crates/
+crates/sumchain-wire/src/equity.rs	EQUITY_PROVE_VOTING_POWER	EXCLUDE	unused	equity::proof_profiles string ids; no reader anywhere in crates/
+crates/sumchain-wire/src/equity.rs	EQUITY_TOKEN_DOMAIN_SEP	EXCLUDE	unused	only read by EquityToken::generate_class_id (equity.rs:582), which has no non-test caller in crates/
+crates/sumchain-wire/src/equity.rs	GOVERNANCE_ACTION_DOMAIN_SEP	EXCLUDE	unused	only read by GovernanceAction::generate_action_id (equity.rs:460), which has no non-test caller in crates/
+crates/sumchain-wire/src/equity.rs	OWNERSHIP_PROOF_DOMAIN_SEP	EXCLUDE	unused	only read by OwnershipProofEnvelope::generate_proof_id (equity.rs:1248), which has no non-test caller in crates/
+crates/sumchain-wire/src/equity.rs	SNAPSHOT_DOMAIN_SEP	EXCLUDE	unused	only read by OwnershipSnapshot::generate_snapshot_id (equity.rs:1140), which has no non-test caller in crates/
+crates/sumchain-wire/src/finance.rs	ACCOUNT_COMMITMENT_DOMAIN_SEP	EXCLUDE	unused	only read by BankStandingCredential::generate_account_commitment (finance.rs:683), which has no non-test caller in crates/
+crates/sumchain-wire/src/finance.rs	ADDRESS_PROOF_DOMAIN_SEP	EXCLUDE	unused	only read by AddressProof::generate_id (finance.rs:408), which has no non-test caller in crates/
+crates/sumchain-wire/src/finance.rs	BALANCE_BRACKET_DOMAIN_SEP	EXCLUDE	unused	only read by BankStandingCredential::generate_threshold_commitment (finance.rs:709), which has no non-test caller in crates/
+crates/sumchain-wire/src/finance.rs	BANK_STANDING_DOMAIN_SEP	EXCLUDE	unused	only read by BankStandingCredential::generate_id (finance.rs:667), which has no non-test caller in crates/
+crates/sumchain-wire/src/finance.rs	FINANCE_PROOF_DOMAIN_SEP	EXCLUDE	unused	only read by FinanceProofEnvelope/FinanceProofProfile::generate_id (finance.rs:996/1050), which has no non-test caller in crates/
+crates/sumchain-wire/src/finance.rs	KYC_ATTESTATION_DOMAIN_SEP	EXCLUDE	unused	only read by KycAttestation::generate_id (finance.rs:887), which has no non-test caller in crates/
+crates/sumchain-wire/src/finance.rs	PHYSICAL_ADDRESS_DOMAIN_SEP	EXCLUDE	unused	only read by AddressProof::generate_address_commitment (finance.rs:426), which has no non-test caller in crates/
+crates/sumchain-wire/src/governance.rs	GOV_ASSET_EQUITY_CLASS_PREFIX	COMMITTED	registry	0x2228
+crates/sumchain-wire/src/governance.rs	GOV_ASSET_NATIVE_ELIGIBILITY_PREFIX	COMMITTED	registry	0x2229
+crates/sumchain-wire/src/governance.rs	GOV_ASSET_SRC20_PREFIX	COMMITTED	registry	0x222a
+crates/sumchain-wire/src/governance.rs	GOV_EQUITY_VOTE_DOMAIN	COMMITTED	registry	0x2226
+crates/sumchain-wire/src/governance.rs	GOV_ESCROW_DOMAIN	COMMITTED	registry	0x2225
+crates/sumchain-wire/src/governance.rs	GOV_PROPOSAL_DOMAIN	COMMITTED	registry	0x2227
+crates/sumchain-wire/src/hash.rs	SIZE	EXCLUDE	algorithm-fixed	Hash is [u8;32] (blake3 output); SIZE only length-checks from_slice (hash.rs:37, crates/storage/src/journal.rs:350)
+crates/sumchain-wire/src/hash.rs	ZERO	COMMITTED	registry	0x222b
+crates/sumchain-wire/src/healthcare.rs	CONSENT_COMMITMENT_SEP	EXCLUDE	unused	only read by ConsentEnvelope::generate_commitment (healthcare.rs:704), which has no non-test caller in crates/
+crates/sumchain-wire/src/healthcare.rs	CONSENT_DOMAIN_SEP	EXCLUDE	unused	only read by ConsentEnvelope::generate_id (healthcare.rs:688), which has no non-test caller in crates/
+crates/sumchain-wire/src/healthcare.rs	CONSENT_GRANT_SIGNING_SEP	COMMITTED	registry	0x222c
+crates/sumchain-wire/src/healthcare.rs	HEALTHCARE_PROOF_DOMAIN_SEP	EXCLUDE	unused	only read by HealthcareProofEnvelope::generate_id (healthcare.rs:1155), which has no non-test caller in crates/
+crates/sumchain-wire/src/healthcare.rs	MEMBERSHIP_COMMITMENT_SEP	EXCLUDE	unused	only read by MembershipRecord::generate_commitment (healthcare.rs:501), which has no non-test caller in crates/
+crates/sumchain-wire/src/healthcare.rs	MEMBERSHIP_DOMAIN_SEP	EXCLUDE	unused	only read by MembershipRecord::generate_id (healthcare.rs:485), which has no non-test caller in crates/
+crates/sumchain-wire/src/healthcare.rs	PRESCRIPTION_COMMITMENT_SEP	EXCLUDE	unused	only read by Prescription::generate_commitment (healthcare.rs:1038), which has no non-test caller in crates/
+crates/sumchain-wire/src/healthcare.rs	PRESCRIPTION_DOMAIN_SEP	EXCLUDE	unused	only read by Prescription::generate_id (healthcare.rs:1021), which has no non-test caller in crates/
+crates/sumchain-wire/src/healthcare.rs	PROVIDER_COMMITMENT_SEP	EXCLUDE	unused	only read by ProviderProfile::generate_commitment (healthcare.rs:305), which has no non-test caller in crates/
+crates/sumchain-wire/src/healthcare.rs	PROVIDER_DOMAIN_SEP	EXCLUDE	unused	only read by ProviderProfile::generate_id (healthcare.rs:288), which has no non-test caller in crates/
+crates/sumchain-wire/src/inference_attestation.rs	DOMAIN_TAG	COMMITTED	registry	0x222d
+crates/sumchain-wire/src/inference_attestation.rs	INFERENCE_ATTESTATION_KEY_DOMAIN	COMMITTED	registry	0x222f
+crates/sumchain-wire/src/inference_attestation.rs	INFERENCE_ATTESTATION_SESSION_INDEX_DOMAIN	COMMITTED	registry	0x2230
+crates/sumchain-wire/src/inference_attestation.rs	MAX_SESSION_ID_BYTES	COMMITTED	registry	0x222e
+crates/sumchain-wire/src/inference_attestation.rs	SESSION_ID_HASH_BYTES	COMMITTED	registry	0x2231
+crates/sumchain-wire/src/inference_settlement.rs	SESSION_INDEX_DOMAIN	COMMITTED	registry	0x2233
+crates/sumchain-wire/src/inference_settlement.rs	SESSION_KEY_DOMAIN	COMMITTED	registry	0x2232
+crates/sumchain-wire/src/inference_settlement.rs	SESSION_PREFIX_BYTES	COMMITTED	registry	0x2234
+crates/sumchain-wire/src/inference_settlement.rs	VERIFIER_KEY_DOMAIN	COMMITTED	registry	0x2235
+crates/sumchain-wire/src/legal.rs	BENEFIT_DOMAIN_SEP	EXCLUDE	unused	only read by BenefitDetermination::generate_id (legal.rs:729), which has no non-test caller in crates/
+crates/sumchain-wire/src/legal.rs	CASE_COMMITMENT_SEP	EXCLUDE	unused	only read by CaseAnchor::generate_commitment (legal.rs:217), which has no non-test caller in crates/
+crates/sumchain-wire/src/legal.rs	CASE_DOMAIN_SEP	EXCLUDE	unused	only read by CaseAnchor::generate_id (legal.rs:200), which has no non-test caller in crates/
+crates/sumchain-wire/src/legal.rs	DETERMINATION_COMMITMENT_SEP	EXCLUDE	unused	only read by BenefitDetermination::generate_commitment (legal.rs:745), which has no non-test caller in crates/
+crates/sumchain-wire/src/legal.rs	EVENT_COMMITMENT_SEP	EXCLUDE	unused	only read by ProcessEvent::generate_commitment (legal.rs:392), which has no non-test caller in crates/
+crates/sumchain-wire/src/legal.rs	LEGAL_PROOF_DOMAIN_SEP	EXCLUDE	unused	only read by LegalProofEnvelope::generate_id (legal.rs:850), which has no non-test caller in crates/
+crates/sumchain-wire/src/legal.rs	ORDER_COMMITMENT_SEP	EXCLUDE	unused	only read by CourtOrder::generate_commitment (legal.rs:574), which has no non-test caller in crates/
+crates/sumchain-wire/src/legal.rs	ORDER_DOMAIN_SEP	EXCLUDE	unused	only read by CourtOrder::generate_id (legal.rs:558), which has no non-test caller in crates/
+crates/sumchain-wire/src/legal.rs	PROCESS_EVENT_DOMAIN_SEP	EXCLUDE	unused	only read by ProcessEvent::generate_id (legal.rs:376), which has no non-test caller in crates/
+crates/sumchain-wire/src/messaging.rs	DEFAULT_DAILY_QUOTA	COMMITTED	registry	0x223b
+crates/sumchain-wire/src/messaging.rs	DEFAULT_HIGH_SPAM_THRESHOLD	EXCLUDE	unused	no reader anywhere in crates/
+crates/sumchain-wire/src/messaging.rs	DEFAULT_MAX_MESSAGE_SIZE	COMMITTED	registry	0x223c
+crates/sumchain-wire/src/messaging.rs	DEFAULT_MIN_TRUST_STAKE	COMMITTED	registry	0x223d
+crates/sumchain-wire/src/messaging.rs	DEFAULT_SPAM_THRESHOLD	EXCLUDE	unused	no reader anywhere in crates/
+crates/sumchain-wire/src/messaging.rs	ENCRYPTED	EXCLUDE	client-only	MessageFlags bits set/read only by client encryption helper crates/crypto/src/messaging.rs:231-236/318-405; validate_message_format does not inspect flags
+crates/sumchain-wire/src/messaging.rs	HAS_ATTACHMENTS	EXCLUDE	unused	only read by MessageFlags getters (messaging.rs:196-208) that have no non-test caller
+crates/sumchain-wire/src/messaging.rs	HAS_REPLY_TO	EXCLUDE	client-only	MessageFlags bits set/read only by client encryption helper crates/crypto/src/messaging.rs:231-236/318-405; validate_message_format does not inspect flags
+crates/sumchain-wire/src/messaging.rs	HAS_TIMESTAMP	EXCLUDE	client-only	MessageFlags bits set/read only by client encryption helper crates/crypto/src/messaging.rs:231-236/318-405; validate_message_format does not inspect flags
+crates/sumchain-wire/src/messaging.rs	IS_PAYMENT_REQUEST	EXCLUDE	unused	only read by MessageFlags getters (messaging.rs:196-208) that have no non-test caller
+crates/sumchain-wire/src/messaging.rs	IS_READ_RECEIPT	EXCLUDE	unused	only read by MessageFlags getters (messaging.rs:196-208) that have no non-test caller
+crates/sumchain-wire/src/messaging.rs	REQUIRES_STAKE	EXCLUDE	unused	only read by MessageFlags getters (messaging.rs:196-208) that have no non-test caller
+crates/sumchain-wire/src/messaging.rs	SPONSORED_REGISTER_V1_PREIMAGE_LEN	EXCLUDE	local	only Vec capacity + debug_assert (messaging.rs:581/586); does not change preimage bytes
+crates/sumchain-wire/src/messaging.rs	SPONSORED_REGISTER_V1_TAG	COMMITTED	registry	0x223e
+crates/sumchain-wire/src/messaging.rs	SRC201_ATTACHMENT_KDF_CONTEXT	EXCLUDE	unused	no reader anywhere in crates/
+crates/sumchain-wire/src/messaging.rs	SRC201_HEADER_SIZE	COMMITTED	registry	0x2238
+crates/sumchain-wire/src/messaging.rs	SRC201_KDF_CONTEXT	EXCLUDE	client-only	ECDH key derivation only in client encryption helper crates/crypto/src/messaging.rs:222/357
+crates/sumchain-wire/src/messaging.rs	SRC201_MAGIC	COMMITTED	registry	0x2236
+crates/sumchain-wire/src/messaging.rs	SRC201_NONCE_SIZE	COMMITTED	registry	0x2239
+crates/sumchain-wire/src/messaging.rs	SRC201_TAG_SIZE	COMMITTED	registry	0x223a
+crates/sumchain-wire/src/messaging.rs	SRC201_VERSION	COMMITTED	registry	0x2237
+crates/sumchain-wire/src/policy_account.rs	APPROVAL_DOMAIN_SEP	EXCLUDE	unused	only read by Proposal::approval_message (policy_account.rs:657), which has no non-test caller (executor uses approval_signing_bytes)
+crates/sumchain-wire/src/policy_account.rs	APPROVAL_SIGNING_DOMAIN_V1	COMMITTED	registry	0x2241
+crates/sumchain-wire/src/policy_account.rs	MAX_APPROVALS	COMMITTED	registry	0x2244
+crates/sumchain-wire/src/policy_account.rs	MAX_CUSTOM_RULES	COMMITTED	registry	0x2243
+crates/sumchain-wire/src/policy_account.rs	MAX_MEMBERS	COMMITTED	registry	0x2242
+crates/sumchain-wire/src/policy_account.rs	MAX_PROPOSAL_PAYLOAD_SIZE	COMMITTED	registry	0x2245
+crates/sumchain-wire/src/policy_account.rs	POLICY_ACCOUNT_DOMAIN_SEP	COMMITTED	registry	0x223f
+crates/sumchain-wire/src/policy_account.rs	PROPOSAL_DOMAIN_SEP	COMMITTED	registry	0x2240
+crates/sumchain-wire/src/property.rs	ASSET_COMMITMENT_SEP	EXCLUDE	unused	only read by AssetAnchor::generate_commitment (property.rs:283), which has no non-test caller in crates/
+crates/sumchain-wire/src/property.rs	ASSET_DOMAIN_SEP	EXCLUDE	unused	only read by AssetAnchor::generate_id (property.rs:266), which has no non-test caller in crates/
+crates/sumchain-wire/src/property.rs	CLAIM_COMMITMENT_SEP	EXCLUDE	unused	only read by InsuranceClaim::generate_commitment (property.rs:1042), which has no non-test caller in crates/
+crates/sumchain-wire/src/property.rs	CLAIM_DOMAIN_SEP	EXCLUDE	unused	only read by InsuranceClaim::generate_id (property.rs:1025), which has no non-test caller in crates/
+crates/sumchain-wire/src/property.rs	COVERAGE_COMMITMENT_SEP	EXCLUDE	unused	only read by InsuranceCoverage::generate_commitment (property.rs:846), which has no non-test caller in crates/
+crates/sumchain-wire/src/property.rs	COVERAGE_DOMAIN_SEP	EXCLUDE	unused	only read by InsuranceCoverage::generate_id (property.rs:829), which has no non-test caller in crates/
+crates/sumchain-wire/src/property.rs	ENCUMBRANCE_COMMITMENT_SEP	EXCLUDE	unused	only read by Encumbrance::generate_commitment (property.rs:646), which has no non-test caller in crates/
+crates/sumchain-wire/src/property.rs	ENCUMBRANCE_DOMAIN_SEP	EXCLUDE	unused	only read by Encumbrance::generate_id (property.rs:630), which has no non-test caller in crates/
+crates/sumchain-wire/src/property.rs	PROPERTY_PROOF_DOMAIN_SEP	EXCLUDE	unused	only read by PropertyProofEnvelope::generate_id (property.rs:1158), which has no non-test caller in crates/
+crates/sumchain-wire/src/property.rs	TITLE_COMMITMENT_SEP	EXCLUDE	unused	only read by TitleEvent::generate_commitment (property.rs:453), which has no non-test caller in crates/
+crates/sumchain-wire/src/property.rs	TITLE_DOMAIN_SEP	EXCLUDE	unused	only read by TitleEvent::generate_id (property.rs:437), which has no non-test caller in crates/
+crates/sumchain-wire/src/registry_wire.rs	GRAPH_DEFINITION_TAG	EXCLUDE	unwired	read by graph_definition_root (registry_wire.rs:68), called only from compute_pool_graph (unwired C1)
+crates/sumchain-wire/src/registry_wire.rs	LEN	EXCLUDE	unused	RegistryRecordV1::LEN has no non-test reader (decoder reads field-by-field)
+crates/sumchain-wire/src/registry_wire.rs	MAGIC	EXCLUDE	client-only	RegistryRecordV1 codec (registry_wire.rs:166/172) decoded only by RPC crates/rpc/src/registry_types.rs:145/287
+crates/sumchain-wire/src/registry_wire.rs	SCHEMA_VERSION	EXCLUDE	client-only	RegistryRecordV1 codec (registry_wire.rs:166/172) decoded only by RPC crates/rpc/src/registry_types.rs:145/287
+crates/sumchain-wire/src/registry_wire.rs	TOKENIZER_ID_TAG	EXCLUDE	unused	only read by registry_wire::vk_id/tokenizer_id (registry_wire.rs:43/54), which have no non-test caller
+crates/sumchain-wire/src/registry_wire.rs	VK_ID_TAG	EXCLUDE	unused	only read by registry_wire::vk_id/tokenizer_id (registry_wire.rs:43/54), which have no non-test caller
+crates/sumchain-wire/src/storage_metadata.rs	CHALLENGE_INTERVAL_BLOCKS	COMMITTED	registry	0x2248
+crates/sumchain-wire/src/storage_metadata.rs	CHALLENGE_REWARD	COMMITTED	registry	0x2249
+crates/sumchain-wire/src/storage_metadata.rs	CHALLENGE_TTL_BLOCKS	COMMITTED	registry	0x2247
+crates/sumchain-wire/src/storage_metadata.rs	CHUNK_SIZE	COMMITTED	registry	0x2246
+crates/sumchain-wire/src/storage_metadata.rs	SLASH_PERCENTAGE	COMMITTED	registry	0x224a
+crates/sumchain-wire/src/storage_metadata.rs	SNIP_V2_ASSIGNMENT_CONTEXT	COMMITTED	registry	0x224b
+crates/sumchain-wire/src/supply.rs	ARCHIVE_ACTIVE_BLOCKS_MILESTONE	COMMITTED	registry	0x225a
+crates/sumchain-wire/src/supply.rs	ARCHIVE_ACTIVE_GRANT	COMMITTED	registry	0x225b
+crates/sumchain-wire/src/supply.rs	ARCHIVE_PROOFS_GRANT_1	COMMITTED	registry	0x225d
+crates/sumchain-wire/src/supply.rs	ARCHIVE_PROOFS_GRANT_2	COMMITTED	registry	0x225f
+crates/sumchain-wire/src/supply.rs	ARCHIVE_PROOFS_MILESTONE_1	COMMITTED	registry	0x225c
+crates/sumchain-wire/src/supply.rs	ARCHIVE_PROOFS_MILESTONE_2	COMMITTED	registry	0x225e
+crates/sumchain-wire/src/supply.rs	COMPUTE_CLAIMS_GRANT_1	COMMITTED	registry	0x2261
+crates/sumchain-wire/src/supply.rs	COMPUTE_CLAIMS_GRANT_2	COMMITTED	registry	0x2263
+crates/sumchain-wire/src/supply.rs	COMPUTE_CLAIMS_MILESTONE_1	COMMITTED	registry	0x2260
+crates/sumchain-wire/src/supply.rs	COMPUTE_CLAIMS_MILESTONE_2	COMMITTED	registry	0x2262
+crates/sumchain-wire/src/supply.rs	FIXED_SERVICE_POOLS	COMMITTED	registry	0x2256
+crates/sumchain-wire/src/supply.rs	GENESIS_ACCOUNTED_SUPPLY	COMMITTED	registry	0x224e
+crates/sumchain-wire/src/supply.rs	GENESIS_VALIDATOR_ACCOUNTS	COMMITTED	registry	0x2257
+crates/sumchain-wire/src/supply.rs	GENESIS_VALIDATOR_PUBKEYS	COMMITTED	registry	0x2258
+crates/sumchain-wire/src/supply.rs	GRANTS_AGGREGATE_DIGEST_DOMAIN	COMMITTED	registry	0x2264
+crates/sumchain-wire/src/supply.rs	GRANT_LIQUID_BPS	COMMITTED	registry	0x2259
+crates/sumchain-wire/src/supply.rs	KOPPA	COMMITTED	registry	0x224c
+crates/sumchain-wire/src/supply.rs	MAINNET_CHAIN_ID	COMMITTED	registry	0x224f
+crates/sumchain-wire/src/supply.rs	POOL_ARCHIVE	COMMITTED	registry	0x2252
+crates/sumchain-wire/src/supply.rs	POOL_COMPUTE	COMMITTED	registry	0x2253
+crates/sumchain-wire/src/supply.rs	POOL_ECOSYSTEM	COMMITTED	registry	0x2254
+crates/sumchain-wire/src/supply.rs	POOL_GOVERNANCE_RESERVE	COMMITTED	registry	0x2255
+crates/sumchain-wire/src/supply.rs	POOL_VALIDATOR	COMMITTED	registry	0x2251
+crates/sumchain-wire/src/supply.rs	PROTOCOL_RESERVE_DIGEST_DOMAIN	COMMITTED	registry	0x2265
+crates/sumchain-wire/src/supply.rs	SUPPLY_CORRECTION_DELTA	EXCLUDE	unused	no non-test reader
+crates/sumchain-wire/src/supply.rs	SUPPLY_CORRECTION_DOMAIN	COMMITTED	registry	0x2250
+crates/sumchain-wire/src/supply.rs	SUPPLY_LEDGER_DIGEST_DOMAIN	COMMITTED	registry	0x2266
+crates/sumchain-wire/src/supply.rs	TARGET_CANONICAL_SUPPLY	COMMITTED	registry	0x224d
+crates/sumchain-wire/src/supply.rs	VALIDATOR_COHORT_1_GRANT	COMMITTED	registry	0x2267
+crates/sumchain-wire/src/supply.rs	VALIDATOR_COHORT_1_LAST_INDEX	COMMITTED	registry	0x2268
+crates/sumchain-wire/src/supply.rs	VALIDATOR_COHORT_2_GRANT	COMMITTED	registry	0x2269
+crates/sumchain-wire/src/supply.rs	VALIDATOR_COHORT_2_LAST_INDEX	COMMITTED	registry	0x226a
+crates/sumchain-wire/src/supply.rs	VALIDATOR_COHORT_3_GRANT	COMMITTED	registry	0x226b
+crates/sumchain-wire/src/supply.rs	VALIDATOR_COHORT_3_LAST_INDEX	COMMITTED	registry	0x226c
+crates/sumchain-wire/src/supply.rs	VALIDATOR_COHORT_4_GRANT	COMMITTED	registry	0x226d
+crates/sumchain-wire/src/supply.rs	VALIDATOR_COHORT_4_LAST_INDEX	COMMITTED	registry	0x226e
+crates/sumchain-wire/src/tax.rs	TAX_BALANCE_STATUS	EXCLUDE	unused	only read by v1_claim_types::*_entry/all_v1_entries and TaxPolicy::create_p_* (tax.rs:177-701), none with a non-test caller
+crates/sumchain-wire/src/tax.rs	TAX_CLAIM_COMMITMENT_DOMAIN_SEP	EXCLUDE	unused	no reader anywhere in crates/
+crates/sumchain-wire/src/tax.rs	TAX_DISCLOSURE_DOMAIN_SEP	EXCLUDE	unused	only read by TaxDisclosureEnvelope::generate_commitment (tax.rs:970), which (with its wire-internal callers all_v1_entries/create_p_*) has no non-test caller in crates/
+crates/sumchain-wire/src/tax.rs	TAX_FILED_RETURN	EXCLUDE	unused	only read by v1_claim_types::*_entry/all_v1_entries and TaxPolicy::create_p_* (tax.rs:177-701), none with a non-test caller
+crates/sumchain-wire/src/tax.rs	TAX_GOOD_STANDING	EXCLUDE	unused	only read by v1_claim_types::*_entry/all_v1_entries and TaxPolicy::create_p_* (tax.rs:177-701), none with a non-test caller
+crates/sumchain-wire/src/tax.rs	TAX_INCOME_BRACKET	EXCLUDE	unused	only read by v1_claim_types::*_entry/all_v1_entries and TaxPolicy::create_p_* (tax.rs:177-701), none with a non-test caller
+crates/sumchain-wire/src/tax.rs	TAX_NOTICE_OPEN	EXCLUDE	unused	only read by v1_claim_types::*_entry/all_v1_entries and TaxPolicy::create_p_* (tax.rs:177-701), none with a non-test caller
+crates/sumchain-wire/src/tax.rs	TAX_PAID_STATUS	EXCLUDE	unused	only read by v1_claim_types::*_entry/all_v1_entries and TaxPolicy::create_p_* (tax.rs:177-701), none with a non-test caller
+crates/sumchain-wire/src/tax.rs	TAX_POLICY_DOMAIN_SEP	EXCLUDE	unused	only read by TaxPolicy::generate_policy_id (tax.rs:554), which (with its wire-internal callers all_v1_entries/create_p_*) has no non-test caller in crates/
+crates/sumchain-wire/src/tax.rs	TAX_PROOF_DOMAIN_SEP	EXCLUDE	unused	only read by TaxProofEnvelope::generate_proof_id (tax.rs:829), which (with its wire-internal callers all_v1_entries/create_p_*) has no non-test caller in crates/
+crates/sumchain-wire/src/tax.rs	TAX_PROVE_FILED	EXCLUDE	unused	tax::proof_profiles string ids; no reader anywhere in crates/
+crates/sumchain-wire/src/tax.rs	TAX_PROVE_GOOD_STANDING	EXCLUDE	unused	tax::proof_profiles string ids; no reader anywhere in crates/
+crates/sumchain-wire/src/tax.rs	TAX_PROVE_INCOME_BRACKET	EXCLUDE	unused	tax::proof_profiles string ids; no reader anywhere in crates/
+crates/sumchain-wire/src/tax.rs	TAX_PROVE_NO_BALANCE	EXCLUDE	unused	tax::proof_profiles string ids; no reader anywhere in crates/
+crates/sumchain-wire/src/tax.rs	TAX_SCHEMA_DOMAIN_SEP	EXCLUDE	unused	only read by TaxClaimTypeEntry::generate_schema_hash (tax.rs:141), which (with its wire-internal callers all_v1_entries/create_p_*) has no non-test caller in crates/
+crates/sumchain-wire/src/tax.rs	TAX_WITHHOLDING_BRACKET	EXCLUDE	unused	only read by v1_claim_types::*_entry/all_v1_entries and TaxPolicy::create_p_* (tax.rs:177-701), none with a non-test caller
+crates/sumchain-wire/src/validator_authority.rs	GOV_CANCEL_PROPOSAL_DOMAIN	COMMITTED	registry	0x2270
+crates/sumchain-wire/src/validator_authority.rs	GOV_REGISTER_ASSET_DOMAIN	COMMITTED	registry	0x226f
+crates/sumchain-wire/src/validator_authority.rs	GOV_REGISTER_EQUITY_CLASS_DOMAIN	COMMITTED	registry	0x2271
+crates/sumchain-wire/src/validator_authority.rs	INFERENCE_RESOLVE_DISPUTE_DOMAIN	COMMITTED	registry	0x2272
+crates/token/src/lib.rs	MAX_DECIMALS	EXCLUDE	unused-crate	read token.rs; sumchain-token has no dependent crate in workspace (grep Cargo.toml)
+crates/token/src/lib.rs	MAX_NAME_BYTES	EXCLUDE	unused-crate	read token.rs:178; sumchain-token has no dependent crate in workspace (grep Cargo.toml)
+crates/token/src/lib.rs	MAX_SYMBOL_BYTES	EXCLUDE	unused-crate	read token.rs; sumchain-token has no dependent crate in workspace (grep Cargo.toml)
+crates/token/src/lib.rs	SRC20_VERSION	EXCLUDE	unused-crate	no reader; sumchain-token has no dependent crate in workspace (grep Cargo.toml)

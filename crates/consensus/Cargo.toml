@@ -12,6 +12,13 @@ sumchain-crypto = { path = "../crypto" }
 sumchain-storage = { path = "../storage" }
 sumchain-genesis = { path = "../genesis" }
 sumchain-state = { path = "../state" }
+# The crates whose compiled consensus constants ConsensusConfigV1 commits to
+# (#268). Each is already a dependency of `sumchain-state`.
+sumchain-wire = { path = "../sumchain-wire" }
+sumchain-nft = { path = "../nft" }
+sumc-runtime = { path = "../sumc-runtime" }
+sumchain-beacon-crypto = { path = "../beacon-crypto" }
+sumchain-beacon-runtime = { path = "../beacon-runtime" }
 tokio = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
@@ -34,5 +41,6 @@ failpoints = ["sumchain-storage/test-hooks"]
 sumchain-storage = { path = "../storage", features = ["activation-fixtures"] }
 sumchain-consensus = { path = ".", features = ["failpoints"] }
 tempfile = "3.10"
+serde_json = { workspace = true }
 hex = { workspace = true }
 wat = "1"

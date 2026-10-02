@@ -339,6 +339,17 @@ impl Node {
         // it already accepted and find out during a reorg.
         Self::check_activation_parameters(&db, &genesis, initial_height)?;
 
+        // ── the consensus-configuration baseline (#268), after the gate check ─
+        //
+        // The activation check above covers heights. This covers everything else
+        // a node's rules are made of — genesis parameters, the engine's rule
+        // codes, the consensus constants compiled into this binary — as one
+        // commitment recorded in this database and compared on every start.
+        // A difference outside future gates refuses here, before anything that
+        // processes a block exists. The record is local: it says what this node
+        // runs, not that any other node agrees.
+        Self::check_consensus_config(&db, &genesis, initial_height)?;
+
         // What this node may claim about its own history, said at start.
         Self::report_sync_capability(&db, initial_height)?;
 
@@ -635,6 +646,60 @@ impl Node {
         );
         if recorded.is_none() {
             info!("Activation heights recorded for the first time on this database");
+        }
+        Ok(())
+    }
+
+    /// Record, or compare against, this database's consensus-configuration
+    /// baseline (`sumchain_consensus::consensus_config`).
+    ///
+    /// First start with no baseline records one and continues. An exact match
+    /// continues. A reschedule of gates still ahead of the chain is recorded as
+    /// a transition and continues. Anything else refuses, naming each field
+    /// that moved; an unreadable record refuses rather than being recreated.
+    pub(crate) fn check_consensus_config(
+        db: &Arc<Database>,
+        genesis: &Genesis,
+        current_height: u64,
+    ) -> Result<()> {
+        use sumchain_consensus::consensus_config::{self as ccfg, StartupOutcome};
+
+        match ccfg::check_at_startup(db, genesis, current_height)
+            .map_err(|e| anyhow::anyhow!("consensus configuration check failed: {}", e))?
+        {
+            StartupOutcome::Initialized {
+                commitment,
+                baseline_height,
+            } => {
+                info!(
+                    "Consensus configuration baseline recorded for the first time at height \
+                     {}: commitment {} (schema {}, unverified local baseline — it describes \
+                     what this node runs and is not network agreement)",
+                    baseline_height,
+                    commitment,
+                    ccfg::SCHEMA_V1
+                );
+            }
+            StartupOutcome::Unchanged { commitment } => {
+                info!(
+                    "Consensus configuration commitment {} (schema {}, unverified local \
+                     baseline) matches this database's record",
+                    commitment,
+                    ccfg::SCHEMA_V1
+                );
+            }
+            StartupOutcome::GatesRescheduled { from, to, changes } => {
+                for change in &changes {
+                    warn!("Consensus configuration: future gate rescheduled: {}", change);
+                }
+                warn!(
+                    "Consensus configuration commitment moved {} -> {} by {} future gate \
+                     reschedule(s); recorded in the transition history",
+                    from,
+                    to,
+                    changes.len()
+                );
+            }
         }
         Ok(())
     }
@@ -1949,3 +2014,10 @@ mod crash_recovery_tests;
 #[cfg(test)]
 #[path = "../tests/unit/genesis_alloc_boot_tests.rs"]
 mod genesis_alloc_boot_tests;
+
+/// The consensus-configuration baseline (#268) through the real boot: recorded
+/// on first start, compared on every later one, refused on a changed rule or a
+/// damaged record. A unit-test module for the same reason as the ones above.
+#[cfg(test)]
+#[path = "../tests/unit/consensus_config_boot_tests.rs"]
+mod consensus_config_boot_tests;

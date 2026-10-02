@@ -837,6 +837,76 @@ pub struct MessagingRegistrySeedInfo {
     pub digest: String,
 }
 
+/// `chain_getConsensusConfig` — the consensus configuration this node runs
+/// and the baseline its database recorded (#268).
+///
+/// Local accountability, not network agreement: `status` is
+/// `unverified-local-baseline`, meaning the node computed the value from its
+/// own genesis and binary. Equal commitments on two nodes mean equal rules;
+/// nothing here shows that any two nodes were compared.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsensusConfigInfo {
+    /// Encoding schema of the recorded baseline (and of `running_commitment`).
+    pub schema: u16,
+    /// `unverified-local-baseline`, or `not-recorded` before the first start
+    /// that records one.
+    pub status: String,
+    /// Always `false` in this release: nothing binds the commitment to peers.
+    pub network_agreement: bool,
+    /// The recorded baseline commitment, hex.
+    pub commitment: Option<String>,
+    /// Height at which this database first recorded a baseline.
+    pub baseline_height: Option<BlockHeight>,
+    /// The commitment first recorded.
+    pub initial_commitment: Option<String>,
+    /// What THIS process computes from the genesis it was started with.
+    pub running_commitment: Option<String>,
+    /// Whether the running configuration equals the recorded baseline.
+    pub matches_baseline: Option<bool>,
+    /// The rules the running engine implements, as named rule codes.
+    pub rules: ConsensusRulesInfo,
+    /// Every field of the recorded baseline: scalars as values, byte strings,
+    /// lists and addresses as a digest only.
+    pub fields: Vec<ConsensusConfigFieldInfo>,
+    /// The append-only transition history, oldest first.
+    pub transitions: Vec<ConsensusConfigTransitionInfo>,
+}
+
+/// Rule codes, named.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsensusRulesInfo {
+    pub engine: String,
+    pub finality: String,
+    pub finality_depth: Option<u64>,
+    pub quorum: String,
+    pub fork_choice: String,
+    pub proposer: String,
+    pub membership: String,
+    pub unfinalized_production: String,
+    pub block_timestamp: String,
+    pub protocol_version: Option<u16>,
+}
+
+/// One configuration field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsensusConfigFieldInfo {
+    pub id: u16,
+    pub name: String,
+    pub value: String,
+}
+
+/// One accepted change to the baseline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsensusConfigTransitionInfo {
+    pub seq: u64,
+    /// `gate-reschedule` or `operator-acknowledged`.
+    pub kind: String,
+    pub at_height: BlockHeight,
+    pub from: String,
+    pub to: String,
+    pub changed_fields: Vec<String>,
+}
+
 /// Transaction status V2 for `chain_getTransactionStatus` (Phase 0b, SNIP V2 Ask 11).
 ///
 /// Distinguishes mempool / included-but-unfinalized / finalized states so

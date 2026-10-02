@@ -46,6 +46,7 @@
 pub mod reorg;
 pub mod bft;
 pub mod branch_switch;
+pub mod consensus_config;
 pub mod engine;
 pub mod poa;
 
