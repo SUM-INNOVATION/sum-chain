@@ -4364,12 +4364,29 @@ impl SumChainApiServer for RpcServer {
         // execution path, so this endpoint now reports the operator's own
         // configured values rather than a literal, and the row stays open on
         // them.
-        let p = self.chain_params.docclass.clone().unwrap_or_default();
+        //
+        // #280: reporting `unwrap_or_default()` told clients about a stake rule
+        // that execution does not apply when `docclass` is unset. The fields now
+        // report the rules the NEXT block executes under, derived by the state
+        // crate from the same parameters and gate decisions execution uses;
+        // the configured values are reported separately.
+        let height = self.consensus.current_height().saturating_add(1);
+        let rules = sumchain_state::DocClassExecutor::effective_rules(&self.chain_params, height);
         Ok(DocClassConfigInfo {
-            min_issuer_stake: p.min_issuer_stake.to_string(),
-            require_issuer_stake: p.require_issuer_stake,
-            max_credential_validity: p.max_credential_validity,
-            admin: p.admin,
+            min_issuer_stake: rules.min_issuer_stake.to_string(),
+            require_issuer_stake: rules.issuer_stake_required,
+            max_credential_validity: rules.max_credential_validity.unwrap_or(0),
+            admin: rules.admin.map(|a| a.to_base58()),
+            configured: rules.configured,
+            effective_at_height: height,
+            configured_values: self.chain_params.docclass.as_ref().map(|p| {
+                crate::types::DocClassConfiguredInfo {
+                    min_issuer_stake: p.min_issuer_stake.to_string(),
+                    require_issuer_stake: p.require_issuer_stake,
+                    max_credential_validity: p.max_credential_validity,
+                    admin: p.admin.clone(),
+                }
+            }),
         })
     }
 

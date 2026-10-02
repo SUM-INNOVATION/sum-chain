@@ -1913,14 +1913,41 @@ pub struct DocClassIssuerKeyInfo {
 
 /// DocClass configuration info for RPC responses
 #[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The four original fields report the rules EXECUTION applies to the next
+/// block (#280), not configured or default values: when `docclass` is unset
+/// in genesis they are `"0"`, `false`, `0` and `null`, because execution then
+/// applies no stake rule, no validity bound and no administrator. What genesis
+/// configures is in `configured_values`.
 pub struct DocClassConfigInfo {
-    /// Minimum issuer stake required
+    /// Stake an issuer registration must carry; `"0"` when none is required.
     pub min_issuer_stake: String,
-    /// Whether issuer stake is required
+    /// Whether a registration below `min_issuer_stake` is refused.
     pub require_issuer_stake: bool,
-    /// Maximum credential validity duration (seconds)
+    /// Longest credential validity window accepted, in milliseconds; `0`
+    /// when no bound is enforced.
     pub max_credential_validity: u64,
-    /// Admin address (if any)
+    /// Administrator address execution recognises, base58, if any.
+    pub admin: Option<String>,
+    /// Whether genesis configures `docclass` at all.
+    #[serde(default)]
+    pub configured: bool,
+    /// Height of the block these rules apply to: the next block.
+    #[serde(default)]
+    pub effective_at_height: u64,
+    /// The values genesis configures, verbatim; `null` when unset.
+    #[serde(default)]
+    pub configured_values: Option<DocClassConfiguredInfo>,
+}
+
+/// `docclass` as written in genesis. Which of these execution applies depends
+/// on activation gates; the effective rules are the fields of
+/// [`DocClassConfigInfo`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocClassConfiguredInfo {
+    pub min_issuer_stake: String,
+    pub require_issuer_stake: bool,
+    pub max_credential_validity: u64,
     pub admin: Option<String>,
 }
 

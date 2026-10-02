@@ -1042,7 +1042,7 @@ pub use agreement_executor::{AgreementExecutionResult, AgreementExecutor, Agreem
 pub use cache::{CacheStats, CachedAccount, StateCache};
 pub use contract_executor::{ContractCallResult, ContractDeployResult, ContractExecutorState, ContractEvent, ContractMetadata};
 pub use docclass_executor::{
-    docclass_stake_escrow_address, DocClassExecutionResult, DocClassExecutor, DocClassGates,
+    docclass_stake_escrow_address, DocClassEffectiveRules, DocClassExecutionResult, DocClassExecutor, DocClassGates,
 };
 pub use docclass_view::BoundedRow;
 pub use employment_executor::{EmploymentExecutionResult, EmploymentExecutor, EmploymentGates};

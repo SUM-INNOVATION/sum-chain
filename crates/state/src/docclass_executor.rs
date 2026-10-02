@@ -188,6 +188,69 @@ impl DocClassGates {
     }
 }
 
+/// The DocClass rules execution applies to a block at a given height, as
+/// values a reader can report (#280).
+///
+/// Derived from the same inputs and the same gate decisions as execution —
+/// `ChainParams::docclass` and [`DocClassGates::from_params`] — and never used
+/// BY execution: it describes the rules, it does not decide them.
+/// `crates/state/tests/docclass_effective_rules.rs` runs the executor across
+/// configurations and gate boundaries and asserts it does exactly what this
+/// reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocClassEffectiveRules {
+    /// Whether genesis configures `docclass` at all. Unset is its own
+    /// behaviour — no stake rule, no admin, no validity bound — not
+    /// `DocClassParams::default()`.
+    pub configured: bool,
+    /// Whether an issuer registration staking less than
+    /// [`Self::min_issuer_stake`] is refused.
+    pub issuer_stake_required: bool,
+    /// The stake a registration must carry; zero when none is required.
+    pub min_issuer_stake: Balance,
+    /// The longest credential validity window accepted, in milliseconds, when
+    /// a bound is enforced; `None` when no bound applies.
+    pub max_credential_validity: Option<u64>,
+    /// The administrator address execution recognises, if any. A configured
+    /// value that does not parse is no administrator, as execution treats it.
+    pub admin: Option<Address>,
+}
+
+impl DocClassExecutor {
+    /// The rules a block at `block_height` is executed under.
+    pub fn effective_rules(params: &ChainParams, block_height: BlockHeight) -> DocClassEffectiveRules {
+        let gates = DocClassGates::from_params(params, block_height);
+        let Some(p) = params.docclass.as_ref() else {
+            return DocClassEffectiveRules {
+                configured: false,
+                issuer_stake_required: false,
+                min_issuer_stake: 0,
+                max_credential_validity: None,
+                admin: None,
+            };
+        };
+        // As `register_issuer`: below the stake-requirement gate the minimum is
+        // enforced whenever it is non-zero, whatever the flag says.
+        let flag = !gates.issuer_stake_requirement || p.require_issuer_stake;
+        let issuer_stake_required = flag && p.min_issuer_stake > 0;
+        DocClassEffectiveRules {
+            configured: true,
+            issuer_stake_required,
+            min_issuer_stake: if issuer_stake_required { p.min_issuer_stake } else { 0 },
+            // As `validity_window_refusal`: only with the gate open and a
+            // non-zero maximum.
+            max_credential_validity: (gates.credential_validity_bound
+                && p.max_credential_validity != 0)
+                .then_some(p.max_credential_validity),
+            // As `is_docclass_admin`.
+            admin: p
+                .admin
+                .as_ref()
+                .and_then(|a| Address::from_base58(a).or_else(|_| Address::from_hex(a)).ok()),
+        }
+    }
+}
+
 /// The account a DocClass issuer's registration stake is held in.
 pub fn docclass_stake_escrow_address() -> Address {
     let hash = blake3::hash(DOCCLASS_STAKE_ESCROW_DOMAIN);
