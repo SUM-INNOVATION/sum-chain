@@ -803,3 +803,57 @@ fn the_transition_history_is_verified_on_every_read() {
         Err(ConfigError::RecordCorrupt(_))
     ));
 }
+
+#[test]
+fn decoding_refuses_a_validator_list_that_repeats_a_key() {
+    // Genesis construction already refuses a repeated validator; the codec must
+    // refuse it on its own, for a record that never went through a genesis.
+    let bytes = encoding();
+    let target = id_of("validators");
+    let mut pos = FIRST_FIELD;
+    loop {
+        let id = u16::from_le_bytes([bytes[pos], bytes[pos + 1]]);
+        let len = u32::from_le_bytes(bytes[pos + 3..pos + 7].try_into().unwrap()) as usize;
+        if id == target {
+            // value = count:u32 ‖ (len:u32 ‖ key[32])*; copy key 0 over key 1.
+            let v = pos + 7;
+            let first = v + 4 + 4;
+            let second = first + 32 + 4;
+            let mut b = bytes.clone();
+            let key: Vec<u8> = b[first..first + 32].to_vec();
+            b[second..second + 32].copy_from_slice(&key);
+            assert!(malformed(&b), "a repeated validator decoded");
+            break;
+        }
+        pos += 7 + len;
+    }
+}
+
+#[test]
+fn a_history_entry_the_record_does_not_count_is_refused() {
+    // A no-op entry (old = new = the current commitment) appended past the
+    // recorded count keeps the chain intact; only the count can catch it.
+    let dir = TempDir::new().unwrap();
+    let db = open(&dir);
+    let g = full_genesis();
+    ccfg::check_at_startup(&db, &g, 0).unwrap();
+    let c = commitment(&g);
+    let enc = ccfg::build(&g).unwrap().encode();
+    let mut t = Vec::new();
+    t.extend_from_slice(&1u16.to_le_bytes());
+    t.extend_from_slice(&1u64.to_le_bytes());
+    t.push(2);
+    t.extend_from_slice(&0u64.to_le_bytes());
+    t.extend_from_slice(c.as_bytes());
+    t.extend_from_slice(c.as_bytes());
+    t.extend_from_slice(&0u16.to_le_bytes());
+    t.extend_from_slice(&(enc.len() as u32).to_le_bytes());
+    t.extend_from_slice(&enc);
+    let mut key = TRANSITION_PREFIX.to_vec();
+    key.extend_from_slice(&1u64.to_be_bytes());
+    db.put(cf::META, &key, &t).unwrap();
+    assert!(matches!(
+        ccfg::check_at_startup(&db, &g, 0),
+        Err(ConfigError::RecordCorrupt(_))
+    ));
+}
