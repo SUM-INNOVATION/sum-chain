@@ -665,7 +665,7 @@ impl Node {
         use sumchain_consensus::consensus_config::{self as ccfg, StartupOutcome};
 
         match ccfg::check_at_startup(db, genesis, current_height)
-            .map_err(|e| anyhow::anyhow!("consensus configuration check failed: {}", e))?
+            .map_err(|e| anyhow::anyhow!("consensus configuration check failed: {e}"))?
         {
             StartupOutcome::Initialized {
                 commitment,

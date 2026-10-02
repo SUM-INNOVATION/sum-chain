@@ -1338,32 +1338,29 @@ async fn main() -> Result<()> {
             // operator types becomes part of it; the two commitments only have
             // to match what is recorded and what is computed.
             let genesis = Genesis::from_file(&genesis)
-                .with_context(|| format!("failed to load genesis from {:?}", genesis))?;
+                .with_context(|| format!("failed to load genesis from {genesis:?}"))?;
             sumchain_consensus::poa::check_protocol_v1(&genesis)?;
             sumchain_state::account_root::validate_runtime_activation(&genesis.params)
-                .map_err(|e| anyhow::anyhow!("chain activation parameters are unsound: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("chain activation parameters are unsound: {e}"))?;
             let old = sumchain_primitives::Hash::from_hex(&old)
-                .map_err(|e| anyhow::anyhow!("--old is not a commitment: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("--old is not a commitment: {e}"))?;
             let new = sumchain_primitives::Hash::from_hex(&new)
-                .map_err(|e| anyhow::anyhow!("--new is not a commitment: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("--new is not a commitment: {e}"))?;
 
             // Opening takes RocksDB's exclusive lock on the data directory, so
             // this fails while a node holds it.
             let db = Database::open_default(&data_dir).with_context(|| {
-                format!(
-                    "cannot open {:?}; the node must be stopped before acknowledging",
-                    data_dir
-                )
+                format!("cannot open {data_dir:?}; the node must be stopped before acknowledging")
             })?;
             sumchain_storage::journal::validate_startup(&db)
                 .context("application journal format check failed")?;
             let height = BlockStore::new(&db).get_latest_height()?.unwrap_or(0);
 
             println!("Acknowledging a consensus configuration change on this node only.");
-            println!("  Data directory: {:?}", data_dir);
-            println!("  Chain height:   {}", height);
-            println!("  Recorded:       {}", old);
-            println!("  Computed:       {}", new);
+            println!("  Data directory: {data_dir:?}");
+            println!("  Chain height:   {height}");
+            println!("  Recorded:       {old}");
+            println!("  Computed:       {new}");
             println!();
             println!("This records that you accept the change locally. It does not make");
             println!("any other node agree, and it cannot be undone: the history is");
@@ -1380,11 +1377,11 @@ async fn main() -> Result<()> {
             }
 
             let done = ccfg::acknowledge(&db, &genesis, height, old, new)
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             println!();
             println!("Recorded transition {} ({} -> {}):", done.seq, done.from, done.to);
             for change in &done.changes {
-                println!("  {}", change);
+                println!("  {change}");
             }
         }
 
