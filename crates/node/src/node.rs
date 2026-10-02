@@ -203,7 +203,7 @@ impl Node {
         // refused here, before a data directory or database exists (#276).
         genesis
             .canonical_alloc()
-            .map_err(|e| anyhow::anyhow!("genesis allocations are invalid: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("genesis allocations are invalid: {e}"))?;
 
         // Create data directory
         std::fs::create_dir_all(&data_dir)?;
