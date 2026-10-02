@@ -333,13 +333,11 @@ fn every_compiled_constant_is_classified() {
     for row in census_rows() {
         assert!(
             matches!(row[2].as_str(), "COMMITTED" | "EXCLUDE"),
-            "verdict {:?}",
-            row
+            "verdict {row:?}"
         );
         assert!(
             !row[3].is_empty() && !row[4].is_empty(),
-            "unexplained {:?}",
-            row
+            "unexplained {row:?}"
         );
         *classified
             .entry((row[0].clone(), row[1].clone()))
@@ -397,10 +395,14 @@ fn every_committed_constant_row_names_a_registry_field_and_back() {
 /// is a deliberate review of what the beacon path commits to.
 #[test]
 fn the_beacon_and_compute_pool_gates_are_still_refused() {
-    let mut p = ChainParams::default();
-    p.beacon_enabled_from_height = Some(1);
-    assert!(p.validate().is_err());
-    let mut p = ChainParams::default();
-    p.compute_pool_enabled_from_height = Some(1);
-    assert!(p.validate().is_err());
+    let beacon = ChainParams {
+        beacon_enabled_from_height: Some(1),
+        ..ChainParams::default()
+    };
+    assert!(beacon.validate().is_err());
+    let compute_pool = ChainParams {
+        compute_pool_enabled_from_height: Some(1),
+        ..ChainParams::default()
+    };
+    assert!(compute_pool.validate().is_err());
 }

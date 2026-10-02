@@ -72,7 +72,9 @@ fn serve(genesis: &Genesis) -> Served {
     Served { dir, db, server }
 }
 
-fn meta_snapshot(db: &Database) -> Vec<(Box<[u8]>, Box<[u8]>)> {
+type Row = (Box<[u8]>, Box<[u8]>);
+
+fn meta_snapshot(db: &Database) -> Vec<Row> {
     db.prefix_iter_checked(cf::META, b"consensus_config/")
         .unwrap()
         .map(Result::unwrap)

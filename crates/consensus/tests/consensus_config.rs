@@ -33,44 +33,46 @@ fn address(i: u8) -> Address {
 /// A genesis in which EVERY optional group and optional value is present, so
 /// that each committed field can be moved on its own.
 fn full_genesis() -> Genesis {
-    let mut params = ChainParams::default();
-    params.staking = Some(StakingParams::default());
-    params.messaging = Some(MessagingParams {
-        registry_admin: Some(address(40).to_base58()),
-        ..MessagingParams::default()
-    });
-    params.docclass = Some(DocClassParams {
-        admin: Some(address(41).to_base58()),
-        max_credential_validity: 1_000,
-        ..DocClassParams::default()
-    });
-    params.governance = Some(GovernanceParams {
-        validator_authority_threshold_bps: 6_000,
-        quorum_bps: 3_000,
-        pass_threshold_bps: 5_000,
-        voting_period_blocks: 1_000,
-        max_snapshot_holders: 100,
-        proposal_bond: 1_000,
-        treasury: Some(address(42)),
-        min_koppa_for_eligibility: 10,
-    });
-    params.beacon_params = Some(BeaconParamsConfig {
-        f: 1,
-        c: 1,
-        t: 2,
-        q_dkg: 3,
-        n: 5,
-    });
-    params.beacon_schedule = Some(BeaconSchedule {
-        start_height: 1_000,
-        epoch_length: 10_000,
-        key_cutoff_offset: 100,
-        deal_start_offset: 200,
-        deal_cutoff_offset: 300,
-        complaint_start_offset: 400,
-        complaint_deadline_offset: 500,
-    });
-    params.inference_settlement_dispute_threshold_bps = Some(100);
+    let params = ChainParams {
+        staking: Some(StakingParams::default()),
+        messaging: Some(MessagingParams {
+            registry_admin: Some(address(40).to_base58()),
+            ..MessagingParams::default()
+        }),
+        docclass: Some(DocClassParams {
+            admin: Some(address(41).to_base58()),
+            max_credential_validity: 1_000,
+            ..DocClassParams::default()
+        }),
+        governance: Some(GovernanceParams {
+            validator_authority_threshold_bps: 6_000,
+            quorum_bps: 3_000,
+            pass_threshold_bps: 5_000,
+            voting_period_blocks: 1_000,
+            max_snapshot_holders: 100,
+            proposal_bond: 1_000,
+            treasury: Some(address(42)),
+            min_koppa_for_eligibility: 10,
+        }),
+        beacon_params: Some(BeaconParamsConfig {
+            f: 1,
+            c: 1,
+            t: 2,
+            q_dkg: 3,
+            n: 5,
+        }),
+        beacon_schedule: Some(BeaconSchedule {
+            start_height: 1_000,
+            epoch_length: 10_000,
+            key_cutoff_offset: 100,
+            deal_start_offset: 200,
+            deal_cutoff_offset: 300,
+            complaint_start_offset: 400,
+            complaint_deadline_offset: 500,
+        }),
+        inference_settlement_dispute_threshold_bps: Some(100),
+        ..ChainParams::default()
+    };
     let mut alloc = HashMap::new();
     for i in 1..=4u8 {
         alloc.insert(address(i).to_base58(), 1_000u128 * i as u128);
@@ -538,10 +540,12 @@ fn tamper(db: &Database, key: &[u8], f: impl FnOnce(&mut Vec<u8>)) {
     db.put(cf::META, key, &raw).unwrap();
 }
 
+type Damage = Box<dyn Fn(&mut Vec<u8>)>;
+
 #[test]
 fn a_damaged_baseline_is_refused_and_never_recreated() {
     let g = full_genesis();
-    let cases: Vec<(&str, Box<dyn Fn(&mut Vec<u8>)>)> = vec![
+    let cases: Vec<(&str, Damage)> = vec![
         (
             "flipped encoding byte",
             Box::new(|r| *r.last_mut().unwrap() ^= 1),

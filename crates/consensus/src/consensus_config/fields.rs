@@ -2414,7 +2414,7 @@ pub fn extra_constants() -> Vec<(u16, &'static str, Value)> {
         (
             0x223d,
             "sumchain_wire::messaging::DEFAULT_MIN_TRUST_STAKE",
-            Value::U128(sumchain_wire::messaging::DEFAULT_MIN_TRUST_STAKE as u128),
+            Value::U128(sumchain_wire::messaging::DEFAULT_MIN_TRUST_STAKE),
         ),
         (
             0x223e,
@@ -2493,17 +2493,17 @@ pub fn extra_constants() -> Vec<(u16, &'static str, Value)> {
         (
             0x224c,
             "sumchain_wire::supply::KOPPA",
-            Value::U128(sumchain_wire::supply::KOPPA as u128),
+            Value::U128(sumchain_wire::supply::KOPPA),
         ),
         (
             0x224d,
             "sumchain_wire::supply::TARGET_CANONICAL_SUPPLY",
-            Value::U128(sumchain_wire::supply::TARGET_CANONICAL_SUPPLY as u128),
+            Value::U128(sumchain_wire::supply::TARGET_CANONICAL_SUPPLY),
         ),
         (
             0x224e,
             "sumchain_wire::supply::GENESIS_ACCOUNTED_SUPPLY",
-            Value::U128(sumchain_wire::supply::GENESIS_ACCOUNTED_SUPPLY as u128),
+            Value::U128(sumchain_wire::supply::GENESIS_ACCOUNTED_SUPPLY),
         ),
         (
             0x224f,
@@ -2518,32 +2518,32 @@ pub fn extra_constants() -> Vec<(u16, &'static str, Value)> {
         (
             0x2251,
             "sumchain_wire::supply::POOL_VALIDATOR",
-            Value::U128(sumchain_wire::supply::POOL_VALIDATOR as u128),
+            Value::U128(sumchain_wire::supply::POOL_VALIDATOR),
         ),
         (
             0x2252,
             "sumchain_wire::supply::POOL_ARCHIVE",
-            Value::U128(sumchain_wire::supply::POOL_ARCHIVE as u128),
+            Value::U128(sumchain_wire::supply::POOL_ARCHIVE),
         ),
         (
             0x2253,
             "sumchain_wire::supply::POOL_COMPUTE",
-            Value::U128(sumchain_wire::supply::POOL_COMPUTE as u128),
+            Value::U128(sumchain_wire::supply::POOL_COMPUTE),
         ),
         (
             0x2254,
             "sumchain_wire::supply::POOL_ECOSYSTEM",
-            Value::U128(sumchain_wire::supply::POOL_ECOSYSTEM as u128),
+            Value::U128(sumchain_wire::supply::POOL_ECOSYSTEM),
         ),
         (
             0x2255,
             "sumchain_wire::supply::POOL_GOVERNANCE_RESERVE",
-            Value::U128(sumchain_wire::supply::POOL_GOVERNANCE_RESERVE as u128),
+            Value::U128(sumchain_wire::supply::POOL_GOVERNANCE_RESERVE),
         ),
         (
             0x2256,
             "sumchain_wire::supply::FIXED_SERVICE_POOLS",
-            Value::U128(sumchain_wire::supply::FIXED_SERVICE_POOLS as u128),
+            Value::U128(sumchain_wire::supply::FIXED_SERVICE_POOLS),
         ),
         (
             0x2257,
@@ -2568,7 +2568,7 @@ pub fn extra_constants() -> Vec<(u16, &'static str, Value)> {
         (
             0x2259,
             "sumchain_wire::supply::GRANT_LIQUID_BPS",
-            Value::U128(sumchain_wire::supply::GRANT_LIQUID_BPS as u128),
+            Value::U128(sumchain_wire::supply::GRANT_LIQUID_BPS),
         ),
         (
             0x225a,
@@ -2578,7 +2578,7 @@ pub fn extra_constants() -> Vec<(u16, &'static str, Value)> {
         (
             0x225b,
             "sumchain_wire::supply::ARCHIVE_ACTIVE_GRANT",
-            Value::U128(sumchain_wire::supply::ARCHIVE_ACTIVE_GRANT as u128),
+            Value::U128(sumchain_wire::supply::ARCHIVE_ACTIVE_GRANT),
         ),
         (
             0x225c,
@@ -2588,7 +2588,7 @@ pub fn extra_constants() -> Vec<(u16, &'static str, Value)> {
         (
             0x225d,
             "sumchain_wire::supply::ARCHIVE_PROOFS_GRANT_1",
-            Value::U128(sumchain_wire::supply::ARCHIVE_PROOFS_GRANT_1 as u128),
+            Value::U128(sumchain_wire::supply::ARCHIVE_PROOFS_GRANT_1),
         ),
         (
             0x225e,
@@ -2598,7 +2598,7 @@ pub fn extra_constants() -> Vec<(u16, &'static str, Value)> {
         (
             0x225f,
             "sumchain_wire::supply::ARCHIVE_PROOFS_GRANT_2",
-            Value::U128(sumchain_wire::supply::ARCHIVE_PROOFS_GRANT_2 as u128),
+            Value::U128(sumchain_wire::supply::ARCHIVE_PROOFS_GRANT_2),
         ),
         (
             0x2260,
@@ -2608,7 +2608,7 @@ pub fn extra_constants() -> Vec<(u16, &'static str, Value)> {
         (
             0x2261,
             "sumchain_wire::supply::COMPUTE_CLAIMS_GRANT_1",
-            Value::U128(sumchain_wire::supply::COMPUTE_CLAIMS_GRANT_1 as u128),
+            Value::U128(sumchain_wire::supply::COMPUTE_CLAIMS_GRANT_1),
         ),
         (
             0x2262,
@@ -2618,7 +2618,7 @@ pub fn extra_constants() -> Vec<(u16, &'static str, Value)> {
         (
             0x2263,
             "sumchain_wire::supply::COMPUTE_CLAIMS_GRANT_2",
-            Value::U128(sumchain_wire::supply::COMPUTE_CLAIMS_GRANT_2 as u128),
+            Value::U128(sumchain_wire::supply::COMPUTE_CLAIMS_GRANT_2),
         ),
         (
             0x2264,
@@ -2638,7 +2638,7 @@ pub fn extra_constants() -> Vec<(u16, &'static str, Value)> {
         (
             0x2267,
             "sumchain_wire::supply::VALIDATOR_COHORT_1_GRANT",
-            Value::U128(sumchain_wire::supply::VALIDATOR_COHORT_1_GRANT as u128),
+            Value::U128(sumchain_wire::supply::VALIDATOR_COHORT_1_GRANT),
         ),
         (
             0x2268,
@@ -2648,7 +2648,7 @@ pub fn extra_constants() -> Vec<(u16, &'static str, Value)> {
         (
             0x2269,
             "sumchain_wire::supply::VALIDATOR_COHORT_2_GRANT",
-            Value::U128(sumchain_wire::supply::VALIDATOR_COHORT_2_GRANT as u128),
+            Value::U128(sumchain_wire::supply::VALIDATOR_COHORT_2_GRANT),
         ),
         (
             0x226a,
@@ -2658,7 +2658,7 @@ pub fn extra_constants() -> Vec<(u16, &'static str, Value)> {
         (
             0x226b,
             "sumchain_wire::supply::VALIDATOR_COHORT_3_GRANT",
-            Value::U128(sumchain_wire::supply::VALIDATOR_COHORT_3_GRANT as u128),
+            Value::U128(sumchain_wire::supply::VALIDATOR_COHORT_3_GRANT),
         ),
         (
             0x226c,
@@ -2668,7 +2668,7 @@ pub fn extra_constants() -> Vec<(u16, &'static str, Value)> {
         (
             0x226d,
             "sumchain_wire::supply::VALIDATOR_COHORT_4_GRANT",
-            Value::U128(sumchain_wire::supply::VALIDATOR_COHORT_4_GRANT as u128),
+            Value::U128(sumchain_wire::supply::VALIDATOR_COHORT_4_GRANT),
         ),
         (
             0x226e,
