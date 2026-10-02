@@ -198,6 +198,13 @@ impl Node {
         //    again, through the same function.
         sumchain_consensus::poa::check_protocol_v1(&genesis)?;
 
+        // The allocations, through the same canonical path that will write the
+        // initial balances: an account allocated twice under any spelling is
+        // refused here, before a data directory or database exists (#276).
+        genesis
+            .canonical_alloc()
+            .map_err(|e| anyhow::anyhow!("genesis allocations are invalid: {}", e))?;
+
         // Create data directory
         std::fs::create_dir_all(&data_dir)?;
 
@@ -1935,3 +1942,10 @@ mod protocol_v1_boot_tests;
 #[cfg(test)]
 #[path = "../tests/unit/crash_recovery_tests.rs"]
 mod crash_recovery_tests;
+
+/// #276 through the real boot: a genesis allocating one account twice is
+/// refused before a data directory exists. A unit-test module for the same
+/// reason as the ones above.
+#[cfg(test)]
+#[path = "../tests/unit/genesis_alloc_boot_tests.rs"]
+mod genesis_alloc_boot_tests;

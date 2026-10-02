@@ -30,6 +30,20 @@ pub enum GenesisError {
     #[error("Invalid address: {0}")]
     InvalidAddress(String),
 
+    /// Two allocation keys name the same account. Refused whatever the
+    /// spellings and balances: keeping either, or summing them, would be a
+    /// choice the genesis author did not write down, and before this refusal
+    /// the choice was made by map iteration order (#276).
+    #[error(
+        "Duplicate genesis allocation for address {address}: written as {first:?} and \
+         {second:?}. Each account may be allocated once."
+    )]
+    DuplicateAllocation {
+        address: String,
+        first: String,
+        second: String,
+    },
+
     #[error("No validators specified")]
     NoValidators,
 
@@ -3914,10 +3928,87 @@ pub struct Genesis {
     pub genesis_time: Timestamp,
     /// Validator public keys (base58 encoded)
     pub validators: Vec<String>,
-    /// Initial account allocations (address -> balance)
+    /// Initial account allocations (address -> balance).
+    ///
+    /// Keys may be written as base58 or hex; each account may appear once,
+    /// however it is spelled. [`Genesis::canonical_alloc`] is the one place
+    /// they are interpreted. A key repeated verbatim in the JSON is refused at
+    /// parse time, because a map would otherwise keep one value silently.
+    #[serde(deserialize_with = "alloc_json::deserialize")]
     pub alloc: HashMap<String, Balance>,
     /// Chain parameters
     pub params: ChainParams,
+}
+
+/// Allocation-map deserialization that refuses a key repeated verbatim.
+mod alloc_json {
+    use super::Balance;
+    use serde::de::{self, MapAccess, Visitor};
+    use serde::Deserializer;
+    use std::collections::HashMap;
+    use std::fmt;
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> std::result::Result<HashMap<String, Balance>, D::Error> {
+        struct AllocVisitor;
+        impl<'de> Visitor<'de> for AllocVisitor {
+            type Value = HashMap<String, Balance>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a map of address to balance")
+            }
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut out = HashMap::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    let balance: Balance = map.next_value()?;
+                    if out.contains_key(&key) {
+                        return Err(de::Error::custom(format!(
+                            "duplicate genesis allocation key {key:?}"
+                        )));
+                    }
+                    out.insert(key, balance);
+                }
+                Ok(out)
+            }
+        }
+        d.deserialize_map(AllocVisitor)
+    }
+}
+
+/// Build an allocation map from `(address, balance)` entries, refusing any
+/// account named twice — verbatim or under another spelling — instead of
+/// letting a later insert overwrite an earlier one.
+///
+/// For tooling that assembles a genesis in code; the result still goes
+/// through [`Genesis::validate`].
+pub fn alloc_from_entries(
+    entries: impl IntoIterator<Item = (String, Balance)>,
+) -> Result<HashMap<String, Balance>> {
+    let mut by_address: std::collections::BTreeMap<[u8; 20], String> = Default::default();
+    let mut out = HashMap::new();
+    for (key, balance) in entries {
+        let address = canonical_address(&key)?;
+        if let Some(first) = by_address.get(address.as_bytes()) {
+            return Err(GenesisError::DuplicateAllocation {
+                address: address.to_base58(),
+                first: first.clone(),
+                second: key,
+            });
+        }
+        by_address.insert(*address.as_bytes(), key.clone());
+        out.insert(key, balance);
+    }
+    Ok(out)
+}
+
+/// The one parser for a genesis allocation key: base58, else hex.
+fn canonical_address(key: &str) -> Result<Address> {
+    Address::from_base58(key)
+        .or_else(|_| Address::from_hex(key))
+        .map_err(|_| GenesisError::InvalidAddress(key.to_string()))
 }
 
 impl Genesis {
@@ -3982,12 +4073,9 @@ impl Genesis {
         sumchain_primitives::proposer::check_validator_set(&self.validator_pubkeys()?)
             .map_err(GenesisError::InvalidValidatorSet)?;
 
-        // Validate all addresses in alloc
-        for addr in self.alloc.keys() {
-            Address::from_base58(addr)
-                .or_else(|_| Address::from_hex(addr))
-                .map_err(|_| GenesisError::InvalidAddress(addr.clone()))?;
-        }
+        // Every allocation key parses, and no account is allocated twice under
+        // any spelling (#276).
+        self.canonical_alloc()?;
 
         // Fail-closed: reject any genesis that opens a subsystem gate whose
         // typed parameter surface does not exist yet (compute-pool / beacon).
@@ -4016,17 +4104,48 @@ impl Genesis {
             .map_err(GenesisError::InvalidValidatorSet)
     }
 
-    /// Parse allocations into addresses and balances
+    /// The allocations as `(address, balance)`, one per account, in ascending
+    /// address order.
+    ///
+    /// The single interpretation of [`Genesis::alloc`]: genesis validation,
+    /// state initialization, the genesis state root and block, and the
+    /// activation digest all read allocations through here. Each key is
+    /// decoded to its 20-byte address, and a second key naming an address
+    /// already seen is refused — with equal or different balances, never
+    /// resolved by keeping one or adding them. The order is fixed by the
+    /// address, never by the map.
+    ///
+    /// Before #276 an account written under two spellings (base58 and hex, or
+    /// hex in two letter cases) was accepted, and which balance was stored, and
+    /// which root and genesis hash resulted, depended on map iteration order.
+    /// For allocations without duplicates nothing changes: every consumer
+    /// already sorted by address or wrote each account independently.
+    pub fn canonical_alloc(&self) -> Result<Vec<(Address, Balance)>> {
+        // Keys in a fixed order, so the refusal names the same pair every run.
+        let mut keys: Vec<&String> = self.alloc.keys().collect();
+        keys.sort();
+        let mut seen: std::collections::BTreeMap<[u8; 20], (&String, Balance)> =
+            Default::default();
+        for key in keys {
+            let address = canonical_address(key)?;
+            if let Some((first, _)) = seen.get(address.as_bytes()) {
+                return Err(GenesisError::DuplicateAllocation {
+                    address: address.to_base58(),
+                    first: (*first).clone(),
+                    second: key.clone(),
+                });
+            }
+            seen.insert(*address.as_bytes(), (key, self.alloc[key]));
+        }
+        Ok(seen
+            .into_iter()
+            .map(|(bytes, (_, balance))| (Address::from(bytes), balance))
+            .collect())
+    }
+
+    /// Parse allocations into addresses and balances: [`Genesis::canonical_alloc`].
     pub fn parsed_alloc(&self) -> Result<Vec<(Address, Balance)>> {
-        self.alloc
-            .iter()
-            .map(|(addr_str, balance)| {
-                let addr = Address::from_base58(addr_str)
-                    .or_else(|_| Address::from_hex(addr_str))
-                    .map_err(|_| GenesisError::InvalidAddress(addr_str.clone()))?;
-                Ok((addr, *balance))
-            })
-            .collect()
+        self.canonical_alloc()
     }
 
     /// Compute the initial state root from allocations
@@ -4135,10 +4254,16 @@ impl Genesis {
     pub fn local_dev(validator_pubkeys: &[&str], prefund_addresses: &[(&str, Balance)]) -> Self {
         let validators: Vec<String> = validator_pubkeys.iter().map(|s| s.to_string()).collect();
 
-        let alloc: HashMap<String, Balance> = prefund_addresses
-            .iter()
-            .map(|(addr, bal)| (addr.to_string(), *bal))
-            .collect();
+        // Never collapse a repeated entry into one: a duplicate is a mistake to
+        // surface, not a value to pick (#276). Other spellings of one account
+        // are refused by `validate`.
+        let mut alloc: HashMap<String, Balance> = HashMap::new();
+        for (addr, bal) in prefund_addresses {
+            assert!(
+                alloc.insert(addr.to_string(), *bal).is_none(),
+                "local_dev: {addr} is prefunded twice"
+            );
+        }
 
         Self {
             chain_id: 1337, // Local dev chain ID

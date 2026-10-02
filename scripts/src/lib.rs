@@ -24,7 +24,6 @@
 //! (`setup_local_testnet.rs`) and is unchanged; this library is only the new
 //! #119 surface.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -280,8 +279,9 @@ pub fn provision_smoke(output_dir: &Path, validator_count: usize) -> Result<Smok
     // ── all funded roles ───────────────────────────────────────────────────
     // alloc funds the validator address AND every role, so every one has
     // balance > 0 straight from genesis (no live node needed to fund).
-    let mut alloc: HashMap<String, u128> = HashMap::new();
-    alloc.insert(validator_address_b58.clone(), ROLE_ALLOC);
+    // Collected, then checked for duplicate accounts before any map is built,
+    // so a repeated address is refused rather than overwritten (#276).
+    let mut alloc_entries: Vec<(String, u128)> = vec![(validator_address_b58.clone(), ROLE_ALLOC)];
 
     let mut roles = Vec::with_capacity(SMOKE_ROLE_NAMES.len());
     for &name in SMOKE_ROLE_NAMES {
@@ -289,7 +289,7 @@ pub fn provision_smoke(output_dir: &Path, validator_count: usize) -> Result<Smok
         let address_b58 = kp.address().to_base58();
         let key_path = keys_dir.join(format!("{name}.json"));
         write_private_key(&key_path, &kp)?;
-        alloc.insert(address_b58.clone(), ROLE_ALLOC);
+        alloc_entries.push((address_b58.clone(), ROLE_ALLOC));
         roles.push(RoleKey {
             name: name.to_string(),
             address_b58,
@@ -309,6 +309,9 @@ pub fn provision_smoke(output_dir: &Path, validator_count: usize) -> Result<Smok
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
+
+    let alloc = sumchain_genesis::alloc_from_entries(alloc_entries)
+        .context("smoke genesis allocations")?;
 
     let genesis = Genesis::new(
         DEVNET_CHAIN_ID,

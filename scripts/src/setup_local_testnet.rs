@@ -15,7 +15,6 @@
 //!   * `ecosystem` — issue #119, DEFERRED. Hard-fails with an explicit blocker
 //!                   message and generates nothing.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -154,7 +153,9 @@ fn run_local() -> Result<()> {
     // Generate validator keys
     println!("Generating validator keys...");
     let mut validators = Vec::new();
-    let mut alloc = HashMap::new();
+    // Collected, then checked for duplicate accounts before any map is built
+    // (#276).
+    let mut alloc_entries: Vec<(String, u128)> = Vec::new();
 
     for i in 1..=3 {
         let keypair = KeyPair::generate();
@@ -171,7 +172,7 @@ fn run_local() -> Result<()> {
         println!("    Key saved to: {}", key_path);
 
         validators.push(pubkey);
-        alloc.insert(address, 1_000_000_000_000_000_000u128); // 1e18 SUM tokens
+        alloc_entries.push((address, 1_000_000_000_000_000_000u128)); // 1e18 SUM tokens
     }
 
     // Generate an extra account for testing
@@ -186,7 +187,8 @@ fn run_local() -> Result<()> {
     println!("  Test account: {}", test_address);
     println!("    Key saved to: keys/test_account.json");
 
-    alloc.insert(test_address, 1_000_000_000_000_000_000u128);
+    alloc_entries.push((test_address, 1_000_000_000_000_000_000u128));
+    let alloc = sumchain_genesis::alloc_from_entries(alloc_entries)?;
 
     // Create genesis
     println!("\nCreating genesis file...");
@@ -317,6 +319,7 @@ fn run_local() -> Result<()> {
         },
     );
 
+    genesis.validate()?;
     genesis.to_file("genesis/local_genesis.json")?;
     println!("  Genesis saved to: genesis/local_genesis.json");
 
