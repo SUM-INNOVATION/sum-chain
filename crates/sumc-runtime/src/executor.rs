@@ -874,9 +874,15 @@ fn host_transfer(env: FunctionEnvMut<WasmEnv>, to_ptr: i32, amount_lo: i64, amou
     0
 }
 
-fn host_abort(env: FunctionEnvMut<WasmEnv>, msg_ptr: i32, msg_len: i32) {
-    // Abort execution with message
-    panic!("Contract aborted");
+/// Abort the call with a trap, never a host panic: the call fails and its
+/// staged writes roll back exactly as for any other trap. The guest message is
+/// not read, so the failure is fixed text and costs no unmetered memory access.
+fn host_abort(
+    _env: FunctionEnvMut<WasmEnv>,
+    _msg_ptr: i32,
+    _msg_len: i32,
+) -> std::result::Result<(), wasmer::RuntimeError> {
+    Err(wasmer::RuntimeError::new("contract aborted"))
 }
 
 #[cfg(test)]
