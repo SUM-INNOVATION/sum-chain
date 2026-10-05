@@ -538,6 +538,7 @@ async fn main() -> Result<()> {
                 cfg.consensus,
             )?;
             node.apply_rpc_contract_limits(&cfg.rpc);
+            node.apply_mempool_policy(&cfg.mempool);
 
             // Run node
             node.run().await?;

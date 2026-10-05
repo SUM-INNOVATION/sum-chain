@@ -120,6 +120,21 @@ pub struct Node {
 }
 
 impl Node {
+    /// Apply the node-local mempool policy. Call before `run`: the mempool is
+    /// then empty and neither gossip nor RPC is accepting transactions yet.
+    pub fn apply_mempool_policy(&self, policy: &crate::config::MempoolSettings) {
+        let removed = self
+            .mempool
+            .set_refuse_contract_transactions(policy.refuse_contract_transactions);
+        if policy.refuse_contract_transactions {
+            info!(
+                "Mempool policy: contract transactions refused at admission and selection \
+                 ({} held removed)",
+                removed
+            );
+        }
+    }
+
     /// Create a new node (without RPC auth or rate limiting)
     #[allow(dead_code)]
     pub fn new(

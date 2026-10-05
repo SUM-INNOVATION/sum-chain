@@ -26,7 +26,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 use sumchain_genesis::ChainParams;
@@ -160,6 +160,20 @@ pub struct Mempool {
     /// Optional education admission context (parallels
     /// `inference_admission`).
     education_admission: Option<EducationAdmission>,
+    /// Node-local policy: refuse `ContractDeploy`/`ContractCall`. Off by
+    /// default. See [`Mempool::set_refuse_contract_transactions`].
+    refuse_contract_transactions: AtomicBool,
+}
+
+/// Whether `tx` is a contract deploy or call.
+fn is_contract_transaction(tx: &SignedTransaction) -> bool {
+    matches!(
+        &tx.inner,
+        TxInner::V2(v2) if matches!(
+            v2.payload,
+            TxPayload::ContractDeploy(_) | TxPayload::ContractCall(_)
+        )
+    )
 }
 
 impl Mempool {
@@ -174,7 +188,38 @@ impl Mempool {
             inference_admission: None,
             education_in_flight: RwLock::new(HashMap::new()),
             education_admission: None,
+            refuse_contract_transactions: AtomicBool::new(false),
         }
+    }
+
+    /// Node-local policy: refuse contract deploys and calls.
+    ///
+    /// When on, `add` refuses them from every source (RPC submission, gossip,
+    /// re-addition after a reorg), any already held are removed, and
+    /// `select_for_block` never returns one. Returns how many were removed.
+    ///
+    /// Not a consensus rule. It decides what THIS node holds and proposes. A
+    /// block from another proposer that carries a contract transaction is
+    /// still executed and accepted.
+    pub fn set_refuse_contract_transactions(&self, refuse: bool) -> usize {
+        self.refuse_contract_transactions
+            .store(refuse, Ordering::SeqCst);
+        if !refuse {
+            return 0;
+        }
+        let held: Vec<Hash> = self
+            .txs
+            .read()
+            .iter()
+            .filter(|(_, e)| is_contract_transaction(&e.tx))
+            .map(|(h, _)| *h)
+            .collect();
+        held.iter().filter(|h| self.remove(h).is_some()).count()
+    }
+
+    /// Whether the node-local contract refusal is on.
+    pub fn refuses_contract_transactions(&self) -> bool {
+        self.refuse_contract_transactions.load(Ordering::SeqCst)
     }
 
     /// Builder: attach the OmniNode `InferenceAttestation` admission
@@ -232,6 +277,10 @@ impl Mempool {
         // Permanently unincludable and permanently unexecutable shapes, refused
         // here rather than discovered at proposal. No-op for everything else.
         self.check_permanently_invalid_admission(&tx)?;
+        // Node-local contract refusal (off by default).
+        if self.refuses_contract_transactions() && is_contract_transaction(&tx) {
+            return Err(StateError::ContractTransactionsRefused);
+        }
 
         // Check mempool size
         if self.txs.read().len() >= self.config.max_size {
@@ -866,6 +915,16 @@ impl Mempool {
         let by_fee = self.by_fee.read();
         let txs = self.txs.read();
 
+        if self.refuses_contract_transactions() {
+            // Nothing held can be a contract transaction (see
+            // `set_refuse_contract_transactions`); this filter is a second line.
+            return by_fee
+                .values()
+                .filter_map(|hash| txs.get(hash).map(|e| e.tx.clone()))
+                .filter(|tx| !is_contract_transaction(tx))
+                .take(max_count)
+                .collect();
+        }
         by_fee
             .values()
             .take(max_count)

@@ -19,6 +19,8 @@ pub struct NodeConfig {
     pub network: NetworkSettings,
     /// RPC server settings
     pub rpc: RpcSettings,
+    /// Node-local mempool policy
+    pub mempool: MempoolSettings,
     /// Health/readiness HTTP server settings
     pub health: HealthSettings,
     /// Logging settings
@@ -32,6 +34,7 @@ impl Default for NodeConfig {
             consensus: ConsensusSettings::default(),
             network: NetworkSettings::default(),
             rpc: RpcSettings::default(),
+            mempool: MempoolSettings::default(),
             health: HealthSettings::default(),
             logging: LoggingSettings::default(),
         }
@@ -179,6 +182,16 @@ impl Default for NetworkSettings {
             max_peers: 50,
         }
     }
+}
+
+/// Node-local mempool policy. Not consensus: it decides what this node admits
+/// and proposes, never which blocks are valid.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MempoolSettings {
+    /// Refuse `ContractDeploy` and `ContractCall` transactions: at admission
+    /// from every source, among those already held, and at block selection.
+    pub refuse_contract_transactions: bool,
 }
 
 /// RPC server settings
@@ -433,6 +446,15 @@ addr = "0.0.0.0:8545"
         let loaded = NodeConfig::from_file(&config_path).unwrap();
         assert_eq!(loaded.node.data_dir, config.node.data_dir);
         assert_eq!(loaded.rpc.addr, config.rpc.addr);
+    }
+
+    #[test]
+    fn mempool_contract_refusal_defaults_off_and_parses() {
+        let cfg: NodeConfig = toml::from_str("[node]\ngenesis = \"g.json\"\n").unwrap();
+        assert!(!cfg.mempool.refuse_contract_transactions);
+        let cfg: NodeConfig =
+            toml::from_str("[mempool]\nrefuse_contract_transactions = true\n").unwrap();
+        assert!(cfg.mempool.refuse_contract_transactions);
     }
 
     #[test]
