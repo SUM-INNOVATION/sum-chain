@@ -1720,6 +1720,9 @@ pub(crate) fn compute(genesis: &Genesis, policy: &SchemaPolicy) -> Result<Vec<Fi
         inference_verifier_unbonding_period_blocks,
         beacon_params,
         beacon_schedule,
+        // Committed through schema 2 (`schema::SCHEMA_2_ADDED`, 0x0720), as its
+        // canonical `ComputePoolParamsV1` encoding.
+        compute_pool_params: _,
         // Activation heights: committed below through `activation_heights()`,
         // whose completeness the genesis crate's own tests enforce. A gate
         // added after schema 1 is registered in `schema::SCHEMA_2_ADDED`.

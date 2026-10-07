@@ -55,6 +55,7 @@ crates/consensus/src/consensus_config/record.rs	RECORD_KEY	EXCLUDE	consensus-con
 crates/consensus/src/consensus_config/record.rs	RECORD_VERSION	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/record.rs	TRANSITION_PREFIX	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/record.rs	TRANSITION_VERSION	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/schema.rs	COMPUTE_POOL_PARAMS_ID	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 field id)
 crates/consensus/src/consensus_config/schema.rs	PRODUCTION	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/schema.rs	SCHEMA_1	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/schema.rs	SCHEMA_2	EXCLUDE	consensus-config-self	the configuration format itself
@@ -655,6 +656,9 @@ crates/sumchain-wire/src/compute_pool_graph.rs	POOL_GRAPHDEF_TAG	EXCLUDE	unwired
 crates/sumchain-wire/src/compute_pool_graph.rs	POOL_JOB_TAG	EXCLUDE	unwired	read only by compute_pool_graph job_id/unit_id/graph root helpers (compute_pool_graph.rs:60/71/81); no execution caller. ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: cra
 crates/sumchain-wire/src/compute_pool_graph.rs	POOL_UNIT_TAG	EXCLUDE	unwired	read only by compute_pool_graph job_id/unit_id/graph root helpers (compute_pool_graph.rs:60/71/81); no execution caller. ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: cra
 crates/sumchain-wire/src/compute_pool_graph.rs	SCHEMA_VERSION	EXCLUDE	unwired	GraphDefinitionV1/DependencyEdgeV1 codec only (compute_pool_graph.rs:256-427); no reader in state/consensus. ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/sr
+crates/sumchain-wire/src/compute_pool_params.rs	LEN	PENDING	schema-2	committed inside the schema-2 field compute_pool_params (0x0720) as part of its CPPRMv1 bytes whenever genesis declares the parameters; no execution reader (compute-pool gate refused at genesis load)
+crates/sumchain-wire/src/compute_pool_params.rs	MAGIC	PENDING	schema-2	committed inside the schema-2 field compute_pool_params (0x0720) as part of its CPPRMv1 bytes whenever genesis declares the parameters; no execution reader (compute-pool gate refused at genesis load)
+crates/sumchain-wire/src/compute_pool_params.rs	SCHEMA_VERSION	PENDING	schema-2	committed inside the schema-2 field compute_pool_params (0x0720) as part of its CPPRMv1 bytes whenever genesis declares the parameters; no execution reader (compute-pool gate refused at genesis load)
 crates/sumchain-wire/src/compute_pool_wire.rs	COMPUTE_POOL_OP_NAMESPACE	EXCLUDE	unwired	only ComputePoolOperation::op (compute_pool_wire.rs:527-534); ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:2073 returns Failed(0) without de
 crates/sumchain-wire/src/compute_pool_wire.rs	LEN	EXCLUDE	unwired	fixed-length doc const for ComputePool carriers; no non-test reader except other LEN consts; ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:20
 crates/sumchain-wire/src/compute_pool_wire.rs	LEN	EXCLUDE	unwired	fixed-length doc const for ComputePool carriers; no non-test reader except other LEN consts; ComputePool (TxType 27) op_bytes are opaque and never decoded by execution: crates/state/src/executor.rs:20
