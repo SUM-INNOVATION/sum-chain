@@ -861,3 +861,65 @@ fn a_history_entry_the_record_does_not_count_is_refused() {
         Err(ConfigError::RecordCorrupt(_))
     ));
 }
+
+/// The #277 gate is registered in the draft schema 2 (0x103f): dormant, it
+/// leaves the schema-1 encoding untouched; set, build refuses, because this
+/// binary records schema 1 and cannot commit to its height.
+#[test]
+fn the_credential_schema_gate_is_a_dormant_schema_2_draft_field() {
+    assert_eq!(
+        ccfg::fields::gate_id("credential_schema_validation_enabled_from_height"),
+        Some(0x103f)
+    );
+    let base = full_genesis();
+    assert_eq!(
+        base.params.credential_schema_validation_enabled_from_height, None,
+        "the golden fixture holds it dormant"
+    );
+    assert_eq!(
+        ccfg::build(&base).unwrap().encode().len(),
+        GOLDEN_LEN,
+        "dormant, the gate adds nothing to the schema-1 encoding"
+    );
+
+    let mut set = full_genesis();
+    set.params.credential_schema_validation_enabled_from_height = Some(10);
+    let err = ccfg::build(&set).expect_err("schema 1 cannot commit to this gate");
+    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
+    assert!(
+        err.to_string()
+            .contains("credential_schema_validation_enabled_from_height"),
+        "{err}"
+    );
+}
+
+/// The #278 gate is registered in the draft schema 2 (0x1040): dormant, it
+/// leaves the schema-1 encoding untouched; set, build refuses, because this
+/// binary records schema 1 and cannot commit to its height.
+#[test]
+fn a_pending_schema_2_gate_is_omitted_dormant_and_refused_set() {
+    assert_eq!(
+        ccfg::fields::gate_id("messaging_timestamp_units_enabled_from_height"),
+        Some(0x1040)
+    );
+    let base = full_genesis();
+    assert_eq!(
+        base.params.messaging_timestamp_units_enabled_from_height, None,
+        "the golden fixture holds it dormant"
+    );
+    assert_eq!(
+        ccfg::build(&base).unwrap().encode().len(),
+        GOLDEN_LEN,
+        "dormant, the gate adds nothing to the schema-1 encoding"
+    );
+
+    let mut set = full_genesis();
+    set.params.messaging_timestamp_units_enabled_from_height = Some(10);
+    let err = ccfg::build(&set).expect_err("schema 1 cannot commit to this gate");
+    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
+    assert!(
+        err.to_string()
+            .contains("messaging_timestamp_units_enabled_from_height"),
+        "{err}"
+    );
+}

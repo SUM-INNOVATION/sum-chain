@@ -98,6 +98,9 @@ pub struct DocClassGates {
     /// every key on it is unclassified. ACTIVATION-AUDIT row D-19b, the half no
     /// height closed.
     pub unknown_attribute_refused: bool,
+    /// The credential schema validator runs at this height whatever its
+    /// compiled-in activation height says. Issue #277.
+    pub schema_validation: bool,
 }
 
 impl DocClassGates {
@@ -129,6 +132,7 @@ impl DocClassGates {
         signature_unsupported: false,
         credential_validity_bound: false,
         unknown_attribute_refused: false,
+        schema_validation: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -147,6 +151,7 @@ impl DocClassGates {
         signature_unsupported: true,
         credential_validity_bound: true,
         unknown_attribute_refused: true,
+        schema_validation: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -184,6 +189,7 @@ impl DocClassGates {
                 params,
                 block_height,
             ),
+            schema_validation: crate::credential_schema_validation_gate_open(params, block_height),
         }
     }
 }
@@ -1701,9 +1707,13 @@ impl DocClassExecutor {
         // every academic subcode rather than the three that have an allowlist.
         // ACTIVATION-AUDIT row D-19b.
         let validation_result = if gates.credential_schema {
-            SchemaValidator::new().validate_academic_credential_wide(&credential, block_height)
+            SchemaValidator::new()
+                .with_chain_gate(gates.schema_validation)
+                .validate_academic_credential_wide(&credential, block_height)
         } else {
-            SchemaValidator::new().validate_academic_credential(&credential, block_height)
+            SchemaValidator::new()
+                .with_chain_gate(gates.schema_validation)
+                .validate_academic_credential(&credential, block_height)
         };
         if !validation_result.is_valid() {
             if let crate::ValidationResult::Invalid { reason } = validation_result {
@@ -1792,7 +1802,9 @@ impl DocClassExecutor {
         // ACTIVATION-AUDIT row D-19b, the "nothing in SRC-80X" half.
         if gates.credential_schema {
             if let crate::ValidationResult::Invalid { reason } =
-                SchemaValidator::new().validate_eligibility_attestation(&attestation, block_height)
+                SchemaValidator::new()
+                    .with_chain_gate(gates.schema_validation)
+                    .validate_eligibility_attestation(&attestation, block_height)
             {
                 warn!(
                     "Schema validation failed for attestation {:?}: {}",

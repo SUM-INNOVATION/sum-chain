@@ -1714,7 +1714,8 @@ impl SumChainApiServer for RpcServer {
                     .iter()
                     .map(|f| crate::types::ConsensusConfigFieldInfo {
                         id: f.id,
-                        name: ccfg::fields::spec_for(f.id)
+                        name: c
+                            .spec(f.id)
                             .map(|s| s.name.to_string())
                             .unwrap_or_default(),
                         value: f.value.render(),
@@ -1724,7 +1725,7 @@ impl SumChainApiServer for RpcServer {
             .unwrap_or_default();
 
         Ok(crate::types::ConsensusConfigInfo {
-            schema: ccfg::SCHEMA_V1,
+            schema: described.map_or(ccfg::PRODUCTION.writes.number, |c| c.schema().number),
             status: record
                 .as_ref()
                 .map(|r| r.status.label().to_string())

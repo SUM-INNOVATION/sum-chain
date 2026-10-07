@@ -12,6 +12,7 @@ pub mod beacon_store;
 pub mod cache;
 pub mod compute_pool;
 pub mod compute_pool_manager;
+pub mod compute_pool_retention;
 pub mod compute_pool_store;
 pub mod contract_executor;
 pub mod docclass_executor;
@@ -558,6 +559,33 @@ pub fn subsystem_ambiguous_policy_id_refused_gate_open(
     block_height: u64,
 ) -> bool {
     matches!(subsystem_policy_id_activation(params), Some(h) if block_height >= h)
+}
+
+/// The chain-defined activation height for the credential schema validator.
+///
+/// Issue #277. Reads `params.credential_schema_validation_enabled_from_height`,
+/// and nothing else. `None` -- the default, and what a genesis written before
+/// the field existed resolves to -- closes the gate, and with it closed the
+/// validator is governed only by its compiled-in
+/// `SchemaValidatorConfig::default().activation_height`, exactly as before.
+///
+/// ONE field for every family the validator serves (DocClass academic
+/// credentials and eligibility attestations, Employment credentials): they
+/// share one validator and one compiled-in height today, and the defect is
+/// that height, not any one family's rule.
+#[inline]
+fn schema_validation_activation(params: &sumchain_genesis::ChainParams) -> Option<u64> {
+    params.credential_schema_validation_enabled_from_height
+}
+
+/// Whether the credential schema validator runs at `block_height` regardless of
+/// its compiled-in activation height.
+#[inline]
+pub fn credential_schema_validation_gate_open(
+    params: &sumchain_genesis::ChainParams,
+    block_height: u64,
+) -> bool {
+    matches!(schema_validation_activation(params), Some(h) if block_height >= h)
 }
 
 /// The `policy_id` sentinel this tree already uses to mean "none named".

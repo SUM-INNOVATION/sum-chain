@@ -15,7 +15,9 @@
 //! | `0x2100–0x2fff` | further compiled consensus constants |
 //!
 //! Ids are permanent. A field that leaves the configuration retires its id; a
-//! field that joins gets a new one, under a new schema.
+//! field that joins gets a new one, under a new schema: post-schema-1 fields,
+//! activation gates included, are registered in [`super::schema`] (schema 2's
+//! append-only list), never here.
 //!
 //! # Inclusion rule
 //!
@@ -45,6 +47,7 @@ use sumchain_primitives::{Address, Hash, StakingParams};
 use sumchain_state::protocol_digest::{consensus_limits, LimitValue};
 
 use super::codec::{ConsensusConfig, Field, Value};
+use super::schema::{Schema, SchemaPolicy, Source, PRODUCTION};
 use super::ConfigError;
 
 /// Wire type of a field.
@@ -1431,12 +1434,10 @@ pub static SCHEMA_V1_FIELDS: &[FieldSpec] = &[
 /// First and last id of the activation-height range.
 const GATE_RANGE: std::ops::RangeInclusive<u16> = 0x1000..=0x1fff;
 
-/// The registry entry for `id`.
+/// The registry entry for `id` in the newest schema this binary knows
+/// ([`PRODUCTION`]`.knows`). A schema-1 id resolves to its schema-1 entry.
 pub fn spec_for(id: u16) -> Option<&'static FieldSpec> {
-    SCHEMA_V1_FIELDS
-        .binary_search_by_key(&id, |s| s.id)
-        .ok()
-        .map(|i| &SCHEMA_V1_FIELDS[i])
+    PRODUCTION.knows.spec(id)
 }
 
 /// Whether `id` is an activation height.
@@ -1458,7 +1459,8 @@ pub fn recorded_gates(config: &ConsensusConfig) -> Vec<(String, Option<u64>)> {
         .iter()
         .filter(|f| is_gate(f.id))
         .map(|f| {
-            let name = spec_for(f.id)
+            let name = config
+                .spec(f.id)
                 .map(|s| s.name)
                 .unwrap_or_default()
                 .to_string();
@@ -1600,12 +1602,41 @@ pub const EXCLUDED_PARAMETERS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Build the configuration this binary enforces for `genesis`.
+/// Build the configuration this binary enforces for `genesis`, in the schema
+/// it records ([`PRODUCTION`]`.writes`).
 ///
-/// Fails only if the genesis itself cannot be interpreted (an unparseable
+/// Fails if the genesis itself cannot be interpreted (an unparseable
 /// validator key or allocation address) — the same inputs on which node start
-/// already fails.
+/// already fails — or if it sets a field of a draft schema, which this binary
+/// can register but never activate.
 pub fn build(genesis: &Genesis) -> Result<ConsensusConfig, ConfigError> {
+    build_with(genesis, &PRODUCTION)
+}
+
+/// [`build`] under `policy`: values computed over `policy.knows`, the
+/// configuration in `policy.writes`.
+pub fn build_with(
+    genesis: &Genesis,
+    policy: &SchemaPolicy,
+) -> Result<ConsensusConfig, ConfigError> {
+    let values = compute(genesis, policy)?;
+    ConsensusConfig::project(values, policy.knows, policy.writes).map_err(|e| match e {
+        ConfigError::BeyondSchema { schema, fields } => ConfigError::Refused(format!(
+            "the genesis sets {fields}: field(s) this binary registers but does not record \
+             (it records schema {schema}). They must stay absent until a binary that \
+             records their schema runs"
+        )),
+        other => other,
+    })
+}
+
+/// Every field value of `policy.knows`, in ascending id order: the schema-1
+/// values below plus every field a later known schema adds.
+pub(crate) fn compute(genesis: &Genesis, policy: &SchemaPolicy) -> Result<Vec<Field>, ConfigError> {
+    policy
+        .check()
+        .map_err(|e| ConfigError::Build(format!("consensus configuration registry: {e}")))?;
+    let knows = policy.knows;
     let build_err =
         |what: &str, e: &dyn std::fmt::Display| ConfigError::Build(format!("{what}: {e}"));
 
@@ -1617,7 +1648,7 @@ pub fn build(genesis: &Genesis) -> Result<ConsensusConfig, ConfigError> {
         params,
     } = genesis;
 
-    let mut f: Vec<Field> = Vec::with_capacity(SCHEMA_V1_FIELDS.len());
+    let mut f: Vec<Field> = Vec::with_capacity(SCHEMA_V1_FIELDS.len() + 16);
     let mut put = |id: u16, value: Value| f.push(Field { id, value });
 
     // ── identity ──
@@ -1689,8 +1720,12 @@ pub fn build(genesis: &Genesis) -> Result<ConsensusConfig, ConfigError> {
         inference_verifier_unbonding_period_blocks,
         beacon_params,
         beacon_schedule,
+        // Committed through schema 2 (`schema::SCHEMA_2_ADDED`, 0x0720), as its
+        // canonical `ComputePoolParamsV1` encoding.
+        compute_pool_params: _,
         // Activation heights: committed below through `activation_heights()`,
-        // whose completeness the genesis crate's own tests enforce.
+        // whose completeness the genesis crate's own tests enforce. A gate
+        // added after schema 1 is registered in `schema::SCHEMA_2_ADDED`.
         v2_enabled_from_height: _,
         omninode_enabled_from_height: _,
         omninode_sponsored_attestation_enabled_from_height: _,
@@ -1754,6 +1789,10 @@ pub fn build(genesis: &Genesis) -> Result<ConsensusConfig, ConfigError> {
         docclass_unknown_attribute_refused_enabled_from_height: _,
         subsystem_ambiguous_policy_id_refused_enabled_from_height: _,
         nft_royalty_operation_unsupported_enabled_from_height: _,
+        // Schema 2 (draft), 0x103f: `schema::SCHEMA_2_ADDED`.
+        credential_schema_validation_enabled_from_height: _,
+        // Schema 2 (draft), 0x1040: `schema::SCHEMA_2_ADDED`.
+        messaging_timestamp_units_enabled_from_height: _,
     } = params;
 
     put(0x0100, Value::U64(*max_block_bytes));
@@ -1961,10 +2000,12 @@ pub fn build(genesis: &Genesis) -> Result<ConsensusConfig, ConfigError> {
 
     // ── activation heights, by name ──
     for (name, height) in params.activation_heights() {
-        let id = gate_id(name).ok_or_else(|| {
+        let id = gate_id_in(knows, name).ok_or_else(|| {
             ConfigError::Build(format!(
-                "activation gate {name} has no ConsensusConfigV1 field id; this binary \
-                 cannot commit to a gate it does not know"
+                "activation gate {name} has no consensus configuration field id in \
+                 schema {}; this binary cannot commit to a gate it does not know \
+                 (register it in schema::SCHEMA_2_ADDED)",
+                knows.number
             ))
         })?;
         put(id, height.map_or(Value::Absent, Value::U64));
@@ -1991,13 +2032,34 @@ pub fn build(genesis: &Genesis) -> Result<ConsensusConfig, ConfigError> {
         put(id, value);
     }
 
-    ConsensusConfig::from_fields(f)
+    // ── fields added after schema 1 ──
+    //
+    // Gates came in through `activation_heights()` above.
+    for added in knows.all_added() {
+        if let Source::Param(value) = added.source {
+            put(added.spec.id, value(genesis));
+        }
+    }
+
+    f.sort_by_key(|field| field.id);
+    if f.windows(2).any(|w| w[0].id == w[1].id) {
+        return Err(ConfigError::Build(
+            "a consensus configuration field was computed twice".to_string(),
+        ));
+    }
+    Ok(f)
 }
 
-/// Field id of an activation gate.
+/// Field id of an activation gate, in the newest schema this binary knows.
 pub fn gate_id(name: &str) -> Option<u16> {
-    SCHEMA_V1_FIELDS
-        .iter()
+    gate_id_in(PRODUCTION.knows, name)
+}
+
+/// Field id of an activation gate in `schema`.
+pub fn gate_id_in(schema: &'static Schema, name: &str) -> Option<u16> {
+    schema
+        .specs()
+        .into_iter()
         .find(|s| is_gate(s.id) && s.name == name)
         .map(|s| s.id)
 }

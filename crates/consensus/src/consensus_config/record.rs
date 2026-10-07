@@ -1,5 +1,6 @@
 //! The persisted baseline, its append-only transition history, the startup
-//! comparison and the stopped-node acknowledgement.
+//! comparison, the stopped-node acknowledgement and the stopped-node schema
+//! transition.
 //!
 //! # Keys (`cf::META`)
 //!
@@ -7,6 +8,10 @@
 //! consensus_config/v1/record                 the current baseline
 //! consensus_config/v1/transition/<seq:u64 BE>  one per accepted change, seq from 1
 //! ```
+//!
+//! The `v1` in the keys names this record LAYOUT, not the configuration
+//! schema: a record of any schema is stored under the same key, and the schema
+//! is the one its encoding declares.
 //!
 //! # Record
 //!
@@ -31,13 +36,25 @@
 //! transitions form an unbroken chain from `initial_commitment` to
 //! `commitment`, each carrying the encoding it replaced. Nothing in this module
 //! deletes a transition.
+//!
+//! # Schemas
+//!
+//! The record and transition layouts are unchanged by a new configuration
+//! schema. A binary refuses a record whose encoding declares a schema it does
+//! not read (see [`super::schema::SchemaPolicy`]) — the same refusal an
+//! older binary applies to a newer record. Every comparison is made in the
+//! schema the record holds. Moving the record to a newer schema is
+//! [`acknowledge_schema_transition`]: a stopped-node command naming both
+//! commitments, recorded as a [`TransitionKind::SchemaTransition`] that keeps
+//! the old encoding, never an implicit re-encoding at start.
 
 use sumchain_genesis::Genesis;
 use sumchain_primitives::Hash;
 use sumchain_storage::{cf, Database};
 
 use super::codec::{commitment_of, ConsensusConfig, FieldChange};
-use super::fields::{build, is_gate, is_identity_or_rule, recorded_gates};
+use super::fields::{compute, is_gate, is_identity_or_rule, recorded_gates};
+use super::schema::{Schema, SchemaPolicy, PRODUCTION};
 use super::ConfigError;
 
 /// Where the baseline lives.
@@ -97,6 +114,11 @@ pub enum TransitionKind {
     /// An operator acknowledged the change with the stopped-node command, naming
     /// both commitments.
     OperatorAcknowledged,
+    /// An operator moved the record to a later schema with the stopped-node
+    /// schema transition, naming both commitments. The rules are unchanged:
+    /// the new configuration is the old one with every added field absent.
+    /// `changed_ids` lists the added fields.
+    SchemaTransition,
 }
 
 impl TransitionKind {
@@ -104,12 +126,14 @@ impl TransitionKind {
         match self {
             TransitionKind::GateReschedule => 1,
             TransitionKind::OperatorAcknowledged => 2,
+            TransitionKind::SchemaTransition => 3,
         }
     }
     fn from_code(code: u8) -> Option<Self> {
         match code {
             1 => Some(TransitionKind::GateReschedule),
             2 => Some(TransitionKind::OperatorAcknowledged),
+            3 => Some(TransitionKind::SchemaTransition),
             _ => None,
         }
     }
@@ -117,6 +141,7 @@ impl TransitionKind {
         match self {
             TransitionKind::GateReschedule => "gate-reschedule",
             TransitionKind::OperatorAcknowledged => "operator-acknowledged",
+            TransitionKind::SchemaTransition => "schema-transition",
         }
     }
 }
@@ -176,6 +201,29 @@ pub struct Acknowledged {
     pub changes: Vec<FieldChange>,
 }
 
+/// What a schema transition did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaTransitioned {
+    pub seq: u64,
+    pub from_schema: u16,
+    pub to_schema: u16,
+    pub from: Hash,
+    pub to: Hash,
+    /// The fields the new schema adds, all recorded absent.
+    pub added: Vec<u16>,
+}
+
+/// A schema transition this binary could perform on this database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSchemaTransition {
+    pub from_schema: u16,
+    pub to_schema: u16,
+    /// The recorded commitment: `--old`.
+    pub old: Hash,
+    /// The commitment of the record carried into the new schema: `--new`.
+    pub new: Hash,
+}
+
 /// Read and verify the stored baseline, or `None` if this database has never
 /// recorded one.
 ///
@@ -184,23 +232,111 @@ pub struct Acknowledged {
 /// error, never `None`: treating a damaged record as a first start would
 /// replace the one record that can show the rules changed.
 pub fn read_record(db: &Database) -> Result<Option<BaselineRecord>, ConfigError> {
+    read_record_with(db, &PRODUCTION)
+}
+
+/// [`read_record`] under `policy`.
+pub fn read_record_with(
+    db: &Database,
+    policy: &SchemaPolicy,
+) -> Result<Option<BaselineRecord>, ConfigError> {
     let raw = match db.get(cf::META, RECORD_KEY).map_err(|e| {
         ConfigError::Storage(format!("reading the consensus configuration record: {e}"))
     })? {
         None => return Ok(None),
         Some(raw) => raw,
     };
-    let record = decode_record(&raw)?;
-    verify_history(db, &record)?;
+    let record = decode_record(&raw, policy)?;
+    verify_history(db, &record, policy)?;
     Ok(Some(record))
 }
 
 /// Read the transition history, oldest first, verified against the record.
 pub fn read_transitions(db: &Database) -> Result<Vec<Transition>, ConfigError> {
-    match read_record(db)? {
+    read_transitions_with(db, &PRODUCTION)
+}
+
+/// [`read_transitions`] under `policy`.
+pub fn read_transitions_with(
+    db: &Database,
+    policy: &SchemaPolicy,
+) -> Result<Vec<Transition>, ConfigError> {
+    match read_record_with(db, policy)? {
         None => Ok(Vec::new()),
-        Some(record) => verify_history(db, &record),
+        Some(record) => verify_history(db, &record, policy),
     }
+}
+
+/// The configuration this binary computes from `genesis`, in `schema`.
+///
+/// A non-absent value of a field `schema` does not have is a refusal: the
+/// record cannot describe that rule. When `policy` writes a schema that has
+/// the field, the refusal names the schema transition.
+fn computed_in(
+    genesis: &Genesis,
+    policy: &SchemaPolicy,
+    schema: &'static Schema,
+    record: Option<&BaselineRecord>,
+) -> Result<ConsensusConfig, ConfigError> {
+    let values = compute(genesis, policy)?;
+    ConsensusConfig::project(values, policy.knows, schema).map_err(|e| match e {
+        ConfigError::BeyondSchema { schema: n, fields } => {
+            let how = match (record, pending_for(record, policy)) {
+                (Some(r), Some(p)) => format!(
+                    "This database records schema {n}; this binary can move it to \
+                     schema {to}. Stop the node and run `sumchain \
+                     acknowledge-consensus-config-schema --old {old} --new {new}` (it \
+                     re-encodes the recorded rules and changes none), then start again; \
+                     or restore the previous genesis.json",
+                    to = p.to_schema,
+                    old = r.commitment,
+                    new = p.new,
+                ),
+                _ => format!(
+                    "This binary records schema {n} and can register those fields but \
+                     not activate them; they must stay absent"
+                ),
+            };
+            ConfigError::Refused(format!(
+                "the genesis sets {fields}, which schema {n} cannot express. {how}"
+            ))
+        }
+        other => other,
+    })
+}
+
+fn pending_for(
+    record: Option<&BaselineRecord>,
+    policy: &SchemaPolicy,
+) -> Option<PendingSchemaTransition> {
+    let r = record?;
+    let from = r.config.schema();
+    if std::ptr::eq(from, policy.writes) || !policy.writes.extends(from) {
+        return None;
+    }
+    let to = r.config.extend_to(policy.writes).ok()?;
+    Some(PendingSchemaTransition {
+        from_schema: from.number,
+        to_schema: policy.writes.number,
+        old: r.commitment,
+        new: to.commitment(),
+    })
+}
+
+/// The schema transition this binary could perform on this database, if any:
+/// its record is of an older schema than the one this binary writes.
+pub fn pending_schema_transition(
+    db: &Database,
+) -> Result<Option<PendingSchemaTransition>, ConfigError> {
+    pending_schema_transition_with(db, &PRODUCTION)
+}
+
+/// [`pending_schema_transition`] under `policy`.
+pub fn pending_schema_transition_with(
+    db: &Database,
+    policy: &SchemaPolicy,
+) -> Result<Option<PendingSchemaTransition>, ConfigError> {
+    Ok(pending_for(read_record_with(db, policy)?.as_ref(), policy))
 }
 
 /// The startup comparison. Runs after the genesis and activation-height checks
@@ -215,21 +351,38 @@ pub fn read_transitions(db: &Database) -> Result<Vec<Transition>, ConfigError> {
 ///   this.
 /// * Anything else changed: refuse, with the field-level difference and both
 ///   commitments, naming the acknowledgement command.
+///
+/// Every comparison is made in the schema the record holds. A stored record of
+/// an older schema than this binary writes is compared as it stands and never
+/// re-encoded here; a value that only the newer schema can express refuses,
+/// naming [`acknowledge_schema_transition`].
 pub fn check_at_startup(
     db: &Database,
     genesis: &Genesis,
     current_height: u64,
 ) -> Result<StartupOutcome, ConfigError> {
-    let now = build(genesis)?;
-    let now_commitment = now.commitment();
+    check_at_startup_with(db, genesis, current_height, &PRODUCTION)
+}
 
-    let Some(record) = read_record(db)? else {
+/// [`check_at_startup`] under `policy`.
+pub fn check_at_startup_with(
+    db: &Database,
+    genesis: &Genesis,
+    current_height: u64,
+    policy: &SchemaPolicy,
+) -> Result<StartupOutcome, ConfigError> {
+    let Some(record) = read_record_with(db, policy)? else {
+        // A fresh baseline is recorded in the schema this binary writes.
+        let now = computed_in(genesis, policy, policy.writes, None)?;
+        let now_commitment = now.commitment();
         write_initial(db, &now, current_height)?;
         return Ok(StartupOutcome::Initialized {
             commitment: now_commitment,
             baseline_height: current_height,
         });
     };
+    let now = computed_in(genesis, policy, record.config.schema(), Some(&record))?;
+    let now_commitment = now.commitment();
 
     if record.commitment == now_commitment {
         return Ok(StartupOutcome::Unchanged {
@@ -290,6 +443,10 @@ pub fn check_at_startup(
 /// * neither the chain identity nor a consensus rule code changed — those are
 ///   a different chain or a protocol upgrade, which a local acknowledgement
 ///   cannot authorize.
+///
+/// The change is acknowledged in the schema the record holds; moving the
+/// record to another schema is [`acknowledge_schema_transition`] and is never
+/// combined with a change of rules.
 pub fn acknowledge(
     db: &Database,
     genesis: &Genesis,
@@ -297,7 +454,26 @@ pub fn acknowledge(
     expected_old: Hash,
     expected_new: Hash,
 ) -> Result<Acknowledged, ConfigError> {
-    let record = read_record(db)?.ok_or_else(|| {
+    acknowledge_with(
+        db,
+        genesis,
+        current_height,
+        expected_old,
+        expected_new,
+        &PRODUCTION,
+    )
+}
+
+/// [`acknowledge`] under `policy`.
+pub fn acknowledge_with(
+    db: &Database,
+    genesis: &Genesis,
+    current_height: u64,
+    expected_old: Hash,
+    expected_new: Hash,
+    policy: &SchemaPolicy,
+) -> Result<Acknowledged, ConfigError> {
+    let record = read_record_with(db, policy)?.ok_or_else(|| {
         ConfigError::Refused(
             "this database has no consensus configuration baseline, so there is nothing \
              to acknowledge; the next node start records one"
@@ -310,7 +486,7 @@ pub fn acknowledge(
             record.commitment
         )));
     }
-    let now = build(genesis)?;
+    let now = computed_in(genesis, policy, record.config.schema(), Some(&record))?;
     let now_commitment = now.commitment();
     if now_commitment != expected_new {
         return Err(ConfigError::Refused(format!(
@@ -353,6 +529,106 @@ pub fn acknowledge(
         from: record.commitment,
         to: now_commitment,
         changes,
+    })
+}
+
+/// The stopped-node schema transition: move the recorded baseline to the
+/// schema this binary writes.
+///
+/// It changes the representation of the recorded rules, never the rules: the
+/// new configuration is the recorded one with every field the newer schema
+/// adds recorded absent, which by the schema rule is the behaviour the node
+/// already runs. It consults neither the genesis nor the binary's own
+/// configuration; the next start compares those against the moved record as
+/// it compares them against any record.
+///
+/// Like [`acknowledge`], the caller holds the database open, which holds
+/// RocksDB's exclusive lock, so a running node and this command cannot both
+/// have it. Accepts only when ALL of these hold:
+/// * a baseline exists and verifies, history included;
+/// * its schema is older than the one this binary writes, and that schema
+///   extends it;
+/// * `expected_old` is exactly the recorded commitment;
+/// * `expected_new` is exactly the commitment of the recorded configuration
+///   carried into the newer schema.
+///
+/// The new record and a [`TransitionKind::SchemaTransition`] carrying the old
+/// encoding are written in ONE durable batch. The old encoding is kept for
+/// good: the history still shows every schema-1 configuration this node held.
+///
+/// This is a LOCAL acknowledgement. It authorizes nothing on the network and
+/// activates no rule.
+pub fn acknowledge_schema_transition(
+    db: &Database,
+    current_height: u64,
+    expected_old: Hash,
+    expected_new: Hash,
+) -> Result<SchemaTransitioned, ConfigError> {
+    acknowledge_schema_transition_with(db, current_height, expected_old, expected_new, &PRODUCTION)
+}
+
+/// [`acknowledge_schema_transition`] under `policy`.
+pub fn acknowledge_schema_transition_with(
+    db: &Database,
+    current_height: u64,
+    expected_old: Hash,
+    expected_new: Hash,
+    policy: &SchemaPolicy,
+) -> Result<SchemaTransitioned, ConfigError> {
+    let record = read_record_with(db, policy)?.ok_or_else(|| {
+        ConfigError::Refused(
+            "this database has no consensus configuration baseline, so there is no \
+             schema to move from; the next node start records one in schema the binary \
+             writes"
+                .to_string(),
+        )
+    })?;
+    let from = record.config.schema();
+    let to = policy.writes;
+    if std::ptr::eq(from, to) {
+        return Err(ConfigError::Refused(format!(
+            "the baseline is already recorded in schema {}, the schema this binary \
+             writes; there is no schema transition to make",
+            from.number
+        )));
+    }
+    if !to.extends(from) {
+        return Err(ConfigError::Refused(format!(
+            "this binary writes schema {}, which does not extend the recorded schema {}",
+            to.number, from.number
+        )));
+    }
+    if record.commitment != expected_old {
+        return Err(ConfigError::Refused(format!(
+            "--old {expected_old} is not the recorded commitment {}",
+            record.commitment
+        )));
+    }
+    let moved = record.config.extend_to(to)?;
+    let moved_commitment = moved.commitment();
+    if moved_commitment != expected_new {
+        return Err(ConfigError::Refused(format!(
+            "--new {expected_new} is not the commitment of the recorded configuration \
+             in schema {}, {moved_commitment}",
+            to.number
+        )));
+    }
+    let added: Vec<u16> = to.added_since(from).iter().map(|s| s.id).collect();
+    let seq = write_transition(
+        db,
+        &record,
+        &moved,
+        TransitionKind::SchemaTransition,
+        current_height,
+        added.clone(),
+    )?;
+    Ok(SchemaTransitioned {
+        seq,
+        from_schema: from.number,
+        to_schema: to.number,
+        from: record.commitment,
+        to: moved_commitment,
+        added,
     })
 }
 
@@ -425,6 +701,24 @@ fn append_transition(
     at_height: u64,
     changes: &[FieldChange],
 ) -> Result<u64, ConfigError> {
+    write_transition(
+        db,
+        record,
+        now,
+        kind,
+        at_height,
+        changes.iter().map(|c| c.id).collect(),
+    )
+}
+
+fn write_transition(
+    db: &Database,
+    record: &BaselineRecord,
+    now: &ConsensusConfig,
+    kind: TransitionKind,
+    at_height: u64,
+    changed_ids: Vec<u16>,
+) -> Result<u64, ConfigError> {
     let seq = record.transition_count + 1;
     let transition = Transition {
         seq,
@@ -432,7 +726,7 @@ fn append_transition(
         at_height,
         old_commitment: record.commitment,
         new_commitment: now.commitment(),
-        changed_ids: changes.iter().map(|c| c.id).collect(),
+        changed_ids,
         old_encoding: record.config.encode(),
     };
     let next = BaselineRecord {
@@ -467,7 +761,11 @@ fn transition_key(seq: u64) -> Vec<u8> {
 }
 
 /// Verify the transition chain behind `record` and return it.
-fn verify_history(db: &Database, record: &BaselineRecord) -> Result<Vec<Transition>, ConfigError> {
+fn verify_history(
+    db: &Database,
+    record: &BaselineRecord,
+    policy: &SchemaPolicy,
+) -> Result<Vec<Transition>, ConfigError> {
     let corrupt = |why: String| ConfigError::RecordCorrupt(why);
     if record.transition_count > MAX_TRANSITIONS {
         return Err(corrupt(format!(
@@ -526,6 +824,9 @@ fn verify_history(db: &Database, record: &BaselineRecord) -> Result<Vec<Transiti
                 "transition {seq} carries an encoding that does not match its commitment"
             )));
         }
+        if t.kind == TransitionKind::SchemaTransition {
+            verify_schema_transition(&t, policy).map_err(corrupt)?;
+        }
         expected_old = t.new_commitment;
         out.push(t);
     }
@@ -536,6 +837,38 @@ fn verify_history(db: &Database, record: &BaselineRecord) -> Result<Vec<Transiti
         )));
     }
     Ok(out)
+}
+
+/// A schema transition must be exactly the re-encoding of its old
+/// configuration into a later schema this binary reads: same rules, every
+/// added field absent, the added ids listed.
+fn verify_schema_transition(t: &Transition, policy: &SchemaPolicy) -> Result<(), String> {
+    let seq = t.seq;
+    let old = ConsensusConfig::decode_with(&t.old_encoding, policy.reads)
+        .map_err(|e| format!("schema transition {seq} carries an unreadable encoding: {e}"))?;
+    for to in policy.reads {
+        if std::ptr::eq(*to, old.schema()) || !to.extends(old.schema()) {
+            continue;
+        }
+        let Ok(moved) = old.extend_to(to) else {
+            continue;
+        };
+        if moved.commitment() == t.new_commitment {
+            let added: Vec<u16> = to.added_since(old.schema()).iter().map(|s| s.id).collect();
+            if added != t.changed_ids {
+                return Err(format!(
+                    "schema transition {seq} lists fields other than those schema {} adds",
+                    to.number
+                ));
+            }
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "schema transition {seq} does not re-encode its schema-{} configuration into a \
+         schema this binary reads",
+        old.schema().number
+    ))
 }
 
 fn encode_record(r: &BaselineRecord) -> Vec<u8> {
@@ -552,7 +885,7 @@ fn encode_record(r: &BaselineRecord) -> Vec<u8> {
     out
 }
 
-fn decode_record(raw: &[u8]) -> Result<BaselineRecord, ConfigError> {
+fn decode_record(raw: &[u8], policy: &SchemaPolicy) -> Result<BaselineRecord, ConfigError> {
     let mut r = Cursor::new(raw);
     let version = r.u16()?;
     if version != RECORD_VERSION {
@@ -570,7 +903,7 @@ fn decode_record(raw: &[u8]) -> Result<BaselineRecord, ConfigError> {
     let len = r.u32()? as usize;
     let encoding = r.take(len)?;
     r.finish()?;
-    let config = ConsensusConfig::decode(encoding).map_err(|e| match e {
+    let config = ConsensusConfig::decode_with(encoding, policy.reads).map_err(|e| match e {
         ConfigError::UnknownSchema(s) => ConfigError::RecordCorrupt(format!(
             "the baseline uses configuration schema {s}, which this binary does not \
              implement; it was written by a newer binary"

@@ -10,19 +10,12 @@
 //!
 //! ## Why in-memory only (no persistence here)
 //!
-//! Persisting these records would require choosing an exact on-disk consensus
-//! value layout (a serialization codec) and the canonical composite row keys.
-//! Those are **owner-ratified consensus decisions that are not yet made**, so
-//! this module persists NOTHING: it holds state in typed maps keyed by typed
-//! tuples (`WorkItemKey`, `UnitKey`), never serialized bytes. The identity of
-//! accepted leaves / assignments is the ratified composite
-//! `(job_id, unit_id, generation)` — modeled as a typed key, not an invented
-//! byte preimage.
-//!
-//! Wiring this model into revertible chain storage (so C1 rows participate in
-//! reorg like other state) is **blocked on codec ratification**: it needs (a) an
-//! owner-ratified versioned canonical codec for each record and (b) the
-//! ratified composite key byte layout. Choosing either here is prohibited.
+//! This module holds state in typed maps keyed by typed tuples (`WorkItemKey`,
+//! `UnitKey`), never serialized bytes. The identity of accepted leaves /
+//! assignments is the ratified composite `(job_id, unit_id, generation)`.
+//! Persistence, the record codec and the composite key bytes live in
+//! [`crate::compute_pool_store`]; their stored encoding is what the C1 state
+//! digest commits once the gate opens (#215, codec option (a)).
 //!
 //! ## Deliberate typed boundaries (unresolved layouts — NOT chosen here)
 //!
@@ -549,7 +542,9 @@ pub fn compute_job_max_retention_files(
 }
 
 /// Reject a job whose retention-file count exceeds the injected per-job cap
-/// (`max_retention_files_per_job`).
+/// (`max_retention_files_per_job`). This is retention relation 5 of issue #129.
+/// Relations 1–4 are checked by
+/// [`crate::compute_pool_retention::validate_retention_relations`].
 pub fn validate_retention_within_cap(files: u128, cap: u128) -> PoolResult<()> {
     if files > cap {
         Err(PoolError::RetentionCapExceeded { files, cap })

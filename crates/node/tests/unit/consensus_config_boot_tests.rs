@@ -139,3 +139,47 @@ fn the_baseline_runs_after_the_gate_check_and_before_consensus_exists() {
         "nothing may process a block first"
     );
 }
+
+/// #277's gate through the real boot sequence. Unset (every committed
+/// genesis), a node boots and records schema 1 exactly as before; set, this
+/// binary refuses to boot -- on a fresh directory and on one it already runs
+/// -- because it records schema 1 and cannot commit to the height, and it
+/// rewrites nothing.
+#[test]
+fn the_credential_schema_gate_boots_unset_and_is_refused_set() {
+    let set = |h| {
+        let mut g = genesis();
+        g.params.credential_schema_validation_enabled_from_height = Some(h);
+        g
+    };
+    let g = genesis();
+    assert_eq!(
+        g.params.credential_schema_validation_enabled_from_height,
+        None
+    );
+
+    let dir = tempfile::TempDir::new().unwrap();
+    boot(dir.path(), &g).unwrap();
+    let r = record(dir.path()).expect("recorded at first boot");
+    assert_eq!(r.config.schema().number, 1);
+    assert_eq!(r.commitment, ccfg::build(&g).unwrap().commitment());
+
+    for h in [0, 1_000, u64::MAX] {
+        let err = boot(dir.path(), &set(h)).unwrap_err();
+        assert!(
+            err.contains("credential_schema_validation_enabled_from_height"),
+            "{err}"
+        );
+        assert_eq!(record(dir.path()).unwrap(), r, "nothing rewritten");
+    }
+    boot(dir.path(), &g).unwrap();
+    assert_eq!(record(dir.path()).unwrap(), r);
+
+    let fresh = tempfile::TempDir::new().unwrap();
+    let err = boot(fresh.path(), &set(1_000)).unwrap_err();
+    assert!(
+        err.contains("credential_schema_validation_enabled_from_height"),
+        "{err}"
+    );
+    assert_eq!(record(fresh.path()), None, "no baseline recorded");
+}
