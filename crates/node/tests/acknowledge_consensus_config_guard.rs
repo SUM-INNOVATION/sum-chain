@@ -127,3 +127,55 @@ fn the_command_refuses_while_the_database_is_held() {
     assert!(text(&out).contains("must be stopped"), "{}", text(&out));
     assert!(ccfg::read_transitions(&held).unwrap().is_empty());
 }
+
+fn ack_schema(data_dir: &Path, old: &str, new: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_sumchain"))
+        .args([
+            "acknowledge-consensus-config-schema",
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "--old",
+            old,
+            "--new",
+            new,
+            "--yes",
+        ])
+        .output()
+        .expect("running the node binary")
+}
+
+/// This binary records schema 1, so a schema-1 database has no schema to move
+/// to: the schema transition refuses and writes nothing, whatever it is told.
+#[test]
+fn the_schema_transition_refuses_while_this_binary_records_schema_1() {
+    let f = fixture();
+    let before = {
+        let db = Database::open_default(&f.data).unwrap();
+        db.get(sumchain_storage::cf::META, ccfg::record::RECORD_KEY)
+            .unwrap()
+    };
+    let out = ack_schema(&f.data, &f.old, &f.old);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("already recorded in schema 1"),
+        "{}",
+        text(&out)
+    );
+    let db = Database::open_default(&f.data).unwrap();
+    assert!(ccfg::read_transitions(&db).unwrap().is_empty());
+    assert_eq!(
+        db.get(sumchain_storage::cf::META, ccfg::record::RECORD_KEY)
+            .unwrap(),
+        before
+    );
+}
+
+#[test]
+fn the_schema_transition_refuses_while_the_database_is_held() {
+    let f = fixture();
+    let held = Database::open_default(&f.data).unwrap();
+    let out = ack_schema(&f.data, &f.old, &f.old);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("must be stopped"), "{}", text(&out));
+    assert!(ccfg::read_transitions(&held).unwrap().is_empty());
+}

@@ -664,9 +664,14 @@ impl Node {
     ) -> Result<()> {
         use sumchain_consensus::consensus_config::{self as ccfg, StartupOutcome};
 
-        match ccfg::check_at_startup(db, genesis, current_height)
+        let outcome = ccfg::check_at_startup(db, genesis, current_height)
+            .map_err(|e| anyhow::anyhow!("consensus configuration check failed: {e}"))?;
+        // The schema the record now holds, which is the schema every
+        // comparison above was made in.
+        let schema = ccfg::read_record(db)
             .map_err(|e| anyhow::anyhow!("consensus configuration check failed: {e}"))?
-        {
+            .map_or(ccfg::PRODUCTION.writes.number, |r| r.config.schema().number);
+        match outcome {
             StartupOutcome::Initialized {
                 commitment,
                 baseline_height,
@@ -675,17 +680,14 @@ impl Node {
                     "Consensus configuration baseline recorded for the first time at height \
                      {}: commitment {} (schema {}, unverified local baseline — it describes \
                      what this node runs and is not network agreement)",
-                    baseline_height,
-                    commitment,
-                    ccfg::SCHEMA_V1
+                    baseline_height, commitment, schema
                 );
             }
             StartupOutcome::Unchanged { commitment } => {
                 info!(
                     "Consensus configuration commitment {} (schema {}, unverified local \
                      baseline) matches this database's record",
-                    commitment,
-                    ccfg::SCHEMA_V1
+                    commitment, schema
                 );
             }
             StartupOutcome::GatesRescheduled { from, to, changes } => {
@@ -700,6 +702,18 @@ impl Node {
                     changes.len()
                 );
             }
+        }
+        // Never performed here: moving the record to a newer schema is the
+        // stopped-node `acknowledge-consensus-config-schema` command.
+        if let Some(p) = ccfg::pending_schema_transition(db)
+            .map_err(|e| anyhow::anyhow!("consensus configuration check failed: {e}"))?
+        {
+            warn!(
+                "Consensus configuration is recorded in schema {}; this binary records \
+                 schema {}. The record stays as it is until an operator stops the node \
+                 and runs `sumchain acknowledge-consensus-config-schema --old {} --new {}`",
+                p.from_schema, p.to_schema, p.old, p.new
+            );
         }
         Ok(())
     }

@@ -361,6 +361,35 @@ enum Commands {
         yes: bool,
     },
 
+    /// Move this database's consensus-configuration baseline (#268) to the
+    /// configuration schema this binary records, on a stopped node.
+    ///
+    /// The recorded rules are re-encoded, not changed: every field the newer
+    /// schema adds is recorded absent, which is the behaviour the node already
+    /// runs. The previous encoding stays in the append-only history. The
+    /// operator names BOTH commitments; the node prints them at start when a
+    /// transition is available.
+    ///
+    /// Local only. It authorizes nothing on the network and activates nothing.
+    /// A binary that records the schema the database already holds refuses.
+    AcknowledgeConsensusConfigSchema {
+        /// Data directory
+        #[arg(short, long, default_value = "data")]
+        data_dir: PathBuf,
+
+        /// The commitment recorded in this database, exactly
+        #[arg(long)]
+        old: String,
+
+        /// The commitment of the recorded configuration in the newer schema, exactly
+        #[arg(long)]
+        new: String,
+
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Inspect SNIP V2 metadata rows in the database (read-only). Used as a
     /// pre-flight before deploying any V2 schema-bump binary: a non-zero file
     /// or owner-index count means the positional bincode shape on disk must
@@ -1383,6 +1412,68 @@ async fn main() -> Result<()> {
             for change in &done.changes {
                 println!("  {change}");
             }
+        }
+
+        Commands::AcknowledgeConsensusConfigSchema {
+            data_dir,
+            old,
+            new,
+            yes,
+        } => {
+            use sumchain_consensus::consensus_config as ccfg;
+            use sumchain_storage::schema::BlockStore;
+
+            init_logging("info", false)?;
+
+            let old = sumchain_primitives::Hash::from_hex(&old)
+                .map_err(|e| anyhow::anyhow!("--old is not a commitment: {e}"))?;
+            let new = sumchain_primitives::Hash::from_hex(&new)
+                .map_err(|e| anyhow::anyhow!("--new is not a commitment: {e}"))?;
+
+            // Opening takes RocksDB's exclusive lock on the data directory, so
+            // this fails while a node holds it.
+            let db = Database::open_default(&data_dir).with_context(|| {
+                format!("cannot open {data_dir:?}; the node must be stopped before acknowledging")
+            })?;
+            sumchain_storage::journal::validate_startup(&db)
+                .context("application journal format check failed")?;
+            let height = BlockStore::new(&db).get_latest_height()?.unwrap_or(0);
+
+            println!(
+                "Moving the consensus configuration record to schema {} on this node only.",
+                ccfg::PRODUCTION.writes.number
+            );
+            println!("  Data directory: {data_dir:?}");
+            println!("  Chain height:   {height}");
+            println!("  Recorded:       {old}");
+            println!("  Re-encoded:     {new}");
+            println!();
+            println!("The recorded rules are unchanged; fields the newer schema adds are");
+            println!("recorded absent. This does not make any other node agree, and it");
+            println!("cannot be undone: the history is append-only.");
+            if !yes {
+                println!();
+                println!("Type 'yes' to proceed:");
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if input.trim().to_lowercase() != "yes" {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+            }
+
+            let done = ccfg::acknowledge_schema_transition(&db, height, old, new)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!();
+            println!(
+                "Recorded transition {}: schema {} -> {} ({} -> {}), {} field(s) added absent",
+                done.seq,
+                done.from_schema,
+                done.to_schema,
+                done.from,
+                done.to,
+                done.added.len()
+            );
         }
 
         Commands::InspectV2Rows { data_dir } => {
