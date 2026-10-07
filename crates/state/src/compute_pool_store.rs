@@ -9,13 +9,26 @@
 //!
 //! ## Why this is an evidence-grounded design, not an invented protocol
 //!
-//! Every choice below reuses an existing sum-chain convention. Nothing here is a
-//! consensus/wire decision: C1 is **dormant** (no `*_enabled_from_height` gate,
-//! no `TxPayload` ordinal, no receipt code) and these rows are **never hashed
-//! into a state root**. Like `state_diffs` / `contract_state_diffs`, they exist
-//! only for local persistence and block-rollback revert, so the at-rest layout
-//! is a local storage concern (migratable via [`C1_SCHEMA_VERSION`]), not frozen
-//! bytes.
+//! Every choice below reuses an existing sum-chain convention. C1 is
+//! **dormant**: `compute_pool_enabled_from_height` is `None` and genesis
+//! validation refuses any `Some(_)`.
+//!
+//! ## The stored encoding is the committed encoding (#215, codec option (a))
+//!
+//! Once the compute-pool gate is open, the block executor folds
+//! [`ComputePoolStore::v_state_digest`] into the block state root, and that
+//! digest hashes the stored key and value bytes of every row directly
+//! (`C1_STATE_DIGEST_DOMAIN ‖ Σ key_len(u32 LE) ‖ key ‖ val_len(u32 LE) ‖ value`).
+//! There is no second, separate digest encoding: the at-rest codec and key
+//! layout below ARE consensus bytes, ratified as such (#215, owner decision
+//! packet §4). They are pinned per record by golden vectors
+//! (`c1_record_rows_are_frozen` and neighbours). While the gate is closed the
+//! digest is not computed and nothing here reaches a root.
+//!
+//! **Versioning.** A change to the value codec, to any record layout or to
+//! the key layout is a new digest domain (`…state.v2`) with its own activation
+//! height; V1 rows are never reinterpreted. [`C1_SCHEMA_VERSION`] is checked on
+//! decode but is not, on its own, a migration path.
 //!
 //! * **Value codec** — `bincode` fixint little-endian, the near-universal
 //!   at-rest convention in `sumchain-storage` (`AccountState`, `ContractMutation`,
@@ -74,8 +87,9 @@ use crate::compute_pool::{
 };
 use crate::{Result, StateError};
 
-/// On-disk schema version stamped as the first byte of every C1 record value.
-/// A future ratified layout bumps this; decoders reject any other value.
+/// Schema version stamped as the first byte of every C1 record value; decoders
+/// reject any other value. The value bytes are committed through the C1 state
+/// digest, so a layout that bumps this also needs a new digest domain.
 pub const C1_SCHEMA_VERSION: u8 = 1;
 
 /// Local anti-DoS ceiling on a single decoded C1 record, in bytes. This is NOT a
@@ -1524,6 +1538,166 @@ mod tests {
                 Err(StateError::InvalidOperation(_))
             ));
         }
+    }
+
+    // ── C1 record codec golden vectors (#215, codec option (a)) ──────────────
+    //
+    // The stored encoding of every record category is what `state_digest`
+    // folds, so these key and value bytes are consensus bytes once the gate can
+    // open. The expected hex was produced by an independent encoder written
+    // from the stated layout (bincode fixint LE values, domain-prefixed
+    // big-endian keys), not by this module. A change to any of them is a new
+    // digest domain (`…state.v2`) with its own activation, never an edit here.
+
+    /// Every record category of `full_model()`: (key hex, value hex), in key order.
+    const FROZEN_ROWS: [(&str, &str); 9] = [
+        // job
+        (
+            "010101010101010101010101010101010101010101010101010101010101010101",
+            "010101010101010101010101010101010101010101010101010101010101010101090909090909090909090909090909090909090901000000020000000000000000000000000000008200000000000000000000000000000000",
+        ),
+        // unit 2
+        (
+            "0201010101010101010101010101010101010101010101010101010101010101010202020202020202020202020202020202020202020202020202020202020202",
+            "010101010101010101010101010101010101010101010101010101010101010101020202020202020202020202020202020202020202020202020202020202020200000000000000000000000000000000000000000000000000",
+        ),
+        // unit 3
+        (
+            "0201010101010101010101010101010101010101010101010101010101010101010303030303030303030303030303030303030303030303030303030303030303",
+            "010101010101010101010101010101010101010101010101010101010101010101030303030303030303030303030303030303030303030303030303030303030300000000000000000000000000000000000000000000000000",
+        ),
+        // offer
+        (
+            "030303030303030303030303030303030303030303030303030303030303030303",
+            "01030303030303030303030303030303030303030303030303030303030303030308080808080808080808080808080808080808083232323232323232323232323232323232323232e80300000000000000000000000000000000000000000000f401000000000000000000000000000001",
+        ),
+        // active-offer index
+        (
+            "040808080808080808080808080808080808080808",
+            "0108080808080808080808080808080808080808080303030303030303030303030303030303030303030303030303030303030303",
+        ),
+        // reservation
+        (
+            "050303030303030303030303030303030303030303030303030303030303030303",
+            "010303030303030303030303030303030303030303030303030303030303030303e80300000000000000000000000000003c000000000000000000000000000000",
+        ),
+        // accepted leaf
+        (
+            "06010101010101010101010101010101010101010101010101010101010101010102020202020202020202020202020202020202020202020202020202020202020000000000000000",
+            "010101010101010101010101010101010101010101010101010101010101010101020202020202020202020202020202020202020202020202020202020202020200000000000000000303030303030303030303030303030303030303030303030303030303030303040404040404040404040404040404040404040404040404040404040404040464000000000000000000000000000000",
+        ),
+        // assignment
+        (
+            "07010101010101010101010101010101010101010101010101010101010101010103030303030303030303030303030303030303030303030303030303030303030000000000000000",
+            "0101010101010101010101010101010101010101010101010101010101010101010303030303030303030303030303030303030303030303030303030303030303000000000000000003030303030303030303030303030303030303030303030303030303030303033232323232323232323232323232323232323232",
+        ),
+        // entitlement
+        (
+            "080606060606060606060606060606060606060606060606060606060606060606",
+            "01060606060606060606060606060606060606060606060606060606060606060607070707070707070707070707070707070707070032000000000000000000000000000000",
+        ),
+    ];
+
+    /// `state_digest` over exactly [`FROZEN_ROWS`].
+    const FROZEN_ROWS_DIGEST: &str =
+        "24ad303ccc0e7e9c299e2fc7a8d80321649eb2a766b0f095989a447547819277";
+
+    #[test]
+    fn c1_record_rows_are_frozen() {
+        let rows = ComputePoolStore::materialize(&full_model()).unwrap();
+        let got: Vec<(String, String)> = rows
+            .iter()
+            .map(|(k, v)| (hex::encode(k), hex::encode(v)))
+            .collect();
+        let want: Vec<(String, String)> = FROZEN_ROWS
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        assert_eq!(got, want, "C1 stored record bytes drifted");
+        assert_eq!(
+            hex::encode(ComputePoolStore::digest_of(&rows).unwrap().as_bytes()),
+            FROZEN_ROWS_DIGEST
+        );
+
+        // Through the database the digest is the same: the stored bytes ARE
+        // what is committed.
+        let (db, _d) = open_db();
+        for (k, v) in FROZEN_ROWS {
+            db.put(
+                cf::COMPUTE_POOL_STATE,
+                &hex::decode(k).unwrap(),
+                &hex::decode(v).unwrap(),
+            )
+            .unwrap();
+        }
+        let stored = ComputePoolStore::new(&db).state_digest().unwrap();
+        assert_eq!(hex::encode(stored.as_bytes()), FROZEN_ROWS_DIGEST);
+    }
+
+    /// Each frozen value decodes through its typed decoder and re-encodes to
+    /// the same bytes; a trailing byte, another schema version or a missing
+    /// byte is refused.
+    #[test]
+    fn c1_record_values_decode_canonically() {
+        fn check<T: Serialize>(hex_value: &str, decode: fn(&[u8]) -> Result<T>) {
+            let bytes = hex::decode(hex_value).unwrap();
+            let v = decode(&bytes).unwrap();
+            assert_eq!(c1_encode(&v).unwrap(), bytes);
+            let mut trailing = bytes.clone();
+            trailing.push(0);
+            assert!(decode(&trailing).is_err(), "trailing byte accepted");
+            let mut version = bytes.clone();
+            version[0] = 2;
+            assert!(decode(&version).is_err(), "schema version 2 accepted");
+            assert!(
+                decode(&bytes[..bytes.len() - 1]).is_err(),
+                "truncation accepted"
+            );
+        }
+        let v = |i: usize| FROZEN_ROWS[i].1;
+        check(v(0), decode_job);
+        check(v(1), decode_work_unit);
+        check(v(2), decode_work_unit);
+        check(v(3), decode_offer);
+        check(v(4), decode_active_offer_index);
+        check(v(5), decode_reservation);
+        check(v(6), decode_accepted_leaf);
+        check(v(7), decode_assignment);
+        check(v(8), decode_entitlement);
+    }
+
+    /// A work unit with predecessors and a required input: each variable-length
+    /// part is a u64 little-endian count followed by the items.
+    #[test]
+    fn c1_work_unit_with_inputs_encoding_is_frozen() {
+        let unit = StoredWorkUnit {
+            schema_version: C1_SCHEMA_VERSION,
+            job_id: [0x11; 32],
+            unit_id: [0x22; 32],
+            predecessors: vec![[0xa1; 32], [0xa2; 32]],
+            required_inputs: vec![StoredRequiredInput {
+                predecessor: [0xb1; 32],
+                required_output_slot_id: [0xb2; 32],
+                pred_output_manifest_root: [0xb3; 32],
+                required_slot_state_object_root: [0xb4; 32],
+            }],
+            generation: 0x0102_0304_0506_0708,
+            state_tag: 4,
+        };
+        let bytes = c1_encode(&unit).unwrap();
+        assert_eq!(
+            hex::encode(&bytes),
+            "01111111111111111111111111111111111111111111111111111111111111111122222222222222222222222222222222222222222222222222222222222222220200000000000000a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a20100000000000000b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4080706050403020104"
+        );
+        assert_eq!(decode_work_unit(&bytes).unwrap(), unit);
+        // A declared count larger than the items present is refused.
+        let mut overcount = bytes.clone();
+        overcount[65] = 3;
+        assert!(decode_work_unit(&overcount).is_err());
+        // An undefined unit-state tag is refused.
+        let mut bad_tag = bytes.clone();
+        *bad_tag.last_mut().unwrap() = 6;
+        assert!(decode_work_unit(&bad_tag).is_err());
     }
 
     fn jid(b: u8) -> JobId {

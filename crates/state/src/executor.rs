@@ -8659,6 +8659,79 @@ mod tests {
         );
     }
 
+    /// #215: declaring `compute_pool_params` changes no block root. With the
+    /// gate unset the root is byte-for-byte the pre-#163 preimage hash whether
+    /// or not parameters are declared, even with a C1 row present; with the
+    /// gate open the root folds the stored-row digest and nothing from the
+    /// parameters (their canonical bytes are committed by the consensus
+    /// configuration, not by the state digest).
+    #[test]
+    fn compute_pool_params_declared_leave_every_root_unchanged() {
+        let (state, db, _dir) = setup();
+        let params: sumchain_primitives::compute_pool_params::ComputePoolParamsV1 =
+            serde_json::from_str(
+                r#"{
+                "b_offer": 7, "b_commit": 0, "b_check": 0,
+                "c_layer": 0, "c_tok": 0, "c_sel": 0, "c_emit": 0,
+                "accept_reimb": 0, "commit_verify_reimb": 0, "publish_reimb": 0,
+                "observe_reimb": 0, "check_reimb": 0, "settle_reimb": 0, "reassign_reimb": 0,
+                "max_work_units": 1, "max_generations": 1, "max_reprovisionable_units": 1,
+                "max_attempts_per_unit": 1, "max_reassignments_per_file": 1,
+                "k_susp": 0, "w_susp": 0, "s_susp": 0, "n_invite_max": 0,
+                "max_retention_files_per_job": 1, "max_retention_updates_per_block": 1,
+                "max_reverse_index_entries": 1, "output_availability_blocks": 0,
+                "d_avail": 0, "d_ack": 0, "d_final": 0
+            }"#,
+            )
+            .unwrap();
+        params.validate().unwrap();
+        let with = |gate: Option<u64>, declared: bool| {
+            BlockExecutor::new(
+                state.clone(),
+                db.clone(),
+                ChainParams {
+                    compute_pool_enabled_from_height: gate,
+                    compute_pool_params: declared.then_some(params),
+                    ..ChainParams::default()
+                },
+            )
+        };
+
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        let empty_contract = ContractStateDiff::new();
+        db.put(
+            sumchain_storage::cf::COMPUTE_POOL_STATE,
+            &[0x01, 0x02, 0x03],
+            &[0xAA, 0xBB],
+        )
+        .unwrap();
+
+        let mut pre163 = Vec::new();
+        pre163.extend_from_slice(&blk.height().to_be_bytes());
+        pre163.extend_from_slice(blk.header.parent_hash.as_bytes());
+        pre163.extend_from_slice(&blk.header.timestamp.to_be_bytes());
+        pre163.extend_from_slice(blk.header.tx_root.as_bytes());
+        pre163.extend_from_slice(state.state_root().as_bytes());
+        let dormant = Hash::hash(&pre163);
+
+        let root =
+            |ex: &BlockExecutor| root_over_empty_candidate(ex, &db, &blk, &[], &empty_contract);
+        assert_eq!(root(&with(None, false)), dormant);
+        assert_eq!(
+            root(&with(None, true)),
+            dormant,
+            "declared parameters must not move a dormant root"
+        );
+        let open = root(&with(Some(0), false));
+        assert_ne!(open, dormant);
+        assert_eq!(
+            root(&with(Some(0), true)),
+            open,
+            "the parameters are not part of the C1 state digest"
+        );
+    }
+
     /// STATE-COMMITMENT differential (issue #127, Item 2): under the dormant BEACON
     /// gate the block-root preimage is byte-for-byte the pre-beacon algorithm (the
     /// beacon fold contributes nothing even with a beacon row present), and under an

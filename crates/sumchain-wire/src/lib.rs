@@ -37,6 +37,7 @@ pub mod b0;
 pub mod beacon_schedule;
 pub mod beacon_wire;
 pub mod compute_pool_graph;
+pub mod compute_pool_params;
 pub mod compute_pool_wire;
 pub mod docclass;
 pub mod education;
