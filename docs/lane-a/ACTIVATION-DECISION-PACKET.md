@@ -28,10 +28,10 @@ asked for:
 
 ---
 
-## Part 0a — Three gates arrived after this packet was regenerated
+## Part 0a — Four gates arrived after this packet was regenerated
 
-`ChainParams` now declares **sixty-four**. This packet covers sixty-one, and
-the three it does not cover are named here rather than left to be discovered by
+`ChainParams` now declares **sixty-five**. This packet covers sixty-one, and
+the four it does not cover are named here rather than left to be discovered by
 counting:
 
   * `subsystem_proof_unsupported_enabled_from_height` — every `VerifyProof` arm
@@ -45,6 +45,13 @@ counting:
     only from its compiled-in 385,000. It can only bring validation earlier;
     below it the compiled-in height governs exactly as before. Added after the
     deficit below was last counted, and not written up or scheduled here.
+  * `contract_error_rollback_enabled_from_height` — a contract call that
+    returns an error (rather than trapping) rolls back its staged storage
+    writes, which otherwise stay visible to later calls of the block and are
+    committed by the next successful call or deploy (#279). Receipt, fee and
+    nonce are unchanged; contract storage and the state root are not. Inert
+    while `contracts_enabled_from_height` is closed, so it should open at or
+    before it. Nothing in `ChainParams::validate` enforces that ordering.
 
 **None of them is scheduled below, and that is deliberate.** Each needs the same six
 fields Part 1 gives the other sixty-one — behaviour, dependency ordering,
@@ -52,18 +59,20 @@ persistent data impact, rollback-in-effect, monitoring signal, recommended wave
 — and scheduling a gate that has not had that treatment is the shortcut this
 packet exists to prevent. The same note appeared in the previous edition for
 three gates, and those three were given their treatment before being scheduled;
-these two should be handled the same way.
+these four should be handled the same way.
 
 Nine gates arrived in the wave that outran the previous edition of this
 document. **Seven of them were written up** — R29 to R35, in Part 1A — and the
-two above are what was left. **A release-closure wave has since added five more,
+first two above are what was left. **A release-closure wave has since added five more,
 and they did NOT join that deficit**: R36 to R40 arrive with their six fields
 already written, which is the standing this section exists to require. The
-deficit is therefore unchanged at two, and it is the same two.
+deficit stood at two, the same two, until #277 and #279 added the third and
+fourth above; #279's dependency is stated in its bullet, and the rest of both
+write-ups is owed.
 
 This is the second time a wave has outrun this document, and the third wave did
 not. The count in a sentence is not checkable by any tool here, which is why the
-two uncovered gates are named: a reader can verify the claim against
+four uncovered gates are named: a reader can verify the claim against
 `tools/lane-b/gate-structure-check.py`'s output without recounting prose.
 
 ## Part 0 — The facts that apply to all sixty-one

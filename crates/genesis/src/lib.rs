@@ -2630,6 +2630,39 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub credential_schema_validation_enabled_from_height: Option<u64>,
+
+    /// A contract call that returns an error rolls back its staged storage
+    /// writes.
+    ///
+    /// Issue #279. The runtime rolls back the staged writes of a call that
+    /// FAILS (a trap, `success == false`), but a call that returns `Err` after
+    /// guest code has run -- the guest `alloc` placing the arguments wrote and
+    /// then failed, or the method wrote and then returned an unreadable value
+    /// -- left them in the runtime's write cache. The transaction gets the
+    /// failed receipt `Failed(5)` and pays its fee, yet its writes stay
+    /// visible to later contract calls in the block and are committed by the
+    /// next successful call or deploy there, into contract storage and the
+    /// state root.
+    ///
+    /// At and above this height such a call rolls its staged writes back, as a
+    /// failed call's are. Receipt status, fee and nonce of the erroring
+    /// transaction are unchanged; what changes is that its writes no longer
+    /// reach later transactions or the block's contract state. Below it, or
+    /// while unset, execution is exactly as before. Inert while
+    /// [`Self::contracts_enabled_from_height`] is closed, since no contract
+    /// runs; it should open at or before that gate.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub contract_error_rollback_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -3046,6 +3079,8 @@ impl Default for ChainParams {
             nft_royalty_operation_unsupported_enabled_from_height: None,
             // Production-safe default: the credential schema validator keeps its compiled-in activation height — dormant.
             credential_schema_validation_enabled_from_height: None,
+            // Production-safe default: a contract call returning an error keeps its staged writes as before — dormant.
+            contract_error_rollback_enabled_from_height: None,
         }
     }
 }
@@ -3607,6 +3642,10 @@ impl ChainParams {
                 "credential_schema_validation_enabled_from_height",
                 self.credential_schema_validation_enabled_from_height,
             ),
+            (
+                "contract_error_rollback_enabled_from_height",
+                self.contract_error_rollback_enabled_from_height,
+            ),
         ]
     }
 
@@ -3647,7 +3686,7 @@ impl ChainParams {
     }
 }
 
-/// The forty-three remediation gates, by field name.
+/// The forty-four remediation gates, by field name.
 ///
 /// The count in this sentence has been wrong twice, both times because a wave
 /// added gates and nothing checked the prose. It is checked now:
@@ -3711,6 +3750,7 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "subsystem_ambiguous_policy_id_refused_enabled_from_height",
     "nft_royalty_operation_unsupported_enabled_from_height",
     "credential_schema_validation_enabled_from_height",
+    "contract_error_rollback_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started

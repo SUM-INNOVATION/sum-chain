@@ -892,3 +892,34 @@ fn the_credential_schema_gate_is_a_dormant_schema_2_draft_field() {
         "{err}"
     );
 }
+
+/// The #279 gate is registered in the draft schema 2 (0x1042): dormant, it
+/// leaves the schema-1 encoding untouched; set, build refuses, because this
+/// binary records schema 1 and cannot commit to its height.
+#[test]
+fn the_contract_error_rollback_gate_is_a_dormant_schema_2_draft_field() {
+    assert_eq!(
+        ccfg::fields::gate_id("contract_error_rollback_enabled_from_height"),
+        Some(0x1042)
+    );
+    let base = full_genesis();
+    assert_eq!(
+        base.params.contract_error_rollback_enabled_from_height, None,
+        "the golden fixture holds it dormant"
+    );
+    assert_eq!(
+        ccfg::build(&base).unwrap().encode().len(),
+        GOLDEN_LEN,
+        "dormant, the gate adds nothing to the schema-1 encoding"
+    );
+
+    let mut set = full_genesis();
+    set.params.contract_error_rollback_enabled_from_height = Some(10);
+    let err = ccfg::build(&set).expect_err("schema 1 cannot commit to this gate");
+    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
+    assert!(
+        err.to_string()
+            .contains("contract_error_rollback_enabled_from_height"),
+        "{err}"
+    );
+}

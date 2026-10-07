@@ -73,6 +73,28 @@ pub struct ContractExecutorState {
 }
 
 impl ContractExecutorState {
+    /// The activation height for rolling back an erroring call's writes.
+    ///
+    /// Reads `params.contract_error_rollback_enabled_from_height`, and nothing
+    /// else. `None` closes the gate.
+    ///
+    /// Issue #279. A contract call that returns `Err` after guest code ran
+    /// (the guest `alloc` wrote and then failed, or the method wrote and then
+    /// returned an unreadable value) is a failed transaction, but below this
+    /// height its staged writes stay in the runtime's write cache: later calls
+    /// of the block read them and the next successful call or deploy commits
+    /// them. At and above it they are rolled back, as a failed call's are.
+    #[inline]
+    fn error_rollback_activation(params: &ChainParams) -> Option<u64> {
+        params.contract_error_rollback_enabled_from_height
+    }
+
+    /// Whether an erroring call's writes are rolled back at `block_height`.
+    #[inline]
+    pub fn error_rollback_gate_open(params: &ChainParams, block_height: u64) -> bool {
+        matches!(Self::error_rollback_activation(params), Some(h) if block_height >= h)
+    }
+
     /// Drain the per-block contract-state journal (committed code/storage/
     /// metadata mutations) for reorg-diff construction.
     pub fn take_journal(&self) -> Vec<sumchain_storage::ContractMutation> {
@@ -417,15 +439,21 @@ impl ContractExecutorState {
             chain_id: state.chain_id(),
         };
 
-        // Execute call
-        let called = self.wasm_executor.call(
+        // Execute call. Below `contract_error_rollback_enabled_from_height` a
+        // call that returns `Err` keeps its staged writes in the runtime's
+        // write cache, where later calls of the block read them and the next
+        // successful call commits them; at and above it they are rolled back
+        // like a failed call's.
+        let called = self.wasm_executor.call_with_error_rollback(
             call_data.contract,
             &call_data.method,
             call_data.args.clone(),
             ctx,
+            Self::error_rollback_gate_open(&self.params, block_height),
         );
         // As in `deploy`: the runtime has rolled back a failed call's writes,
-        // so the queue is empty; a successful one has queued them.
+        // so the queue is empty; a successful one has queued them. An erroring
+        // call queues nothing either way: its writes were never committed.
         self.stage_contract_writes(view)?;
         match called {
             Ok(result) => {

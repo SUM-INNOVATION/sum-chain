@@ -288,6 +288,16 @@ fn the_production_schema_2_is_a_well_formed_draft_of_dormant_gates() {
             && a.spec.name == "credential_schema_validation_enabled_from_height"),
         "#277 holds 0x103f"
     );
+    assert!(
+        SCHEMA_2_ADDED.iter().any(|a| a.spec.id == 0x1042
+            && a.spec.name == "contract_error_rollback_enabled_from_height"),
+        "#279 holds 0x1042"
+    );
+    assert_eq!(
+        SCHEMA_2_ADDED.iter().map(|a| a.spec.id).collect::<Vec<_>>(),
+        vec![0x103f, 0x1042],
+        "append order: #277's 0x103f, then #279's 0x1042"
+    );
     assert_eq!(SCHEMA_2.number, 2);
     assert_eq!(PRODUCTION.writes.number, 1);
     assert_eq!(

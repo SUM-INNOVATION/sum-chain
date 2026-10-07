@@ -248,13 +248,26 @@ pub static SCHEMA_1: Schema = Schema {
 /// written schema 2, and this binary does not (see [`PRODUCTION`]).
 ///
 /// Each post-schema-1 gate or parameter appends its own entry in its own
-/// change. Ids are never reused or reordered.
+/// change. Ids are never reused or reordered. 0x1040 and 0x1041 are held by
+/// gates registered on other branches; this branch registers only its own.
 pub const SCHEMA_2_ADDED: &[AddedField] = &[
     // #277: chain-defined activation of credential schema validation.
     AddedField {
         spec: FieldSpec {
             id: 0x103f,
             name: "credential_schema_validation_enabled_from_height",
+            ty: Ty::U64,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Gate,
+    },
+    // #279: a contract call returning an error rolls back its staged writes.
+    AddedField {
+        spec: FieldSpec {
+            id: 0x1042,
+            name: "contract_error_rollback_enabled_from_height",
             ty: Ty::U64,
             optional: true,
             item_width: None,
