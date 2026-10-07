@@ -468,3 +468,263 @@ fn the_event_row_keeps_the_block_timestamp() {
         assert_eq!(event.timestamp, T_MS);
     }
 }
+
+// ── boundaries and arithmetic ───────────────────────────────────────────────
+
+/// A payment of 500 sent at `sent_ts`; the expiry it is stored with.
+fn escrow_expiry(params: &ChainParams, sent_ts: u64) -> u64 {
+    let (db, _dir) = open_db();
+    let mut overlay = ApplicationOverlay::new(&db, 1 << 24);
+    let mut view = ExecutionView::new(&mut overlay);
+    let sender = Address::new([1; 20]);
+    credit(&mut view, &sender, 10_000_000);
+    let rh = recipient_hash(&Address::new([2; 20]));
+    let pay = op(
+        MessagingOperation::SendMessageWithPayment,
+        &SendMessageWithPaymentData {
+            message_data: valid_message(rh),
+            recipient_hash: rh,
+            koppa_amount: 500,
+        },
+    );
+    let sent = run(&mut view, params, &sender, &pay, sent_ts, 1).unwrap();
+    assert!(sent.success, "{:?}", sent.error);
+    MessagingExecutor::v_get_pending_payment(&view, &Hash::hash(&[1]))
+        .unwrap()
+        .expect("payment escrowed")
+        .expiry
+}
+
+/// Milliseconds to whole seconds rounds DOWN, including for timestamps that
+/// are not a multiple of 1000 and at the top of the range; below the gate the
+/// value is the millisecond timestamp, untouched.
+#[test]
+fn corrected_the_timestamp_is_floored_to_whole_seconds() {
+    for (ts, seconds) in [
+        (0, 0),
+        (1, 0),
+        (999, 0),
+        (1_000, 1),
+        (1_999, 1),
+        (T_MS - 1, T_MS / 1000 - 1),
+        (T_MS, T_MS / 1000),
+        (T_MS + 1, T_MS / 1000),
+        (T_MS + 999, T_MS / 1000),
+        (T_MS + 1_000, T_MS / 1000 + 1),
+        (u64::MAX, u64::MAX / 1000),
+    ] {
+        assert_eq!(
+            escrow_expiry(&corrected(), ts),
+            seconds + PENDING_PAYMENT_EXPIRY,
+            "corrected, block timestamp {ts} ms"
+        );
+    }
+    // Below the gate, the millisecond value as main uses it.
+    for ts in [999, T_MS + 999] {
+        assert_eq!(escrow_expiry(&defect(), ts), ts + PENDING_PAYMENT_EXPIRY);
+        assert_eq!(escrow_expiry(&dormant(), ts), PENDING_PAYMENT_EXPIRY);
+    }
+}
+
+/// A sender with a quota of ONE sends at `first_ts` and again at `second_ts`.
+/// Asserts the first landed in `first_day`; returns whether the second was
+/// admitted.
+fn quota_pair(params: &ChainParams, first_ts: u64, first_day: u32, second_ts: u64) -> bool {
+    let (db, _dir) = open_db();
+    let mut overlay = ApplicationOverlay::new(&db, 1 << 24);
+    let mut view = ExecutionView::new(&mut overlay);
+    let sender = Address::new([1; 20]);
+    credit(&mut view, &sender, 10_000_000);
+    MessagingExecutor::v_set_daily_quota(&mut view, 1).unwrap();
+    let rh = [3u8; 32];
+    let send = op(
+        MessagingOperation::SendMessageDirect,
+        &SendMessageData {
+            message_data: valid_message(rh),
+            recipient_hash: rh,
+        },
+    );
+    let first = run(&mut view, params, &sender, &send, first_ts, 1).unwrap();
+    assert!(first.success, "{:?}", first.error);
+    assert_eq!(
+        MessagingExecutor::v_get_daily_message_count(&view, &sender, first_day).unwrap(),
+        1,
+        "first send at {first_ts} ms counted in day {first_day}"
+    );
+    match run(&mut view, params, &sender, &send, second_ts, 2) {
+        Ok(r) => r.success,
+        Err(e) => {
+            assert!(e.to_string().contains("Daily quota exceeded"), "{e}");
+            false
+        }
+    }
+}
+
+/// The corrected quota day turns over exactly at 00:00:00.000 UTC: the last
+/// millisecond of a day and the first of the next are different days; the
+/// first and last milliseconds of one day are the same day.
+#[test]
+fn corrected_the_quota_day_rolls_over_exactly_at_midnight_utc() {
+    let p = corrected();
+    let next = (T_MS / DAY_MS + 1) as u32;
+    let midnight = next as u64 * DAY_MS;
+    assert!(
+        quota_pair(&p, midnight - 1, next - 1, midnight),
+        "23:59:59.999 then 00:00:00.000: a new day"
+    );
+    assert!(
+        !quota_pair(&p, midnight - 1_000, next - 1, midnight - 1),
+        "the last second of a day is one day"
+    );
+    assert!(
+        !quota_pair(&p, midnight, next, midnight + DAY_MS - 1),
+        "00:00:00.000 to 23:59:59.999 is one day"
+    );
+    assert!(
+        quota_pair(&p, midnight, next, midnight + DAY_MS),
+        "exactly one day later is the next day"
+    );
+}
+
+/// Below the units gate the quota bucket is `ms / 86,400` exactly as main
+/// computes it, boundary included.
+#[test]
+fn defect_the_quota_bucket_boundary_is_mains() {
+    let b = (T_MS / MESSAGING_DAY_SECONDS + 1) * MESSAGING_DAY_SECONDS;
+    let day = (b / MESSAGING_DAY_SECONDS) as u32;
+    assert!(quota_pair(&defect(), b - 1, day - 1, b));
+    assert!(!quota_pair(&defect(), b - 1_000, day - 1, b - 1));
+}
+
+/// A sponsored message whose `expiry` equals the block's second is accepted
+/// (the comparison is strict), through the whole of that second; it is
+/// refused from the next second.
+#[test]
+fn corrected_sponsored_expiry_is_inclusive_of_its_own_second() {
+    let e = T_MS / 1000 + 60;
+    for ts in [e * 1000, e * 1000 + 1, e * 1000 + 999] {
+        let r = sponsored(&corrected(), ts, e);
+        assert!(r.success, "expiry {e} at {ts} ms: {:?}", r.error);
+    }
+    for ts in [(e + 1) * 1000, (e + 1) * 1000 + 1] {
+        let r = sponsored(&corrected(), ts, e);
+        assert_eq!(
+            r.error.as_deref(),
+            Some("Sponsored message has expired"),
+            "expiry {e} at {ts} ms"
+        );
+    }
+    // Below the gate: main's comparison, in milliseconds, same strictness.
+    assert!(sponsored(&defect(), T_MS, T_MS).success);
+    assert!(!sponsored(&defect(), T_MS + 1, T_MS).success);
+}
+
+/// A payment sent at `sent_ts`, claimed at `claim_ts`: whether bob was paid.
+fn claim_paid(params: &ChainParams, sent_ts: u64, claim_ts: u64) -> bool {
+    let (db, _dir) = open_db();
+    let mut overlay = ApplicationOverlay::new(&db, 1 << 24);
+    let mut view = ExecutionView::new(&mut overlay);
+    let sender = Address::new([1; 20]);
+    let recipient = Address::new([2; 20]);
+    credit(&mut view, &sender, 10_000_000);
+    credit(&mut view, &recipient, 10_000_000);
+    let rh = recipient_hash(&recipient);
+    let pay = op(
+        MessagingOperation::SendMessageWithPayment,
+        &SendMessageWithPaymentData {
+            message_data: valid_message(rh),
+            recipient_hash: rh,
+            koppa_amount: 500,
+        },
+    );
+    assert!(
+        run(&mut view, params, &sender, &pay, sent_ts, 1)
+            .unwrap()
+            .success
+    );
+    let claim = op(
+        MessagingOperation::ClaimPayment,
+        &ClaimPaymentData {
+            message_id: Hash::hash(&[1]),
+            recipient_address: recipient,
+        },
+    );
+    let r = run(&mut view, params, &recipient, &claim, claim_ts, 2).unwrap();
+    if !r.success {
+        assert_eq!(
+            r.error.as_deref(),
+            Some("Payment expired, refunded to sender")
+        );
+    }
+    r.success
+}
+
+/// A pending payment is claimable through the whole second its expiry names
+/// and refunded from the next one; below the gate, main's millisecond
+/// boundary, with the same strictness.
+#[test]
+fn pending_payment_expiry_boundaries() {
+    let x = T_MS / 1000 + PENDING_PAYMENT_EXPIRY;
+    assert!(claim_paid(&corrected(), T_MS, x * 1000));
+    assert!(claim_paid(&corrected(), T_MS, x * 1000 + 999));
+    assert!(!claim_paid(&corrected(), T_MS, (x + 1) * 1000));
+    // A send in the last millisecond of a second expires with that second.
+    assert!(claim_paid(&corrected(), T_MS + 999, x * 1000 + 999));
+    assert!(!claim_paid(&corrected(), T_MS + 999, (x + 1) * 1000));
+
+    let x_ms = T_MS + PENDING_PAYMENT_EXPIRY;
+    assert!(claim_paid(&defect(), T_MS, x_ms));
+    assert!(!claim_paid(&defect(), T_MS, x_ms + 1));
+}
+
+/// At the top of the range the corrected rules cannot overflow: the clock is
+/// at most `u64::MAX / 1000`, so `clock + PENDING_PAYMENT_EXPIRY` (a plain
+/// `+`, as on main) has seven orders of magnitude of headroom. The daily
+/// bucket is a truncating `as u32` cast, as on main; at the corrected scale it
+/// first wraps on day 2^32, about 11.7 million years after the epoch.
+#[test]
+fn corrected_the_top_of_the_range_does_not_overflow() {
+    let p = corrected();
+    let top = u64::MAX;
+    assert!(u64::MAX / 1000 + PENDING_PAYMENT_EXPIRY > u64::MAX / 1000);
+    assert_eq!(
+        escrow_expiry(&p, top),
+        u64::MAX / 1000 + PENDING_PAYMENT_EXPIRY
+    );
+    assert!(
+        claim_paid(&p, top, top),
+        "claimed in the same block's second"
+    );
+    let r = sponsored(&p, top, u64::MAX);
+    assert!(r.success, "{:?}", r.error);
+    let r = sponsored(&p, top, u64::MAX / 1000 - 1);
+    assert_eq!(r.error.as_deref(), Some("Sponsored message has expired"));
+    let day = ((u64::MAX / 1000) / MESSAGING_DAY_SECONDS) as u32;
+    assert!(!quota_pair(&p, top - 1, day, top), "same (truncated) day");
+}
+
+/// Below the units gate, with the block-timestamp gate open, the escrow adds
+/// a week of seconds to the MILLISECOND timestamp with a plain `+`, exactly as
+/// main does: a timestamp within 604,800 of `u64::MAX` overflows. In a debug
+/// build that panics; release builds (`overflow-checks` off) wrap. This change
+/// leaves that pre-activation arithmetic untouched on purpose -- altering it
+/// would alter history -- and it is unreachable once the units gate is open
+/// (see `corrected_the_top_of_the_range_does_not_overflow`).
+#[cfg(debug_assertions)]
+#[test]
+fn defect_mains_unchecked_expiry_addition_is_unchanged_below_the_gate() {
+    let ts = u64::MAX - PENDING_PAYMENT_EXPIRY + 1;
+    let r = std::panic::catch_unwind(|| escrow_expiry(&defect(), ts));
+    assert!(
+        r.is_err(),
+        "the pre-activation addition overflows, as on main"
+    );
+    assert_eq!(
+        escrow_expiry(&defect(), u64::MAX - PENDING_PAYMENT_EXPIRY),
+        u64::MAX
+    );
+    assert_eq!(
+        escrow_expiry(&corrected(), ts),
+        ts / 1000 + PENDING_PAYMENT_EXPIRY
+    );
+}
