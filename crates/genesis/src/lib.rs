@@ -1730,7 +1730,8 @@ pub struct ChainParams {
     /// what it executed before this field was declared. In particular the
     /// validator's own `activation_height` of 385,000 is untouched: below this
     /// gate the three covered subcodes are validated at that height exactly as
-    /// before, and nothing else is validated at all.
+    /// before, and nothing else is validated at all. That height itself is moved
+    /// only by [`Self::credential_schema_validation_enabled_from_height`] (#277).
     ///
     /// Activation is a consensus change and a coordinated validator upgrade:
     /// every validator must run the identical reviewed binary and observe the
@@ -2599,6 +2600,36 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub nft_royalty_operation_unsupported_enabled_from_height: Option<u64>,
+
+    /// The credential schema validator runs from a chain-defined height.
+    ///
+    /// Issue #277. `SchemaValidator` (`crates/state/src/schema_validator.rs`)
+    /// skips every check below its compiled-in
+    /// `SchemaValidatorConfig::default().activation_height` (385,000). That
+    /// height is not a chain parameter, so every network -- whatever its
+    /// genesis says -- admits credential metadata the validator would refuse
+    /// for its first 385,000 blocks, and two binaries compiled with different
+    /// constants would disagree about transaction validity.
+    ///
+    /// At and above this gate the validator runs regardless of the compiled-in
+    /// height. Below it the compiled-in height keeps governing exactly as
+    /// before, so history is unchanged: validation is active from
+    /// `min(this gate, 385,000)`. The gate can only bring validation EARLIER;
+    /// it never switches it off where the compiled-in height already has it
+    /// on. What the validator checks, and which families reach it (see
+    /// [`Self::docclass_credential_schema_enabled_from_height`]), is unchanged.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub credential_schema_validation_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -3013,6 +3044,8 @@ impl Default for ChainParams {
             subsystem_ambiguous_policy_id_refused_enabled_from_height: None,
             // Production-safe default: UpdateCollectionConfig stops recording a royalty arrangement — dormant.
             nft_royalty_operation_unsupported_enabled_from_height: None,
+            // Production-safe default: the credential schema validator keeps its compiled-in activation height — dormant.
+            credential_schema_validation_enabled_from_height: None,
         }
     }
 }
@@ -3570,6 +3603,10 @@ impl ChainParams {
                 "nft_royalty_operation_unsupported_enabled_from_height",
                 self.nft_royalty_operation_unsupported_enabled_from_height,
             ),
+            (
+                "credential_schema_validation_enabled_from_height",
+                self.credential_schema_validation_enabled_from_height,
+            ),
         ]
     }
 
@@ -3610,7 +3647,7 @@ impl ChainParams {
     }
 }
 
-/// The forty-two remediation gates, by field name.
+/// The forty-three remediation gates, by field name.
 ///
 /// The count in this sentence has been wrong twice, both times because a wave
 /// added gates and nothing checked the prose. It is checked now:
@@ -3673,6 +3710,7 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "docclass_unknown_attribute_refused_enabled_from_height",
     "subsystem_ambiguous_policy_id_refused_enabled_from_height",
     "nft_royalty_operation_unsupported_enabled_from_height",
+    "credential_schema_validation_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started

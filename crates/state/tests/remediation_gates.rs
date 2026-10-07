@@ -261,6 +261,11 @@ const WIRING: &[(&str, &str, &str)] = &[
         "royalty_operation_unsupported_activation",
         "nft_royalty_operation_unsupported_enabled_from_height",
     ),
+    (
+        "lib.rs",
+        "schema_validation_activation",
+        "credential_schema_validation_enabled_from_height",
+    ),
 ];
 
 fn source(file: &str) -> String {
@@ -383,14 +388,14 @@ fn every_remediation_gate_reads_the_field_it_names() {
 /// while the behavioural suite for that subsystem still reported every test
 /// passing.
 #[test]
-fn the_forty_two_gates_are_forty_two_distinct_fields() {
+fn the_forty_three_gates_are_forty_three_distinct_fields() {
     let fields: BTreeSet<&str> = WIRING.iter().map(|(_, _, f)| *f).collect();
     assert_eq!(
         fields.len(),
-        42,
-        "expected forty-two distinct fields: {fields:?}"
+        43,
+        "expected forty-three distinct fields: {fields:?}"
     );
-    assert_eq!(WIRING.len(), 42, "expected forty-two accessors");
+    assert_eq!(WIRING.len(), 43, "expected forty-three accessors");
 }
 
 /// Wiring a gate is not opening it: the release configuration is unchanged.
@@ -572,6 +577,10 @@ fn every_remediation_gate_is_dormant_by_default() {
             "nft_royalty_operation_unsupported_enabled_from_height",
             p.nft_royalty_operation_unsupported_enabled_from_height,
         ),
+        (
+            "credential_schema_validation_enabled_from_height",
+            p.credential_schema_validation_enabled_from_height,
+        ),
     ];
     assert_eq!(dormant.len(), WIRING.len());
     for (name, value) in dormant {
@@ -675,5 +684,5 @@ fn the_genesis_gate_list_matches_the_accessor_table() {
     // such branches lost three attributes, three doc blocks and two
     // activation_heights entries, and left this list at 20 against a table of
     // 28, all of which compiled.
-    assert_eq!(in_genesis.len(), 42);
+    assert_eq!(in_genesis.len(), 43);
 }

@@ -37,7 +37,7 @@
 use sumchain_genesis::Genesis;
 
 use super::codec::{Value, SCHEMA_V1};
-use super::fields::{is_gate, FieldSpec, Ty, SCHEMA_V1_FIELDS};
+use super::fields::{is_gate, FieldSpec, ListOrder, Ty, SCHEMA_V1_FIELDS};
 
 /// Where an added field's value comes from.
 #[derive(Clone, Copy)]
@@ -247,9 +247,22 @@ pub static SCHEMA_1: Schema = Schema {
 /// Fields schema 2 adds to schema 1. Append-only. DRAFT: no release has
 /// written schema 2, and this binary does not (see [`PRODUCTION`]).
 ///
-/// Empty in this change. Each post-schema-1 gate or parameter appends its own
-/// entry in its own change.
-pub const SCHEMA_2_ADDED: &[AddedField] = &[];
+/// Each post-schema-1 gate or parameter appends its own entry in its own
+/// change. Ids are never reused or reordered.
+pub const SCHEMA_2_ADDED: &[AddedField] = &[
+    // #277: chain-defined activation of credential schema validation.
+    AddedField {
+        spec: FieldSpec {
+            id: 0x103f,
+            name: "credential_schema_validation_enabled_from_height",
+            ty: Ty::U64,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Gate,
+    },
+];
 
 /// Schema 2: schema 1 plus [`SCHEMA_2_ADDED`]. DRAFT.
 pub static SCHEMA_2: Schema = Schema {

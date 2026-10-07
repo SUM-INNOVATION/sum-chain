@@ -111,7 +111,9 @@ impl EmploymentExecutionResult {
 /// `#[allow(dead_code)]` — and the `SchemaValidator` was built from
 /// `SchemaValidator::new()` once per executor. It is built here per call from
 /// the same constructor, so it carries the same default config and validates
-/// identically.
+/// identically -- except that at and above
+/// `credential_schema_validation_enabled_from_height` it also runs below the
+/// compiled-in activation height (issue #277; dormant by default).
 pub struct EmploymentExecutor;
 
 /// The activation decisions an Employment transaction executes under.
@@ -132,6 +134,10 @@ pub struct EmploymentGates {
     /// An accumulating index row past the bound is refused before it is
     /// decoded. ACTIVATION-AUDIT row AL-2.
     pub allocation_bound: bool,
+
+    /// The credential schema validator runs at this height whatever its
+    /// compiled-in activation height says. Issue #277.
+    pub schema_validation: bool,
 }
 
 impl EmploymentGates {
@@ -142,6 +148,7 @@ impl EmploymentGates {
         proof_unsupported: false,
 
         allocation_bound: false,
+        schema_validation: false,
     };
 
     /// Every gate open. For the gated half of a mixed-version test.
@@ -151,6 +158,7 @@ impl EmploymentGates {
         proof_unsupported: true,
 
         allocation_bound: true,
+        schema_validation: true,
     };
 
     /// Derive the decisions from the chain's parameters at `block_height`.
@@ -160,6 +168,7 @@ impl EmploymentGates {
             real_block_timestamp: crate::subsystem_block_timestamp_gate_open(params, block_height),
             proof_unsupported: crate::subsystem_proof_unsupported_gate_open(params, block_height),
             allocation_bound: crate::subsystem_allocation_bound_gate_open(params, block_height),
+            schema_validation: crate::credential_schema_validation_gate_open(params, block_height),
         }
     }
 
@@ -368,7 +377,7 @@ impl EmploymentExecutor {
     ) -> Result<EmploymentExecutionResult> {
         let block_timestamp =
             crate::effective_block_timestamp(block_timestamp, gates.real_block_timestamp);
-        let schema_validator = SchemaValidator::new();
+        let schema_validator = SchemaValidator::new().with_chain_gate(gates.schema_validation);
 
         match data.operation {
             // =================================================================

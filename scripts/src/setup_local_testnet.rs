@@ -313,6 +313,7 @@ fn run_local() -> Result<()> {
             docclass_unknown_attribute_refused_enabled_from_height: None,
             subsystem_ambiguous_policy_id_refused_enabled_from_height: None,
             nft_royalty_operation_unsupported_enabled_from_height: None,
+            credential_schema_validation_enabled_from_height: None,
             beacon_params: None, // issue #127: beacon parameter surface absent by default
             beacon_schedule: None, // issue #127: beacon height->epoch schedule absent by default
             messaging_sponsored_registration_enabled_from_height: None, // issue #145: sponsored registration dormant (coordinated activation only)

@@ -7,8 +7,8 @@
 //! gate reschedule and an operator acknowledgement), loaded into a fresh
 //! database byte for byte.
 //!
-//! Schema 2 is a draft in production (no added field, never read or written).
-//! The tests enable it through test-only policies: the real, empty
+//! Schema 2 is a draft in production (its fields held absent, never read or
+//! written). The tests enable it through test-only policies: the real
 //! [`SCHEMA_2`], and [`TEST_SCHEMA_2`], which adds one test-only example
 //! field. Nothing here registers a production field.
 
@@ -64,10 +64,38 @@ const fn example_spec(id: u16, name: &'static str, optional: bool) -> FieldSpec 
 
 /// What a #277/#278-style change appends to `SCHEMA_2_ADDED`, here a
 /// test-only parameter so that it can be moved freely.
-const TEST_ADDED: &[AddedField] = &[AddedField {
+const EXAMPLE_FIELD: AddedField = AddedField {
     spec: example_spec(EXAMPLE_ID, "test_only_example_parameter", true),
     source: Source::Param(example_value),
-}];
+};
+
+/// The real schema 2's registered fields followed by [`EXAMPLE_FIELD`]: every gate
+/// `ChainParams` declares keeps its id, so the test schema builds.
+const TEST_ADDED_ARRAY: [AddedField; SCHEMA_2_ADDED.len() + 1] = {
+    let mut out = [EXAMPLE_FIELD; SCHEMA_2_ADDED.len() + 1];
+    let mut i = 0;
+    while i < SCHEMA_2_ADDED.len() {
+        out[i] = SCHEMA_2_ADDED[i];
+        i += 1;
+    }
+    out
+};
+const TEST_ADDED: &[AddedField] = &TEST_ADDED_ARRAY;
+
+/// Ids the real schema 2 adds, ascending.
+fn real_added_ids() -> Vec<u16> {
+    let mut ids: Vec<u16> = SCHEMA_2_ADDED.iter().map(|a| a.spec.id).collect();
+    ids.sort();
+    ids
+}
+
+/// Ids the test schema 2 adds, ascending.
+fn test_added_ids() -> Vec<u16> {
+    let mut ids = real_added_ids();
+    ids.push(EXAMPLE_ID);
+    ids.sort();
+    ids
+}
 
 static TEST_SCHEMA_2: Schema = Schema {
     number: 2,
@@ -240,8 +268,26 @@ fn this_binary_keeps_a_schema_1_database_as_it_is() {
 }
 
 #[test]
-fn the_production_schema_2_is_an_empty_well_formed_draft() {
-    assert!(SCHEMA_2_ADDED.is_empty(), "this change registers no field");
+fn the_production_schema_2_is_a_well_formed_draft_of_dormant_gates() {
+    // Every field registered so far is a gate, dormant in every default genesis.
+    let defaults = ChainParams::default().activation_heights();
+    for added in SCHEMA_2_ADDED {
+        assert!(matches!(added.source, Source::Gate), "{}", added.spec.name);
+        assert_eq!(
+            defaults
+                .iter()
+                .find(|(n, _)| *n == added.spec.name)
+                .map(|(_, h)| *h),
+            Some(None),
+            "{} is a dormant ChainParams gate",
+            added.spec.name
+        );
+    }
+    assert!(
+        SCHEMA_2_ADDED.iter().any(|a| a.spec.id == 0x103f
+            && a.spec.name == "credential_schema_validation_enabled_from_height"),
+        "#277 holds 0x103f"
+    );
     assert_eq!(SCHEMA_2.number, 2);
     assert_eq!(PRODUCTION.writes.number, 1);
     assert_eq!(
@@ -341,7 +387,7 @@ fn the_schema_transition_moves_the_record_and_keeps_its_history() {
     assert_eq!(done.seq, 3);
     assert_eq!((done.from_schema, done.to_schema), (1, 2));
     assert_eq!((done.from, done.to), (h(C2), new));
-    assert_eq!(done.added, vec![EXAMPLE_ID]);
+    assert_eq!(done.added, test_added_ids());
 
     let r = read_record_with(&db, &ENABLED).unwrap().unwrap();
     assert_eq!(r.config.schema().number, 2);
@@ -361,7 +407,7 @@ fn the_schema_transition_moves_the_record_and_keeps_its_history() {
     assert_eq!(t.kind, TransitionKind::SchemaTransition);
     assert_eq!(t.kind.label(), "schema-transition");
     assert_eq!(t.at_height, HEIGHT);
-    assert_eq!(t.changed_ids, vec![EXAMPLE_ID]);
+    assert_eq!(t.changed_ids, test_added_ids());
     let old = ConsensusConfig::decode(&t.old_encoding).expect("a schema-1 encoding");
     assert_eq!(old.schema().number, 1);
     assert_eq!(commitment_of(&t.old_encoding), h(C2));
@@ -454,13 +500,18 @@ fn a_fresh_database_records_schema_2_directly() {
     assert_eq!(pending_schema_transition_with(&db, &ENABLED).unwrap(), None);
 }
 
-/// The real (empty) schema 2: the transition re-encodes with no field added.
+/// The real schema 2: the transition re-encodes, adding only its registered
+/// fields, all absent.
 #[test]
-fn the_real_schema_2_transition_adds_no_field() {
+fn the_real_schema_2_transition_adds_only_its_registered_fields_absent() {
     let (_d, db) = schema_1_database();
     let new = moved_commitment(&db, &REAL_ENABLED);
     let done = acknowledge_schema_transition_with(&db, HEIGHT, h(C2), new, &REAL_ENABLED).unwrap();
-    assert!(done.added.is_empty());
+    assert_eq!(done.added, real_added_ids());
+    let r = read_record_with(&db, &REAL_ENABLED).unwrap().unwrap();
+    for id in real_added_ids() {
+        assert_eq!(r.config.get(id), Some(&Value::Absent), "{id:#06x}");
+    }
     assert_eq!(
         check_at_startup_with(&db, &g2(), HEIGHT, &REAL_ENABLED).unwrap(),
         StartupOutcome::Unchanged { commitment: new }

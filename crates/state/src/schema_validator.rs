@@ -96,6 +96,11 @@ impl Default for SchemaValidatorConfig {
 /// Schema validator for academic credentials (SRC-81X)
 pub struct SchemaValidator {
     config: SchemaValidatorConfig,
+    /// `credential_schema_validation_enabled_from_height` is open at the block
+    /// being validated (issue #277). When set, the checks run whatever
+    /// `config.activation_height` says; when clear, `config.activation_height`
+    /// alone decides, as it always has.
+    chain_gate_open: bool,
 }
 
 impl SchemaValidator {
@@ -103,12 +108,37 @@ impl SchemaValidator {
     pub fn new() -> Self {
         Self {
             config: SchemaValidatorConfig::default(),
+            chain_gate_open: false,
         }
     }
 
     /// Create validator with custom config
     pub fn with_config(config: SchemaValidatorConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            chain_gate_open: false,
+        }
+    }
+
+    /// Whether the chain's own activation of the validator is open at the
+    /// block being validated: `crate::credential_schema_validation_gate_open`.
+    ///
+    /// Open, the validator runs at every height, including below the compiled-in
+    /// `activation_height`. Closed (the default), behaviour is exactly that of a
+    /// validator built without this call.
+    pub fn with_chain_gate(mut self, open: bool) -> Self {
+        self.chain_gate_open = open;
+        self
+    }
+
+    /// Whether any check runs at `block_height`.
+    ///
+    /// Below the chain gate this is the original rule, unchanged: enabled and at
+    /// or above the compiled-in activation height.
+    #[inline]
+    fn active_at(&self, block_height: BlockHeight) -> bool {
+        self.config.enabled
+            && (self.chain_gate_open || block_height >= self.config.activation_height)
     }
 
     /// Validate academic credential metadata schema
@@ -121,7 +151,7 @@ impl SchemaValidator {
         block_height: BlockHeight,
     ) -> ValidationResult {
         // Backward compatibility: only validate credentials issued after activation
-        if !self.config.enabled || block_height < self.config.activation_height {
+        if !self.active_at(block_height) {
             return ValidationResult::Valid;
         }
 
@@ -172,7 +202,7 @@ impl SchemaValidator {
         credential: &AcademicCredential,
         block_height: BlockHeight,
     ) -> ValidationResult {
-        if !self.config.enabled || block_height < self.config.activation_height {
+        if !self.active_at(block_height) {
             return ValidationResult::Valid;
         }
 
@@ -233,7 +263,7 @@ impl SchemaValidator {
         attestation: &EligibilityAttestation,
         block_height: BlockHeight,
     ) -> ValidationResult {
-        if !self.config.enabled || block_height < self.config.activation_height {
+        if !self.active_at(block_height) {
             return ValidationResult::Valid;
         }
 
@@ -500,7 +530,7 @@ impl SchemaValidator {
         block_height: BlockHeight,
     ) -> ValidationResult {
         // Backward compatibility check
-        if !self.config.enabled || block_height < self.config.activation_height {
+        if !self.active_at(block_height) {
             return ValidationResult::Valid;
         }
 
@@ -531,7 +561,7 @@ impl SchemaValidator {
         block_height: BlockHeight,
     ) -> ValidationResult {
         // Backward compatibility check
-        if !self.config.enabled || block_height < self.config.activation_height {
+        if !self.active_at(block_height) {
             return ValidationResult::Valid;
         }
 
@@ -563,7 +593,7 @@ impl SchemaValidator {
         block_height: BlockHeight,
     ) -> ValidationResult {
         // Backward compatibility check
-        if !self.config.enabled || block_height < self.config.activation_height {
+        if !self.active_at(block_height) {
             return ValidationResult::Valid;
         }
 

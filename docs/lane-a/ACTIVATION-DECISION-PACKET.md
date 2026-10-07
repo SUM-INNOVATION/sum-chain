@@ -28,10 +28,10 @@ asked for:
 
 ---
 
-## Part 0a — Two gates arrived after this packet was regenerated
+## Part 0a — Three gates arrived after this packet was regenerated
 
-`ChainParams` now declares **sixty-three**. This packet covers sixty-one, and
-the two it does not cover are named here rather than left to be discovered by
+`ChainParams` now declares **sixty-four**. This packet covers sixty-one, and
+the three it does not cover are named here rather than left to be discovered by
 counting:
 
   * `subsystem_proof_unsupported_enabled_from_height` — every `VerifyProof` arm
@@ -40,8 +40,13 @@ counting:
     decides nothing, and a test pins that setting it changes no behaviour.
   * `subsystem_tx_write_set_bound_enabled_from_height` — a per-transaction
     bound on the overlay charge.
+  * `credential_schema_validation_enabled_from_height` — issue #277: the
+    credential schema validator runs from a chain-defined height instead of
+    only from its compiled-in 385,000. It can only bring validation earlier;
+    below it the compiled-in height governs exactly as before. Added after the
+    deficit below was last counted, and not written up or scheduled here.
 
-**Neither is scheduled below, and that is deliberate.** Each needs the same six
+**None of them is scheduled below, and that is deliberate.** Each needs the same six
 fields Part 1 gives the other sixty-one — behaviour, dependency ordering,
 persistent data impact, rollback-in-effect, monitoring signal, recommended wave
 — and scheduling a gate that has not had that treatment is the shortcut this
