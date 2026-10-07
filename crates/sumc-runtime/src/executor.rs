@@ -580,11 +580,29 @@ impl ContractExecutor {
         let mut len_bytes = [0u8; 4];
         view.read(ptr as u64, &mut len_bytes)
             .map_err(|e| RuntimeError::MemoryAccess(e.to_string()))?;
-        let len = u32::from_le_bytes(len_bytes) as usize;
+        let len = u32::from_le_bytes(len_bytes);
 
-        // Read data
-        let mut data = vec![0u8; len];
-        view.read((ptr + 4) as u64, &mut data)
+        // The payload starts after the prefix. `ptr + 4` overflowing `i32` can
+        // only happen when the prefix itself was readable above 2 GiB; release
+        // builds wrapped it to an offset no memory reaches, so the read failed
+        // out of bounds, and it fails out of bounds here.
+        let data_offset = match ptr.checked_add(4) {
+            Some(p) => p as u64,
+            None => {
+                return Err(RuntimeError::MemoryAccess(
+                    wasmer::MemoryAccessError::HeapOutOfBounds.to_string(),
+                ))
+            }
+        };
+
+        // Bounds before allocation: the guest controls `len` (up to 4 GiB), so
+        // the host buffer is sized only once the range is known to be inside
+        // guest memory. Same check, same error as the read below would give.
+        check_guest_range(&view, data_offset, u64::from(len))
+            .map_err(|e| RuntimeError::MemoryAccess(e.to_string()))?;
+
+        let mut data = vec![0u8; len as usize];
+        view.read(data_offset, &mut data)
             .map_err(|e| RuntimeError::MemoryAccess(e.to_string()))?;
 
         Ok(data)
@@ -743,6 +761,28 @@ fn host_chain_id(env: FunctionEnvMut<WasmEnv>) -> i64 {
     host_env.chain_id as i64
 }
 
+/// Whether `[offset, offset + len)` lies inside guest memory, decided exactly
+/// as `MemoryView::read` decides it (checked end, then `end > data_size`) and
+/// with the same error, but before the caller allocates anything.
+///
+/// Callers check with this first so that a guest-chosen length never sizes a
+/// host buffer for a range the read would refuse anyway. The outcome of an
+/// in-bounds read is unchanged, and an out-of-bounds one fails with the error
+/// the read itself returned.
+fn check_guest_range(
+    view: &wasmer::MemoryView<'_>,
+    offset: u64,
+    len: u64,
+) -> std::result::Result<(), wasmer::MemoryAccessError> {
+    let end = offset
+        .checked_add(len)
+        .ok_or(wasmer::MemoryAccessError::Overflow)?;
+    if end > view.data_size() {
+        return Err(wasmer::MemoryAccessError::HeapOutOfBounds);
+    }
+    Ok(())
+}
+
 /// Read `len` bytes at `ptr` from guest linear memory.
 fn read_guest_bytes(
     memory: &Memory,
@@ -754,6 +794,9 @@ fn read_guest_bytes(
         return Err(wasmer::RuntimeError::new("invalid guest memory range"));
     }
     let view = memory.view(store);
+    // Bounds before allocation; see `check_guest_range`.
+    check_guest_range(&view, ptr as u64, len as u64)
+        .map_err(|e| wasmer::RuntimeError::new(format!("guest memory read: {}", e)))?;
     let mut buf = vec![0u8; len as usize];
     view.read(ptr as u64, &mut buf)
         .map_err(|e| wasmer::RuntimeError::new(format!("guest memory read: {}", e)))?;
