@@ -271,7 +271,16 @@ impl ContractExecutor {
         self.cache.write().remove(code_hash);
     }
 
-    /// Call a contract method
+    /// Call a contract method, with the historical error handling.
+    ///
+    /// A call that FAILS (`success == false`, e.g. a trap) has its staged
+    /// storage writes rolled back. A call that returns `Err` does not: whatever
+    /// it staged before the error (an `alloc` that wrote and then failed, a
+    /// method that wrote and then returned an unreadable value) stays in the
+    /// write cache, visible to later calls and committed by the next
+    /// successful one. That is consensus-visible, so it is kept here unchanged
+    /// and corrected only by [`Self::call_with_error_rollback`], which block
+    /// execution selects behind an activation gate.
     pub fn call(
         &self,
         contract: ContractAddress,
@@ -279,10 +288,38 @@ impl ContractExecutor {
         args: Vec<u8>,
         ctx: ExecutionContext,
     ) -> Result<ExecutionResult> {
-        let gas_meter = Arc::new(GasMeter::new(ctx.gas_limit));
-        gas_meter.consume(gas_meter.costs().call_base)?;
+        self.call_with_error_rollback(contract, method, args, ctx, false)
+    }
 
-        let result = self.call_internal(contract, method, args, ctx, gas_meter.clone(), 0)?;
+    /// Call a contract method. With `rollback_on_error`, a call that returns
+    /// `Err` rolls back its staged storage writes exactly as a failed call
+    /// does, so nothing it staged can be read or committed afterwards. Without
+    /// it, this is [`Self::call`].
+    ///
+    /// Block execution passes `true` only at and above
+    /// `contract_error_rollback_enabled_from_height`.
+    pub fn call_with_error_rollback(
+        &self,
+        contract: ContractAddress,
+        method: &str,
+        args: Vec<u8>,
+        ctx: ExecutionContext,
+        rollback_on_error: bool,
+    ) -> Result<ExecutionResult> {
+        let run = || -> Result<ExecutionResult> {
+            let gas_meter = Arc::new(GasMeter::new(ctx.gas_limit));
+            gas_meter.consume(gas_meter.costs().call_base)?;
+            self.call_internal(contract, method, args, ctx, gas_meter, 0)
+        };
+        let result = match run() {
+            Ok(result) => result,
+            Err(e) => {
+                if rollback_on_error {
+                    self.storage.rollback();
+                }
+                return Err(e);
+            }
+        };
 
         if result.success {
             self.storage.commit()?;
@@ -304,10 +341,14 @@ impl ContractExecutor {
         // Use a large gas limit for view calls
         let gas_meter = Arc::new(GasMeter::new(u64::MAX));
 
-        let result = self.call_internal(contract, method, args, ctx, gas_meter, 0)?;
+        let result = self.call_internal(contract, method, args, ctx, gas_meter, 0);
 
-        // Always rollback view calls
+        // Always rollback view calls -- on `Err` too, which used to return
+        // before reaching this and leave the run's staged writes behind. A
+        // view never commits and is served by the RPC's own executor, never by
+        // block execution, so this changes no committed state.
         self.storage.rollback();
+        let result = result?;
 
         if result.success {
             Ok(result.return_value)
