@@ -67,6 +67,13 @@ pub enum GenesisError {
     #[error("invalid beacon_params: {reason}")]
     InvalidBeaconParams { reason: &'static str },
 
+    /// A `compute_pool_params` declaration (issue #215) fails the structural
+    /// validation of `ComputePoolParamsV1` (a zero cap or an overflowing u128
+    /// total). The surface may be declared while the gate stays dormant, but
+    /// only if structurally valid.
+    #[error("invalid compute_pool_params: {reason}")]
+    InvalidComputePoolParams { reason: String },
+
     /// A staking configuration protocol v1 cannot run: stake-weighted proposer
     /// selection, or dynamic epochs that would change validator membership.
     /// Refused at load, never coerced into round robin or static membership.
@@ -773,6 +780,22 @@ pub struct ChainParams {
     /// without opening the gate. No economic magnitude or activation height here.
     #[serde(default)]
     pub beacon_params: Option<BeaconParamsConfig>,
+
+    /// C1 compute-pool parameters (issue #215): the ratified
+    /// `ComputePoolParamsV1` field list. `None` (default) = the typed surface
+    /// is absent. When `Some`, every field is required (no compiled default
+    /// exists for any of them) and the value is STRUCTURALLY validated at
+    /// genesis load ([`ComputePoolParamsV1::validate`]); no economic policy is
+    /// asserted. **Declaring it does NOT activate the compute pool:**
+    /// [`Self::compute_pool_enabled_from_height`] stays `None` and `validate()`
+    /// still rejects any `Some(_)` gate. Nothing executes or commits state from
+    /// these values today; the consensus configuration commits their canonical
+    /// encoding under a schema-2 field, which a binary that records schema 1
+    /// refuses to start with (a draft field cannot be activated).
+    ///
+    /// [`ComputePoolParamsV1::validate`]: sumchain_primitives::compute_pool_params::ComputePoolParamsV1::validate
+    #[serde(default)]
+    pub compute_pool_params: Option<sumchain_primitives::compute_pool_params::ComputePoolParamsV1>,
 
     /// BR1 randomness-beacon height→epoch **schedule** (issue #127). `None` (default)
     /// = absent. When `Some`, it is VALIDATED at genesis load
@@ -2989,6 +3012,9 @@ impl Default for ChainParams {
             beacon_params: None,
             // Production-safe default: no beacon schedule declared.
             beacon_schedule: None,
+            // Production-safe default: no compute-pool parameter surface. No
+            // value is compiled in for any of its fields.
+            compute_pool_params: None,
             // Production-safe default: sponsored public-key registration (issue
             // #145) unavailable. Activation is a coordinated validator upgrade;
             // never set in default/mainnet config.
@@ -3299,6 +3325,17 @@ impl ChainParams {
         // the config at load; it does NOT open the gate (still rejected above).
         if let Some(bp) = &self.beacon_params {
             bp.validate()?;
+        }
+        // The compute-pool PARAMETER surface (#215) MAY likewise be declared
+        // while the gate stays dormant, but only if structurally valid. This is
+        // the `&self` half of the §G validation split; checks needing chain
+        // context belong to the executor that has it. It does NOT open the gate
+        // (still rejected above).
+        if let Some(cp) = &self.compute_pool_params {
+            cp.validate()
+                .map_err(|e| GenesisError::InvalidComputePoolParams {
+                    reason: e.to_string(),
+                })?;
         }
         // The beacon SCHEDULE (#127) MAY likewise be declared dormant, but only if
         // internally consistent (epoch_length ≥ 1, strictly-ordered phase offsets).
@@ -4866,6 +4903,86 @@ mod tests {
             Genesis::from_json(&serde_json::to_string(&v).unwrap()),
             Err(GenesisError::IncompleteSubsystemActivation {
                 gate: "beacon_enabled_from_height"
+            })
+        ));
+    }
+
+    /// #215: the compute-pool parameter surface is absent by default, may be
+    /// declared while the gate stays dormant if structurally valid, requires
+    /// every field, and never opens the gate.
+    #[test]
+    fn compute_pool_params_config_validation() {
+        use sumchain_primitives::compute_pool_params::ComputePoolParamsV1;
+
+        let g =
+            Genesis::from_json(&serde_json::to_string(&local_genesis_value()).unwrap()).unwrap();
+        assert_eq!(g.params.compute_pool_params, None);
+        assert_eq!(ChainParams::default().compute_pool_params, None);
+        assert!(!LOCAL_GENESIS_JSON.contains("compute_pool_params"));
+
+        // TEST_ONLY values: every `max_*` cap 1, everything else 0.
+        let valid = serde_json::json!({
+            "b_offer": 0, "b_commit": 0, "b_check": 0,
+            "c_layer": 0, "c_tok": 0, "c_sel": 0, "c_emit": 0,
+            "accept_reimb": 0, "commit_verify_reimb": 0, "publish_reimb": 0,
+            "observe_reimb": 0, "check_reimb": 0, "settle_reimb": 0, "reassign_reimb": 0,
+            "max_work_units": 1, "max_generations": 1, "max_reprovisionable_units": 1,
+            "max_attempts_per_unit": 1, "max_reassignments_per_file": 1,
+            "k_susp": 0, "w_susp": 0, "s_susp": 0, "n_invite_max": 0,
+            "max_retention_files_per_job": 1, "max_retention_updates_per_block": 1,
+            "max_reverse_index_entries": 1, "output_availability_blocks": 0,
+            "d_avail": 0, "d_ack": 0, "d_final": 0
+        });
+        let mut v = local_genesis_value();
+        v["params"]["compute_pool_params"] = valid.clone();
+        let g = Genesis::from_json(&serde_json::to_string(&v).unwrap()).unwrap();
+        let declared: ComputePoolParamsV1 = serde_json::from_value(valid.clone()).unwrap();
+        assert_eq!(g.params.compute_pool_params, Some(declared));
+        assert_eq!(
+            g.params.compute_pool_enabled_from_height, None,
+            "params surface does NOT open the gate"
+        );
+
+        // A structurally invalid declaration (a zero cap) is rejected at load.
+        let mut v = local_genesis_value();
+        let mut zero_cap = valid.clone();
+        zero_cap["max_generations"] = serde_json::json!(0);
+        v["params"]["compute_pool_params"] = zero_cap;
+        match Genesis::from_json(&serde_json::to_string(&v).unwrap()) {
+            Err(GenesisError::InvalidComputePoolParams { reason }) => {
+                assert!(reason.contains("max_generations"), "{reason}")
+            }
+            other => panic!("expected InvalidComputePoolParams, got {other:?}"),
+        }
+
+        // An overflowing u128 total is rejected at load (text, not Value: the
+        // number exceeds u64).
+        let mut v = local_genesis_value();
+        v["params"]["compute_pool_params"] = valid.clone();
+        let text = serde_json::to_string(&v)
+            .unwrap()
+            .replace("\"b_offer\":0", &format!("\"b_offer\":{}", u128::MAX))
+            .replace("\"b_check\":0", "\"b_check\":1");
+        assert!(matches!(
+            Genesis::from_json(&text),
+            Err(GenesisError::InvalidComputePoolParams { .. })
+        ));
+
+        // No field has a default: a declaration missing one does not parse.
+        let mut v = local_genesis_value();
+        let mut missing = valid.clone();
+        missing.as_object_mut().unwrap().remove("d_final");
+        v["params"]["compute_pool_params"] = missing;
+        assert!(Genesis::from_json(&serde_json::to_string(&v).unwrap()).is_err());
+
+        // Params present but gate Some ⇒ still rejected.
+        let mut v = local_genesis_value();
+        v["params"]["compute_pool_params"] = valid;
+        v["params"]["compute_pool_enabled_from_height"] = serde_json::json!(0u64);
+        assert!(matches!(
+            Genesis::from_json(&serde_json::to_string(&v).unwrap()),
+            Err(GenesisError::IncompleteSubsystemActivation {
+                gate: "compute_pool_enabled_from_height"
             })
         ));
     }

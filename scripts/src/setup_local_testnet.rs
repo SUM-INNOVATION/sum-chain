@@ -317,6 +317,7 @@ fn run_local() -> Result<()> {
             messaging_timestamp_units_enabled_from_height: None,
             beacon_params: None, // issue #127: beacon parameter surface absent by default
             beacon_schedule: None, // issue #127: beacon height->epoch schedule absent by default
+            compute_pool_params: None, // issue #215: compute-pool parameter surface absent by default
             messaging_sponsored_registration_enabled_from_height: None, // issue #145: sponsored registration dormant (coordinated activation only)
         },
     );

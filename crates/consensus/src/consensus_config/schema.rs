@@ -37,6 +37,8 @@
 use sumchain_genesis::Genesis;
 
 use super::codec::{Value, SCHEMA_V1};
+use sumchain_primitives::compute_pool_params::ComputePoolParamsV1;
+
 use super::fields::{is_gate, FieldSpec, ListOrder, Ty, SCHEMA_V1_FIELDS};
 
 /// Where an added field's value comes from.
@@ -274,7 +276,39 @@ pub const SCHEMA_2_ADDED: &[AddedField] = &[
         },
         source: Source::Gate,
     },
+    // #215: the C1 compute-pool parameters, committed as their canonical
+    // `ComputePoolParamsV1` encoding (`CPPRMv1`, 321 bytes). A parameter group,
+    // so in the `0x0300–0x07ff` range after the beacon groups (0x0700, 0x0710),
+    // not in the gate range. Absent when genesis declares no parameters — the
+    // pre-existing behaviour, and the production default.
+    AddedField {
+        spec: FieldSpec {
+            id: COMPUTE_POOL_PARAMS_ID,
+            name: "compute_pool_params",
+            ty: Ty::Bytes,
+            optional: true,
+            item_width: Some(ComputePoolParamsV1::LEN),
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Param(compute_pool_params_value),
+    },
 ];
+
+/// Field id of [`compute_pool_params_value`] (#215).
+pub const COMPUTE_POOL_PARAMS_ID: u16 = 0x0720;
+
+/// The genesis `compute_pool_params` as committed: its canonical encoding, or
+/// [`Value::Absent`] when none is declared.
+///
+/// The bytes are the fixed-width layout whether or not the value passes
+/// structural validation: `Genesis::validate` refuses an invalid declaration
+/// before a node gets here, and a declared value is never committed as absent.
+fn compute_pool_params_value(genesis: &Genesis) -> Value {
+    match &genesis.params.compute_pool_params {
+        None => Value::Absent,
+        Some(p) => Value::Bytes(p.canonical_bytes()),
+    }
+}
 
 /// Schema 2: schema 1 plus [`SCHEMA_2_ADDED`]. DRAFT.
 pub static SCHEMA_2: Schema = Schema {
