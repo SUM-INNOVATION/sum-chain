@@ -55,6 +55,10 @@ crates/consensus/src/consensus_config/record.rs	RECORD_KEY	EXCLUDE	consensus-con
 crates/consensus/src/consensus_config/record.rs	RECORD_VERSION	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/record.rs	TRANSITION_PREFIX	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/record.rs	TRANSITION_VERSION	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/schema.rs	PRODUCTION	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/schema.rs	SCHEMA_1	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/schema.rs	SCHEMA_2	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/schema.rs	SCHEMA_2_ADDED	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/poa.rs	MAX_BLOCK_FIT_ATTEMPTS	EXCLUDE	local-proposer	proposer packing retry budget; importers never read it (doc poa.rs:587-592)
 crates/consensus/src/poa.rs	MAX_PROPOSAL_REFUSAL_BYTES	EXCLUDE	local-proposer	screening-pass budget, proposer policy only (doc poa.rs:661-670); MAX_BLOCK_WRITE_SET_BYTES itself already committed 0x2004
 crates/consensus/src/poa.rs	MAX_REFUSED_TX_DROPS	EXCLUDE	local-proposer	proposer-only drop budget in create_block loop (poa.rs:830-839); not read on import

@@ -46,17 +46,26 @@
 //! implement, so an older binary can never misread a newer record. Moving a
 //! node from one schema to the next is an explicit, acknowledged transition,
 //! never an implicit re-encoding.
+//!
+//! [`schema`] holds the mechanism: schema 2 is schema 1's registry plus an
+//! append-only list of added fields, each optional with absence meaning the
+//! pre-existing behaviour. Schema 2 is a DRAFT in this binary — its fields are
+//! known and held absent, and nothing reads or writes a schema-2 record —
+//! until a later change enables it in [`schema::PRODUCTION`].
 
 pub mod codec;
 pub mod fields;
 pub mod record;
+pub mod schema;
 
 pub use codec::{commitment_of, ConsensusConfig, Field, FieldChange, Value, SCHEMA_V1};
-pub use fields::{build, FieldSpec, SCHEMA_V1_FIELDS};
+pub use fields::{build, build_with, FieldSpec, SCHEMA_V1_FIELDS};
 pub use record::{
-    acknowledge, check_at_startup, read_record, read_transitions, Acknowledged, BaselineRecord,
-    BaselineStatus, StartupOutcome, Transition, TransitionKind,
+    acknowledge, acknowledge_schema_transition, check_at_startup, pending_schema_transition,
+    read_record, read_transitions, Acknowledged, BaselineRecord, BaselineStatus,
+    PendingSchemaTransition, SchemaTransitioned, StartupOutcome, Transition, TransitionKind,
 };
+pub use schema::{AddedField, Schema, SchemaPolicy, Source, PRODUCTION, SCHEMA_1, SCHEMA_2};
 
 /// Why a configuration could not be built, decoded, compared or recorded.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -82,6 +91,10 @@ pub enum ConfigError {
     /// The change is not permitted.
     #[error("refusing: {0}")]
     Refused(String),
+    /// Values computed for fields that a schema does not have, and that are not
+    /// absent: rules that schema cannot express.
+    #[error("the configuration sets {fields}, which schema {schema} cannot express")]
+    BeyondSchema { schema: u16, fields: String },
 }
 
 impl ConfigError {

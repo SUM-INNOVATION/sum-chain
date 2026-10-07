@@ -172,8 +172,13 @@ fn staking_fallback_literals_equal_the_committed_defaults() {
     assert_eq!(seen, total, "an unclassified staking fallback exists");
 }
 
+/// Every gate `ChainParams` declares has exactly one id in the NEWEST schema
+/// this binary knows (schema 1's gates plus any registered after it), and that
+/// schema holds no gate `ChainParams` lacks. A gate added after schema 1 fails
+/// here until it is appended to `schema::SCHEMA_2_ADDED`.
 #[test]
-fn every_activation_gate_has_exactly_one_field_id() {
+fn every_activation_gate_has_exactly_one_field_id_in_the_newest_schema() {
+    use sumchain_consensus::consensus_config::{schema::Source, PRODUCTION};
     let gates = ChainParams::default().activation_heights();
     let mut ids: Vec<u16> = gates
         .iter()
@@ -183,15 +188,44 @@ fn every_activation_gate_has_exactly_one_field_id() {
     ids.sort();
     ids.dedup();
     assert_eq!(ids.len(), n, "two gates share an id");
+    let newest = PRODUCTION.knows.specs();
     assert_eq!(
-        sumchain_consensus::consensus_config::SCHEMA_V1_FIELDS
+        newest
             .iter()
             .filter(|s| (0x1000..0x2000).contains(&s.id))
             .count(),
         n,
         "the registry holds a gate that ChainParams does not"
     );
+    // A gate registered after schema 1 is sourced from `activation_heights()`
+    // like every schema-1 gate, and nothing else sits in the gate range.
+    for added in PRODUCTION.knows.all_added() {
+        assert_eq!(
+            matches!(added.source, Source::Gate),
+            (0x1000..0x2000).contains(&added.spec.id),
+            "{}",
+            added.spec.name
+        );
+    }
+    PRODUCTION
+        .check()
+        .expect("the production schema policy is well formed");
 }
+
+/// Schema 1's gate set is frozen: the gates it held at release, and no more.
+#[test]
+fn schema_1_gates_are_frozen() {
+    assert_eq!(
+        sumchain_consensus::consensus_config::SCHEMA_V1_FIELDS
+            .iter()
+            .filter(|s| (0x1000..0x2000).contains(&s.id))
+            .count(),
+        SCHEMA_1_GATE_COUNT
+    );
+}
+
+/// Gates in schema 1 as released at 8744d8612a072ad4c24229df2b844cedc6cb5a5a.
+const SCHEMA_1_GATE_COUNT: usize = 63;
 
 #[test]
 fn every_consensus_limit_has_exactly_one_field_id() {
@@ -330,9 +364,19 @@ fn every_compiled_constant_is_classified() {
         *declared.entry(key).or_default() += 1;
     }
     let mut classified: BTreeMap<(String, String), usize> = BTreeMap::new();
+    // PENDING / schema-2: a constant introduced after schema 1 froze and read
+    // only behind a dormant schema-2 gate. Schema 1 cannot commit to it; the
+    // change that makes this binary WRITE schema 2 must first commit each one
+    // as a `schema::SCHEMA_2_ADDED` entry, and this test then refuses any
+    // that is left.
+    let writes_schema_2 = sumchain_consensus::consensus_config::PRODUCTION
+        .writes
+        .number
+        >= 2;
     for row in census_rows() {
         assert!(
-            matches!(row[2].as_str(), "COMMITTED" | "EXCLUDE"),
+            matches!(row[2].as_str(), "COMMITTED" | "EXCLUDE")
+                || (row[2] == "PENDING" && row[3] == "schema-2" && !writes_schema_2),
             "verdict {row:?}"
         );
         assert!(

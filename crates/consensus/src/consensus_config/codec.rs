@@ -1,5 +1,9 @@
-//! The ConsensusConfigV1 byte format: typed fields, the strict decoder, the
+//! The ConsensusConfig byte format: typed fields, the strict decoder, the
 //! commitment and the field-level difference.
+//!
+//! One format serves every schema. The schema number in the header selects the
+//! registry ([`super::schema::Schema`]) the fields are checked against; schema
+//! 1's encoding is exactly what the schema-1 release wrote.
 //!
 //! ```text
 //! encoding   = MAGIC[7] ‖ schema:u16 ‖ field_count:u16 ‖ field*
@@ -23,14 +27,15 @@
 
 use sumchain_primitives::Hash;
 
-use super::fields::{spec_for, FieldSpec, ListOrder, Ty, SCHEMA_V1_FIELDS};
+use super::fields::{FieldSpec, ListOrder, Ty};
+use super::schema::{Schema, PRODUCTION};
 use super::ConfigError;
 
 /// Leading bytes of every encoding. Versioned in the string so that a later
 /// format is a different prefix, not a reinterpretation of this one.
 pub const MAGIC: &[u8; 7] = b"CCFGv1\0";
 
-/// The only schema this binary encodes or decodes.
+/// Schema 1, frozen by the release that first wrote it.
 ///
 /// A schema is FROZEN once a release has written it: its field set, ids, types
 /// and meanings never change. Adding, removing or retyping a field is a new
@@ -162,22 +167,95 @@ pub struct Field {
     pub value: Value,
 }
 
-/// A complete schema-1 configuration: every registry field, in id order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A complete configuration of one schema: every field of that schema's
+/// registry, in id order.
+#[derive(Debug, Clone)]
 pub struct ConsensusConfig {
+    schema: &'static Schema,
     fields: Vec<Field>,
 }
 
+impl PartialEq for ConsensusConfig {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.schema, other.schema) && self.fields == other.fields
+    }
+}
+impl Eq for ConsensusConfig {}
+
 impl ConsensusConfig {
-    /// Assemble a configuration, checking it against the schema-1 registry.
+    /// Assemble a configuration, checking it against `schema`'s registry.
     ///
     /// The builder in [`super::fields`] is the only production caller; the
     /// check is here so that no caller, including a test, can produce bytes
     /// the decoder would refuse.
-    pub(crate) fn from_fields(mut fields: Vec<Field>) -> Result<Self, ConfigError> {
+    pub(crate) fn from_fields(
+        schema: &'static Schema,
+        mut fields: Vec<Field>,
+    ) -> Result<Self, ConfigError> {
         fields.sort_by_key(|f| f.id);
-        check_against_registry(&fields)?;
-        Ok(Self { fields })
+        check_against_registry(schema, &fields)?;
+        Ok(Self { schema, fields })
+    }
+
+    /// The configuration `target` holds, from values computed over `known`, a
+    /// registry that extends it.
+    ///
+    /// A value of a field `target` does not have is dropped only when it is
+    /// [`Value::Absent`] — the pre-existing behaviour every later field's
+    /// absence means. Any other value is a rule `target` cannot express and is
+    /// refused with [`ConfigError::BeyondSchema`], never dropped.
+    pub(crate) fn project(
+        values: Vec<Field>,
+        known: &'static Schema,
+        target: &'static Schema,
+    ) -> Result<Self, ConfigError> {
+        let mut kept = Vec::with_capacity(values.len());
+        let mut beyond = Vec::new();
+        for f in values {
+            if target.spec(f.id).is_some() {
+                kept.push(f);
+            } else if f.value != Value::Absent {
+                let name = known.spec(f.id).map_or("?", |s| s.name);
+                beyond.push(format!("{name} ({:#06x}) = {}", f.id, f.value.render()));
+            }
+        }
+        if !beyond.is_empty() {
+            return Err(ConfigError::BeyondSchema {
+                schema: target.number,
+                fields: beyond.join("; "),
+            });
+        }
+        Self::from_fields(target, kept)
+    }
+
+    /// This configuration carried into `target`, a later schema that extends
+    /// its own: every field it holds unchanged, every field `target` adds
+    /// [`Value::Absent`]. The same rules, in the newer schema's encoding.
+    pub fn extend_to(&self, target: &'static Schema) -> Result<Self, ConfigError> {
+        if std::ptr::eq(target, self.schema) || !target.extends(self.schema) {
+            return Err(ConfigError::Refused(format!(
+                "schema {} does not extend schema {}",
+                target.number, self.schema.number
+            )));
+        }
+        let mut fields = self.fields.clone();
+        for spec in target.added_since(self.schema) {
+            fields.push(Field {
+                id: spec.id,
+                value: Value::Absent,
+            });
+        }
+        Self::from_fields(target, fields)
+    }
+
+    /// The schema this configuration is encoded in.
+    pub fn schema(&self) -> &'static Schema {
+        self.schema
+    }
+
+    /// The registry entry of `id` in this configuration's schema.
+    pub fn spec(&self, id: u16) -> Option<&'static FieldSpec> {
+        self.schema.spec(id)
     }
 
     /// Every field, in ascending id order.
@@ -197,7 +275,7 @@ impl ConsensusConfig {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(4096);
         out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&SCHEMA_V1.to_le_bytes());
+        out.extend_from_slice(&self.schema.number.to_le_bytes());
         out.extend_from_slice(&(self.fields.len() as u16).to_le_bytes());
         let mut value = Vec::new();
         for field in &self.fields {
@@ -216,8 +294,15 @@ impl ConsensusConfig {
         commitment_of(&self.encode())
     }
 
-    /// Decode an encoding, refusing anything the encoder would not produce.
+    /// Decode an encoding of a schema this binary reads
+    /// ([`PRODUCTION`]), refusing anything the encoder would not produce.
     pub fn decode(bytes: &[u8]) -> Result<Self, ConfigError> {
+        Self::decode_with(bytes, PRODUCTION.reads)
+    }
+
+    /// Decode an encoding of one of `reads`. A schema outside `reads` is
+    /// [`ConfigError::UnknownSchema`].
+    pub fn decode_with(bytes: &[u8], reads: &[&'static Schema]) -> Result<Self, ConfigError> {
         if bytes.len() > MAX_ENCODING_BYTES {
             return Err(ConfigError::malformed(format!(
                 "encoding is {} bytes, above the {} byte bound",
@@ -235,15 +320,19 @@ impl ConsensusConfig {
             bytes,
             pos: MAGIC.len(),
         };
-        let schema = r.u16()?;
-        if schema != SCHEMA_V1 {
-            return Err(ConfigError::UnknownSchema(schema));
-        }
+        let number = r.u16()?;
+        let schema = reads
+            .iter()
+            .copied()
+            .find(|s| s.number == number)
+            .ok_or(ConfigError::UnknownSchema(number))?;
+        let specs = schema.specs();
         let count = r.u16()? as usize;
-        if count != SCHEMA_V1_FIELDS.len() {
+        if count != specs.len() {
             return Err(ConfigError::malformed(format!(
-                "schema 1 has {} fields, encoding declares {}",
-                SCHEMA_V1_FIELDS.len(),
+                "schema {} has {} fields, encoding declares {}",
+                schema.number,
+                specs.len(),
                 count
             )));
         }
@@ -257,7 +346,8 @@ impl ConsensusConfig {
                     "field {id:#06x} length {len} above the {MAX_FIELD_VALUE_BYTES} byte bound"
                 )));
             }
-            let spec = spec_for(id)
+            let spec = schema
+                .spec(id)
                 .ok_or_else(|| ConfigError::malformed(format!("unknown field id {id:#06x}")))?;
             let raw = r.take(len as usize)?;
             let value = decode_value(spec, tag, raw)?;
@@ -272,13 +362,15 @@ impl ConsensusConfig {
         // Order, completeness and per-field rules are the registry check the
         // encoder also passes through; a decoded encoding that fails it was not
         // produced by an encoder.
-        check_against_registry(&fields)?;
-        Ok(Self { fields })
+        check_against_registry(schema, &fields)?;
+        Ok(Self { schema, fields })
     }
 
     /// Every field whose value differs between `self` (the recorded side) and
-    /// `now`, in id order.
+    /// `now`, in id order. Both sides are of one schema; every caller compares
+    /// in the schema the record holds.
     pub fn diff(&self, now: &ConsensusConfig) -> Vec<FieldChange> {
+        debug_assert!(std::ptr::eq(self.schema, now.schema));
         // Both sides passed the same registry check, so they hold the same ids
         // in the same order and can be walked together.
         self.fields
@@ -287,7 +379,7 @@ impl ConsensusConfig {
             .filter(|(a, b)| a.value != b.value)
             .map(|(a, b)| FieldChange {
                 id: a.id,
-                name: spec_for(a.id).map(|s| s.name).unwrap_or("?"),
+                name: self.schema.spec(a.id).map(|s| s.name).unwrap_or("?"),
                 from: a.value.clone(),
                 to: b.value.clone(),
             })
@@ -325,28 +417,30 @@ impl std::fmt::Display for FieldChange {
     }
 }
 
-fn check_against_registry(fields: &[Field]) -> Result<(), ConfigError> {
-    if fields.len() != SCHEMA_V1_FIELDS.len() {
+fn check_against_registry(schema: &'static Schema, fields: &[Field]) -> Result<(), ConfigError> {
+    let n = schema.number;
+    let specs = schema.specs();
+    if fields.len() != specs.len() {
         return Err(ConfigError::malformed(format!(
-            "schema 1 has {} fields, configuration has {}",
-            SCHEMA_V1_FIELDS.len(),
+            "schema {n} has {} fields, configuration has {}",
+            specs.len(),
             fields.len()
         )));
     }
-    for (field, spec) in fields.iter().zip(SCHEMA_V1_FIELDS.iter()) {
+    for (field, spec) in fields.iter().zip(specs.iter()) {
         if field.id != spec.id {
             return Err(ConfigError::malformed(format!(
-                "field {:#06x} where schema 1 requires {:#06x} ({}): ids must be \
+                "field {:#06x} where schema {n} requires {:#06x} ({}): ids must be \
                  unique, complete and ascending",
                 field.id, spec.id, spec.name
             )));
         }
-        check_value(spec, &field.value)?;
+        check_value(n, spec, &field.value)?;
     }
     Ok(())
 }
 
-fn check_value(spec: &FieldSpec, value: &Value) -> Result<(), ConfigError> {
+fn check_value(n: u16, spec: &FieldSpec, value: &Value) -> Result<(), ConfigError> {
     match value.ty() {
         None if spec.optional => Ok(()),
         None => Err(ConfigError::malformed(format!(
@@ -354,7 +448,7 @@ fn check_value(spec: &FieldSpec, value: &Value) -> Result<(), ConfigError> {
             spec.name, spec.id
         ))),
         Some(ty) if ty != spec.ty => Err(ConfigError::malformed(format!(
-            "field {} ({:#06x}) has type {:?}, schema 1 requires {:?}",
+            "field {} ({:#06x}) has type {:?}, schema {n} requires {:?}",
             spec.name, spec.id, ty, spec.ty
         ))),
         Some(_) => {
@@ -401,7 +495,7 @@ fn check_value(spec: &FieldSpec, value: &Value) -> Result<(), ConfigError> {
             if let (Some(width), Value::Bytes(b)) = (spec.item_width, value) {
                 if b.len() != width {
                     return Err(ConfigError::malformed(format!(
-                        "field {} is {} bytes, schema 1 requires {}",
+                        "field {} is {} bytes, schema {n} requires {}",
                         spec.name,
                         b.len(),
                         width
