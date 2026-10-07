@@ -288,6 +288,11 @@ fn the_production_schema_2_is_a_well_formed_draft_of_dormant_gates() {
             && a.spec.name == "credential_schema_validation_enabled_from_height"),
         "#277 holds 0x103f"
     );
+    assert!(
+        SCHEMA_2_ADDED.iter().any(|a| a.spec.id == 0x1040
+            && a.spec.name == "messaging_timestamp_units_enabled_from_height"),
+        "#278 holds 0x1040"
+    );
     assert_eq!(SCHEMA_2.number, 2);
     assert_eq!(PRODUCTION.writes.number, 1);
     assert_eq!(
