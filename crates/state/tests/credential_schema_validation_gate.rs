@@ -551,3 +551,35 @@ fn open_chain_gate_validates_below_the_compiled_in_height() {
     .with_chain_gate(true);
     assert!(disabled.validate_academic_credential(&pii, 0).is_valid());
 }
+
+// ── Boundaries ──────────────────────────────────────────────────────────────
+
+/// A configured gate takes effect at exactly its height, for every family the
+/// validator serves, wherever it sits below the compiled-in height: `h - 1`
+/// admits what `h` refuses.
+#[test]
+fn a_configured_gate_is_exact_to_the_block() {
+    let c = compiled();
+    for h in [1, 2, 1_000, c - 1] {
+        let p = params_gated(Some(h));
+        assert_admitted(&issue_diploma(&p, true, h - 1), &format!("gate {h}, h-1"));
+        assert_schema_refused(&issue_diploma(&p, true, h), &format!("gate {h}, h"));
+        assert_admitted(&employment_create(&p, h - 1), &format!("gate {h}, h-1"));
+        assert_schema_refused(&employment_create(&p, h), &format!("gate {h}, h"));
+    }
+}
+
+/// A gate at or above the compiled-in height leaves the legacy boundary
+/// exactly where it is: 384,999 admits, 385,000 refuses.
+#[test]
+fn the_legacy_boundary_holds_whenever_the_gate_is_not_below_it() {
+    let c = compiled();
+    assert_eq!(c, 385_000, "the compiled-in height this pins");
+    for gate in [None, Some(c), Some(c + 1), Some(u64::MAX)] {
+        let p = params_gated(gate);
+        assert_admitted(&issue_diploma(&p, true, 384_999), &format!("{gate:?}"));
+        assert_schema_refused(&issue_diploma(&p, true, 385_000), &format!("{gate:?}"));
+        assert_admitted(&employment_create(&p, 384_999), &format!("{gate:?}"));
+        assert_schema_refused(&employment_create(&p, 385_000), &format!("{gate:?}"));
+    }
+}

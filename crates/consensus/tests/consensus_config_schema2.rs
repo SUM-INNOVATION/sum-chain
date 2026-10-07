@@ -827,3 +827,114 @@ fn a_schema_2_encoding_round_trips_and_binds_its_added_field() {
     ));
     set_example(None);
 }
+
+// ── #277's gate on a released schema-1 database ─────────────────────────────
+
+/// Id of `credential_schema_validation_enabled_from_height` (#277).
+const CREDENTIAL_GATE: u16 = 0x103f;
+
+fn with_credential_gate(h: Option<u64>) -> Genesis {
+    let mut g = g2();
+    g.params.credential_schema_validation_enabled_from_height = h;
+    g
+}
+
+/// The upgrade path for #277's gate, from the schema-1 record a released
+/// binary wrote:
+///
+/// * dormant, this binary starts on it and rewrites nothing, under the
+///   production policy and under a policy with the real schema 2 enabled;
+/// * set, the production binary refuses (it records schema 1), and a
+///   schema-2 binary refuses too, naming the schema transition, until the
+///   operator moves the record explicitly;
+/// * after the move, the same genesis is accepted at start as an ordinary gate
+///   reschedule of 0x103f alone, recorded in the history after the schema-1
+///   entries, which stay as they were;
+/// * a height the chain has already passed is refused, as for every gate.
+#[test]
+fn the_credential_gate_on_a_schema_1_database_waits_for_the_schema_transition() {
+    let ahead = HEIGHT + 1_000;
+    let (_d, db) = schema_1_database();
+
+    // Dormant: unchanged, under both policies.
+    let dormant = with_credential_gate(None);
+    assert_eq!(
+        ccfg::check_at_startup(&db, &dormant, HEIGHT).unwrap(),
+        StartupOutcome::Unchanged { commitment: h(C2) }
+    );
+    assert_eq!(
+        check_at_startup_with(&db, &dormant, HEIGHT, &REAL_ENABLED).unwrap(),
+        StartupOutcome::Unchanged { commitment: h(C2) }
+    );
+    assert_eq!(entries(&db), fixture_entries());
+
+    // Set: the production binary cannot record it.
+    let set = with_credential_gate(Some(ahead));
+    let err = ccfg::check_at_startup(&db, &set, HEIGHT).unwrap_err();
+    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
+    assert!(
+        err.to_string()
+            .contains("credential_schema_validation_enabled_from_height"),
+        "{err}"
+    );
+    assert_eq!(entries(&db), fixture_entries());
+
+    // Set, schema 2 enabled, record still schema 1: refused, naming the move.
+    let new = moved_commitment(&db, &REAL_ENABLED);
+    let err = check_at_startup_with(&db, &set, HEIGHT, &REAL_ENABLED).unwrap_err();
+    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
+    assert!(
+        err.to_string()
+            .contains("acknowledge-consensus-config-schema"),
+        "{err}"
+    );
+    let computed = ccfg::build_with(&set, &REAL_ENABLED).unwrap().commitment();
+    let err = acknowledge_with(&db, &set, HEIGHT, h(C2), computed, &REAL_ENABLED).unwrap_err();
+    assert!(err.to_string().contains("schema 1 cannot express"), "{err}");
+    assert_eq!(entries(&db), fixture_entries());
+
+    // The explicit move: 0x103f arrives absent; the history is kept.
+    let moved = acknowledge_schema_transition_with(&db, HEIGHT, h(C2), new, &REAL_ENABLED).unwrap();
+    assert!(moved.added.contains(&CREDENTIAL_GATE), "{:?}", moved.added);
+    let r = read_record_with(&db, &REAL_ENABLED).unwrap().unwrap();
+    assert_eq!(r.config.get(CREDENTIAL_GATE), Some(&Value::Absent));
+    let fixture = fixture_entries();
+    let after = entries(&db);
+    assert_eq!(after[1..3], fixture[1..3], "schema-1 history untouched");
+
+    // A passed height is still refused after the move.
+    let passed = with_credential_gate(Some(HEIGHT));
+    let err = check_at_startup_with(&db, &passed, HEIGHT, &REAL_ENABLED).unwrap_err();
+    assert!(err.to_string().contains("already passed"), "{err}");
+
+    // A future height is now an ordinary gate reschedule of 0x103f alone.
+    let out = check_at_startup_with(&db, &set, HEIGHT, &REAL_ENABLED).unwrap();
+    let StartupOutcome::GatesRescheduled { from, to, changes } = out else {
+        panic!("expected a gate reschedule, got {out:?}");
+    };
+    assert_eq!((from, to), (new, computed));
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0].id, CREDENTIAL_GATE);
+    assert_eq!(
+        (&changes[0].from, &changes[0].to),
+        (&Value::Absent, &Value::U64(ahead))
+    );
+    let history = read_transitions_with(&db, &REAL_ENABLED).unwrap();
+    let kinds: Vec<_> = history.iter().map(|t| t.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            TransitionKind::GateReschedule,
+            TransitionKind::OperatorAcknowledged,
+            TransitionKind::SchemaTransition,
+            TransitionKind::GateReschedule,
+        ]
+    );
+    assert_eq!(history[3].changed_ids, vec![CREDENTIAL_GATE]);
+    assert_eq!(
+        check_at_startup_with(&db, &set, HEIGHT, &REAL_ENABLED).unwrap(),
+        StartupOutcome::Unchanged {
+            commitment: computed
+        }
+    );
+}
