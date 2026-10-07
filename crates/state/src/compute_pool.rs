@@ -542,7 +542,9 @@ pub fn compute_job_max_retention_files(
 }
 
 /// Reject a job whose retention-file count exceeds the injected per-job cap
-/// (`max_retention_files_per_job`).
+/// (`max_retention_files_per_job`). This is retention relation 5 of issue #129.
+/// Relations 1–4 are checked by
+/// [`crate::compute_pool_retention::validate_retention_relations`].
 pub fn validate_retention_within_cap(files: u128, cap: u128) -> PoolResult<()> {
     if files > cap {
         Err(PoolError::RetentionCapExceeded { files, cap })
