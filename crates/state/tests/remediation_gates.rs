@@ -271,6 +271,11 @@ const WIRING: &[(&str, &str, &str)] = &[
         "error_rollback_activation",
         "contract_error_rollback_enabled_from_height",
     ),
+    (
+        "messaging_executor.rs",
+        "timestamp_units_activation",
+        "messaging_timestamp_units_enabled_from_height",
+    ),
 ];
 
 fn source(file: &str) -> String {
@@ -395,16 +400,18 @@ fn every_remediation_gate_reads_the_field_it_names() {
 ///
 /// The forty-third, `schema_validation_activation`, reads #277's gate in
 /// `lib.rs`. The forty-fourth, `error_rollback_activation`, is the first
-/// accessor in `contract_executor.rs` (#279).
+/// accessor in `contract_executor.rs` (#279). The forty-fifth,
+/// `timestamp_units_activation`, is the first accessor in
+/// `messaging_executor.rs` (#278).
 #[test]
-fn the_forty_four_gates_are_forty_four_distinct_fields() {
+fn the_forty_five_gates_are_forty_five_distinct_fields() {
     let fields: BTreeSet<&str> = WIRING.iter().map(|(_, _, f)| *f).collect();
     assert_eq!(
         fields.len(),
-        44,
-        "expected forty-four distinct fields: {fields:?}"
+        45,
+        "expected forty-five distinct fields: {fields:?}"
     );
-    assert_eq!(WIRING.len(), 44, "expected forty-four accessors");
+    assert_eq!(WIRING.len(), 45, "expected forty-five accessors");
 }
 
 /// Wiring a gate is not opening it: the release configuration is unchanged.
@@ -594,6 +601,10 @@ fn every_remediation_gate_is_dormant_by_default() {
             "contract_error_rollback_enabled_from_height",
             p.contract_error_rollback_enabled_from_height,
         ),
+        (
+            "messaging_timestamp_units_enabled_from_height",
+            p.messaging_timestamp_units_enabled_from_height,
+        ),
     ];
     assert_eq!(dormant.len(), WIRING.len());
     for (name, value) in dormant {
@@ -630,6 +641,7 @@ fn a_genesis_written_before_these_fields_still_parses_dormant() {
     assert_eq!(back.nft_receipt_failure_enabled_from_height, None);
     assert_eq!(back.subsystem_block_timestamp_enabled_from_height, None);
     assert_eq!(back.contract_error_rollback_enabled_from_height, None);
+    assert_eq!(back.messaging_timestamp_units_enabled_from_height, None);
     assert_eq!(back.tax_authorization_enabled_from_height, None);
     assert_eq!(back.subsystem_tx_index_enabled_from_height, None);
     assert_eq!(back.subsystem_allocation_bound_enabled_from_height, None);
@@ -698,5 +710,5 @@ fn the_genesis_gate_list_matches_the_accessor_table() {
     // such branches lost three attributes, three doc blocks and two
     // activation_heights entries, and left this list at 20 against a table of
     // 28, all of which compiled.
-    assert_eq!(in_genesis.len(), 44);
+    assert_eq!(in_genesis.len(), 45);
 }

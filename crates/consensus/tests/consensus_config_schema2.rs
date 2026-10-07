@@ -293,10 +293,15 @@ fn the_production_schema_2_is_a_well_formed_draft_of_dormant_gates() {
             && a.spec.name == "contract_error_rollback_enabled_from_height"),
         "#279 holds 0x1042"
     );
+    assert!(
+        SCHEMA_2_ADDED.iter().any(|a| a.spec.id == 0x1040
+            && a.spec.name == "messaging_timestamp_units_enabled_from_height"),
+        "#278 holds 0x1040"
+    );
     assert_eq!(
         SCHEMA_2_ADDED.iter().map(|a| a.spec.id).collect::<Vec<_>>(),
-        vec![0x103f, 0x1042],
-        "append order: #277's 0x103f, then #279's 0x1042"
+        vec![0x103f, 0x1042, 0x1040],
+        "append order: #277's 0x103f, #279's 0x1042, then #278's 0x1040"
     );
     assert_eq!(SCHEMA_2.number, 2);
     assert_eq!(PRODUCTION.writes.number, 1);
