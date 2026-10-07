@@ -31,6 +31,10 @@ pub const STAKED_SENDER_QUOTA_MULTIPLIER: u32 = 5;
 pub const PENDING_PAYMENT_EXPIRY: u64 = 7 * 24 * 3600;
 /// Spam-score increment applied by one accepted report.
 pub const SPAM_REPORT_SCORE_INCREMENT: u32 = 5;
+/// Divisor taking the block timestamp, in milliseconds since the Unix epoch,
+/// to the seconds every messaging time rule is written in (#278). Applied only
+/// at and above `messaging_timestamp_units_enabled_from_height`.
+pub const MESSAGING_TIMESTAMP_MS_PER_SECOND: u64 = 1000;
 
 /// Result of messaging execution
 #[derive(Debug)]
@@ -74,6 +78,43 @@ impl MessagingExecutor {
         params.messaging.clone().unwrap_or_default()
     }
 
+    /// The activation height for reading the block timestamp in seconds.
+    ///
+    /// Reads `params.messaging_timestamp_units_enabled_from_height`.
+    ///
+    /// Issue #278. The block timestamp is milliseconds since the Unix epoch;
+    /// the three messaging time rules are written in seconds: the daily-quota
+    /// bucket ([`MESSAGING_DAY_SECONDS`]), a pending payment's expiry
+    /// ([`PENDING_PAYMENT_EXPIRY`]), and a sponsored message's client-signed
+    /// `expiry`, which `messaging_submitSponsored` checks against
+    /// `as_secs()`. Below this height they are applied to the millisecond value
+    /// exactly as before; at and above it to the value divided by
+    /// [`MESSAGING_TIMESTAMP_MS_PER_SECOND`].
+    ///
+    /// Its own field, not `subsystem_block_timestamp_enabled_from_height`: that
+    /// gate decides WHETHER the executor sees the block's time, this one what
+    /// UNIT it reads it in. While the timestamp gate is closed the executor sees
+    /// zero, and zero is zero in either unit, so this gate is inert until that
+    /// one opens. Opening the timestamp gate without this one gives an 86.4 s
+    /// quota window, a ten-minute payment expiry and a sponsored message that is
+    /// always expired.
+    #[inline]
+    fn timestamp_units_activation(params: &ChainParams) -> Option<u64> {
+        params.messaging_timestamp_units_enabled_from_height
+    }
+
+    /// The time messaging's rules compare against, at `block_height`.
+    ///
+    /// `block_timestamp` is the already-gated value from
+    /// [`crate::effective_block_timestamp`]. Below the units gate it is
+    /// returned unchanged; at and above it, in whole seconds.
+    fn rule_clock(params: &ChainParams, block_height: u64, block_timestamp: u64) -> u64 {
+        match Self::timestamp_units_activation(params) {
+            Some(h) if block_height >= h => block_timestamp / MESSAGING_TIMESTAMP_MS_PER_SECOND,
+            _ => block_timestamp,
+        }
+    }
+
     /// Execute a messaging transaction
     ///
     /// `block_timestamp` arrives real from both dispatch arms and is reduced to
@@ -85,6 +126,10 @@ impl MessagingExecutor {
     /// counts against day zero and the quota is exhausted permanently; and
     /// `claim_payment` compares a pending payment's expiry against it. Both
     /// decide whether a transaction succeeds, so the substitution is gated.
+    ///
+    /// The value those rules compare against is then [`Self::rule_clock`]:
+    /// the same milliseconds below `messaging_timestamp_units_enabled_from_height`,
+    /// whole seconds at and above it (#278).
     ///
     /// `tx_index` is already reduced by the dispatch arm — see
     /// [`crate::effective_tx_index`] — because it is the arm that knows the
@@ -106,6 +151,10 @@ impl MessagingExecutor {
             block_timestamp,
             crate::subsystem_block_timestamp_gate_open(params, block_height),
         );
+        // What the quota bucket and both expiries compare against. The stored
+        // rows that RECORD a time (`MessageEvent::timestamp`,
+        // `RegisteredPublicKey::registered_at`) keep `block_timestamp`.
+        let clock = Self::rule_clock(params, block_height, block_timestamp);
         match data.operation {
             MessagingOperation::SendMessage => Self::send_message_sponsored(
                 view,
@@ -115,6 +164,7 @@ impl MessagingExecutor {
                 proposer,
                 block_height,
                 block_timestamp,
+                clock,
                 tx_index,
                 tx_hash,
             ),
@@ -127,6 +177,7 @@ impl MessagingExecutor {
                 fee,
                 block_height,
                 block_timestamp,
+                clock,
                 tx_index,
                 tx_hash,
             ),
@@ -139,11 +190,12 @@ impl MessagingExecutor {
                 fee,
                 block_height,
                 block_timestamp,
+                clock,
                 tx_index,
                 tx_hash,
             ),
             MessagingOperation::ClaimPayment => {
-                Self::claim_payment(view, sender, &data.data, block_timestamp)
+                Self::claim_payment(view, sender, &data.data, clock)
             }
             MessagingOperation::StakeForTrust => Self::stake_for_trust(view, sender, &data.data),
             MessagingOperation::Unstake => Self::unstake(view, sender, &data.data),
@@ -322,6 +374,7 @@ impl MessagingExecutor {
         proposer: &Address,
         block_height: u64,
         block_timestamp: u64,
+        clock: u64,
         tx_index: u32,
         tx_hash: Hash,
     ) -> Result<MessagingExecutionResult> {
@@ -362,12 +415,12 @@ impl MessagingExecutor {
         }
 
         // Check expiry
-        if sponsored_msg.expiry < block_timestamp {
+        if sponsored_msg.expiry < clock {
             return Ok(MessagingExecutionResult::failure("Sponsored message has expired"));
         }
 
         // Check rate limit for the real sender
-        Self::check_rate_limit(view, &real_sender, block_timestamp)?;
+        Self::check_rate_limit(view, &real_sender, clock)?;
 
         // Check spam restrictions for the real sender
         Self::check_spam_restrictions(view, params, &real_sender)?;
@@ -380,7 +433,7 @@ impl MessagingExecutor {
 
         // Increment real sender's nonce and daily count
         Self::v_increment_sender_nonce(view, &real_sender)?;
-        let day = Self::current_day(block_timestamp);
+        let day = Self::current_day(clock);
         Self::v_increment_daily_message_count(view, &real_sender, day)?;
 
         // Store message event with real sender
@@ -417,6 +470,7 @@ impl MessagingExecutor {
         fee: Balance,
         block_height: u64,
         block_timestamp: u64,
+        clock: u64,
         tx_index: u32,
         tx_hash: Hash,
     ) -> Result<MessagingExecutionResult> {
@@ -436,7 +490,7 @@ impl MessagingExecutor {
         }
 
         // Check rate limit
-        Self::check_rate_limit(view, sender, block_timestamp)?;
+        Self::check_rate_limit(view, sender, clock)?;
 
         // Check spam restrictions
         Self::check_spam_restrictions(view, params, sender)?;
@@ -453,7 +507,7 @@ impl MessagingExecutor {
 
         // Increment sender's message nonce and daily count
         Self::v_increment_sender_nonce(view, sender)?;
-        let day = Self::current_day(block_timestamp);
+        let day = Self::current_day(clock);
         Self::v_increment_daily_message_count(view, sender, day)?;
 
         // Store message event
@@ -484,6 +538,7 @@ impl MessagingExecutor {
         fee: Balance,
         block_height: u64,
         block_timestamp: u64,
+        clock: u64,
         tx_index: u32,
         tx_hash: Hash,
     ) -> Result<MessagingExecutionResult> {
@@ -503,7 +558,7 @@ impl MessagingExecutor {
         }
 
         // Check rate limit
-        Self::check_rate_limit(view, sender, block_timestamp)?;
+        Self::check_rate_limit(view, sender, clock)?;
 
         // Check spam restrictions
         Self::check_spam_restrictions(view, params, sender)?;
@@ -523,7 +578,7 @@ impl MessagingExecutor {
         StateManager::v_credit(view, proposer, fee)?;
 
         // Escrow the payment (store as pending)
-        let expiry = block_timestamp + PENDING_PAYMENT_EXPIRY; // 7 days expiry
+        let expiry = clock + PENDING_PAYMENT_EXPIRY; // 7 days expiry
         let pending = PendingPayment {
             recipient_hash: msg_data.recipient_hash,
             amount: msg_data.koppa_amount,
@@ -537,7 +592,7 @@ impl MessagingExecutor {
 
         // Increment sender's message nonce and daily count
         Self::v_increment_sender_nonce(view, sender)?;
-        let day = Self::current_day(block_timestamp);
+        let day = Self::current_day(clock);
         Self::v_increment_daily_message_count(view, sender, day)?;
 
         // Store message event
@@ -565,7 +620,7 @@ impl MessagingExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        block_timestamp: u64,
+        clock: u64,
     ) -> Result<MessagingExecutionResult> {
         let claim_data: ClaimPaymentData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid claim data: {}", e)))?;
@@ -588,7 +643,7 @@ impl MessagingExecutor {
         }
 
         // Check expiry (if expired, refund to sender)
-        if block_timestamp > pending.expiry {
+        if clock > pending.expiry {
             // Refund to original sender
             StateManager::v_credit(view, &pending.sender, pending.amount)?;
             Self::v_delete_pending_payment(view, &claim_data.message_id)?;

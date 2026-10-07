@@ -186,6 +186,7 @@ crates/state/src/lib.rs	UNNAMED_POLICY_ID	COMMITTED	registry	0x2518
 crates/state/src/lib.rs	UNPAYABLE_ROYALTY_UNSUPPORTED	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
 crates/state/src/lib.rs	VERIFY_PROOF_UNSUPPORTED	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
 crates/state/src/messaging_executor.rs	MESSAGING_DAY_SECONDS	COMMITTED	registry	0x2519
+crates/state/src/messaging_executor.rs	MESSAGING_TIMESTAMP_MS_PER_SECOND	PENDING	schema-2	read only at and above messaging_timestamp_units_enabled_from_height (#278), a draft schema-2 gate (0x1040) that schema 1 does not carry; commit as a schema-2 field before schema 2 is written
 crates/state/src/messaging_executor.rs	PENDING_PAYMENT_EXPIRY	COMMITTED	registry	0x251a
 crates/state/src/messaging_executor.rs	SPAM_REPORT_SCORE_INCREMENT	COMMITTED	registry	0x251b
 crates/state/src/messaging_executor.rs	STAKED_SENDER_QUOTA_MULTIPLIER	COMMITTED	registry	0x251c

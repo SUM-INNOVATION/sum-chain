@@ -262,6 +262,18 @@ pub const SCHEMA_2_ADDED: &[AddedField] = &[
         },
         source: Source::Gate,
     },
+    // #278: messaging rules read the block timestamp in seconds.
+    AddedField {
+        spec: FieldSpec {
+            id: 0x1040,
+            name: "messaging_timestamp_units_enabled_from_height",
+            ty: Ty::U64,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Gate,
+    },
 ];
 
 /// Schema 2: schema 1 plus [`SCHEMA_2_ADDED`]. DRAFT.
