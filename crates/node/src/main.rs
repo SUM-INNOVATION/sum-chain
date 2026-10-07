@@ -537,6 +537,7 @@ async fn main() -> Result<()> {
                 rpc_rate_limit_config,
                 cfg.consensus,
             )?;
+            node.apply_rpc_contract_limits(&cfg.rpc);
 
             // Run node
             node.run().await?;

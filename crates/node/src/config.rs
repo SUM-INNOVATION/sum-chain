@@ -110,6 +110,13 @@ rate_limit_rps = 100
 # Burst size for rate limiting
 rate_limit_burst = 200
 
+# Contract RPC budgets (contract_call, contract_estimateGas). Local to this
+# node; block execution is unaffected.
+# contract_exec_fuel = 200000000
+# contract_exec_max_memory_pages = 256
+# contract_exec_max_host_bytes = 16777216
+# contract_exec_concurrency = 1
+
 [health]
 # Health/readiness HTTP server listen address.
 # Serves GET /health (liveness) and GET /ready (readiness). Bound separately
@@ -188,6 +195,31 @@ pub struct RpcSettings {
     pub rate_limit_rps: u32,
     /// Burst size
     pub rate_limit_burst: u32,
+    /// Contract RPC (`contract_call`, `contract_estimateGas`) budgets. Local
+    /// to this node; they never affect block execution.
+    ///
+    /// WASM operators one execution may run.
+    pub contract_exec_fuel: u64,
+    /// Linear-memory ceiling for one execution, in 64 KiB pages.
+    pub contract_exec_max_memory_pages: u32,
+    /// Bytes host functions may copy in one execution.
+    pub contract_exec_max_host_bytes: u64,
+    /// Executions allowed at once; further requests wait briefly, then get a
+    /// busy error.
+    pub contract_exec_concurrency: usize,
+}
+
+impl RpcSettings {
+    /// The contract RPC budgets as the runtime takes them. The view gas cap is
+    /// filled in from the chain's `max_contract_gas` where the executor is built.
+    pub fn contract_exec_limits(&self) -> sumc_runtime::LocalExecutionLimits {
+        sumc_runtime::LocalExecutionLimits {
+            fuel: self.contract_exec_fuel,
+            max_memory_pages: self.contract_exec_max_memory_pages,
+            max_host_bytes: self.contract_exec_max_host_bytes,
+            ..sumc_runtime::LocalExecutionLimits::DEFAULT
+        }
+    }
 }
 
 impl Default for RpcSettings {
@@ -198,9 +230,16 @@ impl Default for RpcSettings {
             rate_limit_enabled: false,
             rate_limit_rps: 100,
             rate_limit_burst: 200,
+            contract_exec_fuel: sumc_runtime::LocalExecutionLimits::DEFAULT.fuel,
+            contract_exec_max_memory_pages: sumc_runtime::LocalExecutionLimits::DEFAULT
+                .max_memory_pages,
+            contract_exec_max_host_bytes: sumc_runtime::LocalExecutionLimits::DEFAULT
+                .max_host_bytes,
+            contract_exec_concurrency: 1,
         }
     }
 }
+
 
 /// Health/readiness HTTP server settings.
 ///
@@ -404,6 +443,23 @@ addr = "0.0.0.0:8545"
 
     fn engine_config(value: &str) -> String {
         format!("[consensus]\nengine = {value}\n")
+    }
+
+    #[test]
+    fn contract_exec_limits_defaults_and_overrides() {
+        // Omitted: default RPC budgets, one execution slot.
+        let cfg: NodeConfig = toml::from_str("[node]\ngenesis = \"g.json\"\n").unwrap();
+        assert_eq!(
+            cfg.rpc.contract_exec_limits(),
+            sumc_runtime::LocalExecutionLimits::DEFAULT
+        );
+        assert_eq!(cfg.rpc.contract_exec_concurrency, 1);
+
+        let cfg: NodeConfig =
+            toml::from_str("[rpc]\ncontract_exec_fuel = 1000\ncontract_exec_concurrency = 3\n")
+                .unwrap();
+        assert_eq!(cfg.rpc.contract_exec_limits().fuel, 1000);
+        assert_eq!(cfg.rpc.contract_exec_concurrency, 3);
     }
 
     #[test]

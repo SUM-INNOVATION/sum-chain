@@ -214,6 +214,38 @@ impl ContractExecutorState {
         }
     }
 
+    /// A read-only executor for the RPC: the same committed state as
+    /// [`Self::new`], executed under node-local budgets (`limits`, with the
+    /// view gas cap set to this chain's `max_contract_gas`).
+    ///
+    /// For `view_call` and `estimate_gas` only. Never pass it to block
+    /// execution: its budgets are node-local and not part of consensus.
+    pub fn new_local(
+        db: Arc<Database>,
+        params: ChainParams,
+        limits: sumc_runtime::LocalExecutionLimits,
+    ) -> Self {
+        let backend = Arc::new(RocksDbStorage::new(db.clone()));
+        let storage = Arc::new(ContractStorage::new(backend.clone()));
+        let limits = sumc_runtime::LocalExecutionLimits {
+            gas_cap: params.max_contract_gas,
+            ..limits
+        };
+        let wasm_executor = Arc::new(WasmExecutor::with_local_limits(storage, limits));
+
+        Self {
+            wasm_executor,
+            backend,
+            db,
+            params,
+        }
+    }
+
+    /// The local budgets, if this is an RPC executor built by [`Self::new_local`].
+    pub fn local_limits(&self) -> Option<sumc_runtime::LocalExecutionLimits> {
+        self.wasm_executor.local_limits()
+    }
+
     /// Deploy a contract
     #[allow(clippy::too_many_arguments)]
     pub fn deploy(

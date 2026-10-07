@@ -3,9 +3,9 @@
 //! Handles contract deployment and execution with gas metering.
 
 use crate::{
-    host::HostEnv, storage::ContractStorage, CallResult, CodeHash, ContractAddress,
-    ContractEvent, ContractMetadata, DeployResult, Gas, GasMeter, LogEntry,
-    Result, RuntimeError, MAX_CALL_DEPTH, MAX_CODE_SIZE,
+    host::HostEnv, local_limits::LocalExecutionLimits, storage::ContractStorage, CallResult,
+    CodeHash, ContractAddress, ContractEvent, ContractMetadata, DeployResult, Gas, GasMeter,
+    LogEntry, Result, RuntimeError, MAX_CALL_DEPTH, MAX_CODE_SIZE,
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -58,6 +58,10 @@ pub struct ExecutionResult {
 /// Compiled contract cache
 struct CompiledContract {
     module: Module,
+    /// The engine `module` was compiled with; its stores come from here. The
+    /// shared engine on the block executor, a per-module one on a local
+    /// executor (see `local_limits::metered_engine`).
+    engine: wasmer::Engine,
     code_hash: CodeHash,
 }
 
@@ -68,17 +72,40 @@ struct WasmEnv {
     /// Guest allocator export, used by host functions that must return a
     /// variable-length buffer to the guest (e.g. `storage_read`).
     alloc: Option<TypedFunction<i32, i32>>,
+    /// Bytes host functions may still copy in this execution. `None` on the
+    /// block executor: there the only bound is gas, as before.
+    host_bytes_left: Option<u64>,
 }
 
 impl WasmEnv {
-    fn new(host_env: Arc<RwLock<HostEnv>>) -> Self {
+    fn new(host_env: Arc<RwLock<HostEnv>>, host_bytes_left: Option<u64>) -> Self {
         Self {
             host_env,
             memory: None,
             alloc: None,
+            host_bytes_left,
+        }
+    }
+
+    /// Charge `n` bytes of host copying against the local budget, if any.
+    fn charge_host_bytes(&mut self, n: u64) -> std::result::Result<(), wasmer::RuntimeError> {
+        match self.host_bytes_left.as_mut() {
+            None => Ok(()),
+            Some(left) if *left >= n => {
+                *left -= n;
+                Ok(())
+            }
+            Some(_) => Err(wasmer::RuntimeError::new(LOCAL_HOST_BUDGET_EXHAUSTED)),
         }
     }
 }
+
+/// Error text when a local (RPC/view) execution exhausts its operator budget.
+pub const LOCAL_FUEL_EXHAUSTED: &str = "local execution budget exhausted";
+/// Error text when a local execution exhausts its host-copy budget.
+pub const LOCAL_HOST_BUDGET_EXHAUSTED: &str = "local host copy budget exhausted";
+/// Error text when a local execution exhausts its bulk-operation budget.
+pub const LOCAL_BULK_EXHAUSTED: &str = "local bulk memory budget exhausted";
 
 /// Contract executor - compiles and runs WASM contracts
 pub struct ContractExecutor {
@@ -99,6 +126,9 @@ pub struct ContractExecutor {
     storage: Arc<ContractStorage>,
     /// Contract metadata
     metadata: RwLock<HashMap<ContractAddress, ContractMetadata>>,
+    /// Node-local budgets. `Some` only on an executor that never produces
+    /// consensus state (the RPC/view instance); see `with_local_limits`.
+    local_limits: Option<LocalExecutionLimits>,
 }
 
 impl ContractExecutor {
@@ -118,13 +148,53 @@ impl ContractExecutor {
             cache: RwLock::new(HashMap::new()),
             storage,
             metadata: RwLock::new(HashMap::new()),
+            local_limits: None,
         }
     }
 
-    /// A fresh, short-lived `Store` for one deploy/call. Cloning `self.engine`
-    /// preserves the engine id, so cached `Module`s remain instantiable.
-    fn new_store(&self) -> Store {
-        Store::new(self.engine.clone())
+    /// An executor for read-only local use (RPC `contract_call` and
+    /// `contract_estimateGas`), bounded by `limits`.
+    ///
+    /// Not for block execution: its budgets are node-local, so a result from
+    /// here can be a local-budget error that a block would not report. Gas
+    /// accounting is unchanged, so an estimate within budget is the same number
+    /// the block executor would charge.
+    pub fn with_local_limits(storage: Arc<ContractStorage>, limits: LocalExecutionLimits) -> Self {
+        Self {
+            engine: crate::local_limits::metered_engine(&limits),
+            cache: RwLock::new(HashMap::new()),
+            storage,
+            metadata: RwLock::new(HashMap::new()),
+            local_limits: Some(limits),
+        }
+    }
+
+    /// The local budgets this executor enforces, if it is a local executor.
+    pub fn local_limits(&self) -> Option<LocalExecutionLimits> {
+        self.local_limits
+    }
+
+    /// Compile `code`, returning the module and the engine to instantiate it
+    /// with.
+    fn compile(&self, code: &[u8]) -> Result<(Module, wasmer::Engine)> {
+        let engine = match &self.local_limits {
+            Some(limits) => crate::local_limits::metered_engine(limits),
+            None => self.engine.clone(),
+        };
+        let module = Module::new(&Store::new(engine.clone()), code)?;
+        Ok((module, engine))
+    }
+
+    /// Insert into the compiled-module cache. A local executor empties it on
+    /// reaching its bound; the block executor keeps its existing behaviour.
+    fn cache_insert(&self, code_hash: CodeHash, compiled: Arc<CompiledContract>) {
+        let mut cache = self.cache.write();
+        if let Some(limits) = &self.local_limits {
+            if cache.len() >= limits.max_cached_modules && !cache.contains_key(&code_hash) {
+                cache.clear();
+            }
+        }
+        cache.insert(code_hash, compiled);
     }
 
     /// Compute code hash
@@ -167,10 +237,7 @@ impl ContractExecutor {
         );
 
         // Compile and cache module (fresh store; the compiled `Module` outlives it).
-        let module = {
-            let store = self.new_store();
-            Module::new(&store, &code)?
-        };
+        let (module, engine) = self.compile(&code)?;
 
         // Capture the pre-image of the code row for the reorg journal (None
         // for a fresh address), then store code.
@@ -178,16 +245,14 @@ impl ContractExecutor {
         self.storage.store_code(&contract_address, &code)?;
 
         // Cache compiled module
-        {
-            let mut cache = self.cache.write();
-            cache.insert(
+        self.cache_insert(
+            code_hash,
+            Arc::new(CompiledContract {
+                module: module.clone(),
+                engine,
                 code_hash,
-                Arc::new(CompiledContract {
-                    module: module.clone(),
-                    code_hash,
-                }),
-            );
-        }
+            }),
+        );
 
         // Everything after `store_code` runs inside a guarded finalize: ANY
         // failure path (metadata encode/persist, init gas, init Err, init
@@ -338,8 +403,11 @@ impl ContractExecutor {
         args: Vec<u8>,
         ctx: ExecutionContext,
     ) -> Result<Vec<u8>> {
-        // Use a large gas limit for view calls
-        let gas_meter = Arc::new(GasMeter::new(u64::MAX));
+        // Unchanged on an executor without local limits; the local (RPC)
+        // executor caps it.
+        let gas_meter = Arc::new(GasMeter::new(
+            self.local_limits.map_or(u64::MAX, |l| l.gas_cap),
+        ));
 
         let result = self.call_internal(contract, method, args, ctx, gas_meter, 0);
 
@@ -421,24 +489,20 @@ impl ContractExecutor {
             cache.get(&code_hash).cloned()
         };
 
-        let module = match compiled {
-            Some(c) => c.module.clone(),
+        let compiled = match compiled {
+            Some(c) => c,
             None => {
-                let store = self.new_store();
-                let module = Module::new(&store, &code)?;
-
-                let mut cache = self.cache.write();
-                cache.insert(
+                let (module, engine) = self.compile(&code)?;
+                let compiled = Arc::new(CompiledContract {
+                    module,
+                    engine,
                     code_hash,
-                    Arc::new(CompiledContract {
-                        module: module.clone(),
-                        code_hash,
-                    }),
-                );
-
-                module
+                });
+                self.cache_insert(code_hash, compiled.clone());
+                compiled
             }
         };
+        let module = &compiled.module;
 
         // Create host environment
         let host_env = Arc::new(RwLock::new(HostEnv::new(
@@ -455,17 +519,23 @@ impl ContractExecutor {
         )));
 
         // Create WASM environment
-        let wasm_env = WasmEnv::new(host_env.clone());
+        let wasm_env = WasmEnv::new(
+            host_env.clone(),
+            self.local_limits.map(|l| l.max_host_bytes),
+        );
 
         // Create instance with imports. Fresh, short-lived store (never held
         // across an await), cloned from the shared engine so `module` (possibly
         // compiled against another clone) stays compatible.
-        let mut store = self.new_store();
+        let mut store = Store::new(compiled.engine.clone());
         let function_env = FunctionEnv::new(&mut store, wasm_env);
 
         let imports = self.create_imports(&mut store, &function_env);
 
-        let instance = Instance::new(&mut store, &module, &imports)?;
+        let instance = Instance::new(&mut store, module, &imports)?;
+        if let Some(limits) = self.local_limits {
+            crate::local_limits::set_local_budgets(&mut store, &instance, &limits)?;
+        }
 
         // Get memory and set in environment
         if let Ok(memory) = instance.exports.get_memory("memory") {
@@ -491,6 +561,11 @@ impl ContractExecutor {
 
         // Call the function
         let result = func.call(&mut store, args_ptr, args_len);
+        let local_exhausted = if self.local_limits.is_some() {
+            crate::local_limits::exhausted_budget(&mut store, &instance)
+        } else {
+            None
+        };
 
         // Get events and logs
         let events = host_env.read().take_events();
@@ -500,7 +575,8 @@ impl ContractExecutor {
             Ok(ret_ptr) => {
                 // Read return value from memory
                 let return_value = if ret_ptr != 0 {
-                    self.read_from_memory(&instance, &store, ret_ptr)?
+                    let max_len = function_env.as_ref(&store).host_bytes_left;
+                    self.read_from_memory(&instance, &store, ret_ptr, max_len)?
                 } else {
                     Vec::new()
                 };
@@ -522,7 +598,10 @@ impl ContractExecutor {
                     events,
                     logs,
                     success: false,
-                    error: Some(e.to_string()),
+                    error: Some(match local_exhausted {
+                        Some(which) => which.to_string(),
+                        None => e.to_string(),
+                    }),
                 })
             }
         }
@@ -605,6 +684,7 @@ impl ContractExecutor {
         instance: &Instance,
         store: &Store,
         ptr: i32,
+        max_len: Option<u64>,
     ) -> Result<Vec<u8>> {
         if ptr == 0 {
             return Ok(Vec::new());
@@ -622,6 +702,17 @@ impl ContractExecutor {
         view.read(ptr as u64, &mut len_bytes)
             .map_err(|e| RuntimeError::MemoryAccess(e.to_string()))?;
         let len = u32::from_le_bytes(len_bytes);
+        // A local executor also holds the return copy to what is left of its
+        // host-copy budget. Whether the range lies inside guest memory is
+        // `check_guest_range` below, on every executor.
+        if let Some(max) = max_len {
+            if u64::from(len) > max {
+                return Err(RuntimeError::MemoryAccess(format!(
+                    "return data of {} bytes exceeds the local limit",
+                    len
+                )));
+            }
+        }
 
         // The payload starts after the prefix. `ptr + 4` overflowing `i32` can
         // only happen when the prefix itself was readable above 2 GiB; release
@@ -859,7 +950,7 @@ fn host_storage_read(
     key_ptr: i32,
     key_len: i32,
 ) -> std::result::Result<i32, wasmer::RuntimeError> {
-    let (data, mut store) = env.data_and_store_mut();
+    let (data, store) = env.data_and_store_mut();
     let memory = data
         .memory
         .clone()
@@ -867,6 +958,7 @@ fn host_storage_read(
     let alloc = data.alloc.clone();
     let host_env = data.host_env.clone();
 
+    data.charge_host_bytes(key_len.max(0) as u64)?;
     let key = read_guest_bytes(&memory, &store, key_ptr, key_len)?;
     let value = host_env
         .read()
@@ -876,6 +968,8 @@ fn host_storage_read(
     match value {
         None => Ok(0),
         Some(v) => {
+            let (data, mut store) = env.data_and_store_mut();
+            data.charge_host_bytes(4 + v.len() as u64)?;
             let alloc = alloc
                 .ok_or_else(|| wasmer::RuntimeError::new("contract missing alloc export"))?;
             let total = 4usize.saturating_add(v.len());
@@ -907,6 +1001,7 @@ fn host_storage_write(
         .clone()
         .ok_or_else(|| wasmer::RuntimeError::new("contract has no exported memory"))?;
     let host_env = data.host_env.clone();
+    data.charge_host_bytes((key_len.max(0) as u64).saturating_add(value_len.max(0) as u64))?;
     let key = read_guest_bytes(&memory, &store, key_ptr, key_len)?;
     let value = read_guest_bytes(&memory, &store, value_ptr, value_len)?;
     let result = host_env.read().storage_write(&key, &value);
@@ -924,6 +1019,7 @@ fn host_storage_remove(
         .clone()
         .ok_or_else(|| wasmer::RuntimeError::new("contract has no exported memory"))?;
     let host_env = data.host_env.clone();
+    data.charge_host_bytes(key_len.max(0) as u64)?;
     let key = read_guest_bytes(&memory, &store, key_ptr, key_len)?;
     let result = host_env.read().storage_remove(&key);
     result.map_err(|e| wasmer::RuntimeError::new(format!("storage_remove: {}", e)))
