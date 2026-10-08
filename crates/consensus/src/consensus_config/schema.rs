@@ -206,7 +206,10 @@ impl Schema {
 #[derive(Debug)]
 pub struct SchemaPolicy {
     /// Schemas whose stored records this binary decodes. A record of any other
-    /// schema refuses startup.
+    /// schema refuses startup. Only ever grows: a schema any release wrote must
+    /// stay here, because a schema transition in a node's history is verified
+    /// by decoding the older encoding it kept (see the module documentation
+    /// of [`super`]).
     pub reads: &'static [&'static Schema],
     /// The schema a fresh database is recorded in, and the target of an
     /// acknowledged schema transition. Always one of `reads`.

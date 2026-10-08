@@ -20,8 +20,8 @@ use sumchain_consensus::consensus_config::{
     fields::{FieldSpec, ListOrder, Ty},
     record::{
         acknowledge_schema_transition_with, acknowledge_with, check_at_startup_with,
-        pending_schema_transition_with, read_record_with, read_transitions_with, RECORD_KEY,
-        TRANSITION_PREFIX,
+        pending_schema_transition_for, pending_schema_transition_with, read_record_with,
+        read_transitions_with, RECORD_KEY, TRANSITION_PREFIX,
     },
     schema::SCHEMA_2_ADDED,
     AddedField, ConfigError, ConsensusConfig, Schema, SchemaPolicy, Source, StartupOutcome,
@@ -775,4 +775,151 @@ fn a_schema_2_encoding_round_trips_and_binds_its_added_field() {
         Err(ConfigError::Malformed(_))
     ));
     set_example(None);
+}
+
+// ── a field-level difference is made in one schema ──────────────────────────
+
+/// `diff` refuses two configurations of different schemas in every build —
+/// the check is a runtime refusal, not a debug assertion — rather than walking
+/// the fields they share and dropping the ones the newer schema adds.
+#[test]
+fn a_difference_across_schemas_is_refused_in_every_build() {
+    set_example(None);
+    let one = ccfg::build(&g2()).unwrap();
+    assert_eq!(one.schema().number, 1);
+
+    // The same rules carried into a schema with an added field: the shared
+    // fields are equal, so a cross-schema walk would report no difference.
+    let two = one.extend_to(&TEST_SCHEMA_2).unwrap();
+    // The real schema 2 adds nothing: every field is shared, still refused.
+    let real_two = one.extend_to(&SCHEMA_2).unwrap();
+    // A schema-2 configuration whose added field is set: a cross-schema walk
+    // would drop exactly the field that moved.
+    set_example(Some(5));
+    let two_set = ccfg::build_with(&g2(), &ENABLED).unwrap();
+    set_example(None);
+    assert_eq!(two_set.get(EXAMPLE_ID), Some(&Value::U64(5)));
+
+    for (a, b) in [
+        (&one, &two),
+        (&two, &one),
+        (&one, &real_two),
+        (&real_two, &one),
+        (&one, &two_set),
+        (&two_set, &one),
+    ] {
+        let err = a.diff(b).unwrap_err();
+        assert!(matches!(err, ConfigError::Refused(_)), "{err}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("schema {}", a.schema().number))
+                && msg.contains(&format!("schema {}", b.schema().number)),
+            "{msg}"
+        );
+    }
+}
+
+/// Within one schema the difference is unchanged, including on the field a
+/// later schema adds.
+#[test]
+fn a_difference_within_one_schema_is_reported_field_by_field() {
+    set_example(None);
+    let one = ccfg::build(&g2()).unwrap();
+    assert_eq!(one.diff(&one).unwrap(), Vec::new());
+    let ids: Vec<u16> = ccfg::build(&g0())
+        .unwrap()
+        .diff(&one)
+        .unwrap()
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+
+    let absent = one.extend_to(&TEST_SCHEMA_2).unwrap();
+    set_example(Some(5));
+    let set = ccfg::build_with(&g2(), &ENABLED).unwrap();
+    set_example(None);
+    let changes = absent.diff(&set).unwrap();
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0].id, EXAMPLE_ID);
+    assert_eq!(changes[0].name, "test_only_example_parameter");
+    assert_eq!(
+        (&changes[0].from, &changes[0].to),
+        (&Value::Absent, &Value::U64(5))
+    );
+}
+
+/// The startup comparison and the acknowledgement diff in the record's schema,
+/// so a schema-1 record under a binary that writes schema 2 still gets a
+/// field-level difference, not a cross-schema refusal.
+#[test]
+fn record_comparisons_stay_in_the_record_schema() {
+    set_example(None);
+    let (_d, db) = schema_1_database();
+    let mut changed = g2();
+    changed.params.max_contract_gas += 1;
+    let err = check_at_startup_with(&db, &changed, HEIGHT, &ENABLED).unwrap_err();
+    let msg = err.to_string();
+    assert!(matches!(err, ConfigError::Refused(_)), "{msg}");
+    assert!(msg.contains("max_contract_gas"), "{msg}");
+    assert!(!msg.contains("cannot compare"), "{msg}");
+
+    let now = ccfg::build(&changed).unwrap().commitment();
+    let ack = acknowledge_with(&db, &changed, HEIGHT, h(C2), now, &ENABLED).unwrap();
+    assert_eq!(ack.changes.len(), 1);
+    assert_eq!(ack.changes[0].name, "max_contract_gas");
+}
+
+// ── older schemas stay readable ─────────────────────────────────────────────
+
+/// A binary that reads schema 2 but has dropped schema 1 cannot verify a
+/// history that moved from schema 1: the schema transition's kept encoding is
+/// unreadable to it, and it refuses to start. This is why `reads` only grows.
+#[test]
+fn dropping_an_older_schema_from_reads_refuses_a_transitioned_history() {
+    static DROPPED_SCHEMA_1: SchemaPolicy = SchemaPolicy {
+        reads: &[&TEST_SCHEMA_2],
+        writes: &TEST_SCHEMA_2,
+        knows: &TEST_SCHEMA_2,
+    };
+    DROPPED_SCHEMA_1.check().unwrap();
+    set_example(None);
+    let (_d, db, new) = transitioned();
+    let before = entries(&db);
+    // The record itself is schema 2 and decodes; only the history fails.
+    let err = read_record_with(&db, &DROPPED_SCHEMA_1).unwrap_err();
+    assert!(matches!(err, ConfigError::RecordCorrupt(_)), "{err}");
+    assert!(err.to_string().contains("unreadable encoding"), "{err}");
+    let err = check_at_startup_with(&db, &g2(), HEIGHT, &DROPPED_SCHEMA_1).unwrap_err();
+    assert!(matches!(err, ConfigError::RecordCorrupt(_)), "{err}");
+    assert_eq!(entries(&db), before);
+    // Keeping schema 1 readable, the same database starts.
+    assert_eq!(
+        check_at_startup_with(&db, &g2(), HEIGHT, &ENABLED).unwrap(),
+        StartupOutcome::Unchanged { commitment: new }
+    );
+}
+
+/// The pending transition computed from an already read record is the one
+/// read from the database, before and after the transition.
+#[test]
+fn the_pending_transition_of_a_read_record_matches_the_database() {
+    set_example(None);
+    let (_d, db) = schema_1_database();
+    for policy in [&ENABLED, &PRODUCTION, &DRAFT, &REAL_ENABLED] {
+        let record = read_record_with(&db, policy).unwrap();
+        assert_eq!(
+            pending_schema_transition_for(record.as_ref(), policy),
+            pending_schema_transition_with(&db, policy).unwrap()
+        );
+    }
+    assert!(pending_schema_transition_for(None, &ENABLED).is_none());
+    let (_d, db, _new) = transitioned();
+    let record = read_record_with(&db, &ENABLED).unwrap();
+    assert!(record.is_some());
+    assert_eq!(
+        pending_schema_transition_for(record.as_ref(), &ENABLED),
+        None
+    );
+    assert_eq!(pending_schema_transition_with(&db, &ENABLED).unwrap(), None);
 }

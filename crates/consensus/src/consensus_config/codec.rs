@@ -367,13 +367,27 @@ impl ConsensusConfig {
     }
 
     /// Every field whose value differs between `self` (the recorded side) and
-    /// `now`, in id order. Both sides are of one schema; every caller compares
-    /// in the schema the record holds.
-    pub fn diff(&self, now: &ConsensusConfig) -> Vec<FieldChange> {
-        debug_assert!(std::ptr::eq(self.schema, now.schema));
+    /// `now`, in id order.
+    ///
+    /// Both sides must be of one schema; every caller compares in the schema
+    /// the record holds. Two configurations of different schemas are refused
+    /// with [`ConfigError::Refused`] in every build, never compared: walking a
+    /// schema-1 configuration against a schema-2 one would compare only the
+    /// fields they share and silently drop every field the newer schema adds.
+    /// Carry the older side into the newer schema with [`Self::extend_to`]
+    /// first if a cross-schema comparison is meant.
+    pub fn diff(&self, now: &ConsensusConfig) -> Result<Vec<FieldChange>, ConfigError> {
+        if !std::ptr::eq(self.schema, now.schema) {
+            return Err(ConfigError::Refused(format!(
+                "cannot compare a schema {} configuration with a schema {} configuration; \
+                 a comparison is made in one schema",
+                self.schema.number, now.schema.number
+            )));
+        }
         // Both sides passed the same registry check, so they hold the same ids
         // in the same order and can be walked together.
-        self.fields
+        Ok(self
+            .fields
             .iter()
             .zip(now.fields.iter())
             .filter(|(a, b)| a.value != b.value)
@@ -383,7 +397,7 @@ impl ConsensusConfig {
                 from: a.value.clone(),
                 to: b.value.clone(),
             })
-            .collect()
+            .collect())
     }
 }
 
