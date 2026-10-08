@@ -666,10 +666,17 @@ impl Node {
 
         let outcome = ccfg::check_at_startup(db, genesis, current_height)
             .map_err(|e| anyhow::anyhow!("consensus configuration check failed: {e}"))?;
-        // The schema the record now holds, which is the schema every
-        // comparison above was made in.
-        let schema = ccfg::read_record(db)
-            .map_err(|e| anyhow::anyhow!("consensus configuration check failed: {e}"))?
+        // Read the record back once, after the check. Deliberate: the check may
+        // have just written a baseline or a transition, and this re-decodes it
+        // and re-walks its history, so a write that does not read back refuses
+        // this start instead of the next one. It also gives the schema the
+        // record now holds, which is the schema every comparison above was
+        // made in, and the pending schema transition below; both come from
+        // this one read rather than reading and verifying the record again.
+        let record = ccfg::read_record(db)
+            .map_err(|e| anyhow::anyhow!("consensus configuration check failed: {e}"))?;
+        let schema = record
+            .as_ref()
             .map_or(ccfg::PRODUCTION.writes.number, |r| r.config.schema().number);
         match outcome {
             StartupOutcome::Initialized {
@@ -705,9 +712,7 @@ impl Node {
         }
         // Never performed here: moving the record to a newer schema is the
         // stopped-node `acknowledge-consensus-config-schema` command.
-        if let Some(p) = ccfg::pending_schema_transition(db)
-            .map_err(|e| anyhow::anyhow!("consensus configuration check failed: {e}"))?
-        {
+        if let Some(p) = ccfg::pending_schema_transition_for(record.as_ref(), &ccfg::PRODUCTION) {
             warn!(
                 "Consensus configuration is recorded in schema {}; this binary records \
                  schema {}. The record stays as it is until an operator stops the node \
