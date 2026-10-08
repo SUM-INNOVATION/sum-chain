@@ -12,6 +12,10 @@ pub mod beacon_store;
 pub mod cache;
 pub mod compute_pool;
 pub mod compute_pool_manager;
+/// The #129 retention-relation validator. It lives in `sumchain-genesis`,
+/// next to the `ChainParams` validation that calls it, and is re-exported
+/// here so this path keeps resolving.
+pub use sumchain_genesis::compute_pool_retention;
 pub mod compute_pool_store;
 pub mod contract_executor;
 pub mod docclass_executor;

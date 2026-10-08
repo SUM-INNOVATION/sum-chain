@@ -959,7 +959,9 @@ fn the_credential_gate_on_a_schema_1_database_waits_for_the_schema_transition() 
 
 // ── #215: the compute-pool parameters ──────────────────────────────────────
 
-/// TEST_ONLY values (no proposed parameter): every cap 1, everything else 0.
+/// TEST_ONLY values (no proposed parameter): every cap 1,
+/// `output_availability_blocks` on the #129 relation-1 floor (200), everything
+/// else 0.
 fn test_only_compute_pool_params() -> ComputePoolParamsV1 {
     let text = r#"{
         "b_offer": 0, "b_commit": 0, "b_check": 0,
@@ -970,7 +972,7 @@ fn test_only_compute_pool_params() -> ComputePoolParamsV1 {
         "max_attempts_per_unit": 1, "max_reassignments_per_file": 1,
         "k_susp": 0, "w_susp": 0, "s_susp": 0, "n_invite_max": 0,
         "max_retention_files_per_job": 1, "max_retention_updates_per_block": 1,
-        "max_reverse_index_entries": 1, "output_availability_blocks": 0,
+        "max_reverse_index_entries": 1, "output_availability_blocks": 200,
         "d_avail": 0, "d_ack": 0, "d_final": 0
     }"#;
     serde_json::from_str(text).unwrap()
