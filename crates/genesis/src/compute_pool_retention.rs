@@ -15,7 +15,7 @@
 //! | 2 | `output_availability_blocks > finality_depth` | [`validate_retention_relations`] |
 //! | 3 | `max_retention_updates_per_block <= ⌊B / t_recompute⌋`, `t_recompute > 0` | [`validate_retention_relations`] |
 //! | 4 | `max_reverse_index_entries >= max_retention_files_per_job × (2 + R_max)` | [`validate_retention_relations`] |
-//! | 5 | `max_retention_files_per_job >= job_max_retention_files` per admitted job | [`crate::compute_pool::validate_retention_within_cap`] (existing) |
+//! | 5 | `max_retention_files_per_job >= job_max_retention_files` per admitted job | `sumchain_state::compute_pool::validate_retention_within_cap` (existing) |
 //!
 //! Relation 1's floor is at least one complete proof-of-retrievability round
 //! after coverage starts, allowing misalignment. In relation 3, `B` is the
@@ -135,7 +135,7 @@ pub enum RetentionRelationError {
 /// Check relations 1–4 in table order and return the first breach.
 ///
 /// Relation 5 is per job and is enforced at job creation by
-/// [`crate::compute_pool::validate_retention_within_cap`], with
+/// `sumchain_state::compute_pool::validate_retention_within_cap`, with
 /// `max_retention_files_per_job` as its cap. All arithmetic is checked.
 pub fn validate_retention_relations(
     p: &RetentionRelationInputs,
