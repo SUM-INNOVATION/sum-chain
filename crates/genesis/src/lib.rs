@@ -16,6 +16,7 @@ use sumchain_primitives::{
 use thiserror::Error;
 
 pub mod compute_pool_retention;
+pub mod compute_pool_retention_inputs;
 
 /// Genesis configuration errors
 #[derive(Debug, Error)]
@@ -75,6 +76,17 @@ pub enum GenesisError {
     /// only if structurally valid.
     #[error("invalid compute_pool_params: {reason}")]
     InvalidComputePoolParams { reason: String },
+
+    /// A declared `compute_pool_params` breaks retention relation 1 or 2
+    /// (issue #129), the two checked whenever the parameters are declared.
+    #[error("invalid compute_pool_params: {0}")]
+    InvalidComputePoolRetention(compute_pool_retention::RetentionRelationError),
+
+    /// `compute_pool_enabled_from_height` is set over declared parameters and
+    /// the retention relations refuse it: an input is undefined, or a
+    /// relation does not hold (issue #129).
+    #[error("compute_pool_enabled_from_height refused: {0}")]
+    ComputePoolActivationRefused(compute_pool_retention_inputs::RetentionActivationError),
 
     /// A staking configuration protocol v1 cannot run: stake-weighted proposer
     /// selection, or dynamic epochs that would change validator membership.
@@ -787,8 +799,9 @@ pub struct ChainParams {
     /// `ComputePoolParamsV1` field list. `None` (default) = the typed surface
     /// is absent. When `Some`, every field is required (no compiled default
     /// exists for any of them) and the value is STRUCTURALLY validated at
-    /// genesis load ([`ComputePoolParamsV1::validate`]); no economic policy is
-    /// asserted. **Declaring it does NOT activate the compute pool:**
+    /// genesis load ([`ComputePoolParamsV1::validate`]), then against #129
+    /// retention relations 1 and 2 ([`compute_pool_retention_inputs`]); no
+    /// economic policy is asserted. **Declaring it does NOT activate the compute pool:**
     /// [`Self::compute_pool_enabled_from_height`] stays `None` and `validate()`
     /// still rejects any `Some(_)` gate. Nothing executes or commits state from
     /// these values today; the consensus configuration commits their canonical
@@ -3174,6 +3187,19 @@ impl ChainParams {
                 .map_err(GenesisError::StakingProtocolV1)?;
         }
         if self.compute_pool_enabled_from_height.is_some() {
+            // The activation path. With parameters declared, they are checked
+            // before the refusal below, and the retention relations refuse
+            // first while any of their inputs is undefined (#129). Absent
+            // parameters are refused exactly as before.
+            if let Some(cp) = &self.compute_pool_params {
+                self.validate_compute_pool_params(cp)?;
+                compute_pool_retention_inputs::check_activation(
+                    cp,
+                    self.finality_depth,
+                    compute_pool_retention_inputs::UnsourcedRetentionInputs::undefined(),
+                )
+                .map_err(GenesisError::ComputePoolActivationRefused)?;
+            }
             return Err(GenesisError::IncompleteSubsystemActivation {
                 gate: "compute_pool_enabled_from_height",
             });
@@ -3329,15 +3355,11 @@ impl ChainParams {
             bp.validate()?;
         }
         // The compute-pool PARAMETER surface (#215) MAY likewise be declared
-        // while the gate stays dormant, but only if structurally valid. This is
-        // the `&self` half of the §G validation split; checks needing chain
-        // context belong to the executor that has it. It does NOT open the gate
+        // while the gate stays dormant, but only if structurally valid and
+        // within retention relations 1 and 2 (#129). It does NOT open the gate
         // (still rejected above).
         if let Some(cp) = &self.compute_pool_params {
-            cp.validate()
-                .map_err(|e| GenesisError::InvalidComputePoolParams {
-                    reason: e.to_string(),
-                })?;
+            self.validate_compute_pool_params(cp)?;
         }
         // The beacon SCHEDULE (#127) MAY likewise be declared dormant, but only if
         // internally consistent (epoch_length ≥ 1, strictly-ordered phase offsets).
@@ -3350,6 +3372,24 @@ impl ChainParams {
                 })?;
         }
         Ok(())
+    }
+}
+
+impl ChainParams {
+    /// A declared `ComputePoolParamsV1`, gate set or not: the `&self`
+    /// structural validation (#215), then retention relations 1 and 2 against
+    /// [`Self::finality_depth`] (#129). Relations 3 and 4 need inputs that are
+    /// undefined; see [`compute_pool_retention_inputs`].
+    fn validate_compute_pool_params(
+        &self,
+        cp: &sumchain_primitives::compute_pool_params::ComputePoolParamsV1,
+    ) -> Result<()> {
+        cp.validate()
+            .map_err(|e| GenesisError::InvalidComputePoolParams {
+                reason: e.to_string(),
+            })?;
+        compute_pool_retention_inputs::validate_declared(cp, self.finality_depth)
+            .map_err(GenesisError::InvalidComputePoolRetention)
     }
 }
 
@@ -4922,7 +4962,8 @@ mod tests {
         assert_eq!(ChainParams::default().compute_pool_params, None);
         assert!(!LOCAL_GENESIS_JSON.contains("compute_pool_params"));
 
-        // TEST_ONLY values: every `max_*` cap 1, everything else 0.
+        // TEST_ONLY values: every `max_*` cap 1, output_availability_blocks
+        // 200 (the relation-1 floor, #129), everything else 0.
         let valid = serde_json::json!({
             "b_offer": 0, "b_commit": 0, "b_check": 0,
             "c_layer": 0, "c_tok": 0, "c_sel": 0, "c_emit": 0,
@@ -4932,7 +4973,7 @@ mod tests {
             "max_attempts_per_unit": 1, "max_reassignments_per_file": 1,
             "k_susp": 0, "w_susp": 0, "s_susp": 0, "n_invite_max": 0,
             "max_retention_files_per_job": 1, "max_retention_updates_per_block": 1,
-            "max_reverse_index_entries": 1, "output_availability_blocks": 0,
+            "max_reverse_index_entries": 1, "output_availability_blocks": 200,
             "d_avail": 0, "d_ack": 0, "d_final": 0
         });
         let mut v = local_genesis_value();
@@ -4977,16 +5018,194 @@ mod tests {
         v["params"]["compute_pool_params"] = missing;
         assert!(Genesis::from_json(&serde_json::to_string(&v).unwrap()).is_err());
 
-        // Params present but gate Some ⇒ still rejected.
+        // Params present but gate Some ⇒ still rejected, now first by the
+        // retention relations' undefined inputs (#129).
         let mut v = local_genesis_value();
         v["params"]["compute_pool_params"] = valid;
         v["params"]["compute_pool_enabled_from_height"] = serde_json::json!(0u64);
         assert!(matches!(
             Genesis::from_json(&serde_json::to_string(&v).unwrap()),
+            Err(GenesisError::ComputePoolActivationRefused(
+                compute_pool_retention_inputs::RetentionActivationError::InputsUndefined(_)
+            ))
+        ));
+    }
+
+    /// #129 wiring, TEST_ONLY declaration (not proposed values): every
+    /// `max_*` cap 1, `output_availability_blocks` on the relation-1 floor
+    /// (200), everything else 0.
+    fn retention_test_params() -> serde_json::Value {
+        serde_json::json!({
+            "b_offer": 0, "b_commit": 0, "b_check": 0,
+            "c_layer": 0, "c_tok": 0, "c_sel": 0, "c_emit": 0,
+            "accept_reimb": 0, "commit_verify_reimb": 0, "publish_reimb": 0,
+            "observe_reimb": 0, "check_reimb": 0, "settle_reimb": 0, "reassign_reimb": 0,
+            "max_work_units": 1, "max_generations": 1, "max_reprovisionable_units": 1,
+            "max_attempts_per_unit": 1, "max_reassignments_per_file": 1,
+            "k_susp": 0, "w_susp": 0, "s_susp": 0, "n_invite_max": 0,
+            "max_retention_files_per_job": 1, "max_retention_updates_per_block": 1,
+            "max_reverse_index_entries": 1, "output_availability_blocks": 200,
+            "d_avail": 0, "d_ack": 0, "d_final": 0
+        })
+    }
+
+    /// Load the local genesis with `edit` applied to its `params`.
+    fn load_with(edit: impl FnOnce(&mut serde_json::Value)) -> Result<Genesis> {
+        let mut v = local_genesis_value();
+        edit(&mut v["params"]);
+        Genesis::from_json(&serde_json::to_string(&v).unwrap())
+    }
+
+    /// #129: absent parameters are unchanged — nothing is checked, and a set
+    /// gate is refused with the same error as before.
+    #[test]
+    fn retention_absent_parameters_are_unchanged() {
+        let g = load_with(|_| {}).unwrap();
+        assert_eq!(g.params.compute_pool_params, None);
+        assert!(matches!(
+            load_with(|p| p["compute_pool_enabled_from_height"] = serde_json::json!(0u64)),
             Err(GenesisError::IncompleteSubsystemActivation {
                 gate: "compute_pool_enabled_from_height"
             })
         ));
+    }
+
+    /// #129: a declaration below the relation-1 floor fails at genesis load,
+    /// gate unset or set, with the exact relation error.
+    #[test]
+    fn retention_relation_1_fails_at_genesis_load() {
+        use compute_pool_retention::RetentionRelationError as R;
+        for gate in [None, Some(0u64)] {
+            let r = load_with(|p| {
+                let mut cp = retention_test_params();
+                cp["output_availability_blocks"] = serde_json::json!(199);
+                p["compute_pool_params"] = cp;
+                p["compute_pool_enabled_from_height"] = serde_json::json!(gate);
+            });
+            match r {
+                Err(GenesisError::InvalidComputePoolRetention(e)) => assert_eq!(
+                    e,
+                    R::OutputAvailabilityBelowPorRound {
+                        output_availability_blocks: 199,
+                        floor: 200
+                    },
+                    "gate {gate:?}"
+                ),
+                other => {
+                    panic!("gate {gate:?}: expected InvalidComputePoolRetention, got {other:?}")
+                }
+            }
+        }
+        let msg = load_with(|p| {
+            let mut cp = retention_test_params();
+            cp["output_availability_blocks"] = serde_json::json!(0);
+            p["compute_pool_params"] = cp;
+        })
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            msg,
+            "invalid compute_pool_params: output_availability_blocks = 0 is below \
+             2 x CHALLENGE_INTERVAL_BLOCKS = 200"
+        );
+    }
+
+    /// #129: relation 2 is checked against `ChainParams::finality_depth`.
+    #[test]
+    fn retention_relation_2_uses_the_chain_finality_depth() {
+        use compute_pool_retention::RetentionRelationError as R;
+        let with_depth = |depth: u64, oab: u64| {
+            load_with(|p| {
+                let mut cp = retention_test_params();
+                cp["output_availability_blocks"] = serde_json::json!(oab);
+                p["compute_pool_params"] = cp;
+                p["finality_depth"] = serde_json::json!(depth);
+            })
+        };
+        match with_depth(500, 500) {
+            Err(GenesisError::InvalidComputePoolRetention(e)) => assert_eq!(
+                e,
+                R::OutputAvailabilityNotAboveFinality {
+                    output_availability_blocks: 500,
+                    finality_depth: 500
+                }
+            ),
+            other => panic!("expected InvalidComputePoolRetention, got {other:?}"),
+        }
+        let g = with_depth(500, 501).unwrap();
+        assert_eq!(g.params.finality_depth, 500);
+        // The default depth (3) is below the relation-1 floor, so the floor
+        // decides at the default.
+        assert_eq!(load_with(|_| {}).unwrap().params.finality_depth, 3);
+    }
+
+    /// #129: a valid declaration loads while dormant, although relations 3 and
+    /// 4 cannot be checked; with the gate set the same declaration is refused
+    /// because their inputs are undefined, naming each one.
+    #[test]
+    fn retention_activation_is_refused_while_inputs_are_undefined() {
+        use compute_pool_retention_inputs::{
+            MissingInputs, RetentionActivationError, RetentionInput as I,
+        };
+        let g = load_with(|p| p["compute_pool_params"] = retention_test_params()).unwrap();
+        assert!(g.params.compute_pool_params.is_some());
+        assert_eq!(g.params.compute_pool_enabled_from_height, None);
+
+        for gate in [0u64, 1, 1_000_000] {
+            let r = load_with(|p| {
+                p["compute_pool_params"] = retention_test_params();
+                p["compute_pool_enabled_from_height"] = serde_json::json!(gate);
+            });
+            match r {
+                Err(GenesisError::ComputePoolActivationRefused(e)) => assert_eq!(
+                    e,
+                    RetentionActivationError::InputsUndefined(MissingInputs(vec![
+                        I::PerBlockBudgetNs,
+                        I::TRecomputeP99Ns,
+                        I::RMax
+                    ]))
+                ),
+                other => {
+                    panic!("gate {gate}: expected ComputePoolActivationRefused, got {other:?}")
+                }
+            }
+        }
+        let msg = load_with(|p| {
+            p["compute_pool_params"] = retention_test_params();
+            p["compute_pool_enabled_from_height"] = serde_json::json!(0u64);
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            msg.starts_with("compute_pool_enabled_from_height refused: "),
+            "{msg}"
+        );
+        for needle in [
+            "per_block_budget_ns (relation 3",
+            "t_recompute_p99_ns (relation 3",
+            "r_max (relation 4",
+        ] {
+            assert!(msg.contains(needle), "{needle:?} not in {msg:?}");
+        }
+    }
+
+    /// #129: on the activation path a structurally invalid declaration is
+    /// refused by its structural error, before the retention relations.
+    #[test]
+    fn retention_activation_checks_structure_first() {
+        let r = load_with(|p| {
+            let mut cp = retention_test_params();
+            cp["max_generations"] = serde_json::json!(0);
+            cp["output_availability_blocks"] = serde_json::json!(0);
+            p["compute_pool_params"] = cp;
+            p["compute_pool_enabled_from_height"] = serde_json::json!(0u64);
+        });
+        match r {
+            Err(GenesisError::InvalidComputePoolParams { reason }) => {
+                assert!(reason.contains("max_generations"), "{reason}")
+            }
+            other => panic!("expected InvalidComputePoolParams, got {other:?}"),
+        }
     }
 
     // Test 4 — a future `Some(h)` is rejected too (not just `Some(0)`), per gate.

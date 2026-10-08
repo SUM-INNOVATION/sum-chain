@@ -5,7 +5,10 @@
 //! relational validation** before it may be used. This module is that
 //! validator, and nothing more. It holds no value, reads no genesis field,
 //! reads no budget constant and is called by no execution path, so execution,
-//! state roots and receipts are unchanged by it.
+//! state roots and receipts are unchanged by it. Its callers are genesis
+//! validation and the compute-pool activation check, both in
+//! [`crate::compute_pool_retention_inputs`], which decides where each input
+//! comes from.
 //!
 //! # Relations (owner decision packet 2026-09-29, §6)
 //!
@@ -35,10 +38,10 @@
 //!   explicit argument. Whether it means the chain's
 //!   `assignment_replication_factor`, a separate cap, or something else is an
 //!   open owner decision.
-//! * **Where the values live.** Wiring them into a genesis surface
-//!   (`ComputePoolParamsV1`, issue #215), and calling this validator from
-//!   genesis load and from the compute-pool activation path, is a follow-up
-//!   that depends on #215.
+//! * **Where the values live.** Four inputs are `ComputePoolParamsV1` fields
+//!   (issue #215) and `finality_depth` is `ChainParams::finality_depth`. The
+//!   remaining three have no source; see
+//!   [`crate::compute_pool_retention_inputs`].
 //!
 //! # Zero
 //!
@@ -132,6 +135,37 @@ pub enum RetentionRelationError {
     },
 }
 
+/// Check relations 1 and 2 only: the two relations whose inputs a genesis
+/// that declares `ComputePoolParamsV1` always has (`output_availability_blocks`
+/// from the parameters, `finality_depth` from `ChainParams`).
+/// [`validate_retention_relations`] runs this first, so both report the same
+/// error for the same breach.
+pub fn validate_output_availability(
+    output_availability_blocks: u64,
+    finality_depth: u64,
+) -> Result<(), RetentionRelationError> {
+    use RetentionRelationError as E;
+
+    // 1. The floor is a product of compiled constants. Saturating keeps it
+    //    total, and saturation could only make the check stricter.
+    let floor = CHALLENGE_INTERVAL_BLOCKS.saturating_mul(2);
+    if output_availability_blocks < floor {
+        return Err(E::OutputAvailabilityBelowPorRound {
+            output_availability_blocks,
+            floor,
+        });
+    }
+
+    // 2.
+    if output_availability_blocks <= finality_depth {
+        return Err(E::OutputAvailabilityNotAboveFinality {
+            output_availability_blocks,
+            finality_depth,
+        });
+    }
+    Ok(())
+}
+
 /// Check relations 1–4 in table order and return the first breach.
 ///
 /// Relation 5 is per job and is enforced at job creation by
@@ -142,23 +176,8 @@ pub fn validate_retention_relations(
 ) -> Result<(), RetentionRelationError> {
     use RetentionRelationError as E;
 
-    // 1. The floor is a product of compiled constants. Saturating keeps it
-    //    total, and saturation could only make the check stricter.
-    let floor = CHALLENGE_INTERVAL_BLOCKS.saturating_mul(2);
-    if p.output_availability_blocks < floor {
-        return Err(E::OutputAvailabilityBelowPorRound {
-            output_availability_blocks: p.output_availability_blocks,
-            floor,
-        });
-    }
-
-    // 2.
-    if p.output_availability_blocks <= p.finality_depth {
-        return Err(E::OutputAvailabilityNotAboveFinality {
-            output_availability_blocks: p.output_availability_blocks,
-            finality_depth: p.finality_depth,
-        });
-    }
+    // 1 and 2.
+    validate_output_availability(p.output_availability_blocks, p.finality_depth)?;
 
     // 3.
     let bound = p
