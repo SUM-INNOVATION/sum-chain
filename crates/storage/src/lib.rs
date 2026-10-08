@@ -17,6 +17,7 @@ pub mod legal_store;
 pub mod messaging_store;
 pub mod nft_store;
 pub mod candidate;
+pub mod certified;
 pub mod exec_view;
 pub mod overlay;
 pub mod page;
