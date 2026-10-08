@@ -29,6 +29,7 @@ use sumchain_consensus::consensus_config::{
 };
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::{ChainParams, Genesis};
+use sumchain_primitives::compute_pool_params::ComputePoolParamsV1;
 use sumchain_primitives::Hash;
 use sumchain_storage::{cf, Database};
 use tempfile::TempDir;
@@ -268,11 +269,27 @@ fn this_binary_keeps_a_schema_1_database_as_it_is() {
 }
 
 #[test]
-fn the_production_schema_2_is_a_well_formed_draft_of_dormant_gates() {
-    // Every field registered so far is a gate, dormant in every default genesis.
+fn the_production_schema_2_is_a_well_formed_draft() {
+    // Registered in append order: #277's and #278's gates, then #215's
+    // compute-pool parameter group (outside the gate range).
+    let ids: Vec<(u16, &str)> = SCHEMA_2_ADDED
+        .iter()
+        .map(|a| (a.spec.id, a.spec.name))
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            (0x103f, "credential_schema_validation_enabled_from_height"),
+            (0x1040, "messaging_timestamp_units_enabled_from_height"),
+            (0x0720, "compute_pool_params"),
+        ]
+    );
+    // Every gate registered so far is dormant in every default genesis.
     let defaults = ChainParams::default().activation_heights();
-    for added in SCHEMA_2_ADDED {
-        assert!(matches!(added.source, Source::Gate), "{}", added.spec.name);
+    for added in SCHEMA_2_ADDED
+        .iter()
+        .filter(|a| matches!(a.source, Source::Gate))
+    {
         assert_eq!(
             defaults
                 .iter()
@@ -283,16 +300,11 @@ fn the_production_schema_2_is_a_well_formed_draft_of_dormant_gates() {
             added.spec.name
         );
     }
-    assert!(
-        SCHEMA_2_ADDED.iter().any(|a| a.spec.id == 0x103f
-            && a.spec.name == "credential_schema_validation_enabled_from_height"),
-        "#277 holds 0x103f"
-    );
-    assert!(
-        SCHEMA_2_ADDED.iter().any(|a| a.spec.id == 0x1040
-            && a.spec.name == "messaging_timestamp_units_enabled_from_height"),
-        "#278 holds 0x1040"
-    );
+    let cp = &SCHEMA_2_ADDED[2];
+    assert!(matches!(cp.source, Source::Param(_)));
+    assert_eq!(cp.spec.ty, Ty::Bytes);
+    assert_eq!(cp.spec.item_width, Some(321));
+    assert!(cp.spec.optional);
     assert_eq!(SCHEMA_2.number, 2);
     assert_eq!(PRODUCTION.writes.number, 1);
     assert_eq!(
@@ -517,6 +529,7 @@ fn the_real_schema_2_transition_adds_only_its_registered_fields_absent() {
     for id in real_added_ids() {
         assert_eq!(r.config.get(id), Some(&Value::Absent), "{id:#06x}");
     }
+    assert!(done.added.contains(&0x0720), "{:?}", done.added);
     assert_eq!(
         check_at_startup_with(&db, &g2(), HEIGHT, &REAL_ENABLED).unwrap(),
         StartupOutcome::Unchanged { commitment: new }
@@ -941,5 +954,66 @@ fn the_credential_gate_on_a_schema_1_database_waits_for_the_schema_transition() 
         StartupOutcome::Unchanged {
             commitment: computed
         }
+    );
+}
+
+// ── #215: the compute-pool parameters ──────────────────────────────────────
+
+/// TEST_ONLY values (no proposed parameter): every cap 1, everything else 0.
+fn test_only_compute_pool_params() -> ComputePoolParamsV1 {
+    let text = r#"{
+        "b_offer": 0, "b_commit": 0, "b_check": 0,
+        "c_layer": 0, "c_tok": 0, "c_sel": 0, "c_emit": 0,
+        "accept_reimb": 0, "commit_verify_reimb": 0, "publish_reimb": 0,
+        "observe_reimb": 0, "check_reimb": 0, "settle_reimb": 0, "reassign_reimb": 0,
+        "max_work_units": 1, "max_generations": 1, "max_reprovisionable_units": 1,
+        "max_attempts_per_unit": 1, "max_reassignments_per_file": 1,
+        "k_susp": 0, "w_susp": 0, "s_susp": 0, "n_invite_max": 0,
+        "max_retention_files_per_job": 1, "max_retention_updates_per_block": 1,
+        "max_reverse_index_entries": 1, "output_availability_blocks": 0,
+        "d_avail": 0, "d_ack": 0, "d_final": 0
+    }"#;
+    serde_json::from_str(text).unwrap()
+}
+
+/// Undeclared, the parameters leave the production configuration — and its
+/// commitment — exactly the schema-1 one.
+#[test]
+fn undeclared_compute_pool_params_change_nothing() {
+    assert_eq!(g2().params.compute_pool_params, None);
+    assert_eq!(ccfg::build(&g2()).unwrap().commitment(), h(C2));
+    let real = ccfg::build_with(&g2(), &REAL_ENABLED).unwrap();
+    assert_eq!(real.get(0x0720), Some(&Value::Absent));
+}
+
+/// Declared, a binary that records schema 1 refuses to start (a draft field
+/// is never activated); a schema-2 binary commits the canonical encoding.
+#[test]
+fn declared_compute_pool_params_are_refused_by_schema_1_and_committed_by_schema_2() {
+    let p = test_only_compute_pool_params();
+    let mut g = g2();
+    g.params.compute_pool_params = Some(p);
+    // Admitted by genesis validation (g2 itself carries an unrelated gate
+    // the loader refuses, so check over the default parameters).
+    let mut admitted = g0().params;
+    admitted.compute_pool_params = Some(p);
+    admitted.validate().unwrap();
+
+    let err = ccfg::build(&g).unwrap_err();
+    assert!(err.to_string().contains("compute_pool_params"), "{err}");
+
+    let c = ccfg::build_with(&g, &REAL_ENABLED).unwrap();
+    assert_eq!(c.get(0x0720), Some(&Value::Bytes(p.try_encode().unwrap())));
+    let absent = ccfg::build_with(&g2(), &REAL_ENABLED).unwrap();
+    assert_ne!(c.commitment(), absent.commitment());
+
+    // One field changed, one commitment changed.
+    let mut q = p;
+    q.d_final = 1;
+    let mut g_q = g2();
+    g_q.params.compute_pool_params = Some(q);
+    assert_ne!(
+        ccfg::build_with(&g_q, &REAL_ENABLED).unwrap().commitment(),
+        c.commitment()
     );
 }
