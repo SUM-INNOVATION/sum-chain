@@ -281,7 +281,7 @@ fn computed_in(
     let values = compute(genesis, policy)?;
     ConsensusConfig::project(values, policy.knows, schema).map_err(|e| match e {
         ConfigError::BeyondSchema { schema: n, fields } => {
-            let how = match (record, pending_for(record, policy)) {
+            let how = match (record, pending_schema_transition_for(record, policy)) {
                 (Some(r), Some(p)) => format!(
                     "This database records schema {n}; this binary can move it to \
                      schema {to}. Stop the node and run `sumchain \
@@ -305,7 +305,11 @@ fn computed_in(
     })
 }
 
-fn pending_for(
+/// The schema transition `policy` could perform on `record`, an already read
+/// and verified record ([`read_record_with`]), if any. Lets a caller that has
+/// just read the record avoid reading and verifying it again; the answer is
+/// that of [`pending_schema_transition_with`] over the same database.
+pub fn pending_schema_transition_for(
     record: Option<&BaselineRecord>,
     policy: &SchemaPolicy,
 ) -> Option<PendingSchemaTransition> {
@@ -336,7 +340,10 @@ pub fn pending_schema_transition_with(
     db: &Database,
     policy: &SchemaPolicy,
 ) -> Result<Option<PendingSchemaTransition>, ConfigError> {
-    Ok(pending_for(read_record_with(db, policy)?.as_ref(), policy))
+    Ok(pending_schema_transition_for(
+        read_record_with(db, policy)?.as_ref(),
+        policy,
+    ))
 }
 
 /// The startup comparison. Runs after the genesis and activation-height checks
@@ -390,7 +397,7 @@ pub fn check_at_startup_with(
         });
     }
 
-    let changes = record.config.diff(&now);
+    let changes = record.config.diff(&now)?;
     refuse_retroactive_gates(genesis, &record.config, &changes, current_height)?;
 
     let non_gate: Vec<&FieldChange> = changes.iter().filter(|c| !is_gate(c.id)).collect();
@@ -501,7 +508,7 @@ pub fn acknowledge_with(
         ));
     }
 
-    let changes = record.config.diff(&now);
+    let changes = record.config.diff(&now)?;
     refuse_retroactive_gates(genesis, &record.config, &changes, current_height)?;
     let protected: Vec<&FieldChange> = changes
         .iter()

@@ -52,6 +52,23 @@
 //! pre-existing behaviour. Schema 2 is a DRAFT in this binary — its fields are
 //! known and held absent, and nothing reads or writes a schema-2 record —
 //! until a later change enables it in [`schema::PRODUCTION`].
+//!
+//! # Older schemas are read for good
+//!
+//! A schema, once a release has written it, stays in every later binary's
+//! [`schema::SchemaPolicy::reads`] for good, even after every record it
+//! knows of has moved on. A [`record::TransitionKind::SchemaTransition`] in
+//! a node's history keeps the encoding it replaced, and every read of the
+//! record re-verifies the whole history, that entry included: the old
+//! encoding is decoded under `reads` and must re-encode into a later schema
+//! `reads` also holds, to exactly the commitment the transition names. A
+//! binary that dropped the older schema from `reads` would find that encoding
+//! unreadable, treat the history as corrupt, and refuse to start — on every
+//! node that ever made the transition, with no way to recover short of
+//! deleting the history this module exists to keep. So `reads` only grows:
+//! a binary may add a schema to it, never remove one that any release wrote.
+//! The same holds for the registries themselves: a written schema's fields
+//! and its predecessors' must stay decodable exactly as written.
 
 pub mod codec;
 pub mod fields;
@@ -62,8 +79,9 @@ pub use codec::{commitment_of, ConsensusConfig, Field, FieldChange, Value, SCHEM
 pub use fields::{build, build_with, FieldSpec, SCHEMA_V1_FIELDS};
 pub use record::{
     acknowledge, acknowledge_schema_transition, check_at_startup, pending_schema_transition,
-    read_record, read_transitions, Acknowledged, BaselineRecord, BaselineStatus,
-    PendingSchemaTransition, SchemaTransitioned, StartupOutcome, Transition, TransitionKind,
+    pending_schema_transition_for, read_record, read_transitions, Acknowledged, BaselineRecord,
+    BaselineStatus, PendingSchemaTransition, SchemaTransitioned, StartupOutcome, Transition,
+    TransitionKind,
 };
 pub use schema::{AddedField, Schema, SchemaPolicy, Source, PRODUCTION, SCHEMA_1, SCHEMA_2};
 

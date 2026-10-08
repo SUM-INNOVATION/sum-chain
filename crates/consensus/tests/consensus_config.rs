@@ -124,7 +124,7 @@ fn moved(g: &Genesis, path: &str) -> Genesis {
 fn changed_ids(a: &Genesis, b: &Genesis) -> Vec<u16> {
     let a = ccfg::build(a).unwrap();
     let b = ccfg::build(b).unwrap();
-    a.diff(&b).into_iter().map(|c| c.id).collect()
+    a.diff(&b).unwrap().into_iter().map(|c| c.id).collect()
 }
 
 fn id_of(name: &str) -> u16 {
