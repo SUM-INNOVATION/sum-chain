@@ -1788,6 +1788,8 @@ pub(crate) fn compute(genesis: &Genesis, policy: &SchemaPolicy) -> Result<Vec<Fi
         nft_royalty_operation_unsupported_enabled_from_height: _,
         // Schema 2 (draft), 0x103f: `schema::SCHEMA_2_ADDED`.
         credential_schema_validation_enabled_from_height: _,
+        // Schema 2 (draft), 0x1040: `schema::SCHEMA_2_ADDED`.
+        messaging_timestamp_units_enabled_from_height: _,
     } = params;
 
     put(0x0100, Value::U64(*max_block_bytes));

@@ -2630,6 +2630,38 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub credential_schema_validation_enabled_from_height: Option<u64>,
+
+    /// Messaging reads the block timestamp in seconds for its time rules.
+    ///
+    /// Issue #278. The block timestamp is MILLISECONDS since the Unix epoch
+    /// (`BlockHeader::timestamp`, built by the proposer with `as_millis()`).
+    /// The messaging executor applies three rules written in SECONDS to it: the
+    /// daily-quota bucket (`timestamp / 86400`), a pending payment's expiry
+    /// (`timestamp + 7 * 24 * 3600`, compared against the claiming block's
+    /// timestamp), and a sponsored message's client-signed `expiry`, which
+    /// `messaging_submitSponsored` checks against `as_secs()`. Once
+    /// [`Self::subsystem_block_timestamp_enabled_from_height`] opens, the quota
+    /// window is 86.4 seconds, a payment expires about ten minutes after it is
+    /// sent, and every sponsored message is already expired.
+    ///
+    /// At and above this height those three rules compare against the block
+    /// timestamp divided by 1000 (whole seconds). Rows that RECORD a time --
+    /// `MessageEvent::timestamp`, `RegisteredPublicKey::registered_at` -- keep
+    /// the block timestamp unchanged. While the block-timestamp gate is closed
+    /// the executor sees zero, which is zero in either unit, so this gate is
+    /// inert until that one opens; it should open at or before it.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub messaging_timestamp_units_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -3046,6 +3078,8 @@ impl Default for ChainParams {
             nft_royalty_operation_unsupported_enabled_from_height: None,
             // Production-safe default: the credential schema validator keeps its compiled-in activation height — dormant.
             credential_schema_validation_enabled_from_height: None,
+            // Production-safe default: messaging keeps reading the block timestamp as before — dormant.
+            messaging_timestamp_units_enabled_from_height: None,
         }
     }
 }
@@ -3607,6 +3641,10 @@ impl ChainParams {
                 "credential_schema_validation_enabled_from_height",
                 self.credential_schema_validation_enabled_from_height,
             ),
+            (
+                "messaging_timestamp_units_enabled_from_height",
+                self.messaging_timestamp_units_enabled_from_height,
+            ),
         ]
     }
 
@@ -3647,7 +3685,7 @@ impl ChainParams {
     }
 }
 
-/// The forty-three remediation gates, by field name.
+/// The forty-four remediation gates, by field name.
 ///
 /// The count in this sentence has been wrong twice, both times because a wave
 /// added gates and nothing checked the prose. It is checked now:
@@ -3711,6 +3749,7 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "subsystem_ambiguous_policy_id_refused_enabled_from_height",
     "nft_royalty_operation_unsupported_enabled_from_height",
     "credential_schema_validation_enabled_from_height",
+    "messaging_timestamp_units_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started
