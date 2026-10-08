@@ -1,0 +1,92 @@
+name: release-verify
+
+# READ-ONLY verification of releases that already exist. It never creates,
+# edits or deletes a release or tag. For each published native release
+# (tag release-<40-hex commit>) and each architecture it does exactly what
+# release-native.yml's `verify` job does after publishing: download the
+# assets, verify them and their attestations BEFORE running anything,
+# install with --verify-attestation, verify the installed binary's
+# attestation, and smoke-test it natively.
+#
+# Runs on demand for one commit, and on pull requests that change this file
+# (for the most recently published native release).
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: 'Full 40-hex commit of an existing release-<commit> to verify'
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - '.github/workflows/release-verify.yml'
+
+permissions: {}
+
+jobs:
+  list:
+    name: published native releases to verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      commits: ${{ steps.list.outputs.commits }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      INPUT_COMMIT: ${{ inputs.commit }}
+    steps:
+      - id: list
+        run: |
+          set -euo pipefail
+          if [[ -n "${INPUT_COMMIT:-}" ]]; then
+            [[ "$INPUT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit must be a full 40-hex sha"; exit 1; }
+            gh release view "release-$INPUT_COMMIT" -R "$GITHUB_REPOSITORY" >/dev/null
+            commits="[\"$INPUT_COMMIT\"]"
+          else
+            commits=$(gh release list -R "$GITHUB_REPOSITORY" --limit 100 --json tagName,publishedAt \
+              --jq '[.[] | select(.tagName | test("^release-[0-9a-f]{40}$"))] | sort_by(.publishedAt) | last
+                    | [.tagName | sub("^release-"; "")]')
+          fi
+          [[ "$commits" != "[]" ]] || { echo "::error::no native release found"; exit 1; }
+          echo "commits=$commits" >> "$GITHUB_OUTPUT"
+          echo "verifying: $commits"
+
+  verify:
+    name: verify, install and run ${{ matrix.arch }} for release-${{ matrix.commit }}
+    needs: list
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: read
+    strategy:
+      fail-fast: false
+      matrix:
+        commit: ${{ fromJSON(needs.list.outputs.commits) }}
+        arch: [x86_64, aarch64]
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    env:
+      GH_TOKEN: ${{ github.token }}
+      COMMIT: ${{ matrix.commit }}
+    steps:
+      # The release's own verification tools, at the released commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.commit }}
+          persist-credentials: false
+
+      - name: Download, verify, install (architecture from uname -m), smoke-test
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/release"
+          gh release download "release-$COMMIT" -R "$GITHUB_REPOSITORY" -D "$d"
+          python3 tools/release/native-release.py verify "$d" --commit "$COMMIT"
+          for f in "$d"/*; do bash tools/release/verify-attestation.sh --file "$f" "$COMMIT"; done
+          bash tools/release/install-native.sh --release-dir "$d" --commit "$COMMIT" \
+            --prefix "$RUNNER_TEMP/opt" --verify-attestation
+          bin="$RUNNER_TEMP/opt/releases/$COMMIT/sumchain"
+          bash tools/release/verify-attestation.sh --file "$bin" "$COMMIT"
+          bash tools/release/smoke-native.sh "$bin" "$COMMIT"
