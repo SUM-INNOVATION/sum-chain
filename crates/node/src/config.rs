@@ -120,6 +120,22 @@ rate_limit_burst = 200
 # contract_exec_max_host_bytes = 16777216
 # contract_exec_concurrency = 1
 
+[mempool]
+# Node-local mempool policy (not a consensus rule).
+#
+# refuse_contract_transactions: when true, this node refuses contract deploy
+# and contract call transactions at admission from every source (RPC
+# submission, gossip, re-addition after a reorg), removes any it already holds
+# when the setting is applied at startup, and skips them when selecting
+# transactions for a block it proposes. Default false.
+#
+# The setting is read from this file on every start and is not persisted: to
+# keep it on, it must be present each time the node starts.
+#
+# It only governs what this node admits and proposes. Blocks from other
+# proposers that carry contract transactions are still imported and executed.
+refuse_contract_transactions = false
+
 [health]
 # Health/readiness HTTP server listen address.
 # Serves GET /health (liveness) and GET /ready (readiness). Bound separately

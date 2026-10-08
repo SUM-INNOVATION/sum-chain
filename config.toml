@@ -11,5 +11,13 @@ mdns = true
 [rpc]
 addr = "127.0.0.1:8545"
 
+[mempool]
+# Node-local policy, not a consensus rule. When true, contract deploy/call
+# transactions are refused at admission (RPC, gossip, reorg re-add), any held
+# are removed at startup, and they are skipped at block selection. Read on
+# every start, never persisted. Blocks from other proposers carrying contract
+# transactions are still imported and executed. Default false.
+refuse_contract_transactions = false
+
 [logging]
 level = "info"
