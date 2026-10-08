@@ -126,6 +126,13 @@ fn deployed() -> (ContractExecutor, Address, TempDir) {
     (exec, dep.contract_address, dir)
 }
 
+/// The message without the trap-location lines (`\n    at ...`) the runtime
+/// appends on some platforms (Linux x86_64, not macOS arm64). Only that
+/// trailer is removed; the message itself is compared exactly.
+fn without_trap_location(error: &str) -> &str {
+    error.split("\n    at ").next().unwrap_or(error)
+}
+
 /// Everything a call reports that execution could act on, as text.
 fn outcome(exec: &ContractExecutor, addr: Address, method: &str) -> String {
     let r = exec.call(addr, method, vec![], ctx());
@@ -144,7 +151,7 @@ fn outcome(exec: &ContractExecutor, addr: Address, method: &str) -> String {
             "ok success={} gas={} error={:?} ret_len={} ret_blake3={} writes={:?}",
             r.success,
             r.gas_used,
-            r.error,
+            r.error.as_deref().map(without_trap_location),
             r.return_value.len(),
             &blake3::hash(&r.return_value).to_hex()[..16],
             writes
@@ -194,7 +201,7 @@ fn an_out_of_bounds_argument_length_allocates_nothing_of_that_size() {
         let largest = LARGEST.load(Ordering::SeqCst);
         assert!(!r.success, "{method} still traps");
         assert_eq!(
-            r.error.as_deref(),
+            r.error.as_deref().map(without_trap_location),
             Some("RuntimeError: guest memory read: memory access out of bounds"),
             "{method}"
         );
