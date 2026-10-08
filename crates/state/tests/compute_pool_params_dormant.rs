@@ -120,8 +120,9 @@ fn run_digest(run: &Run) -> Hash {
 const MAIN_SEQUENCE_DIGEST: &str =
     "e31624046d7b5e2a291072cdb791dbb759a6ea006c3cac8a6ea1afb4a70774b8";
 
-/// TEST_ONLY declaration: every `max_*` cap 1, everything else 0. Not a
-/// proposed value.
+/// TEST_ONLY declaration: every `max_*` cap 1, `output_availability_blocks`
+/// on the #129 relation-1 floor (200), everything else 0. Not a proposed
+/// value.
 fn declared() -> ComputePoolParamsV1 {
     serde_json::from_str(
         r#"{
@@ -133,7 +134,7 @@ fn declared() -> ComputePoolParamsV1 {
         "max_attempts_per_unit": 1, "max_reassignments_per_file": 1,
         "k_susp": 0, "w_susp": 0, "s_susp": 0, "n_invite_max": 0,
         "max_retention_files_per_job": 1, "max_retention_updates_per_block": 1,
-        "max_reverse_index_entries": 1, "output_availability_blocks": 0,
+        "max_reverse_index_entries": 1, "output_availability_blocks": 200,
         "d_avail": 0, "d_ack": 0, "d_final": 0
     }"#,
     )
@@ -244,4 +245,31 @@ fn parameters_declared_with_the_gate_unset_reproduce_main_roots_and_receipts() {
         hex::encode(run_digest(&run).as_bytes()),
         MAIN_SEQUENCE_DIGEST
     );
+}
+
+// ── #129: activation stays refused ─────────────────────────────────────────
+
+/// With the parameters declared and valid, setting the gate is refused by the
+/// retention relations while their inputs are undefined; without parameters
+/// it is refused as before.
+#[test]
+fn the_gate_is_refused_while_retention_inputs_are_undefined() {
+    use sumchain_genesis::compute_pool_retention_inputs::RetentionActivationError;
+    use sumchain_genesis::GenesisError;
+
+    let mut p = params_with(Some(declared()));
+    p.compute_pool_enabled_from_height = Some(0);
+    assert!(matches!(
+        p.validate(),
+        Err(GenesisError::ComputePoolActivationRefused(
+            RetentionActivationError::InputsUndefined(_)
+        ))
+    ));
+    p.compute_pool_params = None;
+    assert!(matches!(
+        p.validate(),
+        Err(GenesisError::IncompleteSubsystemActivation {
+            gate: "compute_pool_enabled_from_height"
+        })
+    ));
 }
