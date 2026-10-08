@@ -721,6 +721,10 @@ impl<'db, 'a> AcceptedCandidate<'db, 'a> {
         self.block.hash()
     }
 
+    pub(crate) fn parent_hash(&self) -> Hash {
+        self.block.header.parent_hash
+    }
+
     pub fn height(&self) -> BlockHeight {
         self.block.height()
     }
@@ -743,6 +747,58 @@ impl<'db, 'a> AcceptedCandidate<'db, 'a> {
     /// logical ceiling as execution's, and conversion to a RocksDB batch happens
     /// only once every one has been accepted.
     pub fn publish(mut self) -> Result<()> {
+        let block = self.block;
+        let block_hash = block.hash();
+        let height = block.height();
+
+        self.stage_canonical_set()?;
+
+        self.overlay.into_batch()?.commit()?;
+
+        // ── only now, with the commit durable, report the adoption ───────────
+        //
+        // After the commit, never before. A warning emitted at acceptance would
+        // announce that a block's header root was adopted even when staging or
+        // the commit then failed and nothing was published — an operator reading
+        // logs would believe unverified state had entered the chain when it had
+        // not. One line per published block, carrying both roots so the
+        // divergence is recoverable.
+        if let Acceptance::LegacyCompatibility { computed, header } = &self.acceptance {
+            tracing::warn!(
+                height,
+                block = %block_hash,
+                computed_root = %computed,
+                published_root = %header,
+                cutoff = LEGACY_ROOT_COMPATIBILITY_HEIGHT,
+                "published a block whose computed root does not match its header, under the \
+                 historical compatibility allowance; the header's root was adopted and this \
+                 block's state is NOT verified"
+            );
+        }
+        Ok(())
+    }
+
+    /// Stage the complete canonical set [`Self::publish`] writes for this block
+    /// into the overlay, and hand the overlay back UNCOMMITTED.
+    ///
+    /// For the dormant certified-commit seam (`crate::certified`) only, which
+    /// must add the certificate and the finalized pointer to the SAME batch
+    /// before anything is written. Crate-private, so it is not a second public
+    /// publisher: the seam is the only caller, and it commits the result in one
+    /// durable write or not at all.
+    pub(crate) fn into_staged_overlay(
+        mut self,
+    ) -> Result<(ApplicationOverlay<'db>, &'a Block, Acceptance)> {
+        self.stage_canonical_set()?;
+        Ok((self.overlay, self.block, self.acceptance))
+    }
+
+    /// Derive the generic journal, then stage every publication row.
+    ///
+    /// Shared by [`Self::publish`] and [`Self::into_staged_overlay`], so the
+    /// certified path cannot publish a different canonical set from the
+    /// ordinary one.
+    fn stage_canonical_set(&mut self) -> Result<()> {
         let block = self.block;
         let block_hash = block.hash();
         let height = block.height();
@@ -776,31 +832,7 @@ impl<'db, 'a> AcceptedCandidate<'db, 'a> {
             &self.receipts,
             &self.journals,
             &application_journal_bytes,
-        )?;
-
-        self.overlay.into_batch()?.commit()?;
-
-        // ── only now, with the commit durable, report the adoption ───────────
-        //
-        // After the commit, never before. A warning emitted at acceptance would
-        // announce that a block's header root was adopted even when staging or
-        // the commit then failed and nothing was published — an operator reading
-        // logs would believe unverified state had entered the chain when it had
-        // not. One line per published block, carrying both roots so the
-        // divergence is recoverable.
-        if let Acceptance::LegacyCompatibility { computed, header } = &self.acceptance {
-            tracing::warn!(
-                height,
-                block = %block_hash,
-                computed_root = %computed,
-                published_root = %header,
-                cutoff = LEGACY_ROOT_COMPATIBILITY_HEIGHT,
-                "published a block whose computed root does not match its header, under the \
-                 historical compatibility allowance; the header's root was adopted and this \
-                 block's state is NOT verified"
-            );
-        }
-        Ok(())
+        )
     }
 }
 
