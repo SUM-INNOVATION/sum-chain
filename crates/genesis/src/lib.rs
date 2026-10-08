@@ -15,6 +15,8 @@ use sumchain_primitives::{
 };
 use thiserror::Error;
 
+pub mod compute_pool_retention;
+
 /// Genesis configuration errors
 #[derive(Debug, Error)]
 pub enum GenesisError {
