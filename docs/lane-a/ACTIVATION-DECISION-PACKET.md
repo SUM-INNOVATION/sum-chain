@@ -28,10 +28,10 @@ asked for:
 
 ---
 
-## Part 0a — Six gates arrived after this packet was regenerated
+## Part 0a — Five gates arrived after this packet was regenerated
 
-`ChainParams` now declares **sixty-seven**. This packet covers sixty-one, and
-the six it does not cover are named here rather than left to be discovered by
+`ChainParams` now declares **sixty-seven**. This packet covers sixty-two (the
+last, N4, added with its gate), and the five it does not cover are named here rather than left to be discovered by
 counting:
 
   * `subsystem_proof_unsupported_enabled_from_height` — every `VerifyProof` arm
@@ -59,15 +59,6 @@ counting:
     without this one gives an 86.4 s quota window, a ten-minute payment expiry
     and a sponsored message that is always expired, so it should open at or
     before it. Nothing in `ChainParams::validate` enforces that ordering.
-  * `contract_metering_enabled_from_height` — contract execution in blocks
-    runs on metering v1: fuel, memory, stack, host-copy and deploy charges
-    against the transaction's `gas_limit`, and the block contract gas budget
-    `max_block_contract_gas` (#279). At and above it every failing call rolls
-    its staged writes back, `Err` included. Its cost schedule is PROVISIONAL
-    and must be ratified and frozen under a new identity before it is ever
-    set; it is a schema-2 draft field (0x1041), so a binary that does not
-    write schema 2 refuses to start with it set. Inert while
-    `contracts_enabled_from_height` is closed.
 
 **None of them is scheduled below, and that is deliberate.** Each needs the same six
 fields Part 1 gives the other sixty-one — behaviour, dependency ordering,
@@ -75,20 +66,21 @@ persistent data impact, rollback-in-effect, monitoring signal, recommended wave
 — and scheduling a gate that has not had that treatment is the shortcut this
 packet exists to prevent. The same note appeared in the previous edition for
 three gates, and those three were given their treatment before being scheduled;
-these six should be handled the same way.
+these five should be handled the same way.
 
 Nine gates arrived in the wave that outran the previous edition of this
 document. **Seven of them were written up** — R29 to R35, in Part 1A — and the
 first two above are what was left. **A release-closure wave has since added five more,
 and they did NOT join that deficit**: R36 to R40 arrive with their six fields
 already written, which is the standing this section exists to require. The
-deficit stood at two, the same two, until #277, #279 (twice) and #278 added the
-third to sixth above; #279's and #278's dependencies are stated in their
-bullets, and the rest of those write-ups is owed.
+deficit stood at two, the same two, until #277, #279 and #278 added the third,
+fourth and fifth above; #279's and #278's dependencies are stated in their
+bullets, and the rest of those write-ups is owed. #279's metering gate arrived
+with its write-up (N4).
 
 This is the second time a wave has outrun this document, and the third wave did
 not. The count in a sentence is not checkable by any tool here, which is why the
-six uncovered gates are named: a reader can verify the claim against
+five uncovered gates are named: a reader can verify the claim against
 `tools/lane-b/gate-structure-check.py`'s output without recounting prose.
 
 ## Part 0 — The facts that apply to all sixty-one
@@ -1542,11 +1534,13 @@ For the eight that have passed, fields 1-3 are history rather than a decision, a
 
 ---
 
-## Part 1C — The 3 gates that are NEITHER
+## Part 1C — The 4 gates that are NEITHER
 
 These three are introduced by this work, so §0.4's floor applies to them in
 full, but none is a remediation gate: they add or constrain machinery rather
-than repair a subsystem defect. **All three of the system's load-time ordering
+than repair a subsystem defect. N4, the contract metering gate (#279), was added
+later on the same footing and is out of band for a different reason: its values
+are not yet ratified. **All three of the system's load-time ordering
 constraints (§0.7 rules 3 and 4) live in this group**, and two of the three are
 coupled to each other. They are therefore scheduled out of band from the
 cost-shape waves, not inside them.
@@ -1722,6 +1716,65 @@ measured. **This document does not weaken that, and does not propose a height.**
 **6. Recommended wave.** **Out of band, blocked on an external measurement.**
 Not a member of any wave below. **Proposed height:** — owner decision —, and not
 before the row count is measured.
+
+---
+### N4 — `contract_metering_enabled_from_height`
+*declared `crates/genesis/src/lib.rs:2719`; default `None`; schema-2 draft gate `0x1041`; accessor `contract_execution_mode`, `crates/state/src/contract_metering.rs:24`* — cost shape **EXECUTION RULE**
+
+**1. Affected behaviour.** Below the height, or unset, contracts run on the unmetered engine (`sumc_runtime::ENGINE_IDENTITY`), exactly as today: gas is charged on host calls only, and nothing bounds instructions, memory growth, bulk operations, recursion or compilation. At and above it, block execution deploys and calls on metering v1 (`METERED_ENGINE_IDENTITY`, `crates/sumc-runtime/src/metering.rs:84`). All of the following are charged against the transaction's `gas_limit`:
+- fuel before every basic block runs;
+- `memory.grow` per page, with a 256-page ceiling;
+- bulk memory and table operations per element, before they run;
+- a deterministic stack limit, in place of the native stack;
+- table counts and sizes bounded at deploy, and table and element-segment items charged at each instantiation;
+- host lengths, bounded and charged before anything is copied;
+- a deploy, per code byte before it is compiled.
+
+Failure semantics are today's trap path: `Failed(5)` for a call and `Failed(4)` for a deploy, the fee charged and the nonce advanced. Every failing call's staged writes roll back, an `Err` included. The same gate turns on `max_block_contract_gas` (`0x0115`), which works over declared limits:
+- an importer refuses a block whose declared contract gas exceeds it, before executing anything (`check_block_contract_gas`, `crates/state/src/executor.rs:4698`);
+- a proposer skips a transaction that would not fit (`crates/consensus/src/poa.rs`).
+
+RPC views and estimates use the engine of the next block (`ContractExecutorState::local_execution_mode`, `crates/state/src/contract_executor.rs:657`). So from the block before the height, an estimate is the metered charge. **The cost schedule is PROVISIONAL** (`CostScheduleV1Provisional::PROVISIONAL`) and must be ratified and frozen under a non-provisional identity before this gate is ever set.
+
+**2. Dependency ordering.**
+- **At load:** `ChainParams::validate` refuses a budget below `max_contract_gas` when both are set (`GenesisError::BlockContractGasBelowTxCeiling`).
+- **Schema 2:** the gate is a schema-2 DRAFT field. A binary that records schema 1 refuses to start with it or the budget set. Activation therefore needs a release that writes schema 2 — the decision that freezes schema 2 — and that release must carry the ratified schedule.
+- **Start-up floor:** the gate is not predating, so §0.4's floor applies; on a first start it must sit strictly above the head.
+- **Relationship to `contract_error_rollback_enabled_from_height` (`0x1042`):** this gate implies its rollback at and above its height. No order between the two is required, and a rollback height above this one changes nothing. This is pinned by `the_metering_gate_implies_error_rollback_whatever_the_rollback_gate_says`.
+- **Contracts gate:** inert while `contracts_enabled_from_height` is closed. On mainnet that gate has passed.
+- **Peers:** a node without this rule executes the same block unmetered and diverges at the first block where metering changes an outcome. Every validator must run the metered binary before the height (§0.9). Enrolling it in `REMEDIATION_GATES` would tie N1's deadline to it, so that undeclared peers are refused from the height. That is an owner decision; the recommendation is to enrol.
+
+**3. Persistent data impact.** No row changes shape and no column family is added. What changes from the height is WHICH outcomes are committed: a contract execution that exceeds a metered bound fails, and its writes roll back. Unmetered nodes would have committed a success with those writes, so the state root differs from what an unmetered node computes for the same block. Metered modules are compiled and cached separately from unmetered ones, and nothing about a stored contract changes. Declaring the gate already moved every genesis's activation and protocol digests while unset.
+
+**4. Rollback in effect.** **B and E.**
+- **B:** a superseding gate at a later height. It cannot restore unmetered execution — nothing should — but it can replace the schedule (a new identity), or narrow or remove the block budget.
+- **E:** a chain-wide rollback below the height.
+- **No A:** there is no transaction shape to stop submitting; the rule applies to every contract transaction.
+- **No C:** nothing written under the old shape needs a dual read.
+- **No D:** metering moves no value beyond the fees each failing transaction already pays today.
+
+**5. Monitoring signal.**
+- **M4 per contract transaction:** its receipt status. The metering reason (out of gas, stack limit, a refused length) is in node logs and RPC errors, not in the receipt, which carries only `Failed(4)`/`Failed(5)`.
+- **M3:** for over-budget blocks refused at import.
+- **M1:** to confirm the gate's height on every node.
+- **Misbehaving signal:** a workload that succeeded below the height failing above it at a gas limit that used to suffice; that is the intended cost.
+- **Mainnet, today:** both proposers refuse contract transactions (node-local policy), so no contract receipts are produced at all, and the gate's effect becomes observable only once that policy is lifted.
+- **Tests pinning it:**
+  - `crates/sumc-runtime/tests/consensus_metering.rs` (the engine, views and estimates);
+  - `crates/state/tests/contract_metering_gate.rs` (block boundary, budget, RPC engine);
+  - `crates/state/tests/contract_error_rollback.rs` (the two-gate rule);
+  - `crates/consensus/tests/contract_block_gas_budget.rs` and `crates/genesis/tests/contract_block_gas_budget.rs`.
+
+**6. Recommended wave.** **Out of band; blocked on ratification.** It needs:
+- the schedule values and identity;
+- the block budget;
+- the deploy and code-size option;
+- reference types;
+- `REMEDIATION_GATES` enrolment;
+- the schema-2 release that writes it;
+- a coordinated validator upgrade.
+
+Not a member of any wave below. **Proposed height:** — owner decision —.
 
 ---
 ## Part 2 — The recommendation: one prerequisite, five waves, one deferral, two out of band
@@ -1959,11 +2012,13 @@ charged failed receipt.
 | **3** | 1 | **17,004,336** | 70 days | 2026-11-28 | block existence |
 | **deferred** | 1 | — | — | — | see Part 3 |
 | **out of band** | N2 + N3 | — | — | — | blocked on a measurement |
+| **out of band** | N4 | — | — | — | blocked on ratification and the schema-2 release |
 | **not schedulable** | P16, P17 | — | — | — | refused at load |
 | **already passed** | 8 of the 18 | — | — | — | frozen |
 
 24 + 4 + 8 + 2 + 1 + 1 = **40**. Plus N1 in Wave 0, N2 and N3 out of band, and
-the 18 predating = **61**, which is what Part 1 covers. `ChainParams` declares
+the 18 predating = **61**, which is what Part 1 covers; N4, added later, is out
+of band as well, for **62**. `ChainParams` declares
 **63**; the difference is the two remediation gates Part 0a names as deliberately
 uncovered, which are not scheduled and are not counted here.
 
