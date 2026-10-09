@@ -263,6 +263,18 @@ impl ContractExecutor {
         cache.insert(code_hash, compiled);
     }
 
+    /// Insert into the metered-module cache, bounded on a local executor
+    /// exactly as [`Self::cache_insert`] bounds the unmetered one.
+    fn metered_cache_insert(&self, code_hash: CodeHash, compiled: Arc<MeteredModule>) {
+        let mut cache = self.metered_cache.write();
+        if let Some(limits) = &self.local_limits {
+            if cache.len() >= limits.max_cached_modules && !cache.contains_key(&code_hash) {
+                cache.clear();
+            }
+        }
+        cache.insert(code_hash, compiled);
+    }
+
     /// Compute code hash
     fn code_hash(code: &[u8]) -> CodeHash {
         *blake3::hash(code).as_bytes()
@@ -366,7 +378,7 @@ impl ContractExecutor {
                 let compiled = Arc::new(metering::compile(&code, &self.schedule)?);
                 let old_code = self.storage.get_code(&contract_address)?;
                 self.storage.store_code(&contract_address, &code)?;
-                self.metered_cache.write().insert(code_hash, compiled);
+                self.metered_cache_insert(code_hash, compiled);
                 self.deploy_finalize(
                     mode, code, code_hash, contract_address, old_code, init_method, init_args,
                     ctx, precharged,
@@ -652,6 +664,85 @@ impl ContractExecutor {
         }
     }
 
+    /// [`Self::view`] under `mode`.
+    ///
+    /// Metered: the call runs on metering v1 exactly as
+    /// [`Self::call_with_mode`] would run it (base charge, instantiation, fuel,
+    /// host work), against `ctx.gas_limit` capped by a local executor's
+    /// `gas_cap`, and is always rolled back. The budget is finite, so a
+    /// non-terminating view stops out of gas.
+    pub fn view_with_mode(
+        &self,
+        mode: ExecutionMode,
+        contract: ContractAddress,
+        method: &str,
+        args: Vec<u8>,
+        ctx: ExecutionContext,
+    ) -> Result<Vec<u8>> {
+        if mode == ExecutionMode::Unmetered {
+            return self.view(contract, method, args, ctx);
+        }
+        let (_, result) = self.metered_dry_run(contract, method, args, ctx);
+        let result = result?;
+        if result.success {
+            Ok(result.return_value)
+        } else {
+            Err(RuntimeError::Execution(
+                result.error.unwrap_or_else(|| "View call failed".to_string()),
+            ))
+        }
+    }
+
+    /// [`Self::estimate_gas`] under `mode`.
+    ///
+    /// Metered: the gas [`Self::call_with_mode`] would charge the same call
+    /// with the same budget, from a dry run that is always rolled back; `Err`
+    /// when that call would fail, out of gas included.
+    pub fn estimate_gas_with_mode(
+        &self,
+        mode: ExecutionMode,
+        contract: ContractAddress,
+        method: &str,
+        args: Vec<u8>,
+        ctx: ExecutionContext,
+    ) -> Result<u64> {
+        if mode == ExecutionMode::Unmetered {
+            return self.estimate_gas(contract, method, args, ctx);
+        }
+        let (gas_meter, result) = self.metered_dry_run(contract, method, args, ctx);
+        match result {
+            Ok(r) if r.success => Ok(gas_meter.used()),
+            Ok(r) => Err(RuntimeError::Execution(
+                r.error.unwrap_or_else(|| "gas estimation failed".to_string()),
+            )),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// One metered call that never commits: the same charges as
+    /// [`Self::call_with_mode`], then its staged writes rolled back, whatever
+    /// the outcome.
+    fn metered_dry_run(
+        &self,
+        contract: ContractAddress,
+        method: &str,
+        args: Vec<u8>,
+        ctx: ExecutionContext,
+    ) -> (Arc<GasMeter>, Result<ExecutionResult>) {
+        let gas_limit = self
+            .local_limits
+            .map_or(ctx.gas_limit, |l| ctx.gas_limit.min(l.gas_cap));
+        let ctx = ExecutionContext { gas_limit, ..ctx };
+        let gas_meter = Arc::new(GasMeter::new(gas_limit));
+        let result = gas_meter
+            .consume(gas_meter.costs().call_base)
+            .and_then(|_| {
+                self.call_internal_metered(contract, method, args, ctx, gas_meter.clone(), 0)
+            });
+        self.storage.rollback();
+        (gas_meter, result)
+    }
+
     /// Internal call implementation
     fn call_internal(
         &self,
@@ -840,7 +931,7 @@ impl ContractExecutor {
             Some(c) => c,
             None => {
                 let c = Arc::new(metering::compile(&code, &schedule)?);
-                self.metered_cache.write().insert(code_hash, c.clone());
+                self.metered_cache_insert(code_hash, c.clone());
                 c
             }
         };

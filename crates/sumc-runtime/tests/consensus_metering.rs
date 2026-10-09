@@ -7,8 +7,8 @@
 use std::sync::Arc;
 use sumc_runtime::metering::{self, prescan, CostScheduleV1Provisional};
 use sumc_runtime::{
-    ContractExecutor, ContractStorage, ExecutionContext, ExecutionMode, MemoryStorage,
-    RuntimeError, ENGINE_IDENTITY, METERED_ENGINE_IDENTITY,
+    ContractExecutor, ContractStorage, ExecutionContext, ExecutionMode, LocalExecutionLimits,
+    MemoryStorage, RuntimeError, ENGINE_IDENTITY, METERED_ENGINE_IDENTITY,
 };
 use sumchain_primitives::Address;
 
@@ -597,3 +597,98 @@ fn reference_type_operations_are_metered_and_tables_capped() {
         S.memory_grow_per_page + S.bulk_cost(12) * S.instantiate_per_data_unit
     );
 }
+
+// ── views and estimates (the RPC paths) ─────────────────────────────────────
+
+#[test]
+fn a_metered_estimate_is_what_the_metered_call_charges_and_commits_nothing() {
+    let (ex, addr) = deployed(WAT, M);
+    for (method, args) in [("spin_1000", vec![]), ("put", arg(4)), ("get", vec![])] {
+        let estimate = ex
+            .estimate_gas_with_mode(M, addr, method, args.clone(), ctx(10_000_000))
+            .unwrap();
+        let charged = ex
+            .call_with_mode(M, addr, method, args, ctx(10_000_000))
+            .unwrap();
+        assert!(charged.success, "{method}: {:?}", charged.error);
+        assert_eq!(estimate, charged.gas_used, "{method}");
+    }
+    // Neither an estimate nor a view of a writing call leaves anything behind:
+    // the next read still pays for the 4-byte value.
+    let before = ex
+        .call_with_mode(M, addr, "get", vec![], ctx(10_000_000))
+        .unwrap()
+        .gas_used;
+    ex.estimate_gas_with_mode(M, addr, "put", arg(65_536), ctx(10_000_000))
+        .unwrap();
+    ex.view_with_mode(M, addr, "put", arg(65_536), ctx(10_000_000))
+        .unwrap();
+    let after = ex
+        .call_with_mode(M, addr, "get", vec![], ctx(10_000_000))
+        .unwrap()
+        .gas_used;
+    assert_eq!(before, after, "the stored value is still the 4-byte one");
+}
+
+#[test]
+fn metered_views_and_estimates_stop_out_of_gas_and_unmetered_ones_are_unchanged() {
+    let (ex, addr) = deployed(WAT, M);
+    let err = ex
+        .view_with_mode(M, addr, "forever", vec![], ctx(50_000))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(metering::OUT_OF_GAS_MESSAGE), "{err}");
+    let err = ex
+        .estimate_gas_with_mode(M, addr, "forever", vec![], ctx(50_000))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(metering::OUT_OF_GAS_MESSAGE), "{err}");
+
+    // Unmetered: exactly the existing paths.
+    let (ux, uaddr) = deployed(WAT, U);
+    assert_eq!(
+        ux.estimate_gas_with_mode(U, uaddr, "spin_1000", vec![], ctx(10_000_000))
+            .unwrap(),
+        ux.estimate_gas(uaddr, "spin_1000", vec![], ctx(10_000_000))
+            .unwrap()
+    );
+    assert_eq!(
+        ux.view_with_mode(U, uaddr, "spin_1000", vec![], ctx(10_000_000))
+            .unwrap(),
+        ux.view(uaddr, "spin_1000", vec![], ctx(10_000_000)).unwrap()
+    );
+}
+
+#[test]
+fn a_local_executor_runs_metered_views_under_its_gas_cap() {
+    let storage = Arc::new(ContractStorage::new(Arc::new(MemoryStorage::new())));
+    let ex = ContractExecutor::new(storage.clone());
+    let addr = ex
+        .deploy_with_mode(M, wat::parse_str(WAT).unwrap(), "new", vec![], ctx(10_000_000), 0)
+        .unwrap()
+        .contract_address;
+    let local = |gas_cap| {
+        ContractExecutor::with_local_limits(
+            storage.clone(),
+            LocalExecutionLimits {
+                gas_cap,
+                ..LocalExecutionLimits::DEFAULT
+            },
+        )
+    };
+    // An unbounded request is held to the cap.
+    let err = local(50_000)
+        .view_with_mode(M, addr, "forever", vec![], ctx(u64::MAX))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(metering::OUT_OF_GAS_MESSAGE), "{err}");
+    // Within the cap, a local estimate is the block executor's.
+    assert_eq!(
+        local(10_000_000)
+            .estimate_gas_with_mode(M, addr, "spin_1000", vec![], ctx(10_000_000))
+            .unwrap(),
+        ex.estimate_gas_with_mode(M, addr, "spin_1000", vec![], ctx(10_000_000))
+            .unwrap()
+    );
+}
+

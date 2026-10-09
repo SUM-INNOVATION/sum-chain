@@ -581,7 +581,8 @@ impl ContractExecutorState {
         }
     }
 
-    /// View call (read-only, no state changes)
+    /// View call (read-only, no state changes), on the engine the next block
+    /// would use ([`Self::local_execution_mode`]).
     #[allow(clippy::too_many_arguments)]
     pub fn view_call(
         &self,
@@ -594,24 +595,32 @@ impl ContractExecutorState {
         chain_id: u64,
     ) -> Result<Vec<u8>> {
         let caller = from.unwrap_or(Address::ZERO);
+        let mode = Self::local_execution_mode(&self.params, block_height);
 
         let ctx = ExecutionContext {
             caller,
             origin: caller,
             value: 0,
-            gas_limit: u64::MAX, // View calls have unlimited gas
+            // Unmetered views have unlimited gas, as before (a local executor
+            // caps them). A metered view needs a finite budget: the chain's
+            // per-transaction ceiling.
+            gas_limit: match mode {
+                sumc_runtime::ExecutionMode::Unmetered => u64::MAX,
+                _ => self.params.max_contract_gas,
+            },
             block_height,
             block_timestamp,
             chain_id,
         };
 
         self.wasm_executor
-            .view(*contract, method, args, ctx)
+            .view_with_mode(mode, *contract, method, args, ctx)
             .map_err(|e| StateError::ContractError(e.to_string()))
     }
 
     /// Estimate gas for a call via a metered dry-run (executed up to the chain's
-    /// `max_contract_gas`, then rolled back). Returns gas used, or `Err` on
+    /// `max_contract_gas`, then rolled back) on the engine the next block would
+    /// use ([`Self::local_execution_mode`]). Returns gas used, or `Err` on
     /// execution failure / out-of-gas.
     #[allow(clippy::too_many_arguments)]
     pub fn estimate_gas(
@@ -634,9 +643,22 @@ impl ContractExecutorState {
             block_timestamp,
             chain_id,
         };
+        let mode = Self::local_execution_mode(&self.params, block_height);
         self.wasm_executor
-            .estimate_gas(*contract, method, args, ctx)
+            .estimate_gas_with_mode(mode, *contract, method, args, ctx)
             .map_err(|e| StateError::ContractError(e.to_string()))
+    }
+
+    /// The engine a local (RPC) execution at `latest_height` runs on: the one
+    /// block execution uses at `latest_height + 1`, the earliest height at
+    /// which a transaction sent now can execute. So a view or an estimate
+    /// served from the last block before `contract_metering_enabled_from_height`
+    /// is already metered, and its gas is what that block would charge.
+    pub fn local_execution_mode(
+        params: &ChainParams,
+        latest_height: u64,
+    ) -> sumc_runtime::ExecutionMode {
+        crate::contract_metering::contract_execution_mode(params, latest_height.saturating_add(1))
     }
 
     /// Check if a contract exists, from COMMITTED state.

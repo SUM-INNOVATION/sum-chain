@@ -11,7 +11,7 @@
 mod common;
 use common::{fund, setup_with_params, CHAIN_ID};
 
-use sumc_runtime::ContractExecutor;
+use sumc_runtime::{metering, ContractExecutor, ExecutionMode, LocalExecutionLimits};
 use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::transaction::{ContractCallData, ContractDeployData};
@@ -21,7 +21,7 @@ use sumchain_primitives::{
 };
 use sumchain_state::{
     block_contract_gas_budget, check_block_contract_gas, contract_execution_mode,
-    select_within_block_contract_gas,
+    select_within_block_contract_gas, ContractExecutorState,
 };
 use sumchain_storage::contract_cf_kind;
 
@@ -379,3 +379,68 @@ fn the_budget_boundaries_are_exact_and_overflow_is_refused() {
     assert!(check_block_contract_gas(&p, 1, &over).is_err());
     assert_eq!(select_within_block_contract_gas(&p, 1, over).len(), 1);
 }
+
+// ── the RPC executor follows the next block's engine ────────────────────────
+
+/// A view or an estimate is served from the latest block, for a call that can
+/// execute at the next one at the earliest: it runs on that block's engine.
+/// So from the last block before the gate it is already metered, and its gas
+/// is the metered gas a block would charge, not the unmetered figure.
+#[test]
+fn rpc_views_and_estimates_run_on_the_engine_of_the_next_block() {
+    let gate = 100;
+    let mode = |p: &ChainParams, tip| ContractExecutorState::local_execution_mode(p, tip);
+    assert_eq!(mode(&params(Some(gate)), gate - 2), ExecutionMode::Unmetered);
+    assert_eq!(mode(&params(Some(gate)), gate - 1), ExecutionMode::MeteredV1Provisional);
+    assert_eq!(mode(&params(Some(gate)), gate), ExecutionMode::MeteredV1Provisional);
+    assert_eq!(mode(&params(None), u64::MAX), ExecutionMode::Unmetered);
+
+    // Deploy below the gate; ask local (RPC) executors on the published state.
+    let (deployer, proposer) = keys();
+    let (_state, db, _d, ex) = setup_with_params(params(Some(gate)));
+    fund(&db, &deployer, FUNDS);
+    let header = BlockHeader::new(
+        Hash::ZERO,
+        1,
+        1000,
+        Hash::ZERO,
+        Hash::ZERO,
+        *proposer.public_key().as_bytes(),
+    );
+    let mut blk = Block::new(header, vec![deploy_tx(&deployer, 0, "new", 1_000_000)]);
+    let exec = ex.execute_block(&blk, Hash::ZERO, &[]).unwrap();
+    blk.header.state_root = exec.computed_root();
+    let (executed, _sd, _cd) = exec.into_parts();
+    assert_eq!(executed.receipts()[0].status, TxStatus::Success);
+    executed.accept_produced(&blk).unwrap().publish().unwrap();
+
+    let addr = first_contract(&deployer);
+    let local = |gate| {
+        ContractExecutorState::new_local(db.clone(), params(gate), LocalExecutionLimits::DEFAULT)
+    };
+    let estimate = |e: &ContractExecutorState, tip| {
+        e.estimate_gas(&addr, "put", vec![], None, tip, 1000, CHAIN_ID)
+    };
+    let gated = local(Some(gate));
+    let ungated = local(None);
+
+    // Next block below the gate: today's estimate, unchanged.
+    let today = estimate(&ungated, gate).unwrap();
+    assert_eq!(estimate(&gated, gate - 2).unwrap(), today);
+    // Next block at the gate: the metered charge (instantiation and fuel too).
+    let metered = estimate(&gated, gate - 1).unwrap();
+    assert!(metered > today, "metered {metered} vs unmetered {today}");
+    assert_eq!(estimate(&gated, gate).unwrap(), metered);
+
+    // A non-terminating view: stopped by the node-local fuel budget below the
+    // gate, and out of gas (deterministically) from the block before it.
+    let view = |e: &ContractExecutorState, tip| {
+        e.view_call(&addr, "forever", vec![], None, tip, 1000, CHAIN_ID)
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(!view(&gated, gate - 2).contains(metering::OUT_OF_GAS_MESSAGE));
+    let err = view(&gated, gate - 1);
+    assert!(err.contains(metering::OUT_OF_GAS_MESSAGE), "{err}");
+}
+
