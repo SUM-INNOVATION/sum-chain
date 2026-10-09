@@ -237,6 +237,12 @@ impl GasMeter {
         self.consume((pages as Gas).saturating_mul(self.costs.memory_page))
     }
 
+    /// Overwrite the gas used. The metered engine keeps the budget in a guest
+    /// global while guest code runs and writes the result back through this.
+    pub(crate) fn set_used(&self, used: Gas) {
+        self.used.store(used, Ordering::SeqCst);
+    }
+
     /// Get a clone of the used counter (for sharing with WASM)
     pub fn used_counter(&self) -> Arc<AtomicU64> {
         self.used.clone()

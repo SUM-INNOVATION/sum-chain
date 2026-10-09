@@ -3,9 +3,12 @@
 //! Handles contract deployment and execution with gas metering.
 
 use crate::{
-    host::HostEnv, local_limits::LocalExecutionLimits, storage::ContractStorage, CallResult,
-    CodeHash, ContractAddress, ContractEvent, ContractMetadata, DeployResult, Gas, GasMeter,
-    LogEntry, Result, RuntimeError, MAX_CALL_DEPTH, MAX_CODE_SIZE,
+    host::HostEnv,
+    local_limits::LocalExecutionLimits,
+    metering::{self, CostScheduleV1Provisional, MeteredModule},
+    storage::ContractStorage,
+    CallResult, CodeHash, ContractAddress, ContractEvent, ContractMetadata, DeployResult, Gas,
+    GasMeter, LogEntry, Result, RuntimeError, MAX_CALL_DEPTH, MAX_CODE_SIZE,
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -14,8 +17,8 @@ use sumchain_primitives::Address;
 use sumchain_storage::{contract_cf_kind, ContractMutation};
 use tracing::{debug, trace, warn};
 use wasmer::{
-    imports, Function, FunctionEnv, FunctionEnvMut, Instance, Memory, MemoryType, Module, Store,
-    TypedFunction, Value,
+    imports, Function, FunctionEnv, FunctionEnvMut, Global, Instance, Memory, MemoryType, Module,
+    Store, TypedFunction, Value,
 };
 use wasmer_compiler_singlepass::Singlepass;
 
@@ -55,6 +58,20 @@ pub struct ExecutionResult {
     pub error: Option<String>,
 }
 
+/// Which engine and rules a deploy or call runs under.
+///
+/// Chosen by the caller per block height (`contract_metering_enabled_from_height`
+/// in the state layer). [`ExecutionMode::Unmetered`] is the engine and
+/// accounting every block below that gate was executed with, unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    /// The original engine ([`crate::ENGINE_IDENTITY`]): gas on host calls only.
+    Unmetered,
+    /// Metering v1 under the PROVISIONAL schedule
+    /// ([`crate::METERED_ENGINE_IDENTITY`]). See [`crate::metering`].
+    MeteredV1Provisional,
+}
+
 /// Compiled contract cache
 struct CompiledContract {
     module: Module,
@@ -75,6 +92,17 @@ struct WasmEnv {
     /// Bytes host functions may still copy in this execution. `None` on the
     /// block executor: there the only bound is gas, as before.
     host_bytes_left: Option<u64>,
+    /// The budget globals of a metered instance; `None` on the unmetered
+    /// engine, whose host functions never read it.
+    metering: Option<MeteredEnv>,
+}
+
+/// Handles a metered instance's host functions charge through.
+#[derive(Clone)]
+struct MeteredEnv {
+    gas: Global,
+    reason: Global,
+    schedule: CostScheduleV1Provisional,
 }
 
 impl WasmEnv {
@@ -84,6 +112,7 @@ impl WasmEnv {
             memory: None,
             alloc: None,
             host_bytes_left,
+            metering: None,
         }
     }
 
@@ -107,6 +136,27 @@ pub const LOCAL_HOST_BUDGET_EXHAUSTED: &str = "local host copy budget exhausted"
 /// Error text when a local execution exhausts its bulk-operation budget.
 pub const LOCAL_BULK_EXHAUSTED: &str = "local bulk memory budget exhausted";
 
+/// Charge `amount` against a metered instance's gas global, BEFORE the work it
+/// pays for. Short: the global is zeroed, the reason recorded, and the call
+/// traps.
+fn charge_metered(
+    metering: &MeteredEnv,
+    store: &mut impl wasmer::AsStoreMut,
+    amount: Gas,
+) -> std::result::Result<(), wasmer::RuntimeError> {
+    let remaining = metering.gas.get(store).unwrap_i64() as u64;
+    if amount > remaining {
+        metering.gas.set(store, Value::I64(0))?;
+        metering
+            .reason
+            .set(store, Value::I32(metering::TRAP_OUT_OF_GAS))?;
+        return Err(wasmer::RuntimeError::new(metering::OUT_OF_GAS_MESSAGE));
+    }
+    metering
+        .gas
+        .set(store, Value::I64((remaining - amount) as i64))
+}
+
 /// Contract executor - compiles and runs WASM contracts
 pub struct ContractExecutor {
     /// Shared compiler engine. We hold the `Engine` (Send+Sync) rather than a
@@ -129,6 +179,12 @@ pub struct ContractExecutor {
     /// Node-local budgets. `Some` only on an executor that never produces
     /// consensus state (the RPC/view instance); see `with_local_limits`.
     local_limits: Option<LocalExecutionLimits>,
+    /// Modules compiled under metering v1, each with its own engine. Separate
+    /// from `cache`: the same code hash compiles to different machine code
+    /// under the two engines, and neither may be instantiated from the other.
+    metered_cache: RwLock<HashMap<CodeHash, Arc<MeteredModule>>>,
+    /// The metering v1 schedule. PROVISIONAL.
+    schedule: CostScheduleV1Provisional,
 }
 
 impl ContractExecutor {
@@ -149,7 +205,15 @@ impl ContractExecutor {
             storage,
             metadata: RwLock::new(HashMap::new()),
             local_limits: None,
+            metered_cache: RwLock::new(HashMap::new()),
+            schedule: CostScheduleV1Provisional::PROVISIONAL,
         }
+    }
+
+    /// The metering v1 schedule this executor applies in
+    /// [`ExecutionMode::MeteredV1Provisional`].
+    pub fn metering_schedule(&self) -> &CostScheduleV1Provisional {
+        &self.schedule
     }
 
     /// An executor for read-only local use (RPC `contract_call` and
@@ -166,6 +230,8 @@ impl ContractExecutor {
             storage,
             metadata: RwLock::new(HashMap::new()),
             local_limits: Some(limits),
+            metered_cache: RwLock::new(HashMap::new()),
+            schedule: CostScheduleV1Provisional::PROVISIONAL,
         }
     }
 
@@ -210,9 +276,34 @@ impl ContractExecutor {
         Address::from_public_key(&blake3::hash(&data).as_bytes()[..32].try_into().unwrap())
     }
 
-    /// Deploy a new contract
+    /// Deploy a new contract on the unmetered engine.
     pub fn deploy(
         &self,
+        code: Vec<u8>,
+        init_method: &str,
+        init_args: Vec<u8>,
+        ctx: ExecutionContext,
+        deployer_nonce: u64,
+    ) -> Result<DeployResult> {
+        self.deploy_with_mode(
+            ExecutionMode::Unmetered,
+            code,
+            init_method,
+            init_args,
+            ctx,
+            deployer_nonce,
+        )
+    }
+
+    /// Deploy a new contract under `mode`.
+    ///
+    /// Metered: the deploy charge (base plus per code byte) is taken from the
+    /// transaction's budget BEFORE the code is compiled, and the init method
+    /// runs under the metered engine against what is left. Every failure,
+    /// out-of-gas included, takes the same cleanup path as today's traps.
+    pub fn deploy_with_mode(
+        &self,
+        mode: ExecutionMode,
         code: Vec<u8>,
         init_method: &str,
         init_args: Vec<u8>,
@@ -236,23 +327,68 @@ impl ContractExecutor {
             hex::encode(code_hash)
         );
 
-        // Compile and cache module (fresh store; the compiled `Module` outlives it).
-        let (module, engine) = self.compile(&code)?;
+        // Metered: charge the deploy before any compile work, against the one
+        // budget the init call then continues to spend.
+        let precharged = match mode {
+            ExecutionMode::Unmetered => None,
+            ExecutionMode::MeteredV1Provisional => {
+                let meter = Arc::new(GasMeter::new(ctx.gas_limit));
+                meter.consume(self.schedule.deploy_cost(code.len()))?;
+                Some(meter)
+            }
+        };
 
-        // Capture the pre-image of the code row for the reorg journal (None
-        // for a fresh address), then store code.
-        let old_code = self.storage.get_code(&contract_address)?;
-        self.storage.store_code(&contract_address, &code)?;
+        match mode {
+            ExecutionMode::Unmetered => {
+                // Compile and cache module (fresh store; the compiled `Module` outlives it).
+                let (module, engine) = self.compile(&code)?;
 
-        // Cache compiled module
-        self.cache_insert(
-            code_hash,
-            Arc::new(CompiledContract {
-                module: module.clone(),
-                engine,
-                code_hash,
-            }),
-        );
+                // Capture the pre-image of the code row for the reorg journal (None
+                // for a fresh address), then store code.
+                let old_code = self.storage.get_code(&contract_address)?;
+                self.storage.store_code(&contract_address, &code)?;
+
+                // Cache compiled module
+                self.cache_insert(
+                    code_hash,
+                    Arc::new(CompiledContract {
+                        module,
+                        engine,
+                        code_hash,
+                    }),
+                );
+                self.deploy_finalize(
+                    mode, code, code_hash, contract_address, old_code, init_method, init_args,
+                    ctx, None,
+                )
+            }
+            ExecutionMode::MeteredV1Provisional => {
+                let compiled = Arc::new(metering::compile(&code, &self.schedule)?);
+                let old_code = self.storage.get_code(&contract_address)?;
+                self.storage.store_code(&contract_address, &code)?;
+                self.metered_cache.write().insert(code_hash, compiled);
+                self.deploy_finalize(
+                    mode, code, code_hash, contract_address, old_code, init_method, init_args,
+                    ctx, precharged,
+                )
+            }
+        }
+    }
+
+    /// Everything a deploy does after its code row is stored.
+    #[allow(clippy::too_many_arguments)]
+    fn deploy_finalize(
+        &self,
+        mode: ExecutionMode,
+        code: Vec<u8>,
+        code_hash: CodeHash,
+        contract_address: ContractAddress,
+        old_code: Option<Vec<u8>>,
+        init_method: &str,
+        init_args: Vec<u8>,
+        ctx: ExecutionContext,
+        precharged: Option<Arc<GasMeter>>,
+    ) -> Result<DeployResult> {
 
         // Everything after `store_code` runs inside a guarded finalize: ANY
         // failure path (metadata encode/persist, init gas, init Err, init
@@ -274,17 +410,34 @@ impl ContractExecutor {
             self.metadata.write().insert(contract_address, meta);
 
             // Call init method.
-            let gas_meter = Arc::new(GasMeter::new(ctx.gas_limit));
-            gas_meter.consume(gas_meter.costs().deploy_base)?;
+            let (gas_meter, result) = match precharged {
+                None => {
+                    let gas_meter = Arc::new(GasMeter::new(ctx.gas_limit));
+                    gas_meter.consume(gas_meter.costs().deploy_base)?;
 
-            let result = self.call_internal(
-                contract_address,
-                init_method,
-                init_args,
-                ctx.clone(),
-                gas_meter.clone(),
-                0, // call depth
-            )?;
+                    let result = self.call_internal(
+                        contract_address,
+                        init_method,
+                        init_args,
+                        ctx.clone(),
+                        gas_meter.clone(),
+                        0, // call depth
+                    )?;
+                    (gas_meter, result)
+                }
+                Some(gas_meter) => {
+                    debug_assert_eq!(mode, ExecutionMode::MeteredV1Provisional);
+                    let result = self.call_internal_metered(
+                        contract_address,
+                        init_method,
+                        init_args,
+                        ctx.clone(),
+                        gas_meter.clone(),
+                        0,
+                    )?;
+                    (gas_meter, result)
+                }
+            };
 
             if !result.success {
                 return Err(RuntimeError::Execution(
@@ -334,9 +487,11 @@ impl ContractExecutor {
         let _ = self.storage.delete_metadata(contract_address);
         self.metadata.write().remove(contract_address);
         self.cache.write().remove(code_hash);
+        self.metered_cache.write().remove(code_hash);
     }
 
-    /// Call a contract method, with the historical error handling.
+    /// Call a contract method on the unmetered engine, with the historical error
+    /// handling.
     ///
     /// A call that FAILS (`success == false`, e.g. a trap) has its staged
     /// storage writes rolled back. A call that returns `Err` does not: whatever
@@ -354,6 +509,44 @@ impl ContractExecutor {
         ctx: ExecutionContext,
     ) -> Result<ExecutionResult> {
         self.call_with_error_rollback(contract, method, args, ctx, false)
+    }
+
+    /// Call a contract method under `mode`.
+    ///
+    /// Unmetered: [`Self::call`], the historical error handling. Block
+    /// execution below the metering gate calls [`Self::call_with_error_rollback`]
+    /// instead, so that `contract_error_rollback_enabled_from_height` applies.
+    ///
+    /// Metered: one budget, `ctx.gas_limit`, for the base charge, instruction
+    /// fuel, instantiation and host work. Any failure — a trap, out of gas, the
+    /// stack limit, a refused host length — fails the call and rolls its
+    /// staged writes back, including failures that surface as `Err`.
+    pub fn call_with_mode(
+        &self,
+        mode: ExecutionMode,
+        contract: ContractAddress,
+        method: &str,
+        args: Vec<u8>,
+        ctx: ExecutionContext,
+    ) -> Result<ExecutionResult> {
+        if mode == ExecutionMode::Unmetered {
+            return self.call(contract, method, args, ctx);
+        }
+        let gas_meter = Arc::new(GasMeter::new(ctx.gas_limit));
+        gas_meter.consume(gas_meter.costs().call_base)?;
+        let result = match self.call_internal_metered(contract, method, args, ctx, gas_meter, 0) {
+            Ok(r) => r,
+            Err(e) => {
+                self.storage.rollback();
+                return Err(e);
+            }
+        };
+        if result.success {
+            self.storage.commit()?;
+        } else {
+            self.storage.rollback();
+        }
+        Ok(result)
     }
 
     /// Call a contract method. With `rollback_on_error`, a call that returns
@@ -603,6 +796,281 @@ impl ContractExecutor {
                         None => e.to_string(),
                     }),
                 })
+            }
+        }
+    }
+
+    /// [`Self::call_internal`] under metering v1.
+    ///
+    /// Same shape, with these differences, each deterministic:
+    /// * the module comes from (or is compiled into) the metered cache, under
+    ///   its own engine; compiling on a cache miss is NOT charged, so gas never
+    ///   depends on what this node happens to have cached;
+    /// * instantiation (initial pages, data-segment bytes) is charged before
+    ///   it happens;
+    /// * the instance's gas global is loaded from `gas_meter` before any guest
+    ///   code runs (including `alloc`), and written back to it afterwards;
+    /// * argument and return-data copies are charged per byte before copying,
+    ///   and the guest-supplied return length is bounded and range-checked
+    ///   before anything is allocated;
+    /// * metering failures (out of gas, stack limit, refused lengths) are
+    ///   `success: false`, never a panic.
+    fn call_internal_metered(
+        &self,
+        contract: ContractAddress,
+        method: &str,
+        args: Vec<u8>,
+        ctx: ExecutionContext,
+        gas_meter: Arc<GasMeter>,
+        call_depth: u32,
+    ) -> Result<ExecutionResult> {
+        if call_depth >= MAX_CALL_DEPTH {
+            return Err(RuntimeError::RecursionLimit);
+        }
+        let schedule = self.schedule;
+
+        let code = self
+            .storage
+            .get_code(&contract)?
+            .ok_or_else(|| RuntimeError::ContractNotFound(contract.to_string()))?;
+        let code_hash = Self::code_hash(&code);
+
+        let cached = self.metered_cache.read().get(&code_hash).cloned();
+        let compiled = match cached {
+            Some(c) => c,
+            None => {
+                let c = Arc::new(metering::compile(&code, &schedule)?);
+                self.metered_cache.write().insert(code_hash, c.clone());
+                c
+            }
+        };
+
+        let failed = |gas_meter: &GasMeter, error: String| ExecutionResult {
+            return_value: Vec::new(),
+            gas_used: gas_meter.used(),
+            events: Vec::new(),
+            logs: Vec::new(),
+            success: false,
+            error: Some(error),
+        };
+
+        // Instantiation work, charged before it is done.
+        if gas_meter
+            .consume(compiled.plan.instantiation_cost(&schedule))
+            .is_err()
+        {
+            gas_meter.set_used(gas_meter.limit());
+            return Ok(failed(&gas_meter, metering::OUT_OF_GAS_MESSAGE.to_string()));
+        }
+
+        let host_env = Arc::new(RwLock::new(HostEnv::new(
+            contract,
+            ctx.caller,
+            ctx.origin,
+            ctx.value,
+            ctx.block_height,
+            ctx.block_timestamp,
+            ctx.chain_id,
+            gas_meter.clone(),
+            self.storage.clone(),
+            0,
+        )));
+
+        let mut store = Store::new(compiled.engine.clone());
+        // No node-local byte budget: metered host copies are charged as gas
+        // (the metered host functions never read `host_bytes_left`).
+        let function_env = FunctionEnv::new(&mut store, WasmEnv::new(host_env.clone(), None));
+        let imports = self.create_imports_metered(&mut store, &function_env);
+        let instance = Instance::new(&mut store, &compiled.module, &imports)?;
+
+        let global = |name: &str| -> Result<Global> {
+            instance
+                .exports
+                .get_global(name)
+                .cloned()
+                .map_err(|e| RuntimeError::Instantiation(format!("metering global {name}: {e}")))
+        };
+        let gas_global = global(metering::GAS_GLOBAL_EXPORT)?;
+        let reason_global = global(metering::TRAP_REASON_EXPORT)?;
+        gas_global.set(&mut store, Value::I64(gas_meter.remaining() as i64))?;
+        let metered = MeteredEnv {
+            gas: gas_global.clone(),
+            reason: reason_global.clone(),
+            schedule,
+        };
+        {
+            let env = function_env.as_mut(&mut store);
+            env.metering = Some(metered.clone());
+        }
+        if let Ok(memory) = instance.exports.get_memory("memory") {
+            function_env.as_mut(&mut store).memory = Some(memory.clone());
+        }
+        if let Ok(alloc) = instance
+            .exports
+            .get_typed_function::<i32, i32>(&store, "alloc")
+        {
+            function_env.as_mut(&mut store).alloc = Some(alloc);
+        }
+
+        // Write the budget the guest left back into the meter. Out of gas
+        // spends all of it.
+        let settle = |store: &mut Store| {
+            let reason = reason_global.get(store).i32().unwrap_or(0);
+            let remaining = gas_global.get(store).i64().unwrap_or(0) as u64;
+            if reason == metering::TRAP_OUT_OF_GAS {
+                gas_meter.set_used(gas_meter.limit());
+            } else {
+                gas_meter.set_used(gas_meter.limit().saturating_sub(remaining));
+            }
+            reason
+        };
+
+        let func: TypedFunction<(i32, i32), i32> = instance
+            .exports
+            .get_typed_function(&store, method)
+            .map_err(|_| RuntimeError::MethodNotFound(method.to_string()))?;
+
+        // Arguments: charged per byte before the copy (the guest's `alloc`
+        // then runs metered against the same budget).
+        if charge_metered(
+            &metered,
+            &mut store,
+            (args.len() as Gas).saturating_mul(schedule.host_copy_per_byte),
+        )
+        .is_err()
+        {
+            settle(&mut store);
+            return Ok(failed(&gas_meter, metering::OUT_OF_GAS_MESSAGE.to_string()));
+        }
+        let (args_ptr, args_len) = match self.write_to_memory(&instance, &mut store, &args) {
+            Ok(v) => v,
+            Err(e) => {
+                let reason = settle(&mut store);
+                return Ok(failed(&gas_meter, metered_error(reason, e.to_string())));
+            }
+        };
+
+        let result = func.call(&mut store, args_ptr, args_len);
+        let events = host_env.read().take_events();
+        let logs = host_env.read().take_logs();
+
+        match result {
+            Ok(ret_ptr) => {
+                let return_value = if ret_ptr != 0 {
+                    match self.read_return_metered(&instance, &mut store, &metered, ret_ptr) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let reason = settle(&mut store);
+                            return Ok(failed(&gas_meter, metered_error(reason, e)));
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
+                settle(&mut store);
+                Ok(ExecutionResult {
+                    return_value,
+                    gas_used: gas_meter.used(),
+                    events,
+                    logs,
+                    success: true,
+                    error: None,
+                })
+            }
+            Err(e) => {
+                let reason = settle(&mut store);
+                warn!("Metered contract execution failed: {}", e);
+                Ok(ExecutionResult {
+                    return_value: Vec::new(),
+                    gas_used: gas_meter.used(),
+                    events,
+                    logs,
+                    success: false,
+                    error: Some(metered_error(reason, e.to_string())),
+                })
+            }
+        }
+    }
+
+    /// Read a length-prefixed return value under metering v1: the length is
+    /// bounded and range-checked, then charged per byte, before anything is
+    /// allocated or copied.
+    fn read_return_metered(
+        &self,
+        instance: &Instance,
+        store: &mut Store,
+        metered: &MeteredEnv,
+        ptr: i32,
+    ) -> std::result::Result<Vec<u8>, String> {
+        let memory = instance
+            .exports
+            .get_memory("memory")
+            .map_err(|e| format!("return data: {e}"))?;
+        if ptr < 0 {
+            return Err("return data: negative pointer".to_string());
+        }
+        let start = ptr as u64;
+        let mut len_bytes = [0u8; 4];
+        memory
+            .view(store)
+            .read(start, &mut len_bytes)
+            .map_err(|e| format!("return data: {e}"))?;
+        let len = u64::from(u32::from_le_bytes(len_bytes));
+        if len > u64::from(metered.schedule.max_return_data_len) {
+            return Err(format!(
+                "return data of {len} bytes exceeds the limit of {}",
+                metered.schedule.max_return_data_len
+            ));
+        }
+        let end = start.saturating_add(4).saturating_add(len);
+        if end > memory.view(store).data_size() {
+            return Err("return data lies outside guest memory".to_string());
+        }
+        charge_metered(
+            metered,
+            store,
+            len.saturating_mul(metered.schedule.host_copy_per_byte),
+        )
+        .map_err(|e| e.message())?;
+        let mut data = vec![0u8; len as usize];
+        memory
+            .view(store)
+            .read(start + 4, &mut data)
+            .map_err(|e| format!("return data: {e}"))?;
+        Ok(data)
+    }
+
+    /// Imports for a metered instance: the storage functions charge and
+    /// bound before copying; the rest are the unmetered ones, none of which
+    /// copies guest memory.
+    fn create_imports_metered(
+        &self,
+        store: &mut Store,
+        env: &FunctionEnv<WasmEnv>,
+    ) -> wasmer::Imports {
+        imports! {
+            "env" => {
+                "caller" => Function::new_typed_with_env(store, env, host_caller),
+                "self_address" => Function::new_typed_with_env(store, env, host_self_address),
+                "origin" => Function::new_typed_with_env(store, env, host_origin),
+                "attached_value" => Function::new_typed_with_env(store, env, host_attached_value),
+                "block_height" => Function::new_typed_with_env(store, env, host_block_height),
+                "block_timestamp" => Function::new_typed_with_env(store, env, host_block_timestamp),
+                "chain_id" => Function::new_typed_with_env(store, env, host_chain_id),
+
+                "storage_read" => Function::new_typed_with_env(store, env, host_storage_read_metered),
+                "storage_write" => Function::new_typed_with_env(store, env, host_storage_write_metered),
+                "storage_remove" => Function::new_typed_with_env(store, env, host_storage_remove_metered),
+
+                "blake3" => Function::new_typed_with_env(store, env, host_blake3),
+                "ed25519_verify" => Function::new_typed_with_env(store, env, host_ed25519_verify),
+
+                "emit" => Function::new_typed_with_env(store, env, host_emit),
+                "log" => Function::new_typed_with_env(store, env, host_log),
+
+                "transfer" => Function::new_typed_with_env(store, env, host_transfer),
+
+                "abort" => Function::new_typed_with_env(store, env, host_abort),
             }
         }
     }
@@ -1023,6 +1491,165 @@ fn host_storage_remove(
     let key = read_guest_bytes(&memory, &store, key_ptr, key_len)?;
     let result = host_env.read().storage_remove(&key);
     result.map_err(|e| wasmer::RuntimeError::new(format!("storage_remove: {}", e)))
+}
+
+/// The error text of a metered failure: the metering reason if one was
+/// recorded, otherwise what the engine reported.
+fn metered_error(reason: i32, other: String) -> String {
+    match reason {
+        metering::TRAP_OUT_OF_GAS => metering::OUT_OF_GAS_MESSAGE.to_string(),
+        metering::TRAP_STACK_LIMIT => metering::STACK_LIMIT_MESSAGE.to_string(),
+        _ => other,
+    }
+}
+
+/// A guest length, refused if negative or above `cap`, BEFORE anything is
+/// read or charged against it.
+fn bounded_len(len: i32, cap: u32, what: &str) -> std::result::Result<u64, wasmer::RuntimeError> {
+    if len < 0 {
+        return Err(wasmer::RuntimeError::new(format!("{what}: negative length")));
+    }
+    if len as u32 > cap {
+        return Err(wasmer::RuntimeError::new(format!(
+            "{what}: {len} bytes exceeds the limit of {cap}"
+        )));
+    }
+    Ok(len as u64)
+}
+
+fn metering_of(data: &WasmEnv) -> std::result::Result<MeteredEnv, wasmer::RuntimeError> {
+    data.metering
+        .clone()
+        .ok_or_else(|| wasmer::RuntimeError::new("metered import without metering state"))
+}
+
+/// `storage_read` under metering v1: key bounded and charged (base + per key
+/// byte) before it is copied; the value bounded and charged per byte before
+/// it is copied into guest memory.
+fn host_storage_read_metered(
+    mut env: FunctionEnvMut<WasmEnv>,
+    key_ptr: i32,
+    key_len: i32,
+) -> std::result::Result<i32, wasmer::RuntimeError> {
+    let (data, mut store) = env.data_and_store_mut();
+    let metered = metering_of(data)?;
+    let s = metered.schedule;
+    let memory = data
+        .memory
+        .clone()
+        .ok_or_else(|| wasmer::RuntimeError::new("contract has no exported memory"))?;
+    let alloc = data.alloc.clone();
+    let host_env = data.host_env.clone();
+
+    let key_len = bounded_len(key_len, s.max_key_len, "storage_read key")?;
+    charge_metered(
+        &metered,
+        &mut store,
+        s.storage_read_base
+            .saturating_add(key_len.saturating_mul(s.storage_read_per_key_byte)),
+    )?;
+    let key = read_guest_bytes(&memory, &store, key_ptr, key_len as i32)?;
+    let value = {
+        let h = host_env.read();
+        h.storage.read(&h.self_address, &key)
+    }
+    .map_err(|e| wasmer::RuntimeError::new(format!("storage_read: {}", e)))?;
+
+    match value {
+        None => Ok(0),
+        Some(v) => {
+            if v.len() as u64 > u64::from(s.max_value_len) {
+                return Err(wasmer::RuntimeError::new(format!(
+                    "storage_read: stored value of {} bytes exceeds the limit of {}",
+                    v.len(),
+                    s.max_value_len
+                )));
+            }
+            charge_metered(
+                &metered,
+                &mut store,
+                (v.len() as Gas).saturating_mul(s.storage_read_per_value_byte),
+            )?;
+            let alloc = alloc
+                .ok_or_else(|| wasmer::RuntimeError::new("contract missing alloc export"))?;
+            let total = 4usize + v.len();
+            let ptr = alloc
+                .call(&mut store, total as i32)
+                .map_err(|e| wasmer::RuntimeError::new(format!("guest alloc: {}", e)))?;
+            let mut buf = Vec::with_capacity(total);
+            buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&v);
+            let view = memory.view(&store);
+            view.write(ptr as u64, &buf)
+                .map_err(|e| wasmer::RuntimeError::new(format!("guest memory write: {}", e)))?;
+            Ok(ptr)
+        }
+    }
+}
+
+/// `storage_write` under metering v1: key and value bounded and the write
+/// charged (unchanged prices) before either is copied.
+fn host_storage_write_metered(
+    mut env: FunctionEnvMut<WasmEnv>,
+    key_ptr: i32,
+    key_len: i32,
+    value_ptr: i32,
+    value_len: i32,
+) -> std::result::Result<(), wasmer::RuntimeError> {
+    let (data, mut store) = env.data_and_store_mut();
+    let metered = metering_of(data)?;
+    let s = metered.schedule;
+    let memory = data
+        .memory
+        .clone()
+        .ok_or_else(|| wasmer::RuntimeError::new("contract has no exported memory"))?;
+    let host_env = data.host_env.clone();
+    let key_len = bounded_len(key_len, s.max_key_len, "storage_write key")?;
+    let value_len = bounded_len(value_len, s.max_value_len, "storage_write value")?;
+    charge_metered(
+        &metered,
+        &mut store,
+        s.storage_write_base.saturating_add(
+            key_len
+                .saturating_add(value_len)
+                .saturating_mul(s.storage_write_per_byte),
+        ),
+    )?;
+    let key = read_guest_bytes(&memory, &store, key_ptr, key_len as i32)?;
+    let value = read_guest_bytes(&memory, &store, value_ptr, value_len as i32)?;
+    let h = host_env.read();
+    h.storage
+        .write(&h.self_address, &key, &value)
+        .map_err(|e| wasmer::RuntimeError::new(format!("storage_write: {}", e)))
+}
+
+/// `storage_remove` under metering v1: key bounded and the removal plus the
+/// key copy charged before the copy.
+fn host_storage_remove_metered(
+    mut env: FunctionEnvMut<WasmEnv>,
+    key_ptr: i32,
+    key_len: i32,
+) -> std::result::Result<(), wasmer::RuntimeError> {
+    let (data, mut store) = env.data_and_store_mut();
+    let metered = metering_of(data)?;
+    let s = metered.schedule;
+    let memory = data
+        .memory
+        .clone()
+        .ok_or_else(|| wasmer::RuntimeError::new("contract has no exported memory"))?;
+    let host_env = data.host_env.clone();
+    let key_len = bounded_len(key_len, s.max_key_len, "storage_remove key")?;
+    charge_metered(
+        &metered,
+        &mut store,
+        s.storage_remove
+            .saturating_add(key_len.saturating_mul(s.host_copy_per_byte)),
+    )?;
+    let key = read_guest_bytes(&memory, &store, key_ptr, key_len as i32)?;
+    let h = host_env.read();
+    h.storage
+        .delete(&h.self_address, &key)
+        .map_err(|e| wasmer::RuntimeError::new(format!("storage_remove: {}", e)))
 }
 
 fn host_blake3(env: FunctionEnvMut<WasmEnv>, data_ptr: i32, data_len: i32) -> i32 {
