@@ -296,3 +296,42 @@ fn the_gate_is_dormant_by_default() {
         None
     );
 }
+
+// ── with the metering gate (0x1041) ─────────────────────────────────────────
+
+fn with_gates(rollback: Option<u64>, metering: Option<u64>) -> ChainParams {
+    let mut p = with_gate(rollback);
+    p.contract_metering_enabled_from_height = metering;
+    p
+}
+
+/// The rule: an erroring call's staged writes are rolled back at height `h`
+/// when `h >= contract_error_rollback_enabled_from_height` OR
+/// `h >= contract_metering_enabled_from_height`. Metered execution rolls back
+/// every failing call by construction, so the rollback gate decides only
+/// below the metering gate, and neither order between them is required. The
+/// receipt is `Failed(5)` in every case.
+#[test]
+fn the_metering_gate_implies_error_rollback_whatever_the_rollback_gate_says() {
+    // The block is at height 1: a gate at 1 is open, a gate at 2 is not.
+    for (rollback, metering, leaks) in [
+        (None, None, true),
+        (None, Some(2), true),
+        (Some(2), Some(2), true),
+        (None, Some(1), false),
+        (Some(1), None, false),
+        (Some(2), Some(1), false),
+        (Some(1), Some(2), false),
+        (Some(1), Some(1), false),
+    ] {
+        for o in [
+            erroring_then_successful_call(with_gates(rollback, metering)),
+            erroring_call_then_deploy(with_gates(rollback, metering)),
+        ] {
+            let case = format!("rollback {rollback:?}, metering {metering:?}");
+            assert_eq!(o.statuses[1], TxStatus::Failed(5), "{case}");
+            assert_eq!(o.storage_records == 1, leaks, "{case}: {o:?}");
+        }
+    }
+}
+

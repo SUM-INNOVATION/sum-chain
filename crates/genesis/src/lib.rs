@@ -2702,6 +2702,12 @@ pub struct ChainParams {
     /// [`Self::contracts_enabled_from_height`] is closed, since no contract
     /// runs; it should open at or before that gate.
     ///
+    /// Relationship to [`Self::contract_metering_enabled_from_height`]: metered
+    /// execution rolls back every failing call's writes by construction, so
+    /// an erroring call is rolled back at height `h` when `h` reaches either
+    /// gate. This gate decides only below the metering gate; no order between
+    /// the two is required, and set above it, it changes nothing.
+    ///
     /// Production-safe default `None`, which is what an absent field resolves
     /// to and what every genesis written before this gate existed carries.
     /// `None` closes the gate, and a closed gate means a node executes exactly
@@ -2762,7 +2768,9 @@ pub struct ChainParams {
     /// `Failed(5)`, a deploy with `Failed(4)`, the fee is charged, the nonce
     /// advances and staged writes roll back.
     ///
-    /// The same gate enables [`Self::max_block_contract_gas`].
+    /// The same gate enables [`Self::max_block_contract_gas`], and implies the
+    /// error rollback of [`Self::contract_error_rollback_enabled_from_height`]
+    /// at and above it, whether or not that gate is set.
     ///
     /// **The cost schedule behind it is PROVISIONAL**
     /// (`sumc_runtime::CostScheduleV1Provisional`) and must be ratified and
