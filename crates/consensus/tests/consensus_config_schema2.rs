@@ -1181,6 +1181,42 @@ fn the_pending_transition_of_a_read_record_matches_the_database() {
 /// #279: the metering gate and block budget are registered in the draft and
 /// held dormant — unset, the schema-1 configuration is unchanged; set, this
 /// binary refuses rather than run a rule it does not record.
+/// The wire order is ascending id, not registration order: the real schema 2
+/// with `SCHEMA_2_ADDED` listed in reverse encodes every genesis, with every
+/// schema-2 field set or none, to the same bytes and commitment. The list's
+/// order is history (append-only); it is never format.
+#[test]
+fn schema_2_encodes_in_id_order_whatever_the_registration_order() {
+    let reversed: Vec<AddedField> = SCHEMA_2_ADDED.iter().rev().copied().collect();
+    let schema: &'static Schema = Box::leak(Box::new(Schema {
+        number: 2,
+        previous: Some(&SCHEMA_1),
+        added: Box::leak(reversed.into_boxed_slice()),
+    }));
+    let reads: &'static [&'static Schema] = Box::leak(Box::new([&SCHEMA_1, schema]));
+    let policy: &'static SchemaPolicy = Box::leak(Box::new(SchemaPolicy {
+        reads,
+        writes: schema,
+        knows: schema,
+    }));
+    schema.check().unwrap();
+    let ids = |s: &'static Schema| s.specs().iter().map(|f| f.id).collect::<Vec<_>>();
+    assert_eq!(ids(schema), ids(&SCHEMA_2));
+    assert!(ids(&SCHEMA_2).windows(2).all(|w| w[0] < w[1]));
+
+    let mut all_set = g2();
+    all_set.params.credential_schema_validation_enabled_from_height = Some(5_000);
+    all_set.params.contract_error_rollback_enabled_from_height = Some(6_000);
+    all_set.params.contract_metering_enabled_from_height = Some(7_000);
+    all_set.params.max_block_contract_gas = Some(100_000_000);
+    for genesis in [g2(), all_set] {
+        let a = ccfg::build_with(&genesis, &REAL_ENABLED).unwrap();
+        let b = ccfg::build_with(&genesis, policy).unwrap();
+        assert_eq!(a.encode(), b.encode());
+        assert_eq!(a.commitment(), b.commitment());
+    }
+}
+
 #[test]
 fn the_contract_metering_fields_are_dormant_draft_fields() {
     assert_eq!(ccfg::build(&g2()).unwrap().commitment(), h(C2));

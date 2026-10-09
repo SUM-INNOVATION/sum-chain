@@ -253,7 +253,9 @@ pub static SCHEMA_1: Schema = Schema {
 /// written schema 2, and this binary does not (see [`PRODUCTION`]).
 ///
 /// Each post-schema-1 gate or parameter appends its own entry in its own
-/// change. Ids are never reused or reordered.
+/// change. Ids are never reused or reordered. The list's order is history
+/// only: configurations encode in ascending id order ([`Schema::specs`]), so
+/// where an entry sits here never changes bytes or commitments.
 pub const SCHEMA_2_ADDED: &[AddedField] = &[
     // #277: chain-defined activation of credential schema validation.
     AddedField {
