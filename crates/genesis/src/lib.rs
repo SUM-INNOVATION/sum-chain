@@ -207,6 +207,18 @@ pub enum GenesisError {
          gate must be at or below the consent-grant gate"
     )]
     HealthcareAuthorizationAfterConsentGrantGate { authorization: u64, grant: u64 },
+
+    /// The block contract gas budget is below the per-transaction ceiling
+    /// while the metering gate is set (#279). A transaction declaring the
+    /// ceiling could then never be included: every proposer skips it and every
+    /// importer refuses a block carrying it.
+    #[error(
+        "max_block_contract_gas is Some({budget}), below max_contract_gas {ceiling}, while \
+         contract_metering_enabled_from_height is set. A contract transaction declaring \
+         the per-transaction ceiling could never be included in a block. The block budget \
+         must be at least the per-transaction ceiling"
+    )]
+    BlockContractGasBelowTxCeiling { budget: u64, ceiling: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, GenesisError>;
@@ -2733,6 +2745,55 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub messaging_timestamp_units_enabled_from_height: Option<u64>,
+
+    /// Contract execution is metered (#279).
+    ///
+    /// Below this height a contract deploy or call runs on the unmetered
+    /// engine (`sumc_runtime::ENGINE_IDENTITY`), which charges gas on host
+    /// calls only: no instruction, memory-growth, bulk-operation, recursion or
+    /// compile bound, and a recursion depth set by the native stack. At and
+    /// above it the block executor runs contracts on metering v1
+    /// (`sumc_runtime::METERED_ENGINE_IDENTITY`): fuel charged before each basic
+    /// block, dynamic charges before bulk operations and memory growth, a
+    /// 256-page memory ceiling, a deterministic stack limit, host lengths
+    /// bounded and charged before copying, and deploy charged per code byte
+    /// before compiling — all against the transaction's `gas_limit`. Failure
+    /// semantics are those of today's trap path: a call fails with
+    /// `Failed(5)`, a deploy with `Failed(4)`, the fee is charged, the nonce
+    /// advances and staged writes roll back.
+    ///
+    /// The same gate enables [`Self::max_block_contract_gas`].
+    ///
+    /// **The cost schedule behind it is PROVISIONAL**
+    /// (`sumc_runtime::CostScheduleV1Provisional`) and must be ratified and
+    /// frozen under a non-provisional identity before this is ever set.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub contract_metering_enabled_from_height: Option<u64>,
+
+    /// Upper bound on the summed DECLARED `gas_limit` of the contract
+    /// transactions (`ContractDeploy`, `ContractCall`) in one block (#279).
+    ///
+    /// Read only where [`Self::contract_metering_enabled_from_height`] is open.
+    /// Declared limits, not gas used, so an importer refuses an over-budget
+    /// block before executing any of it, and a proposer skips a contract
+    /// transaction that would not fit and carries on with the rest. The sum is
+    /// checked arithmetic: an overflowing sum is over budget.
+    ///
+    /// `None` is no block limit (each transaction is still bounded by
+    /// `max_contract_gas`). PROVISIONAL: no value is chosen; the design note's
+    /// range is a recommendation awaiting measurement on production hardware.
+    #[serde(default)]
+    pub max_block_contract_gas: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -3156,6 +3217,10 @@ impl Default for ChainParams {
             contract_error_rollback_enabled_from_height: None,
             // Production-safe default: messaging keeps reading the block timestamp as before — dormant.
             messaging_timestamp_units_enabled_from_height: None,
+            // Production-safe default: contracts run on the unmetered engine — dormant.
+            contract_metering_enabled_from_height: None,
+            // No block-level contract gas budget (inert while the metering gate is closed).
+            max_block_contract_gas: None,
         }
     }
 }
@@ -3238,6 +3303,23 @@ impl ChainParams {
             return Err(GenesisError::IncompleteSubsystemActivation {
                 gate: "compute_pool_enabled_from_height",
             });
+        }
+        // ── block contract gas budget >= per-transaction ceiling (#279) ─────
+        //
+        // Structural only; it ratifies neither value. Checked whenever both the
+        // metering gate and the budget are set (the budget is inert otherwise),
+        // so any single admissible contract transaction fits an otherwise empty
+        // block and selection and import stay total.
+        if let (Some(_), Some(budget)) = (
+            self.contract_metering_enabled_from_height,
+            self.max_block_contract_gas,
+        ) {
+            if budget < self.max_contract_gas {
+                return Err(GenesisError::BlockContractGasBelowTxCeiling {
+                    budget,
+                    ceiling: self.max_contract_gas,
+                });
+            }
         }
         if self.beacon_enabled_from_height.is_some() {
             return Err(GenesisError::IncompleteSubsystemActivation {
@@ -3762,6 +3844,10 @@ impl ChainParams {
             (
                 "messaging_timestamp_units_enabled_from_height",
                 self.messaging_timestamp_units_enabled_from_height,
+            ),
+            (
+                "contract_metering_enabled_from_height",
+                self.contract_metering_enabled_from_height,
             ),
         ]
     }

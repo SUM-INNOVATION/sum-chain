@@ -270,8 +270,11 @@ fn this_binary_keeps_a_schema_1_database_as_it_is() {
 
 #[test]
 fn the_production_schema_2_is_a_well_formed_draft() {
-    // Registered in append order: #277's, #279's and #278's gates, then
-    // #215's compute-pool parameter group (outside the gate range).
+    // Registered in append order: #277's, #279's and #278's gates, #215's
+    // compute-pool parameter group (outside the gate range), then #279's
+    // metering gate, block budget, engine identity and cost schedule. The
+    // metering parameters are absent while unset (checked through the real
+    // transition below).
     let ids: Vec<(u16, &str)> = SCHEMA_2_ADDED
         .iter()
         .map(|a| (a.spec.id, a.spec.name))
@@ -283,6 +286,13 @@ fn the_production_schema_2_is_a_well_formed_draft() {
             (0x1042, "contract_error_rollback_enabled_from_height"),
             (0x1040, "messaging_timestamp_units_enabled_from_height"),
             (0x0720, "compute_pool_params"),
+            (0x1041, "contract_metering_enabled_from_height"),
+            (0x0115, "max_block_contract_gas"),
+            (0x2716, "sumc_runtime::metering::METERED_ENGINE_IDENTITY"),
+            (
+                0x2717,
+                "sumc_runtime::metering::CostScheduleV1Provisional::PROVISIONAL"
+            ),
         ]
     );
     // Every gate registered so far is dormant in every default genesis.
@@ -1166,4 +1176,21 @@ fn the_pending_transition_of_a_read_record_matches_the_database() {
         None
     );
     assert_eq!(pending_schema_transition_with(&db, &ENABLED).unwrap(), None);
+}
+
+/// #279: the metering gate and block budget are registered in the draft and
+/// held dormant — unset, the schema-1 configuration is unchanged; set, this
+/// binary refuses rather than run a rule it does not record.
+#[test]
+fn the_contract_metering_fields_are_dormant_draft_fields() {
+    assert_eq!(ccfg::build(&g2()).unwrap().commitment(), h(C2));
+    let mut g = g2();
+    g.params.contract_metering_enabled_from_height = Some(1_000);
+    let err = ccfg::build(&g).unwrap_err().to_string();
+    assert!(err.contains("contract_metering_enabled_from_height"), "{err}");
+    assert!(err.contains("METERED_ENGINE_IDENTITY"), "{err}");
+    let mut g = g2();
+    g.params.max_block_contract_gas = Some(100_000_000);
+    let err = ccfg::build(&g).unwrap_err().to_string();
+    assert!(err.contains("max_block_contract_gas"), "{err}");
 }

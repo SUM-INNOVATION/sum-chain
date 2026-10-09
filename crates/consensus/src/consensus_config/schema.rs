@@ -253,8 +253,7 @@ pub static SCHEMA_1: Schema = Schema {
 /// written schema 2, and this binary does not (see [`PRODUCTION`]).
 ///
 /// Each post-schema-1 gate or parameter appends its own entry in its own
-/// change. Ids are never reused or reordered. 0x1041 is held by a gate
-/// registered on another branch; this branch registers only its own.
+/// change. Ids are never reused or reordered.
 pub const SCHEMA_2_ADDED: &[AddedField] = &[
     // #277: chain-defined activation of credential schema validation.
     AddedField {
@@ -308,6 +307,37 @@ pub const SCHEMA_2_ADDED: &[AddedField] = &[
         },
         source: Source::Param(compute_pool_params_value),
     },
+    // #279: contract metering gate (dormant). Next free gate id after the
+    // ids reserved by #285/#286 (0x103f, 0x1040).
+    AddedField {
+        spec: added_spec(0x1041, "contract_metering_enabled_from_height", Ty::U64),
+        source: Source::Gate,
+    },
+    // #279: block contract gas budget. Absent while unset (no block limit);
+    // read only where the metering gate is open.
+    AddedField {
+        spec: added_spec(0x0115, "max_block_contract_gas", Ty::U64),
+        source: Source::Param(max_block_contract_gas),
+    },
+    // #279: the metered engine and its PROVISIONAL cost schedule. Absent while
+    // the metering gate is unset (contracts then run on the unmetered engine,
+    // committed by schema 1 as `sumc_runtime::ENGINE_IDENTITY`).
+    AddedField {
+        spec: added_spec(
+            0x2716,
+            "sumc_runtime::metering::METERED_ENGINE_IDENTITY",
+            Ty::Bytes,
+        ),
+        source: Source::Param(metered_engine_identity),
+    },
+    AddedField {
+        spec: added_spec(
+            0x2717,
+            "sumc_runtime::metering::CostScheduleV1Provisional::PROVISIONAL",
+            Ty::Bytes,
+        ),
+        source: Source::Param(metered_cost_schedule),
+    },
 ];
 
 /// Field id of [`compute_pool_params_value`] (#215).
@@ -323,6 +353,45 @@ fn compute_pool_params_value(genesis: &Genesis) -> Value {
     match &genesis.params.compute_pool_params {
         None => Value::Absent,
         Some(p) => Value::Bytes(p.canonical_bytes()),
+    }
+}
+
+/// An optional schema-2 field (absent is its pre-existing behaviour).
+const fn added_spec(id: u16, name: &'static str, ty: Ty) -> FieldSpec {
+    FieldSpec {
+        id,
+        name,
+        ty,
+        optional: true,
+        item_width: None,
+        list_order: ListOrder::SortedUnique,
+    }
+}
+
+fn max_block_contract_gas(genesis: &Genesis) -> Value {
+    genesis
+        .params
+        .max_block_contract_gas
+        .map_or(Value::Absent, Value::U64)
+}
+
+fn metered_engine_identity(genesis: &Genesis) -> Value {
+    match genesis.params.contract_metering_enabled_from_height {
+        None => Value::Absent,
+        Some(_) => Value::Bytes(
+            sumc_runtime::metering::METERED_ENGINE_IDENTITY
+                .as_bytes()
+                .to_vec(),
+        ),
+    }
+}
+
+fn metered_cost_schedule(genesis: &Genesis) -> Value {
+    match genesis.params.contract_metering_enabled_from_height {
+        None => Value::Absent,
+        Some(_) => Value::Bytes(
+            sumc_runtime::metering::CostScheduleV1Provisional::PROVISIONAL.encode(),
+        ),
     }
 }
 

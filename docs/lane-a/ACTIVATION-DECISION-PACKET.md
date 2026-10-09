@@ -28,10 +28,10 @@ asked for:
 
 ---
 
-## Part 0a — Five gates arrived after this packet was regenerated
+## Part 0a — Six gates arrived after this packet was regenerated
 
-`ChainParams` now declares **sixty-six**. This packet covers sixty-one, and
-the five it does not cover are named here rather than left to be discovered by
+`ChainParams` now declares **sixty-seven**. This packet covers sixty-one, and
+the six it does not cover are named here rather than left to be discovered by
 counting:
 
   * `subsystem_proof_unsupported_enabled_from_height` — every `VerifyProof` arm
@@ -59,6 +59,15 @@ counting:
     without this one gives an 86.4 s quota window, a ten-minute payment expiry
     and a sponsored message that is always expired, so it should open at or
     before it. Nothing in `ChainParams::validate` enforces that ordering.
+  * `contract_metering_enabled_from_height` — contract execution in blocks
+    runs on metering v1: fuel, memory, stack, host-copy and deploy charges
+    against the transaction's `gas_limit`, and the block contract gas budget
+    `max_block_contract_gas` (#279). At and above it every failing call rolls
+    its staged writes back, `Err` included. Its cost schedule is PROVISIONAL
+    and must be ratified and frozen under a new identity before it is ever
+    set; it is a schema-2 draft field (0x1041), so a binary that does not
+    write schema 2 refuses to start with it set. Inert while
+    `contracts_enabled_from_height` is closed.
 
 **None of them is scheduled below, and that is deliberate.** Each needs the same six
 fields Part 1 gives the other sixty-one — behaviour, dependency ordering,
@@ -66,20 +75,20 @@ persistent data impact, rollback-in-effect, monitoring signal, recommended wave
 — and scheduling a gate that has not had that treatment is the shortcut this
 packet exists to prevent. The same note appeared in the previous edition for
 three gates, and those three were given their treatment before being scheduled;
-these five should be handled the same way.
+these six should be handled the same way.
 
 Nine gates arrived in the wave that outran the previous edition of this
 document. **Seven of them were written up** — R29 to R35, in Part 1A — and the
 first two above are what was left. **A release-closure wave has since added five more,
 and they did NOT join that deficit**: R36 to R40 arrive with their six fields
 already written, which is the standing this section exists to require. The
-deficit stood at two, the same two, until #277, #279 and #278 added the third,
-fourth and fifth above; #279's and #278's dependencies are stated in their
+deficit stood at two, the same two, until #277, #279 (twice) and #278 added the
+third to sixth above; #279's and #278's dependencies are stated in their
 bullets, and the rest of those write-ups is owed.
 
 This is the second time a wave has outrun this document, and the third wave did
 not. The count in a sentence is not checkable by any tool here, which is why the
-five uncovered gates are named: a reader can verify the claim against
+six uncovered gates are named: a reader can verify the claim against
 `tools/lane-b/gate-structure-check.py`'s output without recounting prose.
 
 ## Part 0 — The facts that apply to all sixty-one

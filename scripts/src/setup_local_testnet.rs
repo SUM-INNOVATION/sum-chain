@@ -316,6 +316,8 @@ fn run_local() -> Result<()> {
             credential_schema_validation_enabled_from_height: None,
             contract_error_rollback_enabled_from_height: None,
             messaging_timestamp_units_enabled_from_height: None,
+            contract_metering_enabled_from_height: None,
+            max_block_contract_gas: None,
             beacon_params: None, // issue #127: beacon parameter surface absent by default
             beacon_schedule: None, // issue #127: beacon height->epoch schedule absent by default
             compute_pool_params: None, // issue #215: compute-pool parameter surface absent by default
