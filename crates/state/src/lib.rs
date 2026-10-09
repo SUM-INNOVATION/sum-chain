@@ -18,6 +18,7 @@ pub mod compute_pool_manager;
 pub use sumchain_genesis::compute_pool_retention;
 pub mod compute_pool_store;
 pub mod contract_executor;
+pub mod contract_metering;
 pub mod docclass_executor;
 pub mod docclass_view;
 pub mod education_executor;
@@ -1072,6 +1073,10 @@ pub const TX_WRITE_SET_BOUND_RECEIPT_CODE: u32 = 400;
 pub use agreement_executor::{AgreementExecutionResult, AgreementExecutor, AgreementGates};
 pub use cache::{CacheStats, CachedAccount, StateCache};
 pub use contract_executor::{ContractCallResult, ContractDeployResult, ContractExecutorState, ContractEvent, ContractMetadata};
+pub use contract_metering::{
+    block_contract_gas_budget, check_block_contract_gas, contract_execution_mode,
+    contract_metering_gate_open, declared_contract_gas, select_within_block_contract_gas,
+};
 pub use docclass_executor::{
     docclass_stake_escrow_address, DocClassEffectiveRules, DocClassExecutionResult, DocClassExecutor, DocClassGates,
 };

@@ -326,8 +326,11 @@ impl ContractExecutorState {
             chain_id: state.chain_id(),
         };
 
-        // Execute deployment
-        let deployed = self.wasm_executor.deploy(
+        // Execute deployment. The engine is chosen by height: unmetered below
+        // the contract metering gate (and whenever it is unset), exactly as
+        // before it existed.
+        let deployed = self.wasm_executor.deploy_with_mode(
+            crate::contract_metering::contract_execution_mode(&self.params, block_height),
             deploy_data.code.clone(),
             &deploy_data.init_method,
             deploy_data.init_args.clone(),
@@ -471,18 +474,30 @@ impl ContractExecutorState {
             chain_id: state.chain_id(),
         };
 
-        // Execute call. Below `contract_error_rollback_enabled_from_height` a
-        // call that returns `Err` keeps its staged writes in the runtime's
-        // write cache, where later calls of the block read them and the next
+        // Execute call, on the engine chosen by height as for `deploy`.
+        // Unmetered: below `contract_error_rollback_enabled_from_height` a call
+        // that returns `Err` keeps its staged writes in the runtime's write
+        // cache, where later calls of the block read them and the next
         // successful call commits them; at and above it they are rolled back
-        // like a failed call's.
-        let called = self.wasm_executor.call_with_error_rollback(
-            call_data.contract,
-            &call_data.method,
-            call_data.args.clone(),
-            ctx,
-            Self::error_rollback_gate_open(&self.params, block_height),
-        );
+        // like a failed call's. Metered: every failure, `Err` included, rolls
+        // its staged writes back.
+        let mode = crate::contract_metering::contract_execution_mode(&self.params, block_height);
+        let called = match mode {
+            sumc_runtime::ExecutionMode::Unmetered => self.wasm_executor.call_with_error_rollback(
+                call_data.contract,
+                &call_data.method,
+                call_data.args.clone(),
+                ctx,
+                Self::error_rollback_gate_open(&self.params, block_height),
+            ),
+            mode => self.wasm_executor.call_with_mode(
+                mode,
+                call_data.contract,
+                &call_data.method,
+                call_data.args.clone(),
+                ctx,
+            ),
+        };
         // As in `deploy`: the runtime has rolled back a failed call's writes,
         // so the queue is empty; a successful one has queued them. An erroring
         // call queues nothing either way: its writes were never committed.

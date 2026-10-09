@@ -4693,6 +4693,15 @@ impl BlockExecutor {
             )));
         }
 
+        // Block contract gas budget (#279): declared limits, checked before
+        // anything executes. No budget below the metering gate.
+        crate::contract_metering::check_block_contract_gas(
+            &self.params,
+            block.header.height,
+            &block.transactions,
+        )
+        .map_err(StateError::BlockValidation)?;
+
         Ok(())
     }
 }

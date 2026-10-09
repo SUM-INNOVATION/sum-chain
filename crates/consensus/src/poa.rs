@@ -766,6 +766,24 @@ impl PoAEngine {
     fn create_block(&self, transactions: Vec<SignedTransaction>) -> Result<Block> {
         self.check_not_halted()?;
         let _exec = self.exec_lock.lock();
+        // ── block contract gas budget (#279), BEFORE anything executes ──────
+        //
+        // Unlike the fitting below, this one is a validity rule: an importer
+        // refuses a block whose declared contract gas exceeds
+        // `max_block_contract_gas` where the metering gate is open. A contract
+        // transaction that does not fit is skipped (with its sender's later
+        // transactions) and stays in the mempool. Below the gate, or with no
+        // budget configured, the selection is returned unchanged.
+        let next_height = self
+            .best_block
+            .read()
+            .as_ref()
+            .map_or(0, |b| b.height() + 1);
+        let transactions = sumchain_state::select_within_block_contract_gas(
+            &self.params,
+            next_height,
+            transactions,
+        );
         // ── one screening pass, BEFORE the fitting loop ─────────────────────
         //
         // The loop below learns about exactly ONE refusing transaction per
