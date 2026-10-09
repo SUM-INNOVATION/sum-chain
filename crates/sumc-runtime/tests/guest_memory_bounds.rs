@@ -126,11 +126,82 @@ fn deployed() -> (ContractExecutor, Address, TempDir) {
     (exec, dep.contract_address, dir)
 }
 
-/// The message without the trap-location lines (`\n    at ...`) the runtime
-/// appends on some platforms (Linux x86_64, not macOS arm64). Only that
-/// trailer is removed; the message itself is compared exactly.
+/// One trap-location line exactly as the runtime writes it after the message
+/// (wasmer's `RuntimeError` Display): `    at <function> (<module>[<index>]:0x<offset>)`,
+/// with a decimal index and a lowercase hex offset.
+fn is_trap_location(line: &str) -> bool {
+    let Some(rest) = line
+        .strip_prefix("    at ")
+        .and_then(|r| r.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let Some((function, location)) = rest.rsplit_once(" (") else {
+        return false;
+    };
+    let Some((module_index, offset)) = location.rsplit_once("]:0x") else {
+        return false;
+    };
+    let Some((module, index)) = module_index.rsplit_once('[') else {
+        return false;
+    };
+    !function.is_empty()
+        && !module.is_empty()
+        && !index.is_empty()
+        && index.bytes().all(|b| b.is_ascii_digit())
+        && !offset.is_empty()
+        && offset
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The message without the trap-location lines the runtime appends on some
+/// platforms (Linux x86_64, not macOS arm64). Only a trailing run of lines
+/// that are each a trap location is removed; any other text, including text
+/// after a location line, stays and is compared.
 fn without_trap_location(error: &str) -> &str {
-    error.split("\n    at ").next().unwrap_or(error)
+    let mut end = error.len();
+    while let Some(i) = error[..end].rfind('\n') {
+        if !is_trap_location(&error[i + 1..end]) {
+            break;
+        }
+        end = i;
+    }
+    &error[..end]
+}
+
+#[test]
+fn only_trailing_trap_locations_are_removed_from_an_error() {
+    const MSG: &str = "RuntimeError: guest memory read: memory access out of bounds";
+    // As recorded on Linux x86_64 release (huge_value, huge_key).
+    for at in ["<module>[3]:0x13e", "<module>[4]:0x151"] {
+        let e = format!("{MSG}\n    at <unnamed> ({at})");
+        assert_eq!(without_trap_location(&e), MSG);
+    }
+    let two = format!("{MSG}\n    at <unnamed> (<module>[6]:0x173)\n    at run (<module>[0]:0x9)");
+    assert_eq!(without_trap_location(&two), MSG);
+    assert_eq!(without_trap_location(MSG), MSG);
+    // Anything that is not a trap location is kept, and so still compared.
+    for kept in [
+        format!("{MSG}\n    at <unnamed> (<module>[3]:0x13e)\ncaused by: something else"),
+        format!("{MSG}\n    at an unrelated explanation"),
+        format!("{MSG}\n    at <unnamed> (<module>[3]:0x13E)"),
+        format!("{MSG}\n    at <unnamed> (<module>[x]:0x13e)"),
+        format!("{MSG}\n    at <unnamed> (<module>[3]:13e)"),
+        format!("{MSG}\n    at  (<module>[3]:0x13e)"),
+        format!("{MSG}\n  at <unnamed> (<module>[3]:0x13e)"),
+        format!("{MSG}\n    at <unnamed> (<module>[3]:0x13e) "),
+    ] {
+        assert_eq!(without_trap_location(&kept), kept);
+    }
+    // Only the trailing location goes; a location-like line inside the
+    // message that is not one stays.
+    let inner =
+        format!("{MSG}\n    at an unrelated explanation\n    at <unnamed> (<module>[3]:0x13e)");
+    assert_eq!(
+        without_trap_location(&inner),
+        format!("{MSG}\n    at an unrelated explanation")
+    );
 }
 
 /// Everything a call reports that execution could act on, as text.
