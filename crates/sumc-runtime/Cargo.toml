@@ -13,6 +13,8 @@ sumchain-storage = { path = "../storage" }
 
 wasmer = { workspace = true }
 wasmer-compiler-singlepass = { workspace = true }
+wasmer-middlewares = { workspace = true }
+wasmer-types = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

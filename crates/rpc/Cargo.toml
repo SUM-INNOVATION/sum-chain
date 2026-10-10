@@ -36,5 +36,6 @@ blake3 = { workspace = true }
 bincode = { workspace = true }
 
 [dev-dependencies]
+sumc-runtime = { path = "../sumc-runtime" }
 tempfile = "3.10"
 wat = "1"

@@ -118,6 +118,9 @@ pub type PeerInfoProvider = Arc<dyn Fn() -> Vec<RpcPeerInfo> + Send + Sync>;
 /// P2P stats provider function type
 pub type P2pStatsProvider = Arc<dyn Fn() -> P2pStats + Send + Sync>;
 
+/// How long a contract RPC waits for an execution slot before reporting busy.
+const CONTRACT_EXEC_QUEUE_WAIT: Duration = Duration::from_secs(5);
+
 /// RPC server timeout configuration
 #[derive(Debug, Clone)]
 pub struct RpcTimeoutConfig {
@@ -230,6 +233,13 @@ pub struct RpcServer {
     running_consensus_config: Option<sumchain_consensus::consensus_config::ConsensusConfig>,
     /// Contract executor for smart contract RPCs
     contract_executor: Option<Arc<sumchain_state::ContractExecutorState>>,
+    /// Executors for `contract_call` and `contract_estimateGas`, one per slot.
+    /// Each has its own staged-write cache, so concurrent executions never
+    /// share state; a request waits briefly for a free one, then gets "busy".
+    /// Empty: those methods run on `contract_executor` with one slot.
+    contract_exec_pool: Arc<parking_lot::Mutex<Vec<Arc<sumchain_state::ContractExecutorState>>>>,
+    /// Free slots in `contract_exec_pool` (or the single default slot).
+    contract_exec_permits: Arc<tokio::sync::Semaphore>,
 }
 
 /// The consensus handle this server holds is the READ view, and nothing wider.
@@ -379,6 +389,8 @@ impl RpcServer {
             p2p_stats_provider: None,
             timeout_config: RpcTimeoutConfig::default(),
             contract_executor: None,
+            contract_exec_pool: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            contract_exec_permits: Arc::new(tokio::sync::Semaphore::new(1)),
             chain_params: sumchain_genesis::ChainParams::default(),
             genesis_identity: None,
             running_consensus_config: None,
@@ -444,6 +456,14 @@ impl RpcServer {
         self.contract_executor.is_some()
     }
 
+    /// Whether the wired contract executor runs under node-local budgets
+    /// (`ContractExecutorState::new_local`). Wiring tripwire, like the above.
+    pub fn contract_executor_is_local(&self) -> bool {
+        self.contract_executor
+            .as_ref()
+            .is_some_and(|e| e.local_limits().is_some())
+    }
+
     /// Whether this server can produce the activation digest.
     ///
     /// Exists for the wiring tripwire in the node crate: a server built without
@@ -457,6 +477,63 @@ impl RpcServer {
     pub fn with_contract_executor(mut self, executor: Arc<sumchain_state::ContractExecutorState>) -> Self {
         self.contract_executor = Some(executor);
         self
+    }
+
+    /// Serve `contract_call` and `contract_estimateGas` from these executors,
+    /// one execution per executor at a time (at least one executor).
+    pub fn with_contract_exec_pool(
+        mut self,
+        pool: Vec<Arc<sumchain_state::ContractExecutorState>>,
+    ) -> Self {
+        let n = pool.len().max(1);
+        self.contract_exec_pool = Arc::new(parking_lot::Mutex::new(pool));
+        self.contract_exec_permits = Arc::new(tokio::sync::Semaphore::new(n));
+        self
+    }
+
+    /// Whether every execution executor runs under node-local budgets.
+    pub fn contract_exec_pool_is_local(&self) -> bool {
+        let pool = self.contract_exec_pool.lock();
+        !pool.is_empty() && pool.iter().all(|e| e.local_limits().is_some())
+    }
+
+    /// Run one contract execution on the blocking pool with an executor of its
+    /// own, after waiting at most `CONTRACT_EXEC_QUEUE_WAIT` for one to be
+    /// free. The executor and its slot come back only when the execution has
+    /// returned, so a slot is never reused while its work is still running.
+    async fn run_contract_exec<T, F>(&self, f: F) -> std::result::Result<T, RpcError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&sumchain_state::ContractExecutorState) -> T + Send + 'static,
+    {
+        let permit = tokio::time::timeout(
+            CONTRACT_EXEC_QUEUE_WAIT,
+            self.contract_exec_permits.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| RpcError::Internal("contract execution busy, retry later".to_string()))?
+        .map_err(|e| RpcError::Internal(e.to_string()))?;
+        let pool = self.contract_exec_pool.clone();
+        let popped = pool.lock().pop();
+        let (executor, pooled) = match popped {
+            Some(e) => (e, true),
+            None => (
+                self.contract_executor.clone().ok_or_else(|| {
+                    RpcError::Internal("Contract executor not available".to_string())
+                })?,
+                false,
+            ),
+        };
+        tokio::task::spawn_blocking(move || {
+            let out = f(&executor);
+            if pooled {
+                pool.lock().push(executor);
+            }
+            drop(permit);
+            out
+        })
+        .await
+        .map_err(|e| RpcError::Internal(format!("contract execution task: {}", e)))
     }
 
     /// Get the auth validator (for adding/removing keys at runtime)
@@ -2675,7 +2752,7 @@ impl SumChainApiServer for RpcServer {
         let args = hex::decode(request.args.trim_start_matches("0x"))
             .map_err(|e| RpcError::InvalidParams(format!("Invalid args hex: {}", e)))?;
 
-        if let Some(ref executor) = self.contract_executor {
+        if self.contract_executor.is_some() {
             // Get current block info
             let block_store = BlockStore::new(&self.db);
             let height = block_store.get_latest_height()
@@ -2686,15 +2763,22 @@ impl SumChainApiServer for RpcServer {
                 .unwrap()
                 .as_secs();
 
-            match executor.view_call(
-                &contract_addr,
-                &request.method,
-                args,
-                from_addr,
-                height,
-                timestamp,
-                self.state.chain_id(),
-            ) {
+            let method = request.method.clone();
+            let chain_id = self.state.chain_id();
+            let outcome = self
+                .run_contract_exec(move |executor| {
+                    executor.view_call(
+                        &contract_addr,
+                        &method,
+                        args,
+                        from_addr,
+                        height,
+                        timestamp,
+                        chain_id,
+                    )
+                })
+                .await?;
+            match outcome {
                 Ok(return_data) => {
                     return Ok(ContractCallResult {
                         tx_hash: None,
@@ -2756,16 +2840,21 @@ impl SumChainApiServer for RpcServer {
 
         // Metered dry-run; surface failure/out-of-gas as an error, never a
         // fabricated estimate.
-        let gas_estimate = executor
-            .estimate_gas(
-                &contract_addr,
-                &request.method,
-                args,
-                from_addr,
-                height,
-                timestamp,
-                self.state.chain_id(),
-            )
+        let method = request.method.clone();
+        let chain_id = self.state.chain_id();
+        let gas_estimate = self
+            .run_contract_exec(move |executor| {
+                executor.estimate_gas(
+                    &contract_addr,
+                    &method,
+                    args,
+                    from_addr,
+                    height,
+                    timestamp,
+                    chain_id,
+                )
+            })
+            .await?
             .map_err(|e| RpcError::Internal(format!("gas estimation failed: {}", e)))?;
 
         let gas_price: u128 = 1_000_000; // 0.001 Koppa per gas unit
@@ -11591,7 +11680,10 @@ mod contract_rpc_tests {
       (func (export "two") (param i32 i32) (result i32)
         (call $sw (i32.const 0) (i32.const 1) (i32.const 8) (i32.const 3))
         (call $sw (i32.const 16) (i32.const 2) (i32.const 8) (i32.const 3)) (i32.const 0))
-      (func (export "boom") (param i32 i32) (result i32) (unreachable)))
+      (func (export "boom") (param i32 i32) (result i32) (unreachable))
+      (func (export "forever") (param i32 i32) (result i32) (loop $l (br $l)) (i32.const 0))
+      (func (export "overwrite") (param i32 i32) (result i32)
+        (call $sw (i32.const 0) (i32.const 1) (i32.const 16) (i32.const 2)) (i32.const 0)))
     "#;
 
     /// Publish one block carrying `txs`, the way a proposer does: execute, bind
@@ -11634,6 +11726,12 @@ mod contract_rpc_tests {
 
     // Returns (server, deployed contract address).
     fn server_with_contract() -> (RpcServer, Address, TempDir) {
+        server_with_contract_exec(false)
+    }
+
+    // As above; `local` serves contract RPCs from a `new_local` executor, as
+    // the production node does.
+    fn server_with_contract_exec(local: bool) -> (RpcServer, Address, TempDir) {
         let dir = TempDir::new().unwrap();
         let db = Arc::new(Database::open_default(dir.path()).unwrap());
         let state = Arc::new(StateManager::new(db.clone(), 1));
@@ -11714,8 +11812,30 @@ mod contract_rpc_tests {
             PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
         );
         let (tx_sender, _rx) = mpsc::channel(64);
-        let srv = RpcServer::new(db, state, mempool, engine, tx_sender, Arc::new(|| 0usize))
-            .with_contract_executor(cexec);
+        let local_exec = || {
+            Arc::new(ContractExecutorState::new_local(
+                db.clone(),
+                genesis.params.clone(),
+                sumc_runtime::LocalExecutionLimits::DEFAULT,
+            ))
+        };
+        let (cexec, pool) = if local {
+            (local_exec(), vec![local_exec(), local_exec()])
+        } else {
+            (cexec, Vec::new())
+        };
+        let mut srv = RpcServer::new(
+            db.clone(),
+            state,
+            mempool,
+            engine,
+            tx_sender,
+            Arc::new(|| 0usize),
+        )
+        .with_contract_executor(cexec);
+        if !pool.is_empty() {
+            srv = srv.with_contract_exec_pool(pool);
+        }
         (srv, addr, dir)
     }
 
@@ -11764,6 +11884,148 @@ mod contract_rpc_tests {
         assert!(srv.contract_estimate_gas(view(&addr, "boom")).await.is_err());
         // Unknown contract -> error.
         assert!(srv.contract_estimate_gas(view(&Address::new([9u8; 20]), "one")).await.is_err());
+    }
+
+    /// #279: a non-terminating method answers within the local budget, in the
+    /// API's existing failure shapes; ordinary calls and estimates are unchanged.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_budgets_end_non_terminating_contract_rpcs() {
+        let (srv, addr, _dir) = server_with_contract_exec(true);
+        assert!(srv.contract_executor_is_local());
+
+        let call = tokio::time::timeout(
+            Duration::from_secs(30),
+            srv.contract_call(view(&addr, "forever")),
+        )
+        .await
+        .expect("contract_call returned")
+        .unwrap();
+        assert!(!call.success);
+        assert!(
+            call.error
+                .as_deref()
+                .unwrap_or("")
+                .contains("local execution budget exhausted"),
+            "{:?}",
+            call.error
+        );
+        let est = tokio::time::timeout(
+            Duration::from_secs(30),
+            srv.contract_estimate_gas(view(&addr, "forever")),
+        )
+        .await
+        .expect("contract_estimateGas returned");
+        assert!(est.is_err());
+
+        // Same answers as the block-path executor for ordinary work.
+        let (plain, paddr, _d2) = server_with_contract_exec(false);
+        for m in ["one", "two"] {
+            let a = srv
+                .contract_estimate_gas(view(&addr, m))
+                .await
+                .unwrap()
+                .gas_estimate;
+            let b = plain
+                .contract_estimate_gas(view(&paddr, m))
+                .await
+                .unwrap()
+                .gas_estimate;
+            assert_eq!(a, b, "{m}");
+        }
+        assert!(srv.contract_call(view(&addr, "one")).await.unwrap().success);
+    }
+
+    /// With every execution slot taken, a contract RPC reports busy instead of
+    /// queueing without bound.
+    #[tokio::test]
+    async fn contract_rpcs_report_busy_when_every_slot_is_taken() {
+        let (srv, addr, _dir) = server_with_contract_exec(true);
+        let _held = srv
+            .contract_exec_permits
+            .clone()
+            .acquire_many_owned(2)
+            .await
+            .unwrap();
+        let err = srv
+            .contract_estimate_gas(view(&addr, "one"))
+            .await
+            .unwrap_err();
+        assert!(err.message().contains("busy"), "{}", err.message());
+    }
+
+    /// The operator budget ends the execution itself, not just the response:
+    /// the slot comes back only when the worker returns, and it does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_budget_exhausted_execution_releases_its_worker() {
+        let (srv, addr, _dir) = server_with_contract_exec(true);
+        for _ in 0..4 {
+            let r = srv.contract_call(view(&addr, "forever")).await.unwrap();
+            assert!(!r.success);
+        }
+        // Every slot is free again and every executor is back in the pool.
+        assert_eq!(srv.contract_exec_permits.available_permits(), 2);
+        assert_eq!(srv.contract_exec_pool.lock().len(), 2);
+        assert!(srv.contract_call(view(&addr, "one")).await.unwrap().success);
+    }
+
+    /// A burst of non-terminating requests runs at most `slots` at a time;
+    /// the rest wait or get "busy"; nothing is left running afterwards.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_burst_cannot_exceed_the_execution_slots() {
+        let (srv, addr, _dir) = server_with_contract_exec(true);
+        let srv = Arc::new(srv);
+        let started = std::time::Instant::now();
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let srv = srv.clone();
+            tasks.push(tokio::spawn(async move {
+                srv.contract_call(view(&addr, "forever"))
+                    .await
+                    .map(|r| r.success)
+            }));
+        }
+        let mut answered = 0;
+        for t in tasks {
+            match t.await.unwrap() {
+                Ok(success) => {
+                    assert!(!success);
+                    answered += 1;
+                }
+                Err(e) => assert!(e.message().contains("busy"), "{}", e.message()),
+            }
+        }
+        assert!(answered >= 2);
+        // 16 executions of ~0.3 s each over 2 slots, plus queue waits.
+        assert!(started.elapsed() < Duration::from_secs(30));
+        assert_eq!(srv.contract_exec_permits.available_permits(), 2);
+        assert_eq!(srv.contract_exec_pool.lock().len(), 2);
+    }
+
+    /// A view that writes leaves committed state and every executor's write
+    /// queue untouched.
+    #[tokio::test]
+    async fn a_writing_view_changes_nothing_canonical() {
+        let (srv, addr, _dir) = server_with_contract_exec(true);
+        let r = srv.contract_call(view(&addr, "overwrite")).await.unwrap();
+        assert!(r.success, "{:?}", r.error);
+        let got = srv
+            .contract_get_storage_at(addr.to_base58(), "0x6b".to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            got,
+            Some("0x56414c".to_string()),
+            "committed value unchanged"
+        );
+        assert!(srv
+            .contract_exec_pool
+            .lock()
+            .iter()
+            .all(|e| e.queued_write_count() == 0));
+        assert_eq!(
+            srv.contract_executor.as_ref().unwrap().queued_write_count(),
+            0
+        );
     }
 }
 
