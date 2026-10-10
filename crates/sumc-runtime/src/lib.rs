@@ -8,6 +8,7 @@ pub mod error;
 pub mod executor;
 pub mod gas;
 pub mod host;
+pub mod local_limits;
 pub mod memory;
 pub mod storage;
 pub mod types;
@@ -15,6 +16,7 @@ pub mod types;
 pub use error::{RuntimeError, Result};
 pub use executor::{ContractExecutor, ExecutionContext, ExecutionResult};
 pub use gas::{Gas, GasCosts, GasMeter};
+pub use local_limits::LocalExecutionLimits;
 pub use storage::{ContractStorage, MemoryStorage, PendingWrite, RocksDbStorage};
 pub use types::*;
 

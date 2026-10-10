@@ -1373,6 +1373,12 @@ pub enum StateError {
     #[error("ComputePool subprotocol not activated at this height")]
     ComputePoolNotActivated,
 
+    /// This node's local policy refuses contract transactions at admission
+    /// (`[mempool] refuse_contract_transactions`). Node-local, not a
+    /// consensus rule: a block carrying one is still valid.
+    #[error("contract transactions are not accepted by this node")]
+    ContractTransactionsRefused,
+
     /// An education record with the same identity is already in-flight
     /// in the mempool, OR already committed in a Phase 2 education CF.
     /// Rejected at admission; no receipt (admission only).

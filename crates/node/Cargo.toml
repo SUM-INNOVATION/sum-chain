@@ -16,6 +16,7 @@ sumchain-crypto = { path = "../crypto" }
 sumchain-storage = { path = "../storage" }
 sumchain-genesis = { path = "../genesis" }
 sumchain-state = { path = "../state" }
+sumc-runtime = { path = "../sumc-runtime" }
 sumchain-consensus = { path = "../consensus" }
 sumchain-p2p = { path = "../p2p" }
 sumchain-rpc = { path = "../rpc" }

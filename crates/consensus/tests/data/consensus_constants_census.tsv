@@ -494,7 +494,13 @@ crates/storage/src/subsystem_journal.rs	DORMANT	EXCLUDE	local	used only by the o
 crates/storage/src/subsystem_journal.rs	HEADER_LEN	EXCLUDE	local	framing of node-local sealed subsystem undo journals (subsystem_journal.rs); journals never hashed into a block
 crates/storage/src/subsystem_journal.rs	MAGIC	EXCLUDE	local	framing of node-local sealed subsystem undo journals (subsystem_journal.rs); journals never hashed into a block
 crates/storage/src/subsystem_journal.rs	VERSION	EXCLUDE	local	framing of node-local sealed subsystem undo journals (subsystem_journal.rs); journals never hashed into a block
+crates/sumc-runtime/src/executor.rs	LOCAL_BULK_EXHAUSTED	EXCLUDE	local	error text of the RPC/view executor's local budget (with_local_limits); never in a receipt or block
+crates/sumc-runtime/src/executor.rs	LOCAL_FUEL_EXHAUSTED	EXCLUDE	local	error text of the RPC/view executor's local budget (with_local_limits); never in a receipt or block
+crates/sumc-runtime/src/executor.rs	LOCAL_HOST_BUDGET_EXHAUSTED	EXCLUDE	local	error text of the RPC/view executor's local budget (with_local_limits); never in a receipt or block
 crates/sumc-runtime/src/lib.rs	ENGINE_IDENTITY	COMMITTED	registry	0x2713
+crates/sumc-runtime/src/local_limits.rs	BULK_EXHAUSTED	EXCLUDE	local	export name of a global added only to modules compiled by the RPC/view executor; block executor modules are uninstrumented
+crates/sumc-runtime/src/local_limits.rs	BULK_REMAINING	EXCLUDE	local	export name of a global added only to modules compiled by the RPC/view executor; block executor modules are uninstrumented
+crates/sumc-runtime/src/local_limits.rs	DEFAULT	EXCLUDE	local	default node-local RPC/view budgets (node config [rpc] contract_exec_*); block execution never reads them
 crates/sumc-runtime/src/storage.rs	CF_CONTRACT_CODE	EXCLUDE	local-storage	alias of sumchain_storage::cf column-family name (db.rs:304-308); diff uses cf_kind codes not names (schema.rs:650)
 crates/sumc-runtime/src/storage.rs	CF_CONTRACT_METADATA	EXCLUDE	local-storage	alias of sumchain_storage::cf column-family name (db.rs:304-308); diff uses cf_kind codes not names (schema.rs:650)
 crates/sumc-runtime/src/storage.rs	CF_CONTRACT_STORAGE	EXCLUDE	local-storage	alias of sumchain_storage::cf column-family name (db.rs:304-308); diff uses cf_kind codes not names (schema.rs:650)
@@ -502,7 +508,7 @@ crates/sumc-runtime/src/types.rs	MAX_CALL_DEPTH	COMMITTED	registry	0x2715
 crates/sumc-runtime/src/types.rs	MAX_CODE_SIZE	COMMITTED	registry	0x2714
 crates/sumc-runtime/src/types.rs	MAX_EVENTS	EXCLUDE	unused	HostEnv::emit_event host.rs:158 never called: host_emit import is a stub executor.rs:864
 crates/sumc-runtime/src/types.rs	MAX_LOGS	EXCLUDE	unused	HostEnv::log host.rs:176 never called: host_log import is a stub executor.rs:868
-crates/sumc-runtime/src/types.rs	MAX_MEMORY_PAGES	EXCLUDE	unused	only MemoryManager memory.rs:18, never constructed outside tests; no wasmer memory limit enforced (gap: guest memory max unbounded by binary)
+crates/sumc-runtime/src/types.rs	MAX_MEMORY_PAGES	EXCLUDE	local	default memory ceiling of the RPC/view executor (local_limits.rs DEFAULT); node-local, never in a block
 crates/sumchain-wire/src/address.rs	SIZE	EXCLUDE	algorithm-fixed	Address is a [u8;20] newtype; SIZE only length-checks from_slice/base58 (address.rs:29,57); cannot differ without the type changing
 crates/sumchain-wire/src/address.rs	ZERO	COMMITTED	registry	0x2200
 crates/sumchain-wire/src/agreement.rs	AGREEMENT_COMMITMENT_SEP	EXCLUDE	unused	only read by AgreementCommitment::generate_commitment (agreement.rs:242), which has no non-test caller anywhere in crates/ (agreement executor takes ids/commitments from the payload)

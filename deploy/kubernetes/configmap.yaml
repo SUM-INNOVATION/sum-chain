@@ -59,6 +59,15 @@ data:
     rate_limit_rps = 100
     rate_limit_burst = 200
 
+    [mempool]
+    # Node-local policy, not a consensus rule. When true, this node refuses
+    # contract deploy/call transactions at admission (RPC, gossip, reorg
+    # re-add), removes any held at startup, and skips them at block selection.
+    # Read from this file on every start and never persisted. Blocks from other
+    # proposers carrying contract transactions are still imported and executed.
+    # Default false.
+    refuse_contract_transactions = false
+
     [health]
     # Health/readiness HTTP server. Bound separately from the JSON-RPC server
     # (8545) so container liveness/readiness probes and the #121 orchestrator

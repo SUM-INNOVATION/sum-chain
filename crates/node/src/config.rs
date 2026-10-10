@@ -19,6 +19,8 @@ pub struct NodeConfig {
     pub network: NetworkSettings,
     /// RPC server settings
     pub rpc: RpcSettings,
+    /// Node-local mempool policy
+    pub mempool: MempoolSettings,
     /// Health/readiness HTTP server settings
     pub health: HealthSettings,
     /// Logging settings
@@ -32,6 +34,7 @@ impl Default for NodeConfig {
             consensus: ConsensusSettings::default(),
             network: NetworkSettings::default(),
             rpc: RpcSettings::default(),
+            mempool: MempoolSettings::default(),
             health: HealthSettings::default(),
             logging: LoggingSettings::default(),
         }
@@ -110,6 +113,29 @@ rate_limit_rps = 100
 # Burst size for rate limiting
 rate_limit_burst = 200
 
+# Contract RPC budgets (contract_call, contract_estimateGas). Local to this
+# node; block execution is unaffected.
+# contract_exec_fuel = 200000000
+# contract_exec_max_memory_pages = 256
+# contract_exec_max_host_bytes = 16777216
+# contract_exec_concurrency = 1
+
+[mempool]
+# Node-local mempool policy (not a consensus rule).
+#
+# refuse_contract_transactions: when true, this node refuses contract deploy
+# and contract call transactions at admission from every source (RPC
+# submission, gossip, re-addition after a reorg), removes any it already holds
+# when the setting is applied at startup, and skips them when selecting
+# transactions for a block it proposes. Default false.
+#
+# The setting is read from this file on every start and is not persisted: to
+# keep it on, it must be present each time the node starts.
+#
+# It only governs what this node admits and proposes. Blocks from other
+# proposers that carry contract transactions are still imported and executed.
+refuse_contract_transactions = false
+
 [health]
 # Health/readiness HTTP server listen address.
 # Serves GET /health (liveness) and GET /ready (readiness). Bound separately
@@ -174,6 +200,16 @@ impl Default for NetworkSettings {
     }
 }
 
+/// Node-local mempool policy. Not consensus: it decides what this node admits
+/// and proposes, never which blocks are valid.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MempoolSettings {
+    /// Refuse `ContractDeploy` and `ContractCall` transactions: at admission
+    /// from every source, among those already held, and at block selection.
+    pub refuse_contract_transactions: bool,
+}
+
 /// RPC server settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -188,6 +224,31 @@ pub struct RpcSettings {
     pub rate_limit_rps: u32,
     /// Burst size
     pub rate_limit_burst: u32,
+    /// Contract RPC (`contract_call`, `contract_estimateGas`) budgets. Local
+    /// to this node; they never affect block execution.
+    ///
+    /// WASM operators one execution may run.
+    pub contract_exec_fuel: u64,
+    /// Linear-memory ceiling for one execution, in 64 KiB pages.
+    pub contract_exec_max_memory_pages: u32,
+    /// Bytes host functions may copy in one execution.
+    pub contract_exec_max_host_bytes: u64,
+    /// Executions allowed at once; further requests wait briefly, then get a
+    /// busy error.
+    pub contract_exec_concurrency: usize,
+}
+
+impl RpcSettings {
+    /// The contract RPC budgets as the runtime takes them. The view gas cap is
+    /// filled in from the chain's `max_contract_gas` where the executor is built.
+    pub fn contract_exec_limits(&self) -> sumc_runtime::LocalExecutionLimits {
+        sumc_runtime::LocalExecutionLimits {
+            fuel: self.contract_exec_fuel,
+            max_memory_pages: self.contract_exec_max_memory_pages,
+            max_host_bytes: self.contract_exec_max_host_bytes,
+            ..sumc_runtime::LocalExecutionLimits::DEFAULT
+        }
+    }
 }
 
 impl Default for RpcSettings {
@@ -198,9 +259,16 @@ impl Default for RpcSettings {
             rate_limit_enabled: false,
             rate_limit_rps: 100,
             rate_limit_burst: 200,
+            contract_exec_fuel: sumc_runtime::LocalExecutionLimits::DEFAULT.fuel,
+            contract_exec_max_memory_pages: sumc_runtime::LocalExecutionLimits::DEFAULT
+                .max_memory_pages,
+            contract_exec_max_host_bytes: sumc_runtime::LocalExecutionLimits::DEFAULT
+                .max_host_bytes,
+            contract_exec_concurrency: 1,
         }
     }
 }
+
 
 /// Health/readiness HTTP server settings.
 ///
@@ -397,6 +465,15 @@ addr = "0.0.0.0:8545"
     }
 
     #[test]
+    fn mempool_contract_refusal_defaults_off_and_parses() {
+        let cfg: NodeConfig = toml::from_str("[node]\ngenesis = \"g.json\"\n").unwrap();
+        assert!(!cfg.mempool.refuse_contract_transactions);
+        let cfg: NodeConfig =
+            toml::from_str("[mempool]\nrefuse_contract_transactions = true\n").unwrap();
+        assert!(cfg.mempool.refuse_contract_transactions);
+    }
+
+    #[test]
     fn test_parse_example_config() {
         let example = NodeConfig::example_config();
         let _config: NodeConfig = toml::from_str(&example).unwrap();
@@ -404,6 +481,23 @@ addr = "0.0.0.0:8545"
 
     fn engine_config(value: &str) -> String {
         format!("[consensus]\nengine = {value}\n")
+    }
+
+    #[test]
+    fn contract_exec_limits_defaults_and_overrides() {
+        // Omitted: default RPC budgets, one execution slot.
+        let cfg: NodeConfig = toml::from_str("[node]\ngenesis = \"g.json\"\n").unwrap();
+        assert_eq!(
+            cfg.rpc.contract_exec_limits(),
+            sumc_runtime::LocalExecutionLimits::DEFAULT
+        );
+        assert_eq!(cfg.rpc.contract_exec_concurrency, 1);
+
+        let cfg: NodeConfig =
+            toml::from_str("[rpc]\ncontract_exec_fuel = 1000\ncontract_exec_concurrency = 3\n")
+                .unwrap();
+        assert_eq!(cfg.rpc.contract_exec_limits().fuel, 1000);
+        assert_eq!(cfg.rpc.contract_exec_concurrency, 3);
     }
 
     #[test]

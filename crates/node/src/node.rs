@@ -114,9 +114,27 @@ pub struct Node {
     /// being enough once the rules have diverged. See
     /// `sumchain_p2p::peer_compat` for the whole argument.
     peer_compat: Arc<PeerCompatRegistry>,
+    /// Budgets for the RPC's contract executor, and how many executions it
+    /// runs at once. Node-local; see [`Node::apply_local_policy`].
+    rpc_contract_exec: (sumc_runtime::LocalExecutionLimits, usize),
 }
 
 impl Node {
+    /// Apply the node-local mempool policy. Call before `run`: the mempool is
+    /// then empty and neither gossip nor RPC is accepting transactions yet.
+    pub fn apply_mempool_policy(&self, policy: &crate::config::MempoolSettings) {
+        let removed = self
+            .mempool
+            .set_refuse_contract_transactions(policy.refuse_contract_transactions);
+        if policy.refuse_contract_transactions {
+            info!(
+                "Mempool policy: contract transactions refused at admission and selection \
+                 ({} held removed)",
+                removed
+            );
+        }
+    }
+
     /// Create a new node (without RPC auth or rate limiting)
     #[allow(dead_code)]
     pub fn new(
@@ -467,7 +485,13 @@ impl Node {
             chain_height,
             protocol_digest,
             peer_compat: Arc::new(PeerCompatRegistry::new(protocol_digest, enforce_from)),
+            rpc_contract_exec: (sumc_runtime::LocalExecutionLimits::DEFAULT, 1),
         })
+    }
+
+    /// Apply the node-local contract RPC budgets. Call before `run`.
+    pub fn apply_rpc_contract_limits(&mut self, rpc: &crate::config::RpcSettings) {
+        self.rpc_contract_exec = (rpc.contract_exec_limits(), rpc.contract_exec_concurrency);
     }
 
     /// The consensus boundary for a block a PEER supplied, as one function.
@@ -1383,6 +1407,7 @@ impl Node {
             self.rpc_rate_limit_config.clone(),
             self.metrics.clone(),
             &self.genesis,
+            self.rpc_contract_exec,
         );
 
         let handle = rpc.start(self.rpc_addr).await?;
@@ -1598,12 +1623,17 @@ fn build_rpc_server(
     rpc_rate_limit_config: RateLimitConfig,
     metrics: Arc<Metrics>,
     genesis: &Genesis,
+    (contract_limits, contract_concurrency): (sumc_runtime::LocalExecutionLimits, usize),
 ) -> RpcServer {
     let params = genesis.params.clone();
-    let contract_executor = Arc::new(sumchain_state::ContractExecutorState::new(
+    // Read-only, under node-local budgets: this executor serves views and
+    // estimates and never builds or imports a block.
+    let contract_executor = Arc::new(sumchain_state::ContractExecutorState::new_local(
         db.clone(),
         params.clone(),
+        contract_limits,
     ));
+    let (db_for_pool, params_for_pool) = (db.clone(), params.clone());
     RpcServer::with_full_config(
         db,
         state,
@@ -1624,6 +1654,19 @@ fn build_rpc_server(
     // than a hash of whatever the server was configured with.
     .with_genesis(genesis)
     .with_contract_executor(contract_executor)
+    // One executor per execution slot: concurrent executions never share a
+    // staged-write cache.
+    .with_contract_exec_pool(
+        (0..contract_concurrency.max(1))
+            .map(|_| {
+                Arc::new(sumchain_state::ContractExecutorState::new_local(
+                    db_for_pool.clone(),
+                    params_for_pool.clone(),
+                    contract_limits,
+                ))
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -1952,8 +1995,13 @@ mod rpc_wiring_tests {
             RateLimitConfig::disabled(),
             Arc::new(Metrics::new()),
             &genesis,
+            (sumc_runtime::LocalExecutionLimits::DEFAULT, 1),
         );
 
+        assert!(
+            server.contract_executor_is_local() && server.contract_exec_pool_is_local(),
+            "the RPC contract executors must run under local budgets"
+        );
         assert!(
             server.has_contract_executor(),
             "production RPC must wire the contract executor"

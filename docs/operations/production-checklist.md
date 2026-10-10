@@ -50,6 +50,26 @@ identically before starting or restarting the network.
   systemd/CLI `--bootnodes` override (it takes precedence over `config.toml`, so
   it survives sample-config changes). See the joining-network guidance in the
   [README](../../README.md#run-a-node-join-the-live-network).
+- `[mempool] refuse_contract_transactions` (default `false`) is a node-local
+  mempool policy. When `true`, the node:
+  - refuses contract deploy and contract call transactions at admission from
+    every source — RPC submission, gossip, and re-addition after a reorg (an
+    RPC submission gets the error "contract transactions are not accepted by
+    this node");
+  - removes any contract transactions it already holds when the setting is
+    applied at startup;
+  - skips contract transactions when selecting transactions for a block it
+    proposes.
+
+  The value is read from the config file on every start and is not persisted:
+  to keep the policy on across restarts, the key must be present in the config
+  each time the node starts. Removing it (or setting `false`) and restarting
+  turns the policy off.
+
+  It is a selection policy for this node only, not a consensus rule. Blocks
+  proposed by other validators that carry contract transactions are still
+  imported and executed by this node, and other nodes continue to accept
+  contract transactions unless they set the key themselves.
 
 ## Validator Setup
 
