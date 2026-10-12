@@ -18,21 +18,12 @@
 
 use std::fs;
 use std::io::Read;
-use std::net::TcpListener;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_sumchain");
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
 
 struct Devnet {
     dir: tempfile::TempDir,
@@ -87,6 +78,11 @@ fn start() -> Devnet {
         ),
     )
     .unwrap();
+    // Every listener binds port 0, so the kernel assigns a free port when the
+    // node itself binds. Probing for a free port here and releasing it left the
+    // port unheld until the node started; a parallel test or any other process
+    // could take it first ("Address already in use"). The test never connects
+    // to these ports: it reads the log and signals the process.
     fs::write(
         p.join("node.toml"),
         format!(
@@ -97,12 +93,12 @@ validator_key = "{k}"
 [consensus]
 engine = "poa"
 [network]
-listen_addr = "/ip4/127.0.0.1/tcp/{p2p}"
+listen_addr = "/ip4/127.0.0.1/tcp/0"
 mdns = false
 [rpc]
-addr = "127.0.0.1:{rpc}"
+addr = "127.0.0.1:0"
 [health]
-addr = "127.0.0.1:{health}"
+addr = "127.0.0.1:0"
 [logging]
 level = "info"
 json = false
@@ -110,9 +106,6 @@ json = false
             g = p.join("genesis.json").display(),
             d = p.join("data").display(),
             k = key.display(),
-            p2p = free_port(),
-            rpc = free_port(),
-            health = free_port(),
         ),
     )
     .unwrap();
