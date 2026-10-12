@@ -962,6 +962,32 @@ Response:
 
 All refusals are returned together, in the fixed order above. **Stability:** `admissible`, each `reason` tag and its typed payload fields, `evaluated_at_height`, `admitted_proof_systems` and the `candidate` field names are the contract; `detail` is human-facing and may change. New tags may be added — treat an unknown tag as a refusal. A refusal is never reported as `disabled`: `candidate.status` is the record's own byte.
 
+### BR1 randomness beacon (`beacon_*`, `dkg_*`) — read-only, dormant (issue #127)
+
+Reads of the beacon rows committed state holds. They write nothing, run no DKG step, and never fill in an absent value from other state. Genesis validation refuses `beacon_enabled_from_height` on every network, so on a real chain each of these returns `null`.
+
+- `epoch` is the beacon epoch of the genesis `beacon_schedule`, not the `epoch_getInfo` epoch.
+- Byte fields are `0x`-prefixed hex of the stored bytes.
+- An answer is the node's committed state at its current head, not a finality claim: a reorg can replace it.
+- A stored row that does not decode, or a finalized round with only one of its two rows, is `-32603`, never `null`.
+
+| Method | Returns |
+|---|---|
+| `beacon_getOutput(epoch, round)` | `{epoch, round, output, sigma_r}`: the 32-byte beacon output and the 96-byte combined round signature `Σ_r` it was derived from. `null` if round `round` of `epoch` is not finalized. |
+| `beacon_getMembershipSnapshot(epoch)` | `{epoch, n, members}`: the validator set frozen at the epoch boundary, as 32-byte ids in membership order (position `j` is index `j`, evaluation point `x_j = j + 1`). `null` if no snapshot was recorded for the epoch; it is never filled in from the genesis or current validator set. |
+| `dkg_getTranscript(epoch)` | `{epoch, keys, deals, disqualified, false_accusers, adjudicated, key_equivocations, deal_equivocations}`. `null` if the epoch holds no DKG row. |
+
+Transcript entries, each list in canonical key order:
+
+- `keys[]`: `{validator_index, ek, record}`, with `ek` the 48-byte encryption key `EK_j`.
+- `deals[]`: `{dealer_i, recipient_j, commitments[], r_ij, ct_ij, record}`.
+- `disqualified[]`: dealers disqualified by a complaint verdict or by equivocation; `false_accusers[]`: recipients whose complaint was adjudicated false. Both record verdicts; nothing in execution moves stake on them.
+- `adjudicated[]`: `{dealer_i, recipient_j}` pairs whose complaint was adjudicated with effect.
+- `key_equivocations[]`: `{validator_index, first, second}`; `deal_equivocations[]`: `{dealer_i, first, second}`.
+- `record`, `first`, `second`: `{signer, tx_ref, carrier}`, the signing transaction's public key, its hash, and the carrier bytes it carried.
+
+Complaint bodies and partial signatures are not persisted and are not returned. There is no `beacon_getGroupKey`: the group key is not a stored value, and no stored row records when `QUAL` became final.
+
 ### No-key unsigned-tx family builders (issue #89)
 
 One builder per family, each taking a tagged operation request `{from, fee?, nonce?, chain_id?, <envelope ids>, op}`. **No-key** — no private keys, no signing, no submit, no execution, no authorization: the builder only assembles an unsigned `TransactionV2`. All return the shared shape `{unsigned_tx, signing_hash, from, nonce, fee, chain_id}`. `nonce`/`chain_id` are fetched from state when omitted. The client signs `signing_hash` locally and broadcasts via `sum_sendRawTransaction`; the executor stays authoritative for all authority/gate/lifecycle checks.
