@@ -270,8 +270,10 @@ fn this_binary_keeps_a_schema_1_database_as_it_is() {
 
 #[test]
 fn the_production_schema_2_is_a_well_formed_draft() {
-    // Registered in append order: #277's, #279's and #278's gates, then
-    // #215's compute-pool parameter group (outside the gate range).
+    // Registered in append order: #277's, #279's and #278's gates, #215's
+    // compute-pool parameter group (outside the gate range), then #279's
+    // metering gate, block budget, engine identity and cost schedule
+    // (`consensus_config_metering_fields.rs`).
     let ids: Vec<(u16, &str)> = SCHEMA_2_ADDED
         .iter()
         .map(|a| (a.spec.id, a.spec.name))
@@ -283,6 +285,10 @@ fn the_production_schema_2_is_a_well_formed_draft() {
             (0x1042, "contract_error_rollback_enabled_from_height"),
             (0x1040, "messaging_timestamp_units_enabled_from_height"),
             (0x0720, "compute_pool_params"),
+            (0x1041, "contract_metering_enabled_from_height"),
+            (0x0115, "max_block_contract_gas"),
+            (0x2716, "sumc_runtime::metering::METERED_ENGINE_IDENTITY"),
+            (0x2717, "sumc_runtime::metering::METERED_COST_SCHEDULE"),
         ]
     );
     // Every gate registered so far is dormant in every default genesis.

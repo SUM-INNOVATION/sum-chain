@@ -56,6 +56,12 @@ crates/consensus/src/consensus_config/record.rs	RECORD_VERSION	EXCLUDE	consensus
 crates/consensus/src/consensus_config/record.rs	TRANSITION_PREFIX	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/record.rs	TRANSITION_VERSION	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/schema.rs	COMPUTE_POOL_PARAMS_ID	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 field id)
+crates/consensus/src/consensus_config/schema.rs	CONTRACT_METERING_GATE_ID	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 field id)
+crates/consensus/src/consensus_config/schema.rs	MAX_BLOCK_CONTRACT_GAS_ID	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 field id)
+crates/consensus/src/consensus_config/schema.rs	METERED_COST_SCHEDULE_ID	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 field id)
+crates/consensus/src/consensus_config/schema.rs	METERED_COST_SCHEDULE_TAG_MAX_LEN	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 value rule of 0x2717)
+crates/consensus/src/consensus_config/schema.rs	METERED_ENGINE_IDENTITY_ID	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 field id)
+crates/consensus/src/consensus_config/schema.rs	METERED_ENGINE_IDENTITY_MAX_LEN	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 value rule of 0x2716)
 crates/consensus/src/consensus_config/schema.rs	PRODUCTION	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/schema.rs	SCHEMA_1	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/schema.rs	SCHEMA_2	EXCLUDE	consensus-config-self	the configuration format itself

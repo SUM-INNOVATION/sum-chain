@@ -451,6 +451,8 @@ fn check_against_registry(schema: &'static Schema, fields: &[Field]) -> Result<(
         }
         check_value(n, spec, &field.value)?;
     }
+    // Rules that relate fields, or constrain a byte string's contents.
+    super::schema::check_metering_relations(schema, fields).map_err(ConfigError::malformed)?;
     Ok(())
 }
 

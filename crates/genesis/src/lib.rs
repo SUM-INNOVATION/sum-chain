@@ -207,6 +207,38 @@ pub enum GenesisError {
          gate must be at or below the consent-grant gate"
     )]
     HealthcareAuthorizationAfterConsentGrantGate { authorization: u64, grant: u64 },
+
+    /// `contract_metering_enabled_from_height` is set, but this binary has no
+    /// metered contract engine. Set, the height would be recorded as a rule no
+    /// node running this binary executes.
+    #[error(
+        "contract_metering_enabled_from_height is Some({height}), but this binary has no \
+         metered contract engine. The gate cannot be set until a binary that implements \
+         contract metering is released"
+    )]
+    ContractMeteringUnavailable { height: u64 },
+
+    /// The block contract gas budget is below the per-transaction ceiling
+    /// while the metering gate is set. A transaction declaring the ceiling
+    /// could then never be included: every proposer skips it and every
+    /// importer refuses a block carrying it.
+    #[error(
+        "max_block_contract_gas is Some({budget}), below max_contract_gas {ceiling}, while \
+         contract_metering_enabled_from_height is set. A contract transaction declaring \
+         the per-transaction ceiling could never be included in a block. The block budget \
+         must be at least the per-transaction ceiling"
+    )]
+    BlockContractGasBelowTxCeiling { budget: u64, ceiling: u64 },
+
+    /// `max_block_contract_gas` set while `contract_metering_enabled_from_height`
+    /// is not. The budget is read only above the metering gate, so without it
+    /// the value would be inert, yet a consensus configuration would still
+    /// record it.
+    #[error(
+        "max_block_contract_gas = {budget} is set while contract_metering_enabled_from_height \
+         is not. The budget only applies above the metering gate; set both, or neither"
+    )]
+    BlockContractGasWithoutMetering { budget: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, GenesisError>;
@@ -2733,6 +2765,55 @@ pub struct ChainParams {
     /// in this branch.
     #[serde(default)]
     pub messaging_timestamp_units_enabled_from_height: Option<u64>,
+
+    /// Contract execution is metered.
+    ///
+    /// Issue #279. At and above this height a contract deploy or call is
+    /// charged, against its transaction's `gas_limit`, for the execution it
+    /// performs, by the metered engine and under the cost schedule that the
+    /// consensus configuration commits together with this height: fields
+    /// 0x2716 (`sumc_runtime::metering::METERED_ENGINE_IDENTITY`) and 0x2717
+    /// (`sumc_runtime::metering::METERED_COST_SCHEDULE`). A configuration that
+    /// sets this height without committing both is refused. Below it, contracts
+    /// execute exactly as before this field was declared.
+    /// [`Self::max_block_contract_gas`] is read only at and above it.
+    ///
+    /// **This binary has no metered engine.** It refuses the height at load
+    /// ([`GenesisError::ContractMeteringUnavailable`]) rather than record a rule
+    /// it does not execute. The field is declared now so that the consensus
+    /// configuration's schema 2 registers it before that schema is frozen.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub contract_metering_enabled_from_height: Option<u64>,
+
+    /// Upper bound on the summed DECLARED `gas_limit` of the contract
+    /// transactions (`ContractDeploy`, `ContractCall`) in one block.
+    ///
+    /// Issue #279. Read only at and above
+    /// [`Self::contract_metering_enabled_from_height`]. Declared limits, not gas
+    /// used, so an importer refuses an over-budget block before executing any
+    /// of it, and a proposer leaves out a contract transaction that would not
+    /// fit and carries on with the rest. The sum is checked arithmetic: an
+    /// overflowing sum is over budget.
+    ///
+    /// `None` is no block limit; each transaction is still bounded by
+    /// `max_contract_gas`. Set without the metering gate it is refused at load
+    /// ([`GenesisError::BlockContractGasWithoutMetering`]). Set with it, it must
+    /// be at least `max_contract_gas`
+    /// ([`GenesisError::BlockContractGasBelowTxCeiling`]), so any single
+    /// admissible contract transaction fits an otherwise empty block. No value
+    /// is chosen.
+    #[serde(default)]
+    pub max_block_contract_gas: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -3156,6 +3237,10 @@ impl Default for ChainParams {
             contract_error_rollback_enabled_from_height: None,
             // Production-safe default: messaging keeps reading the block timestamp as before — dormant.
             messaging_timestamp_units_enabled_from_height: None,
+            // Production-safe default: contracts execute as before (no metered engine here) — dormant.
+            contract_metering_enabled_from_height: None,
+            // No block-level contract gas budget (inert while the metering gate is closed).
+            max_block_contract_gas: None,
         }
     }
 }
@@ -3238,6 +3323,37 @@ impl ChainParams {
             return Err(GenesisError::IncompleteSubsystemActivation {
                 gate: "compute_pool_enabled_from_height",
             });
+        }
+        // ── block contract gas budget: only with the gate (#279) ───────────────
+        //
+        // A budget without the metering gate is inert, and is refused rather
+        // than recorded: the budget is set together with the gate, or not at all.
+        if let (None, Some(budget)) = (
+            self.contract_metering_enabled_from_height,
+            self.max_block_contract_gas,
+        ) {
+            return Err(GenesisError::BlockContractGasWithoutMetering { budget });
+        }
+        // ── block contract gas budget >= per-transaction ceiling (#279) ─────
+        //
+        // Structural only; it ratifies neither value. Checked whenever both the
+        // metering gate and the budget are set (the budget is inert otherwise),
+        // so any single admissible contract transaction fits an otherwise empty
+        // block and selection and import stay total.
+        if let (Some(_), Some(budget)) = (
+            self.contract_metering_enabled_from_height,
+            self.max_block_contract_gas,
+        ) {
+            if budget < self.max_contract_gas {
+                return Err(GenesisError::BlockContractGasBelowTxCeiling {
+                    budget,
+                    ceiling: self.max_contract_gas,
+                });
+            }
+        }
+        // ── the metering gate itself: no metered engine in this binary (#279) ─
+        if let Some(height) = self.contract_metering_enabled_from_height {
+            return Err(GenesisError::ContractMeteringUnavailable { height });
         }
         if self.beacon_enabled_from_height.is_some() {
             return Err(GenesisError::IncompleteSubsystemActivation {
@@ -3762,6 +3878,10 @@ impl ChainParams {
             (
                 "messaging_timestamp_units_enabled_from_height",
                 self.messaging_timestamp_units_enabled_from_height,
+            ),
+            (
+                "contract_metering_enabled_from_height",
+                self.contract_metering_enabled_from_height,
             ),
         ]
     }

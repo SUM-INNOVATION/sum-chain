@@ -28,10 +28,10 @@ asked for:
 
 ---
 
-## Part 0a — Five gates arrived after this packet was regenerated
+## Part 0a — Six gates arrived after this packet was regenerated
 
-`ChainParams` now declares **sixty-six**. This packet covers sixty-one, and
-the five it does not cover are named here rather than left to be discovered by
+`ChainParams` now declares **sixty-seven**. This packet covers sixty-one, and
+the six it does not cover are named here rather than left to be discovered by
 counting:
 
   * `subsystem_proof_unsupported_enabled_from_height` — every `VerifyProof` arm
@@ -59,6 +59,11 @@ counting:
     without this one gives an 86.4 s quota window, a ten-minute payment expiry
     and a sponsored message that is always expired, so it should open at or
     before it. Nothing in `ChainParams::validate` enforces that ordering.
+  * `contract_metering_enabled_from_height` — contract execution is metered
+    from this height (#279). Declared, with `max_block_contract_gas`, so that
+    schema 2 registers metering (fields `0x1041`, `0x0115`, `0x2716`, `0x2717`)
+    before it freezes. This binary has no metered engine and refuses the gate at
+    load, so it cannot be scheduled; its write-up arrives with the engine.
 
 **None of them is scheduled below, and that is deliberate.** Each needs the same six
 fields Part 1 gives the other sixty-one — behaviour, dependency ordering,
@@ -66,7 +71,7 @@ persistent data impact, rollback-in-effect, monitoring signal, recommended wave
 — and scheduling a gate that has not had that treatment is the shortcut this
 packet exists to prevent. The same note appeared in the previous edition for
 three gates, and those three were given their treatment before being scheduled;
-these five should be handled the same way.
+these six should be handled the same way.
 
 Nine gates arrived in the wave that outran the previous edition of this
 document. **Seven of them were written up** — R29 to R35, in Part 1A — and the
@@ -75,11 +80,12 @@ and they did NOT join that deficit**: R36 to R40 arrive with their six fields
 already written, which is the standing this section exists to require. The
 deficit stood at two, the same two, until #277, #279 and #278 added the third,
 fourth and fifth above; #279's and #278's dependencies are stated in their
-bullets, and the rest of those write-ups is owed.
+bullets, and the rest of those write-ups is owed. The sixth, #279's metering
+gate, is refused at load until its engine exists.
 
 This is the second time a wave has outrun this document, and the third wave did
 not. The count in a sentence is not checkable by any tool here, which is why the
-five uncovered gates are named: a reader can verify the claim against
+six uncovered gates are named: a reader can verify the claim against
 `tools/lane-b/gate-structure-check.py`'s output without recounting prose.
 
 ## Part 0 — The facts that apply to all sixty-one
