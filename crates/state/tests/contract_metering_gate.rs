@@ -452,4 +452,3 @@ fn rpc_views_and_estimates_run_on_the_engine_of_the_next_block() {
     let err = view(&gated, gate - 1);
     assert!(err.contains(metering::OUT_OF_GAS_MESSAGE), "{err}");
 }
-

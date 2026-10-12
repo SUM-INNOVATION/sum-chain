@@ -695,4 +695,3 @@ fn a_local_executor_runs_metered_views_under_its_gas_cap() {
             .unwrap()
     );
 }
-

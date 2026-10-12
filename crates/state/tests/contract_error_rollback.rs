@@ -334,4 +334,3 @@ fn the_metering_gate_implies_error_rollback_whatever_the_rollback_gate_says() {
         }
     }
 }
-
