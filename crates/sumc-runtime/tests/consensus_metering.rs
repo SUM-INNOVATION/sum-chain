@@ -120,7 +120,11 @@ fn identities_are_distinct_and_the_schedule_is_labelled_provisional() {
     assert_eq!(ENGINE_IDENTITY, "wasmer-singlepass-5");
     assert_ne!(METERED_ENGINE_IDENTITY, ENGINE_IDENTITY);
     assert!(METERED_ENGINE_IDENTITY.ends_with("provisional"));
-    assert!(S.encode().starts_with(b"sumc-cost-v1-provisional"));
+    let tag = b"sumc-cost-v1-provisional";
+    let encoded = S.encode();
+    assert_eq!(encoded[0] as usize, tag.len());
+    assert_eq!(&encoded[1..=tag.len()], tag);
+    assert_eq!(encoded.len(), 1 + tag.len() + 19 * 8 + 10 * 4);
     assert_eq!(S.encode(), CostScheduleV1Provisional::PROVISIONAL.encode());
 }
 

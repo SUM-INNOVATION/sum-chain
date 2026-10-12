@@ -56,6 +56,12 @@ crates/consensus/src/consensus_config/record.rs	RECORD_VERSION	EXCLUDE	consensus
 crates/consensus/src/consensus_config/record.rs	TRANSITION_PREFIX	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/record.rs	TRANSITION_VERSION	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/schema.rs	COMPUTE_POOL_PARAMS_ID	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 field id)
+crates/consensus/src/consensus_config/schema.rs	CONTRACT_METERING_GATE_ID	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 field id)
+crates/consensus/src/consensus_config/schema.rs	MAX_BLOCK_CONTRACT_GAS_ID	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 field id)
+crates/consensus/src/consensus_config/schema.rs	METERED_COST_SCHEDULE_ID	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 field id)
+crates/consensus/src/consensus_config/schema.rs	METERED_COST_SCHEDULE_TAG_MAX_LEN	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 value rule of 0x2717)
+crates/consensus/src/consensus_config/schema.rs	METERED_ENGINE_IDENTITY_ID	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 field id)
+crates/consensus/src/consensus_config/schema.rs	METERED_ENGINE_IDENTITY_MAX_LEN	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 value rule of 0x2716)
 crates/consensus/src/consensus_config/schema.rs	PRODUCTION	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/schema.rs	SCHEMA_1	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/schema.rs	SCHEMA_2	EXCLUDE	consensus-config-self	the configuration format itself
@@ -504,9 +510,11 @@ crates/sumc-runtime/src/local_limits.rs	BULK_EXHAUSTED	EXCLUDE	local	export name
 crates/sumc-runtime/src/local_limits.rs	BULK_REMAINING	EXCLUDE	local	export name of a global added only to modules compiled by the RPC/view executor; block executor modules are uninstrumented
 crates/sumc-runtime/src/local_limits.rs	DEFAULT	EXCLUDE	local	default node-local RPC/view budgets (node config [rpc] contract_exec_*); block execution never reads them
 crates/sumc-runtime/src/metering.rs	GAS_GLOBAL_EXPORT	PENDING	schema-2	reserved export of the injected gas global (a module exporting it is refused); part of the metered engine named by METERED_ENGINE_IDENTITY; read only above contract_metering_enabled_from_height (schema-2 gate 0x1041, dormant)
+crates/sumc-runtime/src/metering.rs	METERED_COST_SCHEDULE	PENDING	schema-2	registered as schema-2 Source::Param 0x2717 (its encode()), present only while contract_metering_enabled_from_height (0x1041) is set and METERING_VALUES_RATIFIED; absent otherwise
 crates/sumc-runtime/src/metering.rs	METERED_ENGINE_IDENTITY	PENDING	schema-2	registered as schema-2 Source::Param 0x2716, absent while the gate is unset; read only above contract_metering_enabled_from_height (schema-2 gate 0x1041, dormant)
+crates/sumc-runtime/src/metering.rs	METERING_VALUES_RATIFIED	EXCLUDE	startup-config-check	decides only whether a consensus configuration may commit 0x2716/0x2717; a configuration setting the metering gate is refused while it is false; never read by execution
 crates/sumc-runtime/src/metering.rs	OUT_OF_GAS_MESSAGE	PENDING	schema-2	error text only; receipts carry Failed(4)/Failed(5); read only above contract_metering_enabled_from_height (schema-2 gate 0x1041, dormant)
-crates/sumc-runtime/src/metering.rs	PROVISIONAL	PENDING	schema-2	PROVISIONAL cost schedule; registered as schema-2 Source::Param 0x2717 (encode()), absent while the gate is unset; read only above contract_metering_enabled_from_height (schema-2 gate 0x1041, dormant)
+crates/sumc-runtime/src/metering.rs	PROVISIONAL	PENDING	schema-2	the PROVISIONAL schedule values, which METERED_COST_SCHEDULE holds today; committed only through METERED_COST_SCHEDULE (0x2717), and only once METERING_VALUES_RATIFIED
 crates/sumc-runtime/src/metering.rs	STACK_GLOBAL_EXPORT	PENDING	schema-2	reserved export of the injected stack-height global; part of the metered engine; read only above contract_metering_enabled_from_height (schema-2 gate 0x1041, dormant)
 crates/sumc-runtime/src/metering.rs	STACK_LIMIT_MESSAGE	PENDING	schema-2	error text only; receipts carry Failed(4)/Failed(5); read only above contract_metering_enabled_from_height (schema-2 gate 0x1041, dormant)
 crates/sumc-runtime/src/metering.rs	TRAP_OUT_OF_GAS	PENDING	schema-2	trap-reason code between injected code and host, selects error text; part of the metered engine; read only above contract_metering_enabled_from_height (schema-2 gate 0x1041, dormant)

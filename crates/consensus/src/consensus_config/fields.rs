@@ -2047,6 +2047,10 @@ pub(crate) fn compute(genesis: &Genesis, policy: &SchemaPolicy) -> Result<Vec<Fi
         }
     }
 
+    // #279: a metering gate set without ratified metering values is refused
+    // before any configuration exists to record.
+    super::schema::refuse_unratified_metering(genesis, &f)?;
+
     f.sort_by_key(|field| field.id);
     if f.windows(2).any(|w| w[0].id == w[1].id) {
         return Err(ConfigError::Build(

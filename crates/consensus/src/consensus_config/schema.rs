@@ -36,7 +36,8 @@
 
 use sumchain_genesis::Genesis;
 
-use super::codec::{Value, SCHEMA_V1};
+use super::codec::{Field, Value, SCHEMA_V1};
+use super::ConfigError;
 use sumchain_primitives::compute_pool_params::ComputePoolParamsV1;
 
 use super::fields::{is_gate, FieldSpec, ListOrder, Ty, SCHEMA_V1_FIELDS};
@@ -309,24 +310,34 @@ pub const SCHEMA_2_ADDED: &[AddedField] = &[
         },
         source: Source::Param(compute_pool_params_value),
     },
-    // #279: contract metering gate (dormant). Next free gate id after the
-    // ids reserved by #285/#286 (0x103f, 0x1040).
-    AddedField {
-        spec: added_spec(0x1041, "contract_metering_enabled_from_height", Ty::U64),
-        source: Source::Gate,
-    },
-    // #279: block contract gas budget. Absent while unset (no block limit);
-    // read only where the metering gate is open.
-    AddedField {
-        spec: added_spec(0x0115, "max_block_contract_gas", Ty::U64),
-        source: Source::Param(max_block_contract_gas),
-    },
-    // #279: the metered engine and its PROVISIONAL cost schedule. Absent while
-    // the metering gate is unset (contracts then run on the unmetered engine,
-    // committed by schema 1 as `sumc_runtime::ENGINE_IDENTITY`).
+    // #279: contract metering. Four fields, registered together, whose value
+    // rules are [`check_metering_relations`].
+    //
+    // The gate: metering applies at and above this height.
     AddedField {
         spec: added_spec(
-            0x2716,
+            CONTRACT_METERING_GATE_ID,
+            "contract_metering_enabled_from_height",
+            Ty::U64,
+        ),
+        source: Source::Gate,
+    },
+    // The block contract gas budget: an upper bound on the summed declared
+    // `gas_limit` of a block's contract transactions. Absent: no block bound.
+    AddedField {
+        spec: added_spec(MAX_BLOCK_CONTRACT_GAS_ID, "max_block_contract_gas", Ty::U64),
+        source: Source::Param(max_block_contract_gas),
+    },
+    // The metered engine's identity, and the cost schedule it meters with.
+    // Absent below the metering gate, whose behaviour is the engine schema 1
+    // commits as `sumc_runtime::ENGINE_IDENTITY`. Present only while the gate
+    // is set AND this binary's metering values are ratified; a gate set
+    // without ratified values is refused when the configuration is built
+    // ([`refuse_unratified_metering`]), so no record can hold a provisional
+    // identity or schedule.
+    AddedField {
+        spec: added_spec(
+            METERED_ENGINE_IDENTITY_ID,
             "sumc_runtime::metering::METERED_ENGINE_IDENTITY",
             Ty::Bytes,
         ),
@@ -334,8 +345,8 @@ pub const SCHEMA_2_ADDED: &[AddedField] = &[
     },
     AddedField {
         spec: added_spec(
-            0x2717,
-            "sumc_runtime::metering::CostScheduleV1Provisional::PROVISIONAL",
+            METERED_COST_SCHEDULE_ID,
+            "sumc_runtime::metering::METERED_COST_SCHEDULE",
             Ty::Bytes,
         ),
         source: Source::Param(metered_cost_schedule),
@@ -377,24 +388,174 @@ fn max_block_contract_gas(genesis: &Genesis) -> Value {
         .map_or(Value::Absent, Value::U64)
 }
 
+/// Field id of `contract_metering_enabled_from_height` (#279).
+pub const CONTRACT_METERING_GATE_ID: u16 = 0x1041;
+/// Field id of `max_block_contract_gas` (#279).
+pub const MAX_BLOCK_CONTRACT_GAS_ID: u16 = 0x0115;
+/// Field id of the metered engine's identity (#279).
+pub const METERED_ENGINE_IDENTITY_ID: u16 = 0x2716;
+/// Field id of the metered cost schedule (#279).
+pub const METERED_COST_SCHEDULE_ID: u16 = 0x2717;
+/// Longest metered engine identity, in bytes.
+pub const METERED_ENGINE_IDENTITY_MAX_LEN: usize = 128;
+/// Longest cost-schedule tag, in bytes.
+pub const METERED_COST_SCHEDULE_TAG_MAX_LEN: usize = 64;
+
+/// Whether the metering values may be committed: the gate is set and this
+/// binary's values are ratified.
+fn metering_values_committed(genesis: &Genesis) -> bool {
+    genesis
+        .params
+        .contract_metering_enabled_from_height
+        .is_some()
+        && sumc_runtime::metering::METERING_VALUES_RATIFIED
+}
+
 fn metered_engine_identity(genesis: &Genesis) -> Value {
-    match genesis.params.contract_metering_enabled_from_height {
-        None => Value::Absent,
-        Some(_) => Value::Bytes(
+    if metering_values_committed(genesis) {
+        Value::Bytes(
             sumc_runtime::metering::METERED_ENGINE_IDENTITY
                 .as_bytes()
                 .to_vec(),
-        ),
+        )
+    } else {
+        Value::Absent
     }
 }
 
 fn metered_cost_schedule(genesis: &Genesis) -> Value {
-    match genesis.params.contract_metering_enabled_from_height {
-        None => Value::Absent,
-        Some(_) => Value::Bytes(
-            sumc_runtime::metering::CostScheduleV1Provisional::PROVISIONAL.encode(),
-        ),
+    if metering_values_committed(genesis) {
+        Value::Bytes(sumc_runtime::metering::METERED_COST_SCHEDULE.encode())
+    } else {
+        Value::Absent
     }
+}
+
+/// Refuses a configuration that sets `contract_metering_enabled_from_height`
+/// without both metering values present: a binary that has no ratified engine
+/// identity and cost schedule to commit cannot enable metering.
+///
+/// Called by every build of a configuration, so node start, the
+/// acknowledgements and the RPC all fail before anything is recorded.
+pub(crate) fn refuse_unratified_metering(
+    genesis: &Genesis,
+    fields: &[Field],
+) -> Result<(), ConfigError> {
+    let Some(height) = genesis.params.contract_metering_enabled_from_height else {
+        return Ok(());
+    };
+    let present = |id: u16| {
+        fields
+            .iter()
+            .any(|f| f.id == id && f.value != Value::Absent)
+    };
+    if present(METERED_ENGINE_IDENTITY_ID) && present(METERED_COST_SCHEDULE_ID) {
+        return Ok(());
+    }
+    Err(ConfigError::Refused(format!(
+        "contract_metering_enabled_from_height is set ({height}), but this binary has no \
+         ratified metering values to commit with it: a configuration that enables metering \
+         commits the metered engine identity and cost schedule, and values that are not \
+         ratified are never committed. Nothing was recorded. Remove the height, or run a \
+         binary whose metering values are ratified"
+    )))
+}
+
+/// The value rules of the metering fields (#279). Part of the schema: checked
+/// on every configuration built or decoded in a schema that registers them, so
+/// a record that breaks one was not produced by any encoder and is refused.
+///
+/// - `0x2716` (engine identity) and `0x2717` (cost schedule) are each present
+///   exactly when `0x1041` (the metering gate) is. A configuration that meters
+///   contracts commits the engine and schedule it meters with; one that does
+///   not commits neither.
+/// - `0x0115` (block budget) is present only when `0x1041` is, and is then at
+///   least `max_contract_gas` (`0x0106`).
+/// - `0x2716` is the engine identity string: 1 to
+///   [`METERED_ENGINE_IDENTITY_MAX_LEN`] bytes, each printable ASCII
+///   (`0x21..=0x7e`).
+/// - `0x2717` is `tag_len:u8 ‖ tag[tag_len] ‖ body`. The tag, 1 to
+///   [`METERED_COST_SCHEDULE_TAG_MAX_LEN`] printable ASCII bytes, names the
+///   body's layout and version; the body is non-empty and is the schedule in
+///   that layout, which the engine named by `0x2716` defines. A configuration
+///   compares the bytes: a different schedule is a different value.
+pub(crate) fn check_metering_relations(
+    schema: &'static Schema,
+    fields: &[Field],
+) -> Result<(), String> {
+    if schema.spec(CONTRACT_METERING_GATE_ID).is_none() {
+        return Ok(());
+    }
+    let get = |id: u16| {
+        fields
+            .iter()
+            .find(|f| f.id == id)
+            .map_or(&Value::Absent, |f| &f.value)
+    };
+    let metered = *get(CONTRACT_METERING_GATE_ID) != Value::Absent;
+    for id in [METERED_ENGINE_IDENTITY_ID, METERED_COST_SCHEDULE_ID] {
+        if (*get(id) != Value::Absent) != metered {
+            return Err(format!(
+                "field {id:#06x} is {} while the metering gate {CONTRACT_METERING_GATE_ID:#06x} \
+                 is {}; the engine identity and cost schedule are committed exactly when the \
+                 gate is",
+                if metered { "absent" } else { "present" },
+                if metered { "set" } else { "absent" },
+            ));
+        }
+    }
+    if let Value::U64(budget) = get(MAX_BLOCK_CONTRACT_GAS_ID) {
+        if !metered {
+            return Err(format!(
+                "field {MAX_BLOCK_CONTRACT_GAS_ID:#06x} (block contract gas budget) is present \
+                 while the metering gate {CONTRACT_METERING_GATE_ID:#06x} is absent"
+            ));
+        }
+        let ceiling = SCHEMA_V1_FIELDS
+            .iter()
+            .find(|s| s.name == "max_contract_gas")
+            .and_then(|s| match get(s.id) {
+                Value::U64(c) => Some(*c),
+                _ => None,
+            })
+            .ok_or("max_contract_gas is not a U64 field of this configuration")?;
+        if *budget < ceiling {
+            return Err(format!(
+                "field {MAX_BLOCK_CONTRACT_GAS_ID:#06x} (block contract gas budget) {budget} is \
+                 below max_contract_gas {ceiling}"
+            ));
+        }
+    }
+    let printable = |b: &[u8]| b.iter().all(|c| (0x21..=0x7e).contains(c));
+    if let Value::Bytes(identity) = get(METERED_ENGINE_IDENTITY_ID) {
+        if identity.is_empty()
+            || identity.len() > METERED_ENGINE_IDENTITY_MAX_LEN
+            || !printable(identity)
+        {
+            return Err(format!(
+                "field {METERED_ENGINE_IDENTITY_ID:#06x} (metered engine identity) must be 1 to \
+                 {METERED_ENGINE_IDENTITY_MAX_LEN} bytes of printable ASCII"
+            ));
+        }
+    }
+    if let Value::Bytes(schedule) = get(METERED_COST_SCHEDULE_ID) {
+        let framed = schedule.split_first().and_then(|(&len, rest)| {
+            let len = len as usize;
+            (len >= 1
+                && len <= METERED_COST_SCHEDULE_TAG_MAX_LEN
+                && rest.len() > len
+                && printable(&rest[..len]))
+            .then_some(())
+        });
+        if framed.is_none() {
+            return Err(format!(
+                "field {METERED_COST_SCHEDULE_ID:#06x} (metered cost schedule) must be \
+                 tag_len:u8, a tag of 1 to {METERED_COST_SCHEDULE_TAG_MAX_LEN} printable ASCII \
+                 bytes, and a non-empty body"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Schema 2: schema 1 plus [`SCHEMA_2_ADDED`]. DRAFT.

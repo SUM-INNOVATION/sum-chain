@@ -219,6 +219,16 @@ pub enum GenesisError {
          must be at least the per-transaction ceiling"
     )]
     BlockContractGasBelowTxCeiling { budget: u64, ceiling: u64 },
+
+    /// `max_block_contract_gas` set while `contract_metering_enabled_from_height`
+    /// is not (#279). The budget is read only above the metering gate, so
+    /// without it the value would be inert, yet a consensus configuration would
+    /// still record it.
+    #[error(
+        "max_block_contract_gas = {budget} is set while contract_metering_enabled_from_height \
+         is not. The budget only applies above the metering gate; set both, or neither"
+    )]
+    BlockContractGasWithoutMetering { budget: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, GenesisError>;
@@ -2772,9 +2782,12 @@ pub struct ChainParams {
     /// error rollback of [`Self::contract_error_rollback_enabled_from_height`]
     /// at and above it, whether or not that gate is set.
     ///
-    /// **The cost schedule behind it is PROVISIONAL**
-    /// (`sumc_runtime::CostScheduleV1Provisional`) and must be ratified and
-    /// frozen under a non-provisional identity before this is ever set.
+    /// **The engine identity and cost schedule behind it are PROVISIONAL**
+    /// (`sumc_runtime::metering::METERING_VALUES_RATIFIED` is false). While
+    /// they are, a consensus configuration that sets this height cannot be
+    /// built: node start and the acknowledgements refuse before anything is
+    /// recorded. They are ratified and frozen under a non-provisional identity
+    /// before this is ever set.
     ///
     /// Production-safe default `None`, which is what an absent field resolves
     /// to and what every genesis written before this gate existed carries.
@@ -3311,6 +3324,16 @@ impl ChainParams {
             return Err(GenesisError::IncompleteSubsystemActivation {
                 gate: "compute_pool_enabled_from_height",
             });
+        }
+        // ── block contract gas budget: only with the gate (#279) ───────────────
+        //
+        // A budget without the metering gate is inert, and is refused rather
+        // than recorded: the budget is set together with the gate, or not at all.
+        if let (None, Some(budget)) = (
+            self.contract_metering_enabled_from_height,
+            self.max_block_contract_gas,
+        ) {
+            return Err(GenesisError::BlockContractGasWithoutMetering { budget });
         }
         // ── block contract gas budget >= per-transaction ceiling (#279) ─────
         //

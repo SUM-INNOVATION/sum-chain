@@ -16,7 +16,10 @@ pub mod types;
 
 pub use error::{RuntimeError, Result};
 pub use executor::{ContractExecutor, ExecutionContext, ExecutionMode, ExecutionResult};
-pub use metering::{CostScheduleV1Provisional, METERED_ENGINE_IDENTITY};
+pub use metering::{
+    CostScheduleV1Provisional, METERED_COST_SCHEDULE, METERED_ENGINE_IDENTITY,
+    METERING_VALUES_RATIFIED,
+};
 pub use gas::{Gas, GasCosts, GasMeter};
 pub use local_limits::LocalExecutionLimits;
 pub use storage::{ContractStorage, MemoryStorage, PendingWrite, RocksDbStorage};

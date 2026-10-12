@@ -13,7 +13,7 @@ use common::{fund, setup_with_params, CHAIN_ID};
 
 use sumc_runtime::{metering, ContractExecutor, ExecutionMode, LocalExecutionLimits};
 use sumchain_crypto::{sign, KeyPair};
-use sumchain_genesis::ChainParams;
+use sumchain_genesis::{ChainParams, GenesisError};
 use sumchain_primitives::transaction::{ContractCallData, ContractDeployData};
 use sumchain_primitives::{
     Address, Block, BlockHeader, Hash, Receipt, SignedTransaction, TransactionV2, TxPayload,
@@ -299,8 +299,17 @@ fn the_block_budget_applies_only_where_the_gate_is_open() {
     assert!(check_block_contract_gas(&p, 5, &over[..1]).is_ok());
     // No budget configured: no limit even with the gate open.
     assert!(check_block_contract_gas(&budget_params(Some(1), None), 5, &over).is_ok());
-    // A budget with the gate unset is inert.
-    assert!(check_block_contract_gas(&budget_params(None, Some(1)), 5, &over).is_ok());
+    // A budget with the gate unset is refused at load; were it ever reached,
+    // execution would still ignore it.
+    let mut inert = params(None);
+    inert.max_block_contract_gas = Some(1);
+    inert.max_contract_gas = 1;
+    assert!(matches!(
+        inert.validate(),
+        Err(GenesisError::BlockContractGasWithoutMetering { budget: 1 })
+    ));
+    assert_eq!(block_contract_gas_budget(&inert, 5), None);
+    assert!(check_block_contract_gas(&inert, 5, &over).is_ok());
 }
 
 #[test]

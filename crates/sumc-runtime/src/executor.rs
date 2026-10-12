@@ -206,7 +206,7 @@ impl ContractExecutor {
             metadata: RwLock::new(HashMap::new()),
             local_limits: None,
             metered_cache: RwLock::new(HashMap::new()),
-            schedule: CostScheduleV1Provisional::PROVISIONAL,
+            schedule: metering::METERED_COST_SCHEDULE,
         }
     }
 
@@ -231,7 +231,7 @@ impl ContractExecutor {
             metadata: RwLock::new(HashMap::new()),
             local_limits: Some(limits),
             metered_cache: RwLock::new(HashMap::new()),
-            schedule: CostScheduleV1Provisional::PROVISIONAL,
+            schedule: metering::METERED_COST_SCHEDULE,
         }
     }
 

@@ -83,6 +83,19 @@ use crate::{Gas, Result, RuntimeError, MAX_MEMORY_PAGES};
 /// frozen.
 pub const METERED_ENGINE_IDENTITY: &str = "wasmer-singlepass-5+sumc-cost-v1-provisional";
 
+/// The cost schedule metered execution runs under, and the value the consensus
+/// configuration commits as field 0x2717 (its [`CostScheduleV1Provisional::encode`])
+/// once ratified. PROVISIONAL today: [`CostScheduleV1Provisional::PROVISIONAL`].
+pub const METERED_COST_SCHEDULE: CostScheduleV1Provisional = CostScheduleV1Provisional::PROVISIONAL;
+
+/// Whether [`METERED_ENGINE_IDENTITY`] and [`METERED_COST_SCHEDULE`] are
+/// ratified. While `false`, no consensus configuration can contain them:
+/// building one with `contract_metering_enabled_from_height` set is refused
+/// before anything is recorded, so a node can neither start nor record a
+/// baseline with them. Ratification is the change that sets the final identity,
+/// the final schedule and this flag together.
+pub const METERING_VALUES_RATIFIED: bool = false;
+
 /// Export names of the globals the middleware adds. A module that already
 /// exports one of these names is refused at compile.
 pub const GAS_GLOBAL_EXPORT: &str = "__sumc_v1_gas_remaining";
@@ -230,10 +243,14 @@ impl CostScheduleV1Provisional {
             .saturating_mul(self.bulk_per_unit)
     }
 
-    /// Canonical encoding: every field, declared order, big-endian, behind a
-    /// versioned tag. What the consensus configuration commits to.
+    /// Canonical encoding, what the consensus configuration commits to as
+    /// field 0x2717: `tag_len:u8 ‖ tag ‖ body`. The tag names this layout and
+    /// version; the body is every field, declared order, big-endian.
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = b"sumc-cost-v1-provisional".to_vec();
+        let tag: &[u8] = b"sumc-cost-v1-provisional";
+        let mut out = Vec::with_capacity(1 + tag.len() + 19 * 8 + 10 * 4);
+        out.push(tag.len() as u8);
+        out.extend_from_slice(tag);
         for v in [
             self.op_default,
             self.op_call,

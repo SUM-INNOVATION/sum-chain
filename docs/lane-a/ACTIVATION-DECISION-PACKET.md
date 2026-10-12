@@ -1734,7 +1734,7 @@ Failure semantics are today's trap path: `Failed(5)` for a call and `Failed(4)` 
 - an importer refuses a block whose declared contract gas exceeds it, before executing anything (`check_block_contract_gas`, `crates/state/src/executor.rs:4698`);
 - a proposer skips a transaction that would not fit (`crates/consensus/src/poa.rs`).
 
-RPC views and estimates use the engine of the next block (`ContractExecutorState::local_execution_mode`, `crates/state/src/contract_executor.rs:657`). So from the block before the height, an estimate is the metered charge. **The cost schedule is PROVISIONAL** (`CostScheduleV1Provisional::PROVISIONAL`) and must be ratified and frozen under a non-provisional identity before this gate is ever set.
+RPC views and estimates use the engine of the next block (`ContractExecutorState::local_execution_mode`, `crates/state/src/contract_executor.rs:657`). So from the block before the height, an estimate is the metered charge. **The engine identity and cost schedule are PROVISIONAL** (`sumc_runtime::metering::METERING_VALUES_RATIFIED` is false). While they are, a consensus configuration that sets this gate cannot be built, so node start and the acknowledgements refuse before anything is recorded. The schema-2 fields `0x2716` (`METERED_ENGINE_IDENTITY`) and `0x2717` (`METERED_COST_SCHEDULE`) are committed only once the gate is set and the values are ratified. They must be ratified and frozen under a non-provisional identity before this gate is ever set. A `max_block_contract_gas` without this gate is refused at genesis load.
 
 **2. Dependency ordering.**
 - **At load:** `ChainParams::validate` refuses a budget below `max_contract_gas` when both are set (`GenesisError::BlockContractGasBelowTxCeiling`).

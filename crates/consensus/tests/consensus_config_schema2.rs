@@ -289,10 +289,7 @@ fn the_production_schema_2_is_a_well_formed_draft() {
             (0x1041, "contract_metering_enabled_from_height"),
             (0x0115, "max_block_contract_gas"),
             (0x2716, "sumc_runtime::metering::METERED_ENGINE_IDENTITY"),
-            (
-                0x2717,
-                "sumc_runtime::metering::CostScheduleV1Provisional::PROVISIONAL"
-            ),
+            (0x2717, "sumc_runtime::metering::METERED_COST_SCHEDULE"),
         ]
     );
     // Every gate registered so far is dormant in every default genesis.
@@ -1207,8 +1204,8 @@ fn schema_2_encodes_in_id_order_whatever_the_registration_order() {
     let mut all_set = g2();
     all_set.params.credential_schema_validation_enabled_from_height = Some(5_000);
     all_set.params.contract_error_rollback_enabled_from_height = Some(6_000);
-    all_set.params.contract_metering_enabled_from_height = Some(7_000);
-    all_set.params.max_block_contract_gas = Some(100_000_000);
+    // The metering gate cannot be set while its values are provisional, and
+    // the budget is never committed without it (`consensus_config_metering.rs`).
     for genesis in [g2(), all_set] {
         let a = ccfg::build_with(&genesis, &REAL_ENABLED).unwrap();
         let b = ccfg::build_with(&genesis, policy).unwrap();
@@ -1224,7 +1221,7 @@ fn the_contract_metering_fields_are_dormant_draft_fields() {
     g.params.contract_metering_enabled_from_height = Some(1_000);
     let err = ccfg::build(&g).unwrap_err().to_string();
     assert!(err.contains("contract_metering_enabled_from_height"), "{err}");
-    assert!(err.contains("METERED_ENGINE_IDENTITY"), "{err}");
+    assert!(err.contains("not ratified"), "{err}");
     let mut g = g2();
     g.params.max_block_contract_gas = Some(100_000_000);
     let err = ccfg::build(&g).unwrap_err().to_string();

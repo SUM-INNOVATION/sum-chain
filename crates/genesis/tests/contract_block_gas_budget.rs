@@ -1,6 +1,6 @@
-//! #279: where the metering gate and a block contract gas budget are both
-//! set, the budget must be at least the per-transaction ceiling. Structural
-//! only: neither value is ratified here.
+//! #279: a block contract gas budget is set together with the metering gate or
+//! not at all, and where both are set the budget must be at least the
+//! per-transaction ceiling. Structural only: neither value is ratified here.
 
 use std::collections::HashMap;
 use sumchain_crypto::KeyPair;
@@ -48,7 +48,6 @@ fn a_budget_at_or_above_the_ceiling_or_an_inert_one_is_accepted() {
         params(Some(1), Some(ceiling + 1)),
         params(Some(1), Some(u64::MAX)),
         params(Some(1), None), // no block limit
-        params(None, Some(1)), // gate unset: the budget is inert
         params(None, None),
     ] {
         p.validate().unwrap();
@@ -60,4 +59,22 @@ fn a_budget_at_or_above_the_ceiling_or_an_inert_one_is_accepted() {
     p.validate().unwrap();
     p.max_contract_gas = 501;
     assert!(p.validate().is_err());
+}
+
+#[test]
+fn a_budget_without_the_metering_gate_is_refused_at_load() {
+    for budget in [0, 1, ChainParams::default().max_contract_gas, u64::MAX] {
+        let p = params(None, Some(budget));
+        assert!(matches!(
+            p.validate(),
+            Err(GenesisError::BlockContractGasWithoutMetering { budget: b }) if b == budget
+        ));
+        let err = Genesis::from_json(&genesis_json(p)).unwrap_err();
+        assert!(err.to_string().contains("max_block_contract_gas"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("contract_metering_enabled_from_height"),
+            "{err}"
+        );
+    }
 }
