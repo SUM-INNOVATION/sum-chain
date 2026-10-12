@@ -11,7 +11,7 @@
 //!
 //! | input | source | committed by the consensus configuration as |
 //! |---|---|---|
-//! | `output_availability_blocks` | `ComputePoolParamsV1` | `0x0720` (schema-2 draft) |
+//! | `output_availability_blocks` | `ComputePoolParamsV1` | `0x0720` (schema 2) |
 //! | `max_retention_updates_per_block` | `ComputePoolParamsV1` | `0x0720` |
 //! | `max_retention_files_per_job` | `ComputePoolParamsV1` | `0x0720` |
 //! | `max_reverse_index_entries` | `ComputePoolParamsV1` | `0x0720` |

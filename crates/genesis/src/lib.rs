@@ -857,8 +857,9 @@ pub struct ChainParams {
     /// [`Self::compute_pool_enabled_from_height`] stays `None` and `validate()`
     /// still rejects any `Some(_)` gate. Nothing executes or commits state from
     /// these values today; the consensus configuration commits their canonical
-    /// encoding under a schema-2 field, which a binary that records schema 1
-    /// refuses to start with (a draft field cannot be activated).
+    /// encoding under the schema-2 field `0x0720`. A node whose recorded
+    /// configuration is still schema 1 refuses to start with them declared
+    /// until its operator moves the record to schema 2.
     ///
     /// [`ComputePoolParamsV1::validate`]: sumchain_primitives::compute_pool_params::ComputePoolParamsV1::validate
     #[serde(default)]
