@@ -10,8 +10,9 @@ use sumchain_consensus::consensus_config::{
     codec::{commitment_of, MAGIC},
     fields::{RuleNames, EXCLUDED_PARAMETERS},
     record::{RECORD_KEY, TRANSITION_PREFIX},
-    BaselineStatus, ConfigError, ConsensusConfig, StartupOutcome, TransitionKind, Value,
-    SCHEMA_V1_FIELDS,
+    schema::{METERED_COST_SCHEDULE_ID, METERED_ENGINE_IDENTITY_ID, SCHEMA_2_ADDED},
+    AddedField, BaselineStatus, ConfigError, ConsensusConfig, Schema, SchemaPolicy, Source,
+    StartupOutcome, TransitionKind, Value, SCHEMA_1, SCHEMA_2, SCHEMA_V1_FIELDS,
 };
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::{BeaconParamsConfig, ChainParams, DocClassParams, Genesis, MessagingParams};
@@ -137,6 +138,107 @@ fn id_of(name: &str) -> u16 {
 
 fn open(dir: &TempDir) -> Database {
     Database::open_default(dir.path()).expect("opens")
+}
+
+/// The binaries released before this one: they read and write schema 1, and
+/// know schema 2 only as a draft whose fields must stay absent. It is also how
+/// the frozen schema-1 encoding is pinned now that this binary writes schema 2
+/// (a binary knowing only schema 1 cannot be built: it would not know the
+/// schema-2 gates `ChainParams::activation_heights` lists).
+static SCHEMA_2_DRAFT: SchemaPolicy = SchemaPolicy {
+    reads: &[&SCHEMA_1],
+    writes: &SCHEMA_1,
+    knows: &SCHEMA_2,
+};
+
+/// TEST_ONLY compute-pool parameters (no proposed value): every cap 1,
+/// everything else 0.
+fn test_only_compute_pool_params() -> sumchain_primitives::compute_pool_params::ComputePoolParamsV1
+{
+    serde_json::from_value(json!({
+        "b_offer": 0, "b_commit": 0, "b_check": 0,
+        "c_layer": 0, "c_tok": 0, "c_sel": 0, "c_emit": 0,
+        "accept_reimb": 0, "commit_verify_reimb": 0, "publish_reimb": 0,
+        "observe_reimb": 0, "check_reimb": 0, "settle_reimb": 0, "reassign_reimb": 0,
+        "max_work_units": 1, "max_generations": 1, "max_reprovisionable_units": 1,
+        "max_attempts_per_unit": 1, "max_reassignments_per_file": 1,
+        "k_susp": 0, "w_susp": 0, "s_susp": 0, "n_invite_max": 0,
+        "max_retention_files_per_job": 1, "max_retention_updates_per_block": 1,
+        "max_reverse_index_entries": 1, "output_availability_blocks": 200,
+        "d_avail": 0, "d_ack": 0, "d_final": 0
+    }))
+    .unwrap()
+}
+
+/// [`full_genesis`] with every field schema 2 adds set. Built with
+/// [`METERED_STAND_IN`]: this binary has no metered engine, so it refuses the
+/// metering gate and never commits an engine identity or cost schedule.
+fn full_schema_2_genesis() -> Genesis {
+    let mut g = full_genesis();
+    g.params.credential_schema_validation_enabled_from_height = Some(10_000);
+    g.params.messaging_timestamp_units_enabled_from_height = Some(20_000);
+    g.params.contract_error_rollback_enabled_from_height = Some(30_000);
+    g.params.compute_pool_params = Some(test_only_compute_pool_params());
+    g.params.contract_metering_enabled_from_height = Some(40_000);
+    g.params.max_block_contract_gas = Some(g.params.max_contract_gas);
+    g.params.max_contract_deploy_gas = Some(g.params.max_contract_gas);
+    g
+}
+
+/// TEST_ONLY stand-ins for a metered engine's identity and cost schedule, in
+/// the registered shapes (`schema::check_metering_relations`). No proposed value.
+fn test_only_metered_identity(g: &Genesis) -> Value {
+    match g.params.contract_metering_enabled_from_height {
+        None => Value::Absent,
+        Some(_) => Value::Bytes(b"TEST-ONLY-metered-engine".to_vec()),
+    }
+}
+
+fn test_only_metered_schedule(g: &Genesis) -> Value {
+    match g.params.contract_metering_enabled_from_height {
+        None => Value::Absent,
+        Some(_) => {
+            let tag = b"TEST-ONLY-schedule";
+            let mut v = vec![tag.len() as u8];
+            v.extend_from_slice(tag);
+            v.extend_from_slice(&[0, 0, 0, 1]);
+            Value::Bytes(v)
+        }
+    }
+}
+
+/// The real schema 2 with the two metering value sources replaced by TEST_ONLY
+/// ones: what a binary with a metered engine would compute.
+const METERED_STAND_IN_ADDED: [AddedField; SCHEMA_2_ADDED.len()] = {
+    let mut out = [SCHEMA_2_ADDED[0]; SCHEMA_2_ADDED.len()];
+    let mut i = 0;
+    while i < SCHEMA_2_ADDED.len() {
+        out[i] = SCHEMA_2_ADDED[i];
+        if out[i].spec.id == METERED_ENGINE_IDENTITY_ID {
+            out[i].source = Source::Param(test_only_metered_identity);
+        } else if out[i].spec.id == METERED_COST_SCHEDULE_ID {
+            out[i].source = Source::Param(test_only_metered_schedule);
+        }
+        i += 1;
+    }
+    out
+};
+
+static METERED_STAND_IN_SCHEMA_2: Schema = Schema {
+    number: 2,
+    previous: Some(&SCHEMA_1),
+    added: &METERED_STAND_IN_ADDED,
+};
+
+static METERED_STAND_IN: SchemaPolicy = SchemaPolicy {
+    reads: &[&SCHEMA_1, &METERED_STAND_IN_SCHEMA_2],
+    writes: &METERED_STAND_IN_SCHEMA_2,
+    knows: &METERED_STAND_IN_SCHEMA_2,
+};
+
+/// [`full_schema_2_genesis`]'s configuration: every schema-2 field set.
+fn full_schema_2_config() -> ConsensusConfig {
+    ccfg::build_with(&full_schema_2_genesis(), &METERED_STAND_IN).unwrap()
 }
 
 // ── the rules encoded are the rules that run ────────────────────────────────
@@ -353,6 +455,22 @@ fn decoding_round_trips_exactly() {
     assert_eq!(decoded.encode(), bytes);
     assert_eq!(decoded, ccfg::build(&full_genesis()).unwrap());
     assert_eq!(&bytes[..7], MAGIC);
+    assert_eq!(
+        u16::from_le_bytes([bytes[7], bytes[8]]),
+        2,
+        "this binary writes schema 2"
+    );
+
+    // Every schema-2 field set, and the frozen schema-1 encoding.
+    for bytes in [
+        full_schema_2_config().encode(),
+        ccfg::build_with(&full_genesis(), &SCHEMA_2_DRAFT)
+            .unwrap()
+            .encode(),
+    ] {
+        let decoded = ConsensusConfig::decode(&bytes).expect("decodes");
+        assert_eq!(decoded.encode(), bytes);
+    }
 }
 
 #[test]
@@ -364,11 +482,16 @@ fn decoding_refuses_anything_the_encoder_would_not_produce() {
     assert!(malformed(&b), "wrong magic");
 
     let mut b = bytes.clone();
-    b[7] = 2;
+    b[7] = 3;
     assert_eq!(
         ConsensusConfig::decode(&b),
-        Err(ConfigError::UnknownSchema(2))
+        Err(ConfigError::UnknownSchema(3))
     );
+
+    // Schema 1's number on schema 2's fields.
+    let mut b = bytes.clone();
+    b[7] = 1;
+    assert!(malformed(&b), "schema-2 fields under schema 1");
 
     let mut b = bytes.clone();
     b.push(0);
@@ -453,14 +576,42 @@ fn every_field_value_is_bound_by_the_commitment() {
         pos += 7 + len;
         seen += 1;
     }
-    assert_eq!(seen, SCHEMA_V1_FIELDS.len());
+    assert_eq!(seen, SCHEMA_2.specs().len());
+}
+
+/// [`every_field_value_is_bound_by_the_commitment`] over the fields schema 2
+/// adds, each set.
+#[test]
+fn every_schema_2_field_value_is_bound_by_the_commitment() {
+    let c = full_schema_2_config();
+    let base = c.commitment();
+    let bytes = c.encode();
+    let added: Vec<u16> = SCHEMA_2.added.iter().map(|a| a.spec.id).collect();
+    let mut pos = FIRST_FIELD;
+    let mut flipped = Vec::new();
+    while pos < bytes.len() {
+        let id = u16::from_le_bytes([bytes[pos], bytes[pos + 1]]);
+        let len = u32::from_le_bytes(bytes[pos + 3..pos + 7].try_into().unwrap()) as usize;
+        if added.contains(&id) {
+            assert!(len > 0, "{id:#06x} is set");
+            let mut b = bytes.clone();
+            b[pos + 7 + len - 1] ^= 0x01;
+            assert_ne!(commitment_of(&b), base);
+            flipped.push(id);
+        }
+        pos += 7 + len;
+    }
+    flipped.sort();
+    let mut expected = added;
+    expected.sort();
+    assert_eq!(flipped, expected);
 }
 
 /// The synthetic vector. Computed identically on every architecture CI runs;
-/// a change here is a change to schema 1, which is frozen once released.
+/// a change here is a change to schema 1, which is frozen.
 #[test]
 fn synthetic_golden_vector() {
-    let c = ccfg::build(&full_genesis()).unwrap();
+    let c = ccfg::build_with(&full_genesis(), &SCHEMA_2_DRAFT).unwrap();
     let bytes = c.encode();
     let enc_digest = Hash::hash(&bytes).to_string();
     let commitment = c.commitment().to_string();
@@ -475,6 +626,76 @@ const GOLDEN_ENCODING_DIGEST: &str =
     "0xf9a1ea00dfc23a6bc845f78e335cebd824ee63fd3dadd43b5f9e609a82f3eda8";
 const GOLDEN_COMMITMENT: &str =
     "0xab489a8d36f1084fd33077b14bc6ab915a909222f02e5caa37c225f2d9607641";
+
+/// The schema-2 vectors: the same genesis with every schema-2 field absent, and
+/// with every one set (the metering identity and schedule from TEST_ONLY
+/// stand-ins, [`METERED_STAND_IN`]). Computed identically on every architecture
+/// CI runs; a change here is a change to schema 2, which is frozen.
+#[test]
+fn schema_2_golden_vectors() {
+    let vector = |c: ConsensusConfig| {
+        let bytes = c.encode();
+        (
+            bytes.len(),
+            Hash::hash(&bytes).to_string(),
+            c.commitment().to_string(),
+        )
+    };
+    let dormant = vector(ccfg::build(&full_genesis()).unwrap());
+    let set = vector(full_schema_2_config());
+    assert_eq!(
+        (dormant.0, dormant.1.as_str(), dormant.2.as_str()),
+        (GOLDEN_2_LEN, GOLDEN_2_ENCODING_DIGEST, GOLDEN_2_COMMITMENT),
+    );
+    assert_eq!(
+        (set.0, set.1.as_str(), set.2.as_str()),
+        (
+            GOLDEN_2_SET_LEN,
+            GOLDEN_2_SET_ENCODING_DIGEST,
+            GOLDEN_2_SET_COMMITMENT
+        ),
+    );
+}
+
+const GOLDEN_2_LEN: usize = 7953;
+const GOLDEN_2_ENCODING_DIGEST: &str =
+    "0x31d5fd6d76d6f8203154b398491560d375be6071315c8fa2a4ad7e2cb7e16f84";
+const GOLDEN_2_COMMITMENT: &str =
+    "0x1d33c8889ecad7eb2faed1a95c695897cf8ae77b97966c0ff9f8d63f35653d9f";
+const GOLDEN_2_SET_LEN: usize = 8385;
+const GOLDEN_2_SET_ENCODING_DIGEST: &str =
+    "0xe2b8aad193b0da5871f4f408d4a6c1dfa2fe047cd9b510c639a845e10b6a7522";
+const GOLDEN_2_SET_COMMITMENT: &str =
+    "0x81d2b42c159ee616f71bdb15509c33319c322fdf1581d78b8d7eb8714b27c67f";
+
+/// Schema 2 is schema 1 plus absent fields: under schema 2, a genesis that sets
+/// none of them carries every schema-1 field exactly as schema 1 encodes it,
+/// and each added field as absent.
+#[test]
+fn the_schema_2_encoding_is_the_schema_1_encoding_plus_absent_fields() {
+    let one = ccfg::build_with(&full_genesis(), &SCHEMA_2_DRAFT).unwrap();
+    let two = ccfg::build(&full_genesis()).unwrap();
+    assert_eq!(one.schema().number, 1);
+    assert_eq!(two.schema().number, 2);
+    assert_eq!(
+        two.fields().len(),
+        one.fields().len() + SCHEMA_2.added.len()
+    );
+    for f in two.fields() {
+        match one.fields().iter().find(|o| o.id == f.id) {
+            Some(o) => assert_eq!(o, f),
+            None => {
+                assert!(
+                    SCHEMA_2.added.iter().any(|a| a.spec.id == f.id),
+                    "{:#06x}",
+                    f.id
+                );
+                assert_eq!(f.value, Value::Absent, "{:#06x}", f.id);
+            }
+        }
+    }
+    assert_eq!(one.extend_to(&SCHEMA_2).unwrap(), two);
+}
 
 // ── the local baseline ──────────────────────────────────────────────────────
 
@@ -557,7 +778,7 @@ fn a_damaged_baseline_is_refused_and_never_recreated() {
         ("unknown status", Box::new(|r| r[2] = 9)),
         ("claims a transition", Box::new(|r| r[43] = 1)),
         // Record header is 87 bytes; the encoding's schema follows its magic.
-        ("schema from a newer binary", Box::new(|r| r[87 + 7] = 2)),
+        ("schema from a newer binary", Box::new(|r| r[87 + 7] = 3)),
     ];
     for (what, damage) in cases {
         let dir = TempDir::new().unwrap();
@@ -862,95 +1083,82 @@ fn a_history_entry_the_record_does_not_count_is_refused() {
     ));
 }
 
-/// The #277 gate is registered in the draft schema 2 (0x103f): dormant, it
-/// leaves the schema-1 encoding untouched; set, build refuses, because this
-/// binary records schema 1 and cannot commit to its height.
-#[test]
-fn the_credential_schema_gate_is_a_dormant_schema_2_draft_field() {
-    assert_eq!(
-        ccfg::fields::gate_id("credential_schema_validation_enabled_from_height"),
-        Some(0x103f)
-    );
+/// A schema-2 gate (#277 0x103f, #279 0x1042, #278 0x1040): dormant, it is
+/// committed absent; set, schema 2 commits its height. A binary that records
+/// schema 1 still refuses it, because schema 1 cannot express it.
+fn a_schema_2_gate_is_committed_by_schema_2_and_refused_by_schema_1(
+    name: &str,
+    id: u16,
+    set: fn(&mut Genesis),
+) {
+    assert_eq!(ccfg::fields::gate_id(name), Some(id));
+    assert!(SCHEMA_2
+        .added
+        .iter()
+        .any(|a| a.spec.id == id && a.spec.name == name));
     let base = full_genesis();
     assert_eq!(
-        base.params.credential_schema_validation_enabled_from_height, None,
-        "the golden fixture holds it dormant"
-    );
-    assert_eq!(
-        ccfg::build(&base).unwrap().encode().len(),
-        GOLDEN_LEN,
-        "dormant, the gate adds nothing to the schema-1 encoding"
+        ccfg::build(&base).unwrap().get(id),
+        Some(&Value::Absent),
+        "the golden fixture holds {name} dormant"
     );
 
-    let mut set = full_genesis();
-    set.params.credential_schema_validation_enabled_from_height = Some(10);
-    let err = ccfg::build(&set).expect_err("schema 1 cannot commit to this gate");
-    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
+    let mut g = full_genesis();
+    set(&mut g);
+    let c = ccfg::build(&g).expect("schema 2 commits the gate");
+    assert_eq!(c.get(id), Some(&Value::U64(10)));
+    let changes = ccfg::build(&base).unwrap().diff(&c).unwrap();
     assert!(
-        err.to_string()
-            .contains("credential_schema_validation_enabled_from_height"),
-        "{err}"
+        changes.iter().any(|ch| ch.id == id),
+        "{name} moved the commitment"
+    );
+
+    let err =
+        ccfg::build_with(&g, &SCHEMA_2_DRAFT).expect_err("schema 1 cannot commit to this gate");
+    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
+    assert!(err.to_string().contains(name), "{err}");
+}
+
+#[test]
+fn the_credential_schema_gate_is_a_schema_2_field() {
+    a_schema_2_gate_is_committed_by_schema_2_and_refused_by_schema_1(
+        "credential_schema_validation_enabled_from_height",
+        0x103f,
+        |g| g.params.credential_schema_validation_enabled_from_height = Some(10),
     );
 }
 
-/// The #279 gate is registered in the draft schema 2 (0x1042): dormant, it
-/// leaves the schema-1 encoding untouched; set, build refuses, because this
-/// binary records schema 1 and cannot commit to its height.
 #[test]
-fn the_contract_error_rollback_gate_is_a_dormant_schema_2_draft_field() {
-    assert_eq!(
-        ccfg::fields::gate_id("contract_error_rollback_enabled_from_height"),
-        Some(0x1042)
-    );
-    let base = full_genesis();
-    assert_eq!(
-        base.params.contract_error_rollback_enabled_from_height, None,
-        "the golden fixture holds it dormant"
-    );
-    assert_eq!(
-        ccfg::build(&base).unwrap().encode().len(),
-        GOLDEN_LEN,
-        "dormant, the gate adds nothing to the schema-1 encoding"
-    );
-
-    let mut set = full_genesis();
-    set.params.contract_error_rollback_enabled_from_height = Some(10);
-    let err = ccfg::build(&set).expect_err("schema 1 cannot commit to this gate");
-    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
-    assert!(
-        err.to_string()
-            .contains("contract_error_rollback_enabled_from_height"),
-        "{err}"
+fn the_contract_error_rollback_gate_is_a_schema_2_field() {
+    a_schema_2_gate_is_committed_by_schema_2_and_refused_by_schema_1(
+        "contract_error_rollback_enabled_from_height",
+        0x1042,
+        |g| g.params.contract_error_rollback_enabled_from_height = Some(10),
     );
 }
 
-/// The #278 gate is registered in the draft schema 2 (0x1040): dormant, it
-/// leaves the schema-1 encoding untouched; set, build refuses, because this
-/// binary records schema 1 and cannot commit to its height.
+/// The #278 gate, and the constant its rule reads: the constant is committed
+/// exactly while the gate is set, so a schema-1 record carried into schema 2
+/// (every added field absent) stays exact.
 #[test]
-fn a_pending_schema_2_gate_is_omitted_dormant_and_refused_set() {
-    assert_eq!(
-        ccfg::fields::gate_id("messaging_timestamp_units_enabled_from_height"),
-        Some(0x1040)
+fn the_messaging_timestamp_units_gate_is_a_schema_2_field_with_its_constant() {
+    a_schema_2_gate_is_committed_by_schema_2_and_refused_by_schema_1(
+        "messaging_timestamp_units_enabled_from_height",
+        0x1040,
+        |g| g.params.messaging_timestamp_units_enabled_from_height = Some(10),
     );
-    let base = full_genesis();
+    let constant = ccfg::schema::MESSAGING_TIMESTAMP_MS_PER_SECOND_ID;
+    assert_eq!(constant, 0x252a);
     assert_eq!(
-        base.params.messaging_timestamp_units_enabled_from_height, None,
-        "the golden fixture holds it dormant"
+        ccfg::build(&full_genesis()).unwrap().get(constant),
+        Some(&Value::Absent)
     );
+    let mut g = full_genesis();
+    g.params.messaging_timestamp_units_enabled_from_height = Some(10);
     assert_eq!(
-        ccfg::build(&base).unwrap().encode().len(),
-        GOLDEN_LEN,
-        "dormant, the gate adds nothing to the schema-1 encoding"
-    );
-
-    let mut set = full_genesis();
-    set.params.messaging_timestamp_units_enabled_from_height = Some(10);
-    let err = ccfg::build(&set).expect_err("schema 1 cannot commit to this gate");
-    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
-    assert!(
-        err.to_string()
-            .contains("messaging_timestamp_units_enabled_from_height"),
-        "{err}"
+        ccfg::build(&g).unwrap().get(constant),
+        Some(&Value::U128(
+            sumchain_state::messaging_executor::MESSAGING_TIMESTAMP_MS_PER_SECOND as u128
+        ))
     );
 }

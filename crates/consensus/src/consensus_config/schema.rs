@@ -20,25 +20,32 @@
 //! # Draft and frozen
 //!
 //! A schema freezes when a release first WRITES it. Until then it is a draft:
-//! this binary knows its fields (so a gate registered in it has an id and its
+//! a binary knows its fields (so a gate registered in it has an id and its
 //! genesis value is computed) but neither writes nor reads records of it, and
 //! refuses to start if any of its added fields is non-absent — a draft field
-//! can be registered, never activated. Moving [`PRODUCTION`] to write schema 2
-//! is the change that freezes it, and is a separate, reviewed decision.
+//! can be registered, never activated.
 //!
-//! # Registering a post-schema-1 field
+//! Schema 2 is frozen: [`PRODUCTION`] writes it. Its registry,
+//! [`SCHEMA_2_ADDED`], never changes again, and the encoding is pinned by
+//! `crates/consensus/tests/consensus_config_schema2.rs`.
 //!
-//! Append one [`AddedField`] to [`SCHEMA_2_ADDED`] with the next unused id in
-//! its range (an activation gate: the `0x1000–0x1fff` range, `source:
-//! Source::Gate`, `ty: U64`, named exactly as `ChainParams::activation_heights`
-//! names it). `crates/consensus/tests/consensus_config_census.rs` checks that
-//! every gate has exactly one id in the newest schema and that no id repeats.
+//! # Registering a field after schema 2
+//!
+//! A field registered from now on belongs to a new schema 3: a `SCHEMA_3`
+//! extending [`SCHEMA_2`] with its own append-only list, known by
+//! [`PRODUCTION`] as a draft until a later reviewed change writes it. Use the
+//! next unused id in the field's range (an activation gate: the `0x1000–0x1fff`
+//! range, `source: Source::Gate`, `ty: U64`, named exactly as
+//! `ChainParams::activation_heights` names it).
+//! `crates/consensus/tests/consensus_config_census.rs` checks that every gate
+//! has exactly one id in the newest schema and that no id repeats.
 
 use sumchain_genesis::Genesis;
 
 use super::codec::{Field, Value, SCHEMA_V1};
 use super::ConfigError;
 use sumchain_primitives::compute_pool_params::ComputePoolParamsV1;
+use sumchain_state::messaging_executor::MESSAGING_TIMESTAMP_MS_PER_SECOND;
 
 use super::fields::{is_gate, FieldSpec, ListOrder, Ty, SCHEMA_V1_FIELDS};
 
@@ -250,11 +257,9 @@ pub static SCHEMA_1: Schema = Schema {
     added: &[],
 };
 
-/// Fields schema 2 adds to schema 1. Append-only. DRAFT: no release has
-/// written schema 2, and this binary does not (see [`PRODUCTION`]).
-///
-/// Each post-schema-1 gate or parameter appends its own entry in its own
-/// change. Ids are never reused or reordered. The list's order is history
+/// Fields schema 2 adds to schema 1. FROZEN: this binary writes schema 2
+/// ([`PRODUCTION`]), so this list never changes again; a later field belongs
+/// to schema 3. Ids are never reused or reordered. The list's order is history
 /// only: configurations encode in ascending id order ([`Schema::specs`]), so
 /// where an entry sits here never changes bytes or commitments.
 pub const SCHEMA_2_ADDED: &[AddedField] = &[
@@ -361,6 +366,25 @@ pub const SCHEMA_2_ADDED: &[AddedField] = &[
             Ty::U64,
         ),
         source: Source::Param(max_contract_deploy_gas),
+    },
+    // #278: the compiled constant the messaging rules divide the block
+    // timestamp by at and above `messaging_timestamp_units_enabled_from_height`
+    // (0x1040). Committed only while that gate is set: below it nothing reads
+    // the constant, so absent is the pre-existing behaviour, and a schema-1
+    // record carried into schema 2 stays exact. Setting the gate on an existing
+    // chain therefore also moves this field, which is not a gate, so that start
+    // asks for `acknowledge-consensus-config` rather than recording a
+    // reschedule on its own.
+    AddedField {
+        spec: FieldSpec {
+            id: MESSAGING_TIMESTAMP_MS_PER_SECOND_ID,
+            name: "sumchain_state::messaging_executor::MESSAGING_TIMESTAMP_MS_PER_SECOND",
+            ty: Ty::U128,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Param(messaging_timestamp_ms_per_second_value),
     },
 ];
 
@@ -608,7 +632,21 @@ pub(crate) fn check_metering_relations(
     Ok(())
 }
 
-/// Schema 2: schema 1 plus [`SCHEMA_2_ADDED`]. DRAFT.
+/// Field id of [`messaging_timestamp_ms_per_second_value`] (#278), after the
+/// schema-1 messaging constants (0x2519–0x251c) and the last schema-1 constant
+/// (0x2529).
+pub const MESSAGING_TIMESTAMP_MS_PER_SECOND_ID: u16 = 0x252a;
+
+/// [`MESSAGING_TIMESTAMP_MS_PER_SECOND`] while the messaging timestamp-units
+/// gate is set, [`Value::Absent`] otherwise.
+fn messaging_timestamp_ms_per_second_value(genesis: &Genesis) -> Value {
+    match genesis.params.messaging_timestamp_units_enabled_from_height {
+        None => Value::Absent,
+        Some(_) => Value::U128(MESSAGING_TIMESTAMP_MS_PER_SECOND as u128),
+    }
+}
+
+/// Schema 2: schema 1 plus [`SCHEMA_2_ADDED`]. FROZEN.
 pub static SCHEMA_2: Schema = Schema {
     number: 2,
     previous: Some(&SCHEMA_1),
@@ -617,13 +655,15 @@ pub static SCHEMA_2: Schema = Schema {
 
 /// What this binary does.
 ///
-/// It reads and writes schema 1 only, as the release before it did, and knows
-/// the draft schema 2's fields so that a gate registered there has an id and
-/// is held absent. Enabling schema 2 — `reads: [1, 2]`, `writes: 2` — freezes
-/// it, makes a fresh database record schema 2, and makes the stopped-node
-/// schema transition available to existing ones. That is a later change.
+/// It writes schema 2: a fresh database records schema 2 directly. It reads
+/// schema 1 and schema 2, and keeps reading schema 1 for good (see the module
+/// documentation of [`super`]). An existing schema-1 record is run as it
+/// stands, compared in schema 1 and never re-encoded at start; moving it to
+/// schema 2 is the stopped-node `acknowledge-consensus-config-schema`, which
+/// changes no rule. Until a node has moved, a schema-2 field set in its
+/// genesis refuses start and names that command. Nothing here sets any gate.
 pub static PRODUCTION: SchemaPolicy = SchemaPolicy {
-    reads: &[&SCHEMA_1],
-    writes: &SCHEMA_1,
+    reads: &[&SCHEMA_1, &SCHEMA_2],
+    writes: &SCHEMA_2,
     knows: &SCHEMA_2,
 };

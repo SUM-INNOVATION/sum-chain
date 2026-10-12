@@ -140,46 +140,95 @@ fn the_baseline_runs_after_the_gate_check_and_before_consensus_exists() {
     );
 }
 
-/// #277's gate through the real boot sequence. Unset (every committed
-/// genesis), a node boots and records schema 1 exactly as before; set, this
-/// binary refuses to boot -- on a fresh directory and on one it already runs
-/// -- because it records schema 1 and cannot commit to the height, and it
-/// rewrites nothing.
+/// The release before this binary: it read and wrote schema 1 and knew schema 2
+/// only as a draft. Used to create the database it would have left.
+static PREVIOUS: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
+    reads: &[&ccfg::SCHEMA_1],
+    writes: &ccfg::SCHEMA_1,
+    knows: &ccfg::SCHEMA_2,
+};
+
+/// #277's gate (schema-2 field 0x103f) through the real boot sequence:
+///
+/// * unset (every committed genesis), a fresh node records schema 2;
+/// * set on a fresh directory, the node boots and commits the height;
+/// * set as a future height on a directory this binary records, the boot is an
+///   ordinary gate reschedule;
+/// * set on a directory the previous release recorded (schema 1), the boot is
+///   refused, naming the schema transition, and rewrites nothing; unset, that
+///   directory boots unchanged; after the stopped-node transition the set
+///   genesis boots as a reschedule.
 #[test]
-fn the_credential_schema_gate_boots_unset_and_is_refused_set() {
+fn the_credential_schema_gate_through_the_boot_sequence() {
+    const GATE: u16 = 0x103f;
+    // A remediation gate needs the peer-declaration deadline at or below it.
     let set = |h| {
         let mut g = genesis();
         g.params.credential_schema_validation_enabled_from_height = Some(h);
+        g.params.peer_protocol_declaration_required_from_height = Some(h);
         g
     };
+    let peer_gate =
+        ccfg::fields::gate_id("peer_protocol_declaration_required_from_height").unwrap();
     let g = genesis();
     assert_eq!(
         g.params.credential_schema_validation_enabled_from_height,
         None
     );
 
+    // Unset, fresh: schema 2, the gate absent.
     let dir = tempfile::TempDir::new().unwrap();
     boot(dir.path(), &g).unwrap();
     let r = record(dir.path()).expect("recorded at first boot");
-    assert_eq!(r.config.schema().number, 1);
+    assert_eq!(r.config.schema().number, 2);
+    assert_eq!(r.config.get(GATE), Some(&ccfg::Value::Absent));
     assert_eq!(r.commitment, ccfg::build(&g).unwrap().commitment());
 
-    for h in [0, 1_000, u64::MAX] {
-        let err = boot(dir.path(), &set(h)).unwrap_err();
-        assert!(
-            err.contains("credential_schema_validation_enabled_from_height"),
-            "{err}"
-        );
-        assert_eq!(record(dir.path()).unwrap(), r, "nothing rewritten");
+    // Set as a future height on this node's directory: a reschedule.
+    boot(dir.path(), &set(1_000)).unwrap();
+    {
+        let db = Database::open_default(dir.path()).unwrap();
+        let history = ccfg::read_transitions(&db).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].kind, TransitionKind::GateReschedule);
+        let mut ids = history[0].changed_ids.clone();
+        ids.sort();
+        let mut expected = vec![GATE, peer_gate];
+        expected.sort();
+        assert_eq!(ids, expected);
     }
-    boot(dir.path(), &g).unwrap();
-    assert_eq!(record(dir.path()).unwrap(), r);
 
+    // Set, fresh: committed from the first boot.
     let fresh = tempfile::TempDir::new().unwrap();
-    let err = boot(fresh.path(), &set(1_000)).unwrap_err();
+    boot(fresh.path(), &set(1_000)).unwrap();
+    let r = record(fresh.path()).unwrap();
+    assert_eq!(r.config.get(GATE), Some(&ccfg::Value::U64(1_000)));
+
+    // A directory the previous release recorded.
+    let old = tempfile::TempDir::new().unwrap();
+    {
+        let db = Database::open_default(old.path()).unwrap();
+        ccfg::record::check_at_startup_with(&db, &g, 0, &PREVIOUS).unwrap();
+    }
+    let before = record(old.path()).unwrap();
+    assert_eq!(before.config.schema().number, 1);
+    let err = boot(old.path(), &set(1_000)).unwrap_err();
     assert!(
         err.contains("credential_schema_validation_enabled_from_height"),
         "{err}"
     );
-    assert_eq!(record(fresh.path()), None, "no baseline recorded");
+    assert!(err.contains("acknowledge-consensus-config-schema"), "{err}");
+    assert_eq!(record(old.path()).unwrap(), before, "nothing rewritten");
+    boot(old.path(), &g).unwrap();
+    assert_eq!(record(old.path()).unwrap(), before, "runs as it stands");
+
+    {
+        let db = Database::open_default(old.path()).unwrap();
+        let pending = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+        ccfg::acknowledge_schema_transition(&db, 0, pending.old, pending.new).unwrap();
+    }
+    boot(old.path(), &set(1_000)).unwrap();
+    let r = record(old.path()).unwrap();
+    assert_eq!(r.config.schema().number, 2);
+    assert_eq!(r.config.get(GATE), Some(&ccfg::Value::U64(1_000)));
 }

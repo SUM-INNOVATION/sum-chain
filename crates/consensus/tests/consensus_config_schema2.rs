@@ -7,10 +7,11 @@
 //! gate reschedule and an operator acknowledgement), loaded into a fresh
 //! database byte for byte.
 //!
-//! Schema 2 is a draft in production (its fields held absent, never read or
-//! written). The tests enable it through test-only policies: the real
-//! [`SCHEMA_2`], and [`TEST_SCHEMA_2`], which adds one test-only example
-//! field. Nothing here registers a production field.
+//! This binary writes schema 2 ([`PRODUCTION`]). The release before it read and
+//! wrote schema 1 and knew schema 2 only as a draft: [`PREVIOUS`] models it, for
+//! what an older binary does with a schema-2 database. [`TEST_SCHEMA_2`] adds
+//! one test-only example field to exercise the mechanism. Nothing here
+//! registers a production field.
 
 use std::cell::Cell;
 
@@ -111,18 +112,19 @@ static ENABLED: SchemaPolicy = SchemaPolicy {
     knows: &TEST_SCHEMA_2,
 };
 
-/// The production shape — reads and writes schema 1, schema 2 a draft — with
-/// the example field registered in the draft.
+/// The previous release's shape — reads and writes schema 1, schema 2 a draft —
+/// with the example field registered in the draft.
 static DRAFT: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1],
     writes: &SCHEMA_1,
     knows: &TEST_SCHEMA_2,
 };
 
-/// The real schema 2 enabled, as the change that freezes it would.
-static REAL_ENABLED: SchemaPolicy = SchemaPolicy {
-    reads: &[&SCHEMA_1, &SCHEMA_2],
-    writes: &SCHEMA_2,
+/// The release before this binary: it read and wrote schema 1 and knew the
+/// real schema 2 only as a draft.
+static PREVIOUS: SchemaPolicy = SchemaPolicy {
+    reads: &[&SCHEMA_1],
+    writes: &SCHEMA_1,
     knows: &SCHEMA_2,
 };
 
@@ -222,15 +224,15 @@ fn transitioned() -> (TempDir, Database, Hash) {
 
 // ── schema 1 stays as released ──────────────────────────────────────────────
 
-/// The fixture is what this binary's schema-1 path writes today, byte for
-/// byte: the production path is unchanged.
+/// The fixture is what the schema-1 path writes, byte for byte: the previous
+/// release's behaviour, reproduced by this binary's code under [`PREVIOUS`].
 #[test]
 fn the_fixture_is_what_the_schema_1_path_still_writes() {
     let dir = TempDir::new().unwrap();
     let db = Database::open_default(dir.path()).unwrap();
-    ccfg::check_at_startup(&db, &g0(), 0).unwrap();
-    ccfg::check_at_startup(&db, &g1(), 10).unwrap();
-    ccfg::acknowledge(&db, &g2(), HEIGHT, h(C1), h(C2)).unwrap();
+    check_at_startup_with(&db, &g0(), 0, &PREVIOUS).unwrap();
+    check_at_startup_with(&db, &g1(), 10, &PREVIOUS).unwrap();
+    acknowledge_with(&db, &g2(), HEIGHT, h(C1), h(C2), &PREVIOUS).unwrap();
     assert_eq!(entries(&db), fixture_entries());
 
     let (_d, fx) = schema_1_database();
@@ -252,15 +254,36 @@ fn the_fixture_is_what_the_schema_1_path_still_writes() {
     );
 }
 
+/// This binary runs a released schema-1 database exactly as it stands — compared
+/// in schema 1, never re-encoded, however often it starts — and offers the
+/// explicit move to schema 2. The previous release offered none.
 #[test]
-fn this_binary_keeps_a_schema_1_database_as_it_is() {
+fn this_binary_runs_a_schema_1_database_as_it_is_and_offers_the_transition() {
     let (_d, db) = schema_1_database();
+    for _ in 0..3 {
+        assert_eq!(
+            ccfg::check_at_startup(&db, &g2(), HEIGHT).unwrap(),
+            StartupOutcome::Unchanged { commitment: h(C2) }
+        );
+    }
+    let r = ccfg::read_record(&db).unwrap().unwrap();
+    assert_eq!(r.config.schema().number, 1);
+    let pending = ccfg::pending_schema_transition(&db)
+        .unwrap()
+        .expect("schema 2 is offered");
+    assert_eq!((pending.from_schema, pending.to_schema), (1, 2));
+    assert_eq!(pending.old, h(C2));
     assert_eq!(
-        ccfg::check_at_startup(&db, &g2(), HEIGHT).unwrap(),
-        StartupOutcome::Unchanged { commitment: h(C2) }
+        pending.new,
+        r.config.extend_to(&SCHEMA_2).unwrap().commitment()
     );
-    assert_eq!(ccfg::pending_schema_transition(&db).unwrap(), None);
-    let err = ccfg::acknowledge_schema_transition(&db, HEIGHT, h(C2), h(C2)).unwrap_err();
+    assert_eq!(entries(&db), fixture_entries(), "nothing written at start");
+
+    assert_eq!(
+        pending_schema_transition_with(&db, &PREVIOUS).unwrap(),
+        None
+    );
+    let err = acknowledge_schema_transition_with(&db, HEIGHT, h(C2), h(C2), &PREVIOUS).unwrap_err();
     assert!(
         err.to_string().contains("already recorded in schema 1"),
         "{err}"
@@ -269,12 +292,11 @@ fn this_binary_keeps_a_schema_1_database_as_it_is() {
 }
 
 #[test]
-fn the_production_schema_2_is_a_well_formed_draft() {
+fn the_production_schema_2_is_frozen_and_written() {
     // Registered in append order: #277's, #279's and #278's gates, #215's
-    // compute-pool parameter group (outside the gate range), then #279's
+    // compute-pool parameter group (outside the gate range), #279's
     // metering gate, block budget, engine identity, cost schedule and deploy
-    // gas ceiling. The metering parameters are absent while unset (checked
-    // through the real transition below).
+    // gas ceiling, then the compiled constant #278's rule reads.
     let ids: Vec<(u16, &str)> = SCHEMA_2_ADDED
         .iter()
         .map(|a| (a.spec.id, a.spec.name))
@@ -291,6 +313,10 @@ fn the_production_schema_2_is_a_well_formed_draft() {
             (0x2716, "sumc_runtime::metering::METERED_ENGINE_IDENTITY"),
             (0x2717, "sumc_runtime::metering::METERED_COST_SCHEDULE"),
             (0x0116, "max_contract_deploy_gas"),
+            (
+                0x252a,
+                "sumchain_state::messaging_executor::MESSAGING_TIMESTAMP_MS_PER_SECOND"
+            ),
         ]
     );
     // Every gate registered so far is dormant in every default genesis.
@@ -314,19 +340,23 @@ fn the_production_schema_2_is_a_well_formed_draft() {
     assert_eq!(cp.spec.ty, Ty::Bytes);
     assert_eq!(cp.spec.item_width, Some(321));
     assert!(cp.spec.optional);
+    let ms = SCHEMA_2_ADDED.iter().find(|a| a.spec.id == 0x252a).unwrap();
+    assert!(matches!(ms.source, Source::Param(_)));
+    assert_eq!(ms.spec.ty, Ty::U128);
+    assert!(ms.spec.optional);
     assert_eq!(SCHEMA_2.number, 2);
-    assert_eq!(PRODUCTION.writes.number, 1);
+    assert!(std::ptr::eq(PRODUCTION.writes, &SCHEMA_2));
     assert_eq!(
         PRODUCTION
             .reads
             .iter()
             .map(|s| s.number)
             .collect::<Vec<_>>(),
-        [1]
+        [1, 2]
     );
     assert!(std::ptr::eq(PRODUCTION.knows, &SCHEMA_2));
     PRODUCTION.check().unwrap();
-    REAL_ENABLED.check().unwrap();
+    PREVIOUS.check().unwrap();
     ENABLED.check().unwrap();
     DRAFT.check().unwrap();
 }
@@ -340,7 +370,7 @@ fn a_draft_field_is_held_dormant_and_refused_when_set() {
     set_example(None);
     assert_eq!(
         ccfg::build_with(&g2(), &DRAFT).unwrap(),
-        ccfg::build(&g2()).unwrap()
+        ccfg::build_with(&g2(), &PREVIOUS).unwrap()
     );
     assert_eq!(ccfg::build_with(&g2(), &DRAFT).unwrap().commitment(), h(C2));
 
@@ -531,51 +561,64 @@ fn a_fresh_database_records_schema_2_directly() {
 #[test]
 fn the_real_schema_2_transition_adds_only_its_registered_fields_absent() {
     let (_d, db) = schema_1_database();
-    let new = moved_commitment(&db, &REAL_ENABLED);
-    let done = acknowledge_schema_transition_with(&db, HEIGHT, h(C2), new, &REAL_ENABLED).unwrap();
+    let new = moved_commitment(&db, &PRODUCTION);
+    let done = acknowledge_schema_transition_with(&db, HEIGHT, h(C2), new, &PRODUCTION).unwrap();
     assert_eq!(done.added, real_added_ids());
-    let r = read_record_with(&db, &REAL_ENABLED).unwrap().unwrap();
+    let r = read_record_with(&db, &PRODUCTION).unwrap().unwrap();
     for id in real_added_ids() {
         assert_eq!(r.config.get(id), Some(&Value::Absent), "{id:#06x}");
     }
     assert!(done.added.contains(&0x0720), "{:?}", done.added);
     assert_eq!(
-        check_at_startup_with(&db, &g2(), HEIGHT, &REAL_ENABLED).unwrap(),
+        check_at_startup_with(&db, &g2(), HEIGHT, &PRODUCTION).unwrap(),
         StartupOutcome::Unchanged { commitment: new }
     );
-    // A schema-1 binary refuses it too.
+    // The previous release refuses it.
     assert!(matches!(
-        ccfg::read_record(&db),
+        read_record_with(&db, &PREVIOUS),
         Err(ConfigError::RecordCorrupt(_))
     ));
 }
 
 // ── older binaries ──────────────────────────────────────────────────────────
 
-/// A binary that reads only schema 1 — this one in production, and the
-/// released schema-1 binary through the same decode path — refuses a schema-2
-/// record and rewrites nothing.
+/// The previous release — it reads only schema 1 — refuses a schema-2 record,
+/// whether a database moved to schema 2 or a fresh one this binary created,
+/// and rewrites nothing.
 #[test]
 fn a_schema_1_binary_refuses_a_schema_2_record() {
-    let (_d, db, _new) = transitioned();
-    let before = entries(&db);
+    let (_d, moved) = schema_1_database();
+    let new = moved_commitment(&moved, &PRODUCTION);
+    ccfg::acknowledge_schema_transition(&moved, HEIGHT, h(C2), new).unwrap();
+    let fresh_dir = TempDir::new().unwrap();
+    let fresh = Database::open_default(fresh_dir.path()).unwrap();
+    ccfg::check_at_startup(&fresh, &g2(), 0).unwrap();
 
-    let err = ccfg::read_record(&db).unwrap_err();
-    assert!(matches!(err, ConfigError::RecordCorrupt(_)), "{err}");
-    assert!(err.to_string().contains("schema 2"), "{err}");
-    assert!(err.to_string().contains("newer binary"), "{err}");
+    for db in [&moved, &fresh] {
+        let before = entries(db);
+        let err = read_record_with(db, &PREVIOUS).unwrap_err();
+        assert!(matches!(err, ConfigError::RecordCorrupt(_)), "{err}");
+        assert!(err.to_string().contains("schema 2"), "{err}");
+        assert!(err.to_string().contains("newer binary"), "{err}");
 
-    let err = ccfg::check_at_startup(&db, &g2(), HEIGHT).unwrap_err();
-    assert!(err.to_string().contains("newer binary"), "{err}");
-    assert!(ccfg::acknowledge(&db, &g2(), HEIGHT, h(C2), h(C2)).is_err());
-    assert!(ccfg::acknowledge_schema_transition(&db, HEIGHT, h(C2), h(C2)).is_err());
+        let err = check_at_startup_with(db, &g2(), HEIGHT, &PREVIOUS).unwrap_err();
+        assert!(err.to_string().contains("newer binary"), "{err}");
+        assert!(acknowledge_with(db, &g2(), HEIGHT, h(C2), h(C2), &PREVIOUS).is_err());
+        assert!(acknowledge_schema_transition_with(db, HEIGHT, h(C2), h(C2), &PREVIOUS).is_err());
 
-    let raw = db.get(cf::META, RECORD_KEY).unwrap().unwrap();
-    assert_eq!(
-        ConsensusConfig::decode(&raw[87..]),
-        Err(ConfigError::UnknownSchema(2))
-    );
-    assert_eq!(entries(&db), before, "nothing rewritten");
+        let raw = db.get(cf::META, RECORD_KEY).unwrap().unwrap();
+        assert_eq!(
+            ConsensusConfig::decode_with(&raw[87..], PREVIOUS.reads),
+            Err(ConfigError::UnknownSchema(2))
+        );
+        assert_eq!(&entries(db), &before, "nothing rewritten");
+
+        // This binary starts on it.
+        assert!(matches!(
+            ccfg::check_at_startup(db, &g2(), HEIGHT).unwrap(),
+            StartupOutcome::Unchanged { .. }
+        ));
+    }
 }
 
 // ── interrupted transition ──────────────────────────────────────────────────
@@ -835,17 +878,23 @@ fn a_schema_2_encoding_round_trips_and_binds_its_added_field() {
         ConsensusConfig::decode_with(&bytes, ENABLED.reads).unwrap(),
         c
     );
+    // The previous release does not read schema 2; this binary reads the real
+    // schema 2, which has no test-only field.
     assert_eq!(
-        ConsensusConfig::decode(&bytes),
+        ConsensusConfig::decode_with(&bytes, PREVIOUS.reads),
         Err(ConfigError::UnknownSchema(2))
     );
+    assert!(matches!(
+        ConsensusConfig::decode(&bytes),
+        Err(ConfigError::Malformed(_))
+    ));
     set_example(Some(10));
     assert_ne!(
         ccfg::build_with(&g2(), &ENABLED).unwrap().commitment(),
         c.commitment()
     );
     // A schema-2 encoding missing its added field is refused.
-    let schema_1_bytes = ccfg::build(&g2()).unwrap().encode();
+    let schema_1_bytes = ccfg::build_with(&g2(), &PREVIOUS).unwrap().encode();
     let mut forged = schema_1_bytes.clone();
     forged[7..9].copy_from_slice(&2u16.to_le_bytes());
     assert!(matches!(
@@ -869,11 +918,11 @@ fn with_credential_gate(h: Option<u64>) -> Genesis {
 /// The upgrade path for #277's gate, from the schema-1 record a released
 /// binary wrote:
 ///
-/// * dormant, this binary starts on it and rewrites nothing, under the
-///   production policy and under a policy with the real schema 2 enabled;
-/// * set, the production binary refuses (it records schema 1), and a
-///   schema-2 binary refuses too, naming the schema transition, until the
-///   operator moves the record explicitly;
+/// * dormant, this binary starts on it and rewrites nothing, as the previous
+///   release did;
+/// * set, the previous release refuses (it records schema 1), and this binary
+///   refuses too, naming the schema transition, until the operator moves the
+///   record explicitly;
 /// * after the move, the same genesis is accepted at start as an ordinary gate
 ///   reschedule of 0x103f alone, recorded in the history after the schema-1
 ///   entries, which stay as they were;
@@ -883,21 +932,21 @@ fn the_credential_gate_on_a_schema_1_database_waits_for_the_schema_transition() 
     let ahead = HEIGHT + 1_000;
     let (_d, db) = schema_1_database();
 
-    // Dormant: unchanged, under both policies.
+    // Dormant: unchanged, under both binaries.
     let dormant = with_credential_gate(None);
     assert_eq!(
-        ccfg::check_at_startup(&db, &dormant, HEIGHT).unwrap(),
+        check_at_startup_with(&db, &dormant, HEIGHT, &PREVIOUS).unwrap(),
         StartupOutcome::Unchanged { commitment: h(C2) }
     );
     assert_eq!(
-        check_at_startup_with(&db, &dormant, HEIGHT, &REAL_ENABLED).unwrap(),
+        check_at_startup_with(&db, &dormant, HEIGHT, &PRODUCTION).unwrap(),
         StartupOutcome::Unchanged { commitment: h(C2) }
     );
     assert_eq!(entries(&db), fixture_entries());
 
-    // Set: the production binary cannot record it.
+    // Set: the previous release cannot record it.
     let set = with_credential_gate(Some(ahead));
-    let err = ccfg::check_at_startup(&db, &set, HEIGHT).unwrap_err();
+    let err = check_at_startup_with(&db, &set, HEIGHT, &PREVIOUS).unwrap_err();
     assert!(matches!(err, ConfigError::Refused(_)), "{err}");
     assert!(
         err.to_string()
@@ -906,24 +955,24 @@ fn the_credential_gate_on_a_schema_1_database_waits_for_the_schema_transition() 
     );
     assert_eq!(entries(&db), fixture_entries());
 
-    // Set, schema 2 enabled, record still schema 1: refused, naming the move.
-    let new = moved_commitment(&db, &REAL_ENABLED);
-    let err = check_at_startup_with(&db, &set, HEIGHT, &REAL_ENABLED).unwrap_err();
+    // Set, this binary, record still schema 1: refused, naming the move.
+    let new = moved_commitment(&db, &PRODUCTION);
+    let err = check_at_startup_with(&db, &set, HEIGHT, &PRODUCTION).unwrap_err();
     assert!(matches!(err, ConfigError::Refused(_)), "{err}");
     assert!(
         err.to_string()
             .contains("acknowledge-consensus-config-schema"),
         "{err}"
     );
-    let computed = ccfg::build_with(&set, &REAL_ENABLED).unwrap().commitment();
-    let err = acknowledge_with(&db, &set, HEIGHT, h(C2), computed, &REAL_ENABLED).unwrap_err();
+    let computed = ccfg::build_with(&set, &PRODUCTION).unwrap().commitment();
+    let err = acknowledge_with(&db, &set, HEIGHT, h(C2), computed, &PRODUCTION).unwrap_err();
     assert!(err.to_string().contains("schema 1 cannot express"), "{err}");
     assert_eq!(entries(&db), fixture_entries());
 
     // The explicit move: 0x103f arrives absent; the history is kept.
-    let moved = acknowledge_schema_transition_with(&db, HEIGHT, h(C2), new, &REAL_ENABLED).unwrap();
+    let moved = acknowledge_schema_transition_with(&db, HEIGHT, h(C2), new, &PRODUCTION).unwrap();
     assert!(moved.added.contains(&CREDENTIAL_GATE), "{:?}", moved.added);
-    let r = read_record_with(&db, &REAL_ENABLED).unwrap().unwrap();
+    let r = read_record_with(&db, &PRODUCTION).unwrap().unwrap();
     assert_eq!(r.config.get(CREDENTIAL_GATE), Some(&Value::Absent));
     let fixture = fixture_entries();
     let after = entries(&db);
@@ -931,11 +980,11 @@ fn the_credential_gate_on_a_schema_1_database_waits_for_the_schema_transition() 
 
     // A passed height is still refused after the move.
     let passed = with_credential_gate(Some(HEIGHT));
-    let err = check_at_startup_with(&db, &passed, HEIGHT, &REAL_ENABLED).unwrap_err();
+    let err = check_at_startup_with(&db, &passed, HEIGHT, &PRODUCTION).unwrap_err();
     assert!(err.to_string().contains("already passed"), "{err}");
 
     // A future height is now an ordinary gate reschedule of 0x103f alone.
-    let out = check_at_startup_with(&db, &set, HEIGHT, &REAL_ENABLED).unwrap();
+    let out = check_at_startup_with(&db, &set, HEIGHT, &PRODUCTION).unwrap();
     let StartupOutcome::GatesRescheduled { from, to, changes } = out else {
         panic!("expected a gate reschedule, got {out:?}");
     };
@@ -946,7 +995,7 @@ fn the_credential_gate_on_a_schema_1_database_waits_for_the_schema_transition() 
         (&changes[0].from, &changes[0].to),
         (&Value::Absent, &Value::U64(ahead))
     );
-    let history = read_transitions_with(&db, &REAL_ENABLED).unwrap();
+    let history = read_transitions_with(&db, &PRODUCTION).unwrap();
     let kinds: Vec<_> = history.iter().map(|t| t.kind).collect();
     assert_eq!(
         kinds,
@@ -959,7 +1008,46 @@ fn the_credential_gate_on_a_schema_1_database_waits_for_the_schema_transition() 
     );
     assert_eq!(history[3].changed_ids, vec![CREDENTIAL_GATE]);
     assert_eq!(
-        check_at_startup_with(&db, &set, HEIGHT, &REAL_ENABLED).unwrap(),
+        check_at_startup_with(&db, &set, HEIGHT, &PRODUCTION).unwrap(),
+        StartupOutcome::Unchanged {
+            commitment: computed
+        }
+    );
+}
+
+/// Id of `messaging_timestamp_units_enabled_from_height` (#278) and of the
+/// constant its rule reads.
+const MESSAGING_GATE: u16 = 0x1040;
+const MESSAGING_MS_PER_SECOND: u16 = 0x252a;
+
+/// #278's gate, after the schema transition, moves two fields: the height and
+/// the constant committed while the gate is set. The constant is not a gate,
+/// so start refuses and names the acknowledgement instead of recording a
+/// reschedule; acknowledged, both are recorded together.
+#[test]
+fn the_messaging_gate_on_a_transitioned_database_is_acknowledged_with_its_constant() {
+    let ahead = HEIGHT + 1_000;
+    let (_d, db) = schema_1_database();
+    let new = moved_commitment(&db, &PRODUCTION);
+    ccfg::acknowledge_schema_transition(&db, HEIGHT, h(C2), new).unwrap();
+
+    let mut set = g2();
+    set.params.messaging_timestamp_units_enabled_from_height = Some(ahead);
+    let before = entries(&db);
+    let err = ccfg::check_at_startup(&db, &set, HEIGHT).unwrap_err();
+    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
+    let msg = err.to_string();
+    assert!(msg.contains("MESSAGING_TIMESTAMP_MS_PER_SECOND"), "{msg}");
+    assert!(msg.contains("acknowledge-consensus-config"), "{msg}");
+    assert_eq!(entries(&db), before, "nothing recorded");
+
+    let computed = ccfg::build(&set).unwrap().commitment();
+    let ack = ccfg::acknowledge(&db, &set, HEIGHT, new, computed).unwrap();
+    let mut ids: Vec<u16> = ack.changes.iter().map(|c| c.id).collect();
+    ids.sort();
+    assert_eq!(ids, [MESSAGING_GATE, MESSAGING_MS_PER_SECOND]);
+    assert_eq!(
+        ccfg::check_at_startup(&db, &set, HEIGHT).unwrap(),
         StartupOutcome::Unchanged {
             commitment: computed
         }
@@ -987,13 +1075,16 @@ fn test_only_compute_pool_params() -> ComputePoolParamsV1 {
     serde_json::from_str(text).unwrap()
 }
 
-/// Undeclared, the parameters leave the production configuration — and its
-/// commitment — exactly the schema-1 one.
+/// Undeclared, the parameters leave the schema-1 configuration — and its
+/// commitment — exactly as released, and are absent in schema 2.
 #[test]
 fn undeclared_compute_pool_params_change_nothing() {
     assert_eq!(g2().params.compute_pool_params, None);
-    assert_eq!(ccfg::build(&g2()).unwrap().commitment(), h(C2));
-    let real = ccfg::build_with(&g2(), &REAL_ENABLED).unwrap();
+    assert_eq!(
+        ccfg::build_with(&g2(), &PREVIOUS).unwrap().commitment(),
+        h(C2)
+    );
+    let real = ccfg::build(&g2()).unwrap();
     assert_eq!(real.get(0x0720), Some(&Value::Absent));
 }
 
@@ -1010,12 +1101,12 @@ fn declared_compute_pool_params_are_refused_by_schema_1_and_committed_by_schema_
     admitted.compute_pool_params = Some(p);
     admitted.validate().unwrap();
 
-    let err = ccfg::build(&g).unwrap_err();
+    let err = ccfg::build_with(&g, &PREVIOUS).unwrap_err();
     assert!(err.to_string().contains("compute_pool_params"), "{err}");
 
-    let c = ccfg::build_with(&g, &REAL_ENABLED).unwrap();
+    let c = ccfg::build_with(&g, &PRODUCTION).unwrap();
     assert_eq!(c.get(0x0720), Some(&Value::Bytes(p.try_encode().unwrap())));
-    let absent = ccfg::build_with(&g2(), &REAL_ENABLED).unwrap();
+    let absent = ccfg::build_with(&g2(), &PRODUCTION).unwrap();
     assert_ne!(c.commitment(), absent.commitment());
 
     // One field changed, one commitment changed.
@@ -1024,7 +1115,7 @@ fn declared_compute_pool_params_are_refused_by_schema_1_and_committed_by_schema_
     let mut g_q = g2();
     g_q.params.compute_pool_params = Some(q);
     assert_ne!(
-        ccfg::build_with(&g_q, &REAL_ENABLED).unwrap().commitment(),
+        ccfg::build_with(&g_q, &PRODUCTION).unwrap().commitment(),
         c.commitment()
     );
 }
@@ -1037,7 +1128,7 @@ fn declared_compute_pool_params_are_refused_by_schema_1_and_committed_by_schema_
 #[test]
 fn a_difference_across_schemas_is_refused_in_every_build() {
     set_example(None);
-    let one = ccfg::build(&g2()).unwrap();
+    let one = ccfg::build_with(&g2(), &PREVIOUS).unwrap();
     assert_eq!(one.schema().number, 1);
 
     // The same rules carried into a schema with an added field: the shared
@@ -1076,9 +1167,9 @@ fn a_difference_across_schemas_is_refused_in_every_build() {
 #[test]
 fn a_difference_within_one_schema_is_reported_field_by_field() {
     set_example(None);
-    let one = ccfg::build(&g2()).unwrap();
+    let one = ccfg::build_with(&g2(), &PREVIOUS).unwrap();
     assert_eq!(one.diff(&one).unwrap(), Vec::new());
-    let ids: Vec<u16> = ccfg::build(&g0())
+    let ids: Vec<u16> = ccfg::build_with(&g0(), &PREVIOUS)
         .unwrap()
         .diff(&one)
         .unwrap()
@@ -1116,7 +1207,7 @@ fn record_comparisons_stay_in_the_record_schema() {
     assert!(msg.contains("max_contract_gas"), "{msg}");
     assert!(!msg.contains("cannot compare"), "{msg}");
 
-    let now = ccfg::build(&changed).unwrap().commitment();
+    let now = ccfg::build_with(&changed, &PREVIOUS).unwrap().commitment();
     let ack = acknowledge_with(&db, &changed, HEIGHT, h(C2), now, &ENABLED).unwrap();
     assert_eq!(ack.changes.len(), 1);
     assert_eq!(ack.changes[0].name, "max_contract_gas");
@@ -1158,7 +1249,7 @@ fn dropping_an_older_schema_from_reads_refuses_a_transitioned_history() {
 fn the_pending_transition_of_a_read_record_matches_the_database() {
     set_example(None);
     let (_d, db) = schema_1_database();
-    for policy in [&ENABLED, &PRODUCTION, &DRAFT, &REAL_ENABLED] {
+    for policy in [&ENABLED, &PRODUCTION, &DRAFT, &PRODUCTION] {
         let record = read_record_with(&db, policy).unwrap();
         assert_eq!(
             pending_schema_transition_for(record.as_ref(), policy),
@@ -1208,23 +1299,36 @@ fn schema_2_encodes_in_id_order_whatever_the_registration_order() {
     // The metering gate cannot be set while its values are provisional, and
     // the budget is never committed without it (`consensus_config_metering.rs`).
     for genesis in [g2(), all_set] {
-        let a = ccfg::build_with(&genesis, &REAL_ENABLED).unwrap();
+        let a = ccfg::build_with(&genesis, &ccfg::PRODUCTION).unwrap();
         let b = ccfg::build_with(&genesis, policy).unwrap();
         assert_eq!(a.encode(), b.encode());
         assert_eq!(a.commitment(), b.commitment());
     }
 }
 
+/// The metering fields are dormant: the previous release's schema-1 encoding
+/// is unchanged, the gate is refused while its values are unratified whichever
+/// schema the binary writes, and a budget without the gate is never built.
 #[test]
-fn the_contract_metering_fields_are_dormant_draft_fields() {
-    assert_eq!(ccfg::build(&g2()).unwrap().commitment(), h(C2));
-    let mut g = g2();
-    g.params.contract_metering_enabled_from_height = Some(1_000);
-    let err = ccfg::build(&g).unwrap_err().to_string();
-    assert!(err.contains("contract_metering_enabled_from_height"), "{err}");
-    assert!(err.contains("not ratified"), "{err}");
+fn the_contract_metering_fields_are_dormant() {
+    assert_eq!(
+        ccfg::build_with(&g2(), &PREVIOUS).unwrap().commitment(),
+        h(C2)
+    );
+    for policy in [&PREVIOUS, &ccfg::PRODUCTION] {
+        let mut g = g2();
+        g.params.contract_metering_enabled_from_height = Some(1_000);
+        let err = ccfg::build_with(&g, policy).unwrap_err().to_string();
+        assert!(
+            err.contains("contract_metering_enabled_from_height"),
+            "{err}"
+        );
+        assert!(err.contains("not ratified"), "{err}");
+    }
     let mut g = g2();
     g.params.max_block_contract_gas = Some(100_000_000);
-    let err = ccfg::build(&g).unwrap_err().to_string();
+    let err = ccfg::build_with(&g, &PREVIOUS).unwrap_err().to_string();
     assert!(err.contains("max_block_contract_gas"), "{err}");
+    let err = ccfg::build(&g).unwrap_err().to_string();
+    assert!(err.contains("0x0115"), "{err}");
 }

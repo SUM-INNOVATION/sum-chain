@@ -107,14 +107,14 @@ async fn the_rpc_reports_the_recorded_baseline_and_its_history() {
 
     let info = s.server.chain_get_consensus_config().await.unwrap();
     let c = ccfg::build(&g).unwrap().commitment().to_string();
-    assert_eq!(info.schema, ccfg::SCHEMA_V1);
+    assert_eq!(info.schema, 2, "a fresh baseline is recorded in schema 2");
     assert_eq!(info.status, "unverified-local-baseline");
     assert!(!info.network_agreement);
     assert_eq!(info.commitment.as_deref(), Some(c.as_str()));
     assert_eq!(info.initial_commitment.as_deref(), Some(c.as_str()));
     assert_eq!(info.baseline_height, Some(42));
     assert_eq!(info.matches_baseline, Some(true));
-    assert_eq!(info.fields.len(), ccfg::SCHEMA_V1_FIELDS.len());
+    assert_eq!(info.fields.len(), ccfg::SCHEMA_2.specs().len());
     assert_eq!(info.rules.quorum, "none");
     assert_eq!(info.rules.membership, "static-genesis");
     assert_eq!(info.rules.unfinalized_production, "unbounded");
@@ -140,6 +140,25 @@ async fn the_rpc_reports_the_recorded_baseline_and_its_history() {
     // This server still runs the original genesis, and says it no longer
     // matches what the database records.
     assert_eq!(info.matches_baseline, Some(false));
+}
+
+/// A baseline the previous release recorded (schema 1) is reported in the schema
+/// it holds until its operator moves it.
+#[tokio::test]
+async fn the_rpc_reports_a_schema_1_baseline_as_recorded() {
+    static PREVIOUS: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
+        reads: &[&ccfg::SCHEMA_1],
+        writes: &ccfg::SCHEMA_1,
+        knows: &ccfg::SCHEMA_2,
+    };
+    let g = genesis();
+    let s = serve(&g);
+    ccfg::record::check_at_startup_with(&s.db, &g, 42, &PREVIOUS).unwrap();
+    let info = s.server.chain_get_consensus_config().await.unwrap();
+    assert_eq!(info.schema, ccfg::SCHEMA_V1);
+    assert_eq!(info.fields.len(), ccfg::SCHEMA_V1_FIELDS.len());
+    let recorded = ccfg::read_record(&s.db).unwrap().unwrap().commitment;
+    assert_eq!(info.commitment, Some(recorded.to_string()));
 }
 
 #[tokio::test]

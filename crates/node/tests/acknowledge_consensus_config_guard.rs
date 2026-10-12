@@ -144,30 +144,95 @@ fn ack_schema(data_dir: &Path, old: &str, new: &str) -> Output {
         .expect("running the node binary")
 }
 
-/// This binary records schema 1, so a schema-1 database has no schema to move
-/// to: the schema transition refuses and writes nothing, whatever it is told.
+/// The release before this binary: it read and wrote schema 1 and knew schema 2
+/// only as a draft. Used to create the schema-1 database it would have left.
+static PREVIOUS: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
+    reads: &[&ccfg::SCHEMA_1],
+    writes: &ccfg::SCHEMA_1,
+    knows: &ccfg::SCHEMA_2,
+};
+
+/// A database whose baseline the previous release recorded (schema 1), and the
+/// commitment this binary moves it to.
+fn schema_1_fixture() -> (tempfile::TempDir, std::path::PathBuf, String, String) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let data = dir.path().join("data");
+    let db = Database::open_default(&data).unwrap();
+    ccfg::record::check_at_startup_with(&db, &genesis(), 0, &PREVIOUS).unwrap();
+    let r = ccfg::read_record(&db).unwrap().unwrap();
+    assert_eq!(r.config.schema().number, 1);
+    let pending = ccfg::pending_schema_transition(&db)
+        .unwrap()
+        .expect("this binary offers schema 2");
+    (dir, data, r.commitment.to_string(), pending.new.to_string())
+}
+
+fn meta(data: &Path) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let db = Database::open_default(data).unwrap();
+    db.prefix_iter_checked(sumchain_storage::cf::META, b"consensus_config/")
+        .unwrap()
+        .map(|e| e.unwrap())
+        .take_while(|(k, _)| k.starts_with(b"consensus_config/"))
+        .map(|(k, v)| (k.to_vec(), v.to_vec()))
+        .collect()
+}
+
+/// The command moves a schema-1 database to schema 2 when told both
+/// commitments exactly, keeps the old encoding in the history, and has nothing
+/// left to do afterwards.
 #[test]
-fn the_schema_transition_refuses_while_this_binary_records_schema_1() {
+fn the_schema_transition_moves_a_schema_1_database() {
+    let (_dir, data, old, new) = schema_1_fixture();
+    let out = ack_schema(&data, &old, &new);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("schema 1 -> 2"), "{}", text(&out));
+
+    let db = Database::open_default(&data).unwrap();
+    let r = ccfg::read_record(&db).unwrap().unwrap();
+    assert_eq!(r.config.schema().number, 2);
+    assert_eq!(r.commitment.to_string(), new);
+    let history = ccfg::read_transitions(&db).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].kind, ccfg::TransitionKind::SchemaTransition);
+    drop(db);
+
+    let again = ack_schema(&data, &new, &new);
+    assert!(!again.status.success(), "{}", text(&again));
+    assert!(
+        text(&again).contains("already recorded in schema 2"),
+        "{}",
+        text(&again)
+    );
+    let db = Database::open_default(&data).unwrap();
+    assert_eq!(ccfg::read_transitions(&db).unwrap().len(), 1);
+}
+
+/// Anything but both exact commitments refuses and writes nothing.
+#[test]
+fn the_schema_transition_refuses_wrong_commitments() {
+    let (_dir, data, old, new) = schema_1_fixture();
+    let before = meta(&data);
+    let zero = format!("0x{}", "00".repeat(32));
+    for (o, n) in [(&zero, &new), (&old, &zero), (&new, &old), (&old, &old)] {
+        let out = ack_schema(&data, o, n);
+        assert!(!out.status.success(), "{o} -> {n}: {}", text(&out));
+    }
+    assert_eq!(meta(&data), before, "nothing written");
+}
+
+/// A database this binary created records schema 2 already: nothing to move.
+#[test]
+fn the_schema_transition_refuses_a_database_already_in_schema_2() {
     let f = fixture();
-    let before = {
-        let db = Database::open_default(&f.data).unwrap();
-        db.get(sumchain_storage::cf::META, ccfg::record::RECORD_KEY)
-            .unwrap()
-    };
+    let before = meta(&f.data);
     let out = ack_schema(&f.data, &f.old, &f.old);
     assert!(!out.status.success(), "{}", text(&out));
     assert!(
-        text(&out).contains("already recorded in schema 1"),
+        text(&out).contains("already recorded in schema 2"),
         "{}",
         text(&out)
     );
-    let db = Database::open_default(&f.data).unwrap();
-    assert!(ccfg::read_transitions(&db).unwrap().is_empty());
-    assert_eq!(
-        db.get(sumchain_storage::cf::META, ccfg::record::RECORD_KEY)
-            .unwrap(),
-        before
-    );
+    assert_eq!(meta(&f.data), before);
 }
 
 #[test]

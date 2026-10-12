@@ -49,9 +49,10 @@
 //!
 //! [`schema`] holds the mechanism: schema 2 is schema 1's registry plus an
 //! append-only list of added fields, each optional with absence meaning the
-//! pre-existing behaviour. Schema 2 is a DRAFT in this binary — its fields are
-//! known and held absent, and nothing reads or writes a schema-2 record —
-//! until a later change enables it in [`schema::PRODUCTION`].
+//! pre-existing behaviour. This binary writes schema 2 ([`schema::PRODUCTION`]),
+//! which freezes it: a fresh database records schema 2, and an existing
+//! schema-1 record runs unchanged until its operator moves it with the
+//! stopped-node schema transition.
 //!
 //! # Older schemas are read for good
 //!
