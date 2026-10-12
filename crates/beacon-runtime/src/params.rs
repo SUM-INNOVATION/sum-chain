@@ -1,13 +1,14 @@
 //! Beacon threshold / fault parameters (draft §1.2, §7) — validated, not hardcoded.
 //!
-//! The runtime does **not** bake the proposed `f=1/c=1/T=2/Q=3/n≥5` profile in as
-//! authoritative. Instead it accepts a [`BeaconParams`] object that MUST come from
-//! authoritative chain configuration (genesis `BeaconParams`, which does not exist
-//! yet — the beacon gate stays `None`, fail-closed in `ChainParams::validate`), and
-//! it **enforces the ratified inequalities on construction** ([`BeaconParams::
-//! validated`]), rejecting any inconsistent config. The proposed profile survives
-//! only as a clearly-labelled test fixture ([`BeaconParams::proposed_default`]),
-//! never as frozen protocol behavior.
+//! The runtime does **not** bake the `f=1/c=1/T=2/Q=3/n=5` profile in as
+//! authoritative, although that profile is RATIFIED v1 (owner decision
+//! 2026-09-01, #127; spec banner). Instead it accepts a [`BeaconParams`] object
+//! that MUST come from authoritative chain configuration (genesis `beacon_params`;
+//! the beacon gate stays `None`, fail-closed in `ChainParams::validate`), and it
+//! **enforces the ratified inequalities on construction**
+//! ([`BeaconParams::validated`]), rejecting any inconsistent config. The profile
+//! is also available as a clearly-labelled fixture
+//! ([`BeaconParams::proposed_default`]), which is never the chain's source.
 
 /// A validated construction failure for a [`BeaconParams`] set (draft §7.4). This is
 /// the **shared** `sumchain_wire::beacon_schedule::BeaconParamsViolation` — the SAME
@@ -64,11 +65,11 @@ impl BeaconParams {
         self.n
     }
 
-    /// The draft §1.2 proposed profile (`f=1, c=1, T=2, Q_dkg=3, n=5`).
-    /// **PROPOSED — NOT RATIFIED, TEST FIXTURE ONLY.** A convenience for tests and
-    /// for the gate-closed lifecycle to have concrete thresholds; it is **never**
-    /// frozen protocol behavior. Real activation supplies an owner-ratified
-    /// `BeaconParams` from genesis (which does not exist yet).
+    /// The draft §1.2 profile (`f=1, c=1, T=2, Q_dkg=3, n=5`), RATIFIED v1 (owner
+    /// decision 2026-09-01, #127; spec banner, §15 row 14). **A FIXTURE, not the
+    /// chain's source:** tests and the gate-closed seam use it for concrete
+    /// thresholds. A chain's parameters come from genesis `beacon_params`,
+    /// validated by the same predicate as [`BeaconParams::validated`].
     pub fn proposed_default() -> Self {
         Self::validated(1, 1, 2, 3, 5).expect("proposed profile is self-consistent")
     }

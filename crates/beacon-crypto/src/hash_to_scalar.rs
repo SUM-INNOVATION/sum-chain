@@ -3,8 +3,10 @@
 //! Spec §5.3/§5.6: the DLEQ Fiat-Shamir challenge is
 //! `c = HashToScalar(transcript) mod r`, where `HashToScalar` is RFC 9380
 //! `hash_to_field(msg, 1)` with `expand_message_xmd` over **SHA-256** and
-//! `DST = DST_DLEQ`, reduced mod `r`. This is the RECOMMENDED / PROPOSED
-//! construction (owner decision, OPEN §15 #22) — not frozen consensus bytes.
+//! `DST = DST_DLEQ`, reduced mod `r`. This construction is **RATIFIED v1**
+//! (owner decision 2026-09-01, #127; spec §15 row 22). Its bytes are pinned by
+//! the RFC 9380 `expand_message_xmd` vectors below and, through the DLEQ
+//! challenge, by the committed DLEQ proof KAT in the crate's vectors.
 //!
 //! `blstrs::Scalar` exposes no wide-reduction constructor (only canonical
 //! `from_bytes_le`, which rejects values `>= r`), so we do the RFC 9380 reduction

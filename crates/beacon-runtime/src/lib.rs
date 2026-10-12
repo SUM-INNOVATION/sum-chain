@@ -12,7 +12,7 @@
 //!
 //! * **Validated parameters** ([`params::BeaconParams`]): injected from authoritative
 //!   config, with the ratified §7.4 inequalities enforced on construction; the
-//!   proposed profile is a test fixture only, never frozen behavior.
+//!   ratified v1 profile is also a fixture, never the chain's source.
 //! * **Authenticated context** ([`context`]): every transition takes an
 //!   [`context::ExecContext`] (signer identity, epoch membership snapshot, the
 //!   schedule-derived within-epoch phase) and enforces the actor bindings #164
@@ -60,10 +60,10 @@
 //! then). **This runtime being complete does NOT authorize activation.** Completeness
 //! and audit are separate gates; only the owner, after an independent audit, may set
 //! an activation height — and that decision lives in genesis/params, never here.
-//! Additionally, the parameter set, DKG/ECIES/DLEQ/beacon layouts, and ciphersuite
-//! choices this runtime exercises are (except `G_enc = G1` and K-rotate) **PROPOSED —
-//! OWNER DECISION, not ratified** (draft §16.3); their ratification is a further
-//! prerequisite.
+//! The parameter set, DKG/ECIES/DLEQ/beacon layouts, and ciphersuite choices this
+//! runtime exercises are **RATIFIED v1** (owner decision 2026-09-01, #127; spec
+//! banner and §15). Ratification does not authorize activation: the window
+//! magnitudes and `MARGIN` remain open, and the controls below still apply.
 //!
 //! **Control C5 (MANDATORY independent audit).** An independent cryptographic
 //! construction + integration audit of the on-chain DKG, complaint adjudication, and

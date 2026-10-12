@@ -202,7 +202,7 @@ fn epoch_with_deal(
 
 #[test]
 fn params_valid_and_invalid_configs() {
-    // Valid: the proposed profile + a larger valid one.
+    // Valid: the ratified v1 profile + a larger valid one.
     assert!(BeaconParams::validated(1, 1, 2, 3, 5).is_ok());
     assert!(BeaconParams::validated(2, 1, 3, 5, 8).is_ok());
     let p = BeaconParams::proposed_default();

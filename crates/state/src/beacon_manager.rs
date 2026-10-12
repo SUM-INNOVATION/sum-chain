@@ -604,7 +604,7 @@ mod tests {
     #[test]
     fn params_conformance_genesis_and_runtime_agree() {
         let table: &[(u32, u32, u32, u32, u32)] = &[
-            (1, 1, 2, 3, 5),   // valid (proposed)
+            (1, 1, 2, 3, 5),   // valid (ratified v1 profile)
             (2, 1, 3, 5, 8),   // valid
             (3, 2, 4, 7, 12),  // valid
             (0, 0, 1, 1, 1),   // valid edge

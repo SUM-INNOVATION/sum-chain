@@ -11,8 +11,8 @@
 //! Chaum-Pedersen over `F_r`.
 //!
 //! Ciphersuite DSTs are pinned per spec §2.1 (fixed by draft-irtf-cfrg-bls-
-//! signature-05 / RFC 9380). [`DST_DLEQ`] is a #127 PROPOSED tag (§5.3), not
-//! adopted consensus bytes.
+//! signature-05 / RFC 9380). [`DST_DLEQ`] is a RATIFIED v1 tag (#127, spec §5.3,
+//! §15 row 23), byte-locked by the committed DLEQ proof KAT.
 
 use crate::hash_to_scalar::hash_to_scalar;
 use crate::{BeaconCryptoError, Result};
@@ -47,8 +47,11 @@ pub const DST_SIG: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 /// NORMATIVE (standard-fixed).
 pub const DST_POP: &[u8] = b"BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
-/// DLEQ Fiat-Shamir domain tag (spec §5.3). **PROPOSED** (owner decision, not
-/// adopted); the hash-to-scalar primitive is OPEN (§15 #22).
+/// DLEQ Fiat-Shamir domain tag (spec §5.3). **RATIFIED v1 consensus bytes**
+/// (owner decision 2026-09-01, #127; spec banner + §15 row 23), as is the
+/// hash-to-scalar it keys (§15 row 22). Both are byte-locked by the committed
+/// cross-architecture DLEQ proof KAT in
+/// `vectors::vec_dleq_prove_verify_positive_and_proof_roundtrip`.
 pub const DST_DLEQ: &[u8] = b"OMNINODE-DKG-DLEQ:v1:";
 
 // ---------------------------------------------------------------------------
