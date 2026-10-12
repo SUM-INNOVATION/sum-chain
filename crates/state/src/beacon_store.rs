@@ -407,6 +407,74 @@ pub struct StoredBeaconOutput {
     pub output: Vec<u8>,
 }
 
+/// One finalized round of one epoch, as the store holds it: the combined
+/// signature row and the beacon output row, which every materialization writes
+/// together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredFinalizedRound {
+    /// The round.
+    pub round: u64,
+    /// Canonical compressed G2 `Σ_r` (96 bytes).
+    pub sigma_r: [u8; G2_LEN],
+    /// The 32-byte beacon output.
+    pub output: [u8; OUT_LEN],
+}
+
+/// Every DKG row the store holds for one epoch, as persisted: registered keys,
+/// accepted deals, verdict effects and retained equivocation evidence, each in
+/// canonical key order.
+///
+/// It is a record of what was accepted, not a reconstruction. Complaint bodies
+/// and partial signatures are not persisted and so are not here, and nothing
+/// derived — `QUAL`, the group key, verification keys — is computed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredDkgTranscript {
+    /// Registered encryption keys, by validator index.
+    pub keys: Vec<StoredBeaconKey>,
+    /// Accepted deals, by `(dealer, recipient)`.
+    pub deals: Vec<StoredBeaconDeal>,
+    /// Disqualified dealers, ascending.
+    pub disqualified: Vec<StoredBeaconDisqualified>,
+    /// Recipients whose complaint was adjudicated false (the
+    /// `SlashFalseAccuser` verdict), ascending. A recorded verdict: nothing in
+    /// execution moves stake on it.
+    pub false_accusers: Vec<StoredBeaconFalseAccuser>,
+    /// Adjudicated `(dealer, recipient)` complaint pairs.
+    pub adjudicated: Vec<StoredBeaconAdjudicated>,
+    /// Retained key-equivocation evidence, by `(first, second)` tx reference.
+    pub key_equivocations: Vec<StoredBeaconKeyEquivocation>,
+    /// Retained deal-equivocation evidence, by `(first, second)` tx reference.
+    pub deal_equivocations: Vec<StoredBeaconDealEquivocation>,
+}
+
+impl StoredDkgTranscript {
+    /// Whether the store holds no DKG row at all for the epoch.
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+            && self.deals.is_empty()
+            && self.disqualified.is_empty()
+            && self.false_accusers.is_empty()
+            && self.adjudicated.is_empty()
+            && self.key_equivocations.is_empty()
+            && self.deal_equivocations.is_empty()
+    }
+}
+
+/// Refuse a row whose decoded identity would be stored under a different key.
+///
+/// Materialization derives every key from the record it stores, so the two can
+/// only disagree through corruption. A reader that reported the record anyway
+/// would present it under an identity the chain never gave it.
+fn check_row_key(row_key: &[u8], expected: &[u8]) -> Result<()> {
+    if row_key == expected {
+        Ok(())
+    } else {
+        Err(StateError::DeserializationError(
+            "beacon row: record does not match the key it is stored under".into(),
+        ))
+    }
+}
+
 fn check_version(v: u8) -> Result<()> {
     if v == BEACON_RECORD_VERSION {
         Ok(())
@@ -705,6 +773,117 @@ impl<'a> BeaconStore<'a> {
             Some(bytes) => Ok(Some(decode_membership(&bytes)?.members)),
             None => Ok(None),
         }
+    }
+
+    // ── Committed-state reads for RPC ───────────────────────────────────────
+    //
+    // Read-only views of what the published chain holds for one epoch. They
+    // decode strictly, as rehydration does, and derive nothing the store does
+    // not hold: no `QUAL`, no group key, no membership fallback. Block
+    // execution never calls them; it reads the candidate.
+
+    /// The finalized round `round` of `epoch`, or `None` if the store holds
+    /// neither of its rows.
+    ///
+    /// Every materialization writes the signature row and the output row
+    /// together, so holding exactly one of them is corruption and is an error
+    /// rather than `None`.
+    pub fn get_finalized_round(
+        &self,
+        epoch: u64,
+        round: u64,
+    ) -> Result<Option<StoredFinalizedRound>> {
+        let sig_key = round_row_key(epoch, round);
+        let out_key = output_row_key(epoch, round);
+        let sig = self.db.get(cf::BEACON_STATE, &sig_key)?;
+        let out = self.db.get(cf::BEACON_STATE, &out_key)?;
+        let (sig, out) = match (sig, out) {
+            (None, None) => return Ok(None),
+            (Some(sig), Some(out)) => (decode_round(&sig)?, decode_output(&out)?),
+            _ => {
+                return Err(StateError::DeserializationError(format!(
+                    "beacon round {round} of epoch {epoch}: only one of its signature \
+                     and output rows is present"
+                )))
+            }
+        };
+        check_row_key(&sig_key, &round_row_key(epoch, sig.round))?;
+        check_row_key(&out_key, &output_row_key(epoch, out.round))?;
+        let mut sigma_r = [0u8; G2_LEN];
+        sigma_r.copy_from_slice(&sig.sigma_r);
+        let mut output = [0u8; OUT_LEN];
+        output.copy_from_slice(&out.output);
+        Ok(Some(StoredFinalizedRound {
+            round,
+            sigma_r,
+            output,
+        }))
+    }
+
+    /// Every DKG row the store holds for `epoch` ([`StoredDkgTranscript`]).
+    ///
+    /// Scans only this epoch's rows, one domain at a time, and propagates a
+    /// read error rather than returning what it managed to read: a short
+    /// transcript is indistinguishable from a complete one.
+    pub fn get_dkg_transcript(&self, epoch: u64) -> Result<StoredDkgTranscript> {
+        let mut t = StoredDkgTranscript::default();
+        for (k, v) in self.epoch_rows(domain::KEY, epoch)? {
+            let r = decode_key(&v)?;
+            check_row_key(&k, &key_row_key(epoch, r.validator_index))?;
+            t.keys.push(r);
+        }
+        for (k, v) in self.epoch_rows(domain::DEAL, epoch)? {
+            let r = decode_deal(&v)?;
+            check_row_key(&k, &deal_row_key(epoch, r.dealer_i, r.recipient_j))?;
+            t.deals.push(r);
+        }
+        for (k, v) in self.epoch_rows(domain::VERDICT, epoch)? {
+            let r = decode_disqualified(&v)?;
+            check_row_key(&k, &disqualified_row_key(epoch, r.dealer_i))?;
+            t.disqualified.push(r);
+        }
+        for (k, v) in self.epoch_rows(domain::FALSE_ACCUSER, epoch)? {
+            let r = decode_false_accuser(&v)?;
+            check_row_key(&k, &false_accuser_row_key(epoch, r.recipient_j))?;
+            t.false_accusers.push(r);
+        }
+        for (k, v) in self.epoch_rows(domain::ADJUDICATED, epoch)? {
+            let r = decode_adjudicated(&v)?;
+            check_row_key(&k, &adjudicated_row_key(epoch, r.dealer_i, r.recipient_j))?;
+            t.adjudicated.push(r);
+        }
+        for (k, v) in self.epoch_rows(domain::KEY_EQUIV, epoch)? {
+            let r = decode_key_equivocation(&v)?;
+            check_row_key(
+                &k,
+                &key_equiv_row_key(epoch, &r.first.tx_ref, &r.second.tx_ref),
+            )?;
+            t.key_equivocations.push(r);
+        }
+        for (k, v) in self.epoch_rows(domain::DEAL_EQUIV, epoch)? {
+            let r = decode_deal_equivocation(&v)?;
+            check_row_key(
+                &k,
+                &deal_equiv_row_key(epoch, &r.first.tx_ref, &r.second.tx_ref),
+            )?;
+            t.deal_equivocations.push(r);
+        }
+        Ok(t)
+    }
+
+    /// The committed rows of one `domain` for one `epoch`, in key order.
+    fn epoch_rows(&self, domain: u8, epoch: u64) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let prefix = key_prefix(domain, epoch);
+        let mut rows = Vec::new();
+        for entry in self.db.prefix_iter_checked(cf::BEACON_STATE, &prefix)? {
+            let (k, v) = entry?;
+            // The scan seeks to the prefix and keeps going past it.
+            if !k.starts_with(&prefix) {
+                break;
+            }
+            rows.push((k.to_vec(), v.to_vec()));
+        }
+        Ok(rows)
     }
 
     /// **De-materialize** the persisted rows for `epoch` back into the runtime
@@ -1627,5 +1806,241 @@ mod tests {
             record: null_ref(),
         };
         assert!(decode_deal(&beacon_encode(&bad_deal).unwrap()).is_err());
+    }
+
+    // ── Committed-state reads for RPC ───────────────────────────────────────
+
+    fn signed_ref(tag: u8) -> StoredSignedRef {
+        StoredSignedRef {
+            signer: [tag; 32],
+            tx_ref: [tag.wrapping_add(1); 32],
+            carrier: vec![tag, tag, tag],
+        }
+    }
+
+    /// Seed one row of every DKG domain, plus one finalized round, for `epoch`.
+    /// Values differ per epoch so a read that crossed epochs would be caught.
+    fn seed_epoch(db: &Database, epoch: u64) -> StoredDkgTranscript {
+        let e = epoch as u8;
+        let t = StoredDkgTranscript {
+            keys: vec![StoredBeaconKey {
+                schema_version: BEACON_RECORD_VERSION,
+                validator_index: 2,
+                ek: vec![e; G1_LEN],
+                record: signed_ref(e),
+            }],
+            deals: vec![StoredBeaconDeal {
+                schema_version: BEACON_RECORD_VERSION,
+                dealer_i: 1,
+                recipient_j: 2,
+                commitments: vec![vec![e; G1_LEN], vec![e.wrapping_add(1); G1_LEN]],
+                r_ij: vec![e; G1_LEN],
+                ct_ij: vec![e; CT_LEN],
+                record: signed_ref(e.wrapping_add(2)),
+            }],
+            disqualified: vec![StoredBeaconDisqualified {
+                schema_version: BEACON_RECORD_VERSION,
+                dealer_i: 3,
+            }],
+            false_accusers: vec![StoredBeaconFalseAccuser {
+                schema_version: BEACON_RECORD_VERSION,
+                recipient_j: 4,
+            }],
+            adjudicated: vec![StoredBeaconAdjudicated {
+                schema_version: BEACON_RECORD_VERSION,
+                dealer_i: 3,
+                recipient_j: 1,
+            }],
+            key_equivocations: vec![StoredBeaconKeyEquivocation {
+                schema_version: BEACON_RECORD_VERSION,
+                validator_index: 2,
+                first: signed_ref(e.wrapping_add(4)),
+                second: signed_ref(e.wrapping_add(6)),
+            }],
+            deal_equivocations: vec![StoredBeaconDealEquivocation {
+                schema_version: BEACON_RECORD_VERSION,
+                dealer_i: 1,
+                first: signed_ref(e.wrapping_add(8)),
+                second: signed_ref(e.wrapping_add(10)),
+            }],
+        };
+        let k = &t.keys[0];
+        db.put(
+            cf::BEACON_STATE,
+            &key_row_key(epoch, k.validator_index),
+            &beacon_encode(k).unwrap(),
+        )
+        .unwrap();
+        let d = &t.deals[0];
+        db.put(
+            cf::BEACON_STATE,
+            &deal_row_key(epoch, d.dealer_i, d.recipient_j),
+            &beacon_encode(d).unwrap(),
+        )
+        .unwrap();
+        let q = &t.disqualified[0];
+        db.put(
+            cf::BEACON_STATE,
+            &disqualified_row_key(epoch, q.dealer_i),
+            &beacon_encode(q).unwrap(),
+        )
+        .unwrap();
+        let f = &t.false_accusers[0];
+        db.put(
+            cf::BEACON_STATE,
+            &false_accuser_row_key(epoch, f.recipient_j),
+            &beacon_encode(f).unwrap(),
+        )
+        .unwrap();
+        let a = &t.adjudicated[0];
+        db.put(
+            cf::BEACON_STATE,
+            &adjudicated_row_key(epoch, a.dealer_i, a.recipient_j),
+            &beacon_encode(a).unwrap(),
+        )
+        .unwrap();
+        let ke = &t.key_equivocations[0];
+        db.put(
+            cf::BEACON_STATE,
+            &key_equiv_row_key(epoch, &ke.first.tx_ref, &ke.second.tx_ref),
+            &beacon_encode(ke).unwrap(),
+        )
+        .unwrap();
+        let de = &t.deal_equivocations[0];
+        db.put(
+            cf::BEACON_STATE,
+            &deal_equiv_row_key(epoch, &de.first.tx_ref, &de.second.tx_ref),
+            &beacon_encode(de).unwrap(),
+        )
+        .unwrap();
+        db.put(
+            cf::BEACON_STATE,
+            &round_row_key(epoch, 0),
+            &beacon_encode(&StoredBeaconRound {
+                schema_version: BEACON_RECORD_VERSION,
+                round: 0,
+                sigma_r: vec![e; G2_LEN],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        db.put(
+            cf::BEACON_STATE,
+            &output_row_key(epoch, 0),
+            &beacon_encode(&StoredBeaconOutput {
+                schema_version: BEACON_RECORD_VERSION,
+                round: 0,
+                output: vec![e; OUT_LEN],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        t
+    }
+
+    #[test]
+    fn rpc_reads_of_an_empty_store_find_nothing() {
+        let (db, _d) = open_db();
+        let store = BeaconStore::new(&db);
+        assert_eq!(store.get_finalized_round(0, 0).unwrap(), None);
+        assert!(store.get_dkg_transcript(0).unwrap().is_empty());
+        assert_eq!(store.get_membership(0).unwrap(), None);
+    }
+
+    #[test]
+    fn rpc_reads_return_exactly_the_requested_epochs_rows() {
+        let (db, _d) = open_db();
+        let seven = seed_epoch(&db, 7);
+        let eight = seed_epoch(&db, 8);
+        assert_ne!(seven, eight);
+        let store = BeaconStore::new(&db);
+
+        assert_eq!(store.get_dkg_transcript(7).unwrap(), seven);
+        assert_eq!(store.get_dkg_transcript(8).unwrap(), eight);
+        assert!(store.get_dkg_transcript(9).unwrap().is_empty());
+
+        assert_eq!(
+            store.get_finalized_round(7, 0).unwrap(),
+            Some(StoredFinalizedRound {
+                round: 0,
+                sigma_r: [7; G2_LEN],
+                output: [7; OUT_LEN],
+            })
+        );
+        assert_eq!(
+            store.get_finalized_round(8, 0).unwrap().unwrap().output,
+            [8; OUT_LEN]
+        );
+        assert_eq!(store.get_finalized_round(7, 1).unwrap(), None);
+
+        // Reading wrote nothing.
+        let rows = store.load_state_map().unwrap();
+        assert_eq!(rows.len(), 2 * 9);
+    }
+
+    #[test]
+    fn rpc_reads_refuse_rows_they_cannot_vouch_for() {
+        // Half a finalized round: the signature row without its output.
+        let (db, _d) = open_db();
+        db.put(
+            cf::BEACON_STATE,
+            &round_row_key(1, 0),
+            &beacon_encode(&StoredBeaconRound {
+                schema_version: BEACON_RECORD_VERSION,
+                round: 0,
+                sigma_r: vec![1; G2_LEN],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(BeaconStore::new(&db).get_finalized_round(1, 0).is_err());
+
+        // An output whose body names a different round than its key.
+        let (db, _d) = open_db();
+        db.put(
+            cf::BEACON_STATE,
+            &round_row_key(1, 0),
+            &beacon_encode(&StoredBeaconRound {
+                schema_version: BEACON_RECORD_VERSION,
+                round: 0,
+                sigma_r: vec![1; G2_LEN],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        db.put(
+            cf::BEACON_STATE,
+            &output_row_key(1, 0),
+            &beacon_encode(&StoredBeaconOutput {
+                schema_version: BEACON_RECORD_VERSION,
+                round: 5,
+                output: vec![1; OUT_LEN],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(BeaconStore::new(&db).get_finalized_round(1, 0).is_err());
+
+        // A key record filed under another validator's index.
+        let (db, _d) = open_db();
+        db.put(
+            cf::BEACON_STATE,
+            &key_row_key(1, 0),
+            &beacon_encode(&StoredBeaconKey {
+                schema_version: BEACON_RECORD_VERSION,
+                validator_index: 3,
+                ek: vec![0; G1_LEN],
+                record: null_ref(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(BeaconStore::new(&db).get_dkg_transcript(1).is_err());
+
+        // Bytes that do not decode.
+        let (db, _d) = open_db();
+        db.put(cf::BEACON_STATE, &deal_row_key(1, 0, 0), b"not a deal")
+            .unwrap();
+        assert!(BeaconStore::new(&db).get_dkg_transcript(1).is_err());
     }
 }
