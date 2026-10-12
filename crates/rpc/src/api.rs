@@ -990,6 +990,56 @@ pub trait SumChainApi {
     ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
 
     // ========================================================================
+    // BR1 Beacon / DKG (#127) — read-only
+    // ========================================================================
+    //
+    // Each method returns what committed beacon state holds and nothing it does
+    // not: no row is written, no DKG step is run, and nothing absent is
+    // reconstructed from other state. `null` means the node's committed state
+    // holds no such row — on every network today, because genesis validation
+    // refuses `beacon_enabled_from_height`. These are reads of the node's state
+    // at its current head, not finality claims: a reorg can replace them.
+
+    /// One finalized beacon round: the output `beacon_r` and the combined
+    /// signature `Σ_r` it was derived from.
+    ///
+    /// `Ok(None)` when no finalized round `round` of beacon epoch `epoch` is
+    /// held. A round whose signature and output rows disagree is an internal
+    /// error, never `null`.
+    #[method(name = "beacon_getOutput")]
+    async fn beacon_get_output(
+        &self,
+        epoch: u64,
+        round: u64,
+    ) -> Result<Option<crate::types::BeaconOutputInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// The membership snapshot frozen for beacon epoch `epoch` at its boundary,
+    /// in membership order.
+    ///
+    /// `Ok(None)` when no snapshot is held for the epoch. It is never filled in
+    /// from the genesis validators or the current validator set: an epoch whose
+    /// boundary snapshot was not recorded has no membership.
+    #[method(name = "beacon_getMembershipSnapshot")]
+    async fn beacon_get_membership_snapshot(
+        &self,
+        epoch: u64,
+    ) -> Result<
+        Option<crate::types::BeaconMembershipSnapshotInfo>,
+        jsonrpsee::types::ErrorObjectOwned,
+    >;
+
+    /// Every DKG row held for beacon epoch `epoch`: registered keys, accepted
+    /// deals, verdict effects and retained equivocation evidence.
+    ///
+    /// `Ok(None)` when no DKG row is held for the epoch. The group key is not
+    /// a stored value and is not returned.
+    #[method(name = "dkg_getTranscript")]
+    async fn dkg_get_transcript(
+        &self,
+        epoch: u64,
+    ) -> Result<Option<crate::types::DkgTranscriptInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ========================================================================
     // SRC-201 Messaging Endpoints
     // ========================================================================
 

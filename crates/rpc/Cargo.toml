@@ -37,5 +37,9 @@ bincode = { workspace = true }
 
 [dev-dependencies]
 sumc-runtime = { path = "../sumc-runtime" }
+# `tests/beacon_read_rpcs.rs` (#127) publishes real beacon carriers and checks the
+# values a finalized round must hold.
+sumchain-beacon-crypto = { path = "../beacon-crypto" }
+sumchain-beacon-runtime = { path = "../beacon-runtime" }
 tempfile = "3.10"
 wat = "1"

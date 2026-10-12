@@ -7,6 +7,7 @@ use std::time::Duration;
 use jsonrpsee::server::{Server, ServerHandle};
 use sumchain_consensus::ConsensusQuery;
 use sumchain_primitives::{Address, Block, Hash, SignedTransaction, MessagingTxData, MessagingOperation, SponsoredMessage, TxPayload};
+use sumchain_state::beacon_store::{BeaconStore, StoredDkgTranscript, StoredSignedRef};
 use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
 use sumchain_state::education_executor::{
     EducationExecutor, StoredAssessment, StoredCatalogEntry, StoredEnrollmentLink,
@@ -82,6 +83,76 @@ fn is_institutional_provider(t: sumchain_primitives::healthcare::ProviderType) -
             | ProviderType::Pharmacy
             | ProviderType::Laboratory
     )
+}
+
+/// `0x`-prefixed hex of stored beacon bytes, unchanged.
+fn beacon_hex(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
+}
+
+fn beacon_record_info(r: &StoredSignedRef) -> BeaconSignedRecordInfo {
+    BeaconSignedRecordInfo {
+        signer: beacon_hex(&r.signer),
+        tx_ref: beacon_hex(&r.tx_ref),
+        carrier: beacon_hex(&r.carrier),
+    }
+}
+
+/// The wire view of a stored DKG transcript: every row, as stored, in the
+/// store's canonical order. Nothing is derived from the rows.
+fn dkg_transcript_info(epoch: u64, t: &StoredDkgTranscript) -> DkgTranscriptInfo {
+    DkgTranscriptInfo {
+        epoch,
+        keys: t
+            .keys
+            .iter()
+            .map(|k| DkgKeyInfo {
+                validator_index: k.validator_index,
+                ek: beacon_hex(&k.ek),
+                record: beacon_record_info(&k.record),
+            })
+            .collect(),
+        deals: t
+            .deals
+            .iter()
+            .map(|d| DkgDealInfo {
+                dealer_i: d.dealer_i,
+                recipient_j: d.recipient_j,
+                commitments: d.commitments.iter().map(|c| beacon_hex(c)).collect(),
+                r_ij: beacon_hex(&d.r_ij),
+                ct_ij: beacon_hex(&d.ct_ij),
+                record: beacon_record_info(&d.record),
+            })
+            .collect(),
+        disqualified: t.disqualified.iter().map(|d| d.dealer_i).collect(),
+        false_accusers: t.false_accusers.iter().map(|f| f.recipient_j).collect(),
+        adjudicated: t
+            .adjudicated
+            .iter()
+            .map(|a| DkgComplaintPairInfo {
+                dealer_i: a.dealer_i,
+                recipient_j: a.recipient_j,
+            })
+            .collect(),
+        key_equivocations: t
+            .key_equivocations
+            .iter()
+            .map(|e| DkgKeyEquivocationInfo {
+                validator_index: e.validator_index,
+                first: beacon_record_info(&e.first),
+                second: beacon_record_info(&e.second),
+            })
+            .collect(),
+        deal_equivocations: t
+            .deal_equivocations
+            .iter()
+            .map(|e| DkgDealEquivocationInfo {
+                dealer_i: e.dealer_i,
+                first: beacon_record_info(&e.first),
+                second: beacon_record_info(&e.second),
+            })
+            .collect(),
+    }
 }
 
 /// Classify a transaction's status given its receipt (if any), mempool presence,
@@ -3605,6 +3676,54 @@ impl SumChainApiServer for RpcServer {
         let proposer = self.consensus.get_proposer(height);
         let address = Address::from_public_key(&proposer);
         Ok(address.to_base58())
+    }
+
+    // ========================================================================
+    // BR1 Beacon / DKG (#127) — read-only views of committed beacon state
+    // ========================================================================
+
+    async fn beacon_get_output(
+        &self,
+        epoch: u64,
+        round: u64,
+    ) -> std::result::Result<Option<BeaconOutputInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let held = BeaconStore::new(&self.db)
+            .get_finalized_round(epoch, round)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(held.map(|r| BeaconOutputInfo {
+            epoch,
+            round: r.round,
+            output: beacon_hex(&r.output),
+            sigma_r: beacon_hex(&r.sigma_r),
+        }))
+    }
+
+    async fn beacon_get_membership_snapshot(
+        &self,
+        epoch: u64,
+    ) -> std::result::Result<Option<BeaconMembershipSnapshotInfo>, jsonrpsee::types::ErrorObjectOwned>
+    {
+        let held = BeaconStore::new(&self.db)
+            .get_membership(epoch)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(held.map(|members| BeaconMembershipSnapshotInfo {
+            epoch,
+            n: members.len() as u32,
+            members: members.iter().map(|m| beacon_hex(m)).collect(),
+        }))
+    }
+
+    async fn dkg_get_transcript(
+        &self,
+        epoch: u64,
+    ) -> std::result::Result<Option<DkgTranscriptInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let held = BeaconStore::new(&self.db)
+            .get_dkg_transcript(epoch)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        if held.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(dkg_transcript_info(epoch, &held)))
     }
 
     // ========================================================================

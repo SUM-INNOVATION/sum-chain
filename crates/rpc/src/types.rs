@@ -1566,6 +1566,140 @@ pub struct EpochInfo {
 }
 
 // ============================================================================
+// BR1 Beacon / DKG RPC Types (#127)
+// ============================================================================
+//
+// Read-only views of the beacon rows committed state holds. Every byte field
+// is `0x`-prefixed hex of the stored bytes, unchanged. `epoch` is the beacon
+// epoch of the genesis `beacon_schedule`, not the `epoch_getInfo` epoch.
+
+/// One finalized beacon round, as committed state holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeaconOutputInfo {
+    /// Beacon epoch.
+    pub epoch: u64,
+    /// Round within the epoch.
+    pub round: u64,
+    /// The 32-byte beacon output `beacon_r`.
+    pub output: String,
+    /// The combined round signature `Σ_r` the output was derived from:
+    /// canonical compressed G2, 96 bytes.
+    pub sigma_r: String,
+}
+
+/// The membership snapshot the beacon froze for an epoch at its boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeaconMembershipSnapshotInfo {
+    /// Beacon epoch.
+    pub epoch: u64,
+    /// Committee size `n`: the number of members.
+    pub n: u32,
+    /// Member identities, 32 bytes each, in membership order: position `j` is
+    /// membership index `j`, whose share evaluation point is `x_j = j + 1`.
+    pub members: Vec<String>,
+}
+
+/// The authenticated record reference stored with a key, a deal or a piece of
+/// equivocation evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeaconSignedRecordInfo {
+    /// Signer identity, 32 bytes: the signing transaction's public key.
+    pub signer: String,
+    /// Hash of the signed transaction that carried the record, 32 bytes.
+    pub tx_ref: String,
+    /// The canonical carrier bytes that transaction carried.
+    pub carrier: String,
+}
+
+/// A registered epoch encryption key `EK_j`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DkgKeyInfo {
+    /// Membership index `j`.
+    pub validator_index: u32,
+    /// `EK_j`, canonical compressed G1, 48 bytes.
+    pub ek: String,
+    /// The registration that was accepted.
+    pub record: BeaconSignedRecordInfo,
+}
+
+/// An accepted deal from dealer `i` to recipient `j`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DkgDealInfo {
+    /// Dealer index `i`.
+    pub dealer_i: u32,
+    /// Recipient index `j`.
+    pub recipient_j: u32,
+    /// The dealer's Feldman commitments `C_{i,0..T-1}`, canonical compressed
+    /// G1, 48 bytes each.
+    pub commitments: Vec<String>,
+    /// ECIES carrier `R_ij`, canonical compressed G1, 48 bytes.
+    pub r_ij: String,
+    /// ECIES ciphertext `ct_ij`, 48 bytes.
+    pub ct_ij: String,
+    /// The deal that was accepted.
+    pub record: BeaconSignedRecordInfo,
+}
+
+/// A `(dealer, recipient)` pair whose complaint was adjudicated with effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DkgComplaintPairInfo {
+    /// Dealer index `i`.
+    pub dealer_i: u32,
+    /// Recipient (complainant) index `j`.
+    pub recipient_j: u32,
+}
+
+/// Retained evidence of two conflicting key registrations by one member.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DkgKeyEquivocationInfo {
+    /// Membership index that equivocated.
+    pub validator_index: u32,
+    /// The registration that stayed authoritative.
+    pub first: BeaconSignedRecordInfo,
+    /// The conflicting registration.
+    pub second: BeaconSignedRecordInfo,
+}
+
+/// Retained evidence of two conflicting deals by one dealer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DkgDealEquivocationInfo {
+    /// Dealer index `i`.
+    pub dealer_i: u32,
+    /// The deal that was accepted first.
+    pub first: BeaconSignedRecordInfo,
+    /// The conflicting deal.
+    pub second: BeaconSignedRecordInfo,
+}
+
+/// Every DKG row committed state holds for one beacon epoch.
+///
+/// A record of what was accepted, not a reconstruction: complaint bodies and
+/// partial signatures are not persisted and so are absent, and nothing derived
+/// from these rows — `QUAL`, the group key, verification keys — is included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DkgTranscriptInfo {
+    /// Beacon epoch.
+    pub epoch: u64,
+    /// Registered encryption keys, ascending by `validator_index`.
+    pub keys: Vec<DkgKeyInfo>,
+    /// Accepted deals, ascending by `(dealer_i, recipient_j)`.
+    pub deals: Vec<DkgDealInfo>,
+    /// Dealer indices disqualified by a complaint verdict or by equivocation,
+    /// ascending.
+    pub disqualified: Vec<u32>,
+    /// Recipient indices whose complaint was adjudicated false (the
+    /// `SlashFalseAccuser` verdict), ascending. Both lists record verdicts;
+    /// nothing in execution moves stake on them.
+    pub false_accusers: Vec<u32>,
+    /// Adjudicated complaint pairs, ascending.
+    pub adjudicated: Vec<DkgComplaintPairInfo>,
+    /// Retained key-equivocation evidence.
+    pub key_equivocations: Vec<DkgKeyEquivocationInfo>,
+    /// Retained deal-equivocation evidence.
+    pub deal_equivocations: Vec<DkgDealEquivocationInfo>,
+}
+
+// ============================================================================
 // SRC-201 Messaging RPC Types
 // ============================================================================
 

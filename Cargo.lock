@@ -4634,6 +4634,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sumc-runtime",
+ "sumchain-beacon-crypto",
+ "sumchain-beacon-runtime",
  "sumchain-consensus",
  "sumchain-crypto",
  "sumchain-genesis",
