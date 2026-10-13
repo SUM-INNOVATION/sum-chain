@@ -42,6 +42,10 @@ pub fn block_contract_gas_budget(params: &ChainParams, height: u64) -> Option<u6
 /// The largest `gas_limit` a `ContractDeploy` at `height` may declare:
 /// `max_contract_deploy_gas` where the metering gate is open and it is set,
 /// otherwise `max_contract_gas`, the bound every deploy had before it.
+///
+/// The declared limit is the whole deploy's budget, its init call included.
+/// That is the PROPOSED behaviour, not a ratified one (see
+/// `ChainParams::max_contract_deploy_gas`).
 pub fn contract_deploy_gas_ceiling(params: &ChainParams, height: u64) -> u64 {
     match params.max_contract_deploy_gas {
         Some(ceiling) if contract_metering_gate_open(params, height) => ceiling,

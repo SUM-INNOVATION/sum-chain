@@ -2852,16 +2852,22 @@ pub struct ChainParams {
     ///
     /// Above the metering gate a deploy pays per code byte before compiling, so
     /// a contract of a useful size can need more gas than a call. This raises
-    /// the bound a deploy may declare. One budget covers the whole deploy:
-    /// validation, compilation, instantiation and the init call. Calls, views and
-    /// estimates stay bounded by `max_contract_gas`.
+    /// the bound a deploy may declare. Calls, views and estimates stay bounded
+    /// by `max_contract_gas`.
+    ///
+    /// PROPOSED behaviour, not ratified: the ceiling bounds the WHOLE deploy,
+    /// meaning validation, compilation, instantiation and the init call, from
+    /// one budget. The alternative, an init call held to the call budget
+    /// (`max_contract_gas`), needs a change to the metered engine. Which of the
+    /// two applies is decided with the metering values, before the gate is set.
     ///
     /// `None`, and every height below the gate, keep the bound a deploy has
     /// today: `max_contract_gas`. Set, it requires the gate, must be at least
     /// `max_contract_gas`, and a set `max_block_contract_gas` must be at least
     /// it, so any admissible deploy fits an otherwise empty block.
     ///
-    /// PROVISIONAL: no value is chosen. It is set with the ratified metering
+    /// PROVISIONAL: no value is chosen, and no figure in a design note or
+    /// review is ratified by this field. It is set with the ratified metering
     /// values, never before.
     #[serde(default)]
     pub max_contract_deploy_gas: Option<u64>,
