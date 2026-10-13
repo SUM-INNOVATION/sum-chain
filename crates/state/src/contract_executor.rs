@@ -694,6 +694,11 @@ impl ContractExecutorState {
             .map_err(|e| StateError::ContractError(e.to_string()))
     }
 
+    /// Code bytes compiled under metering v1 by this executor so far. Node-local.
+    pub fn metered_compiled_bytes(&self) -> u64 {
+        self.wasm_executor.metered_compiled_bytes()
+    }
+
     /// Contract metadata from COMMITTED state. See [`Self::contract_exists`].
     pub fn get_metadata(&self, address: &Address) -> Option<ContractMetadata> {
         self.wasm_executor.get_metadata_committed(address).map(|m| ContractMetadata {

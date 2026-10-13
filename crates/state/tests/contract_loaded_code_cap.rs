@@ -66,12 +66,16 @@ fn code(fill: u8) -> Vec<u8> {
 }
 
 fn deploy_tx(kp: &KeyPair, nonce: u64, code: Vec<u8>) -> SignedTransaction {
+    deploy_tx_with_init(kp, nonce, code, "new")
+}
+
+fn deploy_tx_with_init(kp: &KeyPair, nonce: u64, code: Vec<u8>, init: &str) -> SignedTransaction {
     signed(
         kp,
         nonce,
         TxPayload::ContractDeploy(ContractDeployData {
             code,
-            init_method: "new".to_string(),
+            init_method: init.to_string(),
             init_args: vec![],
             value: 0,
             gas_limit: ChainParams::default().max_contract_gas,
@@ -244,6 +248,20 @@ fn chain_with_five_contracts(
     tempfile::TempDir,
     Vec<Address>,
 ) {
+    let (state, _db, ex, dir, addrs) = chain_with_five_contracts_and_db(gate);
+    (state, ex, dir, addrs)
+}
+
+/// [`chain_with_five_contracts`], also returning its database.
+fn chain_with_five_contracts_and_db(
+    gate: Option<u64>,
+) -> (
+    std::sync::Arc<sumchain_state::state::StateManager>,
+    std::sync::Arc<sumchain_storage::Database>,
+    sumchain_state::BlockExecutor,
+    tempfile::TempDir,
+    Vec<Address>,
+) {
     let (state, db, dir, ex) = setup_with_params(params(gate));
     fund(&db, &deployer(), FUNDS);
     fund(&db, &caller(), FUNDS);
@@ -276,7 +294,7 @@ fn chain_with_five_contracts(
     let addrs = (0..5)
         .map(|n| ContractExecutor::compute_address(&d.address(), n))
         .collect();
-    (state, ex, dir, addrs)
+    (state, db, ex, dir, addrs)
 }
 
 fn block(height: u64, txs: Vec<SignedTransaction>) -> Block {
@@ -401,4 +419,113 @@ fn the_proposer_reads_code_lengths_from_canonical_state() {
             Some(code(n as u8).len() as u64)
         );
     }
+}
+
+// ── the bound itself: what a node compiles never exceeds the measure ───────
+//
+// Agreeing verdicts on warm and cold nodes do not by themselves bound anything.
+// These count the bytes a node actually compiles while executing a block and
+// hold them to the block's loaded-code measure. The cold node is a fresh
+// executor over the same database, as after a restart, so every load misses.
+
+/// Executes `txs` as block `height` on `ex` (without committing it) and returns
+/// the bytes it compiled, the block's loaded-code measure over the committed
+/// parent state, and each transaction's status.
+fn compiled_against_measure(
+    state: &std::sync::Arc<sumchain_state::state::StateManager>,
+    db: &std::sync::Arc<sumchain_storage::Database>,
+    ex: &sumchain_state::BlockExecutor,
+    height: u64,
+    txs: Vec<SignedTransaction>,
+) -> (u64, u64, Vec<TxStatus>) {
+    let measure =
+        loaded_code_bytes(&txs, |a| sumchain_state::committed_contract_code_len(db, a)).unwrap();
+    let before = ex.contract_metered_compiled_bytes();
+    let exec = ex
+        .execute_block(&block(height, txs), state.state_root(), &[])
+        .expect("within the cap");
+    let statuses = exec
+        .into_parts()
+        .0
+        .receipts()
+        .iter()
+        .map(|r| r.status.clone())
+        .collect();
+    (
+        ex.contract_metered_compiled_bytes() - before,
+        measure,
+        statuses,
+    )
+}
+
+#[test]
+fn repeated_calls_and_a_deploy_with_its_init_compile_no_more_than_the_measure() {
+    let (state, db, warm, _dir, addrs) = chain_with_five_contracts_and_db(Some(1));
+    let cold = sumchain_state::BlockExecutor::new(state.clone(), db.clone(), params(Some(1)));
+    let d = deployer();
+    let next = state.get_nonce(&d.address()).unwrap();
+    let fresh = ContractExecutor::compute_address(&d.address(), next);
+    let k = caller();
+    let txs = || {
+        vec![
+            call_tx(&k, 0, addrs[0]),
+            call_tx(&k, 1, addrs[1]),
+            call_tx(&k, 2, addrs[0]),
+            call_tx(&k, 3, addrs[1]),
+            deploy_tx(&d, next, code(9)), // compiled once; its init reuses it
+            call_tx(&k, 4, fresh),        // deployed in this block: nothing more
+            call_tx(&k, 5, addrs[0]),
+        ]
+    };
+    let one = code(0).len() as u64;
+
+    let (compiled, measure, statuses) = compiled_against_measure(&state, &db, &cold, 3, txs());
+    assert!(
+        statuses.iter().all(|s| *s == TxStatus::Success),
+        "{statuses:?}"
+    );
+    assert_eq!(measure, 3 * one);
+    assert_eq!(
+        compiled, measure,
+        "a cold node compiles each load exactly once"
+    );
+
+    // A warm node compiles only the deploy.
+    let (compiled, measure_warm, _) = compiled_against_measure(&state, &db, &warm, 3, txs());
+    assert_eq!(measure_warm, measure);
+    assert_eq!(compiled, one);
+}
+
+#[test]
+fn a_failed_deploy_does_not_make_counted_code_compile_again() {
+    // Contract 0's code is deployed again, twice, with an init that does not
+    // exist, so each deploy compiles and then fails. Calls to contract 0 come
+    // before, between and after. Each failed deploy is counted; the calls after
+    // it must find the code still compiled.
+    let (state, db, _warm, _dir, addrs) = chain_with_five_contracts_and_db(Some(1));
+    let cold = sumchain_state::BlockExecutor::new(state.clone(), db.clone(), params(Some(1)));
+    let d = deployer();
+    let next = state.get_nonce(&d.address()).unwrap();
+    let k = caller();
+    let txs = vec![
+        call_tx(&k, 0, addrs[0]),
+        deploy_tx_with_init(&d, next, code(0), "absent"),
+        call_tx(&k, 1, addrs[0]),
+        deploy_tx_with_init(&d, next + 1, code(0), "absent"),
+        call_tx(&k, 2, addrs[0]),
+    ];
+    let one = code(0).len() as u64;
+
+    let (compiled, measure, statuses) = compiled_against_measure(&state, &db, &cold, 3, txs);
+    assert_eq!(statuses[1], statuses[3]);
+    assert_ne!(statuses[1], TxStatus::Success, "{statuses:?}");
+    assert!(
+        [0, 2, 4].iter().all(|&i| statuses[i] == TxStatus::Success),
+        "{statuses:?}"
+    );
+    assert_eq!(measure, 3 * one);
+    assert_eq!(
+        compiled, measure,
+        "compiled {compiled} of a {measure}-byte measure"
+    );
 }

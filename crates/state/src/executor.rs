@@ -3217,6 +3217,14 @@ impl BlockExecutor {
         self.contract_executor.queue_is_non_empty()
     }
 
+    /// Code bytes the contract runtime has compiled under metering v1 so far.
+    ///
+    /// Node-local, never consensus: compilation work checked against a block's
+    /// loaded-code measure (#279, D8).
+    pub fn contract_metered_compiled_bytes(&self) -> u64 {
+        self.contract_executor.metered_compiled_bytes()
+    }
+
     /// Execute a block and return receipts
     pub fn execute_block(
         &self,

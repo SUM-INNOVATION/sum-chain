@@ -12,6 +12,7 @@ use crate::{
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use sumchain_primitives::Address;
 use sumchain_storage::{contract_cf_kind, ContractMutation};
@@ -183,6 +184,10 @@ pub struct ContractExecutor {
     /// from `cache`: the same code hash compiles to different machine code
     /// under the two engines, and neither may be instantiated from the other.
     metered_cache: RwLock<HashMap<CodeHash, Arc<MeteredModule>>>,
+    /// Code bytes compiled under metering v1 so far (deploys and cache misses).
+    /// Node-local and never consensus: it is how compilation work is checked
+    /// against a block's loaded-code measure (#279, D8).
+    metered_compiled_bytes: AtomicU64,
     /// The metering v1 schedule. PROVISIONAL.
     schedule: CostScheduleV1Provisional,
 }
@@ -206,6 +211,7 @@ impl ContractExecutor {
             metadata: RwLock::new(HashMap::new()),
             local_limits: None,
             metered_cache: RwLock::new(HashMap::new()),
+            metered_compiled_bytes: AtomicU64::new(0),
             schedule: metering::METERED_COST_SCHEDULE,
         }
     }
@@ -231,6 +237,7 @@ impl ContractExecutor {
             metadata: RwLock::new(HashMap::new()),
             local_limits: Some(limits),
             metered_cache: RwLock::new(HashMap::new()),
+            metered_compiled_bytes: AtomicU64::new(0),
             schedule: metering::METERED_COST_SCHEDULE,
         }
     }
@@ -261,6 +268,19 @@ impl ContractExecutor {
             }
         }
         cache.insert(code_hash, compiled);
+    }
+
+    /// Compile `code` under metering v1, counting its bytes.
+    fn compile_metered(&self, code: &[u8]) -> Result<MeteredModule> {
+        self.metered_compiled_bytes
+            .fetch_add(code.len() as u64, Ordering::Relaxed);
+        metering::compile(code, &self.schedule)
+    }
+
+    /// Code bytes this executor has compiled under metering v1: every metered
+    /// deploy, and every metered call that missed the cache. Node-local.
+    pub fn metered_compiled_bytes(&self) -> u64 {
+        self.metered_compiled_bytes.load(Ordering::Relaxed)
     }
 
     /// Insert into the metered-module cache, bounded on a local executor
@@ -375,7 +395,7 @@ impl ContractExecutor {
                 )
             }
             ExecutionMode::MeteredV1Provisional => {
-                let compiled = Arc::new(metering::compile(&code, &self.schedule)?);
+                let compiled = Arc::new(self.compile_metered(&code)?);
                 let old_code = self.storage.get_code(&contract_address)?;
                 self.storage.store_code(&contract_address, &code)?;
                 self.metered_cache_insert(code_hash, compiled);
@@ -405,7 +425,8 @@ impl ContractExecutor {
         // Everything after `store_code` runs inside a guarded finalize: ANY
         // failure path (metadata encode/persist, init gas, init Err, init
         // success==false, storage commit) must leave NO persisted code,
-        // metadata, storage, or cache entry behind. On `Err`, run cleanup.
+        // metadata, storage, or unmetered cache entry behind. On `Err`, run
+        // cleanup.
         let finalize = (|| -> Result<DeployResult> {
             // Capture metadata pre-image, then store metadata (backend + cache).
             let old_meta = self.storage.get_metadata(&contract_address)?;
@@ -493,13 +514,18 @@ impl ContractExecutor {
 
     /// Roll back every persisted/cached effect of a deploy that failed after
     /// `store_code`. Idempotent; deletes are best-effort.
+    ///
+    /// The metered module stays cached. It is keyed by its code under one
+    /// fixed schedule, so it is the right module for any contract with that
+    /// code, and removing it would let a failed deploy make a later call in the
+    /// same block recompile code that the block's loaded-code measure (#279,
+    /// D8) has already counted.
     fn cleanup_failed_deploy(&self, contract_address: &ContractAddress, code_hash: &CodeHash) {
         self.storage.rollback();
         let _ = self.storage.delete_code(contract_address);
         let _ = self.storage.delete_metadata(contract_address);
         self.metadata.write().remove(contract_address);
         self.cache.write().remove(code_hash);
-        self.metered_cache.write().remove(code_hash);
     }
 
     /// Call a contract method on the unmetered engine, with the historical error
@@ -930,7 +956,7 @@ impl ContractExecutor {
         let compiled = match cached {
             Some(c) => c,
             None => {
-                let c = Arc::new(metering::compile(&code, &schedule)?);
+                let c = Arc::new(self.compile_metered(&code)?);
                 self.metered_cache_insert(code_hash, c.clone());
                 c
             }
