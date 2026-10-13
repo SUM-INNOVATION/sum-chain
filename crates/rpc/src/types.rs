@@ -1569,9 +1569,10 @@ pub struct EpochInfo {
 // BR1 Beacon / DKG RPC Types (#127)
 // ============================================================================
 //
-// Read-only views of the beacon rows committed state holds. Every byte field
-// is `0x`-prefixed hex of the stored bytes, unchanged. `epoch` is the beacon
-// epoch of the genesis `beacon_schedule`, not the `epoch_getInfo` epoch.
+// Read-only views of the beacon rows committed state holds, and of the one
+// value derived from them (`BeaconGroupKeyInfo`). Every byte field is
+// `0x`-prefixed hex. `epoch` is the beacon epoch of the genesis
+// `beacon_schedule`, not the `epoch_getInfo` epoch.
 
 /// One finalized beacon round, as committed state holds it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1585,6 +1586,21 @@ pub struct BeaconOutputInfo {
     /// The combined round signature `Σ_r` the output was derived from:
     /// canonical compressed G2, 96 bytes.
     pub sigma_r: String,
+}
+
+/// An epoch's group public key and the `QUAL` it is summed over.
+///
+/// Not a stored value: the runtime's own `QUAL` determination over the
+/// epoch's committed DKG rows, made once those rows can no longer change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeaconGroupKeyInfo {
+    /// Beacon epoch.
+    pub epoch: u64,
+    /// `PK_E = Σ_{i∈QUAL} C_{i,0}`: canonical compressed G1, 48 bytes.
+    pub group_key: String,
+    /// Qualified dealer indices, ascending: every member that dealt and was
+    /// not disqualified.
+    pub qual: Vec<u32>,
 }
 
 /// The membership snapshot the beacon froze for an epoch at its boundary.
@@ -1676,6 +1692,7 @@ pub struct DkgDealEquivocationInfo {
 /// A record of what was accepted, not a reconstruction: complaint bodies and
 /// partial signatures are not persisted and so are absent, and nothing derived
 /// from these rows — `QUAL`, the group key, verification keys — is included.
+/// `QUAL` and the group key are `beacon_getGroupKey`'s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DkgTranscriptInfo {
     /// Beacon epoch.

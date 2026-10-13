@@ -871,6 +871,30 @@ impl<'a> BeaconStore<'a> {
         Ok(t)
     }
 
+    /// The committed DKG rows of `epoch`, decoded into the input
+    /// `DkgEpoch::rehydrate` takes.
+    ///
+    /// Scans only this epoch's DKG domains and decodes them with the same
+    /// de-materialization block execution uses, so a `DkgEpoch` rehydrated
+    /// from this is the one the executor rehydrates from the same rows. Round,
+    /// output and membership rows are not read. Like the readers above, it
+    /// derives nothing: `QUAL` and the group key are the caller's to compute.
+    pub fn get_dkg_rehydrate_input(&self, epoch: u64) -> Result<RehydrateInput> {
+        let mut rows = BTreeMap::new();
+        for d in [
+            domain::KEY,
+            domain::DEAL,
+            domain::VERDICT,
+            domain::FALSE_ACCUSER,
+            domain::ADJUDICATED,
+            domain::KEY_EQUIV,
+            domain::DEAL_EQUIV,
+        ] {
+            rows.extend(self.epoch_rows(d, epoch)?);
+        }
+        Ok(Self::materialized_from(&rows, epoch)?.0)
+    }
+
     /// The committed rows of one `domain` for one `epoch`, in key order.
     fn epoch_rows(&self, domain: u8, epoch: u64) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let prefix = key_prefix(domain, epoch);

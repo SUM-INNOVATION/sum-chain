@@ -964,16 +964,17 @@ All refusals are returned together, in the fixed order above. **Stability:** `ad
 
 ### BR1 randomness beacon (`beacon_*`, `dkg_*`) — read-only, dormant (issue #127)
 
-Reads of the beacon rows committed state holds. They write nothing, run no DKG step, and never fill in an absent value from other state. Genesis validation refuses `beacon_enabled_from_height` on every network, so on a real chain each of these returns `null`.
+Reads of the beacon rows committed state holds, plus one value derived from them (`beacon_getGroupKey`). They write nothing and never fill in an absent value from other state. Genesis validation refuses `beacon_enabled_from_height` on every network, so on a real chain each of these returns `null`.
 
 - `epoch` is the beacon epoch of the genesis `beacon_schedule`, not the `epoch_getInfo` epoch.
-- Byte fields are `0x`-prefixed hex of the stored bytes.
+- Byte fields are `0x`-prefixed hex: of the stored bytes, and for `group_key` of the derived key's canonical encoding.
 - An answer is the node's committed state at its current head, not a finality claim: a reorg can replace it.
 - A stored row that does not decode, or a finalized round with only one of its two rows, is `-32603`, never `null`.
 
 | Method | Returns |
 |---|---|
 | `beacon_getOutput(epoch, round)` | `{epoch, round, output, sigma_r}`: the 32-byte beacon output and the 96-byte combined round signature `Σ_r` it was derived from. `null` if round `round` of `epoch` is not finalized. |
+| `beacon_getGroupKey(epoch)` | `{epoch, group_key, qual}`: the epoch group public key `PK_E = Σ_{i∈QUAL} C_{i,0}` as 48-byte compressed G1, and `QUAL`, the dealer indices it sums over, ascending. `null` until the head is past the epoch's complaint window, if no `beacon_schedule` is configured, or if the DKG safe-halted (`\|QUAL\| < Q_dkg`, including an epoch with no deals). See below. |
 | `beacon_getMembershipSnapshot(epoch)` | `{epoch, n, members}`: the validator set frozen at the epoch boundary, as 32-byte ids in membership order (position `j` is index `j`, evaluation point `x_j = j + 1`). `null` if no snapshot was recorded for the epoch; it is never filled in from the genesis or current validator set. |
 | `dkg_getTranscript(epoch)` | `{epoch, keys, deals, disqualified, false_accusers, adjudicated, key_equivocations, deal_equivocations}`. `null` if the epoch holds no DKG row. |
 
@@ -986,7 +987,11 @@ Transcript entries, each list in canonical key order:
 - `key_equivocations[]`: `{validator_index, first, second}`; `deal_equivocations[]`: `{dealer_i, first, second}`.
 - `record`, `first`, `second`: `{signer, tx_ref, carrier}`, the signing transaction's public key, its hash, and the carrier bytes it carried.
 
-Complaint bodies and partial signatures are not persisted and are not returned. There is no `beacon_getGroupKey`: the group key is not a stored value, and no stored row records when `QUAL` became final.
+Complaint bodies and partial signatures are not persisted and are not returned.
+
+`beacon_getGroupKey` is not a stored value, and block execution does not store it either: it rehydrates the epoch from its DKG rows for every block and, in the signing window, takes `QUAL` and `PK_E` from the runtime's `QUAL` determination (`DkgEpoch::finalize`, security spec §4.2) whenever it verifies a partial signature or a `Σ_r`. The RPC runs the same rehydration and determination over the node's committed rows, against the same `Q_dkg` (the genesis `beacon_params`), so it reports the key the executor verifies under.
+
+On the head's branch the rows are fixed once the head is past the epoch's complaint window — that is, in the epoch's signing window (`complaint_deadline_offset + 1` blocks after the epoch start, or later) or in a later epoch. Key registrations, deals and complaints are each accepted only in their own window of the `beacon_schedule`, and only for the epoch the block's height falls in, so no later block on the same branch can add a deal or disqualify a dealer. Until then the answer is `null`, including at the last block of the complaint window, which still accepts complaints. This is not a finality claim: as with the other reads, a reorg back into the DKG windows withdraws the answer, and the replacing branch determines its own key. A DKG row that does not decode is `-32603`.
 
 ### No-key unsigned-tx family builders (issue #89)
 

@@ -4078,14 +4078,11 @@ impl BlockExecutor {
     /// The BR1 beacon (#127) threshold/fault params for the LIVE producer: the
     /// authoritative genesis `beacon_params` (re-validated through the runtime's own
     /// `BeaconParams::validated`, the executable source of truth), or — only when the
-    /// gate is (test-)open with no genesis surface — the PROPOSED fixture.
+    /// gate is (test-)open with no genesis surface — the PROPOSED fixture. The
+    /// rule is `beacon_manager::beacon_params_for`, shared with the committed
+    /// group-key read so the two cannot decide `QUAL` against different `Q_dkg`.
     fn beacon_params_or_fixture(&self) -> Result<sumchain_beacon_runtime::params::BeaconParams> {
-        use sumchain_beacon_runtime::params::BeaconParams;
-        match &self.params.beacon_params {
-            Some(bp) => BeaconParams::validated(bp.f, bp.c, bp.t, bp.q_dkg, bp.n)
-                .map_err(|e| StateError::InvalidOperation(format!("invalid beacon_params: {e:?}"))),
-            None => Ok(BeaconParams::proposed_default()),
-        }
+        crate::beacon_manager::beacon_params_for(&self.params)
     }
 
     /// Build the per-block beacon accumulator when the gate is open (rehydrated from

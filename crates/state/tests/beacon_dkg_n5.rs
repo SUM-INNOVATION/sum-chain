@@ -17,7 +17,8 @@
 //!   and the dealer is disqualified; the crashed member is not penalised; the
 //!   DKG completes with `|QUAL| = Q_dkg = 3` and two chained rounds finalize
 //!   under a group key computed here, independently, from the honest dealers'
-//!   polynomials.
+//!   polynomials — the key the node derives from its committed rows once the
+//!   complaint window has closed, and not before.
 //! * [`different_dealings_on_two_forks_give_different_beacons_and_a_reverted_fork_leaves_no_trace`]
 //!   — two branches over the same registrations carry different dealings and
 //!   produce different beacons. Reverting the first through the reorg unwind
@@ -47,6 +48,7 @@ use sumchain_primitives::beacon_wire::{
     RegisterBeaconKeyV1,
 };
 use sumchain_primitives::{BeaconTxData, Block, SignedTransaction, TransactionV2, TxPayload};
+use sumchain_state::beacon_manager::{committed_group_key, CommittedGroupKey};
 use sumchain_state::beacon_store::{BeaconStore, StoredDkgTranscript};
 use sumchain_state::executor::BlockExecutor;
 use sumchain_state::reorg_undo::{stage_branch_unwind, MissingJournalPolicy, SubsystemJournals};
@@ -351,6 +353,11 @@ impl Node {
         BeaconStore::new(&self.db)
     }
 
+    /// The group key the node derives from its committed rows at its head.
+    fn derived_group_key(&self) -> Option<CommittedGroupKey> {
+        committed_group_key(&self.db, &params(), CHAIN_ID, EPOCH).unwrap()
+    }
+
     /// Execute and publish one block; every transaction in it must succeed.
     fn publish(&self, m: &Members, height: u64, txs: Vec<SignedTransaction>) -> Block {
         let (receipts, block) = common::publish_block_returning(
@@ -535,6 +542,11 @@ fn n5_dkg_survives_an_invalid_dealer_and_a_crash() {
         vec![(INVALID_DEALER, VICTIM)]
     );
     assert!(t.false_accusers.is_empty(), "the complaint was true");
+    assert_eq!(
+        node.derived_group_key(),
+        None,
+        "the complaint window is still open"
+    );
 
     // ── QUAL is the three honest dealers: exactly Q_dkg. The group key is
     // computed here from their polynomials alone, not read from the node.
@@ -592,6 +604,17 @@ fn n5_dkg_survives_an_invalid_dealer_and_a_crash() {
         "chaining gives each round its own output"
     );
     assert_eq!(store.get_finalized_round(EPOCH, 2).unwrap(), None);
+
+    // ── The key the node derives from its committed rows is the one computed
+    // above: the executor verified every partial against QUAL's commitments
+    // and both rounds' Σ under it.
+    assert_eq!(
+        node.derived_group_key(),
+        Some(CommittedGroupKey {
+            qual: qual.clone(),
+            group_key: pk_e.to_compressed(),
+        })
+    );
 
     // ── Absence is not misconduct: the crashed member holds no key and no
     // deal, and no verdict names it.
@@ -688,6 +711,9 @@ fn different_dealings_on_two_forks_give_different_beacons_and_a_reverted_fork_le
     let (a_blocks, a_deals, a_output) = run_branch(&x, &m, FORK_A);
     let a_commitments = commitments_in(&x.store().get_dkg_transcript(EPOCH).unwrap());
     assert!(!a_commitments.is_empty());
+    let a_key = x
+        .derived_group_key()
+        .expect("fork A is past its complaint window");
 
     // ── Reorg away from A. Every row and every undo record A wrote is gone:
     // the node is exactly at the parent again.
@@ -713,6 +739,22 @@ fn different_dealings_on_two_forks_give_different_beacons_and_a_reverted_fork_le
     );
     assert_ne!(a_output, bx_output, "different dealings, different beacon");
     assert_eq!(bx_output, by_output, "a branch's beacon is deterministic");
+    let b_key = x
+        .derived_group_key()
+        .expect("fork B is past its complaint window");
+    assert_eq!(
+        Some(b_key.clone()),
+        y.derived_group_key(),
+        "and so is its group key"
+    );
+    assert_eq!(
+        a_key.qual, b_key.qual,
+        "the same dealers qualified on both forks"
+    );
+    assert_ne!(
+        a_key.group_key, b_key.group_key,
+        "different dealings, different group key"
+    );
     assert_eq!(
         bx_blocks.iter().map(Block::hash).collect::<Vec<_>>(),
         by_blocks.iter().map(Block::hash).collect::<Vec<_>>(),

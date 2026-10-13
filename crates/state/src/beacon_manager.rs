@@ -32,18 +32,20 @@ use std::collections::BTreeMap;
 
 use sumchain_beacon_runtime::context::{BeaconPhase, EpochMembership, ExecContext};
 use sumchain_beacon_runtime::dkg::{DkgConfig, DkgEpoch, DkgOutcome};
+use sumchain_beacon_runtime::params::BeaconParams;
 use sumchain_beacon_runtime::rounds::BeaconChain;
 use sumchain_beacon_runtime::signing::QualifiedEpoch;
 use sumchain_genesis::ChainParams;
+use sumchain_primitives::beacon_schedule::{BeaconSchedule, BeaconWindowPhase};
 use sumchain_primitives::beacon_wire::BeaconOperation;
 use sumchain_primitives::BlockHeight;
 use sumchain_primitives::Hash;
 use sumchain_storage::candidate::JournalRecord;
 use sumchain_storage::exec_view::ExecutionView;
-use sumchain_storage::Database;
+use sumchain_storage::{BlockStore, Database};
 
 use crate::beacon_executor::beacon_gate_open;
-use crate::beacon_store::BeaconStore;
+use crate::beacon_store::{BeaconStore, G1_LEN};
 use crate::{Result, StateError};
 
 /// The authoritative in-memory beacon working state: the DKG epoch plus the optional
@@ -352,6 +354,141 @@ impl BeaconBlockState {
             &members,
         )?;
         BeaconStore::stage_epoch_transition(view, self.cfg.epoch, current)
+    }
+}
+
+/// The BR1 threshold/fault parameters the beacon runtime runs under: the
+/// genesis `beacon_params`, re-validated through the runtime's own
+/// [`BeaconParams::validated`], or — only when the gate is (test-)open with no
+/// genesis surface — the PROPOSED fixture.
+///
+/// The executor builds every epoch's `DkgConfig` from this, and
+/// [`committed_group_key`] must decide `QUAL` against the same `Q_dkg`, so the
+/// rule lives in one place.
+pub fn beacon_params_for(params: &ChainParams) -> Result<BeaconParams> {
+    match &params.beacon_params {
+        Some(bp) => BeaconParams::validated(bp.f, bp.c, bp.t, bp.q_dkg, bp.n)
+            .map_err(|e| StateError::InvalidOperation(format!("invalid beacon_params: {e:?}"))),
+        None => Ok(BeaconParams::proposed_default()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Committed read: an epoch's group key, for RPC. Not on the execution path —
+// block execution derives the key from its candidate in `load_from_candidate`
+// and `ensure_chain`.
+// ---------------------------------------------------------------------------
+
+/// The group key of one beacon epoch and the `QUAL` it is summed over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedGroupKey {
+    /// Qualified dealer indices, ascending (draft §4.1).
+    pub qual: Vec<u32>,
+    /// `PK_E = Σ_{i∈QUAL} C_{i,0}`, canonical compressed G1 (draft §4.2).
+    pub group_key: [u8; G1_LEN],
+}
+
+/// The group key `PK_E` of beacon `epoch` as committed state determines it at
+/// the node's current head, or `None` where it determines none.
+///
+/// The key is not stored, and block execution does not store it either: it
+/// rehydrates the epoch from its DKG rows every block and, in the signing
+/// window, takes the key from [`DkgEpoch::finalize`] whenever it verifies a
+/// partial or a `BeaconFinalizeV1` under it
+/// ([`BeaconBlockState::load_from_candidate`], `ensure_chain`). This repeats
+/// the same steps — the row decoder, the parameters ([`beacon_params_for`]),
+/// `rehydrate`, `finalize` — over committed rows.
+///
+/// On the head's branch those rows are fixed once the head is past the epoch's
+/// complaint window (`dkg_window_closed`). This is not finality: a reorg back
+/// into the DKG windows replaces them. Key registration, deals and complaints
+/// are each valid only in their own window of the genesis `beacon_schedule`,
+/// and a block applies only operations for the epoch its own height derives, so
+/// no later block on this branch can add a deal or disqualify a dealer. Before
+/// then one could, and the answer is `None` rather than a key that may still
+/// change.
+/// It is also `None` when no schedule is configured, nothing has been
+/// published, or the DKG safe-halted (`|QUAL| < Q_dkg`, which includes an
+/// epoch with no deals at all).
+///
+/// It writes nothing. The answer belongs to the current branch: a reorg back
+/// past the complaint window can replace it (draft §10). The head is read
+/// before and after the rows and the read is retried if it moved; three moves
+/// in a row are an error, not an answer whose head and rows may come from
+/// different blocks.
+pub fn committed_group_key(
+    db: &Database,
+    params: &ChainParams,
+    chain_id: u64,
+    epoch: u64,
+) -> Result<Option<CommittedGroupKey>> {
+    let Some(schedule) = params.beacon_schedule else {
+        return Ok(None);
+    };
+    schedule
+        .validate()
+        .map_err(|e| StateError::InvalidOperation(format!("invalid beacon_schedule: {e}")))?;
+
+    for _attempt in 0..3 {
+        let Some(head) = committed_head(db)? else {
+            return Ok(None);
+        };
+        if !dkg_window_closed(&schedule, epoch, head.0)? {
+            return Ok(None);
+        }
+        let input = BeaconStore::new(db).get_dkg_rehydrate_input(epoch)?;
+        if committed_head(db)? != Some(head) {
+            continue;
+        }
+
+        let cfg = DkgConfig {
+            chain_id,
+            epoch,
+            params: beacon_params_for(params)?,
+        };
+        let dkg = DkgEpoch::rehydrate(cfg, input)
+            .map_err(|e| StateError::DeserializationError(format!("beacon rehydrate: {e:?}")))?;
+        return Ok(match dkg.finalize() {
+            DkgOutcome::Success { qual, group_key } => Some(CommittedGroupKey {
+                qual,
+                group_key: group_key.to_compressed(),
+            }),
+            DkgOutcome::SafeHalt { .. } => None,
+        });
+    }
+    Err(StateError::InvalidOperation(format!(
+        "beacon epoch {epoch}: the committed head moved during each of three reads of its DKG rows"
+    )))
+}
+
+/// Whether a head at `head` lies past `epoch`'s complaint window: in that
+/// epoch's signing window, or in a later epoch.
+///
+/// Signing is the window after the complaint deadline (`BeaconSchedule`), so
+/// the last block of the complaint window is not past it: a complaint in it
+/// still counts.
+fn dkg_window_closed(schedule: &BeaconSchedule, epoch: u64, head: BlockHeight) -> Result<bool> {
+    let point = schedule.derive(head).map_err(|e| {
+        StateError::InvalidOperation(format!("beacon schedule at height {head}: {e}"))
+    })?;
+    Ok(match point {
+        None => false,
+        Some(p) => {
+            p.epoch > epoch || (p.epoch == epoch && p.phase == Some(BeaconWindowPhase::Signing))
+        }
+    })
+}
+
+/// The committed head `(height, hash)`. Publication and the reorg unwind write
+/// both in the same batch as the state rows they head.
+fn committed_head(db: &Database) -> Result<Option<(BlockHeight, Hash)>> {
+    let blocks = BlockStore::new(db);
+    match (blocks.get_latest_height()?, blocks.get_latest_hash()?) {
+        (Some(height), Some(hash)) => Ok(Some((height, hash))),
+        (None, None) => Ok(None),
+        _ => Err(StateError::InvalidOperation(
+            "committed head: only one of its height and hash is recorded".into(),
+        )),
     }
 }
 
@@ -789,5 +926,64 @@ mod tests {
         assert!(err.is_err());
         assert!(BeaconStore::new(&db).load_state_map().unwrap().is_empty());
         assert!(!BeaconStore::new(&db).has_journal(5, &bh(5)).unwrap());
+    }
+
+    /// The DKG rows of an epoch stop changing exactly when the schedule leaves
+    /// its complaint window: the deadline block itself still takes complaints.
+    #[test]
+    fn the_dkg_window_closes_at_the_first_signing_block() {
+        // Complaint window 401..=501 of epoch 0, signing 502..=1000, epoch 1
+        // from 1001.
+        let s = BeaconSchedule {
+            start_height: 1,
+            epoch_length: 1000,
+            key_cutoff_offset: 100,
+            deal_start_offset: 200,
+            deal_cutoff_offset: 300,
+            complaint_start_offset: 400,
+            complaint_deadline_offset: 500,
+        };
+        s.validate().unwrap();
+        let closed = |epoch: u64, head: BlockHeight| dkg_window_closed(&s, epoch, head).unwrap();
+
+        assert!(!closed(0, 0), "no epoch before the schedule starts");
+        for open in [1, 201, 401, 501] {
+            assert!(!closed(0, open), "head {open}");
+        }
+        for past in [502, 1000, 1001, 5_000] {
+            assert!(closed(0, past), "head {past}");
+        }
+        assert!(!closed(1, 1001) && !closed(1, 1501) && closed(1, 1502));
+        assert!(
+            !closed(u64::MAX, u64::MAX),
+            "a future epoch is never closed"
+        );
+    }
+
+    #[test]
+    fn no_schedule_or_no_head_means_no_group_key() {
+        let (db, _d) = open_db();
+        assert_eq!(
+            committed_group_key(&db, &ChainParams::default(), CHAIN_ID, 0).unwrap(),
+            None,
+            "no schedule"
+        );
+        let scheduled = ChainParams {
+            beacon_schedule: Some(BeaconSchedule {
+                start_height: 0,
+                epoch_length: 10,
+                key_cutoff_offset: 1,
+                deal_start_offset: 2,
+                deal_cutoff_offset: 3,
+                complaint_start_offset: 4,
+                complaint_deadline_offset: 5,
+            }),
+            ..ChainParams::default()
+        };
+        assert_eq!(
+            committed_group_key(&db, &scheduled, CHAIN_ID, 0).unwrap(),
+            None,
+            "nothing published"
+        );
     }
 }

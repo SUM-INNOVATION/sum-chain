@@ -6,13 +6,20 @@
 //! beacon gate is opened in test-local `ChainParams` only: genesis validation
 //! refuses it on every network, which is why a chain with the production gate
 //! answers `null` to every one of these reads.
+//!
+//! `beacon_getGroupKey` is the one answer derived rather than stored: the
+//! runtime's `QUAL` determination over the epoch's committed DKG rows, given
+//! only once the head is past the complaint window. Its tests pin that window
+//! edge, that the key is the one the executor verified a round signature
+//! under, that a DKG short of `Q_dkg` has none, and that a reorg back into the
+//! DKG withdraws the key and the replacement branch determines its own.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use sumchain_beacon_crypto::{
     aggregate_g1, ecies_seal, eval_share_le, verify, EciesContext, PublicKey, SecretScalar,
-    SCALAR_SIZE,
+    Signature, G1_COMPRESSED_SIZE, SCALAR_SIZE,
 };
 use sumchain_beacon_runtime::wire::{beacon_output, genesis_seed, round_message, ChainInput};
 use sumchain_consensus::PoAEngine;
@@ -27,11 +34,18 @@ use sumchain_primitives::{
 };
 use sumchain_rpc::api::SumChainApiServer;
 use sumchain_rpc::server::RpcServer;
-use sumchain_rpc::types::{BeaconMembershipSnapshotInfo, BeaconOutputInfo, BeaconSignedRecordInfo};
+use sumchain_rpc::types::{
+    BeaconGroupKeyInfo, BeaconMembershipSnapshotInfo, BeaconOutputInfo, BeaconSignedRecordInfo,
+};
 use sumchain_state::beacon_store::{deal_row_key, membership_row_key, round_row_key, BeaconStore};
 use sumchain_state::executor::BlockExecutor;
+use sumchain_state::reorg_undo::{
+    stage_branch_unwind, stage_head_reset, MissingJournalPolicy, SubsystemJournals,
+};
 use sumchain_state::{Mempool, MempoolConfig, StateManager};
+use sumchain_storage::candidate::stage_deindex;
 use sumchain_storage::schema::AccountState;
+use sumchain_storage::subsystem_journal::SubsystemGates;
 use sumchain_storage::{cf, Database, StateStore};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -39,8 +53,19 @@ use tokio::sync::mpsc;
 const CHAIN_ID: u64 = 1;
 const EPOCH: u64 = 0;
 
+/// Heights against [`gate_open`]'s schedule.
+const KEYS_AT: u64 = 1;
+const DEALS_AT: u64 = 201;
+/// The last block of epoch 0's complaint window.
+const COMPLAINT_DEADLINE: u64 = 501;
+/// The first block of epoch 0's signing window.
+const SIGNING_FROM: u64 = 502;
+/// The first block of epoch 1.
+const NEXT_EPOCH_AT: u64 = 1001;
+
 /// Test-local: genesis validation refuses an open beacon gate on any network.
-/// Key window 1..=101, deal window 201..=301, signing from 502.
+/// Key window 1..=101, deal window 201..=301, complaint window 401..=501,
+/// signing from 502.
 fn gate_open() -> ChainParams {
     ChainParams {
         beacon_enabled_from_height: Some(0),
@@ -123,6 +148,9 @@ impl Chain {
             .unwrap(),
         );
         let (tx_sender, _rx) = mpsc::channel(8);
+        // The server is handed the executor's parameters, as a node hands it
+        // its genesis parameters: `beacon_getGroupKey` reads the schedule and
+        // `Q_dkg` from them. The other reads do not look at them.
         let server = RpcServer::new(
             db.clone(),
             state.clone(),
@@ -130,7 +158,8 @@ impl Chain {
             engine,
             tx_sender,
             Arc::new(|| 0usize),
-        );
+        )
+        .with_chain_params(params.clone());
 
         for k in &keys {
             StateStore::new(&db)
@@ -159,6 +188,12 @@ impl Chain {
 
     /// Execute and publish one block at `height`.
     fn publish(&self, height: u64, txs: Vec<SignedTransaction>) -> Vec<Receipt> {
+        self.publish_block(height, txs).0
+    }
+
+    /// [`publish`](Self::publish), also returning the block, for a reorg to
+    /// unwind.
+    fn publish_block(&self, height: u64, txs: Vec<SignedTransaction>) -> (Vec<Receipt>, Block) {
         let header = BlockHeader::new(
             Hash::ZERO,
             height,
@@ -179,7 +214,81 @@ impl Chain {
         let accumulator = accepted.accumulator();
         accepted.publish().expect("publish");
         self.state.set_state_root(accumulator);
-        receipts
+        (receipts, block)
+    }
+
+    /// Abandon `branch` (ancestor first) for `ancestor`, the way the consensus
+    /// reorg does: the state unwind, the de-indexing and the head reset in one
+    /// batch, then the ancestor's accumulator.
+    fn reorg_to(&self, ancestor: &Block, ancestor_root: Hash, branch: &[Block]) {
+        let gates = SubsystemGates {
+            compute_pool: None,
+            beacon: Some(0),
+        };
+        let mut batch = self.db.batch();
+        stage_branch_unwind(
+            &self.db,
+            &mut batch,
+            branch,
+            &SubsystemJournals::new(&self.db, gates),
+            MissingJournalPolicy::ToleratedEverywhere,
+        )
+        .expect("the branch unwinds");
+        for abandoned in branch {
+            stage_deindex(&mut batch, abandoned).unwrap();
+        }
+        stage_head_reset(&mut batch, ancestor).unwrap();
+        batch.commit().unwrap();
+        self.state.set_state_root(ancestor_root);
+    }
+
+    /// Members `j` in `registrants` register, one block at the epoch boundary.
+    fn register(&self, registrants: &[u8]) -> Block {
+        let txs = registrants
+            .iter()
+            .map(|&j| {
+                self.setup_tx(
+                    j as usize,
+                    BeaconOperation::RegisterBeaconKey(registration(j)),
+                )
+            })
+            .collect();
+        let (receipts, block) = self.publish_block(KEYS_AT, txs);
+        assert!(receipts.iter().all(Receipt::is_success));
+        block
+    }
+
+    /// Each of `dealers` deals to recipient 0, one block in the deal window.
+    fn deal(&self, dealers: &[u8]) -> Block {
+        let txs = dealers
+            .iter()
+            .map(|&i| self.setup_tx(i as usize, BeaconOperation::DkgDeal(deal_to_zero(i))))
+            .collect();
+        let (receipts, block) = self.publish_block(DEALS_AT, txs);
+        assert!(receipts.iter().all(Receipt::is_success));
+        block
+    }
+
+    /// Round 0 finalized with `sigma0`, in the first block of the signing
+    /// window. The executor accepts it only if `sigma0` verifies under the
+    /// group key it derives for the epoch.
+    fn finalize_round0(&self, sigma0: &Signature) -> Block {
+        let fin = self.signing_tx(
+            0,
+            BeaconOperation::BeaconFinalize(BeaconFinalizeV1 {
+                chain_id: CHAIN_ID,
+                epoch: EPOCH,
+                round: 0,
+                sigma_r: sigma0.to_compressed(),
+                witness: vec![0, 1],
+            }),
+        );
+        let (receipts, block) = self.publish_block(SIGNING_FROM, vec![fin]);
+        assert!(
+            receipts[0].is_success(),
+            "the executor verified Σ_0 under its group key"
+        );
+        block
     }
 
     fn tx(&self, signer: usize, payload: TxPayload) -> SignedTransaction {
@@ -258,6 +367,47 @@ fn deal_to_zero(i: u8) -> DkgDealV1 {
     }
 }
 
+/// `PK_E = Σ_{i∈dealers} C_{i,0}`, computed here from the polynomials rather
+/// than read from the node.
+fn group_key(dealers: &[u8]) -> PublicKey {
+    let constants: Vec<_> = dealers
+        .iter()
+        .map(|&i| {
+            SecretScalar::from_bytes_le(&coeffs(i)[0])
+                .unwrap()
+                .public_g1()
+        })
+        .collect();
+    PublicKey::from_g1_point(aggregate_g1(&constants).unwrap())
+}
+
+/// Round 0's message, and the group signature over it under the combined
+/// secret `Σ_{i∈dealers} a_{i,0}`.
+fn round0(dealers: &[u8]) -> (Vec<u8>, Signature) {
+    let group_secret = dealers
+        .iter()
+        .map(|&i| SecretScalar::from_bytes_le(&coeffs(i)[0]).unwrap())
+        .reduce(|a, b| a.add(&b))
+        .unwrap();
+    let m0 = round_message(
+        CHAIN_ID,
+        EPOCH,
+        0,
+        &ChainInput::GenesisSeed(genesis_seed(CHAIN_ID, &[0u8; 32])),
+    );
+    let sigma0 = group_secret.sign(&m0);
+    (m0, sigma0)
+}
+
+/// The key a `beacon_getGroupKey` answer reports, decoded and subgroup-checked.
+fn reported_key(info: &BeaconGroupKeyInfo) -> PublicKey {
+    let bytes: [u8; G1_COMPRESSED_SIZE] = hex::decode(info.group_key.strip_prefix("0x").unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    PublicKey::from_compressed(&bytes).unwrap()
+}
+
 fn keys_of(value: serde_json::Value) -> BTreeSet<String> {
     value.as_object().unwrap().keys().cloned().collect()
 }
@@ -291,6 +441,11 @@ async fn with_the_production_gate_every_beacon_read_is_null() {
             "no snapshot is synthesized from the validator set"
         );
         assert_eq!(chain.server.dkg_get_transcript(epoch).await.unwrap(), None);
+        assert_eq!(
+            chain.server.beacon_get_group_key(epoch).await.unwrap(),
+            None,
+            "no schedule, so no epoch's DKG is ever past its complaint window"
+        );
     }
 }
 
@@ -496,6 +651,163 @@ async fn a_row_the_node_cannot_decode_is_an_error_not_null() {
     );
     assert_eq!(
         srv.dkg_get_transcript(EPOCH).await.unwrap_err().code(),
+        -32603
+    );
+}
+
+#[tokio::test]
+async fn the_group_key_is_answered_once_the_complaint_window_has_closed() {
+    let chain = Chain::new(gate_open());
+    let srv = &chain.server;
+    let dealers = [0u8, 1, 2];
+
+    chain.register(&dealers);
+    assert_eq!(srv.beacon_get_group_key(EPOCH).await.unwrap(), None);
+
+    // Q_dkg = 3 dealers are in, but a complaint could still disqualify one.
+    chain.deal(&dealers);
+    assert_eq!(srv.beacon_get_group_key(EPOCH).await.unwrap(), None);
+
+    // The last block of the complaint window still admits a complaint.
+    chain.publish(COMPLAINT_DEADLINE, vec![]);
+    assert_eq!(
+        srv.beacon_get_group_key(EPOCH).await.unwrap(),
+        None,
+        "the deadline block is inside the window"
+    );
+
+    // The first signing block. The executor accepts Σ_0 only under the key it
+    // derives from these same rows.
+    let (m0, sigma0) = round0(&dealers);
+    chain.finalize_round0(&sigma0);
+    let before = BeaconStore::new(&chain.db).load_state_map().unwrap();
+
+    let info = srv
+        .beacon_get_group_key(EPOCH)
+        .await
+        .unwrap()
+        .expect("the head is past the complaint window");
+    assert_eq!(
+        info,
+        BeaconGroupKeyInfo {
+            epoch: EPOCH,
+            group_key: hex0x(&group_key(&dealers).to_compressed()),
+            qual: vec![0, 1, 2],
+        }
+    );
+    assert_eq!(
+        keys_of(serde_json::to_value(&info).unwrap()),
+        set(&["epoch", "group_key", "qual"])
+    );
+    // A BLS signature verifies under exactly one public key, so the key Σ_0
+    // verifies under here is the key the executor verified it under.
+    assert!(verify(&reported_key(&info), &m0, &sigma0));
+    assert!(!verify(&group_key(&[0, 1]), &m0, &sigma0), "and no other");
+    assert_eq!(
+        BeaconStore::new(&chain.db).load_state_map().unwrap(),
+        before,
+        "reading wrote nothing"
+    );
+
+    // Into the next epoch: this epoch's answer stands, and the new epoch's
+    // DKG has not even begun.
+    chain.publish(NEXT_EPOCH_AT, vec![]);
+    assert_eq!(srv.beacon_get_group_key(EPOCH).await.unwrap(), Some(info));
+    assert_eq!(srv.beacon_get_group_key(EPOCH + 1).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_dkg_short_of_q_dkg_has_no_group_key() {
+    let chain = Chain::new(gate_open());
+    let srv = &chain.server;
+
+    chain.register(&[0, 1, 2]);
+    chain.deal(&[0, 1]);
+    chain.publish(SIGNING_FROM, vec![]);
+
+    assert_eq!(
+        srv.dkg_get_transcript(EPOCH)
+            .await
+            .unwrap()
+            .expect("the deals are held")
+            .deals
+            .len(),
+        2
+    );
+    assert_eq!(
+        srv.beacon_get_group_key(EPOCH).await.unwrap(),
+        None,
+        "|QUAL| = 2 < Q_dkg = 3: the DKG safe-halts and produces no key"
+    );
+}
+
+#[tokio::test]
+async fn a_reorg_back_into_the_dkg_replaces_the_group_key() {
+    let chain = Chain::new(gate_open());
+    let srv = &chain.server;
+
+    let ancestor = chain.register(&[0, 1, 2]);
+    let ancestor_root = chain.state.state_root();
+
+    // ── Fork A: dealers 0..=2.
+    let fork_a = [0u8, 1, 2];
+    let a_deals = chain.deal(&fork_a);
+    let (m0, sigma_a) = round0(&fork_a);
+    let a_round = chain.finalize_round0(&sigma_a);
+    let key_a = srv.beacon_get_group_key(EPOCH).await.unwrap().unwrap();
+    assert_eq!(key_a.qual, vec![0, 1, 2]);
+    assert_eq!(key_a.group_key, hex0x(&group_key(&fork_a).to_compressed()));
+
+    // ── Back to the registrations. The head is in the key window again, so
+    // there is no key, not fork A's.
+    chain.reorg_to(&ancestor, ancestor_root, &[a_deals, a_round]);
+    assert_eq!(srv.beacon_get_group_key(EPOCH).await.unwrap(), None);
+    assert!(srv
+        .dkg_get_transcript(EPOCH)
+        .await
+        .unwrap()
+        .unwrap()
+        .deals
+        .is_empty());
+
+    // ── Fork B over the same registrations: dealers 2..=4.
+    let fork_b = [2u8, 3, 4];
+    chain.deal(&fork_b);
+    let (_, sigma_b) = round0(&fork_b);
+    chain.finalize_round0(&sigma_b);
+    let key_b = srv.beacon_get_group_key(EPOCH).await.unwrap().unwrap();
+    assert_eq!(
+        key_b,
+        BeaconGroupKeyInfo {
+            epoch: EPOCH,
+            group_key: hex0x(&group_key(&fork_b).to_compressed()),
+            qual: vec![2, 3, 4],
+        }
+    );
+    assert_ne!(key_a.group_key, key_b.group_key);
+    assert!(verify(&reported_key(&key_b), &m0, &sigma_b));
+    assert!(
+        !verify(&reported_key(&key_a), &m0, &sigma_b),
+        "fork A's key does not verify fork B's round"
+    );
+}
+
+#[tokio::test]
+async fn an_undecodable_dkg_row_is_an_error_once_the_window_has_closed() {
+    let chain = Chain::new(gate_open());
+    let srv = &chain.server;
+
+    // Past the complaint window with no beacon row: no membership was
+    // recorded at the boundary, so nothing was ever accepted.
+    chain.publish(SIGNING_FROM, vec![]);
+    assert_eq!(srv.beacon_get_group_key(EPOCH).await.unwrap(), None);
+
+    chain
+        .db
+        .put(cf::BEACON_STATE, &deal_row_key(EPOCH, 0, 0), b"not a deal")
+        .unwrap();
+    assert_eq!(
+        srv.beacon_get_group_key(EPOCH).await.unwrap_err().code(),
         -32603
     );
 }

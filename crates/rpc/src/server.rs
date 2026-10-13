@@ -3698,6 +3698,26 @@ impl SumChainApiServer for RpcServer {
         }))
     }
 
+    async fn beacon_get_group_key(
+        &self,
+        epoch: u64,
+    ) -> std::result::Result<Option<BeaconGroupKeyInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        // The schedule and `Q_dkg` come from the chain parameters this server
+        // was given; with the defaults (no schedule) the answer is `null`.
+        let derived = sumchain_state::beacon_manager::committed_group_key(
+            &self.db,
+            &self.chain_params,
+            self.state.chain_id(),
+            epoch,
+        )
+        .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(derived.map(|k| BeaconGroupKeyInfo {
+            epoch,
+            group_key: beacon_hex(&k.group_key),
+            qual: k.qual,
+        }))
+    }
+
     async fn beacon_get_membership_snapshot(
         &self,
         epoch: u64,

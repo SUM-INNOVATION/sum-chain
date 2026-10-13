@@ -993,12 +993,14 @@ pub trait SumChainApi {
     // BR1 Beacon / DKG (#127) — read-only
     // ========================================================================
     //
-    // Each method returns what committed beacon state holds and nothing it does
-    // not: no row is written, no DKG step is run, and nothing absent is
-    // reconstructed from other state. `null` means the node's committed state
-    // holds no such row — on every network today, because genesis validation
-    // refuses `beacon_enabled_from_height`. These are reads of the node's state
-    // at its current head, not finality claims: a reorg can replace them.
+    // Each method answers from committed beacon state alone: no row is
+    // written, and nothing absent is reconstructed from other state. Three
+    // return stored rows; `beacon_getGroupKey` returns the one derived value,
+    // the runtime's own `QUAL` determination over rows that can no longer
+    // change. `null` means committed state holds no such row or value — on
+    // every network today, because genesis validation refuses
+    // `beacon_enabled_from_height`. These are reads of the node's state at its
+    // current head, not finality claims: a reorg can replace them.
 
     /// One finalized beacon round: the output `beacon_r` and the combined
     /// signature `Σ_r` it was derived from.
@@ -1012,6 +1014,24 @@ pub trait SumChainApi {
         epoch: u64,
         round: u64,
     ) -> Result<Option<crate::types::BeaconOutputInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// The group public key `PK_E` of beacon epoch `epoch` and the `QUAL` it is
+    /// summed over.
+    ///
+    /// Not stored: derived from the epoch's committed DKG rows by the same
+    /// rehydration and `QUAL` determination block execution uses, so it is the
+    /// key partials and round signatures were verified under. Answered only
+    /// once the head is past the epoch's complaint window — before that a later
+    /// block could still change `QUAL`.
+    ///
+    /// `Ok(None)` when the head is not yet past that window, when no beacon
+    /// schedule is configured, or when the DKG safe-halted (`|QUAL| < Q_dkg`).
+    /// A DKG row that does not decode is an internal error, never `null`.
+    #[method(name = "beacon_getGroupKey")]
+    async fn beacon_get_group_key(
+        &self,
+        epoch: u64,
+    ) -> Result<Option<crate::types::BeaconGroupKeyInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// The membership snapshot frozen for beacon epoch `epoch` at its boundary,
     /// in membership order.
@@ -1031,8 +1051,8 @@ pub trait SumChainApi {
     /// Every DKG row held for beacon epoch `epoch`: registered keys, accepted
     /// deals, verdict effects and retained equivocation evidence.
     ///
-    /// `Ok(None)` when no DKG row is held for the epoch. The group key is not
-    /// a stored value and is not returned.
+    /// `Ok(None)` when no DKG row is held for the epoch. Nothing derived from
+    /// the rows is returned; `QUAL` and the group key are `beacon_getGroupKey`.
     #[method(name = "dkg_getTranscript")]
     async fn dkg_get_transcript(
         &self,
