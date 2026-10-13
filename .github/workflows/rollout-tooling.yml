@@ -10,6 +10,7 @@ name: rollout-tooling
 #   * native systemd preflight (checker, and recorder on Linux)
 #   * scrape configuration points at the port /metrics is served on
 #   * no activation height baked into tracked genesis
+#   * vendored object 0.32.2 is the crates.io crate but for its default features
 #   * git diff --check, no AI attribution in commit messages, clean tree
 
 on:
@@ -64,6 +65,9 @@ jobs:
 
       - name: No activation height baked into tracked genesis
         run: python3 tools/release/check-genesis-gates.py --commit "$(git rev-parse HEAD)"
+
+      - name: Vendored object 0.32.2 matches crates.io but for its default features (#306)
+        run: bash scripts/check-vendored-object.sh
 
       - name: git diff --check over the change
         run: |

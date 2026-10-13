@@ -140,6 +140,15 @@ wasmer-types = "=5.0.6"
 ethabi = "18"
 k256 = "0.13"
 
+# #306 (RUSTSEC-2026-0344): wasmer-compiler 5.0.6 enables object 0.32.2's default
+# features, and its "compression" feature pulls ruzstd 0.5.0. Cargo features are
+# additive, so under the exact wasmer pin the only way to drop it is a patched
+# object. crates/third_party/object-0.32.2 is the crates.io 0.32.2 crate verbatim
+# except for its `default` feature list; scripts/check-vendored-object.sh proves
+# that in CI. It is not a workspace member. See docs/security/DEPENDENCY-AUDIT.md.
+[patch.crates-io]
+object = { path = "crates/third_party/object-0.32.2" }
+
 [profile.release]
 lto = true
 codegen-units = 1

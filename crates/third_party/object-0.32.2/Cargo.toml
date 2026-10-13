@@ -96,10 +96,8 @@ compression = [
     "dep:ruzstd",
     "std",
 ]
-default = [
-    "read",
-    "compression",
-]
+# SUM-CHAIN #306: "compression" removed from default (drops ruzstd 0.5.0, RUSTSEC-2026-0344)
+default = ["read"]
 doc = [
     "read_core",
     "write_std",

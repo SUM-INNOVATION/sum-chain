@@ -37,8 +37,7 @@ ignore = [
     # #203 RESOLVED: rkyv RUSTSEC-2026-0235 fixed by the wasmer migration -- wasmer 5.0.6 pulls rkyv >=0.8.17 and rkyv 0.7.46 has left Cargo.lock.
     # #204 RESOLVED: time RUSTSEC-2026-0009 fixed by MSRV 1.85->1.88 + time>=0.3.47.
     # ALL SIX #200 tracks (#202-#207) are now remediated.
-    # #306 (review deadline 2026-11-13): ruzstd 0.5.0 RUSTSEC-2026-0344 via object 0.32.2 <- wasmer-compiler 5.0.6; read-side decompression unreachable (see .cargo/audit.toml and docs/security/DEPENDENCY-AUDIT.md).
-    "RUSTSEC-2026-0344",
+    # #306 RESOLVED: ruzstd 0.5.0 RUSTSEC-2026-0344 fixed by patching object 0.32.2 to the vendored crates/third_party/object-0.32.2, whose default features no longer include "compression"; ruzstd has left Cargo.lock. Exception removed.
     # ── DEV (signed-release blockers absent security-owner acceptance) ──
 ]
 

@@ -40,6 +40,11 @@ CI, so detection of newer advisories is preserved.
 purely as documentation (and for the day cargo-deny's loader supports CVSS 4.0);
 it is not the live advisory gate.
 
+**One crate is outside the advisory gate:** the vendored `object` 0.32.2 (#306).
+`cargo audit` only matches crates.io lock entries, and a `[patch]` path crate has
+none. `scripts/check-vendored-object.sh` (CI job `rollout-tooling`) checks that the
+vendored copy matches crates.io; see the #306 section below.
+
 ## License policy
 
 `cargo deny check licenses` passes against the allow-list in `deny.toml`. The full
@@ -119,27 +124,28 @@ a localized bridge bump. `ring` / `rustls-webpki` / `h2` all arrive via the
 `ethers` EVM-bridge client stack; a coordinated `ethers` / `jsonwebtoken` /
 `rustls` upgrade likely clears several dev tracks at once.
 
-### Tracked exception — #306, RUSTSEC-2026-0344 (`ruzstd` 0.5.0)
+### Resolved — #306, RUSTSEC-2026-0344 (`ruzstd` 0.5.0), by a vendored `object` 0.32.2
 
-Added 2026-10-13, when `cargo audit` began failing on `main` (advisory-db `6aed8466`, 2026-10-13). It is the only entry in
-the `ignore` lists, in both `.cargo/audit.toml` and `deny.toml`. **Class:** PRODUCTION path, so a **hard blocker for the next consolidated mainnet release**.
-**Review deadline:** 2026-11-13, on #306.
+[RUSTSEC-2026-0344](https://rustsec.org/advisories/RUSTSEC-2026-0344.html) (2026-10-11, denial of service): a crafted zstd input makes `ruzstd` < 0.9.1
+allocate gigabytes; fixed in ≥ 0.9.1. `cargo audit` began failing on it on 2026-10-13 (advisory-db `6aed8466`), and it was
+then carried as a tracked exception. That exception is now removed from `.cargo/audit.toml` and `deny.toml`, and both
+`ignore` lists are empty. **Class:** PRODUCTION path; this clears the #306 blocker for the next consolidated mainnet release.
+
+`ruzstd 0.5.0` came from `object 0.32.2`'s `compression` feature, which `object`'s `default` enables. `wasmer-compiler 5.0.6`
+declares `object = { version = "0.32.0", features = ["write"] }` without `default-features = false`. Cargo features are
+additive and the workspace has no direct dependency on `object`, so no setting of ours can drop the feature. A newer wasmer
+is not an option either: wasmer ≥ 6.0.0 is BUSL-1.1 (see `WASMER-5-MIGRATION.md`). The fix therefore patches `object`.
 
 | Item | Finding |
 |---|---|
-| Advisory | [RUSTSEC-2026-0344](https://rustsec.org/advisories/RUSTSEC-2026-0344.html), 2026-10-11, denial of service. A crafted zstd input makes `ruzstd` < 0.9.1 allocate gigabytes; memory access stays in bounds. Fixed in ≥ 0.9.1. |
-| Exact versions | `ruzstd 0.5.0` ← `object 0.32.2` ← `wasmer-compiler 5.0.6` ← `wasmer 5.0.6`, `wasmer-compiler-singlepass 5.0.6`, `wasmer-compiler-cranelift 5.0.6`, `wasmer-middlewares 5.0.6` ← `sumc-runtime` |
-| Enabled features | `object 0.32.2` has `default`, `read`, `compression` (= `flate2` + `ruzstd` + `std`), `write`, `std`, and the format features. `compression` comes only through `default`, which `wasmer-compiler 5.0.6` enables by declaring `object = { version = "0.32.0", features = ["write"] }` without `default-features = false`. The other `object` in the lock (0.37.3) does not enable `compression`. |
-| Removal through features | Not possible. Cargo features are additive, the workspace has no direct dependency on `object`, and the feature is requested by a dependency's own manifest. It would need a patched or vendored `wasmer-compiler` or `object`, or a different wasmer; wasmer ≥ 6.0.0 is BUSL-1.1 (see `WASMER-5-MIGRATION.md`). |
-| Affected API | `ruzstd` is called only from `object::read::CompressedData::decompress` (`object-0.32.2/src/read/mod.rs`), which is reached through the read API (`ObjectSection::uncompressed_data` and similar) on a parsed object file with a zstd-compressed section. |
-| Callers | None found. `wasmer`, `wasmer-compiler`, `-compiler-singlepass`, `-compiler-cranelift`, `-middlewares`, `-vm`, `-types` and `-derive` 5.0.6 contain no use of `object`'s read API; `wasmer-compiler` only writes object files (`object::write`). No workspace crate calls wasmer's object-file or (de)serialization APIs. |
-| Untrusted input | Contract code is WASM bytecode handled by the compiler. It is never parsed as a native object file, so no transaction, RPC request or peer message reaches `object`'s read side. |
-| Build coverage | Linked into `sumc-runtime`, `sumchain-state`, `sumchain-consensus`, `sumchain-rpc`, `sumchain-node`, `sumchain-wallet` and `sumchain-integration-tests`, and into both release binaries (`sumchain`, `sumchain-wallet`; `tools/release/native.Dockerfile`, `Dockerfile`) on `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`. Not in `sumchain-scripts`, the SDK, or the beacon and crypto crates. |
-| Invalidated by | Any of: a workspace crate using `object`'s read API, or wasmer's object-file, `Module::deserialize*` or artifact-loading APIs; a dependency update that calls `object::read` on data not produced locally; another path to a vulnerable `ruzstd`; a revision of the advisory. |
-| Expiry | `ruzstd` < 0.9.1 leaves `Cargo.lock`, or explicit security-owner re-acceptance is recorded on #306 by the review deadline. |
-
-"Unreachable" is an evidenced assessment of the code at the pinned versions, not a guarantee. The `cargo audit` gate
-still fails on every other vulnerability; only this advisory id is listed.
+| Change | The root `Cargo.toml` has `[patch.crates-io] object = { path = "crates/third_party/object-0.32.2" }`. That directory is the crates.io `object-0.32.2.crate` extracted verbatim (sha256 `a6a622008b6e321afc04970976f62ee297fdbaa6f95318ca343e3eebb9648441`, the checksum `Cargo.lock` recorded for it). The only edit is its `Cargo.toml` `default` list, from `["read", "compression"]` to `["read"]`, under a `# SUM-CHAIN #306` comment. It is not a workspace member. Both `Dockerfile` and `tools/release/native.Dockerfile` copy it with `COPY crates crates`. |
+| `Cargo.lock` | `object 0.32.2` loses its `source` and `checksum` lines and its `flate2` and `ruzstd` edges. `ruzstd 0.5.0` and `twox-hash 1.6.3` leave the lock (606 → 604 packages). Every `wasmer*` entry is byte-identical. `flate2` stays, through `ureq`, a wasmer build dependency. |
+| Features | `object 0.32.2` still has `default`, `read` (with its format features), `write`, `write_core`, `write_std` and `std`. Only `compression` is gone; `std` is still enabled through `write`. `wasmer-compiler` uses `object` only through `object::write`, which `compression` does not affect. Feature unification also changes for two shared crates: `crc32fast` loses only `default` (= `std`, still on), and `miniz_oxide` 0.8.9, now reached only through `backtrace` (debug-info decompression when symbolizing), loses `simd`, `simd-adler32` and `with-alloc`, which `flate2` had enabled. `flate2`, `simd-adler32`, `ruzstd` and `twox-hash` leave the runtime graph. |
+| Behaviour | `compression` gates two read-side items: the zlib and zstd arms of `CompressedData::decompress` (`src/read/mod.rs`), which now return the crate's "Unsupported compressed data." error, and the ELF `.zdebug_*` section fallback (`src/read/elf/file.rs`). No wasmer 5.0.6 crate and no workspace crate calls `object`'s read API. |
+| Equivalence | `Module::serialize()` output for plain and metered Singlepass modules is byte-identical before and after the change on aarch64-darwin (release build). Artifact hashes on x86_64 and aarch64 Linux have not been compared. Those platforms are covered by the workspace tests in `rust-ci.yml`, including `wasmer_determinism_vectors`, `consensus_metering` and `local_execution_limits`. |
+| Verify | `bash scripts/check-vendored-object.sh` (CI job `rollout-tooling`) downloads the crate from crates.io, checks the pinned sha256, extracts it, and fails unless `diff -r` against the vendored directory is exactly the `default` hunk. `cargo tree --workspace --all-features --target all -i ruzstd` matches nothing, and `-i object@0.32.2` shows only `wasmer-compiler`. |
+| Coverage trade-off | A path crate is outside the advisory gate. `cargo audit` matches only crates.io lock entries (a path-sourced `ruzstd 0.5.0` passes it), and the lock no longer holds a checksum for `object 0.32.2`. **A future advisory against `object` 0.32.x will not fail CI**, so it has to be watched manually until the patch is removed. `object`'s own dependencies (`crc32fast`, `hashbrown`, `indexmap`, `memchr`) are still crates.io entries and are still scanned. `cargo deny` still checks its license (`Apache-2.0 OR MIT`). Integrity of the vendored source rests on `scripts/check-vendored-object.sh`. |
+| Exit | Delete the patch and the vendored directory once wasmer resolves to an `object` without `compression` in its defaults, or with `ruzstd` ≥ 0.9.1. That is an engine dependency change and needs review for consensus impact. If `wasmer-compiler` stops resolving to `object 0.32.2`, cargo reports the patch as unused; remove it then. |
 
 ### Non-security warnings (documented, non-blocking)
 
@@ -163,3 +169,8 @@ audit`, not failed, and not broadly allowed:
   and update the revision/date at the top of this file.
 - **A new license appears:** `cargo deny check licenses` fails; add it to the
   `deny.toml` allow-list with a rationale row here, or remove the offending dep.
+- **The vendored `object` 0.32.2 (#306):** never edit
+  `crates/third_party/object-0.32.2` beyond its `default` list;
+  `scripts/check-vendored-object.sh` fails on any other difference. Check RustSec
+  for new `object` advisories by hand while the patch stands, and re-evaluate it
+  on any wasmer change.
