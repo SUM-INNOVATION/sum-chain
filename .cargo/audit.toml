@@ -27,7 +27,7 @@
 
 [advisories]
 ignore = [
-    # ── ALL SIX #200 tracks are now remediated; no exception remains. ─────────
+    # ── ALL SIX #200 tracks are remediated. The only exception is #306 below. ──
     # #202 RESOLVED — hickory-proto RUSTSEC-2026-0119: libp2p de-umbrellaed and
     #   libp2p-mdns dropped; crate absent from graph and lock.
     # #203 RESOLVED — rkyv RUSTSEC-2026-0235: wasmer 5.0.6 pulls rkyv >= 0.8.17.
@@ -39,4 +39,25 @@ ignore = [
     # #207 RESOLVED — rustls-webpki RUSTSEC-2026-0104/0098/0099: the legacy
     #   rustls 0.21 line came in via jsonrpsee 0.21's http client and ethers'
     #   reqwest 0.11; both are gone, leaving only rustls-webpki 0.103.
+    #
+    # ── #306 — PRODUCTION path; HARD BLOCKER for the next consolidated mainnet
+    #    release. Review deadline 2026-11-13. ─────────────────────────────────
+    # RUSTSEC-2026-0344 (2026-10-11, DoS): ruzstd < 0.9.1 decompression bomb.
+    #   Path (Cargo.lock): ruzstd 0.5.0 <- object 0.32.2 [feature "compression",
+    #   via object's "default"] <- wasmer-compiler 5.0.6, whose manifest enables
+    #   object's default features <- wasmer / -compiler-singlepass /
+    #   -compiler-cranelift / -middlewares 5.0.6 <- sumc-runtime. Linked into
+    #   sumchain-node and sumchain-wallet (release binaries), state, consensus,
+    #   rpc and integration-tests, on x86_64 and aarch64.
+    #   Not removable through features: the workspace has no direct dependency
+    #   on object, and Cargo features are additive.
+    #   Reachability (an evidenced assessment, not a guarantee): ruzstd's only
+    #   caller is object's read-side CompressedData::decompress; no wasmer 5.0.6
+    #   crate uses object's read API (wasmer-compiler only writes object files),
+    #   and no workspace crate calls wasmer's object-file or deserialize APIs.
+    #   Invalidated by any new caller of object::read, wasmer's object-file or
+    #   Module::deserialize* APIs, or another path to a vulnerable ruzstd.
+    #   Expiry: ruzstd < 0.9.1 leaves Cargo.lock, or explicit security-owner
+    #   re-acceptance recorded on #306 by the review deadline.
+    "RUSTSEC-2026-0344",
 ]

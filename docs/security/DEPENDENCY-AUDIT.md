@@ -119,6 +119,28 @@ a localized bridge bump. `ring` / `rustls-webpki` / `h2` all arrive via the
 `ethers` EVM-bridge client stack; a coordinated `ethers` / `jsonwebtoken` /
 `rustls` upgrade likely clears several dev tracks at once.
 
+### Tracked exception — #306, RUSTSEC-2026-0344 (`ruzstd` 0.5.0)
+
+Added 2026-10-13, when `cargo audit` began failing on `main` (advisory-db `6aed8466`, 2026-10-13). It is the only entry in
+the `ignore` lists, in both `.cargo/audit.toml` and `deny.toml`. **Class:** PRODUCTION path, so a **hard blocker for the next consolidated mainnet release**.
+**Review deadline:** 2026-11-13, on #306.
+
+| Item | Finding |
+|---|---|
+| Advisory | [RUSTSEC-2026-0344](https://rustsec.org/advisories/RUSTSEC-2026-0344.html), 2026-10-11, denial of service. A crafted zstd input makes `ruzstd` < 0.9.1 allocate gigabytes; memory access stays in bounds. Fixed in ≥ 0.9.1. |
+| Exact versions | `ruzstd 0.5.0` ← `object 0.32.2` ← `wasmer-compiler 5.0.6` ← `wasmer 5.0.6`, `wasmer-compiler-singlepass 5.0.6`, `wasmer-compiler-cranelift 5.0.6`, `wasmer-middlewares 5.0.6` ← `sumc-runtime` |
+| Enabled features | `object 0.32.2` has `default`, `read`, `compression` (= `flate2` + `ruzstd` + `std`), `write`, `std`, and the format features. `compression` comes only through `default`, which `wasmer-compiler 5.0.6` enables by declaring `object = { version = "0.32.0", features = ["write"] }` without `default-features = false`. The other `object` in the lock (0.37.3) does not enable `compression`. |
+| Removal through features | Not possible. Cargo features are additive, the workspace has no direct dependency on `object`, and the feature is requested by a dependency's own manifest. It would need a patched or vendored `wasmer-compiler` or `object`, or a different wasmer; wasmer ≥ 6.0.0 is BUSL-1.1 (see `WASMER-5-MIGRATION.md`). |
+| Affected API | `ruzstd` is called only from `object::read::CompressedData::decompress` (`object-0.32.2/src/read/mod.rs`), which is reached through the read API (`ObjectSection::uncompressed_data` and similar) on a parsed object file with a zstd-compressed section. |
+| Callers | None found. `wasmer`, `wasmer-compiler`, `-compiler-singlepass`, `-compiler-cranelift`, `-middlewares`, `-vm`, `-types` and `-derive` 5.0.6 contain no use of `object`'s read API; `wasmer-compiler` only writes object files (`object::write`). No workspace crate calls wasmer's object-file or (de)serialization APIs. |
+| Untrusted input | Contract code is WASM bytecode handled by the compiler. It is never parsed as a native object file, so no transaction, RPC request or peer message reaches `object`'s read side. |
+| Build coverage | Linked into `sumc-runtime`, `sumchain-state`, `sumchain-consensus`, `sumchain-rpc`, `sumchain-node`, `sumchain-wallet` and `sumchain-integration-tests`, and into both release binaries (`sumchain`, `sumchain-wallet`; `tools/release/native.Dockerfile`, `Dockerfile`) on `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`. Not in `sumchain-scripts`, the SDK, or the beacon and crypto crates. |
+| Invalidated by | Any of: a workspace crate using `object`'s read API, or wasmer's object-file, `Module::deserialize*` or artifact-loading APIs; a dependency update that calls `object::read` on data not produced locally; another path to a vulnerable `ruzstd`; a revision of the advisory. |
+| Expiry | `ruzstd` < 0.9.1 leaves `Cargo.lock`, or explicit security-owner re-acceptance is recorded on #306 by the review deadline. |
+
+"Unreachable" is an evidenced assessment of the code at the pinned versions, not a guarantee. The `cargo audit` gate
+still fails on every other vulnerability; only this advisory id is listed.
+
 ### Non-security warnings (documented, non-blocking)
 
 RustSec informational warnings present at this snapshot — surfaced by `cargo
