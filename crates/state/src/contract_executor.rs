@@ -676,6 +676,24 @@ impl ContractExecutorState {
             .map_err(|e| StateError::ContractError(e.to_string()))
     }
 
+    /// The code length of the contract at `address` as the block `view` belongs
+    /// to sees it BEFORE any of its transactions: the block's parent state,
+    /// through its branch layer when it is on a replacement branch. `None` when
+    /// no contract is deployed there. Used by the loaded-code cap (#279, D8),
+    /// which is decided before the block executes.
+    pub fn code_len_before_block(
+        &self,
+        view: &ExecutionView<'_, '_>,
+        address: &Address,
+    ) -> Result<Option<u64>> {
+        use sumc_runtime::storage::ContractStorageBackend;
+        self.bind_candidate(view);
+        self.backend
+            .get_code(address)
+            .map(|code| code.map(|c| c.len() as u64))
+            .map_err(|e| StateError::ContractError(e.to_string()))
+    }
+
     /// Contract metadata from COMMITTED state. See [`Self::contract_exists`].
     pub fn get_metadata(&self, address: &Address) -> Option<ContractMetadata> {
         self.wasm_executor.get_metadata_committed(address).map(|m| ContractMetadata {

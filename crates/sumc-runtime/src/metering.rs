@@ -191,6 +191,15 @@ pub struct CostScheduleV1Provisional {
     pub max_value_len: u32,
     /// Longest return value a call may hand back.
     pub max_return_data_len: u32,
+    /// Ceiling on the code one block LOADS: the summed code bytes of every
+    /// contract the block deploys plus every distinct contract it calls, the
+    /// latter measured in the block's parent state. Compilation on a metered
+    /// cache miss is outside gas accounting (gas never depends on cache state),
+    /// so this is what bounds a block's compilation work whatever a node's
+    /// cache holds. Decided before anything executes: an importer refuses an
+    /// over-cap block and a proposer leaves out what would not fit. Not a gas
+    /// charge.
+    pub max_block_loaded_code_bytes: u32,
 }
 
 impl CostScheduleV1Provisional {
@@ -229,6 +238,7 @@ impl CostScheduleV1Provisional {
         max_key_len: 256,
         max_value_len: 64 * 1024,
         max_return_data_len: 64 * 1024,
+        max_block_loaded_code_bytes: 256 * 1024,
     };
 
     /// Gas charged for a deploy of `code_len` bytes, before compiling.
@@ -248,7 +258,7 @@ impl CostScheduleV1Provisional {
     /// version; the body is every field, declared order, big-endian.
     pub fn encode(&self) -> Vec<u8> {
         let tag: &[u8] = b"sumc-cost-v1-provisional";
-        let mut out = Vec::with_capacity(1 + tag.len() + 19 * 8 + 10 * 4);
+        let mut out = Vec::with_capacity(1 + tag.len() + 19 * 8 + 11 * 4);
         out.push(tag.len() as u8);
         out.extend_from_slice(tag);
         for v in [
@@ -285,6 +295,7 @@ impl CostScheduleV1Provisional {
             self.max_key_len,
             self.max_value_len,
             self.max_return_data_len,
+            self.max_block_loaded_code_bytes,
         ] {
             out.extend_from_slice(&v.to_be_bytes());
         }

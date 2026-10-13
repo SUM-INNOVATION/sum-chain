@@ -1074,9 +1074,10 @@ pub use agreement_executor::{AgreementExecutionResult, AgreementExecutor, Agreem
 pub use cache::{CacheStats, CachedAccount, StateCache};
 pub use contract_executor::{ContractCallResult, ContractDeployResult, ContractExecutorState, ContractEvent, ContractMetadata};
 pub use contract_metering::{
-    block_contract_gas_budget, check_block_contract_gas, contract_deploy_gas_ceiling,
-    contract_execution_mode, contract_metering_gate_open, declared_contract_gas,
-    select_within_block_contract_gas,
+    block_contract_gas_budget, block_loaded_code_cap, check_block_contract_gas,
+    check_block_loaded_code, committed_contract_code_len, contract_deploy_gas_ceiling,
+    contract_execution_mode, contract_metering_gate_open, declared_contract_gas, loaded_code_bytes,
+    select_within_block_contract_gas, select_within_block_loaded_code,
 };
 pub use docclass_executor::{
     docclass_stake_escrow_address, DocClassEffectiveRules, DocClassExecutionResult, DocClassExecutor, DocClassGates,

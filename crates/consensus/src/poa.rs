@@ -784,6 +784,17 @@ impl PoAEngine {
             next_height,
             transactions,
         );
+        // The loaded-code cap (#279, D8), also a validity rule: the code the
+        // block makes a node load, measured in the canonical head's state (the
+        // parent of the block being built), must fit the metered schedule's cap.
+        // A contract transaction that would push it over is skipped, with its
+        // sender's later transactions. No cap below the metering gate.
+        let transactions = sumchain_state::select_within_block_loaded_code(
+            &self.params,
+            next_height,
+            transactions,
+            |a| sumchain_state::committed_contract_code_len(&self.db, a),
+        );
         // ── one screening pass, BEFORE the fitting loop ─────────────────────
         //
         // The loop below learns about exactly ONE refusing transaction per

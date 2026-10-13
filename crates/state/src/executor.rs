@@ -3460,6 +3460,28 @@ impl BlockExecutor {
             self.init_beacon_block(&view, block.height(), active_validator_pubkeys)?;
         }
 
+        // ── loaded-code cap (#279, D8): decided before any transaction runs ──
+        //
+        // The code this block makes a node load (deploys, plus every distinct
+        // called contract measured in the parent state, read through this
+        // block's candidate so a replacement branch sees its own parent) must
+        // fit the metered schedule's cap. This bounds compilation on a cache
+        // miss whatever the cache holds. No cap below the metering gate.
+        if crate::contract_metering::block_loaded_code_cap(&self.params, block.height()).is_some() {
+            let view = candidate.view();
+            crate::contract_metering::check_block_loaded_code(
+                &self.params,
+                block.height(),
+                &block.transactions,
+                |a| {
+                    self.contract_executor
+                        .code_len_before_block(&view, a)
+                        .map_err(|e| e.to_string())
+                },
+            )
+            .map_err(StateError::BlockValidation)?;
+        }
+
         // Capture WHICH block this execution is for, before executing it. The
         // accumulator and receipts prove artifacts came from an execution; the
         // subject proves they came from an execution of this block, so a

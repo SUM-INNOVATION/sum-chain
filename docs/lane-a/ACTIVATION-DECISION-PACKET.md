@@ -1738,6 +1738,8 @@ It also turns on `max_contract_deploy_gas` (`0x0116`). Above the gate, a `Contra
 - the ceiling bounds the whole deploy, its init call included; holding init to the call budget would need an engine change;
 - no value is chosen.
 
+It also turns on a **loaded-code cap** (D8; `max_block_loaded_code_bytes` in the metered cost schedule, PROVISIONAL 256 KiB). A block may load, in total, the code it deploys plus the code of every distinct contract it calls (measured in its parent state) only up to that cap. An importer refuses an over-cap block before executing it (`check_block_loaded_code`, `crates/state/src/contract_metering.rs`), and a proposer leaves out what would not fit (`crates/consensus/src/poa.rs`). This bounds compilation on a metered-cache miss, which stays outside gas accounting, whatever a node's cache holds. **Proposed, not ratified:** the cap and its value.
+
 RPC views and estimates use the engine of the next block (`ContractExecutorState::local_execution_mode`, `crates/state/src/contract_executor.rs:657`). So from the block before the height, an estimate is the metered charge. **The engine identity and cost schedule are PROVISIONAL** (`sumc_runtime::metering::METERING_VALUES_RATIFIED` is false). While they are, a consensus configuration that sets this gate cannot be built, so node start and the acknowledgements refuse before anything is recorded. The schema-2 fields `0x2716` (`METERED_ENGINE_IDENTITY`) and `0x2717` (`METERED_COST_SCHEDULE`) are committed only once the gate is set and the values are ratified. They must be ratified and frozen under a non-provisional identity before this gate is ever set. A `max_block_contract_gas` without this gate is refused at genesis load.
 
 **2. Dependency ordering.**

@@ -124,7 +124,7 @@ fn identities_are_distinct_and_the_schedule_is_labelled_provisional() {
     let encoded = S.encode();
     assert_eq!(encoded[0] as usize, tag.len());
     assert_eq!(&encoded[1..=tag.len()], tag);
-    assert_eq!(encoded.len(), 1 + tag.len() + 19 * 8 + 10 * 4);
+    assert_eq!(encoded.len(), 1 + tag.len() + 19 * 8 + 11 * 4);
     assert_eq!(S.encode(), CostScheduleV1Provisional::PROVISIONAL.encode());
 }
 
