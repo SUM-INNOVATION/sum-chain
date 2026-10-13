@@ -1,0 +1,49 @@
+name: vendored-object
+
+# #306: object 0.32.2 is patched to crates/third_party/object-0.32.2, the
+# crates.io crate with "compression" dropped from its default features.
+#   * vendored object advisories: the vendored copy is the crates.io crate but
+#     for that one hunk, and RustSec has no advisory against the crates.io
+#     object 0.32.2 it stands for. Neither cargo audit nor cargo deny matches
+#     advisories against a path crate, so this is the advisory check that covers
+#     it. It also runs daily, so a new advisory surfaces without a PR. (The same
+#     advisories check runs in rust-ci's supply-chain-audit on every PR.)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - crates/third_party/**
+      - scripts/check-vendored-object.sh
+      - .cargo/audit.toml
+      - .github/workflows/vendored-object.yml
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    name: vendored object advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pinned toolchain
+        run: rustup show
+
+      - name: Install cargo-audit (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Vendored object 0.32.2 is the crates.io crate but for its default features
+        run: bash scripts/check-vendored-object.sh source
+
+      - name: No RustSec advisory against crates.io object 0.32.2, the vendored copy's identity
+        run: bash scripts/check-vendored-object.sh advisories

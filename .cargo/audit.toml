@@ -42,7 +42,8 @@ ignore = [
     # #306 RESOLVED — ruzstd RUSTSEC-2026-0344: object 0.32.2 is patched to a
     #   vendored copy (crates/third_party/object-0.32.2) whose only change is
     #   dropping "compression" from its default features, so ruzstd 0.5.0 has
-    #   left graph and lock. That path crate is outside this gate's coverage;
-    #   scripts/check-vendored-object.sh and docs/security/DEPENDENCY-AUDIT.md
-    #   cover it instead.
+    #   left graph and lock. cargo audit matches no advisory against that path
+    #   crate, so `scripts/check-vendored-object.sh advisories` audits its
+    #   crates.io identity (object 0.32.2) against this same file, in
+    #   supply-chain-audit and daily; see docs/security/DEPENDENCY-AUDIT.md.
 ]

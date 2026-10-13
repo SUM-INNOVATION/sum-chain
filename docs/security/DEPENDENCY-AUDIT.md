@@ -40,10 +40,13 @@ CI, so detection of newer advisories is preserved.
 purely as documentation (and for the day cargo-deny's loader supports CVSS 4.0);
 it is not the live advisory gate.
 
-**One crate is outside the advisory gate:** the vendored `object` 0.32.2 (#306).
-`cargo audit` only matches crates.io lock entries, and a `[patch]` path crate has
-none. `scripts/check-vendored-object.sh` (CI job `rollout-tooling`) checks that the
-vendored copy matches crates.io; see the #306 section below.
+**One crate needs its own advisory check:** the vendored `object` 0.32.2 (#306).
+Neither `cargo audit` nor `cargo deny check advisories` matches an advisory against
+a `[patch]` path crate. `scripts/check-vendored-object.sh advisories` audits the
+crates.io `object` 0.32.2 that the vendored copy is (apart from one manifest hunk)
+in `supply-chain-audit` and daily in `vendored-object.yml`, and
+`scripts/check-vendored-object.sh` (CI job `rollout-tooling`) checks that the copy
+matches crates.io. See the #306 section below.
 
 ## License policy
 
@@ -129,7 +132,8 @@ a localized bridge bump. `ring` / `rustls-webpki` / `h2` all arrive via the
 [RUSTSEC-2026-0344](https://rustsec.org/advisories/RUSTSEC-2026-0344.html) (2026-10-11, denial of service): a crafted zstd input makes `ruzstd` < 0.9.1
 allocate gigabytes; fixed in ≥ 0.9.1. `cargo audit` began failing on it on 2026-10-13 (advisory-db `6aed8466`), and it was
 then carried as a tracked exception. That exception is now removed from `.cargo/audit.toml` and `deny.toml`, and both
-`ignore` lists are empty. **Class:** PRODUCTION path; this clears the #306 blocker for the next consolidated mainnet release.
+`ignore` lists are empty. **Class:** PRODUCTION path; this is the remediation proposed for the #306 blocker for the next
+consolidated mainnet release, and #306 is closed separately by the owner.
 
 `ruzstd 0.5.0` came from `object 0.32.2`'s `compression` feature, which `object`'s `default` enables. `wasmer-compiler 5.0.6`
 declares `object = { version = "0.32.0", features = ["write"] }` without `default-features = false`. Cargo features are
@@ -143,8 +147,9 @@ is not an option either: wasmer ≥ 6.0.0 is BUSL-1.1 (see `WASMER-5-MIGRATION.m
 | Features | `object 0.32.2` still has `default`, `read` (with its format features), `write`, `write_core`, `write_std` and `std`. Only `compression` is gone; `std` is still enabled through `write`. `wasmer-compiler` uses `object` only through `object::write`, which `compression` does not affect. Feature unification also changes for two shared crates: `crc32fast` loses only `default` (= `std`, still on), and `miniz_oxide` 0.8.9, now reached only through `backtrace` (debug-info decompression when symbolizing), loses `simd`, `simd-adler32` and `with-alloc`, which `flate2` had enabled. `flate2`, `simd-adler32`, `ruzstd` and `twox-hash` leave the runtime graph. |
 | Behaviour | `compression` gates two read-side items: the zlib and zstd arms of `CompressedData::decompress` (`src/read/mod.rs`), which now return the crate's "Unsupported compressed data." error, and the ELF `.zdebug_*` section fallback (`src/read/elf/file.rs`). No wasmer 5.0.6 crate and no workspace crate calls `object`'s read API. |
 | Equivalence | `Module::serialize()` output for plain and metered Singlepass modules is byte-identical before and after the change on aarch64-darwin (release build). Artifact hashes on x86_64 and aarch64 Linux have not been compared. Those platforms are covered by the workspace tests in `rust-ci.yml`, including `wasmer_determinism_vectors`, `consensus_metering` and `local_execution_limits`. |
-| Verify | `bash scripts/check-vendored-object.sh` (CI job `rollout-tooling`) downloads the crate from crates.io, checks the pinned sha256, extracts it, and fails unless `diff -r` against the vendored directory is exactly the `default` hunk. `cargo tree --workspace --all-features --target all -i ruzstd` matches nothing, and `-i object@0.32.2` shows only `wasmer-compiler`. |
-| Coverage trade-off | A path crate is outside the advisory gate. `cargo audit` matches only crates.io lock entries (a path-sourced `ruzstd 0.5.0` passes it), and the lock no longer holds a checksum for `object 0.32.2`. **A future advisory against `object` 0.32.x will not fail CI**, so it has to be watched manually until the patch is removed. `object`'s own dependencies (`crc32fast`, `hashbrown`, `indexmap`, `memchr`) are still crates.io entries and are still scanned. `cargo deny` still checks its license (`Apache-2.0 OR MIT`). Integrity of the vendored source rests on `scripts/check-vendored-object.sh`. |
+| Verify | `bash scripts/check-vendored-object.sh` (CI job `rollout-tooling`, and `vendored-object.yml`) downloads the crate from crates.io, checks the pinned sha256, extracts it, and fails unless `diff -r` against the vendored directory is exactly the `default` hunk. `cargo tree --workspace --all-features --target all -i ruzstd` matches nothing, and `-i object@0.32.2` shows only `wasmer-compiler`. |
+| Coverage | Measured with cargo-audit 0.22.2 and cargo-deny 0.20.2. Neither matches an advisory against a path crate: against a local probe database (test-only advisories for `object` 0.32.2 and its four dependencies), both reported the `object` probe on the base lock, where `object` is a crates.io entry, and not with the patch; both reported the `crc32fast` 1.5.0, `hashbrown` 0.14.5, `indexmap` 2.12.1 and `memchr` 2.7.6 probes with and without it, since those stay crates.io entries. Likewise the real RUSTSEC-2026-0344 fails `cargo audit` on the base lock and passes once `ruzstd` loses its `source` line. `cargo deny` still applies `licenses` (it reads the vendored manifest: a probe relicensing it to GPL-3.0-only was rejected) and `bans` (an explicit ban on `object@0.32.2` fires, and it counts in duplicate detection) to the path crate; `sources` has nothing to check for it. The lock holds no checksum for it. |
+| Monitoring | `scripts/check-vendored-object.sh advisories` writes a synthetic `Cargo.lock` declaring `object` 0.32.2 with its crates.io source and the pinned checksum, and runs `cargo audit --file Cargo.lock --deny warnings` on it with the repository's `.cargo/audit.toml`. Any vulnerability, unsound, unmaintained or yanked advisory against `object` 0.32.2 fails it (checked with the probe database); an exception recorded in `.cargo/audit.toml` applies to it as to the main gate. It runs in `supply-chain-audit` (`rust-ci.yml`) on every PR and push to main, and daily at 05:17 UTC in `vendored-object.yml`. Both modes of the script fail first if the pin drifts from what is built: the vendored manifest must be `object` 0.32.2, `[patch.crates-io]` must point at it, and `Cargo.lock` must resolve `object` 0.32.2 to that path crate only, with no unused patch. `cargo deny` takes no lockfile (it builds its graph from `cargo metadata`), so it is not part of this check. GitHub disables a public repository's scheduled workflows after 60 days without repository activity. |
 | Exit | Delete the patch and the vendored directory once wasmer resolves to an `object` without `compression` in its defaults, or with `ruzstd` ≥ 0.9.1. That is an engine dependency change and needs review for consensus impact. If `wasmer-compiler` stops resolving to `object 0.32.2`, cargo reports the patch as unused; remove it then. |
 
 ### Non-security warnings (documented, non-blocking)
@@ -171,6 +176,8 @@ audit`, not failed, and not broadly allowed:
   `deny.toml` allow-list with a rationale row here, or remove the offending dep.
 - **The vendored `object` 0.32.2 (#306):** never edit
   `crates/third_party/object-0.32.2` beyond its `default` list;
-  `scripts/check-vendored-object.sh` fails on any other difference. Check RustSec
-  for new `object` advisories by hand while the patch stands, and re-evaluate it
-  on any wasmer change.
+  `scripts/check-vendored-object.sh` fails on any other difference.
+  `scripts/check-vendored-object.sh advisories` fails `supply-chain-audit` and the
+  daily `vendored-object.yml` run on any RustSec advisory against `object` 0.32.2;
+  assess it on #306, and record an accepted exception in `.cargo/audit.toml`.
+  Re-evaluate the patch on any wasmer change.

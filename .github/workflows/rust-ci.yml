@@ -111,6 +111,13 @@ jobs:
       - name: cargo-audit — RustSec advisories (fails on any advisory not tracked in .cargo/audit.toml)
         run: cargo audit
 
+      # #306: cargo audit (and cargo deny) match no advisory against a path
+      # crate, so the vendored object 0.32.2 is audited as the crates.io crate
+      # it is apart from its default features. vendored-object.yml also runs
+      # this daily.
+      - name: cargo-audit — vendored object 0.32.2 as its crates.io identity (#306)
+        run: bash scripts/check-vendored-object.sh advisories
+
   build-test-clippy-aarch64:
     # C3 (issue #127 dependency hardening): build/test/clippy the ENTIRE workspace
     # — including the `blst`-backed `sumchain-beacon-crypto` now linked into
