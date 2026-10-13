@@ -351,6 +351,17 @@ pub const SCHEMA_2_ADDED: &[AddedField] = &[
         ),
         source: Source::Param(metered_cost_schedule),
     },
+    // #279: the contract deploy gas ceiling: an upper bound on the declared
+    // `gas_limit` of a `ContractDeploy` where the metering gate is open.
+    // Absent: deploys stay bounded by `max_contract_gas`, as calls are.
+    AddedField {
+        spec: added_spec(
+            MAX_CONTRACT_DEPLOY_GAS_ID,
+            "max_contract_deploy_gas",
+            Ty::U64,
+        ),
+        source: Source::Param(max_contract_deploy_gas),
+    },
 ];
 
 /// Field id of [`compute_pool_params_value`] (#215).
@@ -381,6 +392,13 @@ const fn added_spec(id: u16, name: &'static str, ty: Ty) -> FieldSpec {
     }
 }
 
+fn max_contract_deploy_gas(genesis: &Genesis) -> Value {
+    genesis
+        .params
+        .max_contract_deploy_gas
+        .map_or(Value::Absent, Value::U64)
+}
+
 fn max_block_contract_gas(genesis: &Genesis) -> Value {
     genesis
         .params
@@ -400,6 +418,8 @@ pub const METERED_COST_SCHEDULE_ID: u16 = 0x2717;
 pub const METERED_ENGINE_IDENTITY_MAX_LEN: usize = 128;
 /// Longest cost-schedule tag, in bytes.
 pub const METERED_COST_SCHEDULE_TAG_MAX_LEN: usize = 64;
+/// Field id of `max_contract_deploy_gas` (#279).
+pub const MAX_CONTRACT_DEPLOY_GAS_ID: u16 = 0x0116;
 
 /// Whether the metering values may be committed: the gate is set and this
 /// binary's values are ratified.
@@ -471,6 +491,9 @@ pub(crate) fn refuse_unratified_metering(
 ///   not commits neither.
 /// - `0x0115` (block budget) is present only when `0x1041` is, and is then at
 ///   least `max_contract_gas` (`0x0106`).
+/// - `0x0116` (deploy ceiling) is present only when `0x1041` is, and is then
+///   at least `max_contract_gas`; where `0x0115` is also present, `0x0115` is
+///   at least `0x0116`.
 /// - `0x2716` is the engine identity string: 1 to
 ///   [`METERED_ENGINE_IDENTITY_MAX_LEN`] bytes, each printable ASCII
 ///   (`0x21..=0x7e`).
@@ -504,6 +527,16 @@ pub(crate) fn check_metering_relations(
             ));
         }
     }
+    let tx_ceiling = || {
+        SCHEMA_V1_FIELDS
+            .iter()
+            .find(|s| s.name == "max_contract_gas")
+            .and_then(|s| match get(s.id) {
+                Value::U64(c) => Some(*c),
+                _ => None,
+            })
+            .ok_or("max_contract_gas is not a U64 field of this configuration")
+    };
     if let Value::U64(budget) = get(MAX_BLOCK_CONTRACT_GAS_ID) {
         if !metered {
             return Err(format!(
@@ -511,19 +544,36 @@ pub(crate) fn check_metering_relations(
                  while the metering gate {CONTRACT_METERING_GATE_ID:#06x} is absent"
             ));
         }
-        let ceiling = SCHEMA_V1_FIELDS
-            .iter()
-            .find(|s| s.name == "max_contract_gas")
-            .and_then(|s| match get(s.id) {
-                Value::U64(c) => Some(*c),
-                _ => None,
-            })
-            .ok_or("max_contract_gas is not a U64 field of this configuration")?;
+        let ceiling = tx_ceiling()?;
         if *budget < ceiling {
             return Err(format!(
                 "field {MAX_BLOCK_CONTRACT_GAS_ID:#06x} (block contract gas budget) {budget} is \
                  below max_contract_gas {ceiling}"
             ));
+        }
+    }
+    if let Value::U64(deploy) = get(MAX_CONTRACT_DEPLOY_GAS_ID) {
+        if !metered {
+            return Err(format!(
+                "field {MAX_CONTRACT_DEPLOY_GAS_ID:#06x} (contract deploy gas ceiling) is present \
+                 while the metering gate {CONTRACT_METERING_GATE_ID:#06x} is absent"
+            ));
+        }
+        let ceiling = tx_ceiling()?;
+        if *deploy < ceiling {
+            return Err(format!(
+                "field {MAX_CONTRACT_DEPLOY_GAS_ID:#06x} (contract deploy gas ceiling) {deploy} \
+                 is below max_contract_gas {ceiling}"
+            ));
+        }
+        if let Value::U64(budget) = get(MAX_BLOCK_CONTRACT_GAS_ID) {
+            if budget < deploy {
+                return Err(format!(
+                    "field {MAX_BLOCK_CONTRACT_GAS_ID:#06x} (block contract gas budget) {budget} \
+                     is below field {MAX_CONTRACT_DEPLOY_GAS_ID:#06x} (contract deploy gas \
+                     ceiling) {deploy}"
+                ));
+            }
         }
     }
     let printable = |b: &[u8]| b.iter().all(|c| (0x21..=0x7e).contains(c));

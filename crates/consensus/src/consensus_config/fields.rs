@@ -1799,6 +1799,8 @@ pub(crate) fn compute(genesis: &Genesis, policy: &SchemaPolicy) -> Result<Vec<Fi
         // the gate via `activation_heights()`, the budget as a `Source::Param`.
         contract_metering_enabled_from_height: _,
         max_block_contract_gas: _,
+        // Schema 2 (draft), 0x0116 (param): `schema::SCHEMA_2_ADDED`.
+        max_contract_deploy_gas: _,
     } = params;
 
     put(0x0100, Value::U64(*max_block_bytes));

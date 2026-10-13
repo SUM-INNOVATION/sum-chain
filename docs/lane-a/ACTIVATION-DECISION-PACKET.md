@@ -1734,6 +1734,8 @@ Failure semantics are today's trap path: `Failed(5)` for a call and `Failed(4)` 
 - an importer refuses a block whose declared contract gas exceeds it, before executing anything (`check_block_contract_gas`, `crates/state/src/executor.rs:4698`);
 - a proposer skips a transaction that would not fit (`crates/consensus/src/poa.rs`).
 
+It also turns on `max_contract_deploy_gas` (`0x0116`). Above the gate, a `ContractDeploy` may declare up to that value (`contract_deploy_gas_ceiling`, `crates/state/src/contract_metering.rs`); calls, views and estimates stay at `max_contract_gas`. Unset, deploys stay bounded by `max_contract_gas`. At load it requires the gate, must be at least `max_contract_gas`, and a set block budget must be at least it.
+
 RPC views and estimates use the engine of the next block (`ContractExecutorState::local_execution_mode`, `crates/state/src/contract_executor.rs:657`). So from the block before the height, an estimate is the metered charge. **The engine identity and cost schedule are PROVISIONAL** (`sumc_runtime::metering::METERING_VALUES_RATIFIED` is false). While they are, a consensus configuration that sets this gate cannot be built, so node start and the acknowledgements refuse before anything is recorded. The schema-2 fields `0x2716` (`METERED_ENGINE_IDENTITY`) and `0x2717` (`METERED_COST_SCHEDULE`) are committed only once the gate is set and the values are ratified. They must be ratified and frozen under a non-provisional identity before this gate is ever set. A `max_block_contract_gas` without this gate is refused at genesis load.
 
 **2. Dependency ordering.**
@@ -1768,7 +1770,7 @@ RPC views and estimates use the engine of the next block (`ContractExecutorState
 **6. Recommended wave.** **Out of band; blocked on ratification.** It needs:
 - the schedule values and identity;
 - the block budget;
-- the deploy and code-size option;
+- the deploy ceiling value (`max_contract_deploy_gas`);
 - reference types;
 - `REMEDIATION_GATES` enrolment;
 - the schema-2 release that writes it;

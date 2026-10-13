@@ -229,6 +229,36 @@ pub enum GenesisError {
          is not. The budget only applies above the metering gate; set both, or neither"
     )]
     BlockContractGasWithoutMetering { budget: u64 },
+
+    /// `max_contract_deploy_gas` set while `contract_metering_enabled_from_height`
+    /// is not (#279). The deploy ceiling is read only above the metering gate,
+    /// so without it the value would be inert, yet a consensus configuration
+    /// would still record it.
+    #[error(
+        "max_contract_deploy_gas = {ceiling} is set while contract_metering_enabled_from_height \
+         is not. The deploy ceiling only applies above the metering gate; set both, or neither"
+    )]
+    ContractDeployGasWithoutMetering { ceiling: u64 },
+
+    /// The deploy ceiling is below the per-transaction ceiling (#279). It only
+    /// ever raises the bound a deploy may declare; a lower value would make a
+    /// deploy cheaper to bound than a call, which no configuration means.
+    #[error(
+        "max_contract_deploy_gas is Some({deploy}), below max_contract_gas {ceiling}. The \
+         deploy ceiling raises the bound a contract deploy may declare and must be at least \
+         the per-transaction ceiling"
+    )]
+    ContractDeployGasBelowTxCeiling { deploy: u64, ceiling: u64 },
+
+    /// The block contract gas budget is below the deploy ceiling (#279). A
+    /// deploy declaring the deploy ceiling could then never be included: every
+    /// proposer skips it and every importer refuses a block carrying it.
+    #[error(
+        "max_block_contract_gas is Some({budget}), below max_contract_deploy_gas {deploy}. A \
+         contract deploy declaring the deploy ceiling could never be included in a block. The \
+         block budget must be at least the deploy ceiling"
+    )]
+    BlockContractGasBelowDeployCeiling { budget: u64, deploy: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, GenesisError>;
@@ -2778,9 +2808,10 @@ pub struct ChainParams {
     /// `Failed(5)`, a deploy with `Failed(4)`, the fee is charged, the nonce
     /// advances and staged writes roll back.
     ///
-    /// The same gate enables [`Self::max_block_contract_gas`], and implies the
-    /// error rollback of [`Self::contract_error_rollback_enabled_from_height`]
-    /// at and above it, whether or not that gate is set.
+    /// The same gate enables [`Self::max_block_contract_gas`] and
+    /// [`Self::max_contract_deploy_gas`], and implies the error rollback of
+    /// [`Self::contract_error_rollback_enabled_from_height`] at and above it,
+    /// whether or not that gate is set.
     ///
     /// **The engine identity and cost schedule behind it are PROVISIONAL**
     /// (`sumc_runtime::metering::METERING_VALUES_RATIFIED` is false). While
@@ -2815,6 +2846,25 @@ pub struct ChainParams {
     /// range is a recommendation awaiting measurement on production hardware.
     #[serde(default)]
     pub max_block_contract_gas: Option<u64>,
+
+    /// Upper bound on the DECLARED `gas_limit` of a `ContractDeploy` where
+    /// [`Self::contract_metering_enabled_from_height`] is open (#279).
+    ///
+    /// Above the metering gate a deploy pays per code byte before compiling, so
+    /// a contract of a useful size can need more gas than a call. This raises
+    /// the bound a deploy may declare. One budget covers the whole deploy:
+    /// validation, compilation, instantiation and the init call. Calls, views and
+    /// estimates stay bounded by `max_contract_gas`.
+    ///
+    /// `None`, and every height below the gate, keep the bound a deploy has
+    /// today: `max_contract_gas`. Set, it requires the gate, must be at least
+    /// `max_contract_gas`, and a set `max_block_contract_gas` must be at least
+    /// it, so any admissible deploy fits an otherwise empty block.
+    ///
+    /// PROVISIONAL: no value is chosen. It is set with the ratified metering
+    /// values, never before.
+    #[serde(default)]
+    pub max_contract_deploy_gas: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -3242,6 +3292,8 @@ impl Default for ChainParams {
             contract_metering_enabled_from_height: None,
             // No block-level contract gas budget (inert while the metering gate is closed).
             max_block_contract_gas: None,
+            // No separate deploy ceiling: deploys stay bounded by max_contract_gas.
+            max_contract_deploy_gas: None,
         }
     }
 }
@@ -3350,6 +3402,29 @@ impl ChainParams {
                     budget,
                     ceiling: self.max_contract_gas,
                 });
+            }
+        }
+        // ── deploy ceiling: only with the gate, between the tx ceiling and the
+        //    block budget (#279) ──────────────────────────────────────────────
+        //
+        // Structural only; it ratifies no value.
+        if let Some(deploy) = self.max_contract_deploy_gas {
+            if self.contract_metering_enabled_from_height.is_none() {
+                return Err(GenesisError::ContractDeployGasWithoutMetering { ceiling: deploy });
+            }
+            if deploy < self.max_contract_gas {
+                return Err(GenesisError::ContractDeployGasBelowTxCeiling {
+                    deploy,
+                    ceiling: self.max_contract_gas,
+                });
+            }
+            if let Some(budget) = self.max_block_contract_gas {
+                if budget < deploy {
+                    return Err(GenesisError::BlockContractGasBelowDeployCeiling {
+                        budget,
+                        deploy,
+                    });
+                }
             }
         }
         if self.beacon_enabled_from_height.is_some() {

@@ -272,9 +272,9 @@ fn this_binary_keeps_a_schema_1_database_as_it_is() {
 fn the_production_schema_2_is_a_well_formed_draft() {
     // Registered in append order: #277's, #279's and #278's gates, #215's
     // compute-pool parameter group (outside the gate range), then #279's
-    // metering gate, block budget, engine identity and cost schedule. The
-    // metering parameters are absent while unset (checked through the real
-    // transition below).
+    // metering gate, block budget, engine identity, cost schedule and deploy
+    // gas ceiling. The metering parameters are absent while unset (checked
+    // through the real transition below).
     let ids: Vec<(u16, &str)> = SCHEMA_2_ADDED
         .iter()
         .map(|a| (a.spec.id, a.spec.name))
@@ -290,6 +290,7 @@ fn the_production_schema_2_is_a_well_formed_draft() {
             (0x0115, "max_block_contract_gas"),
             (0x2716, "sumc_runtime::metering::METERED_ENGINE_IDENTITY"),
             (0x2717, "sumc_runtime::metering::METERED_COST_SCHEDULE"),
+            (0x0116, "max_contract_deploy_gas"),
         ]
     );
     // Every gate registered so far is dormant in every default genesis.

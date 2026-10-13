@@ -283,7 +283,11 @@ impl ContractExecutorState {
             });
         }
 
-        if deploy_data.gas_limit > self.params.max_contract_gas {
+        // `max_contract_gas`, or above the metering gate the deploy ceiling
+        // where one is set (#279).
+        let max_deploy_gas =
+            crate::contract_metering::contract_deploy_gas_ceiling(&self.params, block_height);
+        if deploy_data.gas_limit > max_deploy_gas {
             return Ok(ContractDeployResult {
                 contract_address: Address::ZERO,
                 code_hash: [0u8; 32],
@@ -291,7 +295,7 @@ impl ContractExecutorState {
                 success: false,
                 error: Some(format!(
                     "Gas limit {} exceeds maximum {}",
-                    deploy_data.gas_limit, self.params.max_contract_gas
+                    deploy_data.gas_limit, max_deploy_gas
                 )),
             });
         }
