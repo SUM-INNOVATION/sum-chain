@@ -397,10 +397,23 @@ mod tests {
         assert_eq!(snapshot().len(), SERIES_COUNT);
     }
 
+    /// The counters are process-wide statics shared by every test in this
+    /// binary, and tests run in parallel. A test that compares counter values
+    /// before and after a `record` holds this lock, so no other recording test
+    /// moves a counter in between.
+    static RECORDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn recording() -> std::sync::MutexGuard<'static, ()> {
+        RECORDING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// A success is not an execution error.
     #[test]
     fn success_is_not_counted() {
         assert_eq!(labels_for(&TxStatus::Success), None);
+        let _serial = recording();
         let before = total();
         record(&TxStatus::Success);
         assert_eq!(total(), before);
@@ -436,6 +449,7 @@ mod tests {
     #[test]
     fn recording_moves_exactly_one_series() {
         let subject = labels_for(&TxStatus::Failed(400)).unwrap();
+        let _serial = recording();
         let before = value(subject);
         record(&TxStatus::Failed(400));
         assert!(
