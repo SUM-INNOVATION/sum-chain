@@ -158,6 +158,93 @@ fn charge_metered(
         .set(store, Value::I64((remaining - amount) as i64))
 }
 
+/// Bounds on the block executor's metered-module cache (#279).
+///
+/// Node-local and never consensus. A module evicted here is compiled again
+/// the next time a block loads it, and that block's loaded-code measure (D8)
+/// already counts it, so capacity and eviction change neither an outcome nor
+/// the per-block bound on compilation. Eviction only happens between blocks
+/// ([`ContractExecutor::clear_block`]), so a module the current block has
+/// loaded is never evicted while that block runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeteredCacheCapacity {
+    /// Total code bytes of the cached modules.
+    pub max_code_bytes: u64,
+    /// Number of cached modules. Each holds its own engine, so a count bound
+    /// is needed besides the byte bound.
+    pub max_modules: usize,
+}
+
+impl MeteredCacheCapacity {
+    /// PROVISIONAL, like every #279 value: 32 MiB of code, which is 128 blocks
+    /// at the provisional 256 KiB loaded-code cap, and 1024 modules.
+    pub const DEFAULT: Self = Self {
+        max_code_bytes: 32 * 1024 * 1024,
+        max_modules: 1024,
+    };
+}
+
+/// A cached metered module and what bounding the cache needs to know of it.
+struct MeteredEntry {
+    module: Arc<MeteredModule>,
+    code_len: u64,
+    /// When it was last inserted or used (`MeteredCache::uses`); the oldest
+    /// is evicted first.
+    last_used: AtomicU64,
+}
+
+/// The metered-module cache.
+struct MeteredCache {
+    entries: HashMap<CodeHash, MeteredEntry>,
+    code_bytes: u64,
+    /// Use counter that stamps `MeteredEntry::last_used`.
+    uses: AtomicU64,
+    /// `Some` on the block executor; `None` on a local executor, which empties
+    /// the cache at `LocalExecutionLimits::max_cached_modules` instead.
+    capacity: Option<MeteredCacheCapacity>,
+}
+
+impl MeteredCache {
+    fn new(capacity: Option<MeteredCacheCapacity>) -> Self {
+        Self {
+            entries: HashMap::new(),
+            code_bytes: 0,
+            uses: AtomicU64::new(0),
+            capacity,
+        }
+    }
+
+    fn stamp(&self) -> u64 {
+        self.uses.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn within(&self, cap: &MeteredCacheCapacity) -> bool {
+        self.code_bytes <= cap.max_code_bytes && self.entries.len() <= cap.max_modules
+    }
+
+    /// Evict least recently used modules until the cache is within capacity.
+    fn trim(&mut self) {
+        let Some(cap) = self.capacity else { return };
+        if self.within(&cap) {
+            return;
+        }
+        let mut order: Vec<(u64, CodeHash)> = self
+            .entries
+            .iter()
+            .map(|(h, e)| (e.last_used.load(Ordering::Relaxed), *h))
+            .collect();
+        order.sort_unstable();
+        for (_, hash) in order {
+            if self.within(&cap) {
+                break;
+            }
+            if let Some(e) = self.entries.remove(&hash) {
+                self.code_bytes -= e.code_len;
+            }
+        }
+    }
+}
+
 /// Contract executor - compiles and runs WASM contracts
 pub struct ContractExecutor {
     /// Shared compiler engine. We hold the `Engine` (Send+Sync) rather than a
@@ -183,7 +270,8 @@ pub struct ContractExecutor {
     /// Modules compiled under metering v1, each with its own engine. Separate
     /// from `cache`: the same code hash compiles to different machine code
     /// under the two engines, and neither may be instantiated from the other.
-    metered_cache: RwLock<HashMap<CodeHash, Arc<MeteredModule>>>,
+    /// Bounded on the block executor; see [`MeteredCacheCapacity`].
+    metered_cache: RwLock<MeteredCache>,
     /// Code bytes compiled under metering v1 so far (deploys and cache misses).
     /// Node-local and never consensus: it is how compilation work is checked
     /// against a block's loaded-code measure (#279, D8).
@@ -210,7 +298,7 @@ impl ContractExecutor {
             storage,
             metadata: RwLock::new(HashMap::new()),
             local_limits: None,
-            metered_cache: RwLock::new(HashMap::new()),
+            metered_cache: RwLock::new(MeteredCache::new(Some(MeteredCacheCapacity::DEFAULT))),
             metered_compiled_bytes: AtomicU64::new(0),
             schedule: metering::METERED_COST_SCHEDULE,
         }
@@ -236,7 +324,7 @@ impl ContractExecutor {
             storage,
             metadata: RwLock::new(HashMap::new()),
             local_limits: Some(limits),
-            metered_cache: RwLock::new(HashMap::new()),
+            metered_cache: RwLock::new(MeteredCache::new(None)),
             metered_compiled_bytes: AtomicU64::new(0),
             schedule: metering::METERED_COST_SCHEDULE,
         }
@@ -283,16 +371,57 @@ impl ContractExecutor {
         self.metered_compiled_bytes.load(Ordering::Relaxed)
     }
 
-    /// Insert into the metered-module cache, bounded on a local executor
-    /// exactly as [`Self::cache_insert`] bounds the unmetered one.
-    fn metered_cache_insert(&self, code_hash: CodeHash, compiled: Arc<MeteredModule>) {
+    /// Insert into the metered-module cache. A local executor empties it on
+    /// reaching its bound, exactly as [`Self::cache_insert`] bounds the
+    /// unmetered one. The block executor never evicts here: it trims between
+    /// blocks ([`Self::clear_block`]).
+    fn metered_cache_insert(
+        &self,
+        code_hash: CodeHash,
+        compiled: Arc<MeteredModule>,
+        code_len: u64,
+    ) {
         let mut cache = self.metered_cache.write();
         if let Some(limits) = &self.local_limits {
-            if cache.len() >= limits.max_cached_modules && !cache.contains_key(&code_hash) {
-                cache.clear();
+            if cache.entries.len() >= limits.max_cached_modules
+                && !cache.entries.contains_key(&code_hash)
+            {
+                cache.entries.clear();
+                cache.code_bytes = 0;
             }
         }
-        cache.insert(code_hash, compiled);
+        let entry = MeteredEntry {
+            module: compiled,
+            code_len,
+            last_used: AtomicU64::new(cache.stamp()),
+        };
+        if let Some(old) = cache.entries.insert(code_hash, entry) {
+            cache.code_bytes -= old.code_len;
+        }
+        cache.code_bytes += code_len;
+    }
+
+    /// The cached metered module for `code_hash`, marking it used.
+    fn metered_cache_get(&self, code_hash: &CodeHash) -> Option<Arc<MeteredModule>> {
+        let cache = self.metered_cache.read();
+        let entry = cache.entries.get(code_hash)?;
+        entry.last_used.store(cache.stamp(), Ordering::Relaxed);
+        Some(entry.module.clone())
+    }
+
+    /// Modules and code bytes in the metered-module cache. Node-local.
+    pub fn metered_cache_usage(&self) -> (usize, u64) {
+        let cache = self.metered_cache.read();
+        (cache.entries.len(), cache.code_bytes)
+    }
+
+    /// Replace the block executor's metered-cache bounds; `None` leaves it
+    /// unbounded. Takes effect at the next block boundary. Has no effect on a
+    /// local executor, which keeps its own bound.
+    pub fn set_metered_cache_capacity(&self, capacity: Option<MeteredCacheCapacity>) {
+        if self.local_limits.is_none() {
+            self.metered_cache.write().capacity = capacity;
+        }
     }
 
     /// Compute code hash
@@ -398,7 +527,7 @@ impl ContractExecutor {
                 let compiled = Arc::new(self.compile_metered(&code)?);
                 let old_code = self.storage.get_code(&contract_address)?;
                 self.storage.store_code(&contract_address, &code)?;
-                self.metered_cache_insert(code_hash, compiled);
+                self.metered_cache_insert(code_hash, compiled, code.len() as u64);
                 self.deploy_finalize(
                     mode, code, code_hash, contract_address, old_code, init_method, init_args,
                     ctx, precharged,
@@ -952,12 +1081,11 @@ impl ContractExecutor {
             .ok_or_else(|| RuntimeError::ContractNotFound(contract.to_string()))?;
         let code_hash = Self::code_hash(&code);
 
-        let cached = self.metered_cache.read().get(&code_hash).cloned();
-        let compiled = match cached {
+        let compiled = match self.metered_cache_get(&code_hash) {
             Some(c) => c,
             None => {
                 let c = Arc::new(self.compile_metered(&code)?);
-                self.metered_cache_insert(code_hash, c.clone());
+                self.metered_cache_insert(code_hash, c.clone(), code.len() as u64);
                 c
             }
         };
@@ -1404,9 +1532,17 @@ impl ContractExecutor {
     /// boundary to hook; this is the one that keeps a finished block's caches
     /// from sitting in memory until some later block happens to need them.
     /// Same treatment of the compiled-code cache, for the same reason.
+    ///
+    /// It is also the one place the metered-module cache is trimmed to its
+    /// capacity, least recently used first. Block executions are serialized
+    /// and nothing evicts while one runs, so every module a block loads stays
+    /// cached until it ends: within a block each code is compiled at most once
+    /// (deploys aside, which always compile and are always counted), whatever
+    /// the capacity.
     pub fn clear_block(&self) {
         self.storage.end_candidate();
         self.metadata.write().clear();
+        self.metered_cache.write().trim();
     }
 
     /// Get contract metadata from COMMITTED state, ignoring any candidate.

@@ -3225,6 +3225,22 @@ impl BlockExecutor {
         self.contract_executor.metered_compiled_bytes()
     }
 
+    /// Modules and code bytes in the contract runtime's metered-module cache.
+    /// Node-local, never consensus.
+    pub fn contract_metered_cache_usage(&self) -> (usize, u64) {
+        self.contract_executor.metered_cache_usage()
+    }
+
+    /// Replace the bounds of the contract runtime's metered-module cache
+    /// (`None`: unbounded). Node-local, never consensus: it changes when a
+    /// module is compiled again, not what any block executes to.
+    pub fn set_contract_metered_cache_capacity(
+        &self,
+        capacity: Option<sumc_runtime::MeteredCacheCapacity>,
+    ) {
+        self.contract_executor.set_metered_cache_capacity(capacity);
+    }
+
     /// Execute a block and return receipts
     pub fn execute_block(
         &self,

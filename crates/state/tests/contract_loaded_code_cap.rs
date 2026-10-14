@@ -11,7 +11,7 @@ mod common;
 use common::{fund, publish_block, setup_with_params, CHAIN_ID};
 
 use std::collections::HashMap;
-use sumc_runtime::{metering, ContractExecutor};
+use sumc_runtime::{metering, ContractExecutor, MeteredCacheCapacity};
 use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::transaction::{ContractCallData, ContractDeployData};
@@ -65,6 +65,24 @@ fn code(fill: u8) -> Vec<u8> {
     wat::parse_str(wat).unwrap()
 }
 
+/// A contract like [`code`] whose `put` writes one storage row, so a block's
+/// state root depends on its execution.
+fn writer_code(fill: u8) -> Vec<u8> {
+    let data: String = std::iter::repeat_n(char::from(b'a' + fill % 26), DATA).collect();
+    let wat = format!(
+        r#"(module
+  (import "env" "storage_write" (func $swrite (param i32 i32 i32 i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "{data}")
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "new") (param i32 i32) (result i32) (i32.const 0))
+  (func (export "put") (param i32 i32) (result i32)
+    (call $swrite (i32.const 0) (i32.const 1) (i32.const 8) (i32.const 3))
+    (i32.const 0)))"#
+    );
+    wat::parse_str(wat).unwrap()
+}
+
 fn deploy_tx(kp: &KeyPair, nonce: u64, code: Vec<u8>) -> SignedTransaction {
     deploy_tx_with_init(kp, nonce, code, "new")
 }
@@ -84,12 +102,16 @@ fn deploy_tx_with_init(kp: &KeyPair, nonce: u64, code: Vec<u8>, init: &str) -> S
 }
 
 fn call_tx(kp: &KeyPair, nonce: u64, contract: Address) -> SignedTransaction {
+    call_method_tx(kp, nonce, contract, "get")
+}
+
+fn call_method_tx(kp: &KeyPair, nonce: u64, contract: Address, method: &str) -> SignedTransaction {
     signed(
         kp,
         nonce,
         TxPayload::ContractCall(ContractCallData {
             contract,
-            method: "get".to_string(),
+            method: method.to_string(),
             args: vec![],
             value: 0,
             gas_limit: 1_000_000,
@@ -527,5 +549,158 @@ fn a_failed_deploy_does_not_make_counted_code_compile_again() {
     assert_eq!(
         compiled, measure,
         "compiled {compiled} of a {measure}-byte measure"
+    );
+}
+
+// ── a bounded module cache (#279) ──────────────────────────────────────────
+//
+// The block executor's metered-module cache is trimmed to a node-local
+// capacity between blocks, least recently used first, and never while a block
+// runs. With the smallest possible cache a block still compiles no more than
+// its measure, and no capacity changes what any block executes to.
+
+/// A capacity that keeps nothing past a block boundary.
+fn no_cache() -> Option<MeteredCacheCapacity> {
+    Some(MeteredCacheCapacity {
+        max_code_bytes: 0,
+        max_modules: 0,
+    })
+}
+
+#[test]
+fn with_no_cache_room_a_block_still_compiles_each_loaded_contract_once() {
+    let (state, db, _warm, _dir, addrs) = chain_with_five_contracts_and_db(Some(1));
+    let cold = sumchain_state::BlockExecutor::new(state.clone(), db.clone(), params(Some(1)));
+    cold.set_contract_metered_cache_capacity(no_cache());
+    let k = caller();
+    // Three contracts, each called three times, interleaved.
+    let txs = || {
+        (0..9)
+            .map(|i| call_tx(&k, i, addrs[i as usize % 3]))
+            .collect::<Vec<_>>()
+    };
+    let one = code(0).len() as u64;
+    for _ in 0..2 {
+        let (compiled, measure, statuses) = compiled_against_measure(&state, &db, &cold, 3, txs());
+        assert!(
+            statuses.iter().all(|s| *s == TxStatus::Success),
+            "{statuses:?}"
+        );
+        assert_eq!(measure, 3 * one);
+        assert_eq!(
+            compiled, measure,
+            "within a block each loaded contract compiles once"
+        );
+        // Trimmed at the block boundary: nothing is kept for the next block,
+        // which compiles again and is measured again.
+        assert_eq!(cold.contract_metered_cache_usage(), (0, 0));
+    }
+}
+
+#[test]
+fn between_blocks_the_cache_keeps_the_most_recently_used_modules() {
+    let (state, db, _warm, _dir, addrs) = chain_with_five_contracts_and_db(Some(1));
+    let cold = sumchain_state::BlockExecutor::new(state.clone(), db.clone(), params(Some(1)));
+    let one = code(0).len() as u64;
+    cold.set_contract_metered_cache_capacity(Some(MeteredCacheCapacity {
+        max_code_bytes: 2 * one,
+        max_modules: 16,
+    }));
+
+    // Contracts 0, 1, 2 are loaded in that order; 1 and 2 are the most recent.
+    let (compiled, _, _) = compiled_against_measure(&state, &db, &cold, 3, calls(&addrs[..3]));
+    assert_eq!(compiled, 3 * one);
+    assert_eq!(cold.contract_metered_cache_usage(), (2, 2 * one));
+
+    // 1 and 2 are still compiled; 0 was evicted and compiles again.
+    let (compiled, _, _) = compiled_against_measure(&state, &db, &cold, 3, calls(&addrs[1..3]));
+    assert_eq!(compiled, 0);
+    let (compiled, measure, _) =
+        compiled_against_measure(&state, &db, &cold, 3, calls(&addrs[..1]));
+    assert_eq!((compiled, measure), (one, one));
+}
+
+#[test]
+fn after_every_block_the_cache_is_within_its_capacity() {
+    // The setup leaves five modules cached; the bound is two.
+    let (state, _db, ex, _dir, _addrs) = chain_with_five_contracts_and_db(Some(1));
+    assert_eq!(ex.contract_metered_cache_usage().0, 5);
+    ex.set_contract_metered_cache_capacity(Some(MeteredCacheCapacity {
+        max_code_bytes: u64::MAX,
+        max_modules: 2,
+    }));
+    let pk = *proposer().public_key().as_bytes();
+    let d = deployer();
+    let first = state.get_nonce(&d.address()).unwrap();
+    for n in 0..4u64 {
+        let receipts = publish_block(
+            &state,
+            &ex,
+            3 + n,
+            &pk,
+            vec![deploy_tx(&d, first + n, code(10 + n as u8))],
+            &[],
+        );
+        assert!(receipts.iter().all(|r| r.status == TxStatus::Success));
+        assert!(
+            ex.contract_metered_cache_usage().0 <= 2,
+            "{:?} after block {}",
+            ex.contract_metered_cache_usage(),
+            3 + n
+        );
+    }
+}
+
+#[test]
+fn cache_capacity_changes_no_outcome() {
+    // The same blocks on three identical chains whose caches differ: one keeps
+    // nothing, one has the default bound, one is unbounded. Receipts and state
+    // roots must match block for block.
+    let run = |capacity: Option<MeteredCacheCapacity>| {
+        let (state, _db, ex, _dir, addrs) = chain_with_five_contracts_and_db(Some(1));
+        ex.set_contract_metered_cache_capacity(capacity);
+        let pk = *proposer().public_key().as_bytes();
+        let (d, k) = (deployer(), caller());
+        let next = state.get_nonce(&d.address()).unwrap();
+        let w = ContractExecutor::compute_address(&d.address(), next);
+        let blocks = vec![
+            vec![
+                deploy_tx(&d, next, writer_code(7)),
+                call_method_tx(&k, 0, w, "put"),
+                call_tx(&k, 1, addrs[0]),
+            ],
+            vec![
+                call_tx(&k, 2, addrs[1]),
+                call_method_tx(&k, 3, w, "put"),
+                deploy_tx_with_init(&d, next + 1, code(0), "absent"),
+                call_tx(&k, 4, addrs[0]),
+            ],
+            vec![
+                call_tx(&k, 5, addrs[2]),
+                call_tx(&k, 6, addrs[3]),
+                call_method_tx(&k, 7, w, "put"),
+            ],
+        ];
+        let mut outcomes = Vec::new();
+        for (i, txs) in blocks.into_iter().enumerate() {
+            let receipts = publish_block(&state, &ex, 3 + i as u64, &pk, txs, &[]);
+            outcomes.push((receipts, state.state_root()));
+        }
+        (outcomes, ex.contract_metered_compiled_bytes())
+    };
+    let (none, compiled_none) = run(no_cache());
+    let (default, compiled_default) = run(Some(MeteredCacheCapacity::DEFAULT));
+    let (unbounded, compiled_unbounded) = run(None);
+    assert!(
+        none[0].0.iter().any(|r| r.status == TxStatus::Success)
+            && none[1].0.iter().any(|r| r.status != TxStatus::Success),
+        "the blocks exercise success and failure: {none:?}"
+    );
+    assert_eq!(none, default);
+    assert_eq!(default, unbounded);
+    assert_eq!(compiled_default, compiled_unbounded);
+    assert!(
+        compiled_none > compiled_default,
+        "the empty cache compiled again: {compiled_none} vs {compiled_default}"
     );
 }

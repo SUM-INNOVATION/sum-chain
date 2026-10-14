@@ -699,6 +699,17 @@ impl ContractExecutorState {
         self.wasm_executor.metered_compiled_bytes()
     }
 
+    /// Modules and code bytes in the metered-module cache. Node-local.
+    pub fn metered_cache_usage(&self) -> (usize, u64) {
+        self.wasm_executor.metered_cache_usage()
+    }
+
+    /// Replace the metered-module cache's bounds (`None`: unbounded).
+    /// Node-local; takes effect at the next block boundary.
+    pub fn set_metered_cache_capacity(&self, capacity: Option<sumc_runtime::MeteredCacheCapacity>) {
+        self.wasm_executor.set_metered_cache_capacity(capacity);
+    }
+
     /// Contract metadata from COMMITTED state. See [`Self::contract_exists`].
     pub fn get_metadata(&self, address: &Address) -> Option<ContractMetadata> {
         self.wasm_executor.get_metadata_committed(address).map(|m| ContractMetadata {

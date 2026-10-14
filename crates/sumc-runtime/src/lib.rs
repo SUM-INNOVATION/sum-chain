@@ -15,7 +15,9 @@ pub mod storage;
 pub mod types;
 
 pub use error::{RuntimeError, Result};
-pub use executor::{ContractExecutor, ExecutionContext, ExecutionMode, ExecutionResult};
+pub use executor::{
+    ContractExecutor, ExecutionContext, ExecutionMode, ExecutionResult, MeteredCacheCapacity,
+};
 pub use metering::{
     CostScheduleV1Provisional, METERED_COST_SCHEDULE, METERED_ENGINE_IDENTITY,
     METERING_VALUES_RATIFIED,
