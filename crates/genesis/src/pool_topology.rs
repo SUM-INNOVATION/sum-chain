@@ -38,6 +38,20 @@
 //!
 //! The bounds are compiled constants, not genesis parameters: nothing here
 //! reads a file, an environment variable, a flag or the network.
+//!
+//! # A static genesis guard, not the runtime membership check
+//!
+//! #126 asks for an on-chain guard that reads the beacon membership snapshot.
+//! This is not that guard, and it does not satisfy that requirement. It is a
+//! static check of the genesis document, run by every node when it loads the
+//! genesis; it never reads chain state, the membership snapshot or any
+//! runtime membership. It refuses a genesis that enables the pool over too
+//! few genesis validators, which under protocol v1 is the whole validator set.
+//!
+//! The runtime check, over the canonical membership at the pool's activation
+//! height, is unresolved: it needs the membership representation #266 has not
+//! chosen, and nothing here implements or approximates it. When protocol v1's
+//! containment is lifted, this guard alone no longer bounds the live set.
 
 /// `3f + 1 + c`: with `f` invalid dealers and `c` silent ones, the DKG's
 /// qualified set still reaches `2f + 1`.
