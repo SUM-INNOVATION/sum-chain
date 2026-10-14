@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jsonrpsee::server::{Server, ServerHandle};
-use sumchain_consensus::ConsensusQuery;
+use sumchain_consensus::{ConsensusQuery, FinalityMechanism};
 use sumchain_primitives::{Address, Block, Hash, SignedTransaction, MessagingTxData, MessagingOperation, SponsoredMessage, TxPayload};
 use sumchain_state::beacon_store::{BeaconStore, StoredDkgTranscript, StoredSignedRef};
 use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
@@ -158,15 +158,23 @@ fn dkg_transcript_info(epoch: u64, t: &StoredDkgTranscript) -> DkgTranscriptInfo
 /// Classify a transaction's status given its receipt (if any), mempool presence,
 /// and a finality check. Pure function — extracted from `chain_get_transaction_status`
 /// to make the dispatch logic testable without a full RPC server harness.
+///
+/// `mechanism` is the engine's own [`ConsensusQuery::finality_mechanism`], the
+/// same handle `is_finalized` answers from, so a `Finalized` status names the
+/// rule that produced it.
 pub(crate) fn classify_tx_status(
     receipt: Option<&sumchain_primitives::Receipt>,
     in_mempool: bool,
     is_finalized: impl Fn(sumchain_primitives::BlockHeight) -> bool,
+    mechanism: FinalityMechanism,
 ) -> TxStatusV2 {
     if let Some(receipt) = receipt {
         return if receipt.is_success() {
             if is_finalized(receipt.block_height) {
-                TxStatusV2::Finalized { block_height: receipt.block_height }
+                TxStatusV2::Finalized {
+                    block_height: receipt.block_height,
+                    finality_mechanism: mechanism.name().to_string(),
+                }
             } else {
                 TxStatusV2::Included { block_height: receipt.block_height }
             }
@@ -1537,6 +1545,7 @@ impl SumChainApiServer for RpcServer {
             current_height,
             finality_depth,
             pending_finality,
+            finality_mechanism: self.consensus.finality_mechanism().name().to_string(),
         })
     }
 
@@ -1929,15 +1938,18 @@ impl SumChainApiServer for RpcServer {
         &self,
         finality: Option<String>,
     ) -> std::result::Result<BlockHeightInfo, jsonrpsee::types::ErrorObjectOwned> {
-        // Default to latest; "finalized" returns the depth-aware finalized head.
+        // Default to latest; "finalized" returns this node's local-depth
+        // finalized head, labelled with the rule that produced it (#270).
         match finality.as_deref() {
             Some("finalized") => Ok(BlockHeightInfo {
                 height: self.consensus.finalized_height(),
                 finality: "finalized".to_string(),
+                finality_mechanism: Some(self.consensus.finality_mechanism().name().to_string()),
             }),
             None | Some("latest") => Ok(BlockHeightInfo {
                 height: self.consensus.current_height(),
                 finality: "latest".to_string(),
+                finality_mechanism: None,
             }),
             Some(other) => Err(RpcError::InvalidParams(format!(
                 "finality must be \"latest\" or \"finalized\", got {:?}",
@@ -1958,9 +1970,12 @@ impl SumChainApiServer for RpcServer {
             .map_err(|e| RpcError::Internal(e.to_string()))?;
         let in_mempool = self.mempool.get(&hash).is_some();
 
-        Ok(classify_tx_status(receipt.as_ref(), in_mempool, |h| {
-            self.consensus.is_finalized(h)
-        }))
+        Ok(classify_tx_status(
+            receipt.as_ref(),
+            in_mempool,
+            |h| self.consensus.is_finalized(h),
+            self.consensus.finality_mechanism(),
+        ))
     }
 
     async fn get_peers(&self) -> std::result::Result<Vec<RpcPeerInfo>, jsonrpsee::types::ErrorObjectOwned> {
@@ -9597,34 +9612,43 @@ mod phase_0b_rpc_tests {
 
     #[test]
     fn classify_unknown_when_no_receipt_and_no_mempool() {
-        let s = classify_tx_status(None, false, |_| true);
+        let s = classify_tx_status(None, false, |_| true, FinalityMechanism::LocalDepth);
         assert!(matches!(s, TxStatusV2::Unknown));
     }
 
     #[test]
     fn classify_pending_when_in_mempool_only() {
-        let s = classify_tx_status(None, true, |_| true);
+        let s = classify_tx_status(None, true, |_| true, FinalityMechanism::LocalDepth);
         assert!(matches!(s, TxStatusV2::Pending));
     }
 
     #[test]
     fn classify_finalized_when_success_receipt_in_finalized_block() {
         let r = mk_receipt(TxStatus::Success, 42);
-        let s = classify_tx_status(Some(&r), false, |h| h == 42);
-        assert!(matches!(s, TxStatusV2::Finalized { block_height: 42 }));
+        let s = classify_tx_status(Some(&r), false, |h| h == 42, FinalityMechanism::LocalDepth);
+        match s {
+            TxStatusV2::Finalized {
+                block_height,
+                finality_mechanism,
+            } => {
+                assert_eq!(block_height, 42);
+                assert_eq!(finality_mechanism, "local-depth");
+            }
+            other => panic!("expected Finalized, got {other:?}"),
+        }
     }
 
     #[test]
     fn classify_included_when_success_receipt_in_unfinalized_block() {
         let r = mk_receipt(TxStatus::Success, 42);
-        let s = classify_tx_status(Some(&r), false, |_| false);
+        let s = classify_tx_status(Some(&r), false, |_| false, FinalityMechanism::LocalDepth);
         assert!(matches!(s, TxStatusV2::Included { block_height: 42 }));
     }
 
     #[test]
     fn classify_failed_carries_block_height_and_reason() {
         let r = mk_receipt(TxStatus::InvalidNonce, 17);
-        let s = classify_tx_status(Some(&r), false, |_| true);
+        let s = classify_tx_status(Some(&r), false, |_| true, FinalityMechanism::LocalDepth);
         match s {
             TxStatusV2::Failed { block_height, reason } => {
                 assert_eq!(block_height, Some(17));
@@ -9639,8 +9663,10 @@ mod phase_0b_rpc_tests {
         // Documented caveat: Failed { block_height } is returned regardless
         // of whether the block is finalized. SNIP treats this as terminal.
         let r = mk_receipt(TxStatus::Failed(7), 99);
-        let finalized = classify_tx_status(Some(&r), false, |_| true);
-        let unfinalized = classify_tx_status(Some(&r), false, |_| false);
+        let finalized =
+            classify_tx_status(Some(&r), false, |_| true, FinalityMechanism::LocalDepth);
+        let unfinalized =
+            classify_tx_status(Some(&r), false, |_| false, FinalityMechanism::LocalDepth);
         assert!(matches!(finalized,   TxStatusV2::Failed { block_height: Some(99), .. }));
         assert!(matches!(unfinalized, TxStatusV2::Failed { block_height: Some(99), .. }));
     }
@@ -9650,8 +9676,14 @@ mod phase_0b_rpc_tests {
         // Edge case: tx is both in receipt store and mempool (e.g., mempool
         // hasn't pruned yet after inclusion). Receipt wins.
         let r = mk_receipt(TxStatus::Success, 5);
-        let s = classify_tx_status(Some(&r), true, |h| h == 5);
-        assert!(matches!(s, TxStatusV2::Finalized { block_height: 5 }));
+        let s = classify_tx_status(Some(&r), true, |h| h == 5, FinalityMechanism::LocalDepth);
+        assert!(matches!(
+            s,
+            TxStatusV2::Finalized {
+                block_height: 5,
+                ..
+            }
+        ));
     }
 
     // ------- TxStatusV2 JSON wire shape ------------------------------------
@@ -9679,11 +9711,84 @@ mod phase_0b_rpc_tests {
 
     #[test]
     fn tx_status_v2_json_shape_finalized() {
-        let json = serde_json::to_value(&TxStatusV2::Finalized { block_height: 100 }).unwrap();
+        let v = TxStatusV2::Finalized {
+            block_height: 100,
+            finality_mechanism: FinalityMechanism::LocalDepth.name().to_string(),
+        };
+        let json = serde_json::to_value(&v).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({ "kind": "finalized", "block_height": 100 })
+            serde_json::json!({
+                "kind": "finalized",
+                "block_height": 100,
+                "finality_mechanism": "local-depth"
+            })
         );
+    }
+
+    /// #270: the label is ADDED. Every key the `Finalized` shape had before
+    /// keeps its value, and a reader that knows only those keys — SNIP's
+    /// `TxStatusV2` — still decodes it, because neither side denies unknown
+    /// fields.
+    #[test]
+    fn tx_status_v2_finalized_label_is_additive() {
+        let json = serde_json::to_value(classify_tx_status(
+            Some(&mk_receipt(TxStatus::Success, 100)),
+            false,
+            |_| true,
+            FinalityMechanism::LocalDepth,
+        ))
+        .unwrap();
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj["kind"], "finalized");
+        assert_eq!(obj["block_height"], 100);
+        assert_eq!(obj["finality_mechanism"], "local-depth");
+        assert_eq!(obj.len(), 3, "exactly one key added: {json}");
+
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum PreLabelReader {
+            Finalized { block_height: u64 },
+        }
+        assert_eq!(
+            serde_json::from_value::<PreLabelReader>(json).unwrap(),
+            PreLabelReader::Finalized { block_height: 100 }
+        );
+    }
+
+    /// The statuses that make no finality claim are byte-for-byte unchanged.
+    #[test]
+    fn tx_status_v2_other_kinds_carry_no_label() {
+        for (status, expected) in [
+            (
+                classify_tx_status(None, false, |_| true, FinalityMechanism::LocalDepth),
+                serde_json::json!({ "kind": "unknown" }),
+            ),
+            (
+                classify_tx_status(None, true, |_| true, FinalityMechanism::LocalDepth),
+                serde_json::json!({ "kind": "pending" }),
+            ),
+            (
+                classify_tx_status(
+                    Some(&mk_receipt(TxStatus::Success, 9)),
+                    false,
+                    |_| false,
+                    FinalityMechanism::LocalDepth,
+                ),
+                serde_json::json!({ "kind": "included", "block_height": 9 }),
+            ),
+            (
+                classify_tx_status(
+                    Some(&mk_receipt(TxStatus::InvalidNonce, 9)),
+                    false,
+                    |_| true,
+                    FinalityMechanism::LocalDepth,
+                ),
+                serde_json::json!({ "kind": "failed", "block_height": 9, "reason": "invalid nonce" }),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&status).unwrap(), expected);
+        }
     }
 
     #[test]
@@ -9718,7 +9823,10 @@ mod phase_0b_rpc_tests {
             TxStatusV2::Unknown,
             TxStatusV2::Pending,
             TxStatusV2::Included { block_height: 1 },
-            TxStatusV2::Finalized { block_height: 2 },
+            TxStatusV2::Finalized {
+                block_height: 2,
+                finality_mechanism: "local-depth".to_string(),
+            },
             TxStatusV2::Failed { block_height: Some(3), reason: "x".to_string() },
             TxStatusV2::Dropped,
         ];
@@ -9734,18 +9842,54 @@ mod phase_0b_rpc_tests {
 
     #[test]
     fn block_height_info_json_shape() {
-        let v = BlockHeightInfo { height: 42, finality: "finalized".to_string() };
+        let v = BlockHeightInfo {
+            height: 42,
+            finality: "finalized".to_string(),
+            finality_mechanism: Some("local-depth".to_string()),
+        };
         let json = serde_json::to_value(&v).unwrap();
-        assert_eq!(json, serde_json::json!({ "height": 42, "finality": "finalized" }));
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "height": 42,
+                "finality": "finalized",
+                "finality_mechanism": "local-depth"
+            })
+        );
+    }
+
+    /// The `"latest"` view makes no finality claim, so it carries no label and
+    /// its JSON is exactly what it was before #270.
+    #[test]
+    fn block_height_info_latest_json_shape_is_unchanged() {
+        let v = BlockHeightInfo {
+            height: 7,
+            finality: "latest".to_string(),
+            finality_mechanism: None,
+        };
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "height": 7, "finality": "latest" })
+        );
     }
 
     #[test]
     fn block_height_info_round_trip() {
-        let v = BlockHeightInfo { height: 7, finality: "latest".to_string() };
+        let v = BlockHeightInfo {
+            height: 7,
+            finality: "latest".to_string(),
+            finality_mechanism: None,
+        };
         let s = serde_json::to_string(&v).unwrap();
         let back: BlockHeightInfo = serde_json::from_str(&s).unwrap();
         assert_eq!(back.height, 7);
         assert_eq!(back.finality, "latest");
+        assert_eq!(back.finality_mechanism, None);
+        // A response from a node without the label still decodes.
+        let old: BlockHeightInfo =
+            serde_json::from_str(r#"{"height":42,"finality":"finalized"}"#).unwrap();
+        assert_eq!(old.finality_mechanism, None);
     }
 
     // ------- NodeRecordInfo JSON wire shape (Ask 15) ------------------------

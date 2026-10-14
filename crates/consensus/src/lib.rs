@@ -7,9 +7,10 @@
 //! - **Round-robin proposer selection**: Validators take turns proposing blocks
 //!   based on `validators[height % N]` where N is the validator count.
 //!
-//! - **Probabilistic finality**: Blocks become finalized after `finality_depth`
-//!   confirmations (default: 6 blocks). This provides high confidence against
-//!   reorganization while allowing fast block times.
+//! - **Local-depth finality**: a block becomes finalized on this node once its
+//!   own head is `finality_depth` blocks above it (`ChainParams::finality_depth`;
+//!   3 when genesis leaves it unset, 6 in the repository's `genesis.json`). See
+//!   the finality model below: this is not certified network finality.
 //!
 //! - **Longest chain fork choice**: In case of competing forks, the chain with
 //!   the most blocks wins, with ties broken by lower block hash.
@@ -19,17 +20,30 @@
 //!
 //! ## Finality Model
 //!
-//! Unlike BFT consensus with instant finality, PoA uses depth-based finality:
+//! Finality is local confirmation depth: the consensus configuration's finality
+//! rule `0x0011` is `FINALITY_LOCAL_DEPTH`, and RPC responses that say
+//! "finalized" label it `finality_mechanism: "local-depth"`
+//! ([`FinalityMechanism`]). It is NOT certified network finality (#270):
 //!
-//! - A block at height H is finalized when the chain reaches height H + finality_depth
-//! - Finalized blocks cannot be reverted by reorganization
-//! - The `finalized_height()` and `is_finalized()` methods track finality state
-//! - Finality state is persisted to storage for crash recovery
+//! - A block at height H is finalized on THIS node when its own head reaches
+//!   H + finality_depth. No votes are collected and no certificate exists, so
+//!   another node can hold a different finalized height, and no peer can prove
+//!   to a caller that a height is final.
+//! - Fork choice refuses a reorganization that would unwind a block at or below
+//!   the local finalized height. The operator `rollback` command is not bound by
+//!   it: rolling back below the finalized height lowers the stored finalized
+//!   height to the rollback target (`reorg::execute_rollback`).
+//! - The `finalized_height()` and `is_finalized()` methods track finality state.
+//! - Finality state is persisted to storage for crash recovery, as two metadata
+//!   writes outside the block's own batch; a node that cannot read it back
+//!   restarts from finalized height 0 (#270).
 //!
 //! ## Experimental: Byzantine Fault Tolerant (BFT)
 //!
 //! A Tendermint-style BFT implementation exists in the `bft` module but is
-//! **not yet production-ready**. It includes:
+//! **not production-ready and does not provide finality**: it aggregates, stores
+//! and verifies no certificate. A node configured with `engine = "bft"` refuses
+//! to start (#271). It includes:
 //!
 //! - Two-phase voting (prevote + precommit)
 //! - View change mechanism for liveness
@@ -51,7 +65,7 @@ pub mod engine;
 pub mod poa;
 
 pub use bft::BftEngine;
-pub use engine::{ConsensusEngine, ConsensusEvent, ConsensusQuery};
+pub use engine::{ConsensusEngine, ConsensusEvent, ConsensusQuery, FinalityMechanism};
 pub use poa::PoAEngine;
 
 use thiserror::Error;

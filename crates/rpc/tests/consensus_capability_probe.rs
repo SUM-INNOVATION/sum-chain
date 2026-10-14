@@ -19,7 +19,7 @@
 //! calling a method it was handed is not a boundary.
 //!
 //! The handle is now `Arc<dyn ConsensusQuery>` (`crates/consensus/src/engine.rs`),
-//! whose members are exactly the eight reads `crates/rpc/src/server.rs`
+//! whose members are exactly the nine reads `crates/rpc/src/server.rs`
 //! performs. The mistake no longer has a representation.
 //!
 //! # What this file establishes, precisely
@@ -171,7 +171,7 @@ fn the_probe_harness_accepts_valid_code() {
     let (ok, stderr) = compile_with(QUERY_CONTROL, &rlib);
     assert!(
         ok,
-        "the harness cannot compile the eight reads the RPC server performs, so \
+        "the harness cannot compile the reads the RPC server performs, so \
          its rejections prove nothing:\n{stderr}"
     );
 }

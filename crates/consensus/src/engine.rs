@@ -15,7 +15,10 @@ pub enum ConsensusEvent {
     BlockProduced(Block),
     /// A new block was imported from the network
     BlockImported(Block),
-    /// A block was finalized (can't be reverted)
+    /// A block reached this node's local finality: its head is now
+    /// `finality_depth` blocks above it (see [`FinalityMechanism::LocalDepth`]).
+    /// Not certified network finality: fork choice will not unwind it, but the
+    /// operator rollback command can (#270).
     BlockFinalized(Hash, BlockHeight),
     /// Chain reorganization occurred
     Reorg {
@@ -88,6 +91,55 @@ pub trait ConsensusQuery: Send + Sync {
 
     /// Get the finality depth (number of confirmations required)
     fn finality_depth(&self) -> u64;
+
+    /// How this engine decides what `finalized_height`, `finalized_hash` and
+    /// `is_finalized` report. Every RPC response that says "finalized" carries
+    /// its name, so a caller is told what kind of finality it is given (#270).
+    fn finality_mechanism(&self) -> FinalityMechanism;
+}
+
+/// What a finalized height reported by a [`ConsensusQuery`] means.
+///
+/// Named by the consensus configuration's finality rule (`0x0011`), so
+/// `chain_getConsensusConfig` and every finality-bearing RPC response use one
+/// name for one rule.
+///
+/// Neither mechanism is certified network finality. No votes are collected
+/// and no certificate exists, so another node may hold a different finalized
+/// height, and nothing a peer sends can prove that a height is final.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalityMechanism {
+    /// Finality rule `0x0011` =
+    /// [`FINALITY_LOCAL_DEPTH`](crate::consensus_config::fields::FINALITY_LOCAL_DEPTH),
+    /// the PoA engine's rule: height `h` is final on THIS node once its own
+    /// head reaches `h + finality_depth`. Fork choice refuses to unwind at or
+    /// below it, but the operator `rollback` command lowers it with the tip.
+    LocalDepth,
+    /// No finality rule backs the reported heights: the experimental BFT
+    /// engine, which reports its own head as final although it aggregates,
+    /// stores and verifies no certificate. A node refuses to start it (#271),
+    /// so no serving node reports this.
+    NoRule,
+}
+
+impl FinalityMechanism {
+    /// The finality rule code (`0x0011`) this mechanism is, or `None` when no
+    /// rule describes it.
+    pub const fn rule_code(self) -> Option<u8> {
+        match self {
+            Self::LocalDepth => Some(crate::consensus_config::fields::FINALITY_LOCAL_DEPTH),
+            Self::NoRule => None,
+        }
+    }
+
+    /// The stable name RPC responses carry: for a rule, the name
+    /// `chain_getConsensusConfig` reports as `rules.finality`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::LocalDepth => "local-depth",
+            Self::NoRule => "none",
+        }
+    }
 }
 
 /// Consensus engine trait

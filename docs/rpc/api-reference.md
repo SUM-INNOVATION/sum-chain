@@ -346,19 +346,61 @@ Each validator object:
 
 ---
 
+#### Finality semantics
+
+"Finalized" in every response below means **this node's local confirmation
+depth**: a block is finalized on the answering node once that node's own head is
+`finality_depth` blocks above it (consensus-configuration finality rule `0x0011`,
+reported by `chain_getConsensusConfig` as `rules.finality = "local-depth"`).
+
+Local-depth finality is **not certified network finality** (#270):
+
+- No validator votes are collected and no finality certificate exists, so a
+  caller cannot verify a finalized height, and another node may report a
+  different one.
+- Fork choice will not reorganize at or below the node's local finalized height,
+  but the operator `rollback` command can: rolling back below it lowers the
+  stored finalized height to the rollback target.
+- The experimental BFT engine is refused at startup (#271); no serving node
+  reports BFT ("depth 0" or "immediate") finality.
+
+Responses that make a finality claim carry `finality_mechanism`, the name of the
+rule behind it (`"local-depth"` under protocol v1). The field is additive:
+existing fields, their names and values, and the `"latest"` / `"finalized"`
+tokens are unchanged.
+
+| Method | Where the label appears |
+|--------|-------------------------|
+| `get_finality` | always |
+| `chain_getBlockHeight("finalized")` | `{height, finality: "finalized", finality_mechanism}`; the `"latest"` view (`{height, finality: "latest"}`) carries no label |
+| `chain_getTransactionStatus` | `{kind: "finalized", block_height, finality_mechanism}`; the other kinds carry no label |
+| `is_block_finalized` | not labelled (it returns a bare boolean); the same local-depth rule applies |
+
+---
+
 #### `get_finality`
 
-Returns finality information.
+Returns this node's finality information.
 
 **Parameters:** None
 
 **Returns:** Finality object
 
+| Field | Type | Description |
+|-------|------|-------------|
+| `finalized_height` | integer | This node's local finalized height |
+| `finalized_hash` | string | Hash of the block at `finalized_height` |
+| `current_height` | integer | This node's head |
+| `finality_depth` | integer | Confirmations the local-depth rule requires |
+| `pending_finality` | integer | Blocks above `finalized_height` |
+| `finality_mechanism` | string | `"local-depth"`: local confirmation depth, not certified network finality |
+
 ---
 
 #### `is_block_finalized`
 
-Checks if a block is finalized.
+Checks if a block is at or below this node's local finalized height (see
+[Finality semantics](#finality-semantics)).
 
 **Parameters:**
 1. `height` (integer) - Block height

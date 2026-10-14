@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 
 use super::types::{ConsensusState, Step, TimeoutConfig, View, VoteType};
 use super::vote::{Vote, VoteSet};
-use crate::engine::{ConsensusEngine, ConsensusEvent, ConsensusQuery};
+use crate::engine::{ConsensusEngine, ConsensusEvent, ConsensusQuery, FinalityMechanism};
 use crate::{ConsensusError, Result};
 
 /// BFT consensus engine
@@ -361,6 +361,12 @@ impl ConsensusQuery for BftEngine {
 
     fn finality_depth(&self) -> u64 {
         0 // Immediate finality in BFT
+    }
+
+    /// The heights above are this node's own head; no certificate backs them
+    /// (#270), and a node refuses to start this engine (#271).
+    fn finality_mechanism(&self) -> FinalityMechanism {
+        FinalityMechanism::NoRule
     }
 }
 

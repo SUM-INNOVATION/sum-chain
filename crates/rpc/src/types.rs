@@ -709,20 +709,25 @@ pub struct ArchiveUnbondingInfo {
 /// which view was returned. Callers that don't care can leave `finality` unset
 /// in the request and will get the latest height.
 ///
-/// **Consensus-mode caveat:** PoA and BFT engines have different `current_height()`
-/// semantics. PoA returns the height of the most recently produced block (head).
-/// BFT returns the next view height (one past head). So under BFT,
-/// `chain_getBlockHeight("latest")` returns `head + 1`, while `("finalized")`
-/// returns `head` (immediate finality). For uses that need a height matching
-/// an actual produced block (e.g. expiry calculations against block contents),
-/// **prefer `"finalized"`** — it returns a real block height under both engines.
-/// This matches the behavior of pre-existing chain RPCs (`eth_blockNumber`,
-/// `sum_blockNumber`) which also pass `current_height()` straight through.
+/// **What "finalized" means:** the highest block this node has finalized under
+/// the PoA engine's local-depth rule (a block is final once this node's own
+/// head is `finality_depth` blocks above it). It is NOT certified network
+/// finality: there are no votes and no certificate, another node may report a
+/// different height, and the operator rollback command can lower it (#270). The `"finalized"` view
+/// says so in `finality_mechanism`; the `"latest"` view makes no finality claim
+/// and carries no label. The experimental BFT engine, whose `current_height()`
+/// is one past its head, is refused at startup (#271), so `"latest"` is the
+/// head on every serving node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockHeightInfo {
     pub height: BlockHeight,
     /// "finalized" or "latest" — echoes which view the caller asked for.
     pub finality: String,
+    /// On the `"finalized"` view only: how this node decided `height` is final,
+    /// as [`sumchain_consensus::FinalityMechanism::name`] — `"local-depth"`
+    /// under protocol v1. Absent from the `"latest"` view, which is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finality_mechanism: Option<String>,
 }
 
 /// `chain_getActivationStatus` — the activation parameters this node is running
@@ -937,18 +942,31 @@ pub enum TxStatusV2 {
     Pending,
     /// Included in a block but not yet finalized — may reorg under PoA.
     Included { block_height: BlockHeight },
-    /// Finalized per consensus (depth-aware: depth=3 PoA, depth=0 BFT).
-    Finalized { block_height: BlockHeight },
+    /// The block is at or below this node's local finalized height (the
+    /// local-depth rule: `finality_depth` blocks on top of it on THIS node).
+    /// Not certified network finality (#270).
+    Finalized {
+        block_height: BlockHeight,
+        /// How this node decided the block is final, as
+        /// [`sumchain_consensus::FinalityMechanism::name`] — `"local-depth"`
+        /// under protocol v1. Added beside the existing fields, which keep
+        /// their names and values.
+        finality_mechanism: String,
+    },
     /// Executed and reverted, or rejected pre-execution.
     Failed { block_height: Option<BlockHeight>, reason: String },
     /// Evicted from mempool without inclusion. Reserved; not currently emitted.
     Dropped,
 }
 
-/// Finality info for RPC responses
+/// Finality info for `get_finality`.
+///
+/// Every height here is this node's local view (#270): `finalized_height` is
+/// the highest block this node has finalized under the local-depth rule, not a
+/// height any validator quorum certified. `finality_mechanism` names the rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinalityInfo {
-    /// Last finalized block height
+    /// Last finalized block height (local finality, see above)
     pub finalized_height: BlockHeight,
     /// Last finalized block hash
     pub finalized_hash: String,
@@ -958,6 +976,10 @@ pub struct FinalityInfo {
     pub finality_depth: u64,
     /// Number of blocks awaiting finality
     pub pending_finality: u64,
+    /// How this node decides finality, as
+    /// [`sumchain_consensus::FinalityMechanism::name`] — `"local-depth"` under
+    /// protocol v1: local confirmation depth, not certified network finality.
+    pub finality_mechanism: String,
 }
 
 /// Peer info for RPC responses

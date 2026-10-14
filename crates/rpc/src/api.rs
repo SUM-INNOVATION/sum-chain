@@ -492,7 +492,10 @@ pub trait SumChainApi {
     #[method(name = "node_info")]
     async fn node_info(&self) -> Result<NodeInfo, jsonrpsee::types::ErrorObjectOwned>;
 
-    /// Get finality information
+    /// Get finality information: this node's local finalized height and hash,
+    /// its head, `finality_depth`, and `finality_mechanism` — `"local-depth"`
+    /// under protocol v1: local confirmation depth, not certified network
+    /// finality (#270).
     #[method(name = "get_finality")]
     async fn get_finality(&self) -> Result<FinalityInfo, jsonrpsee::types::ErrorObjectOwned>;
 
@@ -620,6 +623,11 @@ pub trait SumChainApi {
         &self,
     ) -> Result<crate::types::ConsensusConfigInfo, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// `"latest"` (the default) returns the head; `"finalized"` returns this
+    /// node's local finalized height and names the rule in
+    /// `finality_mechanism` (`"local-depth"`: local confirmation depth, not
+    /// certified network finality, #270). The `"latest"` response carries no
+    /// label.
     #[method(name = "chain_getBlockHeight")]
     async fn chain_get_block_height(
         &self,
@@ -631,9 +639,12 @@ pub trait SumChainApi {
     ///
     /// Returns one of: `Unknown` (never seen), `Pending` (in mempool),
     /// `Included { block_height }` (in a block, not finalized),
-    /// `Finalized { block_height }` (finalized per consensus mode —
-    /// depth=3 under PoA, depth=0 under BFT), or `Failed { ... }`.
-    /// `Dropped` is reserved but not currently returned.
+    /// `Finalized { block_height, finality_mechanism }` (at or below this
+    /// node's local finalized height: `finality_depth` blocks on top of it on
+    /// THIS node — `"local-depth"`, not certified network finality, #270), or
+    /// `Failed { ... }`. `Dropped` is reserved but not currently returned.
+    /// The experimental BFT engine is refused at startup (#271), so no serving
+    /// node reports BFT finality.
     #[method(name = "chain_getTransactionStatus")]
     async fn chain_get_transaction_status(
         &self,

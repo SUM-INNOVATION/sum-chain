@@ -34,7 +34,8 @@ use tracing::{debug, info, warn};
 
 use crate::branch_switch::{adoption_batch, validate_replacement, BranchLimits, SwitchError};
 use crate::engine::{
-    ConsensusEngine, ConsensusEvent, ConsensusQuery, ForkChoice, LongestChainForkChoice,
+    ConsensusEngine, ConsensusEvent, ConsensusQuery, FinalityMechanism, ForkChoice,
+    LongestChainForkChoice,
 };
 use crate::reorg::plan_reorg_within_undo_history;
 use crate::{ConsensusError, Result};
@@ -2030,6 +2031,12 @@ impl ConsensusQuery for PoAEngine {
 
     fn finality_depth(&self) -> u64 {
         self.params.finality_depth
+    }
+
+    /// `check_finality` is the local-depth rule: it finalizes every block at
+    /// or below `own head - finality_depth`, with no votes and no certificate.
+    fn finality_mechanism(&self) -> FinalityMechanism {
+        FinalityMechanism::LocalDepth
     }
 }
 

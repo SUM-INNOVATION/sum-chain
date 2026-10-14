@@ -1508,7 +1508,13 @@ impl RuleNames {
         };
         RuleNames {
             engine: name(0x0010, &[(ENGINE_POA, "proof-of-authority")]),
-            finality: name(0x0011, &[(FINALITY_LOCAL_DEPTH, "local-depth")]),
+            finality: name(
+                0x0011,
+                &[(
+                    FINALITY_LOCAL_DEPTH,
+                    crate::engine::FinalityMechanism::LocalDepth.name(),
+                )],
+            ),
             finality_depth: match config.and_then(|c| c.get(0x0103)) {
                 Some(Value::U64(d)) => Some(*d),
                 _ => None,
