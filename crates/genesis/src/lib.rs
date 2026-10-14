@@ -4421,11 +4421,10 @@ pub struct Genesis {
 ///
 /// An unknown field is refused, and the error names it; before, it was ignored,
 /// so a parameter written next to `params` instead of inside it, or a
-/// misspelled top-level name, vanished without a word. The one exception is
-/// `_comment`: a free-form annotation, accepted in any shape and ignored, as
-/// it always was, because the tracked network template
-/// (`genesis/mainnet_genesis.json`) carries one at this level. It is accepted
-/// here only; inside `params` it is an unknown field like any other.
+/// misspelled top-level name, vanished without a word. The one exception is a
+/// top-level [`GenesisComment`], because the tracked network template
+/// (`genesis/mainnet_genesis.json`) carries one. Inside `params` `_comment` is
+/// an unknown field like any other.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GenesisJson {
@@ -4436,7 +4435,40 @@ struct GenesisJson {
     alloc: HashMap<String, Balance>,
     params: ChainParams,
     #[serde(rename = "_comment", default)]
-    _comment: serde::de::IgnoredAny,
+    _comment: GenesisComment,
+}
+
+/// The top-level `_comment` of a genesis document: text for the people who
+/// edit the file, and metadata only (#268).
+///
+/// It must be a JSON string; any other value, `null` included, is refused with
+/// an error that names `_comment`. Its text is dropped when the document is
+/// read, so it is not part of [`Genesis`], and nothing derived from a
+/// [`Genesis`] (the genesis block and its hash, the genesis state, the
+/// activation and protocol digests, the consensus-configuration commitment)
+/// depends on it.
+#[derive(Default)]
+struct GenesisComment;
+
+impl<'de> Deserialize<'de> for GenesisComment {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct Text;
+        impl serde::de::Visitor<'_> for Text {
+            type Value = GenesisComment;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("`_comment` as a string (it is a text annotation, and nothing else)")
+            }
+            fn visit_str<E: serde::de::Error>(
+                self,
+                _text: &str,
+            ) -> std::result::Result<GenesisComment, E> {
+                Ok(GenesisComment)
+            }
+        }
+        deserializer.deserialize_str(Text)
+    }
 }
 
 impl From<GenesisJson> for Genesis {

@@ -20,12 +20,12 @@ cargo build --release
   validators/allocations) — nodes do not boot from it.
 - **Unknown genesis fields are refused.** The document, `params` and every
   structure inside `params` accept only the fields the binary defines. Anything
-  else (a misspelled gate, a parameter at the wrong level) stops the node when
-  it loads the genesis, before the data directory or database is touched, with
-  an error naming the field; only a top-level `_comment` is ignored.
-  (`sumchain rollback --genesis` opens the database first, creating an empty
-  one if the data directory has none, and refuses before it writes any state
-  or prompts.) Older binaries ignored such a field. This changes only which
+  else (a misspelled gate, a parameter at the wrong level) stops the command
+  when it loads the genesis, before the data directory or database is created
+  or touched, with an error naming the field. That holds for `run`, `init`,
+  `acknowledge-consensus-config` and `rollback --genesis`. The one exception is
+  a top-level `_comment`, which must be a string and is ignored (any other
+  value, `null` included, is refused). Older binaries ignored such a field. This changes only which
   files are accepted: a file that was accepted before is read to the same
   values, so its genesis hash, activation and protocol digests and
   consensus-configuration commitment do not change.
@@ -46,7 +46,9 @@ cargo build --release
   still a change to a file that must stay byte-identical across nodes, so make
   it on every node together. Correcting a misspelled gate instead *changes*
   the rules (it sets a gate that is unset today) and is an activation decision,
-  not an upgrade step.
+  not an upgrade step. A `_comment` error (a top-level `_comment` that is not a
+  string) is fixed the same way, by deleting it or making it a string, on every
+  node together; the node never read it.
 
 ## Joining an Existing Network (Bootnodes)
 

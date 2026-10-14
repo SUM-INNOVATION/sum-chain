@@ -237,23 +237,69 @@ fn a_parameter_at_the_wrong_level_is_refused() {
     );
 }
 
-/// `_comment` is accepted at the top level of the document only, and ignored,
-/// as before: `genesis/mainnet_genesis.json` carries one. Anywhere else it is
-/// an unknown field like any other.
+/// A top-level `_comment` is text and metadata only:
+/// `genesis/mainnet_genesis.json` carries one. Its text is dropped when the
+/// document is read, so documents that differ only in it, or in whether they
+/// have one, read to the same genesis and the same genesis block.
 #[test]
-fn a_top_level_comment_is_accepted_and_ignored() {
-    let plain = full_genesis().to_json().unwrap();
-    for comment in [json!("a note"), json!({"any": ["shape"]}), Value::Null] {
-        let text = with_extra("", "_comment", comment);
-        let g = Genesis::from_json(&text).expect("a top-level _comment is accepted");
+fn a_top_level_comment_is_text_and_metadata_only() {
+    let plain = full_genesis();
+    let plain_json = plain.to_json().unwrap();
+    let plain_block = plain.create_genesis_block().unwrap().hash();
+    for text in ["a note", "", "TEMPLATE ONLY — not a production genesis"] {
+        let g = Genesis::from_json(&with_extra("", "_comment", json!(text)))
+            .expect("a top-level string _comment is accepted");
+        assert_eq!(g.to_json().unwrap(), plain_json, "_comment is not kept");
         assert_eq!(
-            g.to_json().unwrap(),
-            plain,
-            "_comment is not kept or interpreted"
+            g.create_genesis_block().unwrap().hash(),
+            plain_block,
+            "_comment does not reach the genesis block"
         );
     }
+}
+
+/// A top-level `_comment` that is not a string is refused, and the error names
+/// `_comment`: it is an annotation, not a place to park data.
+#[test]
+fn a_top_level_comment_that_is_not_text_is_refused() {
+    for value in [
+        Value::Null,
+        json!({"any": ["shape"]}),
+        json!(["a", "list"]),
+        json!(7),
+        json!(true),
+    ] {
+        let text = with_extra("", "_comment", value.clone());
+        match Genesis::from_json(&text) {
+            Err(GenesisError::Json(e)) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("`_comment` as a string"),
+                    "{value}: the error must name `_comment`: {msg}"
+                );
+            }
+            other => panic!("a `_comment` of {value} must be refused, got {other:?}"),
+        }
+    }
+}
+
+/// The exception is exactly a top-level `_comment`. Inside any nested object
+/// it is an unknown field, and so is every other annotation-like name at the
+/// top level.
+#[test]
+fn only_a_top_level_comment_is_excepted() {
     for (path, _) in &OBJECTS[1..] {
         assert_refused_naming(&with_extra(path, "_comment", json!("x")), "_comment");
+    }
+    for name in [
+        "comment",
+        "_comments",
+        "_Comment",
+        "__comment",
+        "_note",
+        "//",
+    ] {
+        assert_refused_naming(&with_extra("", name, json!("x")), name);
     }
 }
 

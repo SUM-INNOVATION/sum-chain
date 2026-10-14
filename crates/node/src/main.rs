@@ -946,6 +946,32 @@ async fn main() -> Result<()> {
 
             init_logging("info", false)?;
 
+            // Where this chain's generic journal becomes authoritative. From the
+            // genesis document when one is supplied, so a pinned gate is honoured
+            // exactly; otherwise observed from the journal history on disk, which
+            // is the production `None` rule.
+            //
+            // The document is read BEFORE the database is opened, as `run`,
+            // `init` and `acknowledge-consensus-config` read theirs: one this
+            // binary refuses (an unknown field, #268) stops the command before
+            // the data directory or database is created or touched.
+            let configured = match &genesis {
+                Some(path) => {
+                    let g = sumchain_genesis::Genesis::from_file(path)
+                        .with_context(|| format!("failed to load genesis from {:?}", path))?;
+                    Some((
+                        ActivationSource::from_configured_height(
+                            g.params.application_journal_enabled_from_height,
+                        ),
+                        SubsystemGates {
+                            compute_pool: g.params.compute_pool_enabled_from_height,
+                            beacon: g.params.beacon_enabled_from_height,
+                        },
+                    ))
+                }
+                None => None,
+            };
+
             info!("Opening database at {:?}", data_dir);
             let db = std::sync::Arc::new(Database::open_default(&data_dir)?);
 
@@ -956,24 +982,8 @@ async fn main() -> Result<()> {
             let format = sumchain_storage::journal::validate_startup(&db)
                 .context("application journal format check failed")?;
 
-            // Where this chain's generic journal becomes authoritative. From the
-            // genesis document when one is supplied, so a pinned gate is honoured
-            // exactly; otherwise observed from the journal history on disk, which
-            // is the production `None` rule.
-            let (source, gates) = match &genesis {
-                Some(path) => {
-                    let g = sumchain_genesis::Genesis::from_file(path)
-                        .with_context(|| format!("failed to load genesis from {:?}", path))?;
-                    (
-                        ActivationSource::from_configured_height(
-                            g.params.application_journal_enabled_from_height,
-                        ),
-                        SubsystemGates {
-                            compute_pool: g.params.compute_pool_enabled_from_height,
-                            beacon: g.params.beacon_enabled_from_height,
-                        },
-                    )
-                }
+            let (source, gates) = match configured {
+                Some(configured) => configured,
                 None => {
                     println!(
                         "NOTE: no --genesis given, so the journal activation boundary is \

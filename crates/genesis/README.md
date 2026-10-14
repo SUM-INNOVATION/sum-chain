@@ -18,7 +18,7 @@ bootstrap a network, plus helpers to compute the genesis state root and block.
   `MessagingParams`, `DocClassParams`.
 - Unknown fields are refused in the genesis document, in `params` and in every
   structure nested in it, and the error names the field; only a top-level
-  `_comment` is ignored. This narrows which documents are accepted and never
+  `_comment` string is accepted, and ignored. This narrows which documents are accepted and never
   changes the value read from one that is accepted. Operators: see the
   pre-upgrade check in [`docs/operator-guide.md`](../../docs/operator-guide.md).
 - `NodeConfig` — node config loader (`from_file`/`to_file`).

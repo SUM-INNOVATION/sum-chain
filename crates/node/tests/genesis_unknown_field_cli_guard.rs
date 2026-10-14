@@ -6,8 +6,8 @@
 //!
 //! `sumchain run` parses the genesis (`Genesis::from_file`) before it calls
 //! `Node::with_rpc_config`, whose first disk access is creating the data
-//! directory; `init` and `acknowledge-consensus-config` also parse it before
-//! opening the database.
+//! directory; `init`, `acknowledge-consensus-config` and `rollback --genesis`
+//! also parse it before opening the database.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -131,7 +131,7 @@ fn assert_refused_naming(args: &[&str], field: &str) {
 }
 
 #[test]
-fn run_and_init_refuse_an_unknown_field_before_creating_anything() {
+fn run_init_and_rollback_refuse_an_unknown_field_before_creating_anything() {
     let dir = tempfile::TempDir::new().unwrap();
     for (field, in_params) in [
         ("beacon_enabled_from_heigth", true),
@@ -143,6 +143,7 @@ fn run_and_init_refuse_an_unknown_field_before_creating_anything() {
         for cmd in [
             vec!["run", "--config", config.to_str().unwrap()],
             vec!["init"],
+            vec!["rollback", "--to-height", "0", "--yes"],
         ] {
             let mut args = cmd.clone();
             args.extend([
@@ -194,6 +195,16 @@ fn an_existing_database_is_not_opened_or_modified() {
             data_arg,
         ],
         vec!["init", "--genesis", bad, "--data-dir", data_arg],
+        vec![
+            "rollback",
+            "--genesis",
+            bad,
+            "--data-dir",
+            data_arg,
+            "--to-height",
+            "0",
+            "--yes",
+        ],
         vec![
             "acknowledge-consensus-config",
             "--genesis",
