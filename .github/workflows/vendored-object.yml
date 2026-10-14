@@ -8,6 +8,9 @@ name: vendored-object
 #     advisories against a path crate, so this is the advisory check that covers
 #     it. It also runs daily, so a new advisory surfaces without a PR. (The same
 #     advisories check runs in rust-ci's supply-chain-audit on every PR.)
+#   * wasmer artifacts base vs head: Module::serialize() of the test WAT corpus,
+#     plain and metered Singlepass, is byte-identical at the PR's merge base and
+#     head, on x86_64 and aarch64 Linux (scripts/compare-wasmer-artifacts.sh).
 
 on:
   pull_request:
@@ -15,8 +18,11 @@ on:
     paths:
       - Cargo.lock
       - Cargo.toml
+      - crates/sumc-runtime/Cargo.toml
       - crates/third_party/**
+      - crates/sumc-runtime/examples/artifact_hash.rs
       - scripts/check-vendored-object.sh
+      - scripts/compare-wasmer-artifacts.sh
       - .cargo/audit.toml
       - .github/workflows/vendored-object.yml
   schedule:
@@ -47,3 +53,34 @@ jobs:
 
       - name: No RustSec advisory against crates.io object 0.32.2, the vendored copy's identity
         run: bash scripts/check-vendored-object.sh advisories
+
+  artifacts:
+    name: wasmer artifacts base vs head (${{ matrix.arch }})
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      # librocksdb-sys (via sumc-runtime -> sumchain-storage); see rust-ci.yml.
+      CXXFLAGS: "-include cstdint"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Set up pinned toolchain
+        run: rustup show
+
+      - name: Compiled artifacts at the merge base and the head are byte-identical
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/compare-wasmer-artifacts.sh "$(git merge-base "$BASE_SHA" "$HEAD_SHA")" "$HEAD_SHA"
