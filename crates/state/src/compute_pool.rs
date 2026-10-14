@@ -2520,6 +2520,90 @@ mod tests {
         assert_eq!(repeats.job_entry_count(&job(1)), 4);
     }
 
+    /// Boundary 1 with relation 4's numbers: `max_retention_files_per_job = 2`
+    /// and `R_max = 3` size the cap at 2 × (2 + 3) = 10 entries, and the cap
+    /// is applied to each job. Both epoch readings (D-E) are shown; neither is
+    /// chosen.
+    ///
+    /// Relation 4 counts `R_max` archive entries per file. A tracker holds one
+    /// entry per archive in its dependency set, which is `R` archives only when
+    /// every chunk of the file is on the same `R` (a one-chunk file, say).
+    /// Rendezvous assignment spreads a multi-chunk file over up to
+    /// `min(N, R · chunks)` archives under either reading; the last case below
+    /// shows relation 4 undercounting such a file. No dependency-set size is
+    /// assumed by the kernel: the caller passes the archives.
+    #[test]
+    fn reverse_index_cap_worked_example_sized_by_relation_4() {
+        let (files_per_job, r_max) = (2u64, 3u64);
+        let cap = files_per_job * (2 + r_max);
+        assert_eq!(cap, 10);
+
+        // One epoch and three archives per file (each file's chunks all on the
+        // same three): 1 + 1 + 3 = 5 entries per tracker, so a job's two files
+        // fill its 10 exactly.
+        let mut idx = RetentionReverseIndex::new();
+        idx.insert_tracker(tk(1), index_record(1, 9, 3, &[100], &[1, 2, 3]), cap)
+            .unwrap();
+        idx.insert_tracker(tk(2), index_record(1, 8, 3, &[100], &[4, 5, 6]), cap)
+            .unwrap();
+        assert_eq!(idx.job_entry_count(&job(1)), 10);
+
+        // A second job has its own 10. The index now holds 20 entries; a cap
+        // over the whole index (the other reading, not implemented) of 10 would
+        // have refused this job.
+        idx.insert_tracker(tk(3), index_record(2, 9, 3, &[100], &[1, 2, 3]), cap)
+            .unwrap();
+        idx.insert_tracker(tk(4), index_record(2, 8, 3, &[100], &[4, 5, 6]), cap)
+            .unwrap();
+        assert_eq!(idx.job_entry_count(&job(2)), 10);
+
+        // A reassignment at 210 moves file 9's chunks from archive 3 to
+        // archive 7. Under the union reading the tracker carries both epochs
+        // and all four archives, 1 + 2 + 4 = 7, so job 1 would hold 12 > 10:
+        // refused, and nothing changes (fail-closed, at a cost in liveness).
+        let before = idx.clone();
+        assert_eq!(
+            idx.replace_dependencies(
+                &tk(1),
+                BTreeSet::from([100, 210]),
+                [1, 2, 3, 7].into_iter().map(addr).collect(),
+                cap,
+            ),
+            Err(PoolError::ReverseIndexCapExceeded {
+                entries: 12,
+                cap: 10
+            })
+        );
+        assert_eq!(idx, before);
+        // Under the latest-assignment reading the same update fits: 1 + 1 + 3.
+        idx.replace_dependencies(
+            &tk(1),
+            BTreeSet::from([210]),
+            [1, 2, 7].into_iter().map(addr).collect(),
+            cap,
+        )
+        .unwrap();
+        assert_eq!(idx.job_entry_count(&job(1)), 10);
+
+        // A multi-chunk file at R = 3 whose chunks are spread over all ten
+        // archives of the snapshot: one epoch (either reading), ten archives,
+        // 1 + 1 + 10 = 12 > 10 for a single file. Relation 4's `2 + R_max`
+        // undercounts it, and the tracker is refused.
+        let mut spread = RetentionReverseIndex::new();
+        assert_eq!(
+            spread.insert_tracker(
+                tk(5),
+                index_record(3, 7, 3, &[100], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+                cap,
+            ),
+            Err(PoolError::ReverseIndexCapExceeded {
+                entries: 12,
+                cap: 10
+            })
+        );
+        assert_eq!(spread, RetentionReverseIndex::new());
+    }
+
     #[test]
     fn reverse_index_refuses_a_repeated_key_and_a_tracker_without_epoch() {
         let mut idx = RetentionReverseIndex::new();

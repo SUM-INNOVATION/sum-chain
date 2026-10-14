@@ -3739,4 +3739,23 @@ mod replica_count_tests {
         assert!(!coverage_ok(&[], 1));
         assert!(!coverage_ok(&[5, 5], 0));
     }
+
+    /// Boundary 2: #129 defines `coverage_ok := for-all chunk: count >= R_job`.
+    /// Read literally, that holds for a file with no chunks, and for
+    /// `R_job = 0` whatever the counts, including no replica at all. The
+    /// kernel refuses each of those, and agrees with the literal reading
+    /// everywhere else. Where `R_job` is fixed for a job, and whether `0` is
+    /// refused there too, stays open.
+    #[test]
+    fn coverage_ok_refuses_what_the_literal_definition_accepts() {
+        let literal = |counts: &[u32], r_job: u32| counts.iter().all(|&count| count >= r_job);
+        let degenerate: [(&[u32], u32); 4] = [(&[], 1), (&[], 0), (&[0, 0], 0), (&[5, 5], 0)];
+        for (counts, r_job) in degenerate {
+            assert!(literal(counts, r_job), "{counts:?} at R_job {r_job}");
+            assert!(!coverage_ok(counts, r_job), "{counts:?} at R_job {r_job}");
+        }
+        for (counts, r_job) in [(&[3u32, 3][..], 3), (&[3, 2][..], 3), (&[0][..], 1), (&[1][..], 1)] {
+            assert_eq!(coverage_ok(counts, r_job), literal(counts, r_job));
+        }
+    }
 }
