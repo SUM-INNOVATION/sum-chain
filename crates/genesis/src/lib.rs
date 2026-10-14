@@ -5601,7 +5601,9 @@ mod tests {
                     RetentionActivationError::InputsUndefined(MissingInputs(vec![
                         I::PerBlockBudgetNs,
                         I::TRecomputeP99Ns,
-                        I::RMax
+                        I::RMax,
+                        I::RetentionChunkCap,
+                        I::MaxIndexedEpochs
                     ]))
                 ),
                 other => {

@@ -1,7 +1,7 @@
 //! Where the #129 retention-relation inputs come from, and when each
 //! relation is checked.
 //!
-//! [`crate::compute_pool_retention`] checks the relations over eight injected
+//! [`crate::compute_pool_retention`] checks the relations over ten injected
 //! inputs. This module supplies them from the chain's declared parameters and
 //! is called by [`crate::ChainParams::validate`], the path every loaded
 //! genesis goes through. Nothing here runs during block execution, so state
@@ -19,12 +19,14 @@
 //! | `per_block_budget_ns` (`B`) | **none** | n/a |
 //! | `t_recompute_p99_ns` | **none** | n/a |
 //! | `r_max` | **none** | n/a |
+//! | `retention_chunk_cap` | **none** | n/a |
+//! | `max_indexed_epochs` | **none** | n/a |
 //!
 //! `finality_depth` is the depth the PoA engine finalizes at. The BFT engine
 //! reports a depth of 0, so relation 2 checked against `ChainParams` is never
 //! weaker than against the engine.
 //!
-//! The three inputs without a source are [`RetentionInput`]s. Their state
+//! The five inputs without a source are [`RetentionInput`]s. Their state
 //! today is [`UnsourcedRetentionInputs::undefined`], and that is what
 //! `ChainParams::validate` passes. No value is supplied for any of them.
 //!
@@ -35,7 +37,16 @@
 //!   classifies it as not committed with no reader. Reading it here would make
 //!   it a genesis-validation input without a commitment, so it is not read.
 //! * `t_recompute_p99_ns`: a measured p99; the measurement has not been run.
-//! * `r_max`: named by the ratified text but not defined.
+//! * `r_max`: named by the ratified text but not defined. Relation 4 needs it
+//!   to bound the assignment replication factor over a tracked file's indexed
+//!   epochs ([`crate::compute_pool_retention`], "Relation 4").
+//! * `retention_chunk_cap`: no bound on the chunk count of a file admitted to
+//!   retention has been chosen. `max_chunk_count_per_file` is enforced, but at
+//!   its default it would size the reverse index at over three million entries
+//!   per file.
+//! * `max_indexed_epochs`: depends on D-E. It is 1 under the latest-assignment
+//!   reading; under the union reading it needs a reassignment limit enforced
+//!   for tracked files, which does not exist.
 //!
 //! # When each relation is checked
 //!
@@ -68,6 +79,10 @@ pub enum RetentionInput {
     TRecomputeP99Ns,
     /// `R_max`, relation 4.
     RMax,
+    /// `C_ret`, relation 4.
+    RetentionChunkCap,
+    /// `E_max`, relation 4.
+    MaxIndexedEpochs,
 }
 
 impl RetentionInput {
@@ -77,6 +92,8 @@ impl RetentionInput {
             Self::PerBlockBudgetNs => "per_block_budget_ns",
             Self::TRecomputeP99Ns => "t_recompute_p99_ns",
             Self::RMax => "r_max",
+            Self::RetentionChunkCap => "retention_chunk_cap",
+            Self::MaxIndexedEpochs => "max_indexed_epochs",
         }
     }
 
@@ -84,7 +101,7 @@ impl RetentionInput {
     pub fn relation(self) -> u8 {
         match self {
             Self::PerBlockBudgetNs | Self::TRecomputeP99Ns => 3,
-            Self::RMax => 4,
+            Self::RMax | Self::RetentionChunkCap | Self::MaxIndexedEpochs => 4,
         }
     }
 
@@ -94,26 +111,32 @@ impl RetentionInput {
             Self::PerBlockBudgetNs => "no committed source for the per-block budget B",
             Self::TRecomputeP99Ns => "no measured tracker-recompute p99",
             Self::RMax => "R_max is not defined",
+            Self::RetentionChunkCap => "no retention chunk cap is defined",
+            Self::MaxIndexedEpochs => "depends on D-E (which assignment epochs a tracker counts)",
         }
     }
 }
 
-/// The three inputs that do not come from the declared parameters. `None`
+/// The five inputs that do not come from the declared parameters. `None`
 /// means undefined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnsourcedRetentionInputs {
     pub per_block_budget_ns: Option<u64>,
     pub t_recompute_p99_ns: Option<u64>,
     pub r_max: Option<u64>,
+    pub retention_chunk_cap: Option<u64>,
+    pub max_indexed_epochs: Option<u64>,
 }
 
 impl UnsourcedRetentionInputs {
-    /// The state of this repository: none of the three has a source.
+    /// The state of this repository: none of the five has a source.
     pub fn undefined() -> Self {
         Self {
             per_block_budget_ns: None,
             t_recompute_p99_ns: None,
             r_max: None,
+            retention_chunk_cap: None,
+            max_indexed_epochs: None,
         }
     }
 
@@ -123,6 +146,8 @@ impl UnsourcedRetentionInputs {
             (self.per_block_budget_ns, RetentionInput::PerBlockBudgetNs),
             (self.t_recompute_p99_ns, RetentionInput::TRecomputeP99Ns),
             (self.r_max, RetentionInput::RMax),
+            (self.retention_chunk_cap, RetentionInput::RetentionChunkCap),
+            (self.max_indexed_epochs, RetentionInput::MaxIndexedEpochs),
         ]
         .into_iter()
         .filter_map(|(v, input)| v.is_none().then_some(input))
@@ -173,7 +198,7 @@ pub fn validate_declared(
     validate_output_availability(params.output_availability_blocks, finality_depth)
 }
 
-/// The eight relation inputs, or the undefined ones.
+/// The ten relation inputs, or the undefined ones.
 pub fn relation_inputs(
     params: &ComputePoolParamsV1,
     finality_depth: u64,
@@ -184,6 +209,8 @@ pub fn relation_inputs(
             per_block_budget_ns: Some(per_block_budget_ns),
             t_recompute_p99_ns: Some(t_recompute_p99_ns),
             r_max: Some(r_max),
+            retention_chunk_cap: Some(retention_chunk_cap),
+            max_indexed_epochs: Some(max_indexed_epochs),
         } => Ok(RetentionRelationInputs {
             output_availability_blocks: params.output_availability_blocks,
             finality_depth,
@@ -193,6 +220,8 @@ pub fn relation_inputs(
             max_retention_files_per_job: params.max_retention_files_per_job,
             max_reverse_index_entries: params.max_reverse_index_entries,
             r_max,
+            retention_chunk_cap,
+            max_indexed_epochs,
         }),
         _ => Err(MissingInputs(unsourced.missing())),
     }
@@ -239,14 +268,17 @@ mod tests {
         .unwrap()
     }
 
-    /// TEST_ONLY stand-ins for the three undefined inputs. They exist only to
+    /// TEST_ONLY stand-ins for the five undefined inputs. They exist only to
     /// exercise relations 3 and 4 through this module; they are not values
-    /// for B, t_recompute or R_max.
+    /// for B, t_recompute, R_max, C_ret or E_max. `C_ret = E_max = 1` is the
+    /// one-chunk, one-epoch case, where relation 4 needs `2 + R_max` per file.
     fn injected() -> UnsourcedRetentionInputs {
         UnsourcedRetentionInputs {
             per_block_budget_ns: Some(300_000_000),
             t_recompute_p99_ns: Some(1_000_000),
             r_max: Some(3),
+            retention_chunk_cap: Some(1),
+            max_indexed_epochs: Some(1),
         }
     }
 
@@ -257,12 +289,24 @@ mod tests {
         let u = UnsourcedRetentionInputs::undefined();
         assert_eq!(
             u.missing(),
-            vec![I::PerBlockBudgetNs, I::TRecomputeP99Ns, I::RMax]
+            vec![
+                I::PerBlockBudgetNs,
+                I::TRecomputeP99Ns,
+                I::RMax,
+                I::RetentionChunkCap,
+                I::MaxIndexedEpochs
+            ]
         );
         assert_eq!(
             check_activation(&params(), FINALITY_DEPTH, u),
             Err(RetentionActivationError::InputsUndefined(MissingInputs(
-                vec![I::PerBlockBudgetNs, I::TRecomputeP99Ns, I::RMax]
+                vec![
+                I::PerBlockBudgetNs,
+                I::TRecomputeP99Ns,
+                I::RMax,
+                I::RetentionChunkCap,
+                I::MaxIndexedEpochs
+            ]
             )))
         );
     }
@@ -281,7 +325,10 @@ mod tests {
             "retention relation inputs undefined, relations cannot be checked: \
              per_block_budget_ns (relation 3: no committed source for the per-block budget B); \
              t_recompute_p99_ns (relation 3: no measured tracker-recompute p99); \
-             r_max (relation 4: R_max is not defined)"
+             r_max (relation 4: R_max is not defined); \
+             retention_chunk_cap (relation 4: no retention chunk cap is defined); \
+             max_indexed_epochs (relation 4: depends on D-E (which assignment epochs a \
+             tracker counts))"
         );
     }
 
@@ -309,6 +356,20 @@ mod tests {
                 },
                 I::RMax,
             ),
+            (
+                UnsourcedRetentionInputs {
+                    retention_chunk_cap: None,
+                    ..injected()
+                },
+                I::RetentionChunkCap,
+            ),
+            (
+                UnsourcedRetentionInputs {
+                    max_indexed_epochs: None,
+                    ..injected()
+                },
+                I::MaxIndexedEpochs,
+            ),
         ] {
             assert_eq!(
                 check_activation(&params(), FINALITY_DEPTH, u),
@@ -334,6 +395,8 @@ mod tests {
                 max_retention_files_per_job: p.max_retention_files_per_job,
                 max_reverse_index_entries: p.max_reverse_index_entries,
                 r_max: 3,
+                retention_chunk_cap: 1,
+                max_indexed_epochs: 1,
             }
         );
     }
@@ -408,6 +471,8 @@ mod tests {
                 max_reverse_index_entries: 49,
                 max_retention_files_per_job: 10,
                 r_max: 3,
+                retention_chunk_cap: 1,
+                max_indexed_epochs: 1,
                 required: 50,
             }
         );
@@ -425,6 +490,8 @@ mod tests {
                 R::ReverseIndexRequirementOverflow {
                     max_retention_files_per_job: 10,
                     r_max: u64::MAX,
+                    retention_chunk_cap: 1,
+                    max_indexed_epochs: 1,
                 }
             ))
         );
@@ -443,6 +510,8 @@ mod tests {
                 R::ReverseIndexRequirementOverflow {
                     max_retention_files_per_job: u64::MAX / 2,
                     r_max: 1,
+                    retention_chunk_cap: 1,
+                    max_indexed_epochs: 1,
                 }
             ))
         );

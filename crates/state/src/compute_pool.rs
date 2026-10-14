@@ -285,6 +285,16 @@ pub enum PoolError {
     /// `max_reverse_index_entries`.
     #[error("reverse-index entries {entries} for the job would exceed cap {cap}")]
     ReverseIndexCapExceeded { entries: u64, cap: u64 },
+
+    /// A tracker breaks one of the bounds relation 4 relies on
+    /// ([`ReverseIndexLimits`]), so its job could need more reverse-index
+    /// entries than relation 4 provides.
+    #[error("retention tracker {what} = {value} exceeds its bound {bound}")]
+    RetentionTrackerOutOfBounds {
+        what: &'static str,
+        value: u128,
+        bound: u128,
+    },
 }
 
 /// C1 result alias.
@@ -1209,18 +1219,79 @@ pub struct FileIndexEntry {
 /// What one tracker puts in the reverse indexes.
 ///
 /// `job_id`, `file_root`, `r_job` and `interval_version` are fixed for the
-/// tracker's life; all four are in its key. `epochs` and `archives` are the
-/// caller's: which epochs a tracker is indexed under, and which archives it
-/// depends on, is what the open epoch question (D-E) decides. They are sets,
-/// so a repeat in the caller's list is one entry.
+/// tracker's life; all four are in its key. `chunk_count` is the file's, and
+/// fixed with it. `epochs` and `archives` are the caller's: which epochs a
+/// tracker is indexed under, and which archives it depends on, is what the
+/// open epoch question (D-E) decides. They are sets, so a repeat in the
+/// caller's list is one entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackerIndexRecord {
     pub job_id: JobId,
     pub file_root: Hash,
     pub r_job: u32,
     pub interval_version: u32,
+    pub chunk_count: u32,
     pub epochs: BTreeSet<u64>,
     pub archives: BTreeSet<Address>,
+}
+
+/// The bounds the reverse index enforces on every insert and replacement, all
+/// injected (#129 relations 4 and 5).
+///
+/// `max_entries_per_job` is `max_reverse_index_entries`. The other three are
+/// the invariants relation 4's sound form relies on
+/// (`sumchain_genesis::compute_pool_retention`, "Relation 4"), checked per
+/// tracker before the per-job cap:
+///
+/// * `r_job <= r_max`, and at most `r_max × chunk_count` archives per indexed
+///   epoch: an archive counts for a file in an epoch only for chunks assigned
+///   to it there, and `r_max` must bound the assignment replication factor;
+/// * `chunk_count <= retention_chunk_cap`;
+/// * at most `max_indexed_epochs` epochs.
+///
+/// So a tracker occupies at most
+/// `retention_tracker_entry_bound(r_max, retention_chunk_cap, max_indexed_epochs)`
+/// entries. When relation 4 holds and a job's files are within relation 5,
+/// the per-job cap can then refuse only a caller that broke relation 5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReverseIndexLimits {
+    pub max_entries_per_job: u64,
+    pub r_max: u64,
+    pub retention_chunk_cap: u64,
+    pub max_indexed_epochs: u64,
+}
+
+impl ReverseIndexLimits {
+    /// Refuse a tracker that breaks a per-tracker bound. Changes nothing.
+    fn check_tracker(&self, record: &TrackerIndexRecord) -> PoolResult<()> {
+        let out = |what, value: u128, bound: u128| {
+            Err(PoolError::RetentionTrackerOutOfBounds { what, value, bound })
+        };
+        if u64::from(record.r_job) > self.r_max {
+            return out("r_job", record.r_job.into(), self.r_max.into());
+        }
+        if u64::from(record.chunk_count) > self.retention_chunk_cap {
+            return out(
+                "chunk_count",
+                record.chunk_count.into(),
+                self.retention_chunk_cap.into(),
+            );
+        }
+        let epochs = record.epochs.len() as u128;
+        if epochs > u128::from(self.max_indexed_epochs) {
+            return out("indexed epochs", epochs, self.max_indexed_epochs.into());
+        }
+        // u64 × u32 fits in u128; a further × epochs that overflows u128
+        // cannot be exceeded by a set's length.
+        let per_epoch = u128::from(self.r_max) * u128::from(record.chunk_count);
+        if let Some(bound) = per_epoch.checked_mul(epochs) {
+            let archives = record.archives.len() as u128;
+            if archives > bound {
+                return out("dependency archives", archives, bound);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl TrackerIndexRecord {
@@ -1241,10 +1312,10 @@ impl TrackerIndexRecord {
 /// * Every change is atomic: a refused call leaves the index unchanged.
 /// * Emptied buckets are pruned, so removing every tracker gives back an
 ///   index equal to [`RetentionReverseIndex::new`].
-/// * `max_reverse_index_entries` is injected on every call that can grow the
-///   index and bounds one job's entries, the quantity relation 4 sizes
-///   (`max_retention_files_per_job × (2 + R_max)`). A call that would take
-///   the job over it is refused.
+/// * [`ReverseIndexLimits`] is injected on every call that can grow the index.
+///   A tracker that breaks a per-tracker bound is refused, and so is a call
+///   that would take its job over `max_reverse_index_entries`, the quantity
+///   relation 4 sizes.
 /// * [`Self::affected_trackers`] suppresses duplicates: a tracker reached
 ///   through several changes in one block is listed once.
 ///
@@ -1266,18 +1337,23 @@ impl RetentionReverseIndex {
     }
 
     /// Index a tracker at tracking start. Refused if `key` is already
-    /// indexed, if `record.epochs` is empty, or if the job's entries would
-    /// exceed `max_reverse_index_entries`.
+    /// indexed, if `record.epochs` is empty, if the tracker breaks a bound in
+    /// `limits`, or if the job's entries would exceed
+    /// `limits.max_entries_per_job`.
     pub fn insert_tracker(
         &mut self,
         key: TrackerKey,
         record: TrackerIndexRecord,
-        max_reverse_index_entries: u64,
+        limits: &ReverseIndexLimits,
     ) -> PoolResult<()> {
         if self.trackers.contains_key(&key) {
             return Err(PoolError::RetentionTrackerAlreadyIndexed);
         }
-        let job_total = self.job_total_with(&record, 0, max_reverse_index_entries)?;
+        if record.epochs.is_empty() {
+            return Err(PoolError::RetentionTrackerWithoutEpoch);
+        }
+        limits.check_tracker(&record)?;
+        let job_total = self.job_total_with(&record, 0, limits.max_entries_per_job)?;
         self.link(key, &record);
         self.job_entries.insert(record.job_id, job_total);
         self.trackers.insert(key, record);
@@ -1285,15 +1361,16 @@ impl RetentionReverseIndex {
     }
 
     /// Replace a tracker's epochs and archives, on an epoch or reassignment
-    /// update; its job, file, `R_job` and interval version are kept. Refused
-    /// if the tracker is unknown, if `epochs` is empty, or if the job's
-    /// entries would exceed `max_reverse_index_entries`.
+    /// update; its job, file, `R_job`, chunk count and interval version are
+    /// kept. Refused if the tracker is unknown, if `epochs` is empty, if the
+    /// new shape breaks a bound in `limits`, or if the job's entries would
+    /// exceed `limits.max_entries_per_job`.
     pub fn replace_dependencies(
         &mut self,
         key: &TrackerKey,
         epochs: BTreeSet<u64>,
         archives: BTreeSet<Address>,
-        max_reverse_index_entries: u64,
+        limits: &ReverseIndexLimits,
     ) -> PoolResult<()> {
         let old = self
             .trackers
@@ -1305,10 +1382,14 @@ impl RetentionReverseIndex {
             archives,
             ..old
         };
+        if new.epochs.is_empty() {
+            return Err(PoolError::RetentionTrackerWithoutEpoch);
+        }
+        limits.check_tracker(&new)?;
         let old_count = old
             .entry_count()
             .ok_or(PoolError::Overflow("reverse-index entries"))?;
-        let job_total = self.job_total_with(&new, old_count, max_reverse_index_entries)?;
+        let job_total = self.job_total_with(&new, old_count, limits.max_entries_per_job)?;
         self.unlink(key, &old);
         self.link(*key, &new);
         self.job_entries.insert(new.job_id, job_total);
@@ -2218,6 +2299,17 @@ mod tests {
         pairs.iter().copied().collect()
     }
 
+    /// Per-tracker bounds loose enough not to bind in tests about the per-job
+    /// cap: `r_max` 3, one-million-chunk files, sixteen epochs.
+    fn limits(max_entries_per_job: u64) -> ReverseIndexLimits {
+        ReverseIndexLimits {
+            max_entries_per_job,
+            r_max: 3,
+            retention_chunk_cap: 1_048_576,
+            max_indexed_epochs: 16,
+        }
+    }
+
     fn index_record(
         j: u8,
         file: u8,
@@ -2230,6 +2322,7 @@ mod tests {
             file_root: Hash::new([file; 32]),
             r_job,
             interval_version: 1,
+            chunk_count: 1_024,
             epochs: epochs.iter().copied().collect(),
             archives: archives.iter().map(|&a| addr(a)).collect(),
         }
@@ -2450,7 +2543,8 @@ mod tests {
     fn reverse_index_insert_lookup_and_remove_round_trip() {
         let mut idx = RetentionReverseIndex::new();
         let record = index_record(1, 9, 3, &[100], &[1, 2]);
-        idx.insert_tracker(tk(1), record.clone(), 4).unwrap();
+        idx.insert_tracker(tk(1), record.clone(), &limits(4))
+            .unwrap();
         assert_eq!(
             idx.trackers_for_job(&job(1)).collect::<Vec<_>>(),
             vec![&tk(1)]
@@ -2489,141 +2583,300 @@ mod tests {
     fn reverse_index_cap_is_per_job_and_a_refusal_changes_nothing() {
         let mut idx = RetentionReverseIndex::new();
         // 1 job + 1 file + 2 archive entries = 4, exactly the cap.
-        idx.insert_tracker(tk(1), index_record(1, 9, 3, &[100], &[1, 2]), 4)
+        idx.insert_tracker(tk(1), index_record(1, 9, 3, &[100], &[1, 2]), &limits(4))
             .unwrap();
         // A second tracker of the same job needs 3 more: 7 > 4.
         let second = index_record(1, 8, 3, &[100], &[3]);
         let before = idx.clone();
         assert_eq!(
-            idx.insert_tracker(tk(2), second.clone(), 4),
+            idx.insert_tracker(tk(2), second.clone(), &limits(4)),
             Err(PoolError::ReverseIndexCapExceeded { entries: 7, cap: 4 })
         );
         assert_eq!(idx, before);
         // Boundary: refused at 6, accepted at 7.
         assert_eq!(
-            idx.clone().insert_tracker(tk(2), second.clone(), 6),
+            idx.clone()
+                .insert_tracker(tk(2), second.clone(), &limits(6)),
             Err(PoolError::ReverseIndexCapExceeded { entries: 7, cap: 6 })
         );
         let mut at_cap = idx.clone();
-        at_cap.insert_tracker(tk(2), second, 7).unwrap();
+        at_cap.insert_tracker(tk(2), second, &limits(7)).unwrap();
         assert_eq!(at_cap.job_entry_count(&job(1)), 7);
         // Another job has its own budget.
-        idx.insert_tracker(tk(3), index_record(2, 9, 3, &[100], &[1, 2]), 4)
+        idx.insert_tracker(tk(3), index_record(2, 9, 3, &[100], &[1, 2]), &limits(4))
             .unwrap();
         assert_eq!(idx.job_entry_count(&job(1)), 4);
         assert_eq!(idx.job_entry_count(&job(2)), 4);
         // Repeats in the caller's lists are one entry each.
         let mut repeats = RetentionReverseIndex::new();
         repeats
-            .insert_tracker(tk(1), index_record(1, 9, 3, &[100, 100], &[1, 1, 2]), 4)
+            .insert_tracker(
+                tk(1),
+                index_record(1, 9, 3, &[100, 100], &[1, 1, 2]),
+                &limits(4),
+            )
             .unwrap();
         assert_eq!(repeats.job_entry_count(&job(1)), 4);
     }
 
-    /// Boundary 1 with relation 4's numbers: `max_retention_files_per_job = 2`
-    /// and `R_max = 3` size the cap at 2 × (2 + 3) = 10 entries, and the cap
-    /// is applied to each job. Both epoch readings (D-E) are shown; neither is
-    /// chosen.
-    ///
-    /// Relation 4 counts `R_max` archive entries per file. A tracker holds one
-    /// entry per archive in its dependency set, which is `R` archives only when
-    /// every chunk of the file is on the same `R` (a one-chunk file, say).
-    /// Rendezvous assignment spreads a multi-chunk file over up to
-    /// `min(N, R · chunks)` archives under either reading; the last case below
-    /// shows relation 4 undercounting such a file. No dependency-set size is
-    /// assumed by the kernel: the caller passes the archives.
+    /// A distinct archive address per index, for trackers with more archives
+    /// than [`addr`]'s 256 seeds.
+    fn archive_n(n: u64) -> Address {
+        let mut bytes = [0xA5u8; 20];
+        bytes[..8].copy_from_slice(&n.to_be_bytes());
+        Address::new(bytes)
+    }
+
+    /// The largest tracker the bounds admit: `epochs` epochs, and
+    /// `r_max × chunks` archives for each.
+    fn fullest_record(j: u8, file: u8, r_max: u64, chunks: u32, epochs: u64) -> TrackerIndexRecord {
+        TrackerIndexRecord {
+            job_id: job(j),
+            file_root: Hash::new([file; 32]),
+            r_job: r_max as u32,
+            interval_version: 1,
+            chunk_count: chunks,
+            epochs: (0..epochs).map(|e| 100 + e).collect(),
+            archives: (0..epochs * r_max * u64::from(chunks))
+                .map(archive_n)
+                .collect(),
+        }
+    }
+
+    /// Boundary 1, sound: a job sized by relation 4 never reaches its cap,
+    /// whatever its trackers' shape within the bounds. Three sizings: the
+    /// ratified one (one-chunk files, one epoch), 1,024-chunk files under the
+    /// latest-assignment reading, and the same under the union reading with
+    /// one reassignment. Each job is filled with the largest trackers the
+    /// bounds admit and lands exactly on its cap.
     #[test]
-    fn reverse_index_cap_worked_example_sized_by_relation_4() {
-        let (files_per_job, r_max) = (2u64, 3u64);
-        let cap = files_per_job * (2 + r_max);
-        assert_eq!(cap, 10);
+    fn reverse_index_sized_by_relation_4_never_reaches_the_cap() {
+        use sumchain_genesis::compute_pool_retention::retention_tracker_entry_bound;
+        let files_per_job = 2u64;
+        for (r_max, chunk_cap, max_epochs) in [(3u64, 1u32, 1u64), (3, 1_024, 1), (3, 1_024, 2)] {
+            let per_file =
+                retention_tracker_entry_bound(r_max, chunk_cap.into(), max_epochs).unwrap();
+            let limits = ReverseIndexLimits {
+                max_entries_per_job: files_per_job * per_file,
+                r_max,
+                retention_chunk_cap: chunk_cap.into(),
+                max_indexed_epochs: max_epochs,
+            };
+            let mut idx = RetentionReverseIndex::new();
+            for f in 0..files_per_job as u8 {
+                idx.insert_tracker(
+                    tk(f + 1),
+                    fullest_record(1, f + 1, r_max, chunk_cap, max_epochs),
+                    &limits,
+                )
+                .unwrap();
+            }
+            assert_eq!(idx.job_entry_count(&job(1)), limits.max_entries_per_job);
+            // A second job has its own budget: the cap is per job.
+            idx.insert_tracker(
+                tk(9),
+                fullest_record(2, 1, r_max, chunk_cap, max_epochs),
+                &limits,
+            )
+            .unwrap();
+            assert_eq!(idx.job_entry_count(&job(2)), per_file);
+        }
+    }
 
-        // One epoch and three archives per file (each file's chunks all on the
-        // same three): 1 + 1 + 3 = 5 entries per tracker, so a job's two files
-        // fill its 10 exactly.
+    /// The ratified sizing, `max_retention_files_per_job × (2 + R_max)`,
+    /// undercounts a multi-chunk file: at 2 files and `R_max` 3 it gives 10
+    /// entries, and one 1,024-chunk file spread by rendezvous over ten
+    /// archives needs 12, so the tracker is refused partway through the job's
+    /// life. Sized by the sound form (2 × 3,074) the same file fits.
+    #[test]
+    fn the_ratified_sizing_refuses_a_multi_chunk_file_mid_life() {
+        let spread = fullest_record(3, 7, 3, 1_024, 1);
+        let spread = TrackerIndexRecord {
+            archives: (0..10).map(archive_n).collect(),
+            ..spread
+        };
+        let bounds = ReverseIndexLimits {
+            max_entries_per_job: 2 * (2 + 3),
+            r_max: 3,
+            retention_chunk_cap: 1_024,
+            max_indexed_epochs: 1,
+        };
         let mut idx = RetentionReverseIndex::new();
-        idx.insert_tracker(tk(1), index_record(1, 9, 3, &[100], &[1, 2, 3]), cap)
-            .unwrap();
-        idx.insert_tracker(tk(2), index_record(1, 8, 3, &[100], &[4, 5, 6]), cap)
-            .unwrap();
-        assert_eq!(idx.job_entry_count(&job(1)), 10);
+        assert_eq!(
+            idx.insert_tracker(tk(5), spread.clone(), &bounds),
+            Err(PoolError::ReverseIndexCapExceeded {
+                entries: 12,
+                cap: 10
+            })
+        );
+        assert_eq!(idx, RetentionReverseIndex::new());
+        let sound = ReverseIndexLimits {
+            max_entries_per_job: 2 * (2 + 3 * 1_024),
+            ..bounds
+        };
+        idx.insert_tracker(tk(5), spread, &sound).unwrap();
+        assert_eq!(idx.job_entry_count(&job(3)), 12);
+    }
 
-        // A second job has its own 10. The index now holds 20 entries; a cap
-        // over the whole index (the other reading, not implemented) of 10 would
-        // have refused this job.
-        idx.insert_tracker(tk(3), index_record(2, 9, 3, &[100], &[1, 2, 3]), cap)
-            .unwrap();
-        idx.insert_tracker(tk(4), index_record(2, 8, 3, &[100], &[4, 5, 6]), cap)
-            .unwrap();
-        assert_eq!(idx.job_entry_count(&job(2)), 10);
-
-        // A reassignment at 210 moves file 9's chunks from archive 3 to
-        // archive 7. Under the union reading the tracker carries both epochs
-        // and all four archives, 1 + 2 + 4 = 7, so job 1 would hold 12 > 10:
-        // refused, and nothing changes (fail-closed, at a cost in liveness).
+    /// A tracker outside a per-tracker bound is refused before the per-job
+    /// cap is consulted, on insert and on replacement, and nothing changes.
+    #[test]
+    fn a_tracker_outside_its_bounds_is_refused_and_changes_nothing() {
+        let bounds = ReverseIndexLimits {
+            max_entries_per_job: 1_000_000,
+            r_max: 3,
+            retention_chunk_cap: 4,
+            max_indexed_epochs: 1,
+        };
+        let ok = fullest_record(1, 9, 3, 4, 1);
+        let refused = |what: &'static str, value: u128, bound: u128| {
+            Err(PoolError::RetentionTrackerOutOfBounds { what, value, bound })
+        };
+        let mut idx = RetentionReverseIndex::new();
+        for (record, expected) in [
+            (
+                TrackerIndexRecord {
+                    r_job: 4,
+                    ..ok.clone()
+                },
+                refused("r_job", 4, 3),
+            ),
+            (
+                TrackerIndexRecord {
+                    chunk_count: 5,
+                    ..ok.clone()
+                },
+                refused("chunk_count", 5, 4),
+            ),
+            (
+                TrackerIndexRecord {
+                    epochs: BTreeSet::from([100, 210]),
+                    ..ok.clone()
+                },
+                refused("indexed epochs", 2, 1),
+            ),
+            (
+                TrackerIndexRecord {
+                    archives: (0..13).map(archive_n).collect(),
+                    ..ok.clone()
+                },
+                refused("dependency archives", 13, 12),
+            ),
+        ] {
+            assert_eq!(idx.insert_tracker(tk(1), record, &bounds), expected);
+            assert_eq!(idx, RetentionReverseIndex::new());
+        }
+        // A replacement is held to the same bounds.
+        idx.insert_tracker(tk(1), ok, &bounds).unwrap();
         let before = idx.clone();
         assert_eq!(
             idx.replace_dependencies(
                 &tk(1),
                 BTreeSet::from([100, 210]),
-                [1, 2, 3, 7].into_iter().map(addr).collect(),
-                cap,
+                (0..3).map(archive_n).collect(),
+                &bounds
             ),
-            Err(PoolError::ReverseIndexCapExceeded {
-                entries: 12,
-                cap: 10
-            })
+            refused("indexed epochs", 2, 1)
+        );
+        assert_eq!(
+            idx.replace_dependencies(
+                &tk(1),
+                BTreeSet::from([210]),
+                (0..13).map(archive_n).collect(),
+                &bounds
+            ),
+            refused("dependency archives", 13, 12)
         );
         assert_eq!(idx, before);
-        // Under the latest-assignment reading the same update fits: 1 + 1 + 3.
-        idx.replace_dependencies(
-            &tk(1),
-            BTreeSet::from([210]),
-            [1, 2, 7].into_iter().map(addr).collect(),
-            cap,
-        )
-        .unwrap();
-        assert_eq!(idx.job_entry_count(&job(1)), 10);
+    }
 
-        // A multi-chunk file at R = 3 whose chunks are spread over all ten
-        // archives of the snapshot: one epoch (either reading), ten archives,
-        // 1 + 1 + 10 = 12 > 10 for a single file. Relation 4's `2 + R_max`
-        // undercounts it, and the tracker is refused.
-        let mut spread = RetentionReverseIndex::new();
-        assert_eq!(
-            spread.insert_tracker(
-                tk(5),
-                index_record(3, 7, 3, &[100], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
-                cap,
-            ),
-            Err(PoolError::ReverseIndexCapExceeded {
-                entries: 12,
-                cap: 10
-            })
-        );
-        assert_eq!(spread, RetentionReverseIndex::new());
+    /// Randomized check of the claim behind relation 4's sound form: for any
+    /// sequence of inserts and replacements within the per-tracker bounds,
+    /// with at most `files` trackers per job and the cap sized by relation 4,
+    /// the cap never refuses. Deterministic seed; no external RNG.
+    #[test]
+    fn within_the_bounds_the_sound_cap_never_refuses() {
+        use sumchain_genesis::compute_pool_retention::retention_tracker_entry_bound;
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        for _ in 0..200 {
+            let r_max = 1 + next(4);
+            let chunk_cap = 1 + next(8);
+            let max_epochs = 1 + next(3);
+            let files = 1 + next(4);
+            let limits = ReverseIndexLimits {
+                max_entries_per_job: files
+                    * retention_tracker_entry_bound(r_max, chunk_cap, max_epochs).unwrap(),
+                r_max,
+                retention_chunk_cap: chunk_cap,
+                max_indexed_epochs: max_epochs,
+            };
+            let mut idx = RetentionReverseIndex::new();
+            let shape = |next: &mut dyn FnMut(u64) -> u64| {
+                let chunks = 1 + next(chunk_cap);
+                let epochs = 1 + next(max_epochs);
+                let archives = next(epochs * r_max * chunks + 1);
+                (
+                    chunks as u32,
+                    (0..epochs).map(|e| 100 + e).collect::<BTreeSet<u64>>(),
+                    (0..archives)
+                        .map(|a| archive_n(next(10_000) * 1_000 + a))
+                        .collect::<BTreeSet<Address>>(),
+                )
+            };
+            for f in 0..files as u8 {
+                let (chunk_count, epochs, archives) = shape(&mut next);
+                let record = TrackerIndexRecord {
+                    job_id: job(1),
+                    file_root: Hash::new([f; 32]),
+                    r_job: (1 + next(r_max)) as u32,
+                    interval_version: 1,
+                    chunk_count,
+                    epochs,
+                    archives,
+                };
+                idx.insert_tracker(tk(f + 1), record, &limits).unwrap();
+                // Replacements keep the file's chunk count.
+                for _ in 0..3 {
+                    let (_, epochs, archives) = shape(&mut next);
+                    let chunks = idx.tracker(&tk(f + 1)).unwrap().chunk_count;
+                    let archives: BTreeSet<Address> = archives
+                        .into_iter()
+                        .take((epochs.len() as u64 * r_max * u64::from(chunks)) as usize)
+                        .collect();
+                    idx.replace_dependencies(&tk(f + 1), epochs, archives, &limits)
+                        .unwrap();
+                }
+            }
+            assert!(idx.job_entry_count(&job(1)) <= limits.max_entries_per_job);
+        }
     }
 
     #[test]
     fn reverse_index_refuses_a_repeated_key_and_a_tracker_without_epoch() {
         let mut idx = RetentionReverseIndex::new();
-        idx.insert_tracker(tk(1), index_record(1, 9, 3, &[100], &[1]), 100)
+        idx.insert_tracker(tk(1), index_record(1, 9, 3, &[100], &[1]), &limits(100))
             .unwrap();
         let before = idx.clone();
         assert_eq!(
-            idx.insert_tracker(tk(1), index_record(2, 8, 2, &[100], &[2]), 100),
+            idx.insert_tracker(tk(1), index_record(2, 8, 2, &[100], &[2]), &limits(100)),
             Err(PoolError::RetentionTrackerAlreadyIndexed)
         );
         assert_eq!(
-            idx.insert_tracker(tk(2), index_record(1, 9, 3, &[], &[1]), 100),
+            idx.insert_tracker(tk(2), index_record(1, 9, 3, &[], &[1]), &limits(100)),
             Err(PoolError::RetentionTrackerWithoutEpoch)
         );
         assert_eq!(
-            idx.replace_dependencies(&tk(1), BTreeSet::new(), BTreeSet::new(), 100),
+            idx.replace_dependencies(&tk(1), BTreeSet::new(), BTreeSet::new(), &limits(100)),
             Err(PoolError::RetentionTrackerWithoutEpoch)
         );
         assert_eq!(
-            idx.replace_dependencies(&tk(9), BTreeSet::from([100]), BTreeSet::new(), 100),
+            idx.replace_dependencies(&tk(9), BTreeSet::from([100]), BTreeSet::new(), &limits(100)),
             Err(PoolError::UnknownRetentionTracker)
         );
         assert_eq!(idx, before);
@@ -2633,7 +2886,7 @@ mod tests {
     fn reverse_index_replace_serves_either_epoch_reading() {
         let root = Hash::new([9; 32]);
         let mut idx = RetentionReverseIndex::new();
-        idx.insert_tracker(tk(1), index_record(1, 9, 3, &[100], &[1, 2]), 10)
+        idx.insert_tracker(tk(1), index_record(1, 9, 3, &[100], &[1, 2]), &limits(10))
             .unwrap();
 
         // A reassignment at 210 moves chunks from archive 1 to archive 3. What
@@ -2645,7 +2898,7 @@ mod tests {
                 &tk(1),
                 BTreeSet::from([100, 210]),
                 [1, 2, 3].into_iter().map(addr).collect(),
-                10,
+                &limits(10),
             )
             .unwrap();
         assert_eq!(union.trackers_for_archive(&addr(1)).count(), 1);
@@ -2664,7 +2917,7 @@ mod tests {
                 &tk(1),
                 BTreeSet::from([210]),
                 [2, 3].into_iter().map(addr).collect(),
-                10,
+                &limits(10),
             )
             .unwrap();
         assert_eq!(latest.trackers_for_archive(&addr(1)).count(), 0);
@@ -2702,7 +2955,7 @@ mod tests {
                 &tk(1),
                 BTreeSet::from([100, 210]),
                 [1, 2, 3].into_iter().map(addr).collect(),
-                5,
+                &limits(5),
             ),
             Err(PoolError::ReverseIndexCapExceeded { entries: 6, cap: 5 })
         );
@@ -2715,13 +2968,13 @@ mod tests {
     #[test]
     fn affected_trackers_lists_each_tracker_once_per_block() {
         let mut idx = RetentionReverseIndex::new();
-        idx.insert_tracker(tk(1), index_record(1, 9, 3, &[100], &[1, 2]), 100)
+        idx.insert_tracker(tk(1), index_record(1, 9, 3, &[100], &[1, 2]), &limits(100))
             .unwrap();
-        idx.insert_tracker(tk(2), index_record(1, 8, 3, &[100], &[2]), 100)
+        idx.insert_tracker(tk(2), index_record(1, 8, 3, &[100], &[2]), &limits(100))
             .unwrap();
-        idx.insert_tracker(tk(3), index_record(2, 9, 2, &[100], &[3]), 100)
+        idx.insert_tracker(tk(3), index_record(2, 9, 2, &[100], &[3]), &limits(100))
             .unwrap();
-        idx.insert_tracker(tk(4), index_record(2, 7, 2, &[100], &[4]), 100)
+        idx.insert_tracker(tk(4), index_record(2, 7, 2, &[100], &[4]), &limits(100))
             .unwrap();
         // Archives 2 (reported twice) and 1 change status and file 9 is
         // reassigned, all in one block.
@@ -2744,9 +2997,9 @@ mod tests {
     fn two_jobs_on_one_file_root_are_indexed_independently() {
         let root = Hash::new([9; 32]);
         let mut idx = RetentionReverseIndex::new();
-        idx.insert_tracker(tk(1), index_record(1, 9, 2, &[100], &[1, 2]), 4)
+        idx.insert_tracker(tk(1), index_record(1, 9, 2, &[100], &[1, 2]), &limits(4))
             .unwrap();
-        idx.insert_tracker(tk(2), index_record(2, 9, 3, &[100], &[1, 2]), 4)
+        idx.insert_tracker(tk(2), index_record(2, 9, 3, &[100], &[1, 2]), &limits(4))
             .unwrap();
         assert_eq!(
             idx.file_entries(&root)

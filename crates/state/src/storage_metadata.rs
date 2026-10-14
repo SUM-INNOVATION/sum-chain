@@ -3754,7 +3754,12 @@ mod replica_count_tests {
             assert!(literal(counts, r_job), "{counts:?} at R_job {r_job}");
             assert!(!coverage_ok(counts, r_job), "{counts:?} at R_job {r_job}");
         }
-        for (counts, r_job) in [(&[3u32, 3][..], 3), (&[3, 2][..], 3), (&[0][..], 1), (&[1][..], 1)] {
+        for (counts, r_job) in [
+            (&[3u32, 3][..], 3),
+            (&[3, 2][..], 3),
+            (&[0][..], 1),
+            (&[1][..], 1),
+        ] {
             assert_eq!(coverage_ok(counts, r_job), literal(counts, r_job));
         }
     }
