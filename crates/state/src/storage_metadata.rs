@@ -2584,6 +2584,134 @@ fn epoch_coverage_from(
     (entry, union)
 }
 
+// ─── Per-chunk replica count (issue #129, dormant) ───────────────────────────
+//
+// The pure kernel under #129's `active_replica_count` and `coverage_ok`.
+// Nothing calls it: no execution path, RPC or mempool check reads it. Like
+// `epoch_coverage_from` it works on rows the caller has already read and owns
+// only the arithmetic: which entries count, how archives are deduplicated and
+// which bitmaps are malformed.
+//
+// Two questions #129 leaves open belong to the caller. Each one changes an
+// argument, not the kernel:
+//
+// * D-E, which assignment epochs count. The caller supplies entries for every
+//   epoch in the file's epoch list (the #129 text) or for the latest epoch
+//   only. The kernel counts whatever it is given.
+// * D-H, what `height` means. The caller decides where the activity flags and
+//   bitmaps were read. The kernel takes no height.
+
+/// One archive's attestation for one assignment epoch of a file, as the
+/// caller read it: the input of [`active_replica_counts_from`] and
+/// [`active_replica_count_from`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplicaAttestation<'a> {
+    /// The assignment epoch (its snapshot height) this entry was read for.
+    /// The count does not depend on it: an archive counts at most once,
+    /// however many epochs carry it. Which epochs are supplied is the
+    /// caller's choice (D-E).
+    pub epoch: u64,
+    /// The archive the bitmap belongs to.
+    pub archive: Address,
+    /// Whether the archive counts as active, as `v_is_currently_active`
+    /// reads it.
+    pub active: bool,
+    /// The `(file, epoch, archive)` attestation bitmap, or `None` when there
+    /// is no row.
+    pub bitmap: Option<&'a [u8]>,
+}
+
+/// Fold `entries` into one record per archive: whether every entry for it is
+/// active, and the OR of its well-formed bitmaps. Both count functions read
+/// this, so they share every rule:
+///
+/// * an archive is counted at most once, across epochs and within one;
+/// * a bitmap whose length is not `bitmap_byte_len(chunk_count)` is ignored,
+///   as `v_aggregate_coverage_union` and `epoch_coverage_from` ignore it;
+/// * an archive that any entry marks inactive is not counted, even when
+///   another entry marks it active. Activity belongs to the archive, not to
+///   an epoch, so well-formed input never disagrees; when input does, the
+///   reading that counts fewer replicas is taken.
+fn replicas_by_archive(
+    chunk_count: u32,
+    entries: &[ReplicaAttestation<'_>],
+) -> std::collections::BTreeMap<Address, (bool, Vec<u8>)> {
+    let bm_len = bitmap_byte_len(chunk_count);
+    let mut by_archive = std::collections::BTreeMap::new();
+    for entry in entries {
+        let (active, bits) = by_archive
+            .entry(entry.archive)
+            .or_insert_with(|| (true, vec![0u8; bm_len]));
+        *active &= entry.active;
+        if let Some(bm) = entry.bitmap {
+            if bm.len() == bm_len {
+                bitmap_or_into(bits, bm);
+            }
+        }
+    }
+    by_archive
+}
+
+/// Replica counts for chunks `0..chunk_count`. Element `c` is the number of
+/// distinct active archives with bit `c` set in at least one supplied,
+/// well-formed bitmap.
+///
+/// Pure, with the rules of `replicas_by_archive`. Bits past `chunk_count` in
+/// a bitmap's last byte are never read. A count saturates at `u32::MAX`,
+/// which can only under-count.
+pub fn active_replica_counts_from(
+    chunk_count: u32,
+    entries: &[ReplicaAttestation<'_>],
+) -> Vec<u32> {
+    let mut counts = vec![0u32; chunk_count as usize];
+    for (active, bits) in replicas_by_archive(chunk_count, entries).values() {
+        if !*active {
+            continue;
+        }
+        for (chunk, count) in (0..chunk_count).zip(counts.iter_mut()) {
+            if bitmap_get(bits, chunk) {
+                *count = count.saturating_add(1);
+            }
+        }
+    }
+    counts
+}
+
+/// The replica count of one chunk: element `chunk` of
+/// [`active_replica_counts_from`] over the same input, or 0 when
+/// `chunk >= chunk_count`, since a chunk the file does not have has no
+/// replica.
+pub fn active_replica_count_from(
+    chunk_count: u32,
+    entries: &[ReplicaAttestation<'_>],
+    chunk: u32,
+) -> u32 {
+    if chunk >= chunk_count {
+        return 0;
+    }
+    let counted = replicas_by_archive(chunk_count, entries)
+        .values()
+        .filter(|(active, bits)| *active && bitmap_get(bits, chunk))
+        .count();
+    u32::try_from(counted).unwrap_or(u32::MAX)
+}
+
+/// #129's `coverage_ok` over counts already computed: true iff every chunk
+/// has at least `r_job` replicas.
+///
+/// `counts` is one file's [`active_replica_counts_from`] and `r_job` is one
+/// job's snapshotted `R_job`, so two jobs on the same file root share the
+/// counts and differ only in this threshold. A chunk fewer than `r_job`
+/// distinct active archives attested fails it, including the case
+/// `min(R, |snapshot|) < R_job`.
+///
+/// Two inputs that no valid file and job produce are refused rather than
+/// vacuously true: an empty `counts` (a V2 file has at least one chunk) and
+/// `r_job == 0` (a requirement of no replicas would be met by none).
+pub fn coverage_ok(counts: &[u32], r_job: u32) -> bool {
+    r_job > 0 && !counts.is_empty() && counts.iter().all(|&count| count >= r_job)
+}
+
 impl StorageMetadataExecutor {
 
     /// Read a file's reassignment epoch heights (issue #62). Empty ⇒ epoch-0-only
@@ -3278,5 +3406,337 @@ impl StorageMetadataExecutor {
             .map_err(StateError::Storage)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod replica_count_tests {
+    use super::*;
+
+    /// `(epoch, archive, active, bitmap)`, owned, as a caller would read it.
+    type Row = (u64, Address, bool, Option<Vec<u8>>);
+
+    fn entries(rows: &[Row]) -> Vec<ReplicaAttestation<'_>> {
+        rows.iter()
+            .map(|(epoch, archive, active, bitmap)| ReplicaAttestation {
+                epoch: *epoch,
+                archive: *archive,
+                active: *active,
+                bitmap: bitmap.as_deref(),
+            })
+            .collect()
+    }
+
+    fn counts(chunk_count: u32, rows: &[Row]) -> Vec<u32> {
+        active_replica_counts_from(chunk_count, &entries(rows))
+    }
+
+    fn addr(seed: u8) -> Address {
+        Address::new([seed; 20])
+    }
+
+    /// xorshift64: deterministic test input without a dependency.
+    struct XorShift(u64);
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+    }
+
+    /// Rows over `epochs` for archives `1..=archives`. Activity is drawn once
+    /// per archive, as it is on chain. An archive may be missing from an
+    /// epoch, carry no bitmap, carry a wrong-length bitmap, or carry a
+    /// well-formed one with no bit past `chunk_count`.
+    fn random_rows(rng: &mut XorShift, chunk_count: u32, epochs: &[u64], archives: u8) -> Vec<Row> {
+        let bm_len = bitmap_byte_len(chunk_count);
+        let active: Vec<bool> = (0..archives).map(|_| rng.next() % 4 != 0).collect();
+        let mut rows = Vec::new();
+        for &epoch in epochs {
+            for a in 0..archives {
+                if rng.next() % 3 == 0 {
+                    continue;
+                }
+                let bitmap = match rng.next() % 6 {
+                    0 => None,
+                    1 => Some(vec![0xFF; bm_len + 1]),
+                    _ => {
+                        let mut bm = vec![0u8; bm_len];
+                        for c in 0..chunk_count {
+                            if rng.next() % 3 == 0 {
+                                bitmap_set(&mut bm, c);
+                            }
+                        }
+                        Some(bm)
+                    }
+                };
+                rows.push((epoch, addr(a + 1), active[a as usize], bitmap));
+            }
+        }
+        rows
+    }
+
+    /// Example 1 of the #129 decision packet (§3.2-3.3): file F with chunks
+    /// c = 0 and c' = 1, epoch e0 = 100 over {A,B,C,D} and e1 = 210 over
+    /// {A,B,D,N1,N2}; C is slashed at 200 and reactivated at 300. Returns the
+    /// rows of e0 and of e1 as they stand after `block`.
+    fn packet_example_rows(block: u64) -> (Vec<Row>, Vec<Row>) {
+        let (a, b, c, d, n1, n2) = (addr(1), addr(2), addr(3), addr(4), addr(5), addr(6));
+        let c_active = !(200..300).contains(&block);
+        let e0 = vec![
+            (100, a, true, Some(vec![0b11])),
+            (100, b, true, Some(vec![0b01])),
+            (100, c, c_active, Some(vec![0b11])),
+            (100, d, true, Some(vec![0b10])),
+        ];
+        if block < 210 {
+            return (e0, Vec::new());
+        }
+        let attested = |at: u64, bits: u8| (block >= at).then(|| vec![bits]);
+        let e1 = vec![
+            (210, a, true, attested(216, 0b11)),
+            (210, b, true, attested(213, 0b10)),
+            (210, d, true, attested(215, 0b10)),
+            (210, n1, true, attested(212, 0b01)),
+            (210, n2, true, attested(214, 0b01)),
+        ];
+        (e0, e1)
+    }
+
+    /// The kernel does not choose between the epoch readings: given the
+    /// union's entries it reproduces the packet's U column, given the latest
+    /// epoch's entries its L column.
+    #[test]
+    fn counts_match_the_hand_computed_example_under_either_epoch_selection() {
+        // (block, U(c), U(c'), L(c), L(c'))
+        let table: [(u64, u32, u32, u32, u32); 9] = [
+            (102, 3, 3, 3, 3),
+            (200, 2, 2, 2, 2),
+            (210, 2, 2, 0, 0),
+            (212, 3, 2, 1, 0),
+            (213, 3, 3, 1, 1),
+            (214, 4, 3, 2, 1),
+            (215, 4, 3, 2, 2),
+            (216, 4, 3, 3, 3),
+            (300, 5, 4, 3, 3),
+        ];
+        for (block, u_c, u_c2, l_c, l_c2) in table {
+            let (e0, e1) = packet_example_rows(block);
+            let all: Vec<Row> = e0.iter().chain(e1.iter()).cloned().collect();
+            let latest = if e1.is_empty() { &e0 } else { &e1 };
+            assert_eq!(counts(2, &all), vec![u_c, u_c2], "union, block {block}");
+            assert_eq!(counts(2, latest), vec![l_c, l_c2], "latest, block {block}");
+        }
+
+        // coverage_ok(F, 3) over the same blocks: the union reading is false
+        // over 200-212 and true from 213, the latest reading false over
+        // 200-215 and true from 216 (packet §3.3).
+        for (block, union_ok, latest_ok) in [
+            (102, true, true),
+            (200, false, false),
+            (212, false, false),
+            (213, true, false),
+            (215, true, false),
+            (216, true, true),
+            (300, true, true),
+        ] {
+            let (e0, e1) = packet_example_rows(block);
+            let all: Vec<Row> = e0.iter().chain(e1.iter()).cloned().collect();
+            let latest = if e1.is_empty() { &e0 } else { &e1 };
+            assert_eq!(
+                coverage_ok(&counts(2, &all), 3),
+                union_ok,
+                "union, block {block}"
+            );
+            assert_eq!(
+                coverage_ok(&counts(2, latest), 3),
+                latest_ok,
+                "latest, block {block}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_archive_counts_once_across_and_within_epochs() {
+        let a = addr(1);
+        // The same bit in two epochs, and the same entry twice in one epoch.
+        let rows = vec![
+            (100, a, true, Some(vec![0b01])),
+            (210, a, true, Some(vec![0b01])),
+            (210, a, true, Some(vec![0b01])),
+        ];
+        assert_eq!(counts(2, &rows), vec![1, 0]);
+        assert_eq!(active_replica_count_from(2, &entries(&rows), 0), 1);
+        // Different chunks in different epochs: one replica of each.
+        let rows = vec![
+            (100, a, true, Some(vec![0b01])),
+            (210, a, true, Some(vec![0b10])),
+        ];
+        assert_eq!(counts(2, &rows), vec![1, 1]);
+        // Duplicates cannot lift a single archive to R.
+        let rows: Vec<Row> = (0..5).map(|e| (e, a, true, Some(vec![0b11]))).collect();
+        assert!(!coverage_ok(&counts(2, &rows), 2));
+    }
+
+    #[test]
+    fn inactive_and_slashed_archives_are_not_counted() {
+        let (a, b) = (addr(1), addr(2));
+        let rows = vec![
+            (100, a, false, Some(vec![0b11])),
+            (100, b, true, Some(vec![0b01])),
+        ];
+        assert_eq!(counts(2, &rows), vec![1, 0]);
+        // An archive marked inactive by any entry is not counted, whatever
+        // the others say: the reading that counts fewer replicas wins.
+        for rows in [
+            vec![
+                (100, a, false, Some(vec![0b11])),
+                (210, a, true, Some(vec![0b11])),
+            ],
+            vec![(100, a, true, Some(vec![0b11])), (210, a, false, None)],
+        ] {
+            assert_eq!(counts(2, &rows), vec![0, 0]);
+            assert_eq!(active_replica_count_from(2, &entries(&rows), 0), 0);
+        }
+    }
+
+    #[test]
+    fn missing_and_wrong_length_bitmaps_are_ignored() {
+        // chunk_count 9: a well-formed bitmap is 2 bytes.
+        let rows = vec![
+            (100, addr(1), true, None),
+            (100, addr(2), true, Some(vec![])),
+            (100, addr(3), true, Some(vec![0xFF])),
+            (100, addr(4), true, Some(vec![0xFF, 0xFF, 0xFF])),
+            (100, addr(5), true, Some(vec![0x01, 0x01])),
+        ];
+        let mut expected = vec![0u32; 9];
+        expected[0] = 1;
+        expected[8] = 1;
+        assert_eq!(counts(9, &rows), expected);
+        // A malformed bitmap in one epoch does not hide a well-formed one in
+        // another.
+        let rows = vec![
+            (100, addr(1), true, Some(vec![0xFF])),
+            (210, addr(1), true, Some(vec![0x02, 0x00])),
+        ];
+        let mut expected = vec![0u32; 9];
+        expected[1] = 1;
+        assert_eq!(counts(9, &rows), expected);
+    }
+
+    #[test]
+    fn one_chunk_agrees_with_all_chunks_and_unknown_chunks_have_no_replica() {
+        // chunk_count 10 leaves six padding bits; set them all.
+        let rows = vec![(100, addr(1), true, Some(vec![0xFF, 0xFF]))];
+        assert_eq!(counts(10, &rows), vec![1; 10]);
+        for chunk in [10, 15, 16, u32::MAX] {
+            assert_eq!(active_replica_count_from(10, &entries(&rows), chunk), 0);
+        }
+        assert!(counts(0, &rows).is_empty());
+
+        let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
+        for chunk_count in [1, 7, 8, 9, 23, 64] {
+            for _ in 0..20 {
+                let rows = random_rows(&mut rng, chunk_count, &[100, 150, 210], 7);
+                let all = counts(chunk_count, &rows);
+                assert_eq!(all.len(), chunk_count as usize);
+                for chunk in 0..chunk_count {
+                    assert_eq!(
+                        active_replica_count_from(chunk_count, &entries(&rows), chunk),
+                        all[chunk as usize]
+                    );
+                }
+            }
+        }
+    }
+
+    /// At R = 1 the count is the activation union: per chunk, a replica exists
+    /// iff the OR of every epoch's `epoch_coverage_from` union has the bit,
+    /// and `coverage_ok(_, 1)` iff that union is full.
+    #[test]
+    fn at_r_one_coverage_is_the_activation_union() {
+        let mut rng = XorShift(0xD1B5_4A32_D192_ED03);
+        let epochs = [100u64, 150, 210];
+        let mut full = 0;
+        for chunk_count in [1u32, 5, 8, 13] {
+            let row = StorageMetadataV2 {
+                merkle_root: Hash::new([7; 32]),
+                owner: addr(0xEE),
+                plaintext_size_bytes: 0,
+                stored_size_bytes: 0,
+                chunk_count,
+                fee_pool: 0,
+                created_at: 0,
+                activated_at_height: None,
+                abandoned_at_height: None,
+                assignment_height: epochs[0],
+                visibility: FileVisibilityV2::Public,
+                lifecycle: FileLifecycleV2::Pending,
+                access_list: Vec::new(),
+                predecessor_root: None,
+            };
+            for _ in 0..40 {
+                let rows = random_rows(&mut rng, chunk_count, &epochs, 6);
+                let mut union = vec![0u8; bitmap_byte_len(chunk_count)];
+                for &epoch in &epochs {
+                    let gathered: Vec<(Address, bool, Option<Vec<u8>>)> = rows
+                        .iter()
+                        .filter(|r| r.0 == epoch)
+                        .map(|(_, a, active, bm)| (*a, *active, bm.clone()))
+                        .collect();
+                    let (_, epoch_union) = epoch_coverage_from(&row, epoch, &gathered, 3);
+                    bitmap_or_into(&mut union, &epoch_union);
+                }
+                let got = counts(chunk_count, &rows);
+                for chunk in 0..chunk_count {
+                    assert_eq!(got[chunk as usize] >= 1, bitmap_get(&union, chunk));
+                }
+                let union_full = bitmap_popcount(&union) == chunk_count;
+                assert_eq!(coverage_ok(&got, 1), union_full);
+                full += usize::from(union_full);
+            }
+        }
+        // The draw must exercise both outcomes.
+        assert!(full > 0 && full < 160, "full unions: {full}");
+    }
+
+    #[test]
+    fn coverage_ok_is_every_chunk_at_or_above_r_job() {
+        // Boundary +/- 1.
+        assert!(coverage_ok(&[3, 3, 3], 3));
+        assert!(!coverage_ok(&[3, 3, 3], 4));
+        assert!(coverage_ok(&[3, 3, 3], 2));
+        assert!(!coverage_ok(&[3, 2, 3], 3));
+        assert!(coverage_ok(&[3, 2, 3], 2));
+        assert!(coverage_ok(&[4, 9, 3], 3));
+
+        // Two jobs on one file root share the counts and differ only in R_job.
+        let rows: Vec<Row> = (1..=3)
+            .map(|a| {
+                (
+                    100,
+                    addr(a),
+                    true,
+                    Some(vec![if a == 3 { 0b01 } else { 0b11 }]),
+                )
+            })
+            .collect();
+        let shared = counts(2, &rows);
+        assert_eq!(shared, vec![3, 2]);
+        assert!(coverage_ok(&shared, 2));
+        assert!(!coverage_ok(&shared, 3));
+
+        // Fewer distinct active archives than R_job: false whatever the bits.
+        let rows: Vec<Row> = (1..=2)
+            .map(|a| (100, addr(a), true, Some(vec![0xFF])))
+            .collect();
+        assert!(!coverage_ok(&counts(8, &rows), 3));
+
+        // Inputs no valid file and job produce are refused, not vacuously true.
+        assert!(!coverage_ok(&[], 1));
+        assert!(!coverage_ok(&[5, 5], 0));
     }
 }

@@ -35,6 +35,17 @@
 //!   reimbursement amounts, …) are **function parameters**, never baked
 //!   constants. The ratified formulas ([`compute_job_max_retention_files`],
 //!   [`compute_requester_debit`]) are implemented; the numbers are injected.
+//!
+//! ## Retention kernels (issue #129)
+//!
+//! [`retention_satisfied`], [`retention_tracker_dirty`], [`RecomputeCursor`]
+//! and [`RetentionReverseIndex`] are dormant pieces of C-RETENTION; the
+//! per-chunk count is [`crate::storage_metadata::active_replica_counts_from`].
+//! Nothing calls them, and every bound is an argument. Two #129 questions are
+//! open and none of these pieces answers them: what `height` means for a
+//! replica count (D-H) and which assignment epochs count (D-E). Whatever
+//! depends on them (the epochs and archives a tracker depends on, and the
+//! tracker key's epoch commitment) is supplied by the caller.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -119,6 +130,13 @@ opaque_id32!(
     /// `DerivedInputCommitmentV1` value. Produced by a
     /// [`DerivedInputCommitmentScheme`]; the preimage is a typed boundary.
     Dic
+);
+opaque_id32!(
+    /// A retention tracker's key (#129 scope (3)). Its preimage includes
+    /// `file_assignment_epoch_commitment`, whose definition depends on the
+    /// open epoch question (D-E), so no derivation exists here. It is used
+    /// only as an ordered key: the reverse indexes and the recompute order.
+    TrackerKey
 );
 
 // ---------------------------------------------------------------------------
@@ -249,6 +267,24 @@ pub enum PoolError {
     /// A referenced job is not present in the model.
     #[error("unknown job")]
     UnknownJob,
+
+    /// The retention tracker is already in the reverse index.
+    #[error("retention tracker already indexed")]
+    RetentionTrackerAlreadyIndexed,
+
+    /// The retention tracker is not in the reverse index.
+    #[error("unknown retention tracker")]
+    UnknownRetentionTracker,
+
+    /// A retention tracker must be indexed under at least one assignment
+    /// epoch of its file, or no file event could find it.
+    #[error("retention tracker has no file epoch to index")]
+    RetentionTrackerWithoutEpoch,
+
+    /// The job's reverse-index entries would exceed the injected
+    /// `max_reverse_index_entries`.
+    #[error("reverse-index entries {entries} for the job would exceed cap {cap}")]
+    ReverseIndexCapExceeded { entries: u64, cap: u64 },
 }
 
 /// C1 result alias.
@@ -551,6 +587,64 @@ pub fn validate_retention_within_cap(files: u128, cap: u128) -> PoolResult<()> {
     } else {
         Ok(())
     }
+}
+
+/// #129 scope (7): `RetentionSatisfied(tracker) := not Dirty AND
+/// since.is_some() AND head >= since + output_availability_blocks`.
+///
+/// `dirty` is [`retention_tracker_dirty`] evaluated at the same read, `since`
+/// is the tracker's `coverage_satisfied_since_height`, and
+/// `output_availability_blocks` is injected; relations 1 and 2, checked where
+/// the value is declared, bound it from below. The addition is checked: if
+/// `since + output_availability_blocks` overflows `u64`, the tracker is not
+/// satisfied. Pure; C4's settlement revalidation is separate.
+pub fn retention_satisfied(
+    dirty: bool,
+    since: Option<u64>,
+    head: u64,
+    output_availability_blocks: u64,
+) -> bool {
+    !dirty
+        && since
+            .and_then(|since| since.checked_add(output_availability_blocks))
+            .is_some_and(|matures_at| head >= matures_at)
+}
+
+/// #129 scope (4): whether a tracker is Dirty at this read.
+///
+/// Not Dirty iff both hold:
+/// * every recorded `(archive, generation)` pair matches
+///   `current_generation(archive)`; and
+/// * the recorded archives are exactly the set `recomputed_dependencies`.
+///
+/// `recomputed_dependencies` is the tracker's dependency set recomputed by
+/// the caller at this read. Which archives belong in it depends on the open
+/// epoch question (D-E), so it is an argument; duplicates in it are one
+/// archive. `current_generation` is the per-archive `status_generation` read,
+/// which #129 scope (1) adds and this does not.
+///
+/// Fails closed. An archive with no generation (`None`) and a recorded list
+/// that names one archive twice both make the tracker Dirty, since neither
+/// can come from a valid recompute.
+pub fn retention_tracker_dirty<G>(
+    recorded: &[(Address, u64)],
+    recomputed_dependencies: &[Address],
+    current_generation: G,
+) -> bool
+where
+    G: Fn(&Address) -> Option<u64>,
+{
+    let mut recorded_archives = BTreeSet::new();
+    for (archive, generation) in recorded {
+        if !recorded_archives.insert(*archive) {
+            return true;
+        }
+        if current_generation(archive) != Some(*generation) {
+            return true;
+        }
+    }
+    let recomputed: BTreeSet<Address> = recomputed_dependencies.iter().copied().collect();
+    recorded_archives != recomputed
 }
 
 /// Requester-exposure inputs. All values injected from B0 params / the job
@@ -1018,6 +1112,349 @@ impl ComputePoolModel {
         let next = job.state.transition(to)?; // validate before mutate
         job.state = next;
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Retention trackers (issue #129): bounded recompute cursor and reverse index.
+//
+// Both are containers over tracker keys, in memory. Neither decides which
+// trackers are Dirty, nor which epochs and archives a tracker depends on: the
+// caller supplies those, because they turn on the open epoch question (D-E).
+// Every bound is an argument.
+// ---------------------------------------------------------------------------
+
+/// Where the #129 scope (5) background recompute resumes: after the last
+/// tracker key it visited, or at the start. The caller keeps it between
+/// blocks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecomputeCursor {
+    last: Option<TrackerKey>,
+}
+
+/// One block's recompute selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecomputeBatch {
+    /// The trackers to recompute in this block, in visiting order.
+    pub selected: Vec<TrackerKey>,
+    /// Where the next block's selection resumes.
+    pub next: RecomputeCursor,
+}
+
+impl RecomputeCursor {
+    /// A cursor before every key.
+    pub fn start() -> Self {
+        Self { last: None }
+    }
+
+    /// A cursor that resumes after `key`.
+    pub fn after(key: TrackerKey) -> Self {
+        Self { last: Some(key) }
+    }
+
+    /// The last key visited, if any.
+    pub fn last(&self) -> Option<&TrackerKey> {
+        self.last.as_ref()
+    }
+
+    /// Select at most `max_retention_updates_per_block` keys of `pending`,
+    /// ascending from the first key after the cursor and wrapping past the
+    /// end to the start once, so no key is selected twice in one block.
+    ///
+    /// * Deterministic: the result depends only on the cursor, the set and
+    ///   the bound. A key that has left `pending` is simply not there.
+    /// * Fair: while `pending` is unchanged, every key is selected within
+    ///   `ceil(|pending| / bound)` consecutive blocks.
+    /// * Fail-closed on overflow: selecting removes nothing and marks nothing
+    ///   clean. A key over the bound stays in `pending`, and Dirty is a
+    ///   read-time predicate over generations, so a tracker that is not
+    ///   recomputed stays Dirty and unsatisfied.
+    ///
+    /// `pending` is the caller's set of trackers awaiting recompute, for
+    /// example the trackers [`RetentionReverseIndex::affected_trackers`]
+    /// returns. A bound of zero selects nothing and leaves the cursor where it
+    /// is.
+    pub fn select(
+        &self,
+        pending: &BTreeSet<TrackerKey>,
+        max_retention_updates_per_block: u64,
+    ) -> RecomputeBatch {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+
+        let limit = usize::try_from(max_retention_updates_per_block).unwrap_or(usize::MAX);
+        let selected: Vec<TrackerKey> = match self.last {
+            None => pending.iter().take(limit).copied().collect(),
+            Some(last) => pending
+                .range((Excluded(last), Unbounded))
+                .chain(pending.range((Unbounded, Included(last))))
+                .take(limit)
+                .copied()
+                .collect(),
+        };
+        let next = selected.last().map_or(*self, |key| Self::after(*key));
+        RecomputeBatch { selected, next }
+    }
+}
+
+/// One `file_root -> {(tracker_key, R_job, interval_version, epoch)}` entry
+/// of the #129 scope (6) file index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FileIndexEntry {
+    pub tracker_key: TrackerKey,
+    pub r_job: u32,
+    pub interval_version: u32,
+    pub epoch: u64,
+}
+
+/// What one tracker puts in the reverse indexes.
+///
+/// `job_id`, `file_root`, `r_job` and `interval_version` are fixed for the
+/// tracker's life; all four are in its key. `epochs` and `archives` are the
+/// caller's: which epochs a tracker is indexed under, and which archives it
+/// depends on, is what the open epoch question (D-E) decides. They are sets,
+/// so a repeat in the caller's list is one entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackerIndexRecord {
+    pub job_id: JobId,
+    pub file_root: Hash,
+    pub r_job: u32,
+    pub interval_version: u32,
+    pub epochs: BTreeSet<u64>,
+    pub archives: BTreeSet<Address>,
+}
+
+impl TrackerIndexRecord {
+    /// The entries this tracker occupies: one job entry, one file entry per
+    /// epoch and one archive entry per archive. `None` if that overflows
+    /// `u64`.
+    pub fn entry_count(&self) -> Option<u64> {
+        let epochs = u64::try_from(self.epochs.len()).ok()?;
+        let archives = u64::try_from(self.archives.len()).ok()?;
+        epochs.checked_add(archives)?.checked_add(1)
+    }
+}
+
+/// The #129 scope (6) reverse indexes, in memory: `archive -> {tracker_key}`,
+/// `file_root -> {(tracker_key, R_job, interval_version, epoch)}` and
+/// `job_id -> {tracker_key}`.
+///
+/// * Every change is atomic: a refused call leaves the index unchanged.
+/// * Emptied buckets are pruned, so removing every tracker gives back an
+///   index equal to [`RetentionReverseIndex::new`].
+/// * `max_reverse_index_entries` is injected on every call that can grow the
+///   index and bounds one job's entries, the quantity relation 4 sizes
+///   (`max_retention_files_per_job × (2 + R_max)`). A call that would take
+///   the job over it is refused.
+/// * [`Self::affected_trackers`] suppresses duplicates: a tracker reached
+///   through several changes in one block is listed once.
+///
+/// Persisting it, journalling it and reverting it on reorg belong to the
+/// caller that stores it; nothing stores it yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetentionReverseIndex {
+    trackers: BTreeMap<TrackerKey, TrackerIndexRecord>,
+    by_archive: BTreeMap<Address, BTreeSet<TrackerKey>>,
+    by_file: BTreeMap<[u8; 32], BTreeSet<FileIndexEntry>>,
+    by_job: BTreeMap<JobId, BTreeSet<TrackerKey>>,
+    job_entries: BTreeMap<JobId, u64>,
+}
+
+impl RetentionReverseIndex {
+    /// An empty index.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Index a tracker at tracking start. Refused if `key` is already
+    /// indexed, if `record.epochs` is empty, or if the job's entries would
+    /// exceed `max_reverse_index_entries`.
+    pub fn insert_tracker(
+        &mut self,
+        key: TrackerKey,
+        record: TrackerIndexRecord,
+        max_reverse_index_entries: u64,
+    ) -> PoolResult<()> {
+        if self.trackers.contains_key(&key) {
+            return Err(PoolError::RetentionTrackerAlreadyIndexed);
+        }
+        let job_total = self.job_total_with(&record, 0, max_reverse_index_entries)?;
+        self.link(key, &record);
+        self.job_entries.insert(record.job_id, job_total);
+        self.trackers.insert(key, record);
+        Ok(())
+    }
+
+    /// Replace a tracker's epochs and archives, on an epoch or reassignment
+    /// update; its job, file, `R_job` and interval version are kept. Refused
+    /// if the tracker is unknown, if `epochs` is empty, or if the job's
+    /// entries would exceed `max_reverse_index_entries`.
+    pub fn replace_dependencies(
+        &mut self,
+        key: &TrackerKey,
+        epochs: BTreeSet<u64>,
+        archives: BTreeSet<Address>,
+        max_reverse_index_entries: u64,
+    ) -> PoolResult<()> {
+        let old = self
+            .trackers
+            .get(key)
+            .ok_or(PoolError::UnknownRetentionTracker)?
+            .clone();
+        let new = TrackerIndexRecord {
+            epochs,
+            archives,
+            ..old
+        };
+        let old_count = old
+            .entry_count()
+            .ok_or(PoolError::Overflow("reverse-index entries"))?;
+        let job_total = self.job_total_with(&new, old_count, max_reverse_index_entries)?;
+        self.unlink(key, &old);
+        self.link(*key, &new);
+        self.job_entries.insert(new.job_id, job_total);
+        self.trackers.insert(*key, new);
+        Ok(())
+    }
+
+    /// Remove a tracker (at settlement, incomplete, cancel or
+    /// reprovision-supersede) and return what it had indexed.
+    pub fn remove_tracker(&mut self, key: &TrackerKey) -> PoolResult<TrackerIndexRecord> {
+        let record = self
+            .trackers
+            .remove(key)
+            .ok_or(PoolError::UnknownRetentionTracker)?;
+        self.unlink(key, &record);
+        // The record was counted when it was indexed, so this cannot fail; if
+        // it did, 0 would leave the job's total high, never low.
+        let count = record.entry_count().unwrap_or(0);
+        let remaining = self
+            .job_entries
+            .get(&record.job_id)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(count);
+        if remaining == 0 {
+            self.job_entries.remove(&record.job_id);
+        } else {
+            self.job_entries.insert(record.job_id, remaining);
+        }
+        Ok(record)
+    }
+
+    /// What `key` has indexed, if it is indexed.
+    pub fn tracker(&self, key: &TrackerKey) -> Option<&TrackerIndexRecord> {
+        self.trackers.get(key)
+    }
+
+    /// Trackers indexed under `archive`, in key order.
+    pub fn trackers_for_archive(
+        &self,
+        archive: &Address,
+    ) -> impl Iterator<Item = &TrackerKey> + '_ {
+        self.by_archive.get(archive).into_iter().flatten()
+    }
+
+    /// File-index entries under `file_root`, in order.
+    pub fn file_entries(&self, file_root: &Hash) -> impl Iterator<Item = &FileIndexEntry> + '_ {
+        self.by_file.get(file_root.as_bytes()).into_iter().flatten()
+    }
+
+    /// Trackers indexed under `job_id`, in key order.
+    pub fn trackers_for_job(&self, job_id: &JobId) -> impl Iterator<Item = &TrackerKey> + '_ {
+        self.by_job.get(job_id).into_iter().flatten()
+    }
+
+    /// The reverse-index entries `job_id` occupies, as the cap counts them.
+    pub fn job_entry_count(&self, job_id: &JobId) -> u64 {
+        self.job_entries.get(job_id).copied().unwrap_or(0)
+    }
+
+    /// The trackers to enqueue for one block's changes: every tracker indexed
+    /// under a changed archive or a changed file root, each once, in key
+    /// order. Which changes the caller reports (status transitions,
+    /// reassignments) is the caller's.
+    pub fn affected_trackers(
+        &self,
+        changed_archives: &[Address],
+        changed_files: &[Hash],
+    ) -> BTreeSet<TrackerKey> {
+        let mut affected = BTreeSet::new();
+        for archive in changed_archives {
+            affected.extend(self.trackers_for_archive(archive).copied());
+        }
+        for file_root in changed_files {
+            affected.extend(self.file_entries(file_root).map(|entry| entry.tracker_key));
+        }
+        affected
+    }
+
+    /// The job's entry total once `record` takes the place of `replaced` of
+    /// its entries, refused over `cap`.
+    fn job_total_with(
+        &self,
+        record: &TrackerIndexRecord,
+        replaced: u64,
+        cap: u64,
+    ) -> PoolResult<u64> {
+        if record.epochs.is_empty() {
+            return Err(PoolError::RetentionTrackerWithoutEpoch);
+        }
+        let entries = record
+            .entry_count()
+            .and_then(|added| {
+                self.job_entry_count(&record.job_id)
+                    .checked_sub(replaced)?
+                    .checked_add(added)
+            })
+            .ok_or(PoolError::Overflow("reverse-index entries"))?;
+        if entries > cap {
+            return Err(PoolError::ReverseIndexCapExceeded { entries, cap });
+        }
+        Ok(entries)
+    }
+
+    fn file_entry(key: TrackerKey, record: &TrackerIndexRecord, epoch: u64) -> FileIndexEntry {
+        FileIndexEntry {
+            tracker_key: key,
+            r_job: record.r_job,
+            interval_version: record.interval_version,
+            epoch,
+        }
+    }
+
+    fn link(&mut self, key: TrackerKey, record: &TrackerIndexRecord) {
+        self.by_job.entry(record.job_id).or_default().insert(key);
+        let file = self
+            .by_file
+            .entry(*record.file_root.as_bytes())
+            .or_default();
+        for &epoch in &record.epochs {
+            file.insert(Self::file_entry(key, record, epoch));
+        }
+        for archive in &record.archives {
+            self.by_archive.entry(*archive).or_default().insert(key);
+        }
+    }
+
+    fn unlink(&mut self, key: &TrackerKey, record: &TrackerIndexRecord) {
+        remove_pruning(&mut self.by_job, &record.job_id, key);
+        for &epoch in &record.epochs {
+            let entry = Self::file_entry(*key, record, epoch);
+            remove_pruning(&mut self.by_file, record.file_root.as_bytes(), &entry);
+        }
+        for archive in &record.archives {
+            remove_pruning(&mut self.by_archive, archive, key);
+        }
+    }
+}
+
+/// Remove `value` from `map[bucket]`, and the bucket once it is empty.
+fn remove_pruning<K: Ord, V: Ord>(map: &mut BTreeMap<K, BTreeSet<V>>, bucket: &K, value: &V) {
+    if let Some(set) = map.get_mut(bucket) {
+        set.remove(value);
+        if set.is_empty() {
+            map.remove(bucket);
+        }
     }
 }
 
@@ -1769,5 +2206,482 @@ mod tests {
         assert_eq!(m.accepted_leaves().count(), 0);
         assert_eq!(m.assignments().count(), 0);
         assert_eq!(m.entitlements().count(), 0);
+    }
+
+    // --- Retention kernels (issue #129) ---------------------------------------
+
+    fn tk(seed: u8) -> TrackerKey {
+        TrackerKey::from_bytes([seed; 32])
+    }
+
+    fn generations(pairs: &[(Address, u64)]) -> BTreeMap<Address, u64> {
+        pairs.iter().copied().collect()
+    }
+
+    fn index_record(
+        j: u8,
+        file: u8,
+        r_job: u32,
+        epochs: &[u64],
+        archives: &[u8],
+    ) -> TrackerIndexRecord {
+        TrackerIndexRecord {
+            job_id: job(j),
+            file_root: Hash::new([file; 32]),
+            r_job,
+            interval_version: 1,
+            epochs: epochs.iter().copied().collect(),
+            archives: archives.iter().map(|&a| addr(a)).collect(),
+        }
+    }
+
+    #[test]
+    fn retention_satisfied_needs_a_clean_since_and_the_full_interval() {
+        let oab = 200;
+        assert!(retention_satisfied(false, Some(1_000), 1_200, oab));
+        assert!(retention_satisfied(false, Some(1_000), 1_201, oab));
+        assert!(
+            !retention_satisfied(false, Some(1_000), 1_199, oab),
+            "one block short"
+        );
+        assert!(!retention_satisfied(true, Some(1_000), 1_200, oab), "dirty");
+        assert!(
+            !retention_satisfied(true, Some(1_000), u64::MAX, oab),
+            "dirty never matures"
+        );
+        assert!(!retention_satisfied(false, None, u64::MAX, oab), "no since");
+        assert!(
+            !retention_satisfied(false, Some(1_000), 999, oab),
+            "since after head"
+        );
+    }
+
+    #[test]
+    fn retention_satisfied_fails_closed_on_overflow() {
+        assert!(!retention_satisfied(
+            false,
+            Some(u64::MAX - 5),
+            u64::MAX,
+            10
+        ));
+        assert!(!retention_satisfied(false, Some(u64::MAX), u64::MAX, 1));
+        assert!(!retention_satisfied(false, Some(1), u64::MAX, u64::MAX));
+        // The largest sum that fits still matures.
+        assert!(retention_satisfied(
+            false,
+            Some(u64::MAX - 10),
+            u64::MAX,
+            10
+        ));
+    }
+
+    #[test]
+    fn a_moved_generation_makes_the_tracker_dirty() {
+        let (a, b) = (addr(1), addr(2));
+        let recorded = [(a, 4), (b, 7)];
+        for (current, dirty) in [
+            (generations(&[(a, 4), (b, 7)]), false),
+            // A slash, exit or unbond of either dependency bumps its generation.
+            (generations(&[(a, 5), (b, 7)]), true),
+            (generations(&[(a, 4), (b, 8)]), true),
+            // Slashed and reactivated: back to Active, but two generations on.
+            (generations(&[(a, 6), (b, 7)]), true),
+        ] {
+            let current_gen = |x: &Address| current.get(x).copied();
+            assert_eq!(
+                retention_tracker_dirty(&recorded, &[a, b], current_gen),
+                dirty
+            );
+        }
+    }
+
+    #[test]
+    fn a_changed_dependency_set_makes_the_tracker_dirty() {
+        let (a, b, c) = (addr(1), addr(2), addr(3));
+        let recorded = [(a, 1), (b, 1)];
+        let current = generations(&[(a, 1), (b, 1), (c, 1)]);
+        let current_gen = |x: &Address| current.get(x).copied();
+        // The same set in another order, with repeats (an archive in several
+        // epochs): clean.
+        assert!(!retention_tracker_dirty(
+            &recorded,
+            &[b, a, b, a],
+            current_gen
+        ));
+        // An archive joins or leaves the set, every generation unchanged.
+        assert!(retention_tracker_dirty(&recorded, &[a, b, c], current_gen));
+        assert!(retention_tracker_dirty(&recorded, &[a], current_gen));
+        assert!(retention_tracker_dirty(&recorded, &[], current_gen));
+        assert!(!retention_tracker_dirty(&[], &[], current_gen));
+    }
+
+    #[test]
+    fn dirty_fails_closed_on_a_missing_generation_or_a_repeated_record() {
+        let (a, b) = (addr(1), addr(2));
+        let current = generations(&[(a, 1)]);
+        let current_gen = |x: &Address| current.get(x).copied();
+        assert!(retention_tracker_dirty(
+            &[(a, 1), (b, 0)],
+            &[a, b],
+            current_gen
+        ));
+        assert!(retention_tracker_dirty(
+            &[(a, 1), (a, 1)],
+            &[a],
+            current_gen
+        ));
+    }
+
+    #[test]
+    fn below_r_coverage_cannot_mature() {
+        use crate::storage_metadata::{
+            active_replica_counts_from, coverage_ok, ReplicaAttestation,
+        };
+        // Chunk 1 has R_job - 1 = 2 replicas.
+        let (both, first) = ([0b11u8], [0b01u8]);
+        let entries: Vec<ReplicaAttestation<'_>> =
+            [(1, &both[..]), (2, &both[..]), (3, &first[..])]
+                .into_iter()
+                .map(|(seed, bitmap)| ReplicaAttestation {
+                    epoch: 100,
+                    archive: addr(seed),
+                    active: true,
+                    bitmap: Some(bitmap),
+                })
+                .collect();
+        let counts = active_replica_counts_from(2, &entries);
+        assert_eq!(counts, vec![3, 2]);
+        assert!(!coverage_ok(&counts, 3));
+        assert!(coverage_ok(&counts, 2));
+        // Scope (5) leaves `since` unset when coverage fails, and an unset
+        // `since` never matures.
+        assert!(!retention_satisfied(false, None, u64::MAX, 200));
+    }
+
+    #[test]
+    fn recompute_cursor_is_bounded_ordered_fair_and_wraps() {
+        let pending: BTreeSet<TrackerKey> = [5, 1, 4, 2, 3].into_iter().map(tk).collect();
+        let mut cursor = RecomputeCursor::start();
+        let mut visits = Vec::new();
+        for _ in 0..3 {
+            let batch = cursor.select(&pending, 2);
+            visits.push(batch.selected);
+            cursor = batch.next;
+        }
+        assert_eq!(
+            visits,
+            vec![vec![tk(1), tk(2)], vec![tk(3), tk(4)], vec![tk(5), tk(1)]]
+        );
+        // Every key within ceil(5 / 2) = 3 blocks.
+        assert_eq!(
+            visits.concat().into_iter().collect::<BTreeSet<_>>(),
+            pending
+        );
+        assert_eq!(cursor.last(), Some(&tk(1)));
+
+        // A bound at or above the set visits each key once, after the cursor.
+        assert_eq!(
+            RecomputeCursor::after(tk(3)).select(&pending, 99).selected,
+            vec![tk(4), tk(5), tk(1), tk(2), tk(3)]
+        );
+        // A key that has left the set is skipped; the order resumes after it.
+        let fewer: BTreeSet<TrackerKey> = [1, 2, 4].into_iter().map(tk).collect();
+        assert_eq!(
+            RecomputeCursor::after(tk(3)).select(&fewer, 2).selected,
+            vec![tk(4), tk(1)]
+        );
+        // Bound 0, or nothing pending: nothing selected, the cursor stays.
+        let at = RecomputeCursor::after(tk(2));
+        let nothing = RecomputeBatch {
+            selected: Vec::new(),
+            next: at,
+        };
+        assert_eq!(at.select(&pending, 0), nothing);
+        assert_eq!(at.select(&BTreeSet::new(), 3), nothing);
+    }
+
+    #[test]
+    fn a_tracker_the_bound_skips_stays_dirty_and_cannot_mature() {
+        // Three trackers wait and the bound recomputes one per block. Tracker
+        // 3's only dependency was slashed (generation 1 -> 2) long after its
+        // `since`, and its deadline `since + oab` is far behind the head.
+        let a = addr(1);
+        let recorded = [(a, 1)];
+        let current = generations(&[(a, 2)]);
+        let current_gen = |x: &Address| current.get(x).copied();
+        let (since, oab) = (Some(100), 200);
+        let pending: BTreeSet<TrackerKey> = [1, 2, 3].into_iter().map(tk).collect();
+        let mut cursor = RecomputeCursor::start();
+        for head in [10_000u64, 10_001] {
+            let batch = cursor.select(&pending, 1);
+            assert!(!batch.selected.contains(&tk(3)));
+            cursor = batch.next;
+            // Not recomputed, so still Dirty by generation: never satisfied.
+            let dirty = retention_tracker_dirty(&recorded, &[a], current_gen);
+            assert!(dirty);
+            assert!(!retention_satisfied(dirty, since, head, oab));
+        }
+        // Still pending, and reached on the next block.
+        assert_eq!(cursor.select(&pending, 1).selected, vec![tk(3)]);
+    }
+
+    #[test]
+    fn a_stale_since_never_settles() {
+        // `since` was recorded over {a, b}. Since then the dependency set has
+        // changed with no generation bump: a reassignment added archive c
+        // (both epoch readings) or replaced b by c (latest-only reading).
+        let (a, b, c) = (addr(1), addr(2), addr(3));
+        let recorded = [(a, 1), (b, 1)];
+        let current = generations(&[(a, 1), (b, 1), (c, 1)]);
+        let current_gen = |x: &Address| current.get(x).copied();
+        for recomputed in [vec![a, b, c], vec![a, c]] {
+            let dirty = retention_tracker_dirty(&recorded, &recomputed, current_gen);
+            assert!(dirty);
+            for head in [300, 10_000, u64::MAX] {
+                assert!(!retention_satisfied(dirty, Some(100), head, 200));
+            }
+        }
+        // Unchanged set and generations: the same `since` matures.
+        let clean = retention_tracker_dirty(&recorded, &[a, b], current_gen);
+        assert!(retention_satisfied(clean, Some(100), 300, 200));
+    }
+
+    #[test]
+    fn reverse_index_insert_lookup_and_remove_round_trip() {
+        let mut idx = RetentionReverseIndex::new();
+        let record = index_record(1, 9, 3, &[100], &[1, 2]);
+        idx.insert_tracker(tk(1), record.clone(), 4).unwrap();
+        assert_eq!(
+            idx.trackers_for_job(&job(1)).collect::<Vec<_>>(),
+            vec![&tk(1)]
+        );
+        assert_eq!(
+            idx.trackers_for_archive(&addr(1)).collect::<Vec<_>>(),
+            vec![&tk(1)]
+        );
+        assert_eq!(
+            idx.trackers_for_archive(&addr(2)).collect::<Vec<_>>(),
+            vec![&tk(1)]
+        );
+        assert_eq!(idx.trackers_for_archive(&addr(3)).count(), 0);
+        assert_eq!(
+            idx.file_entries(&Hash::new([9; 32])).collect::<Vec<_>>(),
+            vec![&FileIndexEntry {
+                tracker_key: tk(1),
+                r_job: 3,
+                interval_version: 1,
+                epoch: 100,
+            }]
+        );
+        assert_eq!(idx.job_entry_count(&job(1)), 4);
+        assert_eq!(idx.tracker(&tk(1)), Some(&record));
+
+        assert_eq!(idx.remove_tracker(&tk(1)), Ok(record));
+        // Pruned: nothing is left behind.
+        assert_eq!(idx, RetentionReverseIndex::new());
+        assert_eq!(
+            idx.remove_tracker(&tk(1)),
+            Err(PoolError::UnknownRetentionTracker)
+        );
+    }
+
+    #[test]
+    fn reverse_index_cap_is_per_job_and_a_refusal_changes_nothing() {
+        let mut idx = RetentionReverseIndex::new();
+        // 1 job + 1 file + 2 archive entries = 4, exactly the cap.
+        idx.insert_tracker(tk(1), index_record(1, 9, 3, &[100], &[1, 2]), 4)
+            .unwrap();
+        // A second tracker of the same job needs 3 more: 7 > 4.
+        let second = index_record(1, 8, 3, &[100], &[3]);
+        let before = idx.clone();
+        assert_eq!(
+            idx.insert_tracker(tk(2), second.clone(), 4),
+            Err(PoolError::ReverseIndexCapExceeded { entries: 7, cap: 4 })
+        );
+        assert_eq!(idx, before);
+        // Boundary: refused at 6, accepted at 7.
+        assert_eq!(
+            idx.clone().insert_tracker(tk(2), second.clone(), 6),
+            Err(PoolError::ReverseIndexCapExceeded { entries: 7, cap: 6 })
+        );
+        let mut at_cap = idx.clone();
+        at_cap.insert_tracker(tk(2), second, 7).unwrap();
+        assert_eq!(at_cap.job_entry_count(&job(1)), 7);
+        // Another job has its own budget.
+        idx.insert_tracker(tk(3), index_record(2, 9, 3, &[100], &[1, 2]), 4)
+            .unwrap();
+        assert_eq!(idx.job_entry_count(&job(1)), 4);
+        assert_eq!(idx.job_entry_count(&job(2)), 4);
+        // Repeats in the caller's lists are one entry each.
+        let mut repeats = RetentionReverseIndex::new();
+        repeats
+            .insert_tracker(tk(1), index_record(1, 9, 3, &[100, 100], &[1, 1, 2]), 4)
+            .unwrap();
+        assert_eq!(repeats.job_entry_count(&job(1)), 4);
+    }
+
+    #[test]
+    fn reverse_index_refuses_a_repeated_key_and_a_tracker_without_epoch() {
+        let mut idx = RetentionReverseIndex::new();
+        idx.insert_tracker(tk(1), index_record(1, 9, 3, &[100], &[1]), 100)
+            .unwrap();
+        let before = idx.clone();
+        assert_eq!(
+            idx.insert_tracker(tk(1), index_record(2, 8, 2, &[100], &[2]), 100),
+            Err(PoolError::RetentionTrackerAlreadyIndexed)
+        );
+        assert_eq!(
+            idx.insert_tracker(tk(2), index_record(1, 9, 3, &[], &[1]), 100),
+            Err(PoolError::RetentionTrackerWithoutEpoch)
+        );
+        assert_eq!(
+            idx.replace_dependencies(&tk(1), BTreeSet::new(), BTreeSet::new(), 100),
+            Err(PoolError::RetentionTrackerWithoutEpoch)
+        );
+        assert_eq!(
+            idx.replace_dependencies(&tk(9), BTreeSet::from([100]), BTreeSet::new(), 100),
+            Err(PoolError::UnknownRetentionTracker)
+        );
+        assert_eq!(idx, before);
+    }
+
+    #[test]
+    fn reverse_index_replace_serves_either_epoch_reading() {
+        let root = Hash::new([9; 32]);
+        let mut idx = RetentionReverseIndex::new();
+        idx.insert_tracker(tk(1), index_record(1, 9, 3, &[100], &[1, 2]), 10)
+            .unwrap();
+
+        // A reassignment at 210 moves chunks from archive 1 to archive 3. What
+        // the tracker now depends on is the caller's answer; two answers:
+        // (i) every epoch, and every archive that attested in any of them;
+        let mut union = idx.clone();
+        union
+            .replace_dependencies(
+                &tk(1),
+                BTreeSet::from([100, 210]),
+                [1, 2, 3].into_iter().map(addr).collect(),
+                10,
+            )
+            .unwrap();
+        assert_eq!(union.trackers_for_archive(&addr(1)).count(), 1);
+        assert_eq!(
+            union
+                .file_entries(&root)
+                .map(|e| e.epoch)
+                .collect::<Vec<_>>(),
+            vec![100, 210]
+        );
+        assert_eq!(union.job_entry_count(&job(1)), 1 + 2 + 3);
+        // (ii) the latest epoch and its archives only.
+        let mut latest = idx.clone();
+        latest
+            .replace_dependencies(
+                &tk(1),
+                BTreeSet::from([210]),
+                [2, 3].into_iter().map(addr).collect(),
+                10,
+            )
+            .unwrap();
+        assert_eq!(latest.trackers_for_archive(&addr(1)).count(), 0);
+        assert!(
+            !latest.by_archive.contains_key(&addr(1)),
+            "emptied bucket pruned"
+        );
+        assert_eq!(
+            latest.trackers_for_archive(&addr(3)).collect::<Vec<_>>(),
+            vec![&tk(1)]
+        );
+        assert_eq!(
+            latest
+                .file_entries(&root)
+                .map(|e| e.epoch)
+                .collect::<Vec<_>>(),
+            vec![210]
+        );
+        assert_eq!(latest.job_entry_count(&job(1)), 1 + 1 + 2);
+        // Kept: job, file, R_job and interval version.
+        let kept = latest.tracker(&tk(1)).unwrap();
+        assert_eq!(
+            (
+                kept.job_id,
+                kept.file_root,
+                kept.r_job,
+                kept.interval_version
+            ),
+            (job(1), root, 3, 1)
+        );
+        // A replacement over the cap changes nothing.
+        let before = idx.clone();
+        assert_eq!(
+            idx.replace_dependencies(
+                &tk(1),
+                BTreeSet::from([100, 210]),
+                [1, 2, 3].into_iter().map(addr).collect(),
+                5,
+            ),
+            Err(PoolError::ReverseIndexCapExceeded { entries: 6, cap: 5 })
+        );
+        assert_eq!(idx, before);
+        // Removing after a replacement leaves nothing behind.
+        latest.remove_tracker(&tk(1)).unwrap();
+        assert_eq!(latest, RetentionReverseIndex::new());
+    }
+
+    #[test]
+    fn affected_trackers_lists_each_tracker_once_per_block() {
+        let mut idx = RetentionReverseIndex::new();
+        idx.insert_tracker(tk(1), index_record(1, 9, 3, &[100], &[1, 2]), 100)
+            .unwrap();
+        idx.insert_tracker(tk(2), index_record(1, 8, 3, &[100], &[2]), 100)
+            .unwrap();
+        idx.insert_tracker(tk(3), index_record(2, 9, 2, &[100], &[3]), 100)
+            .unwrap();
+        idx.insert_tracker(tk(4), index_record(2, 7, 2, &[100], &[4]), 100)
+            .unwrap();
+        // Archives 2 (reported twice) and 1 change status and file 9 is
+        // reassigned, all in one block.
+        let affected = idx.affected_trackers(&[addr(2), addr(1), addr(2)], &[Hash::new([9; 32])]);
+        assert_eq!(
+            affected.into_iter().collect::<Vec<_>>(),
+            vec![tk(1), tk(2), tk(3)]
+        );
+        // Merging into a pending set is idempotent.
+        let mut pending = BTreeSet::new();
+        pending.extend(idx.affected_trackers(&[addr(2)], &[]));
+        pending.extend(idx.affected_trackers(&[addr(1)], &[Hash::new([9; 32])]));
+        assert_eq!(pending.len(), 3);
+        assert!(idx
+            .affected_trackers(&[addr(5)], &[Hash::new([6; 32])])
+            .is_empty());
+    }
+
+    #[test]
+    fn two_jobs_on_one_file_root_are_indexed_independently() {
+        let root = Hash::new([9; 32]);
+        let mut idx = RetentionReverseIndex::new();
+        idx.insert_tracker(tk(1), index_record(1, 9, 2, &[100], &[1, 2]), 4)
+            .unwrap();
+        idx.insert_tracker(tk(2), index_record(2, 9, 3, &[100], &[1, 2]), 4)
+            .unwrap();
+        assert_eq!(
+            idx.file_entries(&root)
+                .map(|e| (e.tracker_key, e.r_job))
+                .collect::<Vec<_>>(),
+            vec![(tk(1), 2), (tk(2), 3)]
+        );
+        idx.remove_tracker(&tk(1)).unwrap();
+        assert_eq!(
+            idx.file_entries(&root)
+                .map(|e| e.tracker_key)
+                .collect::<Vec<_>>(),
+            vec![tk(2)]
+        );
+        assert_eq!(
+            idx.trackers_for_archive(&addr(1)).collect::<Vec<_>>(),
+            vec![&tk(2)]
+        );
+        assert_eq!(idx.job_entry_count(&job(1)), 0);
+        assert_eq!(idx.job_entry_count(&job(2)), 4);
     }
 }
