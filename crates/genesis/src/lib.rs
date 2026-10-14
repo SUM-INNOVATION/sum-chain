@@ -17,6 +17,7 @@ use thiserror::Error;
 
 pub mod compute_pool_retention;
 pub mod compute_pool_retention_inputs;
+pub mod pool_topology;
 
 /// Genesis configuration errors
 #[derive(Debug, Error)]
@@ -87,6 +88,13 @@ pub enum GenesisError {
     /// relation does not hold (issue #129).
     #[error("compute_pool_enabled_from_height refused: {0}")]
     ComputePoolActivationRefused(compute_pool_retention_inputs::RetentionActivationError),
+
+    /// `compute_pool_enabled_from_height` is set over fewer genesis validators
+    /// than the pool-activation product minimum (issue #126). The error reports
+    /// the count and the three #126 bounds; it does not evaluate the separate
+    /// maintenance/operational minimum.
+    #[error("{0}")]
+    PoolActivationTopology(pool_topology::BelowProductMinimum),
 
     /// A staking configuration protocol v1 cannot run: stake-weighted proposer
     /// selection, or dynamic epochs that would change validator membership.
@@ -3431,7 +3439,17 @@ impl ChainParams {
     /// in isolation) that carries `Some(h)`. The guarantee is loader-level:
     /// [`Genesis::validate`] calls this, so every genesis admitted through the
     /// authoritative loader rejects any `Some(_)` for these gates.
+    ///
+    /// Without the validator set, the #126 topology guard cannot run here; it
+    /// runs in [`Genesis::validate`], which passes the set. The compute-pool
+    /// gate is refused further down either way.
     pub fn validate(&self) -> Result<()> {
+        self.validate_over(None)
+    }
+
+    /// [`Self::validate`], with the #126 pool topology guard applied to
+    /// `validators` (the genesis validator list) when it is given.
+    fn validate_over(&self, validators: Option<&[[u8; 32]]>) -> Result<()> {
         // ── protocol v1 proposer and membership rules, first ────────────────
         //
         // Round-robin proposers over the static genesis validator set. A
@@ -3444,6 +3462,17 @@ impl ChainParams {
                 .map_err(GenesisError::StakingProtocolV1)?;
         }
         if self.compute_pool_enabled_from_height.is_some() {
+            // The validator-topology guard (#126), before anything else on the
+            // activation path: pool enablement over fewer than
+            // `pool_topology::PRODUCT_MINIMUM` validators is refused. The set
+            // is the genesis validator list, which the protocol v1 rule just
+            // above makes the whole, static, live membership; the guard adds no
+            // epoch rule of its own. At or above the minimum nothing is
+            // admitted by it: every refusal below still applies.
+            if let Some(validators) = validators {
+                pool_topology::check_pool_activation(validators)
+                    .map_err(GenesisError::PoolActivationTopology)?;
+            }
             // The activation path. With parameters declared, they are checked
             // before the refusal below, and the retention relations refuse
             // first while any of their inputs is undefined (#129). Absent
@@ -4630,7 +4659,9 @@ impl Genesis {
 
         // Fail-closed: reject any genesis that opens a subsystem gate whose
         // typed parameter surface does not exist yet (compute-pool / beacon).
-        self.params.validate()?;
+        // The validator set goes with it, for the #126 pool topology guard.
+        let validators = self.validator_pubkeys()?;
+        self.params.validate_over(Some(&validators))?;
 
         Ok(())
     }
@@ -5236,6 +5267,18 @@ mod tests {
         serde_json::from_str(LOCAL_GENESIS_JSON).expect("local genesis is valid JSON")
     }
 
+    /// The committed local genesis over five synthetic validators. The #126
+    /// topology guard refuses the compute-pool gate over the local genesis's
+    /// three before any other check on that path, so tests of the refusals
+    /// after it start from a set it admits.
+    fn pool_ready_value() -> serde_json::Value {
+        let mut v = local_genesis_value();
+        v["validators"] = serde_json::json!((1..=5u8)
+            .map(|i| KeyPair::from_bytes([i; 32]).public_key().to_base58())
+            .collect::<Vec<_>>());
+        v
+    }
+
     // Test 1 — missing fields are accepted as `None` by the authoritative loader.
     #[test]
     fn foundation_gates_absent_default_to_none_and_loader_accepts() {
@@ -5263,7 +5306,7 @@ mod tests {
     // Test 3a — `Some(0)` on compute-pool is rejected INDEPENDENTLY (beacon absent).
     #[test]
     fn foundation_compute_pool_some_zero_rejected_by_loader() {
-        let mut v = local_genesis_value();
+        let mut v = pool_ready_value();
         v["params"]["compute_pool_enabled_from_height"] = serde_json::json!(0u64);
         let s = serde_json::to_string(&v).unwrap();
         match Genesis::from_json(&s) {
@@ -5415,7 +5458,7 @@ mod tests {
 
         // Params present but gate Some ⇒ still rejected, now first by the
         // retention relations' undefined inputs (#129).
-        let mut v = local_genesis_value();
+        let mut v = pool_ready_value();
         v["params"]["compute_pool_params"] = valid;
         v["params"]["compute_pool_enabled_from_height"] = serde_json::json!(0u64);
         assert!(matches!(
@@ -5444,9 +5487,10 @@ mod tests {
         })
     }
 
-    /// Load the local genesis with `edit` applied to its `params`.
+    /// Load the local genesis, over five validators (`pool_ready_value`),
+    /// with `edit` applied to its `params`.
     fn load_with(edit: impl FnOnce(&mut serde_json::Value)) -> Result<Genesis> {
-        let mut v = local_genesis_value();
+        let mut v = pool_ready_value();
         edit(&mut v["params"]);
         Genesis::from_json(&serde_json::to_string(&v).unwrap())
     }
@@ -5610,7 +5654,7 @@ mod tests {
             "compute_pool_enabled_from_height",
             "beacon_enabled_from_height",
         ] {
-            let mut v = local_genesis_value();
+            let mut v = pool_ready_value();
             v["params"][gate] = serde_json::json!(9_000_000u64);
             let s = serde_json::to_string(&v).unwrap();
             match Genesis::from_json(&s) {
