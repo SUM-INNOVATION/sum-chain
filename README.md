@@ -62,7 +62,16 @@ docker compose up -d --build
 
 To exercise only the health/readiness endpoints from a clean checkout without touching any tracked file, run `deploy/health-e2e-harness.sh`; it provisions a disposable identity into a temp directory (evidence is chain id 1337, `DEVNET_ONLY / NON_SELECTION / INVALID_FOR_B0`).
 
-A self-bootstrapping single-validator preset (`deploy/snip-local-mirror.yaml`) is **planned under #118/#119**. Its required runtime artifacts (a genesis template and a first-boot disposable-key mechanism) are **not present on `main`**, so that preset cannot `up` from a clean `main` checkout yet — use the three-validator harness above for clean local testing at chain id 1337.
+`deploy/snip-local-mirror.yaml` (#118) runs a **synthetic five-validator devnet** (chain id 1337) for SNIP/OmniNode client tests. Its validator keys are throwaway keys you generate locally; it is a test topology, not a production validator set. It reads only the ignored runtime directory `devnet/` and refuses to start if `devnet/genesis.json` or a validator key is missing:
+
+```bash
+mkdir -m 0700 devnet
+cargo run --locked --bin setup-local-testnet -- --mode topology --validator-count 5 --output-dir devnet
+GIT_HASH=$(git rev-parse HEAD) docker compose -f deploy/snip-local-mirror.yaml up -d --build   # RPC on localhost:8545
+docker compose -f deploy/snip-local-mirror.yaml down -v && rm -rf devnet                      # wipe chain data, keys and genesis
+```
+
+It is consensus only: the compute-pool and beacon gates stay unset, so it is not the #118 pool "ecosystem" devnet, whose genesis template still needs unratified values. `deploy/topology-e2e-harness.sh` runs this preset in CI and checks that every validator proposes, that all nodes advance, and that they agree on block hashes. The compose file header covers key permissions on Linux hosts whose uid is not 1000.
 
 ## Architecture
 

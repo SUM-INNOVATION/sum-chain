@@ -1,15 +1,29 @@
-# End-to-end health/readiness evidence for the devnet health server (issue #120).
+# End-to-end devnet evidence on an Ubuntu runner (Docker Engine, Docker Compose
+# v2, python3 and a Rust toolchain are all preinstalled on ubuntu-latest). Two
+# independent jobs:
 #
-# Runs deploy/health-e2e-harness.sh on an Ubuntu runner (Docker Engine, Docker
-# Compose v2, and a Rust toolchain are all preinstalled on ubuntu-latest). The
-# harness brings up the real three-validator docker-compose.yaml devnet from an
-# ephemeral, mktemp-provisioned identity set and asserts the 503->200 readiness
-# transition after block advancement. The sanitized evidence log is uploaded as
-# an artifact; it is NOT committed. Evidence is DEVNET_ONLY / NON_SELECTION /
-# INVALID_FOR_B0, chain id 1337.
+# * health-e2e (issue #120) runs deploy/health-e2e-harness.sh: the real
+#   three-validator docker-compose.yaml devnet from an ephemeral,
+#   mktemp-provisioned identity set, asserting the 503->200 readiness
+#   transition after block advancement.
+# * topology-e2e (issue #118) runs deploy/topology-e2e-harness.sh: the
+#   five-validator deploy/snip-local-mirror.yaml devnet from the ignored
+#   devnet/ runtime directory, asserting that absent runtime files fail
+#   closed, the same health/readiness behaviour on every validator, and that
+#   every validator proposes under round-robin while all nodes advance and
+#   agree on block hashes. It is a SYNTHETIC test topology: its validator keys
+#   are throwaway keys generated on the runner for the run and never
+#   committed, and it is not a production validator-set change. Consensus
+#   only; the pool and beacon gates stay unset.
+#
+# The sanitized evidence logs are uploaded as artifacts; they are NOT
+# committed. Evidence is DEVNET_ONLY / NON_SELECTION / INVALID_FOR_B0, chain id
+# 1337.
 name: health-e2e (devnet #120)
 
 on:
+  # Manual runs, e.g. for a branch before it has a pull request.
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
@@ -19,6 +33,10 @@ on:
       - 'Dockerfile'
       - 'crates/rpc/src/health.rs'
       - 'crates/node/**'
+      - 'deploy/topology-e2e-harness.sh'
+      - 'deploy/snip-local-mirror.yaml'
+      - 'scripts/**'
+      - '.gitignore'
   pull_request:
     branches: [main]
     paths:
@@ -28,6 +46,10 @@ on:
       - 'Dockerfile'
       - 'crates/rpc/src/health.rs'
       - 'crates/node/**'
+      - 'deploy/topology-e2e-harness.sh'
+      - 'deploy/snip-local-mirror.yaml'
+      - 'scripts/**'
+      - '.gitignore'
 
 # One in-flight run per ref; a newer push cancels the older devnet bring-up.
 concurrency:
@@ -60,4 +82,34 @@ jobs:
         with:
           name: health-e2e-evidence
           path: ${{ runner.temp }}/health-e2e-evidence.log
+          if-no-files-found: warn
+
+  topology-e2e:
+    name: synthetic 5-validator devnet E2E (snip-local-mirror compose)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain versions
+        run: |
+          docker version
+          docker compose version
+          cargo --version
+          python3 --version
+
+      - name: Run the synthetic topology E2E harness
+        env:
+          EVIDENCE_LOG: ${{ runner.temp }}/topology-e2e-evidence.log
+          # NO_CACHE: "1"   # uncomment to force a fully clean image build
+        run: bash deploy/topology-e2e-harness.sh
+
+      - name: Upload sanitized evidence log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: topology-e2e-evidence
+          path: ${{ runner.temp }}/topology-e2e-evidence.log
           if-no-files-found: warn

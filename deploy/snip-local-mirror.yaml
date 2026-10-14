@@ -1,61 +1,96 @@
-# SUM Chain — SNIP V2 local-mirror compose preset.
+# SUM Chain — SNIP local-mirror devnet preset (issue #118).
 #
-# **Purpose:** the smallest possible chain SNIP needs for V2 client integration
-# tests. One validator producing blocks, RPC exposed on `localhost:8545`, no
-# Prometheus, no Grafana, no fullnode separation. Optimized for fast spin-up
-# in CI loops, not for any kind of production realism.
+# **SYNTHETIC TEST TOPOLOGY.** Five validators whose keys are throwaway devnet
+# keys, generated on the machine that runs this file and never committed. This
+# preset is a local/CI test devnet. It is NOT a production validator set, it
+# does not describe or propose a change to any live validator set, and nothing
+# about it carries over to mainnet (chain id 1) or any shared network.
 #
-# **NOT production-like. NOT fault-tolerant.**
-# - One validator means a single container outage halts block production
-#   (PoA round-robin can't skip a missing proposer; see
-#   crates/consensus/src/poa.rs:213-238).
-# - PoR challenge generation, archive-node assignment, and reorg behavior are
-#   exercised on this preset only against this single proposer's view.
-# - Do NOT use this preset for performance benchmarks, security testing, or
-#   any "looks like mainnet" claims. It exists to verify SNIP V2 client code
-#   round-trips against a working chain end-to-end. Nothing more.
+# **Purpose:** a local chain for SNIP/OmniNode client integration tests and for
+# the round-robin consensus check in CI. JSON-RPC on `localhost:8545` and the
+# health/readiness server on `localhost:8546` (both validator-1); no Prometheus,
+# no Grafana, no separate full node.
 #
-# **Chain ID 31337** (from `genesis/snip-mirror-genesis.json`) — Hardhat-style
-# "this is unambiguously a local devnet" chain ID. Distinct from `local_genesis
-# .json`'s 1337 and from any plausible mainnet ID. Refusing to mix this chain
-# with mainnet is a SNIP-client-side concern; the chain ID is the signal.
+# **Topology:** five PoA validators — issue #118's ">= 5 validators", #126's
+# product minimum. Consensus only: the compute-pool and beacon gates stay unset
+# (the genesis loader refuses them), so this is not the pool "ecosystem"
+# devnet; that one still needs #118's genesis template, whose values are not
+# ratified.
 #
-# **Single validator on purpose**: PoA round-robin requires every validator
-# in the set to produce, so a single-validator genesis is the only way to
-# get block production from one container. The 3-validator `local_genesis
-# .json` won't make progress with only validator-1 running because
-# heights assigned to the absent validators 2/3 stall the chain.
+# **NOT production-like. NOT fault-tolerant.** PoA round-robin has no
+# skip-proposer: height h is proposed by validators[h mod 5], so every one of
+# the five containers must stay up or the chain halts at the first height an
+# absent validator owns (see crates/consensus/src/poa.rs). Do NOT use this
+# preset for benchmarks, security testing, or any "looks like mainnet" claim.
 #
-# Usage:
-#   docker-compose -f deploy/snip-local-mirror.yaml up -d --build
+# **Chain id 1337** (from the generated genesis) — the devnet value, distinct
+# from mainnet (1).
+#
+# Files this compose mounts — all GENERATED into the ignored runtime directory
+# `devnet/` at the repository root, never committed (`/devnet/` is in
+# .gitignore), and no tracked genesis is read or overwritten:
+#   ../devnet/genesis.json               — the runnable genesis (5 validators,
+#                                          funded test roles, chain id 1337)
+#   ../devnet/keys/validator{1..5}.json  — throwaway validator private-key seeds
+#                                          ([u8; 32] JSON, the format
+#                                          crates/node/src/main.rs feeds to
+#                                          KeyPair::from_bytes)
+#
+# Every bind is the long form with `create_host_path: false`, so a missing file
+# FAILS `up` before any container starts, naming the absent path ("bind source
+# path does not exist: .../devnet/genesis.json"). The short form would instead
+# make Docker create an empty root-owned DIRECTORY at that path and boot a node
+# that cannot read its genesis.
+#
+# Usage (from the repository root):
+#   mkdir -m 0700 devnet
+#   cargo run --locked --bin setup-local-testnet -- \
+#       --mode topology --validator-count 5 --output-dir devnet
+#   GIT_HASH=$(git rev-parse HEAD) \
+#       docker compose -f deploy/snip-local-mirror.yaml up -d --build
 #   curl -s -X POST -H 'Content-Type: application/json' \
 #        --data '{"jsonrpc":"2.0","id":1,"method":"chain_id","params":[]}' \
 #        http://localhost:8545
-#   docker-compose -f deploy/snip-local-mirror.yaml down -v   # stop + wipe
+#   docker compose -f deploy/snip-local-mirror.yaml down -v   # stop + wipe chain data
+#   rm -rf devnet                                             # discard the keys + genesis
 #
-# Files referenced are real, checked-in artifacts — no `./deploy/config/...`
-# placeholders to chase:
-#   ./genesis/snip-mirror-genesis.json — chain_id 31337, ONE validator pubkey
-#                                         (matches keys/validator1.json), same
-#                                         pre-funded test accounts as
-#                                         local_genesis.json so SNIP can reuse
-#                                         their funded-account pubkeys.
-#   ./keys/validator1.json             — JSON-encoded [u8; 32] private-key seed.
-#                                         Format consumed by KeyPair::from_bytes
-#                                         per crates/node/src/main.rs:367-371.
+# The provisioner writes every key file 0600. The containers run as uid 1000
+# (Dockerfile); on a Linux host whose uid differs, make the throwaway validator
+# keys readable inside the 0700 `devnet/` directory first:
+#   chmod 0644 devnet/keys/validator*.json
+# deploy/topology-e2e-harness.sh runs exactly this flow in CI and checks that
+# every validator proposes, that all nodes advance, and that they agree on
+# block hashes.
+
+name: snip-local-mirror
+
+# Settings every validator shares. Each service still lists its own command
+# (bootnodes) and volumes (its own key), because YAML merge keys do not merge
+# lists.
+x-validator: &validator
+  build:
+    context: ..
+    dockerfile: Dockerfile
+    # Required by the Dockerfile, which refuses to build without the full
+    # commit. Empty here rather than `:?`, because compose interpolates this
+    # file on every command and a hard failure would break `down` too.
+    args:
+      GIT_HASH: ${GIT_HASH:-}
+  environment:
+    - RUST_LOG=info,sumchain=debug
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8546/health"]
+    interval: 5s
+    timeout: 3s
+    retries: 5
+    start_period: 10s
+  restart: "no"  # crash → log; don't auto-restart on test failures
 
 services:
-  validator:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      # Required by the Dockerfile, which refuses to build without the full
-      # commit. Empty here rather than `:?`, because compose interpolates this
-      # file on every command and a hard failure would break `down` too.
-      args:
-        GIT_HASH: ${GIT_HASH:-}
-    container_name: snip-mirror-validator
-    hostname: validator
+  # Validator 1 — bootnode for the others; the only one with host ports.
+  validator-1:
+    <<: *validator
+    hostname: validator-1
     command:
       - "run"
       - "--genesis"
@@ -69,28 +104,169 @@ services:
       - "--rpc-addr"
       - "0.0.0.0:8545"
     volumes:
-      - validator-data:/data
-      - ../genesis/snip-mirror-genesis.json:/config/genesis.json:ro
-      - ../keys/validator1.json:/secrets/validator.key:ro
+      - validator-1-data:/data
+      - type: bind
+        source: ../devnet/genesis.json
+        target: /config/genesis.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../devnet/keys/validator1.json
+        target: /secrets/validator.key
+        read_only: true
+        bind:
+          create_host_path: false
     ports:
-      # RPC plus the health/readiness port. P2P (30303) and /metrics (health port 8546) stay
-      # inside the compose network — SNIP doesn't need them and surfacing
-      # extra ports invites confusion. If you need metrics, run the full
-      # 3-validator `docker-compose.yaml` instead.
+      # JSON-RPC, where SNIP/OmniNode clients point.
       - "8545:8545"
-      # Health/readiness server (default 0.0.0.0:8546). Published so the host
-      # orchestrator (issue #121) can poll GET /ready before registering this
-      # single validator; the in-container healthcheck below also uses it.
+      # Health/readiness server (default 0.0.0.0:8546). Published so a host
+      # orchestrator (issue #121) can poll GET /ready. P2P (30303) stays inside
+      # the compose network.
       - "8546:8546"
-    environment:
-      - RUST_LOG=info,sumchain=debug
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8546/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
-    restart: "no"  # crash → log; don't auto-restart on test failures
+
+  # Validators 2-5 — bootstrap off validator-1; no host ports (reach them with
+  # `docker compose exec`).
+  validator-2:
+    <<: *validator
+    hostname: validator-2
+    command:
+      - "run"
+      - "--genesis"
+      - "/config/genesis.json"
+      - "--data-dir"
+      - "/data"
+      - "--validator-key"
+      - "/secrets/validator.key"
+      - "--p2p-addr"
+      - "/ip4/0.0.0.0/tcp/30303"
+      - "--rpc-addr"
+      - "0.0.0.0:8545"
+      # `/dns4/` resolves through the OS resolver (crates/p2p/src/dns.rs, #237).
+      - "--bootnodes"
+      - "/dns4/validator-1/tcp/30303"
+    volumes:
+      - validator-2-data:/data
+      - type: bind
+        source: ../devnet/genesis.json
+        target: /config/genesis.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../devnet/keys/validator2.json
+        target: /secrets/validator.key
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      - validator-1
+
+  validator-3:
+    <<: *validator
+    hostname: validator-3
+    command:
+      - "run"
+      - "--genesis"
+      - "/config/genesis.json"
+      - "--data-dir"
+      - "/data"
+      - "--validator-key"
+      - "/secrets/validator.key"
+      - "--p2p-addr"
+      - "/ip4/0.0.0.0/tcp/30303"
+      - "--rpc-addr"
+      - "0.0.0.0:8545"
+      - "--bootnodes"
+      - "/dns4/validator-1/tcp/30303"
+    volumes:
+      - validator-3-data:/data
+      - type: bind
+        source: ../devnet/genesis.json
+        target: /config/genesis.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../devnet/keys/validator3.json
+        target: /secrets/validator.key
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      - validator-1
+
+  validator-4:
+    <<: *validator
+    hostname: validator-4
+    command:
+      - "run"
+      - "--genesis"
+      - "/config/genesis.json"
+      - "--data-dir"
+      - "/data"
+      - "--validator-key"
+      - "/secrets/validator.key"
+      - "--p2p-addr"
+      - "/ip4/0.0.0.0/tcp/30303"
+      - "--rpc-addr"
+      - "0.0.0.0:8545"
+      - "--bootnodes"
+      - "/dns4/validator-1/tcp/30303"
+    volumes:
+      - validator-4-data:/data
+      - type: bind
+        source: ../devnet/genesis.json
+        target: /config/genesis.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../devnet/keys/validator4.json
+        target: /secrets/validator.key
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      - validator-1
+
+  validator-5:
+    <<: *validator
+    hostname: validator-5
+    command:
+      - "run"
+      - "--genesis"
+      - "/config/genesis.json"
+      - "--data-dir"
+      - "/data"
+      - "--validator-key"
+      - "/secrets/validator.key"
+      - "--p2p-addr"
+      - "/ip4/0.0.0.0/tcp/30303"
+      - "--rpc-addr"
+      - "0.0.0.0:8545"
+      - "--bootnodes"
+      - "/dns4/validator-1/tcp/30303"
+    volumes:
+      - validator-5-data:/data
+      - type: bind
+        source: ../devnet/genesis.json
+        target: /config/genesis.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../devnet/keys/validator5.json
+        target: /secrets/validator.key
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      - validator-1
 
 volumes:
-  validator-data:
+  validator-1-data:
+  validator-2-data:
+  validator-3-data:
+  validator-4-data:
+  validator-5-data:

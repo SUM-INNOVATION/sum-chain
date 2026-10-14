@@ -129,7 +129,7 @@ a validator:
 | `deploy/kubernetes/statefulset-validator-2.yaml` | validator | `1Gi` → **`4Gi`** | `4Gi` | yes, after the change |
 | `deploy/kubernetes/statefulset-validator-3.yaml` | validator | `1Gi` → **`4Gi`** | `4Gi` | yes, after the change |
 | `docker-compose.yaml` | validator-1/2/3, fullnode | none set | none set | n/a — sets no memory bound at all |
-| `deploy/snip-local-mirror.yaml` | single validator | none set | none set | n/a — a CI devnet preset, explicitly not production-like |
+| `deploy/snip-local-mirror.yaml` | validator-1..5 (synthetic test topology) | none set | none set | n/a — a CI devnet preset, explicitly not production-like |
 
 There is no Helm chart in this tree; `deploy/kubernetes/` and the two compose
 files are the whole manifest surface.

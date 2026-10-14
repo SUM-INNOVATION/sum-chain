@@ -114,6 +114,8 @@ Equivalent UI settings under **Settings → Branches** for `main`:
 3. **Do not allow bypassing the above settings** (**enforce admins**).
 4. **Block force pushes** and **restrict deletions** for `main`.
 
-The devnet health/readiness E2E (`health-e2e.yml`) also runs on pull requests. It
-is not a required context because it builds and boots a 3-validator compose
-stack, but a red E2E should be treated as blocking in practice.
+The devnet E2E workflow (`health-e2e.yml`) also runs on pull requests that touch
+its paths: the 3-validator health/readiness job (#120) and the synthetic
+5-validator round-robin job on `deploy/snip-local-mirror.yaml` (#118). Neither is
+a required context because each builds and boots a compose stack, but a red E2E
+should be treated as blocking in practice.
