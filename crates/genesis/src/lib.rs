@@ -2903,6 +2903,36 @@ pub struct ChainParams {
     #[serde(default)]
     pub messaging_timestamp_units_enabled_from_height: Option<u64>,
 
+    /// A transaction-borne node-registry `UpdateStatus` is refused.
+    ///
+    /// `NodeRegistryOperation::UpdateStatus { target, new_status }` sets any
+    /// registered node's status, and the operation relates neither its sender
+    /// to `target` nor the requested change to the current status. The RPC
+    /// builder documents it as "privileged/internal and intentionally
+    /// unsupported", and no specification names a privileged caller. The
+    /// voluntary transitions have their own sender-scoped operations
+    /// (`Register`, `BeginUnstake`, `WithdrawUnbonded`), and slashing has a
+    /// system path that needs no transaction (expired-challenge slashing in
+    /// block execution).
+    ///
+    /// At and above this height an `UpdateStatus` transaction fails as any
+    /// other failed node-registry operation does: the fee is charged, the
+    /// nonce advances, the receipt is `Failed(18)`, and no node record or
+    /// active-archive snapshot changes. Every other node-registry operation,
+    /// and expired-challenge slashing, are unchanged at every height.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub node_registry_update_status_unsupported_enabled_from_height: Option<u64>,
+
     /// Contract execution is metered (#279).
     ///
     /// Below this height a contract deploy or call runs on the unmetered
@@ -3407,6 +3437,8 @@ impl Default for ChainParams {
             contract_error_rollback_enabled_from_height: None,
             // Production-safe default: messaging keeps reading the block timestamp as before — dormant.
             messaging_timestamp_units_enabled_from_height: None,
+            // Production-safe default: a node-registry UpdateStatus executes as before — dormant.
+            node_registry_update_status_unsupported_enabled_from_height: None,
             // Production-safe default: contracts run on the unmetered engine — dormant.
             contract_metering_enabled_from_height: None,
             // No block-level contract gas budget (inert while the metering gate is closed).
@@ -4094,6 +4126,10 @@ impl ChainParams {
                 self.messaging_timestamp_units_enabled_from_height,
             ),
             (
+                "node_registry_update_status_unsupported_enabled_from_height",
+                self.node_registry_update_status_unsupported_enabled_from_height,
+            ),
+            (
                 "contract_metering_enabled_from_height",
                 self.contract_metering_enabled_from_height,
             ),
@@ -4137,7 +4173,7 @@ impl ChainParams {
     }
 }
 
-/// The forty-five remediation gates, by field name.
+/// The forty-six remediation gates, by field name.
 ///
 /// The count in this sentence has been wrong twice, both times because a wave
 /// added gates and nothing checked the prose. It is checked now:
@@ -4203,6 +4239,7 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "credential_schema_validation_enabled_from_height",
     "contract_error_rollback_enabled_from_height",
     "messaging_timestamp_units_enabled_from_height",
+    "node_registry_update_status_unsupported_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started

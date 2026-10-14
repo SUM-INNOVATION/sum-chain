@@ -29,14 +29,14 @@ const ALL: [u16; 4] = [GATE, BUDGET, IDENTITY, SCHEDULE];
 static ENABLED: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &SCHEMA_2],
     writes: &SCHEMA_2,
-    knows: &SCHEMA_2,
+    knows: &ccfg::SCHEMA_3,
 };
 
 /// A binary that reads and writes schema 1 and knows schema 2 as a draft.
 static SCHEMA_1_BINARY: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1],
     writes: &SCHEMA_1,
-    knows: &SCHEMA_2,
+    knows: &ccfg::SCHEMA_3,
 };
 
 fn genesis() -> Genesis {

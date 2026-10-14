@@ -653,6 +653,32 @@ pub static SCHEMA_2: Schema = Schema {
     added: SCHEMA_2_ADDED,
 };
 
+/// Fields schema 3 adds to schema 2. DRAFT: [`PRODUCTION`] knows these fields
+/// but neither writes nor reads schema-3 records, and refuses to start if any
+/// of them is non-absent, so a gate registered here can be declared but never
+/// activated by this binary. Append-only, like every later schema.
+pub const SCHEMA_3_ADDED: &[AddedField] = &[
+    // A transaction-borne node-registry `UpdateStatus` is refused.
+    AddedField {
+        spec: FieldSpec {
+            id: 0x1043,
+            name: "node_registry_update_status_unsupported_enabled_from_height",
+            ty: Ty::U64,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Gate,
+    },
+];
+
+/// Schema 3: schema 2 plus [`SCHEMA_3_ADDED`]. DRAFT.
+pub static SCHEMA_3: Schema = Schema {
+    number: 3,
+    previous: Some(&SCHEMA_2),
+    added: SCHEMA_3_ADDED,
+};
+
 /// What this binary does.
 ///
 /// It writes schema 2: a fresh database records schema 2 directly. It reads
@@ -661,9 +687,10 @@ pub static SCHEMA_2: Schema = Schema {
 /// stands, compared in schema 1 and never re-encoded at start; moving it to
 /// schema 2 is the stopped-node `acknowledge-consensus-config-schema`, which
 /// changes no rule. Until a node has moved, a schema-2 field set in its
-/// genesis refuses start and names that command. Nothing here sets any gate.
+/// genesis refuses start and names that command. It knows the draft schema 3,
+/// whose fields must all be absent. Nothing here sets any gate.
 pub static PRODUCTION: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &SCHEMA_2],
     writes: &SCHEMA_2,
-    knows: &SCHEMA_2,
+    knows: &SCHEMA_3,
 };

@@ -105,11 +105,18 @@ static TEST_SCHEMA_2: Schema = Schema {
     added: TEST_ADDED,
 };
 
+/// [`TEST_SCHEMA_2`] plus the draft schema 3, as [`PRODUCTION`] knows it.
+static TEST_SCHEMA_3: Schema = Schema {
+    number: 3,
+    previous: Some(&TEST_SCHEMA_2),
+    added: ccfg::schema::SCHEMA_3_ADDED,
+};
+
 /// A binary that reads schemas 1 and 2 and writes 2.
 static ENABLED: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &TEST_SCHEMA_2],
     writes: &TEST_SCHEMA_2,
-    knows: &TEST_SCHEMA_2,
+    knows: &TEST_SCHEMA_3,
 };
 
 /// The previous release's shape — reads and writes schema 1, schema 2 a draft —
@@ -117,7 +124,7 @@ static ENABLED: SchemaPolicy = SchemaPolicy {
 static DRAFT: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1],
     writes: &SCHEMA_1,
-    knows: &TEST_SCHEMA_2,
+    knows: &TEST_SCHEMA_3,
 };
 
 /// The release before this binary: it read and wrote schema 1 and knew the
@@ -125,7 +132,7 @@ static DRAFT: SchemaPolicy = SchemaPolicy {
 static PREVIOUS: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1],
     writes: &SCHEMA_1,
-    knows: &SCHEMA_2,
+    knows: &ccfg::SCHEMA_3,
 };
 
 // ── the schema-1 fixture ────────────────────────────────────────────────────
@@ -354,7 +361,10 @@ fn the_production_schema_2_is_frozen_and_written() {
             .collect::<Vec<_>>(),
         [1, 2]
     );
-    assert!(std::ptr::eq(PRODUCTION.knows, &SCHEMA_2));
+    // It knows the draft schema 3, which extends schema 2 and is never
+    // written; schema 2 itself is unchanged.
+    assert!(std::ptr::eq(PRODUCTION.knows, &ccfg::SCHEMA_3));
+    assert!(ccfg::SCHEMA_3.extends(&SCHEMA_2));
     PRODUCTION.check().unwrap();
     PREVIOUS.check().unwrap();
     ENABLED.check().unwrap();
@@ -1223,7 +1233,7 @@ fn dropping_an_older_schema_from_reads_refuses_a_transitioned_history() {
     static DROPPED_SCHEMA_1: SchemaPolicy = SchemaPolicy {
         reads: &[&TEST_SCHEMA_2],
         writes: &TEST_SCHEMA_2,
-        knows: &TEST_SCHEMA_2,
+        knows: &TEST_SCHEMA_3,
     };
     DROPPED_SCHEMA_1.check().unwrap();
     set_example(None);
@@ -1283,10 +1293,15 @@ fn schema_2_encodes_in_id_order_whatever_the_registration_order() {
         added: Box::leak(reversed.into_boxed_slice()),
     }));
     let reads: &'static [&'static Schema] = Box::leak(Box::new([&SCHEMA_1, schema]));
+    let knows: &'static Schema = Box::leak(Box::new(Schema {
+        number: 3,
+        previous: Some(schema),
+        added: ccfg::schema::SCHEMA_3_ADDED,
+    }));
     let policy: &'static SchemaPolicy = Box::leak(Box::new(SchemaPolicy {
         reads,
         writes: schema,
-        knows: schema,
+        knows,
     }));
     schema.check().unwrap();
     let ids = |s: &'static Schema| s.specs().iter().map(|f| f.id).collect::<Vec<_>>();

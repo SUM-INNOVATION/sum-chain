@@ -148,7 +148,7 @@ fn open(dir: &TempDir) -> Database {
 static SCHEMA_2_DRAFT: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1],
     writes: &SCHEMA_1,
-    knows: &SCHEMA_2,
+    knows: &ccfg::SCHEMA_3,
 };
 
 /// TEST_ONLY compute-pool parameters (no proposed value): every cap 1,
@@ -230,10 +230,18 @@ static METERED_STAND_IN_SCHEMA_2: Schema = Schema {
     added: &METERED_STAND_IN_ADDED,
 };
 
+/// [`METERED_STAND_IN_SCHEMA_2`] plus the draft schema 3, as
+/// [`ccfg::PRODUCTION`] knows it.
+static METERED_STAND_IN_SCHEMA_3: Schema = Schema {
+    number: 3,
+    previous: Some(&METERED_STAND_IN_SCHEMA_2),
+    added: ccfg::schema::SCHEMA_3_ADDED,
+};
+
 static METERED_STAND_IN: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &METERED_STAND_IN_SCHEMA_2],
     writes: &METERED_STAND_IN_SCHEMA_2,
-    knows: &METERED_STAND_IN_SCHEMA_2,
+    knows: &METERED_STAND_IN_SCHEMA_3,
 };
 
 /// [`full_schema_2_genesis`]'s configuration: every schema-2 field set.
@@ -1161,4 +1169,48 @@ fn the_messaging_timestamp_units_gate_is_a_schema_2_field_with_its_constant() {
             sumchain_state::messaging_executor::MESSAGING_TIMESTAMP_MS_PER_SECOND as u128
         ))
     );
+}
+
+/// The node-registry `UpdateStatus` refusal gate is registered in the draft
+/// schema 3 (0x1043). Dormant, it leaves the written schema-2 configuration
+/// byte-identical; set, build refuses, because this binary writes schema 2 and
+/// a draft field can be declared but never activated.
+#[test]
+fn the_draft_schema_3_gate_is_held_dormant_and_refused_when_set() {
+    let name = "node_registry_update_status_unsupported_enabled_from_height";
+    assert_eq!(ccfg::fields::gate_id(name), Some(0x1043));
+    assert!(ccfg::SCHEMA_3
+        .added
+        .iter()
+        .any(|a| a.spec.id == 0x1043 && a.spec.name == name));
+    assert!(!SCHEMA_2.added.iter().any(|a| a.spec.name == name));
+
+    let base = full_genesis();
+    assert_eq!(
+        base.params
+            .node_registry_update_status_unsupported_enabled_from_height,
+        None
+    );
+    let c = ccfg::build(&base).unwrap();
+    let bytes = c.encode();
+    assert_eq!(
+        (
+            bytes.len(),
+            Hash::hash(&bytes).to_string(),
+            c.commitment().to_string()
+        ),
+        (
+            GOLDEN_2_LEN,
+            GOLDEN_2_ENCODING_DIGEST.to_string(),
+            GOLDEN_2_COMMITMENT.to_string()
+        ),
+        "dormant, the draft gate changes nothing the binary writes"
+    );
+
+    let mut set = full_genesis();
+    set.params
+        .node_registry_update_status_unsupported_enabled_from_height = Some(10);
+    let err = ccfg::build(&set).expect_err("a draft field is never activated");
+    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
+    assert!(err.to_string().contains(name), "{err}");
 }

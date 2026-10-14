@@ -1380,6 +1380,21 @@ impl BlockExecutor {
                                     block_height,
                                 )?
                             }
+                            // Refused from the gate on; below it, or while it
+                            // is unset, `UpdateStatus` executes as before.
+                            NodeRegistryOperation::UpdateStatus { .. }
+                                if NodeRegistryExecutor::update_status_unsupported(
+                                    &self.params,
+                                    block_height,
+                                ) =>
+                            {
+                                NodeRegistryExecutor::execute_unsupported_update_status(
+                                    view,
+                                    &v2_tx.from,
+                                    proposer,
+                                    v2_tx.fee,
+                                )?
+                            }
                             _ => NodeRegistryExecutor::execute(
                                 view,
                                 &v2_tx.from,

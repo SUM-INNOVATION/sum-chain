@@ -22,6 +22,7 @@
 use std::sync::Arc;
 
 use sumchain_crypto::is_low_order_x25519_public_key;
+use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
     Address, ArchiveUnbondingRecord, Balance, NodeRecord, NodeRegistryOperation,
     NodeRegistryOperationV2, NodeRegistryTxData, NodeRegistryV2TxData, NodeRole, NodeStatus,
@@ -250,6 +251,34 @@ impl NodeRegistryExecutor {
         }
 
         Ok(())
+    }
+
+    /// The height from which a transaction-borne `UpdateStatus` is refused:
+    /// `ChainParams::node_registry_update_status_unsupported_enabled_from_height`.
+    #[inline]
+    fn update_status_unsupported_activation(params: &ChainParams) -> Option<u64> {
+        params.node_registry_update_status_unsupported_enabled_from_height
+    }
+
+    /// Whether a transaction-borne `UpdateStatus` is refused at `block_height`.
+    pub fn update_status_unsupported(params: &ChainParams, block_height: u64) -> bool {
+        matches!(Self::update_status_unsupported_activation(params), Some(h) if block_height >= h)
+    }
+
+    /// An `UpdateStatus` transaction at or above the gate. It is charged as any
+    /// other failed node-registry operation is (fee to the proposer, nonce
+    /// advanced) and changes nothing else: no node record and no active-archive
+    /// snapshot.
+    pub fn execute_unsupported_update_status(
+        view: &mut ExecutionView<'_, '_>,
+        sender: &Address,
+        proposer: &Address,
+        fee: Balance,
+    ) -> Result<NodeRegistryExecutionResult> {
+        Self::deduct_fee(view, sender, fee, proposer)?;
+        Ok(NodeRegistryExecutionResult::fail(
+            "node-registry UpdateStatus is not accepted from transactions",
+        ))
     }
 
     /// Execute a node registry operation.

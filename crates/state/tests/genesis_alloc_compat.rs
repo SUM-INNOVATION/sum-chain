@@ -11,8 +11,10 @@
 //! gate moves them for every genesis. Their pins were recomputed, from the
 //! combined tree, when `credential_schema_validation_enabled_from_height`
 //! (#277), `contract_error_rollback_enabled_from_height` (#279),
-//! `messaging_timestamp_units_enabled_from_height` (#278) and
-//! `contract_metering_enabled_from_height` (#279) were declared; the block hash,
+//! `messaging_timestamp_units_enabled_from_height` (#278),
+//! `contract_metering_enabled_from_height` (#279) and
+//! `node_registry_update_status_unsupported_enabled_from_height` were
+//! declared; the block hash,
 //! state root and balances -- what #276 could have changed -- are the pre-#276
 //! values.
 
@@ -39,48 +41,48 @@ const PINS: &[Pin] = &[
         file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-1v.json",
         block: "0x9c22b13ee6c753f288538165afac3dd48ea79a5581341fa2d08e23035726e28e",
         root: "0xe2711f5e07574ca1371c938f6f04482f52bddaa1f1b8e3aa94f269487440d584",
-        activation: "0xa769efe899ae35167c11ad1510a5fbd7602e028277643f354f81980eaa49f0e2",
-        protocol: "0x28ce9afcc751b8d9140853509176e51ea690d69bd70d6af5216dfaa58f55f325",
+        activation: "0xf86f11d18e57eab928d2cece0c029d883ef5ea9eb40435c467f9cfb1e376aeae",
+        protocol: "0x9dc8e8541b2e6408fdedeb979bdc8ea4594a5c5f87a9d1424c5ef61ec96ebfe0",
         balances: "0xe2711f5e07574ca1371c938f6f04482f52bddaa1f1b8e3aa94f269487440d584",
     },
     Pin {
         file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-2v.json",
         block: "0xf92241d3986ae1c5a30ef34e61dbec5e851ee289404e3276792dd0a27cf3083c",
         root: "0xac9a93d885f55fc964b027871e22a59932e1082af03b1b73ac5457297572055a",
-        activation: "0x6128c278ef3a97ed00116b285469c0ccc2165712882778bc28fc08d6b6f00d70",
-        protocol: "0xf54bfb234333765db3f9fb2e8b9943d4fa79cb3d4c90a5b211f7b697f92ad9e5",
+        activation: "0x04c08b4ba547e3ce30316f58c14fc655a6003bd4f55f350232efbfd8600f6af7",
+        protocol: "0x904b68a5df74f7137f950f9863a25bd30ccd9b47f8ecfe40c145630493be9e52",
         balances: "0xac9a93d885f55fc964b027871e22a59932e1082af03b1b73ac5457297572055a",
     },
     Pin {
         file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-A.json",
         block: "0x9c22b13ee6c753f288538165afac3dd48ea79a5581341fa2d08e23035726e28e",
         root: "0xe2711f5e07574ca1371c938f6f04482f52bddaa1f1b8e3aa94f269487440d584",
-        activation: "0x2c9bda57407b0b3652d085d44b3cc1889be97b1a5f21ff5fe67dfbac4421bbe7",
-        protocol: "0x42ce0915804bc3a50d9cf4ba487ff3a3229ed08bde6c511c1b5a5b0434f088ba",
+        activation: "0x1479fea55e30c9f5e5c964950fe32ca8f36f1c5cac4c6f19557b8941177b52f0",
+        protocol: "0xbc97e0241d82d8481ae23eef4d3a849038bec2c8b5cf93f77ebfd170d8b70bb3",
         balances: "0xe2711f5e07574ca1371c938f6f04482f52bddaa1f1b8e3aa94f269487440d584",
     },
     Pin {
         file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-B.json",
         block: "0x9c22b13ee6c753f288538165afac3dd48ea79a5581341fa2d08e23035726e28e",
         root: "0xe2711f5e07574ca1371c938f6f04482f52bddaa1f1b8e3aa94f269487440d584",
-        activation: "0xfc6da291b0bcd8f730b26baf374d2b9ccb4bac2a774fe77262468a8003de1948",
-        protocol: "0x9d8ca552513d50035749f302b660121e32c6884d215823bb48dfe343b10e3dcd",
+        activation: "0xfa0d55848ad38399358f32c99675ded98984527b0f61582a59e5ec6d7d8d6425",
+        protocol: "0x12086768c768c8b35b0086bdaf055b33dc61435a5aa5056a29a55eaa5de1a688",
         balances: "0xe2711f5e07574ca1371c938f6f04482f52bddaa1f1b8e3aa94f269487440d584",
     },
     Pin {
         file: "genesis.json",
         block: "0x1156d350e7d0ac45cb96bfca25d57c71675ceea5949ea44d81432d08baed68e6",
         root: "0x5fa18c9e8b229ac4cec3aca0b28eba87e2bb1b54c249510f16f084c421511ff2",
-        activation: "0x3ac6425676b31b3fac65c8ff6650bd78c409fc427a516bbd032ad3e632f7014c",
-        protocol: "0x181807ba666e646bf55945a66bc8d91d865f769c32117210b0f35ded3c2169ae",
+        activation: "0xa454afffab50ba7d1c3f52d2c212acdccfe1793e812aa6d08f0895a364651b3d",
+        protocol: "0xb9a324d5473e632220e5143619e2362029f37c2875331e15d3cb6ef6379592bd",
         balances: "0x5fa18c9e8b229ac4cec3aca0b28eba87e2bb1b54c249510f16f084c421511ff2",
     },
     Pin {
         file: "genesis/local_genesis.json",
         block: "0xe5e3fccc545ef9b0f29fb4204d4e79da04d47661e89eaebe23352abba269e1b4",
         root: "0xac9a93d885f55fc964b027871e22a59932e1082af03b1b73ac5457297572055a",
-        activation: "0x232353dee8ad03ae0af9adbd61e41efd7425a2bdc4ec105dc434ec64f5bbf253",
-        protocol: "0x47df763c265611acdcff17299bbe746801fd0bd6f34b4b5012dff2effbf7c2f0",
+        activation: "0xdf6786c49f2c444581f6f071977b889b3d5ea13018b5ce0070427f5dbafd0376",
+        protocol: "0xeb2859c0f358cb51f01a3471aa9e29a29ff56ba8ec803357219469f0bc25211b",
         balances: "0xac9a93d885f55fc964b027871e22a59932e1082af03b1b73ac5457297572055a",
     },
 ];

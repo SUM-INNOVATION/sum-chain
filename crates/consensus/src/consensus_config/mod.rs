@@ -84,7 +84,9 @@ pub use record::{
     BaselineStatus, PendingSchemaTransition, SchemaTransitioned, StartupOutcome, Transition,
     TransitionKind,
 };
-pub use schema::{AddedField, Schema, SchemaPolicy, Source, PRODUCTION, SCHEMA_1, SCHEMA_2};
+pub use schema::{
+    AddedField, Schema, SchemaPolicy, Source, PRODUCTION, SCHEMA_1, SCHEMA_2, SCHEMA_3,
+};
 
 /// Why a configuration could not be built, decoded, compared or recorded.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

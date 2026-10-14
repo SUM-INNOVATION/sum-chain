@@ -39,14 +39,14 @@ const BUDGET: u16 = MAX_BLOCK_CONTRACT_GAS_ID;
 static ENABLED: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &SCHEMA_2],
     writes: &SCHEMA_2,
-    knows: &SCHEMA_2,
+    knows: &ccfg::SCHEMA_3,
 };
 
 /// A binary that reads and writes schema 1 and knows schema 2 as a draft.
 static SCHEMA_1_BINARY: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1],
     writes: &SCHEMA_1,
-    knows: &SCHEMA_2,
+    knows: &ccfg::SCHEMA_3,
 };
 
 fn genesis() -> Genesis {
@@ -304,10 +304,17 @@ static RATIFIED_SCHEMA_2: Schema = Schema {
     added: &RATIFIED_ADDED_ARRAY,
 };
 
+/// [`RATIFIED_SCHEMA_2`] plus the draft schema 3, as [`ccfg::PRODUCTION`] knows it.
+static RATIFIED_SCHEMA_3: Schema = Schema {
+    number: 3,
+    previous: Some(&RATIFIED_SCHEMA_2),
+    added: ccfg::schema::SCHEMA_3_ADDED,
+};
+
 static RATIFIED: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &RATIFIED_SCHEMA_2],
     writes: &RATIFIED_SCHEMA_2,
-    knows: &RATIFIED_SCHEMA_2,
+    knows: &RATIFIED_SCHEMA_3,
 };
 
 #[test]
