@@ -320,8 +320,9 @@ mod addr_json {
     }
 
     /// JSON proxy for [`GovernanceParams`]: base58 `treasury`, plain numeric
-    /// threshold/tally params.
+    /// threshold/tally params. Unknown fields are refused (#268).
     #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct GovernanceParamsJson {
         validator_authority_threshold_bps: u16,
         quorum_bps: u16,
@@ -388,8 +389,82 @@ mod addr_json {
     }
 }
 
+/// Strict genesis readers for the two parameter structures that `ChainParams`
+/// takes from the published `sumchain-wire` crate: `StakingParams` and
+/// `BeaconSchedule` (#268).
+///
+/// Both derive a plain `Deserialize` in `sumchain-wire`, a byte-frozen crate
+/// published for other consumers; adding `deny_unknown_fields` there would
+/// change what every consumer of that crate accepts. The genesis document reads
+/// them through serde's remote derive instead: each mirror lists the same
+/// fields with the same types and no serde attributes (the wire types have
+/// none: no defaults, renames or aliases), refuses any other field, and builds
+/// the wire type with a complete struct literal, so a field added to either
+/// wire type does not compile here until it is mirrored. Serialization is
+/// untouched: the fields keep the wire types' own `Serialize`.
+mod strict_json {
+    use serde::{Deserialize, Deserializer};
+    use sumchain_primitives::beacon_schedule::BeaconSchedule;
+    use sumchain_primitives::{Balance, StakingParams};
+
+    #[derive(Deserialize)]
+    #[serde(remote = "StakingParams", deny_unknown_fields)]
+    struct StrictStakingParams {
+        min_validator_stake: Balance,
+        max_validators: u32,
+        unbonding_period: u64,
+        max_commission_bps: u16,
+        double_sign_slash_bps: u16,
+        downtime_slash_bps: u16,
+        double_sign_jail_duration: u64,
+        downtime_jail_duration: u64,
+        downtime_threshold: u64,
+        epoch_length: u64,
+        stake_weighted_selection: bool,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(remote = "BeaconSchedule", deny_unknown_fields)]
+    struct StrictBeaconSchedule {
+        start_height: u64,
+        epoch_length: u64,
+        key_cutoff_offset: u64,
+        deal_start_offset: u64,
+        deal_cutoff_offset: u64,
+        complaint_start_offset: u64,
+        complaint_deadline_offset: u64,
+    }
+
+    /// `Option<StakingParams>` read strictly. With `#[serde(default)]` on the
+    /// field, absent and `null` are both `None`, as before.
+    pub(super) fn opt_staking<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> std::result::Result<Option<StakingParams>, D::Error> {
+        #[derive(Deserialize)]
+        struct Strict(#[serde(with = "StrictStakingParams")] StakingParams);
+        Ok(Option::<Strict>::deserialize(d)?.map(|s| s.0))
+    }
+
+    /// `Option<BeaconSchedule>` read strictly; absent and `null` are `None`.
+    pub(super) fn opt_beacon_schedule<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> std::result::Result<Option<BeaconSchedule>, D::Error> {
+        #[derive(Deserialize)]
+        struct Strict(#[serde(with = "StrictBeaconSchedule")] BeaconSchedule);
+        Ok(Option::<Strict>::deserialize(d)?.map(|s| s.0))
+    }
+}
+
 /// Chain parameters
+///
+/// Unknown fields are refused (#268), here and in every structure nested in
+/// it, and the error names the field: a misspelled gate used to parse as "not
+/// set". This changes only which documents are accepted. A document that was
+/// accepted before is read to exactly the same values, so for it every
+/// parameter value, the genesis hash, the activation and protocol digests and
+/// the consensus-configuration commitment are unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChainParams {
     /// Target block time in milliseconds
     pub block_time_ms: u64,
@@ -416,7 +491,7 @@ pub struct ChainParams {
     #[serde(default = "default_max_contract_gas")]
     pub max_contract_gas: u64,
     /// Staking parameters (optional - uses defaults if not specified)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "strict_json::opt_staking")]
     pub staking: Option<StakingParams>,
     /// SRC-201 Messaging parameters (optional - uses defaults if not specified)
     #[serde(default)]
@@ -874,7 +949,7 @@ pub struct ChainParams {
     /// height:** the gate ([`Self::beacon_enabled_from_height`]) stays `None` and
     /// `validate()` still rejects any `Some(_)` gate; the schedule is frozen config
     /// that may be declared ahead of a future coordinated activation.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "strict_json::opt_beacon_schedule")]
     pub beacon_schedule: Option<sumchain_primitives::beacon_schedule::BeaconSchedule>,
 
     /// SRC-201 sponsored public-key registration activation gate (issue #145).
@@ -2962,8 +3037,9 @@ fn default_validator_reclaim_delay_blocks() -> u64 {
     201_600 // ~7 days at 3s blocks (dormant)
 }
 
-/// SRC-201 Messaging Parameters
+/// SRC-201 Messaging Parameters. Unknown fields are refused (#268).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MessagingParams {
     /// Daily free message quota per address
     #[serde(default = "default_msg_daily_quota")]
@@ -3038,8 +3114,9 @@ impl Default for MessagingParams {
     }
 }
 
-/// SRC-80X/81X DocClass Parameters
+/// SRC-80X/81X DocClass Parameters. Unknown fields are refused (#268).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DocClassParams {
     /// Minimum stake required for issuer registration
     #[serde(default = "default_docclass_min_issuer_stake")]
@@ -3645,8 +3722,10 @@ fn e_reason(e: sumchain_primitives::beacon_schedule::BeaconScheduleError) -> &'s
 /// the SAME ratified §7.4 inequalities as `sumchain_beacon_runtime::BeaconParams::
 /// validated`; the state producer re-validates through that runtime constructor (the
 /// single source of truth for the executable runtime), so the two cannot silently
-/// diverge — a mismatch would fail the runtime's own construction.
+/// diverge — a mismatch would fail the runtime's own construction. Unknown
+/// fields are refused (#268).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BeaconParamsConfig {
     /// Byzantine faults tolerated `f`.
     pub f: u32,
@@ -4315,7 +4394,10 @@ impl ChainParams {
 }
 
 /// Genesis configuration
+///
+/// Read through `GenesisJson`, which refuses unknown fields (#268).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "GenesisJson")]
 pub struct Genesis {
     /// Chain identifier
     pub chain_id: ChainId,
@@ -4329,10 +4411,52 @@ pub struct Genesis {
     /// however it is spelled. [`Genesis::canonical_alloc`] is the one place
     /// they are interpreted. A key repeated verbatim in the JSON is refused at
     /// parse time, because a map would otherwise keep one value silently.
-    #[serde(deserialize_with = "alloc_json::deserialize")]
     pub alloc: HashMap<String, Balance>,
     /// Chain parameters
     pub params: ChainParams,
+}
+
+/// The genesis document as it is read: [`Genesis`]'s fields, and nothing else
+/// (#268).
+///
+/// An unknown field is refused, and the error names it; before, it was ignored,
+/// so a parameter written next to `params` instead of inside it, or a
+/// misspelled top-level name, vanished without a word. The one exception is
+/// `_comment`: a free-form annotation, accepted in any shape and ignored, as
+/// it always was, because the tracked network template
+/// (`genesis/mainnet_genesis.json`) carries one at this level. It is accepted
+/// here only; inside `params` it is an unknown field like any other.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GenesisJson {
+    chain_id: ChainId,
+    genesis_time: Timestamp,
+    validators: Vec<String>,
+    #[serde(deserialize_with = "alloc_json::deserialize")]
+    alloc: HashMap<String, Balance>,
+    params: ChainParams,
+    #[serde(rename = "_comment", default)]
+    _comment: serde::de::IgnoredAny,
+}
+
+impl From<GenesisJson> for Genesis {
+    fn from(json: GenesisJson) -> Self {
+        let GenesisJson {
+            chain_id,
+            genesis_time,
+            validators,
+            alloc,
+            params,
+            _comment: _,
+        } = json;
+        Genesis {
+            chain_id,
+            genesis_time,
+            validators,
+            alloc,
+            params,
+        }
+    }
 }
 
 /// Allocation-map deserialization that refuses a key repeated verbatim.

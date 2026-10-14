@@ -16,6 +16,11 @@ bootstrap a network, plus helpers to compute the genesis state root and block.
 - `ChainParams` — chain parameters incl. subprotocol activation gates
   (`*_enabled_from_height`); `with_v2_enabled` for dev. Sub-configs:
   `MessagingParams`, `DocClassParams`.
+- Unknown fields are refused in the genesis document, in `params` and in every
+  structure nested in it, and the error names the field; only a top-level
+  `_comment` is ignored. This narrows which documents are accepted and never
+  changes the value read from one that is accepted. Operators: see the
+  pre-upgrade check in [`docs/operator-guide.md`](../../docs/operator-guide.md).
 - `NodeConfig` — node config loader (`from_file`/`to_file`).
 - `GenesisError` — error type.
 

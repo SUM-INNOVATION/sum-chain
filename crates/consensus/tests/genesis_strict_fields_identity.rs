@@ -1,0 +1,238 @@
+//! Refusing unknown genesis fields (#268) changes which inputs are accepted,
+//! never what an accepted genesis means.
+//!
+//! Every value below was computed from the tracked genesis files on `main` at
+//! 1f017f55, before unknown fields were refused, and must be reproduced
+//! exactly: the canonical JSON the loader writes back (`Genesis::to_json`), the
+//! genesis block hash, the activation and protocol digests, and the
+//! consensus-configuration encoding and commitment (#268) a node records.
+//!
+//! The two network templates hold placeholder validator keys and are refused
+//! by validation, before and after, with the same error; what serde reads from
+//! them (including the template's top-level `_comment`) is pinned too.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use sumchain_consensus::consensus_config as ccfg;
+use sumchain_genesis::{ChainParams, Genesis};
+use sumchain_primitives::Hash;
+
+struct Pin {
+    file: &'static str,
+    /// BLAKE3 of the genesis as JSON, allocations in key order.
+    json: &'static str,
+    block: &'static str,
+    activation: &'static str,
+    protocol: &'static str,
+    /// BLAKE3 of the consensus-configuration encoding.
+    ccfg_encoding: &'static str,
+    ccfg_commitment: &'static str,
+}
+
+struct Template {
+    file: &'static str,
+    /// BLAKE3 of the raw serde parse as JSON, allocations in key order.
+    json: &'static str,
+    error: &'static str,
+}
+
+const PINS: &[Pin] = &[
+    Pin {
+        file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-1v.json",
+        json: "0x2f68578df7c35c044a4cf718436a0be4c50ef922323a605e885cf03ba3d104d2",
+        block: "0x9c22b13ee6c753f288538165afac3dd48ea79a5581341fa2d08e23035726e28e",
+        activation: "0xa769efe899ae35167c11ad1510a5fbd7602e028277643f354f81980eaa49f0e2",
+        protocol: "0x28ce9afcc751b8d9140853509176e51ea690d69bd70d6af5216dfaa58f55f325",
+        ccfg_encoding: "0xc9bb4182295ac07b0bf71136259679caa1639cb6ab96a627ca409616e3d76c32",
+        ccfg_commitment: "0x66ef2cb66e07cb457a998c4361226ee114877f92666addd599caa89d07d53b79",
+    },
+    Pin {
+        file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-2v.json",
+        json: "0xd7891b128408619455f668bc688e5ddc25f729642d3d9d0aff2b3cc25aae0d0f",
+        block: "0xf92241d3986ae1c5a30ef34e61dbec5e851ee289404e3276792dd0a27cf3083c",
+        activation: "0x6128c278ef3a97ed00116b285469c0ccc2165712882778bc28fc08d6b6f00d70",
+        protocol: "0xf54bfb234333765db3f9fb2e8b9943d4fa79cb3d4c90a5b211f7b697f92ad9e5",
+        ccfg_encoding: "0xa518ff0db6253e80545b24b5d20aadee593cb7a8692671aabc5f7710ebf22d7c",
+        ccfg_commitment: "0x075b28ec3521f49c6ca7fb12ae5297c79f74bada8649899771bd1cdb1fdce564",
+    },
+    Pin {
+        file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-A.json",
+        json: "0xcff2c1770df5028c79104bf0cedb420740e4317c58f45962fd3b588dc8d207ff",
+        block: "0x9c22b13ee6c753f288538165afac3dd48ea79a5581341fa2d08e23035726e28e",
+        activation: "0x2c9bda57407b0b3652d085d44b3cc1889be97b1a5f21ff5fe67dfbac4421bbe7",
+        protocol: "0x42ce0915804bc3a50d9cf4ba487ff3a3229ed08bde6c511c1b5a5b0434f088ba",
+        ccfg_encoding: "0x62cc58e670135f46769fae95eb7a41ee7aff3a6de2fe5e783b726ed9281b0aa4",
+        ccfg_commitment: "0xfb73f20bec922b4c256098ea2a4f78f230271a42fe961ac913a97a511c217eb0",
+    },
+    Pin {
+        file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-B.json",
+        json: "0x9513b614ccefc91b2943658edb9654c9a0e19638ad06d2dab2581426c5247a4c",
+        block: "0x9c22b13ee6c753f288538165afac3dd48ea79a5581341fa2d08e23035726e28e",
+        activation: "0xfc6da291b0bcd8f730b26baf374d2b9ccb4bac2a774fe77262468a8003de1948",
+        protocol: "0x9d8ca552513d50035749f302b660121e32c6884d215823bb48dfe343b10e3dcd",
+        ccfg_encoding: "0x67b53cfd13cb2ac5eca5150f1e0dd163fb41134afe74d7fce86534c77d471efc",
+        ccfg_commitment: "0x2f3026bc8d54499c35c0cf657e431c8cf7b5731e3acc1ca3735e8bf7d3a309d9",
+    },
+    Pin {
+        file: "genesis.json",
+        json: "0x8656311cfae90ff5591d3569ac8eb4e89267ac3d4acd9444d99d19a6c1aa9985",
+        block: "0x1156d350e7d0ac45cb96bfca25d57c71675ceea5949ea44d81432d08baed68e6",
+        activation: "0x3ac6425676b31b3fac65c8ff6650bd78c409fc427a516bbd032ad3e632f7014c",
+        protocol: "0x181807ba666e646bf55945a66bc8d91d865f769c32117210b0f35ded3c2169ae",
+        ccfg_encoding: "0xd3d4f1ccf5cde71083d000b87d9425d08b9e6817d30614ed312747968f0af3e3",
+        ccfg_commitment: "0x2afc2d46fbad85cdeac914d3c6ccb5e4457f596f36d3265997710a42268f979b",
+    },
+    Pin {
+        file: "genesis/local_genesis.json",
+        json: "0xb2078414ee6108cbc5caae0357c612eb07248bd70d9ab47c1344c1c258fc3ad0",
+        block: "0xe5e3fccc545ef9b0f29fb4204d4e79da04d47661e89eaebe23352abba269e1b4",
+        activation: "0x232353dee8ad03ae0af9adbd61e41efd7425a2bdc4ec105dc434ec64f5bbf253",
+        protocol: "0x47df763c265611acdcff17299bbe746801fd0bd6f34b4b5012dff2effbf7c2f0",
+        ccfg_encoding: "0x708b1cc7fe7aa9ac8e823d6ecb9ec2eccf495e7a79b6f9da41bc3703416b574a",
+        ccfg_commitment: "0x1d61e756ad20cd078dbde4d89ad38fa28ef6b04b98f6eb3b7a18a7653fcdf591",
+    },
+];
+
+const TEMPLATES: &[Template] = &[
+    Template {
+        file: "genesis/mainnet_genesis.json",
+        json: "0xa4da782ec974ac6b0056a71ccf7c7234dd998936bc2e0755eadea3107414c8e6",
+        error: "Invalid validator public key: validator[0]: VALIDATOR1_PUBKEY_PLACEHOLDER",
+    },
+    Template {
+        file: "genesis/testnet_genesis.json",
+        json: "0x0d10456f3b021ed864c94e048d0aaec9e5336718a4dfb4aba1564997b563f7b8",
+        error: "Invalid validator public key: validator[0]: TESTNET_VALIDATOR1_PUBKEY",
+    },
+];
+
+fn repo() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn blake3(bytes: &[u8]) -> String {
+    Hash::hash(bytes).to_string()
+}
+
+/// `g` written back as `Genesis::to_json` writes it, except that the
+/// allocations are in key order, so the map's iteration order cannot move the
+/// bytes.
+fn canonical_json(g: &Genesis) -> String {
+    #[derive(serde::Serialize)]
+    struct Canonical<'a> {
+        chain_id: u64,
+        genesis_time: u64,
+        validators: &'a [String],
+        alloc: BTreeMap<&'a String, &'a u128>,
+        params: &'a ChainParams,
+    }
+    serde_json::to_string_pretty(&Canonical {
+        chain_id: g.chain_id,
+        genesis_time: g.genesis_time,
+        validators: &g.validators,
+        alloc: g.alloc.iter().collect(),
+        params: &g.params,
+    })
+    .unwrap()
+}
+
+fn identity(file: &str) -> [String; 6] {
+    let g = Genesis::from_file(repo().join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+    let config = ccfg::build(&g).unwrap_or_else(|e| panic!("{file}: {e}"));
+    [
+        blake3(canonical_json(&g).as_bytes()),
+        g.create_genesis_block().unwrap().hash().to_string(),
+        g.activation_digest().unwrap().to_string(),
+        sumchain_state::protocol_digest::protocol_digest(&g)
+            .unwrap()
+            .to_string(),
+        blake3(&config.encode()),
+        config.commitment().to_string(),
+    ]
+}
+
+fn template(file: &str) -> [String; 2] {
+    let path = repo().join(file);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let raw: Genesis = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{file}: {e}"));
+    [
+        blake3(canonical_json(&raw).as_bytes()),
+        Genesis::from_file(&path).unwrap_err().to_string(),
+    ]
+}
+
+/// Every tracked `*genesis*.json` under the repository, skipping build output.
+fn tracked_genesis_files() -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let p = entry.unwrap().path();
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            if p.is_dir() {
+                if !matches!(name.as_str(), "target" | ".git" | "node_modules") {
+                    walk(&p, root, out);
+                }
+            } else if name.contains("genesis") && name.ends_with(".json") {
+                let rel = p.strip_prefix(root).unwrap().to_string_lossy().to_string();
+                out.push(rel);
+            }
+        }
+    }
+    let root = repo().canonicalize().unwrap();
+    let mut out = Vec::new();
+    walk(&root, &root, &mut out);
+    out.sort();
+    out
+}
+
+#[test]
+fn every_tracked_genesis_file_is_pinned() {
+    let mut pinned: Vec<String> = PINS
+        .iter()
+        .map(|p| p.file)
+        .chain(TEMPLATES.iter().map(|t| t.file))
+        .map(String::from)
+        .collect();
+    pinned.sort();
+    assert_eq!(
+        tracked_genesis_files(),
+        pinned,
+        "a genesis file was added or removed: pin its identity here, computed before \
+         and after any change to how genesis is read"
+    );
+}
+
+#[test]
+fn loadable_genesis_files_keep_their_identity() {
+    for pin in PINS {
+        let [json, block, activation, protocol, ccfg_encoding, ccfg_commitment] =
+            identity(pin.file);
+        assert_eq!(json, pin.json, "{}: canonical JSON", pin.file);
+        assert_eq!(block, pin.block, "{}: genesis block hash", pin.file);
+        assert_eq!(
+            activation, pin.activation,
+            "{}: activation digest",
+            pin.file
+        );
+        assert_eq!(protocol, pin.protocol, "{}: protocol digest", pin.file);
+        assert_eq!(
+            ccfg_encoding, pin.ccfg_encoding,
+            "{}: consensus-configuration encoding",
+            pin.file
+        );
+        assert_eq!(
+            ccfg_commitment, pin.ccfg_commitment,
+            "{}: consensus-configuration commitment",
+            pin.file
+        );
+    }
+}
+
+#[test]
+fn templates_parse_as_before_and_are_refused_as_before() {
+    for t in TEMPLATES {
+        let [json, error] = template(t.file);
+        assert_eq!(json, t.json, "{}: what serde reads", t.file);
+        assert_eq!(error, t.error, "{}: the refusal", t.file);
+    }
+}
