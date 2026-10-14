@@ -1,4 +1,4 @@
-//! Devnet provisioner for the SUM Chain local/smoke testnets.
+//! Devnet provisioner for the SUM Chain local/smoke/topology devnets.
 //!
 //! Modes (`--mode`):
 //!   * `local`     — DEFAULT, legacy behaviour, UNCHANGED. Generates three
@@ -10,8 +10,18 @@
 //!   * `smoke`     — issue #119. Generates EXACTLY ONE validator plus all funded
 //!                   roles (three archives, one verifier, one client, one funder)
 //!                   and a runnable genesis, ALL under an explicit `--output-dir`
-//!                   (required). Never writes a tracked genesis file. Chain id
-//!                   1337; compute-pool + beacon gates dormant (`None`).
+//!                   (required, outside the repository). Never writes a tracked
+//!                   genesis file. Chain id 1337; compute-pool + beacon gates
+//!                   dormant (`None`).
+//!   * `topology`  — issue #118. A SYNTHETIC test topology: `--validator-count`
+//!                   validators (default 5, at least 5) plus the same funded
+//!                   roles and a consensus-only runnable genesis (chain id 1337,
+//!                   compute-pool + beacon gates `None`), ALL under an explicit
+//!                   `--output-dir` (required): outside the repository, or
+//!                   exactly the ignored `./devnet` that
+//!                   `deploy/snip-local-mirror.yaml` reads. The keys are
+//!                   throwaway devnet keys; this is never a production
+//!                   validator-set change.
 //!   * `ecosystem` — issue #119, DEFERRED. Hard-fails with an explicit blocker
 //!                   message and generates nothing.
 
@@ -22,7 +32,9 @@ use anyhow::{bail, Result};
 use clap::{Parser, ValueEnum};
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::{ChainParams, Genesis};
-use sumchain_scripts::{provision_smoke, ECOSYSTEM_DEFERRED_MSG};
+use sumchain_scripts::{
+    provision_smoke, provision_topology, ECOSYSTEM_DEFERRED_MSG, TOPOLOGY_DEFAULT_VALIDATORS,
+};
 
 /// Provisioning mode.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -31,6 +43,9 @@ enum Mode {
     Local,
     /// Issue #119 single-validator smoke devnet (writes into --output-dir).
     Smoke,
+    /// Issue #118 synthetic >= 5-validator, consensus-only devnet (writes into
+    /// --output-dir; `./devnet` is what deploy/snip-local-mirror.yaml reads).
+    Topology,
     /// Issue #119 five-validator pool — DEFERRED, hard-fails.
     Ecosystem,
 }
@@ -38,22 +53,24 @@ enum Mode {
 #[derive(Parser, Debug)]
 #[command(
     name = "setup-local-testnet",
-    about = "Provision a SUM Chain local/smoke devnet (issue #119)"
+    about = "Provision a SUM Chain local/smoke/topology devnet (issues #118, #119)"
 )]
 struct Cli {
     /// Provisioning mode.
     #[arg(long, value_enum, default_value = "local")]
     mode: Mode,
 
-    /// Number of validators to generate. Only meaningful for `smoke` (must be 1,
-    /// its default). REJECTED for `local` (always exactly 3) and `ecosystem`
+    /// Number of validators to generate. `smoke`: must be 1 (its default).
+    /// `topology`: 5 to 16 (default 5, the number deploy/snip-local-mirror.yaml
+    /// runs). REJECTED for `local` (always exactly 3) and `ecosystem`
     /// (deferred) rather than silently ignored.
     #[arg(long)]
     validator_count: Option<usize>,
 
     /// Output directory for ALL generated keys + the runnable genesis.
-    /// REQUIRED for `smoke` (its keys/genesis are written only here, never a
-    /// tracked path). REJECTED for `local` (which uses ./genesis + ./keys).
+    /// REQUIRED for `smoke` and `topology` (their keys/genesis are written only
+    /// here, never a tracked path). REJECTED for `local` (which uses ./genesis
+    /// + ./keys).
     #[arg(long)]
     output_dir: Option<PathBuf>,
 }
@@ -67,20 +84,25 @@ fn main() -> Result<()> {
             bail!("{ECOSYSTEM_DEFERRED_MSG}");
         }
         Mode::Smoke => run_smoke(cli.output_dir, cli.validator_count.unwrap_or(1)),
+        Mode::Topology => run_topology(
+            cli.output_dir,
+            cli.validator_count.unwrap_or(TOPOLOGY_DEFAULT_VALIDATORS),
+        ),
         Mode::Local => {
             // Fail closed: `local` is the fixed legacy 3-validator mode. Reject
             // arguments it does not support instead of silently ignoring them.
             if cli.output_dir.is_some() {
                 bail!(
                     "--output-dir is not supported with --mode local (it always writes \
-                     ./genesis/local_genesis.json + ./keys). Use --mode smoke --output-dir \
-                     <dir> for an out-of-repo devnet."
+                     ./genesis/local_genesis.json + ./keys). Use --mode smoke or --mode topology \
+                     with --output-dir <dir>."
                 );
             }
             if cli.validator_count.is_some() {
                 bail!(
                     "--validator-count is not supported with --mode local (it always \
-                     generates exactly 3 validators). Use --mode smoke (1 validator) or \
+                     generates exactly 3 validators). Use --mode smoke (1 validator), \
+                     --mode topology (synthetic >= 5-validator consensus-only devnet) or \
                      --mode ecosystem (deferred five-validator pool)."
                 );
             }
@@ -136,6 +158,56 @@ fn run_smoke(output_dir: Option<PathBuf>, validator_count: usize) -> Result<()> 
     );
     println!("    --p2p-addr /ip4/127.0.0.1/tcp/30301 \\");
     println!("    --rpc-addr 127.0.0.1:8545");
+
+    Ok(())
+}
+
+/// Issue #118 synthetic topology provisioning. `--output-dir` is required so the
+/// hardcoded tracked path can never be taken. SYNTHETIC: throwaway devnet keys,
+/// never a production validator set.
+fn run_topology(output_dir: Option<PathBuf>, validator_count: usize) -> Result<()> {
+    let output_dir = output_dir.ok_or_else(|| {
+        anyhow::anyhow!(
+            "topology mode requires --output-dir <path>: all keys and the runnable \
+             genesis are written there. Use `mkdir -m 0700 devnet` and \
+             `--output-dir devnet` for deploy/snip-local-mirror.yaml, or a mktemp dir \
+             OUTSIDE the repo. Topology mode never writes a tracked genesis file."
+        )
+    })?;
+
+    println!("=== SUM Chain Synthetic Topology Devnet Setup (issue #118) ===\n");
+    println!("SYNTHETIC TEST TOPOLOGY: throwaway devnet keys, not a production validator set.");
+    println!("Output directory: {}", output_dir.display());
+
+    let artifacts = provision_topology(&output_dir, validator_count)?;
+
+    println!(
+        "\nGenerated {} validators (round-robin order) + {} funded roles:",
+        artifacts.validators.len(),
+        artifacts.roles.len()
+    );
+    for v in &artifacts.validators {
+        println!("  {:<11} pubkey:  {}", v.name, v.pubkey_b58);
+        println!("  {:<11} address: {}", "", v.address_b58);
+    }
+    for role in &artifacts.roles {
+        println!("  {:<11} address: {}", role.name, role.address_b58);
+    }
+    println!(
+        "\n  chain id:          {}",
+        sumchain_scripts::DEVNET_CHAIN_ID
+    );
+    println!("  compute-pool gate: None (dormant)");
+    println!("  beacon gate:       None (dormant)");
+    println!("\n  Runnable genesis: {}", artifacts.genesis_path.display());
+    println!("  Manifest:         {}", artifacts.manifest_path.display());
+    println!(
+        "  Keys:             {}/keys/ (private material — do not commit)",
+        output_dir.display()
+    );
+    println!("\nWith --output-dir devnet, run the five-validator compose preset:");
+    println!("  GIT_HASH=$(git rev-parse HEAD) \\");
+    println!("    docker compose -f deploy/snip-local-mirror.yaml up -d --build");
 
     Ok(())
 }
@@ -248,8 +320,8 @@ fn run_local() -> Result<()> {
             inference_verifier_bonding_enabled_from_height: None,       // issue #78: dormant
             inference_verifier_unbonding_period_blocks: 201_600,
             omninode_sponsored_attestation_enabled_from_height: None, // issue #79: dormant
-            compute_pool_enabled_from_height: None, // issue #118: compute-pool gate dormant (fail-closed until ComputePoolParams exists)
-            beacon_enabled_from_height: None, // issue #118: beacon gate dormant (fail-closed until BeaconParams exists)
+            compute_pool_enabled_from_height: None, // issue #118: compute-pool gate dormant (Genesis::validate refuses any Some)
+            beacon_enabled_from_height: None, // issue #118: beacon gate dormant (Genesis::validate refuses any Some)
             // The application journal's own activation gate. `None` = the revert
             // boundary is OBSERVED from this node's journal history, which is the
             // production rule and not an off position: the write side is ungated,

@@ -2,27 +2,38 @@
 //!
 //! # Issue #119 — bootstrap ephemeral keys + a runnable genesis
 //!
-//! This crate owns the *smoke-mode* devnet provisioner: it generates ephemeral
-//! keypairs and materializes a runnable genesis **into an explicit output
-//! directory** on the current dormant [`ChainParams`] (chain id `1337`). It
-//! never reads or overwrites any tracked genesis file — the caller (a test or
-//! the `deploy/smoke-e2e-harness.sh` harness) points `output_dir` at a `mktemp`
-//! directory *outside* the repository, so the git worktree stays clean.
+//! This crate owns the devnet provisioner: it generates ephemeral keypairs and
+//! materializes a runnable genesis **into an explicit output directory** on the
+//! current dormant [`ChainParams`] (chain id `1337`). It never reads or
+//! overwrites any tracked genesis file, and every artifact it writes lives under
+//! the output directory, so the git worktree stays clean.
 //!
-//! Two provisioning modes are exposed to the binary:
+//! Three provisioning modes are exposed to the binary:
 //!
 //! * **smoke** ([`provision_smoke`]) — *exactly one* validator plus all funded
 //!   roles required by #119 scope (three archives, one verifier, one client,
-//!   one funder). Implementable now on the dormant schema; the compute-pool and
-//!   beacon activation gates stay `None`.
-//! * **ecosystem** ([`ECOSYSTEM_DEFERRED_MSG`]) — the five-validator pool. It is
-//!   **deferred** and hard-fails: its prerequisites (a ≥5-validator template,
-//!   the `n_min` validator-floor field, `ComputePoolParams`, `BeaconParams`) do
-//!   not exist yet. A passing smoke run does NOT constitute the ecosystem.
+//!   one funder). The output directory must resolve outside the repository
+//!   (the caller, a test or `deploy/smoke-e2e-harness.sh`, uses `mktemp -d`).
+//!   The compute-pool and beacon activation gates stay `None`.
+//! * **topology** ([`provision_topology`]) — issue #118's runtime-path contract:
+//!   a **synthetic test topology** of `>= 5` validators (default 5, the #126
+//!   product minimum) plus the same funded roles, on the same dormant
+//!   `ChainParams`. Consensus only: the compute-pool and beacon gates stay
+//!   `None` and their parameter surfaces stay absent. This is what
+//!   `deploy/snip-local-mirror.yaml` runs. Every validator key is a throwaway
+//!   key generated on the machine that runs the provisioner; nothing here
+//!   describes, proposes or changes any production validator set. The output
+//!   directory may resolve outside the repository, or be exactly the ignored
+//!   runtime directory `<repo>/devnet` ([`DEVNET_RUNTIME_DIR`]) that the compose
+//!   file reads.
+//! * **ecosystem** ([`ECOSYSTEM_DEFERRED_MSG`]) — the five-validator *pool*
+//!   devnet. It is **deferred** and hard-fails: its genesis template needs
+//!   values that are not ratified and gates the loader refuses. A passing smoke
+//!   or topology run does NOT constitute the ecosystem.
 //!
 //! The legacy three-validator "local testnet" behaviour lives in the binary
-//! (`setup_local_testnet.rs`) and is unchanged; this library is only the new
-//! #119 surface.
+//! (`setup_local_testnet.rs`) and is unchanged; this library is only the
+//! #118/#119 surface.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,38 +52,78 @@ pub const DEVNET_CHAIN_ID: u64 = 1337;
 /// "balance > 0" holds for the validator and every bootstrap role.
 pub const ROLE_ALLOC: u128 = 1_000_000_000_000_000_000; // 1e18 base units
 
-/// The non-validator funded roles a smoke devnet must bootstrap (issue #119
+/// The non-validator funded roles every devnet mode bootstraps (issue #119
 /// scope): three archives, one verifier, one client, one funder.
 pub const SMOKE_ROLE_NAMES: &[&str] = &[
     "archive1", "archive2", "archive3", "verifier", "client", "funder",
 ];
 
-/// Basename of the runnable genesis written by smoke mode. Deliberately NOT
-/// `local_genesis.json` (a tracked file) — smoke mode never writes a tracked
+/// Basename of the runnable genesis written by every devnet mode. Deliberately
+/// NOT `local_genesis.json` (a tracked file) — no devnet mode writes a tracked
 /// genesis name.
-pub const SMOKE_GENESIS_FILE: &str = "genesis.json";
+pub const GENESIS_FILE: &str = "genesis.json";
+
+/// Basename of the runnable genesis written by smoke mode (see [`GENESIS_FILE`]).
+pub const SMOKE_GENESIS_FILE: &str = GENESIS_FILE;
+
+/// The repository-relative runtime directory issue #118 assigns to the
+/// generated devnet. `deploy/snip-local-mirror.yaml` bind-mounts
+/// `../devnet/genesis.json` and `../devnet/keys/validator<i>.json` from it, and
+/// `.gitignore` ignores it (`/devnet/`).
+///
+/// It is the ONLY path inside the repository a provisioner may write to, only
+/// in topology mode, and only while `.gitignore` still ignores it — see
+/// [`provision_topology`].
+pub const DEVNET_RUNTIME_DIR: &str = "devnet";
+
+/// The `.gitignore` line that must be present before the in-repository
+/// exception for [`DEVNET_RUNTIME_DIR`] is honoured.
+pub const DEVNET_GITIGNORE_LINE: &str = "/devnet/";
+
+/// Validator count `topology` mode provisions when none is given: the number of
+/// validator services `deploy/snip-local-mirror.yaml` runs.
+pub const TOPOLOGY_DEFAULT_VALIDATORS: usize = 5;
+
+/// Fewest validators `topology` mode accepts: issue #118 requires a `>= 5`
+/// validator devnet, which is #126's product minimum for the DKG-creation phase
+/// (`n >= 3f + 1 + c` with `f = 1`, `c = 1`).
+///
+/// This is a floor on a SYNTHETIC test topology. It is not the beacon `n_min`
+/// field (which does not exist), not a ratified validator floor, and not a
+/// statement about any production validator set.
+pub const TOPOLOGY_MIN_VALIDATORS: usize = 5;
+
+/// Most validators `topology` mode accepts. A local resource bound (one
+/// container per validator on one host), not a protocol value; it exists so a
+/// typo cannot generate thousands of key files.
+pub const TOPOLOGY_MAX_VALIDATORS: usize = 16;
 
 /// Explicit, actionable message emitted when `ecosystem` mode is selected while
 /// its prerequisites are absent. Naming the blockers keeps the deferral honest
 /// (the five-validator pool is tracked separately and is never satisfied by a
-/// smoke run).
+/// smoke or topology run).
 pub const ECOSYSTEM_DEFERRED_MSG: &str = "\
 ecosystem mode is DEFERRED and cannot generate anything yet.
 
-The five-validator pool devnet requires prerequisites that do not exist on the
-current schema:
-  - #118's full (>= 5-validator) genesis template file (absent)
-  - the `n_min` validator-floor field (absent)
-  - `ComputePoolParams` — the compute-pool typed parameter surface
-    (blocked on B0 #123 + C1 #130; the `compute_pool_enabled_from_height`
-    gate is fail-closed until it exists)
-  - `BeaconParams` — the threshold-BLS beacon typed parameter surface
-    (blocked on BR1 #127; the `beacon_enabled_from_height` gate is
-    fail-closed until it exists)
+The five-validator pool devnet needs #118's genesis template
+(genesis/snip-mirror-genesis.template.json), which does not exist because
+its contents are not ratified:
+  - bond values (B_offer, B_commit, D_beacon, B_check) and reimbursement
+    amounts
+  - re-provision and reassignment bounds, and the retention values
+    (#129)
+  - the beacon DKG windows and the VK/program/tokenizer/model registry
+    contents
+  - the beacon `n_min` validator-floor field, which `BeaconParamsConfig`
+    does not have
+and its gates are refused: the genesis loader rejects any value, including
+0, for `compute_pool_enabled_from_height` and `beacon_enabled_from_height`.
 
-A passing smoke run does NOT constitute the five-validator pool ecosystem.
-Ecosystem completion is tracked separately. Use `--mode smoke` for the
-single-validator devnet that is implementable today.";
+A passing smoke or topology run does NOT constitute the five-validator pool
+ecosystem; ecosystem completion is tracked separately. Available today:
+`--mode smoke` (one validator) and `--mode topology` (a synthetic >= 5
+validator, consensus-only devnet with both gates None, which
+deploy/snip-local-mirror.yaml runs).";
 
 /// A generated, funded role: its name, its base58 address, and the path its
 /// private key was written to (inside `output_dir/keys`).
@@ -81,6 +132,23 @@ pub struct RoleKey {
     /// Role name, e.g. `archive1`, `verifier`, `client`, `funder`.
     pub name: String,
     /// base58 account address (public identifier).
+    pub address_b58: String,
+    /// Path to the JSON private-key file (32-byte array), inside `output_dir`.
+    pub key_path: PathBuf,
+}
+
+/// A generated, funded validator identity. Throwaway: generated fresh on every
+/// run, never committed.
+#[derive(Debug, Clone)]
+pub struct ValidatorKey {
+    /// Key-file stem: `validator` (smoke) or `validator<i>`, 1-based (topology).
+    pub name: String,
+    /// base58 public key, exactly as listed in `genesis.validators`.
+    pub pubkey_b58: String,
+    /// The same public key as lowercase hex, the form block headers carry
+    /// (`get_block_by_height` reports `proposer` in it).
+    pub pubkey_hex: String,
+    /// base58 account address (also funded in `alloc`).
     pub address_b58: String,
     /// Path to the JSON private-key file (32-byte array), inside `output_dir`.
     pub key_path: PathBuf,
@@ -99,6 +167,23 @@ pub struct SmokeArtifacts {
     pub validator_address_b58: String,
     /// Path to the validator private key (`output_dir/keys/validator.json`).
     pub validator_key_path: PathBuf,
+    /// The funded non-validator roles (three archives, verifier, client, funder).
+    pub roles: Vec<RoleKey>,
+    /// Public manifest path (`output_dir/manifest.json`).
+    pub manifest_path: PathBuf,
+}
+
+/// Everything a topology provisioning produced. All paths live under
+/// `output_dir`.
+#[derive(Debug, Clone)]
+pub struct TopologyArtifacts {
+    /// The output directory every artifact was written under.
+    pub output_dir: PathBuf,
+    /// The runnable genesis path (`output_dir/genesis.json`).
+    pub genesis_path: PathBuf,
+    /// The validators, in `genesis.validators` order: `validators[i]` proposes
+    /// every height `h` with `h % n == i` under round-robin.
+    pub validators: Vec<ValidatorKey>,
     /// The funded non-validator roles (three archives, verifier, client, funder).
     pub roles: Vec<RoleKey>,
     /// Public manifest path (`output_dir/manifest.json`).
@@ -167,28 +252,113 @@ fn write_new_public_file(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-/// Fail-closed validation of a smoke `--output-dir` **before** anything is
-/// written. The directory must (1) resolve OUTSIDE this repository, (2) already
-/// exist and be EMPTY, and (3) contain no pre-existing/symlinked `keys/`. Any
+/// Where a provisioning mode may write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputPolicy {
+    /// Outside the repository only. Smoke mode (#119), unchanged.
+    OutsideRepository,
+    /// Outside the repository, or exactly the ignored `<repo>/devnet` runtime
+    /// directory. Topology mode (#118).
+    OutsideRepositoryOrDevnet,
+}
+
+/// True when `.gitignore` text ignores the devnet runtime directory: it holds
+/// the exact line [`DEVNET_GITIGNORE_LINE`] and no negation that could
+/// re-include anything under it.
+fn gitignore_ignores_devnet(gitignore: &str) -> bool {
+    let lines: Vec<&str> = gitignore.lines().map(str::trim).collect();
+    let ignored = lines.contains(&DEVNET_GITIGNORE_LINE);
+    let reincluded = lines
+        .iter()
+        .any(|l| l.starts_with('!') && l.contains(DEVNET_RUNTIME_DIR));
+    ignored && !reincluded
+}
+
+/// Decide whether the canonical output directory `resolved` is an acceptable
+/// location under `policy`. `repo_root` is canonical too; `gitignore` is the
+/// text of `<repo_root>/.gitignore`, `None` when it could not be read.
+///
+/// The rule the in-repository exception keeps: no provisioner write can modify
+/// a tracked file or show up in `git status`. Smoke mode meets it by writing
+/// outside the tree only. Topology mode may also write into exactly
+/// `<repo>/devnet` — the path #118 assigns to the generated devnet, and the
+/// only one `deploy/snip-local-mirror.yaml` reads — and only while
+/// `.gitignore` ignores it, so the exception cannot outlive the ignore rule.
+/// Any other path inside the repository (the root, `genesis/`, `target/`, a
+/// subdirectory of `devnet/`) is still refused, as are a non-empty directory
+/// and a symlink, by [`validate_output_dir`].
+fn check_output_location(
+    resolved: &Path,
+    repo_root: &Path,
+    gitignore: Option<&str>,
+    policy: OutputPolicy,
+    mode: &str,
+) -> Result<()> {
+    if !(resolved == repo_root || resolved.starts_with(repo_root)) {
+        return Ok(());
+    }
+    match policy {
+        OutputPolicy::OutsideRepository => bail!(
+            "{mode} --output-dir must resolve OUTSIDE the repository \
+             (got {}, repo root {}); use an ephemeral `mktemp -d` directory",
+            resolved.display(),
+            repo_root.display()
+        ),
+        OutputPolicy::OutsideRepositoryOrDevnet => {
+            let devnet = repo_root.join(DEVNET_RUNTIME_DIR);
+            if resolved != devnet {
+                bail!(
+                    "{mode} --output-dir must resolve OUTSIDE the repository, or be exactly the \
+                     ignored runtime directory {} (got {}); use `mktemp -d` or `mkdir -m 0700 {}`",
+                    devnet.display(),
+                    resolved.display(),
+                    DEVNET_RUNTIME_DIR
+                );
+            }
+            if !gitignore.is_some_and(gitignore_ignores_devnet) {
+                bail!(
+                    "{mode} --output-dir {} is inside the repository and {}/.gitignore does not \
+                     ignore it (expected the line `{}` and no negation under it); refusing to \
+                     write keys or a genesis where git could track them",
+                    resolved.display(),
+                    repo_root.display(),
+                    DEVNET_GITIGNORE_LINE
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Fail-closed validation of an `--output-dir` **before** anything is written.
+/// The directory must (1) already exist as a real directory (not a symlink),
+/// (2) be an acceptable location under `policy` ([`check_output_location`]),
+/// (3) be EMPTY, and (4) contain no pre-existing/symlinked `keys/`. Any
 /// violation is an error — the provisioner never overwrites an existing
-/// artifact and never writes inside the repo tree.
-fn validate_smoke_output_dir(output_dir: &Path) -> Result<()> {
-    // Must already exist as a real directory (caller creates it with `mktemp -d`).
+/// artifact.
+fn validate_output_dir(output_dir: &Path, policy: OutputPolicy, mode: &str) -> Result<()> {
+    let create_hint = match policy {
+        OutputPolicy::OutsideRepository => "create it with `mktemp -d`",
+        OutputPolicy::OutsideRepositoryOrDevnet => {
+            "create it with `mktemp -d`, or `mkdir -m 0700 devnet` at the repository root"
+        }
+    };
+    // Must already exist as a real directory (caller creates it).
     let meta = fs::symlink_metadata(output_dir).with_context(|| {
         format!(
-            "smoke --output-dir {} must exist (create it with `mktemp -d`)",
+            "{mode} --output-dir {} must exist ({create_hint})",
             output_dir.display()
         )
     })?;
     if !meta.is_dir() {
         bail!(
-            "smoke --output-dir {} must be a directory (not a file/symlink)",
+            "{mode} --output-dir {} must be a directory (not a file/symlink)",
             output_dir.display()
         );
     }
 
-    // (1) Must resolve OUTSIDE the repository. Repo root = parent of this crate's
-    // compile-time manifest dir (`<repo>/scripts`).
+    // Location. Repo root = parent of this crate's compile-time manifest dir
+    // (`<repo>/scripts`).
     let resolved = output_dir
         .canonicalize()
         .with_context(|| format!("canonicalize --output-dir {}", output_dir.display()))?;
@@ -197,36 +367,160 @@ fn validate_smoke_output_dir(output_dir: &Path) -> Result<()> {
         .context("locate repository root")?
         .canonicalize()
         .context("canonicalize repository root")?;
-    if resolved == repo_root || resolved.starts_with(&repo_root) {
-        bail!(
-            "smoke --output-dir must resolve OUTSIDE the repository \
-             (got {}, repo root {}); use an ephemeral `mktemp -d` directory",
-            resolved.display(),
-            repo_root.display()
-        );
-    }
+    let gitignore = fs::read_to_string(repo_root.join(".gitignore")).ok();
+    check_output_location(&resolved, &repo_root, gitignore.as_deref(), policy, mode)?;
 
-    // (2) Must be empty before provisioning — never overwrite existing artifacts.
+    // Must be empty before provisioning — never overwrite existing artifacts.
     if fs::read_dir(output_dir)
         .with_context(|| format!("read --output-dir {}", output_dir.display()))?
         .next()
         .is_some()
     {
         bail!(
-            "smoke --output-dir {} must be EMPTY before provisioning \
+            "{mode} --output-dir {} must be EMPTY before provisioning \
              (refusing to overwrite genesis.json / manifest.json / keys)",
             output_dir.display()
         );
     }
 
-    // (3) No pre-existing/symlinked `keys/` (implied by empty, but explicit).
+    // No pre-existing/symlinked `keys/` (implied by empty, but explicit).
     if output_dir.join("keys").symlink_metadata().is_ok() {
         bail!(
-            "smoke output {}/keys already exists (possibly a symlink); refusing to write into it",
+            "{mode} output {}/keys already exists (possibly a symlink); refusing to write into it",
             output_dir.display()
         );
     }
     Ok(())
+}
+
+/// Create `output_dir/keys` (it must not exist yet).
+fn create_keys_dir(output_dir: &Path) -> Result<PathBuf> {
+    let keys_dir = output_dir.join("keys");
+    fs::create_dir(&keys_dir).with_context(|| {
+        format!(
+            "create keys dir {} (must not already exist)",
+            keys_dir.display()
+        )
+    })?;
+    Ok(keys_dir)
+}
+
+/// Generate one validator keypair per name, writing each private key to
+/// `keys_dir/<name>.json` (create-new, `0600`).
+fn generate_validators(keys_dir: &Path, names: &[String]) -> Result<Vec<ValidatorKey>> {
+    names
+        .iter()
+        .map(|name| {
+            let kp = KeyPair::generate();
+            let key_path = keys_dir.join(format!("{name}.json"));
+            write_private_key(&key_path, &kp)?;
+            Ok(ValidatorKey {
+                name: name.clone(),
+                pubkey_b58: kp.public_key().to_base58(),
+                pubkey_hex: kp.public_key().to_hex(),
+                address_b58: kp.address().to_base58(),
+                key_path,
+            })
+        })
+        .collect()
+}
+
+/// Generate the #119 funded roles ([`SMOKE_ROLE_NAMES`]), writing each private
+/// key to `keys_dir/<role>.json` (create-new, `0600`).
+fn generate_roles(keys_dir: &Path) -> Result<Vec<RoleKey>> {
+    SMOKE_ROLE_NAMES
+        .iter()
+        .map(|&name| {
+            let kp = KeyPair::generate();
+            let key_path = keys_dir.join(format!("{name}.json"));
+            write_private_key(&key_path, &kp)?;
+            Ok(RoleKey {
+                name: name.to_string(),
+                address_b58: kp.address().to_base58(),
+                key_path,
+            })
+        })
+        .collect()
+}
+
+/// Build the runnable genesis every devnet mode shares — the single
+/// genesis-building path (#119: no second independent implementation).
+///
+/// `validators` in the given order (round-robin proposer order); `alloc` funds
+/// every validator address and every role with [`ROLE_ALLOC`], so each has
+/// balance > 0 straight from genesis. Duplicate accounts are refused rather
+/// than overwritten (#276). Validated through the authoritative loader check
+/// before it is returned.
+fn build_dormant_genesis(
+    validators: &[ValidatorKey],
+    roles: &[RoleKey],
+    mode: &str,
+) -> Result<Genesis> {
+    let alloc_entries: Vec<(String, u128)> = validators
+        .iter()
+        .map(|v| (v.address_b58.clone(), ROLE_ALLOC))
+        .chain(roles.iter().map(|r| (r.address_b58.clone(), ROLE_ALLOC)))
+        .collect();
+
+    // `with_v2_enabled()` activates SNIP V2 from genesis (so the funded archive
+    // roles have a live storage subprotocol) while leaving every other gate at
+    // its production-safe default — crucially compute_pool + beacon = None, with
+    // their parameter surfaces absent. Checked, not assumed: a devnet genesis is
+    // consensus only.
+    let params = ChainParams::with_v2_enabled();
+    if params.compute_pool_enabled_from_height.is_some()
+        || params.beacon_enabled_from_height.is_some()
+        || params.compute_pool_params.is_some()
+        || params.beacon_params.is_some()
+        || params.beacon_schedule.is_some()
+    {
+        bail!("{mode} genesis must leave the compute-pool and beacon gates and parameters absent");
+    }
+
+    let genesis_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let alloc = sumchain_genesis::alloc_from_entries(alloc_entries)
+        .with_context(|| format!("{mode} genesis allocations"))?;
+
+    let genesis = Genesis::new(
+        DEVNET_CHAIN_ID,
+        genesis_time,
+        validators.iter().map(|v| v.pubkey_b58.clone()).collect(),
+        alloc,
+        params,
+    );
+    // Fail-closed loader check: rejects any opened compute-pool/beacon gate and
+    // validates every validator key + alloc address.
+    genesis
+        .validate()
+        .with_context(|| format!("generated {mode} genesis failed validation"))?;
+    Ok(genesis)
+}
+
+/// Serialize `genesis` to `output_dir/genesis.json` (create-new).
+fn write_genesis(output_dir: &Path, genesis: &Genesis) -> Result<PathBuf> {
+    let genesis_path = output_dir.join(GENESIS_FILE);
+    let genesis_json = genesis.to_json().context("serialize runnable genesis")?;
+    write_new_public_file(&genesis_path, &genesis_json)
+        .with_context(|| format!("write runnable genesis to {}", genesis_path.display()))?;
+    Ok(genesis_path)
+}
+
+/// The public role list a manifest carries (no private material).
+fn roles_manifest(roles: &[RoleKey]) -> Vec<serde_json::Value> {
+    roles
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "name": r.name,
+                "address": r.address_b58,
+                "key_file": format!("keys/{}.json", r.name),
+            })
+        })
+        .collect()
 }
 
 /// Provision a **smoke** devnet into `output_dir`.
@@ -241,95 +535,32 @@ fn validate_smoke_output_dir(output_dir: &Path) -> Result<()> {
 /// * `output_dir/manifest.json` (public role → address map + gate states).
 ///
 /// `validator_count` must be `1` — smoke mode is single-validator by definition;
-/// multi-validator provisioning is the deferred ecosystem mode.
+/// the synthetic multi-validator devnet is [`provision_topology`], and the pool
+/// is the deferred ecosystem mode.
 ///
-/// This function writes **only** under `output_dir`. It never reads #118's
-/// template and never touches a tracked genesis file.
+/// This function writes **only** under `output_dir`, which must resolve outside
+/// the repository. It never reads #118's template and never touches a tracked
+/// genesis file.
 pub fn provision_smoke(output_dir: &Path, validator_count: usize) -> Result<SmokeArtifacts> {
     if validator_count != 1 {
         bail!(
             "smoke mode is single-validator by definition (got --validator-count {validator_count}). \
              A multi-validator pool is the deferred ecosystem mode; use --mode ecosystem to see \
-             its blockers, or --validator-count 1."
+             its blockers, --mode topology for the synthetic consensus-only multi-validator \
+             devnet, or --validator-count 1."
         );
     }
 
-    // Defensive guard: smoke must never emit a tracked genesis basename.
-    debug_assert_eq!(SMOKE_GENESIS_FILE, "genesis.json");
-
     // Fail-closed: outside-repo, empty, no pre-existing/symlinked keys/ — checked
     // before anything is written, so we never overwrite an existing artifact.
-    validate_smoke_output_dir(output_dir)?;
+    validate_output_dir(output_dir, OutputPolicy::OutsideRepository, "smoke")?;
 
-    let keys_dir = output_dir.join("keys");
-    fs::create_dir(&keys_dir).with_context(|| {
-        format!(
-            "create keys dir {} (must not already exist)",
-            keys_dir.display()
-        )
-    })?;
-
-    // ── one validator ──────────────────────────────────────────────────────
-    let validator = KeyPair::generate();
-    let validator_pubkey_b58 = validator.public_key().to_base58();
-    let validator_address_b58 = validator.address().to_base58();
-    let validator_key_path = keys_dir.join("validator.json");
-    write_private_key(&validator_key_path, &validator)?;
-
-    // ── all funded roles ───────────────────────────────────────────────────
-    // alloc funds the validator address AND every role, so every one has
-    // balance > 0 straight from genesis (no live node needed to fund).
-    // Collected, then checked for duplicate accounts before any map is built,
-    // so a repeated address is refused rather than overwritten (#276).
-    let mut alloc_entries: Vec<(String, u128)> = vec![(validator_address_b58.clone(), ROLE_ALLOC)];
-
-    let mut roles = Vec::with_capacity(SMOKE_ROLE_NAMES.len());
-    for &name in SMOKE_ROLE_NAMES {
-        let kp = KeyPair::generate();
-        let address_b58 = kp.address().to_base58();
-        let key_path = keys_dir.join(format!("{name}.json"));
-        write_private_key(&key_path, &kp)?;
-        alloc_entries.push((address_b58.clone(), ROLE_ALLOC));
-        roles.push(RoleKey {
-            name: name.to_string(),
-            address_b58,
-            key_path,
-        });
-    }
-
-    // ── runnable genesis on the dormant ChainParams ─────────────────────────
-    // `with_v2_enabled()` activates SNIP V2 from genesis (so the funded archive
-    // roles have a live storage subprotocol) while leaving every other gate at
-    // its production-safe default — crucially compute_pool + beacon = None.
-    let params = ChainParams::with_v2_enabled();
-    debug_assert!(params.compute_pool_enabled_from_height.is_none());
-    debug_assert!(params.beacon_enabled_from_height.is_none());
-
-    let genesis_time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-
-    let alloc = sumchain_genesis::alloc_from_entries(alloc_entries)
-        .context("smoke genesis allocations")?;
-
-    let genesis = Genesis::new(
-        DEVNET_CHAIN_ID,
-        genesis_time,
-        vec![validator_pubkey_b58.clone()],
-        alloc,
-        params,
-    );
-    // Fail-closed loader check: rejects any opened compute-pool/beacon gate and
-    // validates every validator key + alloc address.
-    genesis
-        .validate()
-        .context("generated smoke genesis failed validation")?;
-
-    let genesis_path = output_dir.join(SMOKE_GENESIS_FILE);
-    let genesis_json = genesis.to_json().context("serialize runnable genesis")?;
-    write_new_public_file(&genesis_path, &genesis_json)
-        .with_context(|| format!("write runnable genesis to {}", genesis_path.display()))?;
+    let keys_dir = create_keys_dir(output_dir)?;
+    let mut validators = generate_validators(&keys_dir, &["validator".to_string()])?;
+    let roles = generate_roles(&keys_dir)?;
+    let genesis = build_dormant_genesis(&validators, &roles, "smoke")?;
+    let genesis_path = write_genesis(output_dir, &genesis)?;
+    let validator = validators.remove(0);
 
     // ── public manifest (no private material) ───────────────────────────────
     let manifest_path = output_dir.join("manifest.json");
@@ -338,20 +569,11 @@ pub fn provision_smoke(output_dir: &Path, validator_count: usize) -> Result<Smok
         "chain_id": DEVNET_CHAIN_ID,
         "genesis_file": SMOKE_GENESIS_FILE,
         "validator": {
-            "pubkey": validator_pubkey_b58,
-            "address": validator_address_b58,
+            "pubkey": validator.pubkey_b58,
+            "address": validator.address_b58,
             "key_file": "keys/validator.json",
         },
-        "roles": roles
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "name": r.name,
-                    "address": r.address_b58,
-                    "key_file": format!("keys/{}.json", r.name),
-                })
-            })
-            .collect::<Vec<_>>(),
+        "roles": roles_manifest(&roles),
         "gates": {
             "compute_pool_enabled_from_height": serde_json::Value::Null,
             "beacon_enabled_from_height": serde_json::Value::Null,
@@ -364,9 +586,101 @@ pub fn provision_smoke(output_dir: &Path, validator_count: usize) -> Result<Smok
     Ok(SmokeArtifacts {
         output_dir: output_dir.to_path_buf(),
         genesis_path,
-        validator_pubkey_b58,
-        validator_address_b58,
-        validator_key_path,
+        validator_pubkey_b58: validator.pubkey_b58,
+        validator_address_b58: validator.address_b58,
+        validator_key_path: validator.key_path,
+        roles,
+        manifest_path,
+    })
+}
+
+/// Provision a **synthetic test topology** of `validator_count` validators into
+/// `output_dir` (issue #118's runtime-path contract).
+///
+/// SYNTHETIC: every validator key is a throwaway key generated here, for a
+/// local or CI devnet. This never describes, proposes or changes a production
+/// validator set.
+///
+/// Generates `validator_count` validators (`validator1` .. `validatorN`, in
+/// genesis and therefore round-robin order) plus the #119 funded roles, builds
+/// the runnable genesis through the same path as smoke mode (consensus only:
+/// compute-pool and beacon gates `None`, their parameters absent; chain id
+/// [`DEVNET_CHAIN_ID`]), and writes:
+///
+/// * `output_dir/keys/validator<i>.json` + one file per role (each `0600`),
+/// * `output_dir/genesis.json` (the runnable genesis; only public identifiers),
+/// * `output_dir/manifest.json` (public identities + gate states).
+///
+/// `validator_count` must lie in
+/// [`TOPOLOGY_MIN_VALIDATORS`]`..=`[`TOPOLOGY_MAX_VALIDATORS`].
+///
+/// `output_dir` must exist, be empty, and resolve outside the repository or be
+/// exactly the ignored `<repo>/devnet` ([`DEVNET_RUNTIME_DIR`]) — the directory
+/// `deploy/snip-local-mirror.yaml` reads. Nothing is written anywhere else, and
+/// no tracked genesis file is read or written.
+pub fn provision_topology(output_dir: &Path, validator_count: usize) -> Result<TopologyArtifacts> {
+    if !(TOPOLOGY_MIN_VALIDATORS..=TOPOLOGY_MAX_VALIDATORS).contains(&validator_count) {
+        bail!(
+            "topology mode needs {TOPOLOGY_MIN_VALIDATORS}..={TOPOLOGY_MAX_VALIDATORS} validators \
+             (got --validator-count {validator_count}). Issue #118 requires a >= 5-validator devnet \
+             (#126's product minimum); deploy/snip-local-mirror.yaml runs exactly \
+             {TOPOLOGY_DEFAULT_VALIDATORS}. Use --mode smoke for a single validator."
+        );
+    }
+
+    validate_output_dir(
+        output_dir,
+        OutputPolicy::OutsideRepositoryOrDevnet,
+        "topology",
+    )?;
+
+    let keys_dir = create_keys_dir(output_dir)?;
+    let names: Vec<String> = (1..=validator_count)
+        .map(|i| format!("validator{i}"))
+        .collect();
+    let validators = generate_validators(&keys_dir, &names)?;
+    let roles = generate_roles(&keys_dir)?;
+    let genesis = build_dormant_genesis(&validators, &roles, "topology")?;
+    let genesis_path = write_genesis(output_dir, &genesis)?;
+
+    // ── public manifest (no private material) ───────────────────────────────
+    let manifest_path = output_dir.join("manifest.json");
+    let manifest = serde_json::json!({
+        "mode": "topology",
+        "synthetic_test_topology": true,
+        "notice": "Synthetic test topology with throwaway keys for a local or CI devnet; \
+                   not a production validator set.",
+        "chain_id": DEVNET_CHAIN_ID,
+        "genesis_file": GENESIS_FILE,
+        "validator_count": validators.len(),
+        "validators": validators
+            .iter()
+            .enumerate()
+            .map(|(index, v)| {
+                serde_json::json!({
+                    "name": v.name,
+                    "index": index,
+                    "pubkey": v.pubkey_b58,
+                    "pubkey_hex": v.pubkey_hex,
+                    "address": v.address_b58,
+                    "key_file": format!("keys/{}.json", v.name),
+                })
+            })
+            .collect::<Vec<_>>(),
+        "roles": roles_manifest(&roles),
+        "gates": {
+            "compute_pool_enabled_from_height": serde_json::Value::Null,
+            "beacon_enabled_from_height": serde_json::Value::Null,
+        },
+    });
+    let manifest_json = serde_json::to_string_pretty(&manifest).context("serialize manifest")?;
+    write_new_public_file(&manifest_path, &manifest_json)
+        .with_context(|| format!("write manifest to {}", manifest_path.display()))?;
+
+    Ok(TopologyArtifacts {
+        output_dir: output_dir.to_path_buf(),
+        genesis_path,
+        validators,
         roles,
         manifest_path,
     })
@@ -393,5 +707,103 @@ mod tests {
             "FIRST",
             "existing artifact bytes must be unchanged"
         );
+    }
+
+    const IGNORES: &str = "/target/\n/keys/\n/devnet/\n";
+
+    fn location(
+        resolved: &Path,
+        root: &Path,
+        gitignore: Option<&str>,
+        policy: OutputPolicy,
+    ) -> Result<()> {
+        check_output_location(resolved, root, gitignore, policy, "test")
+    }
+
+    /// Outside the repository is acceptable under both policies.
+    #[test]
+    fn outside_the_repository_is_accepted_by_both_policies() {
+        let root = Path::new("/r/repo");
+        for policy in [
+            OutputPolicy::OutsideRepository,
+            OutputPolicy::OutsideRepositoryOrDevnet,
+        ] {
+            location(Path::new("/tmp/x"), root, Some(IGNORES), policy).expect("outside");
+            // A sibling whose name merely starts with the repo's is outside.
+            location(Path::new("/r/repo-devnet"), root, None, policy).expect("sibling");
+        }
+    }
+
+    /// Smoke's rule is unchanged: nothing inside the repository, `devnet`
+    /// included.
+    #[test]
+    fn smoke_policy_refuses_every_in_repository_path_including_devnet() {
+        let root = Path::new("/r/repo");
+        for p in [
+            "/r/repo",
+            "/r/repo/devnet",
+            "/r/repo/target/t",
+            "/r/repo/genesis",
+        ] {
+            let err = location(
+                Path::new(p),
+                root,
+                Some(IGNORES),
+                OutputPolicy::OutsideRepository,
+            )
+            .expect_err(p);
+            assert!(
+                format!("{err:#}").contains("OUTSIDE the repository"),
+                "{p}: {err:#}"
+            );
+        }
+    }
+
+    /// Topology may write into exactly `<repo>/devnet` while it is ignored —
+    /// and nowhere else inside the repository.
+    #[test]
+    fn topology_policy_allows_only_the_ignored_devnet_directory() {
+        let root = Path::new("/r/repo");
+        let policy = OutputPolicy::OutsideRepositoryOrDevnet;
+        location(Path::new("/r/repo/devnet"), root, Some(IGNORES), policy)
+            .expect("the ignored devnet runtime directory");
+        for p in [
+            "/r/repo",
+            "/r/repo/devnet/sub",
+            "/r/repo/devnet2",
+            "/r/repo/genesis",
+            "/r/repo/keys",
+            "/r/repo/target/t",
+            "/r/repo/deploy/devnet",
+        ] {
+            let err = location(Path::new(p), root, Some(IGNORES), policy).expect_err(p);
+            assert!(
+                format!("{err:#}").contains("OUTSIDE the repository"),
+                "{p}: {err:#}"
+            );
+        }
+    }
+
+    /// The exception does not outlive the ignore rule: without the exact
+    /// `/devnet/` line, or with a negation re-including part of it, or with no
+    /// readable `.gitignore`, `<repo>/devnet` is refused.
+    #[test]
+    fn topology_devnet_exception_requires_the_gitignore_rule() {
+        let root = Path::new("/r/repo");
+        let devnet = Path::new("/r/repo/devnet");
+        let policy = OutputPolicy::OutsideRepositoryOrDevnet;
+        for gi in [
+            Some("/target/\n/keys/\n"),
+            Some("devnet\n"),
+            Some("/devnet/*\n"),
+            Some("/devnet/\n!/devnet/genesis.json\n"),
+            None,
+        ] {
+            let err = location(devnet, root, gi, policy).expect_err("must refuse");
+            assert!(
+                format!("{err:#}").contains("does not ignore it"),
+                "{gi:?}: {err:#}"
+            );
+        }
     }
 }

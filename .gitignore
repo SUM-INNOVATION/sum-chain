@@ -13,6 +13,9 @@
 /keys/
 /genesis/*
 !/genesis/*.json
+# Generated devnet runtime directory (#118): throwaway keys + the runnable
+# genesis that deploy/snip-local-mirror.yaml mounts. Never commit it.
+/devnet/
 
 # OS files
 .DS_Store
