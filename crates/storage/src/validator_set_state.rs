@@ -22,6 +22,7 @@
 //! | S3 | Competing blocks never share a row: each executes on its own overlay and, on a replacement branch, over the reconstructed fork parent; adopting the branch makes its rows canonical in the one adoption batch. | `crate::branch` and `crate::candidate::build_adoption_batch`, from the same journals. | `s3_*` |
 //! | S4 | Every read fails closed: a row that is missing when required, present when absent, corrupt, of another version or for another key is an error, never "no set". | [`read`]. | `s4_*` |
 //! | S5 | A write states what it replaces: [`stage_insert`] refuses an occupied key, [`stage_replace`] a missing one, and both refuse an undecodable row instead of overwriting it. A refused write stages nothing. | Every check runs before the one staged write. | `s5_*` |
+//! | S6 | Rows stay in their own namespace. A row outside another subsystem's key range is invisible to that subsystem's reads and scans, and a layout that lands on another subsystem's row fails closed instead of overwriting it. | Disjointness is the layout's obligation (see [`ValidatorSetLayout`]); a collision is caught by S5's decode-before-write. | `s6_*` |
 //!
 //! # What is deliberately NOT decided here
 //!
@@ -53,6 +54,22 @@ use crate::StorageError;
 /// Injected so that this seam freezes no column family or key. The family
 /// must already exist (this seam adds none), and two different keys must map
 /// to two different locations.
+///
+/// A production layout must also keep rows out of every other subsystem's
+/// namespace:
+///
+/// * its keys must be disjoint from every key another subsystem writes in the
+///   family, and from every range another subsystem scans. In `STATE` that is
+///   the `acct` prefix, which the account readers and the account-root digest
+///   scan with RocksDB's prefix overrun and bound by the prefix;
+/// * it must not use a family that a committed digest scans in full (today
+///   `COMPUTE_POOL_STATE` and `BEACON_STATE`), or its rows would change the
+///   state root.
+///
+/// A layout that lands on another subsystem's row fails closed at write time
+/// (the row does not decode, so nothing is overwritten), but disjointness
+/// itself is the layout's obligation, checked where a production layout is
+/// chosen.
 pub trait ValidatorSetLayout {
     fn row_location(&self, key: u64) -> (&'static str, Vec<u8>);
 }

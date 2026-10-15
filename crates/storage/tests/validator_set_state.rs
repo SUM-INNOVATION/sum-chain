@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use sumchain_primitives::{Block, BlockHeader, Hash};
+use sumchain_primitives::{Address, Block, BlockHeader, Hash};
 use sumchain_storage::branch::BranchState;
 use sumchain_storage::candidate::{
     build_adoption_batch, BlockJournals, CandidateExecution, ExecutionSubject, JournalRecord,
@@ -18,7 +18,7 @@ use sumchain_storage::candidate::{
 use sumchain_storage::db::{cf, Database, ALL_CFS};
 use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::journal::{ApplicationJournal, Preimage};
-use sumchain_storage::schema::journal_key;
+use sumchain_storage::schema::{journal_key, AccountState, StateStore};
 use sumchain_storage::validator_set_record::{ValidatorSetRecord, ValidatorSetRecordError};
 use sumchain_storage::validator_set_state::{
     read, stage_insert, stage_replace, Presence, StateError, ValidatorSetLayout,
@@ -570,4 +570,93 @@ fn s5_a_replace_within_one_block_reads_the_blocks_own_insert() {
     // The journal records the value the block started from: absent.
     undo(&d, &b);
     assert_eq!(stored(&d, 1), None);
+}
+
+// ── S6: rows stay in their own namespace ───────────────────────────────────
+
+/// Every account as `(address, balance, nonce)`.
+fn accounts(d: &Database) -> Vec<(Address, u128, u64)> {
+    StateStore::new(d)
+        .iter_all_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|(a, s)| (a, s.balance, s.nonce))
+        .collect()
+}
+
+#[test]
+fn s6_rows_outside_the_account_namespace_are_invisible_to_account_reads() {
+    let (d, _g) = db();
+    let store = StateStore::new(&d);
+    for (b, balance) in [(0x01u8, 10u128), (0xFE, 20)] {
+        store
+            .put_account(&Address::new([b; 20]), &AccountState { balance, nonce: 1 })
+            .unwrap();
+    }
+    let before = accounts(&d);
+    assert_eq!(before.len(), 2);
+
+    // Rows at both ends of the key space, in the family accounts live in.
+    publish(
+        &d,
+        &block(Hash::hash(b"g"), 1, 1),
+        Box::new(|view| {
+            stage_insert(view, &TestLayout, &set(0, &[1]))?;
+            stage_insert(view, &TestLayout, &set(u64::MAX, &[2, 3]))
+        }),
+    )
+    .unwrap();
+    assert_eq!(membership(&d).len(), 2);
+
+    // The account reader scans the `acct` prefix with RocksDB's prefix
+    // overrun and bounds it by the prefix; membership rows are not accounts.
+    assert_eq!(accounts(&d), before);
+    for (address, balance, nonce) in &before {
+        let read = store.get_account(address).unwrap();
+        assert_eq!((read.balance, read.nonce), (*balance, *nonce));
+    }
+}
+
+/// A layout that maps a key onto another subsystem's row.
+struct CollidingLayout(Address);
+
+impl ValidatorSetLayout for CollidingLayout {
+    fn row_location(&self, _key: u64) -> (&'static str, Vec<u8>) {
+        (cf::STATE, StateStore::account_key(&self.0))
+    }
+}
+
+#[test]
+fn s6_a_layout_that_lands_on_another_subsystems_row_fails_closed() {
+    let (d, _g) = db();
+    let victim = Address::new([0x42; 20]);
+    let account = AccountState {
+        balance: 1_000,
+        nonce: 7,
+    };
+    StateStore::new(&d).put_account(&victim, &account).unwrap();
+    let layout = CollidingLayout(victim);
+    let before = whole_db(&d);
+
+    let attempts: Vec<Writes<'static>> = vec![
+        Box::new(move |view| stage_insert(view, &CollidingLayout(victim), &set(1, &[1]))),
+        Box::new(move |view| {
+            stage_replace(view, &CollidingLayout(victim), &set(1, &[1])).map(|_| ())
+        }),
+    ];
+    for writes in attempts {
+        let err = publish(&d, &block(Hash::hash(b"g"), 1, 1), writes).unwrap_err();
+        assert!(err.contains("is refused"), "{err}");
+    }
+    assert!(matches!(
+        read(&d, &layout, 1, Presence::Required),
+        Err(StateError::Record { .. })
+    ));
+    assert!(matches!(
+        read(&d, &layout, 1, Presence::Absent),
+        Err(StateError::Unexpected { key: 1 })
+    ));
+    assert_eq!(whole_db(&d), before, "the account row is never overwritten");
+    let read = StateStore::new(&d).get_account(&victim).unwrap();
+    assert_eq!((read.balance, read.nonce), (account.balance, account.nonce));
 }
