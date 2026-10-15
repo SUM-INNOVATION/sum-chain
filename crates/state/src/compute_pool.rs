@@ -1263,7 +1263,7 @@ pub struct ReverseIndexLimits {
 
 impl ReverseIndexLimits {
     /// Refuse a tracker that breaks a per-tracker bound. Changes nothing.
-    fn check_tracker(&self, record: &TrackerIndexRecord) -> PoolResult<()> {
+    pub(crate) fn check_tracker(&self, record: &TrackerIndexRecord) -> PoolResult<()> {
         let out = |what, value: u128, bound: u128| {
             Err(PoolError::RetentionTrackerOutOfBounds { what, value, bound })
         };
