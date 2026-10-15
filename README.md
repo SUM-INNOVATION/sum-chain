@@ -71,7 +71,7 @@ GIT_HASH=$(git rev-parse HEAD) docker compose -f deploy/snip-local-mirror.yaml u
 docker compose -f deploy/snip-local-mirror.yaml down -v && rm -rf devnet                      # wipe chain data, keys and genesis
 ```
 
-It is consensus only: the compute-pool and beacon gates stay unset, so it is not the #118 pool "ecosystem" devnet, whose genesis template still needs unratified values. `deploy/topology-e2e-harness.sh` runs this preset in CI and checks that every validator proposes, that all nodes advance, and that they agree on block hashes. The compose file header covers key permissions on Linux hosts whose uid is not 1000.
+It is consensus only: the compute-pool and beacon gates stay unset, so it is not the #118 pool "ecosystem" devnet. The tracked template `genesis/snip-mirror-genesis.template.json` describes exactly the genesis this preset provisions, with placeholders in place of the throwaway keys; its pool and beacon fields are absent because their values are not ratified and the loader refuses both gates at any value. `deploy/topology-e2e-harness.sh` runs this preset in CI and checks that every validator proposes, that all nodes advance, and that they agree on block hashes. The compose file header covers key permissions on Linux hosts whose uid is not 1000.
 
 ## Architecture
 

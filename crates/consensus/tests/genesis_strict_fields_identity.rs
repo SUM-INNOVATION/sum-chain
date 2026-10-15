@@ -9,7 +9,9 @@
 //!
 //! The two network templates hold placeholder validator keys and are refused
 //! by validation, before and after, with the same error; what serde reads from
-//! them (including the template's top-level `_comment`) is pinned too.
+//! them (including the template's top-level `_comment`) is pinned too. The
+//! devnet topology template (#118) was added after 1f017f55; it is pinned the
+//! same way, from when it was added.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -100,6 +102,13 @@ const TEMPLATES: &[Template] = &[
         json: "0xa4da782ec974ac6b0056a71ccf7c7234dd998936bc2e0755eadea3107414c8e6",
         error: "Invalid validator public key: validator[0]: VALIDATOR1_PUBKEY_PLACEHOLDER",
     },
+    // Added by #118 (not on 1f017f55): the synthetic topology template,
+    // refused until `sumchain_scripts::substitute_template` fills it.
+    Template {
+        file: "genesis/snip-mirror-genesis.template.json",
+        json: "0x5745d511faa376cdfa5ce51eac14396895d75de034bb3eaceda6448833fd0827",
+        error: "Invalid validator public key: validator[0]: DEVNET_VALIDATOR1_PUBKEY",
+    },
     Template {
         file: "genesis/testnet_genesis.json",
         json: "0x0d10456f3b021ed864c94e048d0aaec9e5336718a4dfb4aba1564997b563f7b8",
@@ -162,14 +171,17 @@ fn template(file: &str) -> [String; 2] {
     ]
 }
 
-/// Every tracked `*genesis*.json` under the repository, skipping build output.
+/// Every tracked `*genesis*.json` under the repository, skipping build output
+/// and the ignored devnet runtime directory (`/devnet/`, #118), where a
+/// provisioned, untracked `genesis.json` may legitimately sit.
 fn tracked_genesis_files() -> Vec<String> {
     fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
         for entry in std::fs::read_dir(dir).unwrap() {
             let p = entry.unwrap().path();
             let name = p.file_name().unwrap().to_string_lossy().to_string();
             if p.is_dir() {
-                if !matches!(name.as_str(), "target" | ".git" | "node_modules") {
+                let ignored_devnet = p == root.join("devnet");
+                if !ignored_devnet && !matches!(name.as_str(), "target" | ".git" | "node_modules") {
                     walk(&p, root, out);
                 }
             } else if name.contains("genesis") && name.ends_with(".json") {

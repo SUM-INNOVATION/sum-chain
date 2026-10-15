@@ -26,6 +26,12 @@
 //!   directory may resolve outside the repository, or be exactly the ignored
 //!   runtime directory `<repo>/devnet` ([`DEVNET_RUNTIME_DIR`]) that the compose
 //!   file reads.
+//!
+//!   Its genesis is described, for review, by the tracked placeholder template
+//!   [`TOPOLOGY_TEMPLATE`]: [`substitute_template`] fills it, the loader refuses
+//!   it until then, and `tests/topology_template.rs` checks that it describes
+//!   exactly what this mode provisions. [`check_topology_shape`] is the one
+//!   shape rule both satisfy.
 //! * **ecosystem** ([`ECOSYSTEM_DEFERRED_MSG`]) — the five-validator *pool*
 //!   devnet. It is **deferred** and hard-fails: its genesis template needs
 //!   values that are not ratified and gates the loader refuses. A passing smoke
@@ -35,6 +41,7 @@
 //! (`setup_local_testnet.rs`) and is unchanged; this library is only the
 //! #118/#119 surface.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -98,6 +105,18 @@ pub const TOPOLOGY_MIN_VALIDATORS: usize = 5;
 /// typo cannot generate thousands of key files.
 pub const TOPOLOGY_MAX_VALIDATORS: usize = 16;
 
+/// The tracked, repository-relative placeholder template that describes the
+/// topology genesis for review (issue #118). It is a TEMPLATE, never a runnable
+/// genesis: its `DEVNET_*` strings are placeholders the loader refuses until
+/// [`substitute_template`] replaces them. Consensus only, like everything
+/// [`provision_topology`] writes; it is not the pool or beacon ecosystem
+/// genesis.
+pub const TOPOLOGY_TEMPLATE: &str = "genesis/snip-mirror-genesis.template.json";
+
+/// Every placeholder in a template starts with this prefix and is otherwise
+/// upper-case ASCII letters, digits and underscores.
+pub const TEMPLATE_PLACEHOLDER_PREFIX: &str = "DEVNET_";
+
 /// Explicit, actionable message emitted when `ecosystem` mode is selected while
 /// its prerequisites are absent. Naming the blockers keeps the deferral honest
 /// (the five-validator pool is tracked separately and is never satisfied by a
@@ -105,9 +124,10 @@ pub const TOPOLOGY_MAX_VALIDATORS: usize = 16;
 pub const ECOSYSTEM_DEFERRED_MSG: &str = "\
 ecosystem mode is DEFERRED and cannot generate anything yet.
 
-The five-validator pool devnet needs #118's genesis template
-(genesis/snip-mirror-genesis.template.json), which does not exist because
-its contents are not ratified:
+The five-validator pool devnet needs #118's pool and beacon fields in the
+genesis template (genesis/snip-mirror-genesis.template.json). That template
+is consensus only today: it holds the synthetic five-validator topology,
+and its pool and beacon fields are absent because they are not ratified:
   - bond values (B_offer, B_commit, D_beacon, B_check) and reimbursement
     amounts
   - re-provision and reassignment bounds, and the retention values
@@ -467,7 +487,13 @@ fn build_dormant_genesis(
     // its production-safe default — crucially compute_pool + beacon = None, with
     // their parameter surfaces absent. Checked, not assumed: a devnet genesis is
     // consensus only.
-    let params = ChainParams::with_v2_enabled();
+    //
+    // No staking section, like every shipped genesis and the legacy local mode:
+    // protocol v1 membership is the static validator list, and the executor's
+    // staking defaults apply (`genesis/tests/protocol_v1_staking.rs` requires
+    // every shipped genesis, including the topology template, to omit it).
+    let mut params = ChainParams::with_v2_enabled();
+    params.staking = None;
     if params.compute_pool_enabled_from_height.is_some()
         || params.beacon_enabled_from_height.is_some()
         || params.compute_pool_params.is_some()
@@ -641,6 +667,7 @@ pub fn provision_topology(output_dir: &Path, validator_count: usize) -> Result<T
     let validators = generate_validators(&keys_dir, &names)?;
     let roles = generate_roles(&keys_dir)?;
     let genesis = build_dormant_genesis(&validators, &roles, "topology")?;
+    check_topology_shape(&genesis).context("generated topology genesis")?;
     let genesis_path = write_genesis(output_dir, &genesis)?;
 
     // ── public manifest (no private material) ───────────────────────────────
@@ -684,6 +711,157 @@ pub fn provision_topology(output_dir: &Path, validator_count: usize) -> Result<T
         roles,
         manifest_path,
     })
+}
+
+/// The topology shape issue #118 asks of a devnet genesis, and nothing more:
+/// chain id [`DEVNET_CHAIN_ID`], at least [`TOPOLOGY_MIN_VALIDATORS`] distinct
+/// validators, every validator funded, and consensus only.
+///
+/// "Consensus only" is checked, not assumed: the compute-pool and beacon gates
+/// must be `None` and their parameter surfaces absent. Issue #118's checklist
+/// asks for both gates at `Some(0)`; the loader refuses either gate at any
+/// value, including 0, and their parameters are not ratified, so a topology
+/// genesis that opened them would be wrong twice over. Activating either one is
+/// a separate, owner-authorized change, not something a devnet genesis may
+/// assume.
+pub fn check_topology_shape(genesis: &Genesis) -> Result<()> {
+    if genesis.chain_id != DEVNET_CHAIN_ID {
+        bail!(
+            "topology genesis has chain id {}, not the devnet's {DEVNET_CHAIN_ID}",
+            genesis.chain_id
+        );
+    }
+    let n = genesis.validators.len();
+    if n < TOPOLOGY_MIN_VALIDATORS {
+        bail!(
+            "topology genesis lists {n} validators; issue #118 requires at least \
+             {TOPOLOGY_MIN_VALIDATORS} (#126's product minimum)"
+        );
+    }
+    let distinct: BTreeSet<&String> = genesis.validators.iter().collect();
+    if distinct.len() != n {
+        bail!("topology genesis lists a validator more than once");
+    }
+    for (i, v) in genesis.validators.iter().enumerate() {
+        let key = sumchain_crypto::PublicKey::from_base58(v)
+            .with_context(|| format!("topology validator {i} is not a public key"))?;
+        let address = key.address().to_base58();
+        if genesis.alloc.get(&address).copied().unwrap_or(0) == 0 {
+            bail!("topology validator {i} is not funded at genesis");
+        }
+    }
+    let p = &genesis.params;
+    if p.compute_pool_enabled_from_height.is_some()
+        || p.beacon_enabled_from_height.is_some()
+        || p.compute_pool_params.is_some()
+        || p.beacon_params.is_some()
+        || p.beacon_schedule.is_some()
+    {
+        bail!(
+            "topology genesis must leave the compute-pool and beacon gates and parameters \
+             absent: it is consensus only, and neither feature is activated by a devnet genesis"
+        );
+    }
+    Ok(())
+}
+
+/// Fill a placeholder template: every JSON string (value or object key) equal
+/// to a key of `values` becomes that value, and the result is returned as JSON
+/// text for the genesis loader.
+///
+/// Fail closed in both directions: a placeholder left in the template with no
+/// value, and a value whose placeholder does not appear, are both refused, so a
+/// template and its caller cannot drift apart silently. A placeholder is any
+/// string starting with [`TEMPLATE_PLACEHOLDER_PREFIX`] made only of upper-case
+/// ASCII letters, digits and underscores.
+pub fn substitute_template(template: &str, values: &BTreeMap<String, String>) -> Result<String> {
+    fn is_placeholder(s: &str) -> bool {
+        s.len() > TEMPLATE_PLACEHOLDER_PREFIX.len()
+            && s.starts_with(TEMPLATE_PLACEHOLDER_PREFIX)
+            && s.bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+    }
+    fn fill(
+        s: &str,
+        values: &BTreeMap<String, String>,
+        used: &mut BTreeSet<String>,
+        missing: &mut BTreeSet<String>,
+    ) -> Option<String> {
+        if let Some(real) = values.get(s) {
+            used.insert(s.to_string());
+            Some(real.clone())
+        } else {
+            if is_placeholder(s) {
+                missing.insert(s.to_string());
+            }
+            None
+        }
+    }
+    fn walk(
+        v: &mut serde_json::Value,
+        values: &BTreeMap<String, String>,
+        used: &mut BTreeSet<String>,
+        missing: &mut BTreeSet<String>,
+    ) {
+        match v {
+            serde_json::Value::String(s) => {
+                if let Some(real) = fill(s, values, used, missing) {
+                    *s = real;
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, values, used, missing);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                let entries: Vec<(String, serde_json::Value)> =
+                    std::mem::take(map).into_iter().collect();
+                for (k, mut child) in entries {
+                    let k = fill(&k, values, used, missing).unwrap_or(k);
+                    walk(&mut child, values, used, missing);
+                    map.insert(k, child);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut doc: serde_json::Value =
+        serde_json::from_str(template).context("template is not JSON")?;
+    let mut used = BTreeSet::new();
+    let mut missing = BTreeSet::new();
+    walk(&mut doc, values, &mut used, &mut missing);
+    if !missing.is_empty() {
+        bail!("template placeholders with no value: {missing:?}");
+    }
+    let unused: Vec<&String> = values.keys().filter(|k| !used.contains(*k)).collect();
+    if !unused.is_empty() {
+        bail!("values for placeholders the template does not contain: {unused:?}");
+    }
+    serde_json::to_string_pretty(&doc).context("serialize substituted template")
+}
+
+/// The values a provisioned topology gives [`TOPOLOGY_TEMPLATE`]'s
+/// placeholders: `DEVNET_VALIDATOR<i>_PUBKEY` and `DEVNET_VALIDATOR<i>_ADDRESS`
+/// for each validator in order (from 1), and `DEVNET_<ROLE>_ADDRESS` for each
+/// funded role.
+pub fn topology_template_values(artifacts: &TopologyArtifacts) -> BTreeMap<String, String> {
+    let mut values = BTreeMap::new();
+    for (i, v) in artifacts.validators.iter().enumerate() {
+        let n = i + 1;
+        values.insert(format!("DEVNET_VALIDATOR{n}_PUBKEY"), v.pubkey_b58.clone());
+        values.insert(
+            format!("DEVNET_VALIDATOR{n}_ADDRESS"),
+            v.address_b58.clone(),
+        );
+    }
+    for r in &artifacts.roles {
+        values.insert(
+            format!("DEVNET_{}_ADDRESS", r.name.to_ascii_uppercase()),
+            r.address_b58.clone(),
+        );
+    }
+    values
 }
 
 #[cfg(test)]

@@ -2,28 +2,28 @@
 //!
 //! Modes (`--mode`):
 //!   * `local`     — DEFAULT, legacy behaviour, UNCHANGED. Generates three
-//!                   validators + a test account and writes the tracked-name
-//!                   `genesis/local_genesis.json` + `keys/` relative to the
-//!                   working directory. This is what the `deploy/health-e2e-
-//!                   harness.sh` (#120) harness invokes with no arguments, so it
-//!                   is preserved verbatim for backward compatibility.
+//!     validators + a test account and writes the tracked-name
+//!     `genesis/local_genesis.json` + `keys/` relative to the
+//!     working directory. This is what the `deploy/health-e2e-
+//!     harness.sh` (#120) harness invokes with no arguments, so it
+//!     is preserved verbatim for backward compatibility.
 //!   * `smoke`     — issue #119. Generates EXACTLY ONE validator plus all funded
-//!                   roles (three archives, one verifier, one client, one funder)
-//!                   and a runnable genesis, ALL under an explicit `--output-dir`
-//!                   (required, outside the repository). Never writes a tracked
-//!                   genesis file. Chain id 1337; compute-pool + beacon gates
-//!                   dormant (`None`).
+//!     roles (three archives, one verifier, one client, one funder)
+//!     and a runnable genesis, ALL under an explicit `--output-dir`
+//!     (required, outside the repository). Never writes a tracked
+//!     genesis file. Chain id 1337; compute-pool + beacon gates
+//!     dormant (`None`).
 //!   * `topology`  — issue #118. A SYNTHETIC test topology: `--validator-count`
-//!                   validators (default 5, at least 5) plus the same funded
-//!                   roles and a consensus-only runnable genesis (chain id 1337,
-//!                   compute-pool + beacon gates `None`), ALL under an explicit
-//!                   `--output-dir` (required): outside the repository, or
-//!                   exactly the ignored `./devnet` that
-//!                   `deploy/snip-local-mirror.yaml` reads. The keys are
-//!                   throwaway devnet keys; this is never a production
-//!                   validator-set change.
+//!     validators (default 5, at least 5) plus the same funded
+//!     roles and a consensus-only runnable genesis (chain id 1337,
+//!     compute-pool + beacon gates `None`), ALL under an explicit
+//!     `--output-dir` (required): outside the repository, or
+//!     exactly the ignored `./devnet` that
+//!     `deploy/snip-local-mirror.yaml` reads. The keys are
+//!     throwaway devnet keys; this is never a production
+//!     validator-set change.
 //!   * `ecosystem` — issue #119, DEFERRED. Hard-fails with an explicit blocker
-//!                   message and generates nothing.
+//!     message and generates nothing.
 
 use std::fs;
 use std::path::PathBuf;
