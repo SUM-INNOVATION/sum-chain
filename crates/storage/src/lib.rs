@@ -27,6 +27,8 @@ pub mod pruner;
 pub mod schema;
 pub mod subsystem_journal;
 pub mod tax_store;
+pub mod validator_set_record;
+pub mod validator_set_state;
 
 pub use db::{cf, BackupInfo, Database, DatabaseConfig};
 pub use page::{
