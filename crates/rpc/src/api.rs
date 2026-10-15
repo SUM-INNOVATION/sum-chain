@@ -1071,6 +1071,41 @@ pub trait SumChainApi {
     ) -> Result<Option<crate::types::DkgTranscriptInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     // ========================================================================
+    // C1 compute pool (#130) — read-only
+    // ========================================================================
+    //
+    // Each method answers from the committed C1 rows (`COMPUTE_POOL_STATE`)
+    // alone: no row is written, and nothing absent is reconstructed. `null`
+    // means committed state holds no such row — on every network today,
+    // because genesis validation refuses `compute_pool_enabled_from_height`, so
+    // no block can write pool state. A row that does not decode, or that
+    // disagrees with the key it is stored under or with the index that names
+    // it, is an internal error, never `null`. These are reads of the node's
+    // state at its current head, not finality claims: a reorg can replace them.
+
+    /// One work unit of a compute-pool job, with the assignment and the
+    /// accepted leaf recorded for its current generation, if any.
+    ///
+    /// `job_id` and `unit_id` are 32-byte ids, `0x`-prefixed or bare hex.
+    /// `Ok(None)` when no unit `(job_id, unit_id)` is held.
+    #[method(name = "pool_getUnit")]
+    async fn pool_get_unit(
+        &self,
+        job_id: String,
+        unit_id: String,
+    ) -> Result<Option<crate::types::PoolUnitInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// One bonded offer, with the capacity reservation held against it, if any.
+    ///
+    /// `offer_bond_id` is a 32-byte id, `0x`-prefixed or bare hex. `Ok(None)`
+    /// when no offer with that id is held.
+    #[method(name = "pool_getOffer")]
+    async fn pool_get_offer(
+        &self,
+        offer_bond_id: String,
+    ) -> Result<Option<crate::types::PoolOfferInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ========================================================================
     // SRC-201 Messaging Endpoints
     // ========================================================================
 

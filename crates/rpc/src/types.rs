@@ -1739,6 +1739,99 @@ pub struct DkgTranscriptInfo {
 }
 
 // ============================================================================
+// C1 compute pool (#130): read-only views of committed pool rows
+// ============================================================================
+
+/// One input a work unit requires from a predecessor's output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolRequiredInputInfo {
+    /// The predecessor unit's 32-byte id.
+    pub predecessor: String,
+    /// The predecessor output slot this unit reads, 32 bytes.
+    pub required_output_slot_id: String,
+    /// The predecessor's output manifest root, 32 bytes.
+    pub pred_output_manifest_root: String,
+    /// The required slot's state object root, 32 bytes.
+    pub required_slot_state_object_root: String,
+}
+
+/// The assignment recorded for one work item `(job, unit, generation)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolAssignmentInfo {
+    /// The winning offer's 32-byte bond id.
+    pub winner_offer_bond_id: String,
+    /// The winner's payment address (base58).
+    pub winner_payment_addr: String,
+}
+
+/// The write-once accepted leaf recorded for one work item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolAcceptedLeafInfo {
+    /// The accepting offer's 32-byte bond id.
+    pub offer_bond_id: String,
+    /// The commit bond's 32-byte id.
+    pub commit_bond_id: String,
+    /// Bytes reserved by the acceptance, as a decimal string (u128).
+    pub accepted_bytes: String,
+}
+
+/// One work unit of a compute-pool job, as committed state holds it.
+///
+/// `generation` is the unit's current generation, and `(job_id, unit_id,
+/// generation)` is the work item `assignment` and `accepted_leaf` are read
+/// for. Either is `null` when no such row is held.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolUnitInfo {
+    /// The job's 32-byte id.
+    pub job_id: String,
+    /// The unit's 32-byte id.
+    pub unit_id: String,
+    /// The unit's current generation.
+    pub generation: u64,
+    /// Lifecycle state: `blocked`, `eligible`, `assigned`, `accepted`,
+    /// `reassignable` or `assignment_halted`.
+    pub state: String,
+    /// Predecessor unit ids (32 bytes each), in stored order.
+    pub predecessors: Vec<String>,
+    /// Inputs required from predecessors, in stored order.
+    pub required_inputs: Vec<PoolRequiredInputInfo>,
+    /// The assignment for the current generation's work item, if held.
+    pub assignment: Option<PoolAssignmentInfo>,
+    /// The accepted leaf for the current generation's work item, if held.
+    pub accepted_leaf: Option<PoolAcceptedLeafInfo>,
+}
+
+/// The capacity reservation held against one offer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolReservationInfo {
+    /// Capacity the reservation was opened with, decimal string (u128).
+    pub offered: String,
+    /// Capacity reserved so far, decimal string (u128); never above `offered`.
+    pub reserved: String,
+}
+
+/// One bonded offer, as committed state holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolOfferInfo {
+    /// The offer's 32-byte bond id.
+    pub offer_bond_id: String,
+    /// The offering identity (base58).
+    pub identity: String,
+    /// The payment address (base58).
+    pub payment_addr: String,
+    /// Offered capacity in bytes, decimal string (u128).
+    pub offered_bytes: String,
+    /// The identity's offer sequence number.
+    pub offer_seq: u64,
+    /// Bond locked by the offer, decimal string (u128).
+    pub bond_locked: String,
+    /// Whether this is the identity's one active offer.
+    pub active: bool,
+    /// The reservation held against this offer, if any.
+    pub reservation: Option<PoolReservationInfo>,
+}
+
+// ============================================================================
 // SRC-201 Messaging RPC Types
 // ============================================================================
 

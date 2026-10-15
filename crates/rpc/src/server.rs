@@ -8,6 +8,8 @@ use jsonrpsee::server::{Server, ServerHandle};
 use sumchain_consensus::{ConsensusQuery, FinalityMechanism};
 use sumchain_primitives::{Address, Block, Hash, SignedTransaction, MessagingTxData, MessagingOperation, SponsoredMessage, TxPayload};
 use sumchain_state::beacon_store::{BeaconStore, StoredDkgTranscript, StoredSignedRef};
+use sumchain_state::compute_pool::{JobId, OfferBondId, UnitId, UnitState, WorkItemKey};
+use sumchain_state::compute_pool_store::{ComputePoolStore, StoredOffer, StoredWorkUnit};
 use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
 use sumchain_state::education_executor::{
     EducationExecutor, StoredAssessment, StoredCatalogEntry, StoredEnrollmentLink,
@@ -88,6 +90,163 @@ fn is_institutional_provider(t: sumchain_primitives::healthcare::ProviderType) -
 /// `0x`-prefixed hex of stored beacon bytes, unchanged.
 fn beacon_hex(bytes: &[u8]) -> String {
     format!("0x{}", hex::encode(bytes))
+}
+
+/// A C1 row that cannot be reported as committed state holds it: an internal
+/// error, never `null`.
+fn pool_corrupt(what: String) -> RpcError {
+    RpcError::Internal(format!("compute-pool state is inconsistent: {what}"))
+}
+
+fn pool_unit_state_name(state: UnitState) -> &'static str {
+    match state {
+        UnitState::Blocked => "blocked",
+        UnitState::Eligible => "eligible",
+        UnitState::Assigned => "assigned",
+        UnitState::Accepted => "accepted",
+        UnitState::Reassignable => "reassignable",
+        UnitState::AssignmentHalted => "assignment_halted",
+    }
+}
+
+/// `pool_getUnit`'s answer for a held unit: the unit row, plus the
+/// assignment and accepted leaf of its current generation's work item. Every
+/// row is checked against the key it was read under.
+fn pool_unit_info(
+    store: &ComputePoolStore<'_>,
+    job: &JobId,
+    unit: &UnitId,
+    u: &StoredWorkUnit,
+) -> Result<PoolUnitInfo> {
+    if &u.job_id != job.as_bytes() || &u.unit_id != unit.as_bytes() {
+        return Err(pool_corrupt(format!(
+            "the unit row stored under ({}, {}) names ({}, {})",
+            beacon_hex(job.as_bytes()),
+            beacon_hex(unit.as_bytes()),
+            beacon_hex(&u.job_id),
+            beacon_hex(&u.unit_id)
+        )));
+    }
+    let state = u
+        .state()
+        .map_err(|e| pool_corrupt(format!("unit state: {e}")))?;
+    let item = WorkItemKey::new(*job, *unit, u.generation);
+    let same_item = |j: &[u8; 32], un: &[u8; 32], g: u64| {
+        j == job.as_bytes() && un == unit.as_bytes() && g == u.generation
+    };
+
+    let assignment = match store
+        .get_assignment(&item)
+        .map_err(|e| pool_corrupt(format!("assignment row: {e}")))?
+    {
+        Some(a) if same_item(&a.job_id, &a.unit_id, a.generation) => Some(PoolAssignmentInfo {
+            winner_offer_bond_id: beacon_hex(&a.winner_offer_bond_id),
+            winner_payment_addr: Address::new(a.winner_payment_addr).to_base58(),
+        }),
+        Some(_) => {
+            return Err(pool_corrupt(
+                "an assignment row names a different work item than its key".to_string(),
+            ))
+        }
+        None => None,
+    };
+    let accepted_leaf = match store
+        .get_accepted_leaf(&item)
+        .map_err(|e| pool_corrupt(format!("accepted-leaf row: {e}")))?
+    {
+        Some(l) if same_item(&l.job_id, &l.unit_id, l.generation) => Some(PoolAcceptedLeafInfo {
+            offer_bond_id: beacon_hex(&l.offer_bond_id),
+            commit_bond_id: beacon_hex(&l.commit_bond_id),
+            accepted_bytes: l.accepted_bytes.to_string(),
+        }),
+        Some(_) => {
+            return Err(pool_corrupt(
+                "an accepted-leaf row names a different work item than its key".to_string(),
+            ))
+        }
+        None => None,
+    };
+
+    Ok(PoolUnitInfo {
+        job_id: beacon_hex(&u.job_id),
+        unit_id: beacon_hex(&u.unit_id),
+        generation: u.generation,
+        state: pool_unit_state_name(state).to_string(),
+        predecessors: u.predecessors.iter().map(|p| beacon_hex(p)).collect(),
+        required_inputs: u
+            .required_inputs
+            .iter()
+            .map(|ri| PoolRequiredInputInfo {
+                predecessor: beacon_hex(&ri.predecessor),
+                required_output_slot_id: beacon_hex(&ri.required_output_slot_id),
+                pred_output_manifest_root: beacon_hex(&ri.pred_output_manifest_root),
+                required_slot_state_object_root: beacon_hex(&ri.required_slot_state_object_root),
+            })
+            .collect(),
+        assignment,
+        accepted_leaf,
+    })
+}
+
+/// `pool_getOffer`'s answer for a held offer: the offer row, checked against
+/// its key and against the one-active-offer index, plus its reservation.
+fn pool_offer_info(
+    store: &ComputePoolStore<'_>,
+    id: &OfferBondId,
+    o: &StoredOffer,
+) -> Result<PoolOfferInfo> {
+    if &o.offer_bond_id != id.as_bytes() {
+        return Err(pool_corrupt(format!(
+            "the offer row stored under {} names {}",
+            beacon_hex(id.as_bytes()),
+            beacon_hex(&o.offer_bond_id)
+        )));
+    }
+    let identity = Address::new(o.identity);
+    let indexed = store
+        .active_offer_of(&identity)
+        .map_err(|e| pool_corrupt(format!("active-offer index: {e}")))?;
+    match (o.active, indexed) {
+        (true, Some(x)) if x == *id => {}
+        (false, Some(x)) if x == *id => {
+            return Err(pool_corrupt(format!(
+                "the active-offer index names inactive offer {}",
+                beacon_hex(id.as_bytes())
+            )))
+        }
+        (false, _) => {}
+        (true, _) => {
+            return Err(pool_corrupt(format!(
+                "active offer {} is not its identity's indexed active offer",
+                beacon_hex(id.as_bytes())
+            )))
+        }
+    }
+    let reservation = match store
+        .get_reservation(id)
+        .map_err(|e| pool_corrupt(format!("reservation row: {e}")))?
+    {
+        Some(r) if &r.offer_bond_id == id.as_bytes() => Some(PoolReservationInfo {
+            offered: r.offered.to_string(),
+            reserved: r.reserved.to_string(),
+        }),
+        Some(_) => {
+            return Err(pool_corrupt(
+                "a reservation row names a different offer than its key".to_string(),
+            ))
+        }
+        None => None,
+    };
+    Ok(PoolOfferInfo {
+        offer_bond_id: beacon_hex(&o.offer_bond_id),
+        identity: identity.to_base58(),
+        payment_addr: Address::new(o.payment_addr).to_base58(),
+        offered_bytes: o.offered_bytes.to_string(),
+        offer_seq: o.offer_seq,
+        bond_locked: o.bond_locked.to_string(),
+        active: o.active,
+        reservation,
+    })
 }
 
 fn beacon_record_info(r: &StoredSignedRef) -> BeaconSignedRecordInfo {
@@ -3759,6 +3918,42 @@ impl SumChainApiServer for RpcServer {
             return Ok(None);
         }
         Ok(Some(dkg_transcript_info(epoch, &held)))
+    }
+
+    // ========================================================================
+    // C1 compute pool (#130) — read-only views of committed pool rows
+    // ========================================================================
+
+    async fn pool_get_unit(
+        &self,
+        job_id: String,
+        unit_id: String,
+    ) -> std::result::Result<Option<PoolUnitInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let job = JobId::from_bytes(self.parse_hex32(&job_id)?);
+        let unit = UnitId::from_bytes(self.parse_hex32(&unit_id)?);
+        let store = ComputePoolStore::new(&self.db);
+        let held = store
+            .get_unit(&job, &unit)
+            .map_err(|e| pool_corrupt(format!("unit row: {e}")))?;
+        match held {
+            Some(u) => Ok(Some(pool_unit_info(&store, &job, &unit, &u)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn pool_get_offer(
+        &self,
+        offer_bond_id: String,
+    ) -> std::result::Result<Option<PoolOfferInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = OfferBondId::from_bytes(self.parse_hex32(&offer_bond_id)?);
+        let store = ComputePoolStore::new(&self.db);
+        let held = store
+            .get_offer(&id)
+            .map_err(|e| pool_corrupt(format!("offer row: {e}")))?;
+        match held {
+            Some(o) => Ok(Some(pool_offer_info(&store, &id, &o)?)),
+            None => Ok(None),
+        }
     }
 
     // ========================================================================

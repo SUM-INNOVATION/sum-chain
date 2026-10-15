@@ -1035,6 +1035,19 @@ Complaint bodies and partial signatures are not persisted and are not returned.
 
 On the head's branch the rows are fixed once the head is past the epoch's complaint window — that is, in the epoch's signing window (`complaint_deadline_offset + 1` blocks after the epoch start, or later) or in a later epoch. Key registrations, deals and complaints are each accepted only in their own window of the `beacon_schedule`, and only for the epoch the block's height falls in, so no later block on the same branch can add a deal or disqualify a dealer. Until then the answer is `null`, including at the last block of the complaint window, which still accepts complaints. This is not a finality claim: as with the other reads, a reorg back into the DKG windows withdraws the answer, and the replacing branch determines its own key. A DKG row that does not decode is `-32603`.
 
+### C1 compute pool (`pool_*`) — read-only, dormant (issue #130)
+
+Reads of the compute-pool rows committed state holds (`COMPUTE_POOL_STATE`). They write nothing and never fill in an absent value from other state. Genesis validation refuses `compute_pool_enabled_from_height` on every network, so no block can write pool state, and on a real chain each of these returns `null`.
+
+- Ids are 32-byte values as `0x`-prefixed or bare hex; anything else is `-32602`. Addresses are base58. `u128` amounts are decimal strings.
+- An answer is the node's committed state at its current head, not a finality claim: a reorg can replace it.
+- A stored row that does not decode, that names a different id than the key it is stored under, or an offer that disagrees with the one-active-offer index, is `-32603`, never `null`.
+
+| Method | Returns |
+|---|---|
+| `pool_getUnit(job_id, unit_id)` | `{job_id, unit_id, generation, state, predecessors, required_inputs, assignment, accepted_leaf}`. `state` is `blocked`, `eligible`, `assigned`, `accepted`, `reassignable` or `assignment_halted`. `required_inputs[]` is `{predecessor, required_output_slot_id, pred_output_manifest_root, required_slot_state_object_root}`. `assignment` (`{winner_offer_bond_id, winner_payment_addr}`) and `accepted_leaf` (`{offer_bond_id, commit_bond_id, accepted_bytes}`) are the rows for the work item `(job_id, unit_id, generation)` at the unit's current generation, each `null` if not held. `null` if no such unit is held. |
+| `pool_getOffer(offer_bond_id)` | `{offer_bond_id, identity, payment_addr, offered_bytes, offer_seq, bond_locked, active, reservation}`. `reservation` is `{offered, reserved}`, or `null` if none is held against the offer. `null` if no such offer is held. |
+
 ### No-key unsigned-tx family builders (issue #89)
 
 One builder per family, each taking a tagged operation request `{from, fee?, nonce?, chain_id?, <envelope ids>, op}`. **No-key** — no private keys, no signing, no submit, no execution, no authorization: the builder only assembles an unsigned `TransactionV2`. All return the shared shape `{unsigned_tx, signing_hash, from, nonce, fee, chain_id}`. `nonce`/`chain_id` are fetched from state when omitted. The client signs `signing_hash` locally and broadcasts via `sum_sendRawTransaction`; the executor stays authoritative for all authority/gate/lifecycle checks.
