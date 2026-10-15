@@ -3,9 +3,9 @@
 //!
 //! Below the gate, or while it is unset, the operation executes exactly as it
 //! always has. At and above it, the transaction fails as any other failed
-//! node-registry operation does (fee charged, nonce advanced, `Failed(18)`), and
-//! no node record or active-archive snapshot changes. Other registry
-//! operations are unaffected.
+//! node-registry operation does (`Failed(18)`; the non-zero fee these tests pay
+//! is charged and advances the nonce), and no node record or active-archive
+//! snapshot changes. Other registry operations are unaffected.
 
 mod common;
 use common::{fund, publish_block, setup_with_params, CHAIN_ID};

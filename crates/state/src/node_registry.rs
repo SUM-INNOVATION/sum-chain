@@ -266,9 +266,10 @@ impl NodeRegistryExecutor {
     }
 
     /// An `UpdateStatus` transaction at or above the gate. It is charged as any
-    /// other failed node-registry operation is (fee to the proposer, nonce
-    /// advanced) and changes nothing else: no node record and no active-archive
-    /// snapshot.
+    /// other failed node-registry operation is, through `deduct_fee`:
+    /// a non-zero fee goes to the proposer and advances the nonce, and a zero
+    /// fee changes neither. It changes nothing else: no node record and no
+    /// active-archive snapshot.
     pub fn execute_unsupported_update_status(
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,

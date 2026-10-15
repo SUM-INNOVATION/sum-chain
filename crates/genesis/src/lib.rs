@@ -2916,10 +2916,13 @@ pub struct ChainParams {
     /// block execution).
     ///
     /// At and above this height an `UpdateStatus` transaction fails as any
-    /// other failed node-registry operation does: the fee is charged, the
-    /// nonce advances, the receipt is `Failed(18)`, and no node record or
-    /// active-archive snapshot changes. Every other node-registry operation,
-    /// and expired-challenge slashing, are unchanged at every height.
+    /// other failed node-registry operation does: the receipt is `Failed(18)`,
+    /// and no node record or active-archive snapshot changes. A non-zero fee
+    /// is charged and advances the nonce. A zero fee, possible only where
+    /// `min_fee` is 0, charges nothing and leaves the nonce where it was, as
+    /// for every other failed node-registry operation. Every other
+    /// node-registry operation, and expired-challenge slashing, are unchanged
+    /// at every height.
     ///
     /// Production-safe default `None`, which is what an absent field resolves
     /// to and what every genesis written before this gate existed carries.
