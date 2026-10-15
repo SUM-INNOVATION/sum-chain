@@ -146,10 +146,12 @@ async fn the_rpc_reports_the_recorded_baseline_and_its_history() {
 /// it holds until its operator moves it.
 #[tokio::test]
 async fn the_rpc_reports_a_schema_1_baseline_as_recorded() {
+    // Knows schema 3 only because this binary's genesis carries the draft
+    // schema-3 gate; unset, it adds nothing to the schema-1 record written.
     static PREVIOUS: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
         reads: &[&ccfg::SCHEMA_1],
         writes: &ccfg::SCHEMA_1,
-        knows: &ccfg::SCHEMA_2,
+        knows: &ccfg::SCHEMA_3,
     };
     let g = genesis();
     let s = serve(&g);

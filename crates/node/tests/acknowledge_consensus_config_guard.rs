@@ -146,10 +146,13 @@ fn ack_schema(data_dir: &Path, old: &str, new: &str) -> Output {
 
 /// The release before this binary: it read and wrote schema 1 and knew schema 2
 /// only as a draft. Used to create the schema-1 database it would have left.
+/// It knows schema 3 only because this binary's genesis carries the draft
+/// schema-3 gate, which a policy must be able to name to build at all; unset,
+/// that gate adds nothing to the schema-1 record this writes.
 static PREVIOUS: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
     reads: &[&ccfg::SCHEMA_1],
     writes: &ccfg::SCHEMA_1,
-    knows: &ccfg::SCHEMA_2,
+    knows: &ccfg::SCHEMA_3,
 };
 
 /// A database whose baseline the previous release recorded (schema 1), and the
