@@ -1,0 +1,19 @@
+# UNRATIFIED DRAFT — NEW PROPOSAL. Not recovered §K bytes; not previously
+# ratified; not consensus; do not implement until ratified.
+#
+# Standalone second generator for the C1 pool identifier PROPOSAL vectors. The
+# empty [workspace] table makes this its own workspace root, so the sum-chain
+# workspace (and its CI) never builds it. Run it through ../check.py --rust.
+[package]
+name = "c1-pool-id-kdfs-generator"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# The same BLAKE3 crate and version the sum-chain workspace locks (1.8.2).
+blake3 = "=1.8.2"
+# Frozen job_id / unit_id functions, used unchanged.
+sumchain-wire = { path = "../../../../crates/sumchain-wire" }

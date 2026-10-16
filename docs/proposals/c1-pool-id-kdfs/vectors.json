@@ -1,0 +1,434 @@
+{
+  "status": "PROPOSAL — UNRATIFIED DRAFT. Not recovered §K bytes; not previously ratified; not consensus; do not implement until ratified.",
+  "hash": "BLAKE3, plain hash mode, 32-byte output",
+  "integers": "little-endian",
+  "entitlement_kinds": {
+    "0": "AcceptReimb",
+    "1": "ReassignReimb",
+    "2": "ReprovisionReimb"
+  },
+  "tags": [
+    {
+      "name": "JOB",
+      "status": "FROZEN on main",
+      "kdf": "job_id",
+      "ascii": "SUMCHAIN/POOL/JOB/v1\\n",
+      "hex": "53554d434841494e2f504f4f4c2f4a4f422f76310a",
+      "len": 21
+    },
+    {
+      "name": "UNIT",
+      "status": "FROZEN on main",
+      "kdf": "unit_id",
+      "ascii": "SUMCHAIN/POOL/UNIT/v1\\n",
+      "hex": "53554d434841494e2f504f4f4c2f554e49542f76310a",
+      "len": 22
+    },
+    {
+      "name": "GRAPHDEF",
+      "status": "FROZEN on main",
+      "kdf": "graph_definition_root",
+      "ascii": "SUMCHAIN/POOL/GRAPHDEF/v1\\n",
+      "hex": "53554d434841494e2f504f4f4c2f47524150484445462f76310a",
+      "len": 26
+    },
+    {
+      "name": "OFFERBOND",
+      "status": "PROPOSAL",
+      "kdf": "offer_bond_id",
+      "ascii": "SUMCHAIN/POOL/OFFERBOND/v1\\n",
+      "hex": "53554d434841494e2f504f4f4c2f4f46464552424f4e442f76310a",
+      "len": 27
+    },
+    {
+      "name": "RESERVATION",
+      "status": "PROPOSAL",
+      "kdf": "reservation_id",
+      "ascii": "SUMCHAIN/POOL/RESERVATION/v1\\n",
+      "hex": "53554d434841494e2f504f4f4c2f5245534552564154494f4e2f76310a",
+      "len": 29
+    },
+    {
+      "name": "ENTITLEMENT",
+      "status": "PROPOSAL",
+      "kdf": "entitlement_id",
+      "ascii": "SUMCHAIN/POOL/ENTITLEMENT/v1\\n",
+      "hex": "53554d434841494e2f504f4f4c2f454e5449544c454d454e542f76310a",
+      "len": 29
+    }
+  ],
+  "frozen_context": [
+    {
+      "name": "job_id/kat",
+      "kdf": "job_id",
+      "status": "FROZEN on main; not part of this proposal",
+      "fields": [
+        {
+          "name": "chain_id",
+          "width": 8,
+          "value": "1",
+          "hex": "0100000000000000"
+        },
+        {
+          "name": "requester",
+          "width": 20,
+          "value": "0102030405060708090a0b0c0d0e0f1011121314",
+          "hex": "0102030405060708090a0b0c0d0e0f1011121314"
+        },
+        {
+          "name": "requester_nonce",
+          "width": 8,
+          "value": "7",
+          "hex": "0700000000000000"
+        },
+        {
+          "name": "client_job_salt",
+          "width": 32,
+          "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "preimage_len": 89,
+      "preimage_hex": "53554d434841494e2f504f4f4c2f4a4f422f76310a01000000000000000102030405060708090a0b0c0d0e0f10111213140700000000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "output_len": 32,
+      "output_hex": "8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f82"
+    },
+    {
+      "name": "unit_id/kat",
+      "kdf": "unit_id",
+      "status": "FROZEN on main; not part of this proposal",
+      "fields": [
+        {
+          "name": "job_id",
+          "width": 32,
+          "value": "8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f82",
+          "hex": "8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f82"
+        },
+        {
+          "name": "unit_index",
+          "width": 4,
+          "value": "0",
+          "hex": "00000000"
+        }
+      ],
+      "preimage_len": 58,
+      "preimage_hex": "53554d434841494e2f504f4f4c2f554e49542f76310a8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f8200000000",
+      "output_len": 32,
+      "output_hex": "3adf1cdd6b0f0f01f89cc627622736537bfcc44564e09b5805cf475490bb2662"
+    }
+  ],
+  "vectors": [
+    {
+      "name": "offer_bond_id/base",
+      "kdf": "offer_bond_id",
+      "status": "PROPOSAL",
+      "fields": [
+        {
+          "name": "chain_id",
+          "width": 8,
+          "value": "1",
+          "hex": "0100000000000000"
+        },
+        {
+          "name": "sender",
+          "width": 20,
+          "value": "0102030405060708090a0b0c0d0e0f1011121314",
+          "hex": "0102030405060708090a0b0c0d0e0f1011121314"
+        },
+        {
+          "name": "offer_seq",
+          "width": 8,
+          "value": "7",
+          "hex": "0700000000000000"
+        }
+      ],
+      "preimage_len": 63,
+      "preimage_hex": "53554d434841494e2f504f4f4c2f4f46464552424f4e442f76310a01000000000000000102030405060708090a0b0c0d0e0f10111213140700000000000000",
+      "output_len": 32,
+      "output_hex": "98fc8ba3a47488bc5c3941691f57f4ea7915086d4057ade85aa8debea7a1a4ea"
+    },
+    {
+      "name": "offer_bond_id/chain_id_2",
+      "kdf": "offer_bond_id",
+      "status": "PROPOSAL",
+      "fields": [
+        {
+          "name": "chain_id",
+          "width": 8,
+          "value": "2",
+          "hex": "0200000000000000"
+        },
+        {
+          "name": "sender",
+          "width": 20,
+          "value": "0102030405060708090a0b0c0d0e0f1011121314",
+          "hex": "0102030405060708090a0b0c0d0e0f1011121314"
+        },
+        {
+          "name": "offer_seq",
+          "width": 8,
+          "value": "7",
+          "hex": "0700000000000000"
+        }
+      ],
+      "preimage_len": 63,
+      "preimage_hex": "53554d434841494e2f504f4f4c2f4f46464552424f4e442f76310a02000000000000000102030405060708090a0b0c0d0e0f10111213140700000000000000",
+      "output_len": 32,
+      "output_hex": "85181c227b1f434961fdbdb1f9a3050871b04c3592149c7c7175d09245d78851"
+    },
+    {
+      "name": "offer_bond_id/byte_order",
+      "kdf": "offer_bond_id",
+      "status": "PROPOSAL",
+      "fields": [
+        {
+          "name": "chain_id",
+          "width": 8,
+          "value": "578437695752307201",
+          "hex": "0102030405060708"
+        },
+        {
+          "name": "sender",
+          "width": 20,
+          "value": "ffffffffffffffffffffffffffffffffffffffff",
+          "hex": "ffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "name": "offer_seq",
+          "width": 8,
+          "value": "1234605616436508552",
+          "hex": "8877665544332211"
+        }
+      ],
+      "preimage_len": 63,
+      "preimage_hex": "53554d434841494e2f504f4f4c2f4f46464552424f4e442f76310a0102030405060708ffffffffffffffffffffffffffffffffffffffff8877665544332211",
+      "output_len": 32,
+      "output_hex": "5826d4c3a89fd1374b06f69b10a9531300786cee60f07a2e73ad1e815cde071e"
+    },
+    {
+      "name": "reservation_id/base",
+      "kdf": "reservation_id",
+      "status": "PROPOSAL",
+      "fields": [
+        {
+          "name": "job_id",
+          "width": 32,
+          "value": "8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f82",
+          "hex": "8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f82"
+        },
+        {
+          "name": "unit_id",
+          "width": 32,
+          "value": "3adf1cdd6b0f0f01f89cc627622736537bfcc44564e09b5805cf475490bb2662",
+          "hex": "3adf1cdd6b0f0f01f89cc627622736537bfcc44564e09b5805cf475490bb2662"
+        },
+        {
+          "name": "generation",
+          "width": 8,
+          "value": "1",
+          "hex": "0100000000000000"
+        },
+        {
+          "name": "offer_bond_id",
+          "width": 32,
+          "value": "98fc8ba3a47488bc5c3941691f57f4ea7915086d4057ade85aa8debea7a1a4ea",
+          "hex": "98fc8ba3a47488bc5c3941691f57f4ea7915086d4057ade85aa8debea7a1a4ea"
+        }
+      ],
+      "preimage_len": 133,
+      "preimage_hex": "53554d434841494e2f504f4f4c2f5245534552564154494f4e2f76310a8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f823adf1cdd6b0f0f01f89cc627622736537bfcc44564e09b5805cf475490bb2662010000000000000098fc8ba3a47488bc5c3941691f57f4ea7915086d4057ade85aa8debea7a1a4ea",
+      "output_len": 32,
+      "output_hex": "1b251c9b56949e5b383b618003331f50b19acd98234ca7d73adef5fc66624c4f"
+    },
+    {
+      "name": "entitlement_id/accept_reimb",
+      "kdf": "entitlement_id",
+      "status": "PROPOSAL",
+      "fields": [
+        {
+          "name": "job_id",
+          "width": 32,
+          "value": "8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f82",
+          "hex": "8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f82"
+        },
+        {
+          "name": "unit_id",
+          "width": 32,
+          "value": "3adf1cdd6b0f0f01f89cc627622736537bfcc44564e09b5805cf475490bb2662",
+          "hex": "3adf1cdd6b0f0f01f89cc627622736537bfcc44564e09b5805cf475490bb2662"
+        },
+        {
+          "name": "generation",
+          "width": 8,
+          "value": "1",
+          "hex": "0100000000000000"
+        },
+        {
+          "name": "entitlement_kind",
+          "width": 1,
+          "value": "0 (AcceptReimb)",
+          "hex": "00"
+        },
+        {
+          "name": "occurrence",
+          "width": 4,
+          "value": "0",
+          "hex": "00000000"
+        }
+      ],
+      "preimage_len": 106,
+      "preimage_hex": "53554d434841494e2f504f4f4c2f454e5449544c454d454e542f76310a8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f823adf1cdd6b0f0f01f89cc627622736537bfcc44564e09b5805cf475490bb266201000000000000000000000000",
+      "output_len": 32,
+      "output_hex": "7377c94d7668f3347e779acac43a4110951ee9c8423468c3172b6605d302da27"
+    },
+    {
+      "name": "entitlement_id/reassign_reimb_occurrence_2",
+      "kdf": "entitlement_id",
+      "status": "PROPOSAL",
+      "fields": [
+        {
+          "name": "job_id",
+          "width": 32,
+          "value": "8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f82",
+          "hex": "8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f82"
+        },
+        {
+          "name": "unit_id",
+          "width": 32,
+          "value": "3adf1cdd6b0f0f01f89cc627622736537bfcc44564e09b5805cf475490bb2662",
+          "hex": "3adf1cdd6b0f0f01f89cc627622736537bfcc44564e09b5805cf475490bb2662"
+        },
+        {
+          "name": "generation",
+          "width": 8,
+          "value": "1",
+          "hex": "0100000000000000"
+        },
+        {
+          "name": "entitlement_kind",
+          "width": 1,
+          "value": "1 (ReassignReimb)",
+          "hex": "01"
+        },
+        {
+          "name": "occurrence",
+          "width": 4,
+          "value": "2",
+          "hex": "02000000"
+        }
+      ],
+      "preimage_len": 106,
+      "preimage_hex": "53554d434841494e2f504f4f4c2f454e5449544c454d454e542f76310a8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f823adf1cdd6b0f0f01f89cc627622736537bfcc44564e09b5805cf475490bb266201000000000000000102000000",
+      "output_len": 32,
+      "output_hex": "f0fc9e68ce981ce200d82502657b195179ba8bee94dc16d82fca4b149aac23c9"
+    },
+    {
+      "name": "entitlement_id/reprovision_reimb",
+      "kdf": "entitlement_id",
+      "status": "PROPOSAL",
+      "fields": [
+        {
+          "name": "job_id",
+          "width": 32,
+          "value": "8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f82",
+          "hex": "8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f82"
+        },
+        {
+          "name": "unit_id",
+          "width": 32,
+          "value": "3adf1cdd6b0f0f01f89cc627622736537bfcc44564e09b5805cf475490bb2662",
+          "hex": "3adf1cdd6b0f0f01f89cc627622736537bfcc44564e09b5805cf475490bb2662"
+        },
+        {
+          "name": "generation",
+          "width": 8,
+          "value": "1",
+          "hex": "0100000000000000"
+        },
+        {
+          "name": "entitlement_kind",
+          "width": 1,
+          "value": "2 (ReprovisionReimb)",
+          "hex": "02"
+        },
+        {
+          "name": "occurrence",
+          "width": 4,
+          "value": "0",
+          "hex": "00000000"
+        }
+      ],
+      "preimage_len": 106,
+      "preimage_hex": "53554d434841494e2f504f4f4c2f454e5449544c454d454e542f76310a8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f823adf1cdd6b0f0f01f89cc627622736537bfcc44564e09b5805cf475490bb266201000000000000000200000000",
+      "output_len": 32,
+      "output_hex": "11d1849a4a75b45140cb801fe3d33ffac1d40a2680ebf1d164c1018b23de7b89"
+    },
+    {
+      "name": "entitlement_id/reassign_reimb_byte_order",
+      "kdf": "entitlement_id",
+      "status": "PROPOSAL",
+      "fields": [
+        {
+          "name": "job_id",
+          "width": 32,
+          "value": "8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f82",
+          "hex": "8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f82"
+        },
+        {
+          "name": "unit_id",
+          "width": 32,
+          "value": "3adf1cdd6b0f0f01f89cc627622736537bfcc44564e09b5805cf475490bb2662",
+          "hex": "3adf1cdd6b0f0f01f89cc627622736537bfcc44564e09b5805cf475490bb2662"
+        },
+        {
+          "name": "generation",
+          "width": 8,
+          "value": "72623859790382856",
+          "hex": "0807060504030201"
+        },
+        {
+          "name": "entitlement_kind",
+          "width": 1,
+          "value": "1 (ReassignReimb)",
+          "hex": "01"
+        },
+        {
+          "name": "occurrence",
+          "width": 4,
+          "value": "16909060",
+          "hex": "04030201"
+        }
+      ],
+      "preimage_len": 106,
+      "preimage_hex": "53554d434841494e2f504f4f4c2f454e5449544c454d454e542f76310a8b974099e58a7005fd25ef863283958351b785e6bf4fb127cf0de5ca4d5c4f823adf1cdd6b0f0f01f89cc627622736537bfcc44564e09b5805cf475490bb266208070605040302010104030201",
+      "output_len": 32,
+      "output_hex": "66d885ec3397304cd5bf211e784aa73277d0aeb98baec256c3372f9a80d9105f"
+    }
+  ],
+  "rejected": [
+    {
+      "kdf": "entitlement_id",
+      "entitlement_kind": 3,
+      "occurrence": 0,
+      "reason": "entitlement_kind 3 is not in {0,1,2}"
+    },
+    {
+      "kdf": "entitlement_id",
+      "entitlement_kind": 255,
+      "occurrence": 0,
+      "reason": "entitlement_kind 255 is not in {0,1,2}"
+    },
+    {
+      "kdf": "entitlement_id",
+      "entitlement_kind": 0,
+      "occurrence": 1,
+      "reason": "AcceptReimb is one-time: occurrence must be 0, got 1"
+    },
+    {
+      "kdf": "entitlement_id",
+      "entitlement_kind": 2,
+      "occurrence": 1,
+      "reason": "ReprovisionReimb is one-time: occurrence must be 0, got 1"
+    }
+  ]
+}
