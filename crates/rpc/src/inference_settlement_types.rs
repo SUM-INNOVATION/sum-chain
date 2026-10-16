@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceConsistencyInfo {
     /// Minimum matching (finalized, undisputed) verifiers, claimant included.
+    /// "Finalized" is `included + finality_depth <= height`: the local-depth
+    /// rule's confirmation count, not certified network finality (#270).
     pub min_matching_verifiers: u32,
     /// Basis points of the fixed `max_verifiers`; `0` = no percentage threshold.
     pub threshold_bps: u16,
@@ -80,6 +82,8 @@ pub struct InferenceConsistencyGroupInfo {
     /// Subset that is finalized at the current height (`included + finality_depth
     /// <= height`) and not blocked by an open/denied dispute — i.e. the count
     /// that would currently satisfy a consistency claim for this tuple.
+    /// "Finalized" is the local-depth rule on the answering node's head, named
+    /// by the report's `finality_mechanism` (#270).
     pub eligible_count: u32,
 }
 
@@ -92,6 +96,12 @@ pub struct InferenceConsistencyReport {
     pub max_verifiers: u32,
     /// Groups, sorted by `eligible_count` then `verifier_count` (descending).
     pub groups: Vec<InferenceConsistencyGroupInfo>,
+    /// How the answering node decides that an attestation counted in
+    /// `eligible_count` is finalized, as
+    /// [`sumchain_consensus::FinalityMechanism::name`] — `"local-depth"` under
+    /// protocol v1: `finality_depth` blocks on this node's head, not certified
+    /// network finality (#270). Added beside the existing fields.
+    pub finality_mechanism: String,
 }
 
 /// A paid reward claim (`omninode_getInferenceClaims`).
@@ -128,7 +138,10 @@ pub struct ClaimableRewardInfo {
     pub eligible: bool,
     /// Reward amount if eligible.
     pub amount: Option<u128>,
-    /// Height at/after which the claim matures (finality + dispute window).
+    /// Height at/after which the claim matures (finality + dispute window):
+    /// `included_at_height + finality_depth + dispute_window_blocks`. Its
+    /// "finality" is the local-depth rule's confirmation count, not certified
+    /// network finality (#270); `finality_mechanism` names it.
     pub unlock_height: Option<u64>,
     /// Human-readable reason (e.g. "no attestation", "not mature", "already
     /// claimed", "blocked by dispute", "insufficient consistency", "eligible").
@@ -141,6 +154,14 @@ pub struct ClaimableRewardInfo {
     /// verifier bond. `null` otherwise.
     #[serde(default)]
     pub bond: Option<ClaimBondEval>,
+    /// Present exactly when `unlock_height` is: how the maturity's finality
+    /// component is decided, as [`sumchain_consensus::FinalityMechanism::name`]
+    /// — `"local-depth"` under protocol v1: `finality_depth` confirmations, not
+    /// certified network finality (#270). Absent when there is no maturity
+    /// height (no session, closed session, no attestation), so those responses
+    /// are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finality_mechanism: Option<String>,
 }
 
 /// Bond eligibility for a specific claimant (issue #78).
@@ -163,7 +184,8 @@ pub struct ClaimConsistencyEval {
     pub threshold_bps: u16,
     /// Fixed denominator for the bps rule.
     pub max_verifiers: u32,
-    /// Size of the claimant's exact-tuple group (finalized, undisputed).
+    /// Size of the claimant's exact-tuple group (finalized, undisputed;
+    /// "finalized" as in the enclosing response's `finality_mechanism`).
     pub matching_count: u32,
     /// Whether `matching_count` satisfies both active constraints.
     pub satisfied: bool,

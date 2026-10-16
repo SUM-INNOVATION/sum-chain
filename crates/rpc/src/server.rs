@@ -1129,7 +1129,8 @@ impl RpcServer {
     /// All binary fields hex-encoded with `0x` prefix; addresses use
     /// base58 with checksum (chain's canonical Address::to_base58).
     /// `finalized` is computed against live chain height + chain-param
-    /// `finality_depth` — same convention as `is_block_finalized` RPC.
+    /// `finality_depth` — same convention as `is_block_finalized` RPC — and
+    /// labelled with the engine's finality rule, local depth (#270).
     fn attestation_record_to_info(
         &self,
         record: &sumchain_primitives::inference_attestation::InferenceAttestationRecord,
@@ -1149,6 +1150,7 @@ impl RpcServer {
             included_at_height: record.included_at_height,
             tx_hash: record.tx_hash.to_hex(),
             finalized,
+            finality_mechanism: self.consensus.finality_mechanism().name().to_string(),
         }
     }
 
@@ -2379,13 +2381,16 @@ impl SumChainApiServer for RpcServer {
             .get(&hash)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
+        // A `"finalized"` status names the rule that produced it (#270), from
+        // the same engine whose head and depth the classifier was handed.
         Ok(sumchain_primitives::inference_attestation::classify_inference_attestation_status(
             stored_tx.as_ref(),
             mempool_tx.as_ref(),
             receipt.as_ref(),
             self.consensus.current_height(),
             self.consensus.finality_depth(),
-        ))
+        )
+        .with_finality_mechanism(self.consensus.finality_mechanism().name()))
     }
 
     async fn sum_build_sponsored_inference_attestation(
@@ -5853,7 +5858,11 @@ impl SumChainApiServer for RpcServer {
         let aexec = sumchain_state::inference_attestation_executor::InferenceAttestationExecutor::new(
             self.db.clone(),
         );
-        let base = |eligible, amount, unlock, reason: &str| ClaimableRewardInfo {
+        // A maturity height embeds the local-depth finality count, so a
+        // response that carries one names that rule (#270); one without a
+        // maturity height makes no finality claim and is unchanged.
+        let mechanism = self.consensus.finality_mechanism().name();
+        let base = |eligible, amount, unlock: Option<u64>, reason: &str| ClaimableRewardInfo {
             session_id: session_id.clone(),
             verifier: v.to_base58(),
             eligible,
@@ -5862,6 +5871,7 @@ impl SumChainApiServer for RpcServer {
             reason: reason.to_string(),
             consistency: None,
             bond: None,
+            finality_mechanism: unlock.map(|_| mechanism.to_string()),
         };
 
         let session = match sexec.get_session(&session_id).map_err(|e| RpcError::Internal(e.to_string()))? {
@@ -5965,6 +5975,7 @@ impl SumChainApiServer for RpcServer {
             reason: reason.to_string(),
             consistency: consistency_eval,
             bond: bond_eval,
+            finality_mechanism: Some(mechanism.to_string()),
         })
     }
 
@@ -6063,7 +6074,13 @@ impl SumChainApiServer for RpcServer {
                 .then(a.proof_root.cmp(&b.proof_root))
         });
 
-        Ok(InferenceConsistencyReport { session_id, consistency, max_verifiers, groups })
+        Ok(InferenceConsistencyReport {
+            session_id,
+            consistency,
+            max_verifiers,
+            groups,
+            finality_mechanism: self.consensus.finality_mechanism().name().to_string(),
+        })
     }
 
     async fn omninode_build_open_inference_session(

@@ -514,3 +514,77 @@ fn classifier_receipt_takes_precedence_over_mempool() {
         "receipt-first precedence: mempool presence must not downgrade a finalized status"
     );
 }
+
+// #270: a `"finalized"` status names the finality rule behind it; no other
+// status makes a finality claim, so none carries the label.
+
+#[test]
+fn classifier_leaves_the_label_to_the_rpc() {
+    let att = mk_attestation_signed_tx([6u8; 32]);
+    let r = mk_receipt(TxStatus::Success, 50);
+    let s = classify_inference_attestation_status(Some(&att), None, Some(&r), 53, 3);
+    assert_eq!(s.status, "finalized");
+    assert_eq!(s.finality_mechanism, None, "the pure classifier cannot know the engine's rule");
+}
+
+#[test]
+fn with_finality_mechanism_labels_only_finalized() {
+    let att = mk_attestation_signed_tx([7u8; 32]);
+    let ok = mk_receipt(TxStatus::Success, 50);
+    let bad = mk_receipt(TxStatus::Failed(51), 50);
+    let label = |s: sumchain_primitives::inference_attestation::InferenceAttestationStatusInfo| {
+        let before = s.clone();
+        let after = s.with_finality_mechanism("local-depth");
+        (before, after)
+    };
+
+    let (before, after) =
+        label(classify_inference_attestation_status(Some(&att), None, Some(&ok), 53, 3));
+    assert_eq!(after.status, "finalized");
+    assert_eq!(after.finality_mechanism.as_deref(), Some("local-depth"));
+    assert_eq!(
+        (after.status.as_str(), after.included_at_height, &after.reason),
+        (before.status.as_str(), before.included_at_height, &before.reason),
+        "the label is added beside the existing fields, which are unchanged"
+    );
+
+    for s in [
+        classify_inference_attestation_status(Some(&att), None, Some(&ok), 51, 3), // included
+        classify_inference_attestation_status(Some(&att), None, Some(&bad), 100, 3), // failed
+        classify_inference_attestation_status(None, Some(&att), None, 100, 3),     // submitted
+        classify_inference_attestation_status(None, None, None, 100, 3),           // unknown
+    ] {
+        let (before, after) = label(s);
+        assert_ne!(before.status, "finalized");
+        assert_eq!(after, before, "a status without a finality claim is returned unchanged");
+    }
+}
+
+#[test]
+fn the_label_is_omitted_from_json_unless_set() {
+    let att = mk_attestation_signed_tx([8u8; 32]);
+    let ok = mk_receipt(TxStatus::Success, 50);
+    let included = classify_inference_attestation_status(Some(&att), None, Some(&ok), 51, 3)
+        .with_finality_mechanism("local-depth");
+    assert_eq!(
+        serde_json::to_value(&included).unwrap(),
+        serde_json::json!({ "status": "included", "included_at_height": 50, "reason": null }),
+        "the pre-#270 shape, byte for byte"
+    );
+    let finalized = classify_inference_attestation_status(Some(&att), None, Some(&ok), 53, 3)
+        .with_finality_mechanism("local-depth");
+    assert_eq!(
+        serde_json::to_value(&finalized).unwrap(),
+        serde_json::json!({
+            "status": "finalized",
+            "included_at_height": 50,
+            "reason": null,
+            "finality_mechanism": "local-depth",
+        })
+    );
+    // A pre-#270 response still decodes.
+    let old: sumchain_primitives::inference_attestation::InferenceAttestationStatusInfo =
+        serde_json::from_str(r#"{"status":"finalized","included_at_height":50,"reason":null}"#)
+            .unwrap();
+    assert_eq!(old.finality_mechanism, None);
+}

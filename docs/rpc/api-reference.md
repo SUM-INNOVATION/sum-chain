@@ -374,7 +374,11 @@ tokens are unchanged.
 | `get_finality` | always |
 | `chain_getBlockHeight("finalized")` | `{height, finality: "finalized", finality_mechanism}`; the `"latest"` view (`{height, finality: "latest"}`) carries no label |
 | `chain_getTransactionStatus` | `{kind: "finalized", block_height, finality_mechanism}`; the other kinds carry no label |
-| `is_block_finalized` | not labelled (it returns a bare boolean); the same local-depth rule applies |
+| `sum_getInferenceAttestation` / `sum_listInferenceAttestations` | every record, beside `finalized` (true or false) |
+| `sum_getInferenceAttestationStatus` | `{status: "finalized", included_at_height, reason, finality_mechanism}`; the other statuses carry no label |
+| `omninode_getClaimableReward` | whenever `unlock_height` is present: maturity is `included_at_height + finality_depth + dispute_window_blocks`, and its finality part is the local-depth count. Responses without `unlock_height` carry no label |
+| `omninode_getInferenceConsistency` | always: `eligible_count` counts attestations finalized under the local-depth rule |
+| `is_block_finalized` | not labelled: it returns a bare boolean, and a label would change its type. The same local-depth rule applies; `get_finality` names it |
 
 ---
 
@@ -925,10 +929,10 @@ active once the chain reaches it (≈2026-07-12)**.
 
 | Method | Notes |
 |---|---|
-| `sum_getInferenceAttestation(session_id, verifier_address)` | One attestation record. |
-| `sum_listInferenceAttestations(session_id)` | Every verifier for a session. |
+| `sum_getInferenceAttestation(session_id, verifier_address)` | One attestation record. `finalized` is local-depth finality, named in `finality_mechanism` (see [Finality semantics](#finality-semantics)). |
+| `sum_listInferenceAttestations(session_id)` | Every verifier for a session, each record labelled as above. |
 | `sum_getInferenceAttestationSponsor(session_id, verifier_address)` | Sponsor metadata (sponsor address, height, tx hash) for a sponsored (v2) attestation; `null` for v1 direct or absent attestations (issue #95). |
-| `sum_getInferenceAttestationStatus(tx_hash)` | Chain-side status of an attestation tx. |
+| `sum_getInferenceAttestationStatus(tx_hash)` | Chain-side status of an attestation tx. A `"finalized"` status adds `finality_mechanism`. |
 | `sum_buildSponsoredInferenceAttestation(request)` | Build an unsigned **sponsored** (v2) attestation tx (issue #79): a payer/sponsor submits on a verifier's behalf. No keys; the sponsor signs offline. The attestation stays verifier-keyed for dedup, storage, and settlement. |
 
 ### OmniNode inference settlement (`omninode_*`) — gate set to 8,900,000 (issue #61)
@@ -944,8 +948,8 @@ slashing in v1 (reward denial / claim withholding / escrow refund only).
 | `omninode_getInferenceSession(session_id)` | read |
 | `omninode_getInferenceClaims(session_id)` | read |
 | `omninode_getInferenceDisputes(session_id)` | read |
-| `omninode_getClaimableReward(session_id, verifier)` | read |
-| `omninode_getInferenceConsistency(session_id)` | read — attestations grouped by full digest tuple (issue #77 consistency mode) |
+| `omninode_getClaimableReward(session_id, verifier)` | read. With `unlock_height`, also `finality_mechanism`: maturity's finality part is local confirmation depth, not certified finality (see [Finality semantics](#finality-semantics)) |
+| `omninode_getInferenceConsistency(session_id)` | read — attestations grouped by full digest tuple (issue #77 consistency mode); `finality_mechanism` names the rule behind `eligible_count` |
 | `omninode_getVerifier(verifier)` | read — verifier bond record: bond, status, unbonding timers (issue #78) |
 | `omninode_buildOpenInferenceSession` / `buildFundInferenceSession` / `buildClaimInferenceReward` / `buildOpenInferenceDispute` / `buildResolveInferenceDispute` / `buildRefundInferenceSession` | unsigned-tx builders (no keys). `buildOpenInferenceSession` accepts optional `consistency` (issue #77) and `bond_requirement` (issue #78) configs. Dispute resolution is validator-quorum controlled (no personal resolver key); `buildResolveInferenceDispute` accepts an optional `approvals` list of validator signatures. |
 | `omninode_buildRegisterVerifier` / `buildAddVerifierBond` / `buildBeginVerifierUnbond` / `buildWithdrawVerifierBond` | verifier bond-registry builders (no keys, issue #78). Bond is native Koppa; slashing on a denied dispute burns to the zero address. |

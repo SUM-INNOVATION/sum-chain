@@ -272,8 +272,15 @@ pub struct InferenceAttestationInfo {
     pub included_at_height: u64,
     /// `0x` + 64 hex chars of the tx hash that committed this attestation.
     pub tx_hash: String,
-    /// True iff `current_height >= included_at_height + finality_depth`.
+    /// True iff `current_height >= included_at_height + finality_depth`, on
+    /// the answering node's own head: the local-depth rule, not certified
+    /// network finality (#270).
     pub finalized: bool,
+    /// How the answering node decides `finalized`, as
+    /// [`sumchain_consensus::FinalityMechanism::name`] — `"local-depth"` under
+    /// protocol v1: local confirmation depth, not certified network finality.
+    /// Added beside the existing fields, which keep their names and values.
+    pub finality_mechanism: String,
 }
 
 /// Additive sponsor metadata for a **sponsored (v2)** inference attestation

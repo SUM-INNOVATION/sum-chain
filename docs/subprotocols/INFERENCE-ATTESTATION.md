@@ -319,12 +319,14 @@ pub struct InferenceAttestationInfo {
     pub included_at_height: u64,
     pub tx_hash:            String,            // "0x" + 64 hex chars
     pub finalized:          bool,              // see §10
+    pub finality_mechanism: String,            // "local-depth"; see §10
 }
 
 pub struct InferenceAttestationStatusInfo {
     pub status:             String,            // "submitted" | "included" | "finalized" | "failed" | "unknown"
     pub included_at_height: Option<u64>,       // None for submitted/unknown
     pub reason:             Option<String>,    // Some(description) when status == "failed"
+    pub finality_mechanism: Option<String>,    // Some("local-depth") only when status == "finalized"; omitted otherwise
 }
 ```
 
@@ -373,6 +375,14 @@ The classifier function is pure and lives in primitives: [`classify_inference_at
 ```
 finalized = current_height >= included_at_height + finality_depth
 ```
+
+This is the local-depth rule counted on the **answering node's own head**, not
+certified network finality (#270): no validator votes or certificate back it,
+and another node may answer differently. Responses that say `finalized` name the
+rule in `finality_mechanism` (`"local-depth"` under protocol v1): every
+`InferenceAttestationInfo`, and an `InferenceAttestationStatusInfo` whose status
+is `"finalized"`. The field is additive; nothing else in either shape changes.
+See [Finality semantics](../rpc/api-reference.md#finality-semantics).
 
 **Read `finality_depth` from the live chain via `chain_getChainParams`. Don't bake a constant.**
 

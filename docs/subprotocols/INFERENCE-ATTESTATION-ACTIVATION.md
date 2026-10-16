@@ -84,7 +84,7 @@ Recommended metrics. Reasonable starting points; tune thresholds against observe
 - **Status counters via `sum_getInferenceAttestationStatus`** over a rolling window:
   - `submitted`: in flight in mempool
   - `included`: in a block but not yet finalized
-  - `finalized`: at or past `chain_getChainParams.finality_depth`
+  - `finalized`: at or past `chain_getChainParams.finality_depth` on the answering node's head (local-depth, not certified network finality; labelled `finality_mechanism`, #270)
   - `failed`: in a block but executor rejected; `fee_paid: 0`, `reason` set to the executor's status description
   - `unknown`: no receipt and not in mempool (evicted, never seen, or non-OmniNode tx hash submitted by mistake)
 - **Executor failure-code counters** (per the protocol doc's §"Failure codes"):

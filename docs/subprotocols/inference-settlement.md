@@ -47,6 +47,12 @@ attestation is finalized AND the dispute window has elapsed**, i.e. not before:
 attestation.included_at_height + finality_depth + dispute_window_blocks
 ```
 
+"Finalized" here is a confirmation count of `finality_depth` blocks, the
+local-depth rule, not certified network finality (#270). The read RPCs that
+report maturity or finalized counts (`omninode_getClaimableReward` with an
+`unlock_height`, `omninode_getInferenceConsistency`) name it in
+`finality_mechanism` (`"local-depth"`).
+
 Each verifier can claim once, up to `max_verifiers`, while escrow remains.
 
 ### Consistency / plurality mode (issue #77, v1.1 — gated, opt-in)

@@ -80,6 +80,10 @@ pub fn verify_attestation_signature(
 /// NOT represented in v1 — mempool eviction is not tracked; clients
 /// should resubmit after a client-side timeout. `unknown` is returned
 /// for any tx hash that isn't a recognized `InferenceAttestation`.
+///
+/// `finalized` is the local-depth rule counted on the answering node's own
+/// head, not certified network finality (#270); the RPC says so in
+/// `finality_mechanism`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferenceAttestationStatusInfo {
     /// One of: `"submitted"`, `"included"`, `"finalized"`, `"failed"`,
@@ -91,6 +95,25 @@ pub struct InferenceAttestationStatusInfo {
     /// Human-readable failure reason from `TxStatus::description()` when
     /// `status == "failed"`. `None` otherwise.
     pub reason: Option<String>,
+    /// On `status == "finalized"` only: how the answering node decided the tx
+    /// is final — `"local-depth"` under protocol v1 (#270). Absent from every
+    /// other status, whose shape is unchanged. The pure classifier cannot know
+    /// the engine's rule and leaves it unset; the RPC attaches it with
+    /// [`Self::with_finality_mechanism`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finality_mechanism: Option<String>,
+}
+
+impl InferenceAttestationStatusInfo {
+    /// Label a `"finalized"` status with the finality rule that produced it
+    /// (the engine's `FinalityMechanism::name`). Every other status makes no
+    /// finality claim and is returned unchanged.
+    pub fn with_finality_mechanism(mut self, name: &str) -> Self {
+        if self.status == "finalized" {
+            self.finality_mechanism = Some(name.to_string());
+        }
+        self
+    }
 }
 
 /// Pure classifier for `sum_getInferenceAttestationStatus`. Receipt-first
@@ -132,6 +155,7 @@ pub fn classify_inference_attestation_status(
             status: "unknown".to_string(),
             included_at_height: None,
             reason: None,
+            finality_mechanism: None,
         };
     }
 
@@ -153,6 +177,7 @@ pub fn classify_inference_attestation_status(
             status: status_str.to_string(),
             included_at_height: Some(r.block_height),
             reason,
+            finality_mechanism: None,
         };
     }
 
@@ -161,12 +186,14 @@ pub fn classify_inference_attestation_status(
             status: "submitted".to_string(),
             included_at_height: None,
             reason: None,
+            finality_mechanism: None,
         }
     } else {
         InferenceAttestationStatusInfo {
             status: "unknown".to_string(),
             included_at_height: None,
             reason: None,
+            finality_mechanism: None,
         }
     }
 }

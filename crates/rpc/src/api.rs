@@ -212,6 +212,10 @@ pub trait SumChainApi {
     /// Get a single `InferenceAttestation` record for `(session_id, verifier_address)`.
     /// Returns `None` if no attestation has been committed for that pair.
     /// OmniNode Stage 6 / chain Phase 4.
+    ///
+    /// `finalized` is this node's local-depth rule and the record names it in
+    /// `finality_mechanism` (`"local-depth"`: local confirmation depth, not
+    /// certified network finality, #270).
     #[method(name = "sum_getInferenceAttestation")]
     async fn sum_get_inference_attestation(
         &self,
@@ -221,7 +225,8 @@ pub trait SumChainApi {
 
     /// List every verifier's `InferenceAttestation` for a given session.
     /// Returns an empty vec if no attestations exist. Used by OmniNode
-    /// coordinators to determine quorum.
+    /// coordinators to determine quorum. Each record carries
+    /// `finality_mechanism`, as `sum_getInferenceAttestation` does.
     #[method(name = "sum_listInferenceAttestations")]
     async fn sum_list_inference_attestations(
         &self,
@@ -244,6 +249,9 @@ pub trait SumChainApi {
     /// Four states (`submitted`, `included`, `finalized`, `failed`) plus
     /// `unknown` for unrecognized hashes. `Dropped` is not tracked in
     /// v1 — see `crates/rpc/src/types.rs::InferenceAttestationStatusInfo`.
+    /// A `finalized` status adds `finality_mechanism` (`"local-depth"`: local
+    /// confirmation depth, not certified network finality, #270); the other
+    /// states carry no label.
     #[method(name = "sum_getInferenceAttestationStatus")]
     async fn sum_get_inference_attestation_status(
         &self,
@@ -283,6 +291,11 @@ pub trait SumChainApi {
     ) -> Result<Vec<InferenceDisputeInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Whether a verifier can currently claim a session's reward (and when).
+    ///
+    /// Maturity is `included_at_height + finality_depth + dispute_window_blocks`.
+    /// Whenever the response carries `unlock_height` it also carries
+    /// `finality_mechanism` (`"local-depth"`): the finality part of maturity is
+    /// a confirmation count, not certified network finality (#270).
     #[method(name = "omninode_getClaimableReward")]
     async fn omninode_get_claimable_reward(
         &self,
@@ -293,6 +306,8 @@ pub trait SumChainApi {
     /// Consistency landscape for a session (issue #77): attestations grouped by
     /// the full digest tuple `(model_hash, manifest_root, response_hash,
     /// proof_root)`, with per-group total and currently-eligible counts.
+    /// "Eligible" includes "finalized" under the rule the report names in
+    /// `finality_mechanism` (`"local-depth"`, not certified finality, #270).
     #[method(name = "omninode_getInferenceConsistency")]
     async fn omninode_get_inference_consistency(
         &self,
@@ -499,7 +514,13 @@ pub trait SumChainApi {
     #[method(name = "get_finality")]
     async fn get_finality(&self) -> Result<FinalityInfo, jsonrpsee::types::ErrorObjectOwned>;
 
-    /// Check if a block at a given height is finalized
+    /// Check if a block at a given height is at or below this node's local
+    /// finalized height: the local-depth rule (`finality_depth` blocks on top
+    /// of it on THIS node), not certified network finality (#270).
+    ///
+    /// The answer stays a bare boolean, so it cannot carry a label without
+    /// changing its type; `get_finality` names the rule it answers from in
+    /// `finality_mechanism`.
     ///
     /// `false` means "not finalized". A node that cannot know — a height below
     /// its snapshot-import floor — answers `-32003`, because a caller waiting on
@@ -578,12 +599,6 @@ pub trait SumChainApi {
         request: SupplyBuildRequest,
     ) -> Result<crate::types::TxBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
 
-    /// Get the chain's current block height. SNIP V2 Ask 8 (Phase 0b).
-    ///
-    /// `finality` selector: `Some("finalized")` returns the finalized height
-    /// (safe for expiry calculations under PoA reorgs); `None` or
-    /// `Some("latest")` returns the head height. The return value's
-    /// `finality` field echoes which view was returned.
     /// The activation parameters this node is running under.
     ///
     /// Returns one digest over the chain identity and every activation height,
@@ -623,11 +638,17 @@ pub trait SumChainApi {
         &self,
     ) -> Result<crate::types::ConsensusConfigInfo, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Get the chain's current block height. SNIP V2 Ask 8 (Phase 0b).
+    ///
     /// `"latest"` (the default) returns the head; `"finalized"` returns this
     /// node's local finalized height and names the rule in
     /// `finality_mechanism` (`"local-depth"`: local confirmation depth, not
     /// certified network finality, #270). The `"latest"` response carries no
-    /// label.
+    /// label. The return value's `finality` field echoes which view was
+    /// returned. Fork choice on this node will not reorganize at or below the
+    /// finalized height, which is why expiry calculations use it, but the
+    /// operator rollback command can lower it and another node may report a
+    /// different one.
     #[method(name = "chain_getBlockHeight")]
     async fn chain_get_block_height(
         &self,
