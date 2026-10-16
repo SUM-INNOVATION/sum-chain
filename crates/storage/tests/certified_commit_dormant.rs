@@ -1,7 +1,8 @@
 //! The certified-commit seam (#270) is DORMANT: no crate outside
-//! `sumchain-storage` may use it until the commit rule (F-1), the certificate
-//! encoding and the storage layout are ratified and an activation is
-//! authorized. Wiring it in must be a deliberate change that deletes this test.
+//! `sumchain-storage` may use it until the certificate encoding and the
+//! storage layout are ratified and an activation is authorized. (The commit
+//! rule itself, G2-a, was ratified on 2026-10-16.) Wiring it in must be a
+//! deliberate change that deletes this test.
 
 use std::path::{Path, PathBuf};
 

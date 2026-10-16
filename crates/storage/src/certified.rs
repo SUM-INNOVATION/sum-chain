@@ -15,10 +15,13 @@
 //!   [`CertifiedLayout`]. Neither trait has a production implementation. The
 //!   tests use a test-only certificate and a test-only layout, which are not a
 //!   proposal for either encoding.
-//! * **No commit rule is ratified.** The seam implements the storage half of
-//!   commit-on-certificate (decision F-1, proposed, not ratified): a block
-//!   becomes canonical only together with its certificate. If F-1 is not
-//!   adopted this module is deleted, not adapted.
+//! * **The commit rule is ratified; its wiring is not.** Commit-on-certificate
+//!   (G2-a, ratified 2026-10-16; formerly decision F-1) says a block is
+//!   published as canonical only together with a verified certificate, its
+//!   post-state and the finalized pointer, in one durable atomic batch. This
+//!   seam implements the storage half of that rule and stays dormant: the
+//!   certificate encoding, the storage layout and any activation are still
+//!   unratified, and nothing publishes through it.
 //! * **No consensus library is chosen.** Nothing here knows about rounds,
 //!   votes or proposers; whatever engine produces a decision hands this seam an
 //!   accepted candidate and certificate bytes.
