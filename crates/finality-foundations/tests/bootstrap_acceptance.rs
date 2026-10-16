@@ -5,7 +5,7 @@
 //! they are not a proposal for any authorization or membership encoding.
 //! Signatures are real Ed25519 over those synthetic digests.
 
-use ed25519_dalek::{Signer as _, Verifier as _};
+use ed25519_dalek::Signer as _;
 use sumchain_finality_foundations::bootstrap::{
     Acceptance, ApplyError, Authorization, BlockAction, BlockRef, BootstrapState, CanonicalChain,
     Deferral, HaltReason, HandlerId, Hint, HintAssessment, HintNext, IndexedSignature, Membership,
@@ -33,7 +33,9 @@ impl SignatureVerifier for Ed25519 {
         let Ok(sig) = ed25519_dalek::Signature::from_slice(signature) else {
             return false;
         };
-        vk.verify(message, &sig).is_ok()
+        // Strict verification (E1, the approved direction for new finality and
+        // upgrade signatures).
+        vk.verify_strict(message, &sig).is_ok()
     }
 }
 

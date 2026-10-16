@@ -102,6 +102,19 @@ pub struct Authorization {
 }
 
 /// Verifies one member signature over a body digest.
+///
+/// **Required: strict Ed25519 verification.** Every implementation used for new
+/// finality or upgrade signatures must:
+/// - require canonical S < L and canonical R and A encodings;
+/// - reject small-order A and R;
+/// - use the cofactorless equation (ed25519-dalek `verify_strict` semantics).
+///
+/// Strict verification is the approved design direction (owner, 2026-10-16,
+/// choice E1). The signature bytes themselves are still unratified.
+///
+/// This trait does not change any existing verification path. Historical
+/// signatures, including every `sumchain-crypto` `verify` caller, are verified
+/// exactly as before.
 pub trait SignatureVerifier {
     fn verify(&self, public_key: &[u8], message: &Digest, signature: &[u8]) -> bool;
 }

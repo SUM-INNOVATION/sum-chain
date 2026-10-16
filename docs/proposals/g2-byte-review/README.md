@@ -6,6 +6,9 @@
 - **Base:** sum-chain `main` `2c27524279339ff29b6b8073b8027f1e4d217f60`.
 - **Files:** `generate.py` (stdlib-only generator), `check.py` (mechanical checks), `vectors.json`, `crosscheck-20260929.json`.
 
+- **Decided since drafting (owner, 2026-10-16):** E1. Strict Ed25519 verification is the approved design direction for **new** finality and upgrade signatures, and historical signature verification stays unchanged. This is a direction, not ratified bytes.
+- **Still unresolved:** every other choice, namely D0, D2–D6, M1–M5, H1 and S1.
+
 These semantics alone are **not** complete certified finality. See §10 for what is still missing.
 
 ## 0. The ratified semantics this serves (G2, 2026-10-16)
@@ -32,7 +35,7 @@ These semantics alone are **not** complete certified finality. See §10 for what
 - `FinalitySafetyStateV1` (BL §6, `FSAFv1`);
 - the persisted `FinalityLockV1` (BL R2, `FLCKv1`).
 
-**Sources reused** (owner-local drafts under `~/worktrees/sum-chain/`):
+**Sources reused** (owner-held review drafts, not in this repository):
 - BL = `finality-byte-layout-review-draft-20260929.md` (§0–§7, R0–R5);
 - GV = `finality-golden-vectors-draft-20260929.txt`;
 - UD = `consensus-upgrade-design-268-20261001.md` (§1–§5; R7 §1; R8 §1);
@@ -46,7 +49,7 @@ These semantics alone are **not** complete certified finality. See §10 for what
 |---|---|
 | Integers | Little-endian in every object, signed preimage and record. **Big-endian only in RocksDB keys**, so that keys sort by height. |
 | Hash | BLAKE3-256 |
-| Signature | Ed25519, RFC 8032 pure mode (no prehash, no context), 64 bytes. The verification criterion is open choice **E1**. |
+| Signature | Ed25519, RFC 8032 pure mode (no prehash, no context), 64 bytes. Verification criterion **E1**: strict verification is the approved design direction for new finality and upgrade signatures (owner, 2026-10-16); the bytes are still unratified. |
 | Domains | ASCII, versioned, NUL-terminated. The NUL appears only as the last byte, so the set is prefix-free. Never reused across object kinds. |
 | Magics | 7 bytes, ASCII + NUL; the first bytes of every standalone encoding |
 | Decoding | Exact length. Every enum and flag byte is checked. An absent group must be all zero. Trailing bytes are refused. `schema` u16 = 1, and anything else is refused (no forward-compatible parsing, no defaults). |
@@ -347,7 +350,7 @@ Only full manifest bytes can produce this record; a hint never does.
 | **M5** | `quorum_version` (in B-1) | **Drop it.** It has no meaning separate from `quorum_rule`. | Keep it as a reserved byte = 1 |
 | **H1** | Next sequence in the hint | **Implied** (applied + 1); the applied digest is the last applied manifest digest | Explicit field (a redundant mismatch case); a separate accumulator |
 | **S1** | Signer-state binding and content | **Bind chain identity and the signer's public key**, not commitment, valset or index, which can change across upgrades. **Store the digest of the sign bytes**, which supports variable-length proposals. | BL §6's binding to commitment, valset and index; storing the full sign bytes |
-| **E1** | Ed25519 verification criterion, which must be identical on every node | **Strict:** canonical S < L and canonical R and A encodings; reject small-order A and R; the cofactorless equation (ed25519-dalek `verify_strict` semantics). Edge-case vectors are to be added once chosen. | ZIP-215 (cofactored, permissive, batch-friendly); or today's `sumchain-crypto` `verify` (cofactorless, accepts small-order keys) |
+| **E1** | Ed25519 verification criterion, which must be identical on every node | **APPROVED DESIGN DIRECTION (owner, 2026-10-16), for NEW finality and upgrade signatures only: strict.** Canonical S < L and canonical R and A encodings; reject small-order A and R; the cofactorless equation (ed25519-dalek `verify_strict` semantics). Historical signature verification (every existing path, including `sumchain-crypto` `verify`) is unchanged. The bytes are still unratified; edge-case vectors are added with the byte ratification. | ZIP-215 (cofactored, permissive, batch-friendly); or today's `sumchain-crypto` `verify` (cofactorless, accepts small-order keys) |
 
 ## 10. What this artifact does not provide (do not read it as complete certified finality)
 
