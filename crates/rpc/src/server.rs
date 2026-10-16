@@ -1919,6 +1919,8 @@ impl SumChainApiServer for RpcServer {
                 .inference_verifier_bonding_enabled_from_height,
             messaging_sponsored_registration_enabled_from_height: p
                 .messaging_sponsored_registration_enabled_from_height,
+            omninode_sponsored_attestation_enabled_from_height: p
+                .omninode_sponsored_attestation_enabled_from_height,
             governance: p.governance.as_ref().map(|g| crate::types::GovernanceParamsInfo {
                 validator_authority_threshold_bps: g.validator_authority_threshold_bps,
                 quorum_bps: g.quorum_bps,
@@ -10445,6 +10447,7 @@ mod phase_0b_rpc_tests {
             inference_settlement_consistency_enabled_from_height: None,
             inference_verifier_bonding_enabled_from_height: None,
             messaging_sponsored_registration_enabled_from_height: None,
+            omninode_sponsored_attestation_enabled_from_height: None,
             governance: None,
         };
         let got = serde_json::to_value(&v).unwrap();
@@ -10473,9 +10476,16 @@ mod phase_0b_rpc_tests {
             "inference_settlement_consistency_enabled_from_height": null,
             "inference_verifier_bonding_enabled_from_height": null,
             "messaging_sponsored_registration_enabled_from_height": null,
+            "omninode_sponsored_attestation_enabled_from_height": null,
             "governance": null,
         });
         assert_eq!(got, want);
+        // #135: the sponsored-attestation gate is a present key (serialized as
+        // `null` while unset), never omitted.
+        assert!(got
+            .as_object()
+            .unwrap()
+            .contains_key("omninode_sponsored_attestation_enabled_from_height"));
     }
 
     #[test]
@@ -10505,6 +10515,7 @@ mod phase_0b_rpc_tests {
             inference_settlement_consistency_enabled_from_height: Some(2_000_000),  // distinct
             inference_verifier_bonding_enabled_from_height: Some(2_100_000),  // distinct
             messaging_sponsored_registration_enabled_from_height: Some(2_200_000),  // distinct
+            omninode_sponsored_attestation_enabled_from_height: Some(2_300_000),  // distinct
             governance: None,
         };
         let s = serde_json::to_string(&v).unwrap();
@@ -10517,6 +10528,13 @@ mod phase_0b_rpc_tests {
         assert_eq!(back.inference_settlement_consistency_enabled_from_height, Some(2_000_000));
         assert_eq!(back.inference_verifier_bonding_enabled_from_height, Some(2_100_000));
         assert_eq!(back.messaging_sponsored_registration_enabled_from_height, Some(2_200_000));
+        assert_eq!(back.omninode_sponsored_attestation_enabled_from_height, Some(2_300_000));
+        // #135: a `Some` gate serializes as the bare height under its own key.
+        let json: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            json["omninode_sponsored_attestation_enabled_from_height"],
+            serde_json::json!(2_300_000)
+        );
     }
 
     #[test]

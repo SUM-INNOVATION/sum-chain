@@ -46,6 +46,32 @@ Returns the chain ID.
 
 ---
 
+#### `chain_getChainParams`
+
+The chain parameters this node is running, read from its live `ChainParams` (never library defaults). The wire shape is flat; fields are only ever appended.
+
+**Parameters:** None
+
+**Returns:** `ChainParamsInfo` — `chain_id`, `block_time_ms`, `max_block_bytes`, `max_txs_per_block`, `min_fee`, `finality_depth`, `storage_fee_per_byte`, `max_metadata_bytes`, the SNIP V2 parameters (`max_access_list_bytes`, `activation_grace_blocks`, `abandonment_fee_percent`, `max_chunk_count_per_file`, `max_chunk_indices_per_tx`, `assignment_replication_factor`), `governance`, and these activation gates:
+
+| Field | Gate |
+|---|---|
+| `v2_enabled_from_height` | SNIP V2 storage operations |
+| `omninode_enabled_from_height` | OmniNode inference attestation (v1) |
+| `education_enabled_from_height` | SRC-817/818 education suite |
+| `governance_enabled_from_height` | Governance |
+| `monetary_policy_enabled_from_height` | Reserve release and monetary-policy mint |
+| `service_grants_enabled_from_height` | Service-grant claiming |
+| `inference_settlement_enabled_from_height` | Base inference settlement (#61) |
+| `inference_settlement_consistency_enabled_from_height` | Consistency/plurality settlement mode (#77) |
+| `inference_verifier_bonding_enabled_from_height` | Verifier bonding and slashing (#78) |
+| `messaging_sponsored_registration_enabled_from_height` | Sponsored public-key registration (#145) |
+| `omninode_sponsored_attestation_enabled_from_height` | Sponsored inference attestation, v2 envelope (#79; exposed for #135) |
+
+Every gate is `null` while unset (the feature is dormant) and the activation height once set. A key is present even when its value is `null`. Gates not listed here are not exposed by this method; `chain_getActivationStatus` and the runtime genesis cover them.
+
+---
+
 #### `chain_getSupplyInfo`
 
 Canonical-supply report (800B supply correction). All amounts are base-unit decimal strings. `automatic_emissions_enabled` is always `false` — the chain has no block-reward/inflation path; supply can only change via the one-time correction and NativeEligibility governance (`MonetaryPolicyMint`, 6667 bps).

@@ -643,6 +643,14 @@ pub struct ChainParamsInfo {
     /// activation is forbidden). Additive field — appended after
     /// `inference_verifier_bonding_enabled_from_height`.
     pub messaging_sponsored_registration_enabled_from_height: Option<u64>,
+    /// Sponsored inference attestation (v2 envelope) gate (issue #79; exposed
+    /// for #135). `null` / `None` means the sponsored/relayed
+    /// `InferenceAttestationV2` path is dormant and rejects free (`Failed(54)`);
+    /// `Some(h)` means it executes from block height `h`. v1 attestation is
+    /// governed only by `omninode_enabled_from_height`. Read straight from the
+    /// chain's live `ChainParams`, like every other gate here. Additive field —
+    /// appended after `messaging_sponsored_registration_enabled_from_height`.
+    pub omninode_sponsored_attestation_enabled_from_height: Option<u64>,
     /// Configured governance parameters, when present in the deployed genesis.
     pub governance: Option<GovernanceParamsInfo>,
 }
