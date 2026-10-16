@@ -108,10 +108,12 @@ const TEMPLATES: &[Template] = &[
         error: "Invalid validator public key: validator[0]: VALIDATOR1_PUBKEY_PLACEHOLDER",
     },
     // Added by #118 (not on 1f017f55): the synthetic topology template,
-    // refused until `sumchain_scripts::substitute_template` fills it.
+    // refused until `sumchain_scripts::substitute_template` fills it. Re-pinned
+    // with the node-registry gate like its siblings: only the gate's `null`
+    // line is new in what serde reads.
     Template {
         file: "genesis/snip-mirror-genesis.template.json",
-        json: "0x5745d511faa376cdfa5ce51eac14396895d75de034bb3eaceda6448833fd0827",
+        json: "0xcfded7d0c523d61de6e525512886a08155082870492bc73df1783b8dde99c5c6",
         error: "Invalid validator public key: validator[0]: DEVNET_VALIDATOR1_PUBKEY",
     },
     Template {
