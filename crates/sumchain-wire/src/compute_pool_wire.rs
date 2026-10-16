@@ -24,7 +24,8 @@
 //!   `offer_bond_id` an accept refers to is DERIVED from the assignment state at
 //!   execution (not carried), so an accept cannot name a different offer than the
 //!   assignment selected. An offer's own `offer_bond_id` is DERIVED from the
-//!   chain id, the sender, and `offer_seq` (draft §K:288) — the op carries
+//!   chain id, the sender, and `offer_seq` (ratified 2026-10-16,
+//!   `compute_pool_graph::offer_bond_id`) — the op carries
 //!   `offer_seq`, not the id, so a submitter cannot present a forged id.
 //! * **Work-item identity** = `job_id[32] ‖ unit_id[32] ‖ generation u64` (the C3
 //!   routing precedent, draft §F), carried in FULL (generation included) by every
@@ -255,7 +256,8 @@ impl CreateComputePoolJobV1 {
 /// | 33 | 20 | `payment_addr` |
 ///
 /// `offer_bond_id` is DERIVED at execution from
-/// the chain id, the sender, and `offer_seq` (draft §K:288), so it is not carried
+/// the chain id, the sender, and `offer_seq` (ratified 2026-10-16,
+/// [`crate::compute_pool_graph::offer_bond_id`]), so it is not carried
 /// (a submitter cannot present a forged id). `identity` (= the sender),
 /// `bond_locked` (`B_offer`, a governance value), and the internal `active` flag
 /// are NOT encoded (owner ruling 2026-09-02).

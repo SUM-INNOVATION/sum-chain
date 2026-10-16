@@ -71,7 +71,8 @@ See [C1-CREATEJOB-GRAPH.md](C1-CREATEJOB-GRAPH.md) for the full derivation.
 | 33 | 20 | `payment_addr` |
 
 `offer_bond_id` is DERIVED at execution from the chain id, the sender and
-`offer_seq` (§K:288) — not carried, so a forged id cannot be presented.
+`offer_seq` (ratified 2026-10-16; [C1-POOL-IDS.md](C1-POOL-IDS.md)) — not
+carried, so a forged id cannot be presented.
 `identity` (= the sender), `bond_locked` (a governance value) and the internal
 `active` flag are not encoded.
 

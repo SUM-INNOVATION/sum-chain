@@ -57,8 +57,10 @@ use thiserror::Error;
 //
 // Each wraps 32 opaque bytes. Using an opaque id as a typed map/compare key does
 // NOT commit to how the id is derived from wire data — that derivation
-// (preimage / byte layout) is owned by the not-yet-frozen wire spec. These
-// types intentionally derive NO serialization: the module chooses no bytes.
+// (preimage / byte layout) is owned by the wire spec. Where it is ratified
+// (`OfferBondId` and `EntitlementId`, G1, 2026-10-16), the type also has a
+// `derive` constructor that calls the wire crate's function. These types
+// intentionally derive NO serialization: the module chooses no bytes.
 // ---------------------------------------------------------------------------
 
 macro_rules! opaque_id32 {
@@ -68,8 +70,8 @@ macro_rules! opaque_id32 {
         pub struct $name([u8; 32]);
 
         impl $name {
-            /// Wrap already-canonical id bytes. C1 never derives these bytes;
-            /// the derivation is a typed boundary owned by the frozen-wire spec.
+            /// Wrap already-canonical id bytes. The derivation is owned by the
+            /// wire spec; ratified ones are exposed as `derive`.
             pub const fn from_bytes(bytes: [u8; 32]) -> Self {
                 Self(bytes)
             }
@@ -108,6 +110,48 @@ opaque_id32!(
     /// Entitlement (reimbursement) record identifier — must be unique.
     EntitlementId
 );
+
+impl OfferBondId {
+    /// The ratified derivation (G1-1, 2026-10-16):
+    /// `BLAKE3("SUMCHAIN/POOL/OFFERBOND/v1\n" ‖ u64_le(chain_id) ‖ sender ‖
+    /// u64_le(offer_seq))`. `sender` is the publishing transaction's sender.
+    pub fn derive(chain_id: u64, sender: &Address, offer_seq: u64) -> Self {
+        Self(sumchain_wire::compute_pool_graph::offer_bond_id(
+            chain_id, sender, offer_seq,
+        ))
+    }
+}
+
+impl EntitlementId {
+    /// The ratified derivation (G1-1..G1-3, 2026-10-16):
+    /// `BLAKE3("SUMCHAIN/POOL/ENTITLEMENT/v1\n" ‖ job_id ‖ unit_id ‖
+    /// u64_le(generation) ‖ u8(kind) ‖ u32_le(occurrence))`.
+    ///
+    /// The id names the event, not the payee, so a second entitlement for one
+    /// event derives the same id and [`ComputePoolModel::register_entitlement`]
+    /// refuses it. `occurrence` must be 0 for the one-time kinds
+    /// ([`PoolError::NonzeroOccurrence`] otherwise). For `ReassignReimb` it is
+    /// the count of earlier `ReassignReimb` entitlements for the same work item;
+    /// the row that would hold that count is not ratified, so it is supplied by
+    /// the caller.
+    pub fn derive(
+        job_id: &JobId,
+        unit_id: &UnitId,
+        generation: u64,
+        kind: EntitlementKind,
+        occurrence: u32,
+    ) -> PoolResult<Self> {
+        sumchain_wire::compute_pool_graph::entitlement_id(
+            job_id.as_bytes(),
+            unit_id.as_bytes(),
+            generation,
+            kind,
+            occurrence,
+        )
+        .map(Self)
+        .map_err(|_| PoolError::NonzeroOccurrence { kind, occurrence })
+    }
+}
 opaque_id32!(
     /// Output-slot identifier referenced by a downstream required input.
     SlotId
@@ -222,6 +266,14 @@ pub enum PoolError {
     /// Entitlement ids must be unique.
     #[error("duplicate entitlement id")]
     DuplicateEntitlement,
+
+    /// A one-time entitlement kind (`AcceptReimb`, `ReprovisionReimb`) was
+    /// given a nonzero occurrence (G1-3).
+    #[error("{kind:?} is one-time: occurrence must be 0, got {occurrence}")]
+    NonzeroOccurrence {
+        kind: EntitlementKind,
+        occurrence: u32,
+    },
 
     /// One active offer per identity (enforced from model state).
     #[error("identity already has an active bonded offer")]
@@ -473,6 +525,38 @@ pub struct BondedOffer {
     pub active: bool,
 }
 
+impl BondedOffer {
+    /// The offer a `PublishBondedOfferV1` from `sender` on chain `chain_id`
+    /// publishes: its id DERIVED by the ratified [`OfferBondId::derive`] from
+    /// the chain id, the sender and the op's `offer_seq` (the op carries no id,
+    /// so none can be forged), the sender as `identity`, and the op's
+    /// `payment_addr` and `offered_bytes`. `bond_locked` (`B_offer`) is a
+    /// governance value and stays injected. Constructs only; it validates
+    /// nothing against the model — that is [`ComputePoolModel::publish_offer`].
+    pub fn from_publish(
+        chain_id: u64,
+        sender: Address,
+        op: &sumchain_wire::compute_pool_wire::PublishBondedOfferV1,
+        bond_locked: u128,
+    ) -> Self {
+        Self {
+            offer_bond_id: OfferBondId::derive(chain_id, &sender, op.offer_seq),
+            identity: sender,
+            payment_addr: op.payment_addr,
+            offered_bytes: op.offered_bytes,
+            offer_seq: op.offer_seq,
+            bond_locked,
+            active: true,
+        }
+    }
+
+    /// Whether this offer's id is the ratified derivation of its own
+    /// `(chain_id, identity, offer_seq)`.
+    pub fn id_is_derived(&self, chain_id: u64) -> bool {
+        self.offer_bond_id == OfferBondId::derive(chain_id, &self.identity, self.offer_seq)
+    }
+}
+
 /// A write-once accepted leaf: the immutable record that a work item's
 /// assignment was accepted. Written exactly once per `(job, unit, generation)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -538,13 +622,11 @@ pub struct AssignmentIndexEntry {
     pub winner_payment_addr: Address,
 }
 
-/// The kind of reimbursement an entitlement encodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntitlementKind {
-    AcceptReimb,
-    ReassignReimb,
-    ReprovisionReimb,
-}
+/// The kind of reimbursement an entitlement encodes. The ratified `u8` map
+/// (G1-2, 2026-10-16: 0 / 1 / 2, with 3–255 reserved and refused) lives in the
+/// wire crate, so the model, the stored row and the id derivation share one
+/// definition.
+pub use sumchain_wire::compute_pool_graph::EntitlementKind;
 
 /// A reimbursement entitlement. `entitlement_id` must be globally unique.
 #[derive(Debug, Clone, PartialEq, Eq)]

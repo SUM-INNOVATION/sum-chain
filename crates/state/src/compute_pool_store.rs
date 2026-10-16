@@ -308,22 +308,14 @@ fn unit_state_from_tag(t: u8) -> Result<UnitState> {
     }
 }
 
+// The stored tag IS the ratified `entitlement_kind` byte of the
+// `entitlement_id` preimage (G1-2): one map, owned by the wire crate.
 fn entitlement_kind_tag(k: EntitlementKind) -> u8 {
-    match k {
-        EntitlementKind::AcceptReimb => 0,
-        EntitlementKind::ReassignReimb => 1,
-        EntitlementKind::ReprovisionReimb => 2,
-    }
+    k.to_u8()
 }
 fn entitlement_kind_from_tag(t: u8) -> Result<EntitlementKind> {
-    match t {
-        0 => Ok(EntitlementKind::AcceptReimb),
-        1 => Ok(EntitlementKind::ReassignReimb),
-        2 => Ok(EntitlementKind::ReprovisionReimb),
-        other => Err(StateError::DeserializationError(format!(
-            "invalid EntitlementKind tag {other}"
-        ))),
-    }
+    EntitlementKind::from_u8(t)
+        .map_err(|_| StateError::DeserializationError(format!("invalid EntitlementKind tag {t}")))
 }
 
 fn check_version(v: u8) -> Result<()> {

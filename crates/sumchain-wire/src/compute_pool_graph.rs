@@ -84,6 +84,144 @@ pub fn graph_definition_root(canonical_encoding: &[u8]) -> [u8; 32] {
 }
 
 // --------------------------------------------------------------------------- //
+// Offer, reservation and entitlement ids (RATIFIED 2026-10-16, G1-1..G1-3)
+// --------------------------------------------------------------------------- //
+//
+// A REPLACEMENT for the lost draft §K text, not a recovery of it: ratified by
+// the owner on 2026-10-16 from the proposal at `docs/proposals/c1-pool-id-kdfs/`
+// (sum-chain 6fde77fa) and specified in `docs/design/C1-POOL-IDS.md`. Same
+// shape as `job_id`/`unit_id`: plain BLAKE3 over a `\n`-terminated POOL tag and
+// fixed-width little-endian fields. NOT ratified, and so not here: the
+// reassignment-counter row, the generation-advance rule, the reservation
+// lifecycle, and every amount.
+
+/// `offer_bond_id` domain tag (27 bytes, `\n`-terminated).
+pub const POOL_OFFERBOND_TAG: &[u8] = b"SUMCHAIN/POOL/OFFERBOND/v1\n";
+/// `reservation_id` domain tag (29 bytes, `\n`-terminated).
+pub const POOL_RESERVATION_TAG: &[u8] = b"SUMCHAIN/POOL/RESERVATION/v1\n";
+/// `entitlement_id` domain tag (29 bytes, `\n`-terminated).
+pub const POOL_ENTITLEMENT_TAG: &[u8] = b"SUMCHAIN/POOL/ENTITLEMENT/v1\n";
+
+/// `offer_bond_id = BLAKE3(POOL_OFFERBOND_TAG ‖ u64_le(chain_id) ‖ sender[20] ‖
+/// u64_le(offer_seq))` (63-byte preimage).
+///
+/// Never carried on the wire: `PublishBondedOfferV1` carries only `offer_seq`,
+/// and execution derives the id from the chain id and the **transaction
+/// sender**, so a submitter cannot present a forged id. `payment_addr` is not
+/// an input: the id names the sender's bond.
+pub fn offer_bond_id(chain_id: u64, sender: &Address, offer_seq: u64) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(POOL_OFFERBOND_TAG);
+    h.update(&chain_id.to_le_bytes());
+    h.update(sender.as_bytes());
+    h.update(&offer_seq.to_le_bytes());
+    *h.finalize().as_bytes()
+}
+
+/// `reservation_id = BLAKE3(POOL_RESERVATION_TAG ‖ job_id[32] ‖ unit_id[32] ‖
+/// u64_le(generation) ‖ offer_bond_id[32])` (133-byte preimage).
+///
+/// Names the capacity hold one work item places on one offer: the work item in
+/// `WorkItemRef` order, then the offer (the order of the ratified assignment
+/// score). The reservation lifecycle, and whether this id keys any stored row,
+/// are NOT ratified; nothing in the chain uses it yet.
+pub fn reservation_id(
+    job_id: &[u8; 32],
+    unit_id: &[u8; 32],
+    generation: u64,
+    offer_bond_id: &[u8; 32],
+) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(POOL_RESERVATION_TAG);
+    h.update(job_id);
+    h.update(unit_id);
+    h.update(&generation.to_le_bytes());
+    h.update(offer_bond_id);
+    *h.finalize().as_bytes()
+}
+
+/// The reimbursement an entitlement records: the `u8` in the `entitlement_id`
+/// preimage and in the stored entitlement row. Append-only; 3–255 are reserved
+/// and refused until a ratified issue appends a kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EntitlementKind {
+    /// One-time per work item (the accepted leaf is write-once).
+    AcceptReimb = 0,
+    /// Per SNIP retention-file reassignment. `generation` does not separate
+    /// these events, so `occurrence` counts them.
+    ReassignReimb = 1,
+    /// One-time per work item, keyed by the generation the re-provisioning
+    /// creates.
+    ReprovisionReimb = 2,
+}
+
+impl EntitlementKind {
+    pub const fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Strict decode: 0, 1 and 2 only; 3–255 are reserved and refused.
+    pub fn from_u8(v: u8) -> Result<Self, DecodeError> {
+        match v {
+            0 => Ok(Self::AcceptReimb),
+            1 => Ok(Self::ReassignReimb),
+            2 => Ok(Self::ReprovisionReimb),
+            _ => Err(DecodeError::ReservedEnum {
+                name: "EntitlementKind",
+                value: v as u64,
+            }),
+        }
+    }
+
+    /// Whether one work item can carry more than one entitlement of this kind,
+    /// i.e. whether `occurrence` may be nonzero. Only `ReassignReimb`.
+    pub const fn is_repeatable(self) -> bool {
+        matches!(self, Self::ReassignReimb)
+    }
+}
+
+/// `entitlement_id = BLAKE3(POOL_ENTITLEMENT_TAG ‖ job_id[32] ‖ unit_id[32] ‖
+/// u64_le(generation) ‖ u8(kind) ‖ u32_le(occurrence))` (106-byte preimage).
+///
+/// The id names the EVENT, not the payee: `beneficiary` and `amount` are not
+/// inputs, so paying one event twice, to the same or to a different address,
+/// derives the same id, which the unique-entitlement check refuses.
+///
+/// `occurrence` must be 0 for the one-time kinds (`AcceptReimb`,
+/// `ReprovisionReimb`); a nonzero value is refused. For `ReassignReimb` it is
+/// the 0-based count of `ReassignReimb` entitlements already registered for the
+/// same `(job_id, unit_id, generation)`, read and incremented atomically with
+/// the registration. The row holding that count is NOT ratified, so the caller
+/// supplies the value; nothing in the chain derives it yet.
+pub fn entitlement_id(
+    job_id: &[u8; 32],
+    unit_id: &[u8; 32],
+    generation: u64,
+    kind: EntitlementKind,
+    occurrence: u32,
+) -> Result<[u8; 32], DecodeError> {
+    if !kind.is_repeatable() && occurrence != 0 {
+        return Err(DecodeError::BadFixedScalar {
+            ctx: match kind {
+                EntitlementKind::AcceptReimb => {
+                    "entitlement_id occurrence (AcceptReimb is one-time)"
+                }
+                _ => "entitlement_id occurrence (ReprovisionReimb is one-time)",
+            },
+            value: occurrence as u64,
+        });
+    }
+    let mut h = blake3::Hasher::new();
+    h.update(POOL_ENTITLEMENT_TAG);
+    h.update(job_id);
+    h.update(unit_id);
+    h.update(&generation.to_le_bytes());
+    h.update(&[kind.to_u8()]);
+    h.update(&occurrence.to_le_bytes());
+    Ok(*h.finalize().as_bytes())
+}
+
+// --------------------------------------------------------------------------- //
 // DependencyEdgeV1 — draft §F, 101 B (authoritative over the in-memory model)
 // --------------------------------------------------------------------------- //
 

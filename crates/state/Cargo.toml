@@ -8,6 +8,8 @@ description = "State management and transaction execution for SUM Chain"
 
 [dependencies]
 sumchain-primitives = { path = "../primitives" }
+# Frozen C1 wire: the ratified pool-id derivations (G1) and `EntitlementKind`.
+sumchain-wire = { workspace = true }
 sumchain-crypto = { path = "../crypto" }
 sumchain-storage = { path = "../storage" }
 sumchain-genesis = { path = "../genesis" }
