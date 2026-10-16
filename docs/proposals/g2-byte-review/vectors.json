@@ -1,0 +1,387 @@
+{
+ "title": "G2 byte-review draft vectors",
+ "status": "UNRATIFIED BYTE-REVIEW DRAFT. Semantics ratified 2026-10-16 (G2); bytes not ratified. Every vector is SYNTHETIC/UNRATIFIED.",
+ "keys": "test-only Ed25519 seeds [0x01;32]..[0x04;32]",
+ "domains": {
+  "D_VALSET": "SUMCHAIN/VALSET/v1\\0",
+  "D_VOTE": "SUMCHAIN/FINALITY/VOTE/v1\\0",
+  "D_MDIGEST": "SUMCHAIN/CONSENSUS-UPGRADE-MANIFEST/v1\\0",
+  "D_MSIGN": "SUMCHAIN/CONSENSUS-UPGRADE-MANIFEST/SIGN/v1\\0",
+  "D_HANDLER": "SUMCHAIN/CONSENSUS-UPGRADE-HANDLER/v1\\0",
+  "D_SIGNER": "SUMCHAIN/FINALITY/SIGNER/v1\\0",
+  "D_SIGNBYTES": "SUMCHAIN/FINALITY/SIGNBYTES/v1\\0"
+ },
+ "magics": {
+  "M_VOTE": "FVOTv1\\0",
+  "M_CERT": "FCRTv1\\0",
+  "M_EVID": "FEVDv1\\0",
+  "M_MANIFEST": "CUPMv1\\0",
+  "M_HINT": "UHNTv1\\0",
+  "M_SIGNER": "FSGNv1\\0",
+  "M_UCONFLICT": "UCEVv1\\0"
+ },
+ "vectors": [
+  {
+   "name": "pubkey[0]",
+   "object": "test key",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {
+    "seed": "0101010101010101010101010101010101010101010101010101010101010101"
+   },
+   "length": 32,
+   "hex": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+  },
+  {
+   "name": "pubkey[1]",
+   "object": "test key",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {
+    "seed": "0202020202020202020202020202020202020202020202020202020202020202"
+   },
+   "length": 32,
+   "hex": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"
+  },
+  {
+   "name": "pubkey[2]",
+   "object": "test key",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {
+    "seed": "0303030303030303030303030303030303030303030303030303030303030303"
+   },
+   "length": 32,
+   "hex": "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1"
+  },
+  {
+   "name": "pubkey[3]",
+   "object": "test key",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {
+    "seed": "0404040404040404040404040404040404040404040404040404040404040404"
+   },
+   "length": 32,
+   "hex": "ca93ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c"
+  },
+  {
+   "name": "valset n=4",
+   "object": "validator-set commitment preimage",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "G2-a, G2-c, G2-d",
+   "inputs": {},
+   "length": 149,
+   "hex": "53554d434841494e2f56414c5345542f76310004008a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1ca93ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c"
+  },
+  {
+   "name": "valset n=4 commitment",
+   "object": "validator-set commitment",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {},
+   "length": 32,
+   "hex": "566db25cadf7843040d25d312366a6d47f512d964de9e36d0a32ab10980b76fe"
+  },
+  {
+   "name": "valset n=2 commitment",
+   "object": "validator-set commitment",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {},
+   "length": 32,
+   "hex": "1259c941402c71a49c65efe0ea648063e4728cea56a3248d4c2107a66ab49dd5"
+  },
+  {
+   "name": "synthetic config commitment",
+   "object": "stand-in commitment",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {
+    "note": "draft header-only CCFGv1, chain 4242; not the merged codec"
+   },
+   "length": 32,
+   "hex": "afcb234f872390f110bbd92112b0b739962b202e5c2373f4dc658307f6ebdaf3"
+  },
+  {
+   "name": "vote precommit h=7 r=0 idx=1 preimage",
+   "object": "FinalityVoteV1 preimage",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "G2-a, G2-b",
+   "inputs": {
+    "height": 7,
+    "round": 0,
+    "type": "precommit",
+    "index": 1
+   },
+   "length": 139,
+   "hex": "53554d434841494e2f46494e414c4954592f564f54452f763100afcb234f872390f110bbd92112b0b739962b202e5c2373f4dc658307f6ebdaf301000700000000000000da6a3ac16fcdd5b5dae2204318364a9aaf7707f1675c35ac5a112b438a14c6a60000000002566db25cadf7843040d25d312366a6d47f512d964de9e36d0a32ab10980b76fe0100"
+  },
+  {
+   "name": "vote precommit h=7 r=0 idx=1 signature",
+   "object": "Ed25519",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {},
+   "length": 64,
+   "hex": "0fa9bb74ac0d98f3333b9c15e047a711f91d97cf526a1b113334f12cc4f1331fc9e9e3f2388b5702a22406fea9940c07e0e643f3f0d7f0f3aaa80ce9f65d9109"
+  },
+  {
+   "name": "vote precommit h=7 r=0 idx=1 wire",
+   "object": "FinalityVoteV1 wire",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {},
+   "length": 184,
+   "hex": "46564f54763100afcb234f872390f110bbd92112b0b739962b202e5c2373f4dc658307f6ebdaf301000700000000000000da6a3ac16fcdd5b5dae2204318364a9aaf7707f1675c35ac5a112b438a14c6a60000000002566db25cadf7843040d25d312366a6d47f512d964de9e36d0a32ab10980b76fe01000fa9bb74ac0d98f3333b9c15e047a711f91d97cf526a1b113334f12cc4f1331fc9e9e3f2388b5702a22406fea9940c07e0e643f3f0d7f0f3aaa80ce9f65d9109"
+  },
+  {
+   "name": "vote nil prevote h=7 r=1 idx=0 wire",
+   "object": "FinalityVoteV1 wire",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {},
+   "length": 184,
+   "hex": "46564f54763100afcb234f872390f110bbd92112b0b739962b202e5c2373f4dc658307f6ebdaf30100070000000000000000000000000000000000000000000000000000000000000000000000000000000100000001566db25cadf7843040d25d312366a6d47f512d964de9e36d0a32ab10980b76fe00003426c3b9bb975b3ef8e990aca971a682e123065add7898561985dac10284b8e6111cc596431a007d5f8c8c3cfada053f7e63d346541d3c610222ef94914fa705"
+  },
+  {
+   "name": "certificate n=4 h=7 r=0 signers {0,1,3}",
+   "object": "FinalityCertificateV1",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "G2-a",
+   "inputs": {
+    "n": 4,
+    "k": 3
+   },
+   "length": 317,
+   "hex": "464352547631000100afcb234f872390f110bbd92112b0b739962b202e5c2373f4dc658307f6ebdaf30700000000000000da6a3ac16fcdd5b5dae2204318364a9aaf7707f1675c35ac5a112b438a14c6a600000000566db25cadf7843040d25d312366a6d47f512d964de9e36d0a32ab10980b76fe03000000bab12e01388c84fc591cced48e18c0d347b6cda1e10bc76b1f33cbdf46f3ca9ddd495022a8b449560885f2472ad3a8de18b43d606a321e73b158596263353d0e01000fa9bb74ac0d98f3333b9c15e047a711f91d97cf526a1b113334f12cc4f1331fc9e9e3f2388b5702a22406fea9940c07e0e643f3f0d7f0f3aaa80ce9f65d91090300fe930aef76bfb0c91b0e0d80b2445a08a5e9558761df7ea5347376aff753af00dd99a11a87e81c09fd3063959ce28590ffada8f89d3acdf5085f7fb670af550c"
+  },
+  {
+   "name": "certificate n=2 h=7 r=0 signers {0,1}",
+   "object": "FinalityCertificateV1",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "G2-a",
+   "inputs": {
+    "n": 2,
+    "k": 2
+   },
+   "length": 251,
+   "hex": "464352547631000100afcb234f872390f110bbd92112b0b739962b202e5c2373f4dc658307f6ebdaf30700000000000000da6a3ac16fcdd5b5dae2204318364a9aaf7707f1675c35ac5a112b438a14c6a6000000001259c941402c71a49c65efe0ea648063e4728cea56a3248d4c2107a66ab49dd5020000002c46f212573c4ad4fb06751959847b98af26b1607757db6f26bd83b696a71fd33fbbd950c8e8e39a2473123ecd5b296b35c734d83e8561f4095f4f33816f1a0a0100126270cb02f73bf8cf0f1470486b591cea50e7775fbf15ff753bb2809df41593078f7bf65160feace360c17a99d139900c3327bf102d85389aafd093a59dfa0b"
+  },
+  {
+   "name": "certificate CF key h=7",
+   "object": "storage key (BE)",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {},
+   "length": 40,
+   "hex": "0000000000000007da6a3ac16fcdd5b5dae2204318364a9aaf7707f1675c35ac5a112b438a14c6a6"
+  },
+  {
+   "name": "finalized pointer h=7",
+   "object": "storage value (LE)",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {},
+   "length": 40,
+   "hex": "0700000000000000da6a3ac16fcdd5b5dae2204318364a9aaf7707f1675c35ac5a112b438a14c6a6"
+  },
+  {
+   "name": "equivocation evidence idx=2 h=7 r=0 precommit",
+   "object": "EquivocationEvidenceV1",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "G2-b",
+   "inputs": {},
+   "length": 363,
+   "hex": "464556447631000100afcb234f872390f110bbd92112b0b739962b202e5c2373f4dc658307f6ebdaf301000700000000000000c639522df8737bd7ae16ccb63b253d4dabb69ae27a3f94d175aee17cb5375cba0000000002566db25cadf7843040d25d312366a6d47f512d964de9e36d0a32ab10980b76fe020030523bced03202e46c4bc878adf092c15c2a86af24f7d92f5d3ba3779c03800ed37c1d3f14d851f3fe6d19fe1646b24d5d89031f3245a5910b5b938473443a0eafcb234f872390f110bbd92112b0b739962b202e5c2373f4dc658307f6ebdaf301000700000000000000da6a3ac16fcdd5b5dae2204318364a9aaf7707f1675c35ac5a112b438a14c6a60000000002566db25cadf7843040d25d312366a6d47f512d964de9e36d0a32ab10980b76fe020080aa5d9172c34527cf151c8a0bd9296e7bee9ad7f43cb4ec1cc3e39b8a8d039760a93c7837fd05a5102bd54961b3f37b74474e00d139322b9f27f2e22567200d"
+  },
+  {
+   "name": "equivocation evidence key",
+   "object": "storage key (BE)",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {},
+   "length": 15,
+   "hex": "000000000000000700000000020002"
+  },
+  {
+   "name": "handler digest certified-finality v1",
+   "object": "handler identity",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {
+    "name": "certified-finality",
+    "version": 1
+   },
+   "length": 32,
+   "hex": "65a561cbc3082dbc5f312a666acb4c5b5d86bca13d452d2db5ebe8e295ea2c1e"
+  },
+  {
+   "name": "manifest A body",
+   "object": "ConsensusUpgradeManifestV1 body",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "G2-c",
+   "inputs": {
+    "chain_id": 4242,
+    "genesis_block_hash": "db35ed1bed1296e6fc2786072a1a9ec30813e79e7f8f0873d578d7a11cb5f527",
+    "sequence": 1,
+    "previous_manifest_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "old_config_commitment": "afcb234f872390f110bbd92112b0b739962b202e5c2373f4dc658307f6ebdaf3",
+    "new_config_commitment": "c7bc0adfc23547011944cd316888509538ce17bb5753890758549842a3e47d32",
+    "protocol_version": 2,
+    "checkpoint_height": 90000,
+    "checkpoint_block_hash": "1cf00ab6588f7c77dce79299c774a40bcdf55bd8447d7a8b50294abd1e4f5320",
+    "activation_height": 100000,
+    "signing_deadline_height": 95000,
+    "validator_set_commitment": "1259c941402c71a49c65efe0ea648063e4728cea56a3248d4c2107a66ab49dd5",
+    "quorum_rule": 1,
+    "handler_digest": "65a561cbc3082dbc5f312a666acb4c5b5d86bca13d452d2db5ebe8e295ea2c1e"
+   },
+   "length": 276,
+   "hex": "4355504d76310001009210000000000000db35ed1bed1296e6fc2786072a1a9ec30813e79e7f8f0873d578d7a11cb5f52701000000000000000000000000000000000000000000000000000000000000000000000000000000afcb234f872390f110bbd92112b0b739962b202e5c2373f4dc658307f6ebdaf3c7bc0adfc23547011944cd316888509538ce17bb5753890758549842a3e47d320200905f0100000000001cf00ab6588f7c77dce79299c774a40bcdf55bd8447d7a8b50294abd1e4f5320a08601000000000018730100000000001259c941402c71a49c65efe0ea648063e4728cea56a3248d4c2107a66ab49dd50165a561cbc3082dbc5f312a666acb4c5b5d86bca13d452d2db5ebe8e295ea2c1e"
+  },
+  {
+   "name": "manifest A digest",
+   "object": "manifest digest",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {},
+   "length": 32,
+   "hex": "9fdf6972973a796fabd02f1ea2fc279e7440466c940151a220ded3c4b6ade387"
+  },
+  {
+   "name": "manifest A n=2 both signers",
+   "object": "ConsensusUpgradeManifestV1",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {},
+   "length": 410,
+   "hex": "4355504d76310001009210000000000000db35ed1bed1296e6fc2786072a1a9ec30813e79e7f8f0873d578d7a11cb5f52701000000000000000000000000000000000000000000000000000000000000000000000000000000afcb234f872390f110bbd92112b0b739962b202e5c2373f4dc658307f6ebdaf3c7bc0adfc23547011944cd316888509538ce17bb5753890758549842a3e47d320200905f0100000000001cf00ab6588f7c77dce79299c774a40bcdf55bd8447d7a8b50294abd1e4f5320a08601000000000018730100000000001259c941402c71a49c65efe0ea648063e4728cea56a3248d4c2107a66ab49dd50165a561cbc3082dbc5f312a666acb4c5b5d86bca13d452d2db5ebe8e295ea2c1e020000007d2ea458b39b94763fd45f11943bd32ff730caacddcc245ff2f1978742cd84eec930134d2c6808d84d90b987e00c6f0a1aefc3365485c0a87192c45d38d1680401005f07effe4c3c9d9bffbdbfae2db5ef22d181cb17e89914ea4937d590e1922803ae8ca2a357c8fe79f60a26c582c9310629fd2a26181ee77c3bf41d601279d403"
+  },
+  {
+   "name": "manifest B body",
+   "object": "ConsensusUpgradeManifestV1 body",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "G2-c",
+   "inputs": {
+    "chain_id": 4242,
+    "genesis_block_hash": "db35ed1bed1296e6fc2786072a1a9ec30813e79e7f8f0873d578d7a11cb5f527",
+    "sequence": 1,
+    "previous_manifest_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "old_config_commitment": "afcb234f872390f110bbd92112b0b739962b202e5c2373f4dc658307f6ebdaf3",
+    "new_config_commitment": "c7bc0adfc23547011944cd316888509538ce17bb5753890758549842a3e47d32",
+    "protocol_version": 2,
+    "checkpoint_height": 90000,
+    "checkpoint_block_hash": "1cf00ab6588f7c77dce79299c774a40bcdf55bd8447d7a8b50294abd1e4f5320",
+    "activation_height": 100100,
+    "signing_deadline_height": 95000,
+    "validator_set_commitment": "1259c941402c71a49c65efe0ea648063e4728cea56a3248d4c2107a66ab49dd5",
+    "quorum_rule": 1,
+    "handler_digest": "65a561cbc3082dbc5f312a666acb4c5b5d86bca13d452d2db5ebe8e295ea2c1e"
+   },
+   "length": 276,
+   "hex": "4355504d76310001009210000000000000db35ed1bed1296e6fc2786072a1a9ec30813e79e7f8f0873d578d7a11cb5f52701000000000000000000000000000000000000000000000000000000000000000000000000000000afcb234f872390f110bbd92112b0b739962b202e5c2373f4dc658307f6ebdaf3c7bc0adfc23547011944cd316888509538ce17bb5753890758549842a3e47d320200905f0100000000001cf00ab6588f7c77dce79299c774a40bcdf55bd8447d7a8b50294abd1e4f5320048701000000000018730100000000001259c941402c71a49c65efe0ea648063e4728cea56a3248d4c2107a66ab49dd50165a561cbc3082dbc5f312a666acb4c5b5d86bca13d452d2db5ebe8e295ea2c1e"
+  },
+  {
+   "name": "manifest B digest",
+   "object": "manifest digest",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {},
+   "length": 32,
+   "hex": "ae9a20148e100beab57d6cdf005df3f2e6ec604f21e607ed43977b1819afe522"
+  },
+  {
+   "name": "manifest B n=2 both signers",
+   "object": "ConsensusUpgradeManifestV1",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {},
+   "length": 410,
+   "hex": "4355504d76310001009210000000000000db35ed1bed1296e6fc2786072a1a9ec30813e79e7f8f0873d578d7a11cb5f52701000000000000000000000000000000000000000000000000000000000000000000000000000000afcb234f872390f110bbd92112b0b739962b202e5c2373f4dc658307f6ebdaf3c7bc0adfc23547011944cd316888509538ce17bb5753890758549842a3e47d320200905f0100000000001cf00ab6588f7c77dce79299c774a40bcdf55bd8447d7a8b50294abd1e4f5320048701000000000018730100000000001259c941402c71a49c65efe0ea648063e4728cea56a3248d4c2107a66ab49dd50165a561cbc3082dbc5f312a666acb4c5b5d86bca13d452d2db5ebe8e295ea2c1e02000000848f745455a78a1f6192c227ee847b44540ad55adc5178a0a679f4d332cfa4767b75bec43ed175a0ac7115278d70dcfa8e827494ebd2d6a2f0e50d8975261a060100e5d066d9eed494c9d34cc5968d53361d0d8be664b5bb44e0a4039e2a6ddf3f43dbcb46a592487fc38ddda8f3db12abfd7b200ebfe0a1adc45372026d1d1b4403"
+  },
+  {
+   "name": "upgrade-conflict evidence A/B sequence 1",
+   "object": "UpgradeConflictEvidenceV1",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "G2-c",
+   "inputs": {},
+   "length": 837,
+   "hex": "5543455676310001009a0100004355504d76310001009210000000000000db35ed1bed1296e6fc2786072a1a9ec30813e79e7f8f0873d578d7a11cb5f52701000000000000000000000000000000000000000000000000000000000000000000000000000000afcb234f872390f110bbd92112b0b739962b202e5c2373f4dc658307f6ebdaf3c7bc0adfc23547011944cd316888509538ce17bb5753890758549842a3e47d320200905f0100000000001cf00ab6588f7c77dce79299c774a40bcdf55bd8447d7a8b50294abd1e4f5320a08601000000000018730100000000001259c941402c71a49c65efe0ea648063e4728cea56a3248d4c2107a66ab49dd50165a561cbc3082dbc5f312a666acb4c5b5d86bca13d452d2db5ebe8e295ea2c1e020000007d2ea458b39b94763fd45f11943bd32ff730caacddcc245ff2f1978742cd84eec930134d2c6808d84d90b987e00c6f0a1aefc3365485c0a87192c45d38d1680401005f07effe4c3c9d9bffbdbfae2db5ef22d181cb17e89914ea4937d590e1922803ae8ca2a357c8fe79f60a26c582c9310629fd2a26181ee77c3bf41d601279d4039a0100004355504d76310001009210000000000000db35ed1bed1296e6fc2786072a1a9ec30813e79e7f8f0873d578d7a11cb5f52701000000000000000000000000000000000000000000000000000000000000000000000000000000afcb234f872390f110bbd92112b0b739962b202e5c2373f4dc658307f6ebdaf3c7bc0adfc23547011944cd316888509538ce17bb5753890758549842a3e47d320200905f0100000000001cf00ab6588f7c77dce79299c774a40bcdf55bd8447d7a8b50294abd1e4f5320048701000000000018730100000000001259c941402c71a49c65efe0ea648063e4728cea56a3248d4c2107a66ab49dd50165a561cbc3082dbc5f312a666acb4c5b5d86bca13d452d2db5ebe8e295ea2c1e02000000848f745455a78a1f6192c227ee847b44540ad55adc5178a0a679f4d332cfa4767b75bec43ed175a0ac7115278d70dcfa8e827494ebd2d6a2f0e50d8975261a060100e5d066d9eed494c9d34cc5968d53361d0d8be664b5bb44e0a4039e2a6ddf3f43dbcb46a592487fc38ddda8f3db12abfd7b200ebfe0a1adc45372026d1d1b4403"
+  },
+  {
+   "name": "upgrade-conflict evidence key sequence 1",
+   "object": "storage key",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {},
+   "length": 28,
+   "hex": "757067726164652f636f6e666c6963742f76312f0000000000000001"
+  },
+  {
+   "name": "hint before H (nothing applied; A pending)",
+   "object": "UpgradeHintV1",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "G2-c (hint only)",
+   "inputs": {},
+   "length": 122,
+   "hex": "55484e547631000100db35ed1bed1296e6fc2786072a1a9ec30813e79e7f8f0873d578d7a11cb5f52700000000000000000000000000000000000000000000000000000000000000000000000000000000019fdf6972973a796fabd02f1ea2fc279e7440466c940151a220ded3c4b6ade387a086010000000000"
+  },
+  {
+   "name": "hint after H (A applied; nothing pending)",
+   "object": "UpgradeHintV1",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {},
+   "length": 122,
+   "hex": "55484e547631000100db35ed1bed1296e6fc2786072a1a9ec30813e79e7f8f0873d578d7a11cb5f52701000000000000009fdf6972973a796fabd02f1ea2fc279e7440466c940151a220ded3c4b6ade3870000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+  },
+  {
+   "name": "signer state initialized floor=7 (validator 1)",
+   "object": "SignerStateV1",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "G2-b",
+   "inputs": {
+    "counter": 0,
+    "floor_height": 7
+   },
+   "length": 284,
+   "hex": "4653474e763100010000000000000000009210000000000000db35ed1bed1296e6fc2786072a1a9ec30813e79e7f8f0873d578d7a11cb5f5278139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b3940700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000052ced2f6b8fa884bfe516c45e576b63e9e79139a0720b1d21bea92b533300eff"
+  },
+  {
+   "name": "signer mirror initialized",
+   "object": "SignerMirrorV1",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {},
+   "length": 21,
+   "hex": "000000000000000007000000000000000000000000"
+  },
+  {
+   "name": "signer state after precommit h=7 r=0 (locked)",
+   "object": "SignerStateV1",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "G2-b",
+   "inputs": {
+    "counter": 1,
+    "last": "the precommit vector above",
+    "lock": [
+     7,
+     0,
+     "da6a3ac16fcdd5b5dae2204318364a9aaf7707f1675c35ac5a112b438a14c6a6"
+    ]
+   },
+   "length": 284,
+   "hex": "4653474e763100010001000000000000009210000000000000db35ed1bed1296e6fc2786072a1a9ec30813e79e7f8f0873d578d7a11cb5f5278139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394070000000000000001070000000000000000000000034d7d60bcfbf279bb65e1ecad534e9d0914e8166bf3282714cc97f60c61d892090fa9bb74ac0d98f3333b9c15e047a711f91d97cf526a1b113334f12cc4f1331fc9e9e3f2388b5702a22406fea9940c07e0e643f3f0d7f0f3aaa80ce9f65d910901070000000000000000000000da6a3ac16fcdd5b5dae2204318364a9aaf7707f1675c35ac5a112b438a14c6a61e03079bb2c963ac5949969c2ba6c59977f56cfbe3b584d33b1d19c7ebfe215c"
+  },
+  {
+   "name": "signer mirror after precommit",
+   "object": "SignerMirrorV1",
+   "status": "SYNTHETIC/UNRATIFIED",
+   "serves": "",
+   "inputs": {},
+   "length": 21,
+   "hex": "010000000000000007000000000000000000000003"
+  }
+ ]
+}
