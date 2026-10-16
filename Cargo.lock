@@ -4478,6 +4478,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sumchain-finality-foundations"
+version = "0.4.0"
+dependencies = [
+ "ed25519-dalek",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "sumchain-genesis"
 version = "0.4.0"
 dependencies = [

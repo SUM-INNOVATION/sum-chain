@@ -1,0 +1,20 @@
+[package]
+name = "sumchain-finality-foundations"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "DORMANT library code for the G2 consensus-foundation rules ratified on 2026-10-16 (#270, #268): a durable-signer safety core and bootstrap-authorization acceptance logic over abstract types. Not wired into any node path; freezes no bytes; is not certified finality."
+publish = false
+
+# Deliberately no dependency on any other workspace crate: nothing here may reach
+# block import, consensus or storage until a reviewed wiring change, and
+# `tests/dormant.rs` fails if any workspace crate starts depending on this one.
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Tests sign synthetic digests with real Ed25519 keys. The signed bytes are
+# synthetic test payloads, not a proposal for any vote or authorization encoding.
+ed25519-dalek = { workspace = true }
