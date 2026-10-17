@@ -7,7 +7,13 @@
 - **Files:** `generate.py` (stdlib-only generator), `check.py` (mechanical checks), `vectors.json`, `crosscheck-20260929.json`.
 
 - **Decided since drafting (owner, 2026-10-16):** E1. Strict Ed25519 verification is the approved design direction for **new** finality and upgrade signatures, and historical signature verification stays unchanged. This is a direction, not ratified bytes.
-- **Still unresolved:** every other choice, namely D0, D2–D6, M1–M5, H1 and S1.
+- **Ratified since drafting (owner, 2026-10-17), group A1:**
+  - D0: integers are little-endian in these objects and preimages, and big-endian only in database keys;
+  - D4: round fields are `u32` with `round ≤ 2^20`;
+  - D2: the certificate carries no explicit validator count; it is implied by the validator-set commitment.
+
+  Dormant code for these conventions is in `crates/finality-foundations` (`encoding`, `certificate`). Ratifying the conventions froze no object layout and no database-key composition.
+- **Still unresolved:** D3, D5, D6, M1–M5, H1 and S1 (groups A2–A5), and every object layout and key composition in this draft.
 
 These semantics alone are **not** complete certified finality. See §10 for what is still missing.
 
