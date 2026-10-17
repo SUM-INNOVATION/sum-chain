@@ -93,6 +93,22 @@ Base: sum-chain `main` 2c275242. SNIP references are to `main` b4786c0b. OmniNod
 | `union_comparison_over_the_same_sequence` | U keeps `[2,1,1,2]` through the reassignment, but counts a stale bit from an archive moved off a chunk that deleted it (3 counted, 2 holders). |
 | `l_indexes_one_epoch_union_needs_a_larger_epoch_bound` | With E_max = 1, L's re-indexing passes and U's two-epoch index is refused. |
 
+### P5 readiness-window model
+**Source:** this branch, `crates/state/tests/retention_p5_grace_model.rs`, headed "MODEL OF AN UNRATIFIED PROPOSAL".
+- It changes no production code.
+- It chooses no value of G. Each test runs over the test parameters G ∈ {1, 5, 20, 64}, and G = 0 where stated.
+- The rule is evaluated over the canonical event log, so a reorg replaces a suffix of that log.
+
+| Test | Pins |
+|---|---|
+| `p5_attesting_before_g_is_challengeable_from_the_attestation` | A newly assigned archive that attests at h < e + G is challengeable from h, and not before. |
+| `p5_an_unattested_archive_becomes_challengeable_exactly_at_e_plus_g` | It is not challengeable at e + G − 1, and is challengeable at e + G and after. |
+| `p5_g_zero_is_todays_behaviour` | With G = 0, every archive assigned under the latest epoch is a target at once, and an archive moved off the chunk is not. |
+| `p5_an_archive_assigned_before_and_after_is_unaffected` | A continuing assignee has no gap at the reassignment. |
+| `p5_a_reorg_across_the_boundary_recomputes_from_the_canonical_log` | Reorging away the reassignment removes the window. A reassignment at another height anchors the window there. |
+| `p5_two_reassignments_in_a_row_restart_the_window` | An archive not yet challengeable when a second reassignment keeps it assigned gets a new window from the new epoch. One already challengeable stays so. |
+| `p5_results_are_deterministic` | Identical challengeability traces on repeated runs, for each G. |
+
 ## 4. Comparison
 
 | | L (proposed) | U (the #129 text) | L′ |
@@ -127,19 +143,29 @@ Under L, coverage after any reassignment depends on archives re-fetching and re-
   - each refuses chunks no longer assigned to it.
 - **P3. V2 re-fetch (SNIP).** A newly assigned archive obtains each missing chunk from a current holder (or the owner), verified against the chain Merkle root and chunk count, with no owner action.
 - **P4. Re-attestation (SNIP).** After re-fetch, the archive submits `AcceptAssignmentV2` for exactly held ∩ assigned(c, S(e_last)). On restart it rebuilds the held set from disk and resumes.
-- **P5. PoR-safe transition (SNIP + an owner decision).** Either SNIP completes P3 within the PoR response window, or the chain grants newly assigned archives a grace period before they become challengeable. **This is an open owner choice.**
+- **P5. PoR-safe transition. Recommendation, awaiting ratification: a chain-side readiness window with G committed.**
+  - Under the targeting gate, an archive that a reassignment newly assigns a chunk becomes challengeable for that chunk at the first height at which either:
+    - it has attested the chunk in the latest epoch; or
+    - `h ≥ e + G`, where e is the reassignment height.
+  - Archives assigned the chunk both before and after the reassignment, and already challengeable, are unaffected. G = 0 is today's behaviour.
+  - It is deterministic, and it uses only committed state.
+  - **Alternative:** no chain change, relying on SNIP completing P3 within the PoR response window. Whether an honest archive is penalised would then depend on fetch timing.
+  - **Cost:** it amends R-E5 ("PoR targeting unchanged") for newly assigned archives only. It also needs G as a committed field (§6).
+  - **Condition:** this works without a new gate only if no network has set the targeting gate. On mainnet that gate is unset.
 - **P6. V2-aware GC (SNIP).**
   - The retained set includes every chunk the archive is assigned under the latest epoch of every non-Abandoned V2 file.
   - When ownership or retention is uncertain, data is preserved.
   - This is coordinated with separate SNIP GC work.
-- **P7. Reassignment submitter (SNIP owner tool and/or OmniNode for pool output files, or a chain-side owner decision).**
-  - When `reassignment_needed` is true, a component submits `ReassignChunksV2`; otherwise reassignment is made automatic chain-side.
-  - Which identity owns pool output files decides who may submit it.
+- **P7. Reassignment submitter. Recommendation, awaiting ratification: the SNIP owner tool and OmniNode, using the existing owner-authorized builder.**
+  - When `reassignment_needed` is true, the file owner's tool builds the transaction with the existing `storage_buildReassignChunksV2` RPC, signs it with the owner's existing key and submits `ReassignChunksV2`. For pool output files, OmniNode does this as their owner.
+  - This needs no new signing authority and no consensus or schema change. The owner-only rule already applies on mainnet.
+  - A SNIP change for the owner tool is being prepared.
+  - **Deferred alternative:** automatic chain-side reassignment, or letting any account submit it once the chain's own condition holds. That needs a gated executor change and a per-block bound.
 - **P8. Gate state (operations).** The mainnet state of the reassignment and PoR-targeting gates is confirmed before the pool gate opens.
 
-## 6. B and T: an explicit schema-evolution proposal
+## 6. B, T and G: an explicit schema-evolution proposal
 
-### Finding: no existing approved encoding can carry B or T without changing its contract
+### Finding: no existing approved encoding can carry B, T or G without changing its contract
 - **Schema 2 is frozen** (`consensus_config/schema.rs:28-30, 255-262`: "never changes again"). `PRODUCTION` writes it (`:666-668`). Its ten added fields (#299) are:
   - `0x103f`, `0x1042`, `0x1040`;
   - `0x0720`;
@@ -148,7 +174,7 @@ Under L, coverage after any reassignment depends on archives re-fetching and re-
   - `0x0116`;
   - `0x252a`.
 
-  Amending it is not available.
+  **This proposal does not amend schema 2.** Its registry is fixed by #299, and "unreleased" is not permission to change it.
 - **`0x0720` `ComputePoolParamsV1` is fixed-width,** 321 B, with no optional, reserved or extension field (`sumchain-wire/src/compute_pool_params.rs:16-60`).
   - Its golden vectors are append-only.
   - Its upgrade rule is "a change is a V2 type with its own magic, schema version and activation height; V1 bytes are never reinterpreted" (`:81-85`).
@@ -160,36 +186,41 @@ Under L, coverage after any reassignment depends on archives re-fetching and re-
   - `fields::build` destructures every parameter struct without `..`, so any new genesis key is a code change that must be classified.
 
 ### Proposal (for ratification; no number assumed)
-- **Schema.** A later schema, its number allocated at ratification, extends the newest schema with an append-only list of two `AddedField`s. `PRODUCTION` knows it as a draft (start is refused while any of its fields is non-absent) until a reviewed release writes it.
-- **Fields.** Two scalar parameters, in the `0x0100–0x01ff` range. Their ids are the next unused in that range at ratification; on today's public main, `0x0117` and `0x0118` are unused.
+- **Schema.** A later schema, its number allocated at ratification, extends the newest schema with an append-only list of three `AddedField`s. `PRODUCTION` knows it as a draft (start is refused while any of its fields is non-absent) until a reviewed release writes it.
+- **Fields.** Three scalar parameters in the `0x0100–0x01ff` range. **Their ids are allocated at ratification;** this proposal reserves none.
 
 | Field | Genesis key | Type | Meaning |
 |---|---|---|---|
 | B | `retention_per_block_budget_ns` | `Ty::U64`, optional, `Source::Param` | the per-block recompute budget, ns |
 | T | `retention_t_recompute_bound_ns` | `Ty::U64`, optional, `Source::Param` | the ratified per-recompute bound, ns |
+| G | `por_reassignment_readiness_blocks` | `Ty::U64`, optional, `Source::Param` | P5's readiness window, in blocks |
 
-- **Naming.** Neither name ends in `_from_height`, so neither is an activation gate. The activation digest and the protocol digest (gates plus compiled limits; `crates/genesis/tests/activation_digest.rs` selects `*_from_height` `Option<u64>` fields) do not change, and nor does the peer handshake.
+- **Naming.** No name ends in `_from_height`, so none is an activation gate. The activation digest and the protocol digest (gates plus compiled limits; `crates/genesis/tests/activation_digest.rs` selects `*_from_height` `Option<u64>` fields) do not change, and nor does the peer handshake.
 - **Value rules,** checked on every configuration built or decoded in that schema, like `check_metering_relations`:
   - B and T are both present or both absent;
   - present only while `0x0720` is present;
   - each ≥ 1;
   - relation 3: `(max_retention_updates_per_block as u128) × (T as u128) ≤ (B as u128)`, where `max_retention_updates_per_block` is read from `0x0720`. A u64 × u64 product cannot overflow u128, so this is exact. For whole-number m it is equivalent to m ≤ ⌊B/T⌋.
-- **Genesis and activation.** `compute_pool_retention_inputs` sources `PerBlockBudgetNs` from B, and the renamed `TRecomputeBoundNs` from T.
+  - **G:**
+    - it may be present only while `por_assignment_targeting_enabled_from_height` is declared;
+    - when present, G ≥ 1 (absence means G = 0, today's behaviour, so the same behaviour has one encoding);
+    - pool activation is refused while G is absent. This presence rule is part of the ratification choice; the alternative is to allow pool activation with G absent, meaning 0.
+- **Genesis and activation.** `compute_pool_retention_inputs` sources `PerBlockBudgetNs` from B, and the renamed `TRecomputeBoundNs` from T. The targeting path reads G from the committed configuration at the executing block.
   - Relation 3 is checked at genesis validation whenever both are declared.
   - Activation is refused while either is absent, as today.
   - Execution enforces only the count, through `RecomputeCursor::select`. **No node measures time.**
 - **Census.**
-  - The two new `ChainParams` fields are classified as COMMITTED through the new schema's `AddedField`s. No exclusion row is needed.
+  - The three new `ChainParams` fields are classified as COMMITTED through the new schema's `AddedField`s. No exclusion row is needed.
   - `consensus_config_census.rs` gains nothing to exclude.
   - `consensus_constants_census.tsv` is unaffected unless L's single-epoch rule is introduced as a named compiled constant. In that case it needs a row (COMMITTED in `0x2100–0x2fff` under the same schema), or the rule stays structural with no constant.
   - The B0 aggregate-verify constant stays uncommitted and unread.
 - **Migration and compatibility.**
   - An existing schema-1 or schema-2 record is carried forward by the stopped-node `acknowledge-consensus-config-schema`, which changes no rule: absent fields mean pre-field behaviour.
   - No state rows and no database migration beyond that record.
-  - A chain that declares no `compute_pool_params` (mainnet today) keeps both fields absent, so its behaviour is unchanged.
+  - A chain that declares no `compute_pool_params` and no targeting gate (mainnet today) keeps all three fields absent, so its behaviour is unchanged.
   - Older binaries refuse a genesis that names the new keys (fail-closed).
   - Other draft schemas may claim numbers, so the number is allocated at ratification.
-- **Why commit B and T.** Ratified relation 3 is part of the activation condition of a committed gate. Committing B and T makes every node validate the same relation over the same declared values. The alternative, classifying them as excluded genesis-only inputs, contradicts the inclusion rule's intent for activation-gating values and is not recommended.
+- **Why commit B, T and G.** G changes which archives are challengeable, which is a validity-relevant outcome, so every node must read the same value. Ratified relation 3 is part of the activation condition of a committed gate. Committing B and T makes every node validate the same relation over the same declared values. The alternative, classifying them as excluded genesis-only inputs, contradicts the inclusion rule's intent for activation-gating values and is not recommended.
 
 ### Derived values (no field)
 - **R_max** := `assignment_replication_factor` (`0x010c`, already committed). Changing it while the pool gate is set is refused.
@@ -206,6 +237,7 @@ Under L, coverage after any reassignment depends on archives re-fetching and re-
 - `finality_depth`;
 - B;
 - T;
+- G;
 - `assignment_replication_factor` (= R_max);
 - E_max = 1;
 - C_ret (derived);
@@ -214,13 +246,15 @@ Under L, coverage after any reassignment depends on archives re-fetching and re-
 **OBSERVATIONS** (inform the choice of values only; never read by a node; not guaranteed bounds):
 - the measured `t_recompute` p99 on reference hardware, which is still to be measured;
 - any per-block or per-call millisecond figure;
+- observed re-fetch times for a newly assigned archive;
 - block-interval figures used to translate `output_availability_blocks` into wall time (for example, 200 blocks at an observed 1.5 s interval is about 5 min).
 
-T is chosen as a committed value at or above the observed p99. Choosing it is a ratification act, not a measurement in consensus.
+T is chosen as a committed value at or above the observed p99. G is chosen as a committed value at or above the observed re-fetch time plus a margin.
+
+Choosing either is a ratification act that is informed by observations; no node measures anything in consensus.
 
 ## 8. What this proposal does not decide
-- The values of `output_availability_blocks`, F, M, B and T.
+- The values of `output_availability_blocks`, F, M, B, T and G.
 - The bytes of the status-generation row and the retention namespace (decided with the C-series layouts).
-- P5's choice between a SNIP response-window guarantee and a chain-side grace period.
-- P7's submitter.
+- Ratification of the P5 and P7 recommendations (§5). Both await the owner.
 - Activation of anything.
