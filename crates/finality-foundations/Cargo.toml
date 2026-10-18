@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "DORMANT library code for the G2 consensus-foundation rules ratified on 2026-10-16 (#270, #268): a durable-signer safety core and bootstrap-authorization acceptance logic over abstract types. Not wired into any node path; freezes no bytes; is not certified finality."
+description = "DORMANT library code for the G2 consensus-foundation rules ratified on 2026-10-16 (#270, #268): a durable-signer safety core and bootstrap-authorization acceptance logic over abstract types, the A1 encoding conventions, and the ratified FinalityVoteV1 format with strict (E1) verification. Not wired into any node path; is not certified finality."
 publish = false
 
 # Deliberately no dependency on any other workspace crate: nothing here may reach
@@ -13,8 +13,12 @@ publish = false
 # `tests/dormant.rs` fails if any workspace crate starts depending on this one.
 [dependencies]
 thiserror = { workspace = true }
+# E1 strict verification of FinalityVoteV1 signatures (`vote`). The
+# `legacy_compatibility` feature must never be enabled anywhere in the
+# workspace: `tests/vote_v1.rs` fails if a manifest names it.
+ed25519-dalek = { workspace = true }
 
 [dev-dependencies]
-# Tests sign synthetic digests with real Ed25519 keys. The signed bytes are
-# synthetic test payloads, not a proposal for any vote or authorization encoding.
-ed25519-dalek = { workspace = true }
+# Test vectors in tests/vectors/finality_vote_v1.json.
+hex = { workspace = true }
+serde_json = { workspace = true }

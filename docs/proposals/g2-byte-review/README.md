@@ -13,7 +13,17 @@
   - D2: the certificate carries no explicit validator count; it is implied by the validator-set commitment.
 
   Dormant code for these conventions is in `crates/finality-foundations` (`encoding`, `certificate`). Ratifying the conventions froze no object layout and no database-key composition.
-- **Still unresolved:** D3, D5, D6, M1–M5, H1 and S1 (groups A2–A5), and every object layout and key composition in this draft.
+- **Ratified since drafting (owner, 2026-10-17), group V: the finality vote (§3)**, with choices V-1 to V-6:
+  - the 113-byte body in the §3 field order (V-1);
+  - the 26-byte `D_VOTE` domain and the 139-byte pure-Ed25519 preimage `D_VOTE ‖ body`, verified under E1;
+  - the 184-byte wire form (V-5);
+  - the explicit mapping `step = vote_type + 1` (V-2);
+  - an all-zero `block_id` as nil (V-3);
+  - the validator-set commitment field (V-4);
+  - canonical, non-small-order validator keys at set construction (V-6).
+
+  Dormant code is in `crates/finality-foundations` (`vote`); its tests and E1 edge-case vectors are `tests/vote_v1.rs` and `tests/vectors/finality_vote_v1.json`. Nothing calls it and nothing is active. Historical signature verification is unchanged. Ratifying the vote froze no other object layout: not the certificate, not the validator-set commitment preimage (§2), and no database key.
+- **Still unresolved:** D3, D5, D6, M1–M5, H1 and S1 (groups A2–A5), and every object layout and key composition in this draft other than the vote.
 
 These semantics alone are **not** complete certified finality. See §10 for what is still missing.
 
@@ -55,13 +65,13 @@ These semantics alone are **not** complete certified finality. See §10 for what
 |---|---|
 | Integers | Little-endian in every object, signed preimage and record. **Big-endian only in RocksDB keys**, so that keys sort by height. |
 | Hash | BLAKE3-256 |
-| Signature | Ed25519, RFC 8032 pure mode (no prehash, no context), 64 bytes. Verification criterion **E1**: strict verification is the approved design direction for new finality and upgrade signatures (owner, 2026-10-16); the bytes are still unratified. |
+| Signature | Ed25519, RFC 8032 pure mode (no prehash, no context), 64 bytes. Verification criterion **E1**: strict verification is the approved design direction for new finality and upgrade signatures (owner, 2026-10-16). The vote's bytes are ratified (group V); the other objects' bytes are not. |
 | Domains | ASCII, versioned, NUL-terminated. The NUL appears only as the last byte, so the set is prefix-free. Never reused across object kinds. |
 | Magics | 7 bytes, ASCII + NUL; the first bytes of every standalone encoding |
 | Decoding | Exact length. Every enum and flag byte is checked. An absent group must be all zero. Trailing bytes are refused. `schema` u16 = 1, and anything else is refused (no forward-compatible parsing, no defaults). |
 | Round | u32, with the validity rule `round ≤ 2^20` (D4) on every round field |
 
-**Domains and magics proposed here.** `check.py` confirms they are distinct, prefix-free, and clash with no retired draft and no byte-string literal under `crates/`.
+**Domains and magics proposed here.** `check.py` confirms they are distinct, prefix-free, and clash with no retired draft and no byte-string literal under `crates/`. The one exception is a ratified constant in its implementation file: `D_VOTE` and `FVOTv1\0` are spelled exactly, and only, in `crates/finality-foundations/src/vote.rs`.
 
 | Constant | Bytes | Length | Use |
 |---|---|---|---|
@@ -89,7 +99,7 @@ These semantics alone are **not** complete certified finality. See §10 for what
 - Duplicate keys are refused when the set is constructed.
 - Sizes: n = 4 gives 149 bytes; n = 2 gives 85 bytes.
 
-## 3. Finality vote `FinalityVoteV1` (BL §3, unchanged): serves G2-a and G2-b
+## 3. Finality vote `FinalityVoteV1` (BL §3, unchanged): serves G2-a and G2-b. RATIFIED 2026-10-17 (V-1 to V-6)
 
 | Offset | Size | Field (signed preimage, 139 bytes) |
 |---|---|---|
@@ -111,6 +121,11 @@ These semantics alone are **not** complete certified finality. See §10 for what
   - the index is ≥ n;
   - the signature fails E1.
 - **`block_id`** is the block identity under the rules in force at that height. Header v2 is out of scope.
+- **Ratified with the layout:**
+  - `step = vote_type + 1`: prevote 1 → step 2, precommit 2 → step 3; a proposal is step 1 and has no `vote_type` (V-2);
+  - n and the verifying key come from the authenticated set, never from the vote; a set has 1 ≤ n ≤ 65535 keys, each canonically encoded and not of small order, with no duplicate (V-6);
+  - at most one vote counts per (commitment, height, round, type, valset commitment, index). An identical body with other signature bytes is a duplicate; another `block_id` in the same slot is equivocation, nil against non-nil included;
+  - a nil precommit never counts toward a certificate, whose `block_id` is never zero.
 
 ## 4. Certificate `FinalityCertificateV1` (BL §4, unchanged): serves G2-a
 
@@ -356,7 +371,7 @@ Only full manifest bytes can produce this record; a hint never does.
 | **M5** | `quorum_version` (in B-1) | **Drop it.** It has no meaning separate from `quorum_rule`. | Keep it as a reserved byte = 1 |
 | **H1** | Next sequence in the hint | **Implied** (applied + 1); the applied digest is the last applied manifest digest | Explicit field (a redundant mismatch case); a separate accumulator |
 | **S1** | Signer-state binding and content | **Bind chain identity and the signer's public key**, not commitment, valset or index, which can change across upgrades. **Store the digest of the sign bytes**, which supports variable-length proposals. | BL §6's binding to commitment, valset and index; storing the full sign bytes |
-| **E1** | Ed25519 verification criterion, which must be identical on every node | **APPROVED DESIGN DIRECTION (owner, 2026-10-16), for NEW finality and upgrade signatures only: strict.** Canonical S < L and canonical R and A encodings; reject small-order A and R; the cofactorless equation (ed25519-dalek `verify_strict` semantics). Historical signature verification (every existing path, including `sumchain-crypto` `verify`) is unchanged. The bytes are still unratified; edge-case vectors are added with the byte ratification. | ZIP-215 (cofactored, permissive, batch-friendly); or today's `sumchain-crypto` `verify` (cofactorless, accepts small-order keys) |
+| **E1** | Ed25519 verification criterion, which must be identical on every node | **APPROVED DESIGN DIRECTION (owner, 2026-10-16), for NEW finality and upgrade signatures only: strict.** Canonical S < L and canonical R and A encodings; reject small-order A and R; the cofactorless equation (ed25519-dalek `verify_strict` semantics). Historical signature verification (every existing path, including `sumchain-crypto` `verify`) is unchanged. The vote's bytes are ratified (group V, 2026-10-17); its E1 edge-case vectors are in `crates/finality-foundations/tests/vectors/finality_vote_v1.json`. Other objects' bytes are unratified. | ZIP-215 (cofactored, permissive, batch-friendly); or today's `sumchain-crypto` `verify` (cofactorless, accepts small-order keys) |
 
 ## 10. What this artifact does not provide (do not read it as complete certified finality)
 
@@ -441,6 +456,7 @@ Run `python3 check.py` (standard library only; under a minute). It exits nonzero
 - Ed25519 against RFC 8032 TEST 1, plus a negative case;
 - byte-for-byte reproduction of the dalek-produced 2026-09-29 vectors: 4 public keys, the valset bytes and both commitments, the stand-in commitment, the vote preimage, signature and wire, the nil prevote, the n = 4 certificate, the evidence, and the storage key and pointer;
 - every length in these tables;
+- that each ratified constant (`D_VOTE`, `FVOTv1\0`) is spelled only in its implementation file, and every other domain and magic nowhere under `crates/`;
 - that every vector passes its strict decoder or verifier;
 - that **every single-byte flip**, truncation and trailing byte is refused, for:
   - the vote, both certificates, the equivocation evidence, both manifests, the upgrade-conflict evidence and both signer states;
