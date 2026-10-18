@@ -261,6 +261,22 @@ that validator's block slots until it rejoins, so coordinate restarts.
 
 - Keep validator keys off shared storage; restrict `config.toml`/key file perms.
 - Do not commit real bootnode IPs, peer IDs, or validator keys to the repo.
+- **A validator signing key is used only by the node and this repository's
+  fixed-format commands.** Never load it into, paste it into, or submit it to:
+  - an arbitrary-message signer, including a signing request presented by a
+    contract or an application;
+  - a general-purpose wallet;
+  - an RPC service or RPC method of any node, local or remote.
+
+  The node signs block headers with this key, and the consensus messages being
+  designed for certified finality (votes and upgrade authorizations) will be
+  signed with it too. A tool that signs whatever bytes it is given could be
+  asked for bytes that form a valid consensus message.
+
+  This rule changes nothing in how the node signs blocks. Transaction fees are
+  credited to the validator's own address, and moving them with this
+  repository's `sumchain transfer` command is still supported: that command
+  signs only a fixed 32-byte transaction hash.
 - See [docs/architecture/security-overview.md](../architecture/security-overview.md)
   for the security architecture, threat model, and mitigations.
 
