@@ -26,9 +26,9 @@
 //!   the behaviour and the manifests).
 //! * **Validator keys (V-6):** refused at set construction when their encoding
 //!   is not canonical or the point is of small order, alongside the duplicate
-//!   refusal. The set size is at most `u16::MAX`: every index then fits the
-//!   `u16` field, and `n` fits the `u16` count the certificate rules (D2)
-//!   already use.
+//!   refusal. The set size passes the shared count check
+//!   [`checked_validator_count`] (`1 ≤ n ≤ 65,535`): every index then fits the
+//!   `u16` field, and `n` fits the `u16` count the certificate rules (D2) use.
 //! * **Vote type and signer step (V-2):** `step = vote_type + 1`, so prevote
 //!   1 → step 2 and precommit 2 → step 3; a proposal is step 1 and has no vote
 //!   type ([`VoteType::step`], [`step_number`]).
@@ -69,7 +69,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use ed25519_dalek::{Signature, VerifyingKey};
 use thiserror::Error;
 
-use crate::certificate::{self, CertificateSigners, SignerSetError, ValidatorSetResolver};
+pub use crate::certificate::MAX_VALIDATORS;
+use crate::certificate::{
+    self, checked_validator_count, CertificateSigners, SignerSetError, ValidatorCountError,
+    ValidatorSetResolver,
+};
 use crate::encoding::{LeReader, LeWriter, Round, RoundOutOfRange};
 use crate::signer::Step;
 use crate::Digest;
@@ -90,8 +94,6 @@ pub const SIGNATURE_LEN: usize = 64;
 pub const WIRE_LEN: usize = VOTE_MAGIC.len() + BODY_LEN + SIGNATURE_LEN;
 /// The nil `block_id` (V-3).
 pub const NIL_BLOCK_ID: Digest = [0; 32];
-/// The largest validator set: `n` and every index fit a `u16`.
-pub const MAX_VALIDATORS: usize = u16::MAX as usize;
 
 const _: () = assert!(PREIMAGE_LEN == 139 && WIRE_LEN == 184);
 
@@ -305,18 +307,17 @@ pub struct AuthenticatedValidatorSet {
 
 impl AuthenticatedValidatorSet {
     /// A set from its commitment and its keys in authenticated order. Refused:
-    /// an empty set, more than `u16::MAX` keys, a key that does not decode, is
-    /// not canonically encoded or is of small order (V-6), and a duplicate.
+    /// a count outside `1 ≤ n ≤ 65,535` ([`checked_validator_count`]), a key
+    /// that does not decode, is not canonically encoded or is of small order
+    /// (V-6), and a duplicate.
     pub fn new(
         commitment: Digest,
         keys: &[[u8; 32]],
     ) -> Result<AuthenticatedValidatorSet, ValidatorSetError> {
-        if keys.is_empty() {
-            return Err(ValidatorSetError::Empty);
-        }
-        if keys.len() > MAX_VALIDATORS {
-            return Err(ValidatorSetError::TooMany { n: keys.len() });
-        }
+        checked_validator_count(keys.len()).map_err(|e| match e {
+            ValidatorCountError::Empty => ValidatorSetError::Empty,
+            ValidatorCountError::TooMany { n } => ValidatorSetError::TooMany { n },
+        })?;
         let mut seen: BTreeMap<[u8; 32], u16> = BTreeMap::new();
         let mut decoded = Vec::with_capacity(keys.len());
         for (i, bytes) in keys.iter().enumerate() {

@@ -123,7 +123,7 @@ These semantics alone are **not** complete certified finality. See §10 for what
 - **`block_id`** is the block identity under the rules in force at that height. Header v2 is out of scope.
 - **Ratified with the layout:**
   - `step = vote_type + 1`: prevote 1 → step 2, precommit 2 → step 3; a proposal is step 1 and has no `vote_type` (V-2);
-  - n and the verifying key come from the authenticated set, never from the vote; a set has 1 ≤ n ≤ 65535 keys, each canonically encoded and not of small order, with no duplicate (V-6);
+  - n and the verifying key come from the authenticated set, never from the vote; a set has 1 ≤ n ≤ 65535 keys, each canonically encoded and not of small order, with no duplicate (V-6). The owner accepted the 65,535 cap on 2026-10-18 for this dormant protocol version; the dormant code applies it through one check (`certificate::checked_validator_count`), used by the vote's authenticated set and by the certificate's implied n (D2);
   - at most one vote counts per (commitment, height, round, type, valset commitment, index). An identical body with other signature bytes is a duplicate; another `block_id` in the same slot is equivocation, nil against non-nil included;
   - a nil precommit never counts toward a certificate, whose `block_id` is never zero.
 

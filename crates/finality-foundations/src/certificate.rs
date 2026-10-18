@@ -5,7 +5,8 @@
 //! names, which the verifier must resolve anyway. This module checks a
 //! certificate's signer entries against the `n` of the resolved set:
 //!
-//! * the commitment must resolve to a known, non-empty set;
+//! * the commitment must resolve to a known set whose count passes
+//!   [`checked_validator_count`] (`1 ≤ n ≤ 65,535`);
 //! * `q(n) ≤ k ≤ n`, with quorum `q(n) = ⌊2n/3⌋ + 1`;
 //! * every index is `< n`, and the indices are strictly ascending (so a
 //!   duplicate is refused).
@@ -21,13 +22,42 @@ use thiserror::Error;
 
 use crate::Digest;
 
+/// The largest validator count `n`: `n` and every signer index fit a `u16`
+/// (owner, 2026-10-18, for this dormant protocol version). Every place that
+/// represents a validator count as a `u16` checks it with
+/// [`checked_validator_count`].
+pub const MAX_VALIDATORS: u16 = u16::MAX;
+
+/// Why a validator count is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ValidatorCountError {
+    #[error("a validator set is never empty")]
+    Empty,
+    #[error("{n} validators exceeds the cap {}", MAX_VALIDATORS)]
+    TooMany { n: usize },
+}
+
+/// The one check of a validator count: `1 ≤ n ≤ MAX_VALIDATORS`, returned as
+/// the `u16` the encodings carry.
+pub const fn checked_validator_count(n: usize) -> Result<u16, ValidatorCountError> {
+    if n == 0 {
+        Err(ValidatorCountError::Empty)
+    } else if n > MAX_VALIDATORS as usize {
+        Err(ValidatorCountError::TooMany { n })
+    } else {
+        Ok(n as u16)
+    }
+}
+
 /// Resolves a validator-set commitment to the size `n` of the set it names.
 pub trait ValidatorSetResolver {
     /// `None` when the commitment names no known set.
     fn validator_count(&self, commitment: &Digest) -> Option<u16>;
 }
 
-/// Signatures needed from a set of `n`: `⌊2n/3⌋ + 1`.
+/// Signatures needed from a set of `n`: `⌊2n/3⌋ + 1`, the least count
+/// strictly greater than two-thirds of `n`. Computed in `u32`, so it cannot
+/// overflow; `quorum(65_535) = 43_691`.
 pub const fn quorum(n: u16) -> u16 {
     (n as u32 * 2 / 3 + 1) as u16
 }
@@ -76,9 +106,9 @@ pub fn check_signers(
     let n = resolver
         .validator_count(commitment)
         .ok_or(SignerSetError::UnknownValidatorSet)?;
-    if n == 0 {
-        return Err(SignerSetError::EmptyValidatorSet);
-    }
+    // A `u16` count never exceeds the cap, so the only refusal here is empty.
+    let n =
+        checked_validator_count(usize::from(n)).map_err(|_| SignerSetError::EmptyValidatorSet)?;
     let k = indices.len();
     if k > usize::from(n) {
         return Err(SignerSetError::AboveSetSize { k, n });

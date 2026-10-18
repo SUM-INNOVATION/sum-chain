@@ -714,13 +714,13 @@ fn validator_set_size_is_bounded_by_the_u16_capacity() {
     );
     let key = keys(&vectors())[0];
     // 65,536 keys: refused by size before any key is looked at.
-    let too_many = vec![key; MAX_VALIDATORS + 1];
+    let too_many = vec![key; usize::from(MAX_VALIDATORS) + 1];
     assert_eq!(
         AuthenticatedValidatorSet::new([1; 32], &too_many),
         Err(ValidatorSetError::TooMany { n: 65_536 })
     );
     // 65,535 keys pass the size check (here they then fail as duplicates).
-    let at_cap = vec![key; MAX_VALIDATORS];
+    let at_cap = vec![key; usize::from(MAX_VALIDATORS)];
     assert_eq!(
         AuthenticatedValidatorSet::new([1; 32], &at_cap),
         Err(ValidatorSetError::Duplicate {
