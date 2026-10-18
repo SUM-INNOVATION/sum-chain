@@ -86,6 +86,9 @@ These semantics alone are **not** complete certified finality. See §10 for what
 
 **Cross-object signature separation.** Validator keys sign votes (`D_VOTE` ‖ 113 bytes) and manifests (`D_MSIGN` ‖ 276 bytes). Distinct NUL-terminated prefixes separate the two. Today's v1 block-header signatures sign a 32-byte hash, which can never equal either message. **The review must confirm that no other signing path for validator keys** (for example transactions) can produce a message beginning with a `SUMCHAIN/…\0` consensus domain.
 
+- **Repository audit (2026-10-17, sum-chain `d8130ead` with SNIP and OmniNode at their then-current `main`):** no repository-controlled production signing path can sign a message beginning with any of these domains. Each production signature covers a 32-byte hash, a fixed-length layout of another length on a path not wired into any binary, or bytes with a fixed non-consensus prefix; the only other signer is the dormant consensus signer itself. The audit is re-run at the commits proposed for activation.
+- **Operational rule (adopted):** paths outside repository control remain, for example contracts can verify Ed25519 signatures over arbitrary bytes. So a validator key is never given to an arbitrary-message signer, a general-purpose wallet or an RPC service; see `docs/operations/production-checklist.md` § Security. Block signing is unchanged.
+
 ## 2. Validator-set commitment (BL §1, unchanged)
 
 | Offset | Size | Field |
