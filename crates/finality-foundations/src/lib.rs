@@ -1,14 +1,16 @@
 //! Dormant library code for the consensus-foundation rules ratified on
 //! 2026-10-16 (group G2; #270 certified finality, #268 upgrade authorization),
-//! and the encoding conventions of byte group A1 ratified on 2026-10-17.
+//! the encoding conventions of byte group A1 ratified on 2026-10-17, and the
+//! finality vote format (group V) ratified on 2026-10-17.
 //!
 //! # This is NOT certified finality
 //!
-//! Nothing in this crate makes the chain final. There is no vote codec, no
-//! certificate encoding, no consensus core (rounds, timeouts, gossip), no
-//! network protocol, no frozen object layout, and no activation. The A1
-//! conventions below fix how integers and rounds are encoded and how a
-//! certificate's signer count is checked; they freeze no object layout.
+//! Nothing in this crate makes the chain final. There is no certificate
+//! encoding, no consensus core (rounds, timeouts, gossip), no network
+//! protocol, no signing of votes, and no activation. The A1 conventions below
+//! fix how integers and rounds are encoded and how a certificate's signer
+//! count is checked. The vote codec ([`vote`]) is the one frozen object
+//! layout: it decodes, verifies (E1) and counts votes, and nothing calls it.
 //! No node, consensus, storage or RPC code calls this crate, and
 //! `tests/dormant.rs` fails if any workspace crate starts depending on it.
 //! The code exists so that the ratified *semantics* are implemented and tested
@@ -29,11 +31,16 @@
 //! | D4 | Every round field is a `u32` with `round ≤ 2^20`. | [`encoding::Round`] |
 //! | D2 | The certificate carries no explicit validator count; it is implied by the validator-set commitment. | [`certificate::check_signers`] |
 //!
+//! | Object | Ratified format (group V, 2026-10-17) | Implemented here |
+//! |--------|----------------------------------------|------------------|
+//! | `FinalityVoteV1` | 113-byte body (V-1), `D_VOTE ‖ body` 139-byte pure-Ed25519 preimage, 184-byte wire (V-5), `step = vote_type + 1` (V-2), all-zero `block_id` = nil (V-3), validator-set commitment (V-4), canonical non-small-order keys (V-6); verified under E1 (`verify_strict`) | [`vote`] |
+//!
 //! # Still unratified (deliberately absent)
 //!
-//! * Every object layout: authorization manifest, handshake hint, vote,
-//!   certificate, signer state, evidence, and the composition of every
-//!   database key (byte groups A2–A5 and the object layouts). Types here are
+//! * Every other object layout: authorization manifest, handshake hint,
+//!   certificate, signer state, evidence, the validator-set commitment's
+//!   preimage, and the composition of every database key (byte groups A2–A5
+//!   and the object layouts). Types here are
 //!   plain Rust structs;
 //!   where a digest or signature is needed it is supplied by the caller or an
 //!   injected trait, and the tests use synthetic digests.
@@ -63,6 +70,7 @@ pub mod certificate;
 pub mod containment;
 pub mod encoding;
 pub mod signer;
+pub mod vote;
 
 /// A 32-byte digest. How it is computed (hash function, domain separation) is
 /// decided by the unratified encodings, so this crate only compares digests.

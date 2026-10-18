@@ -44,9 +44,11 @@
 //!
 //! # Limits of what this core can check
 //!
-//! * The payload bytes are opaque. Until the vote codec is ratified the signer
-//!   trusts the caller's declared position and value to match the payload.
-//!   With a codec it would decode them instead.
+//! * The payload bytes are opaque: the signer trusts the caller's declared
+//!   position and value to match the payload. The vote format is now ratified
+//!   ([`crate::vote`]); decoding the payload as exactly `D_VOTE ‖ body` and
+//!   binding it to the requested position and value is a follow-up together
+//!   with the signer-state layout (A2, unratified).
 //! * Restoring an old copy of the state is detected only against external
 //!   evidence: [`DurableSigner::open`] takes the highest position at which this
 //!   key's signature is known to exist (for example in certificates on the

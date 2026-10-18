@@ -15,6 +15,8 @@ Checks:
    truncation and trailing byte is refused; named refusal cases are refused.
 6. Domains and magics: NUL only at the end, distinct, prefix-free, and no
    clash with retired drafts or with any byte-string literal under `crates/`.
+   A ratified constant may be spelled exactly, and only, in its implementation
+   file (`RATIFIED_HOME`).
 7. Determinism: two builds are identical and equal `vectors.json`.
 8. Every 32-byte-or-longer hex string in README.md appears in `vectors.json`
    or the cross-check file.
@@ -143,16 +145,26 @@ def flips_all_refused(blob, validate, name, stride=1):
 
 
 def rust_byte_literals(root):
-    lits = set()
+    """Every byte-string literal under crates/, with the files it appears in."""
+    lits = {}
     pat = re.compile(rb'b"((?:[^"\\]|\\.)*)"')
     for dp, _, fns in os.walk(os.path.join(root, "crates")):
         for fn in fns:
             if fn.endswith(".rs"):
+                path = os.path.relpath(os.path.join(dp, fn), root)
                 with open(os.path.join(dp, fn), "rb") as fh:
                     for m in pat.finditer(fh.read()):
                         raw = m.group(1).replace(rb"\0", b"\0").replace(rb"\n", b"\n")
-                        lits.add(raw)
+                        lits.setdefault(raw, set()).add(path)
     return lits
+
+
+# Ratified constants and the one file allowed to spell them (group V,
+# ratified 2026-10-17). Anywhere else, the clash check below still refuses them.
+RATIFIED_HOME = {
+    "D_VOTE": "crates/finality-foundations/src/vote.rs",
+    "M_VOTE": "crates/finality-foundations/src/vote.rs",
+}
 
 
 def main():
@@ -332,8 +344,13 @@ def main():
     root = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
     lits = rust_byte_literals(root)
     check(len(lits) > 100, f"scanned {len(lits)} byte-string literals under crates/")
+    named = {**g.DOMAINS, **g.MAGICS}
+    for name, home in sorted(RATIFIED_HOME.items()):
+        check(lits.get(named[name]) == {home}, f"ratified {name} is spelled only in {home}")
+    homed = {named[n] for n in RATIFIED_HOME}
     reused = {x for x in set(news)
-              if any(lit == x or lit.startswith(x) or (lit and x.startswith(lit) and lit.endswith(b"\0"))
+              if any((lit == x and x not in homed) or (lit != x and lit.startswith(x))
+                     or (lit and lit != x and x.startswith(lit) and lit.endswith(b"\0"))
                      for lit in lits)}
     check(not reused, f"no clash with crates/ literals {sorted(reused)}")
 
