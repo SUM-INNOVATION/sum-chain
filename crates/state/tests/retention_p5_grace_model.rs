@@ -314,3 +314,107 @@ fn p5_results_are_deterministic() {
         assert_eq!(first, second, "G={g}: identical results on every run");
     }
 }
+
+/// Test parameters at the edges of `u64`; none is a proposed value.
+const EDGE_G_VALUES: [u64; 6] = [0, 1, 2, 1_000_000, u64::MAX - 1, u64::MAX];
+
+#[test]
+fn p5_window_ends_saturate_instead_of_wrapping() {
+    for g in EDGE_G_VALUES {
+        let ch = base(); // the reassignment epoch starts at 100
+        let end = 100u64.saturating_add(g);
+        if g > 0 {
+            assert!(
+                !ch.challengeable(C, 0, end - 1, g),
+                "G={g}: not at e + G - 1"
+            );
+        }
+        if g >= 2 {
+            assert!(
+                !ch.challengeable(C, 0, 101, g),
+                "G={g}: the window never ends early"
+            );
+        }
+        assert!(ch.challengeable(C, 0, end, g), "G={g}: at e + G, saturated");
+        assert!(
+            ch.challengeable(B, 0, 100, g),
+            "G={g}: the continuing assignee"
+        );
+    }
+    // An epoch that starts near the top of the height range: e + G saturates to
+    // u64::MAX rather than wrapping below e, and evaluating there never panics.
+    let top = u64::MAX - 3;
+    for g in [4, 5, 1_000, u64::MAX] {
+        let mut ch = Chain::default();
+        ch.epoch(10, &[(0, &[A, B])]);
+        ch.epoch(top, &[(0, &[B, C])]);
+        for h in [top, top + 1, top + 2] {
+            assert!(!ch.challengeable(C, 0, h, g), "G={g}, h={h}");
+        }
+        assert!(
+            ch.challengeable(C, 0, u64::MAX, g),
+            "G={g}: the saturated end"
+        );
+        assert!(
+            ch.challengeable(B, 0, top, g),
+            "G={g}: the continuing assignee"
+        );
+    }
+}
+
+#[test]
+fn p5_an_archive_reassigned_away_and_back_gets_a_fresh_window() {
+    for g in G_VALUES.into_iter().filter(|g| *g >= 2) {
+        // A attested chunk 0 in the first epoch, was moved off it at 100 (and
+        // may have deleted it), and is assigned it again at 140.
+        let mut ch = Chain::default();
+        ch.epoch(10, &[(0, &[A, B])]);
+        ch.attest(11, A, &[0]);
+        ch.epoch(100, &[(0, &[B, C])]);
+        ch.epoch(140, &[(0, &[A, B])]);
+        assert!(
+            ch.challengeable(A, 0, 99, g),
+            "G={g}: a target in the first epoch"
+        );
+        assert!(
+            !ch.challengeable(A, 0, 139, g),
+            "G={g}: off the chunk in epoch 100"
+        );
+        assert!(
+            !ch.challengeable(A, 0, 140, g),
+            "G={g}: its first-epoch attestation does not carry over"
+        );
+        assert!(!ch.challengeable(A, 0, 140 + g - 1, g));
+        assert!(
+            ch.challengeable(A, 0, 140 + g, g),
+            "G={g}: the new deadline"
+        );
+        assert!(
+            ch.challengeable(B, 0, 140, g),
+            "G={g}: B stayed assigned throughout"
+        );
+
+        // Attesting in the new epoch opens it early.
+        let mut early = ch.clone();
+        early.attest(141, A, &[0]);
+        assert!(early.challengeable(A, 0, 141, g));
+    }
+}
+
+#[test]
+fn p5_readiness_is_per_chunk() {
+    for g in G_VALUES.into_iter().filter(|g| *g >= 2) {
+        // C is newly assigned two chunks at 100 and attests only chunk 1.
+        let mut ch = Chain::default();
+        ch.epoch(10, &[(0, &[A]), (1, &[A])]);
+        ch.epoch(100, &[(0, &[C]), (1, &[C])]);
+        ch.attest(101, C, &[1]);
+        assert!(ch.challengeable(C, 1, 101, g), "G={g}: the attested chunk");
+        assert!(
+            !ch.challengeable(C, 0, 101, g),
+            "G={g}: the other chunk keeps its window"
+        );
+        assert!(!ch.challengeable(C, 0, 100 + g - 1, g));
+        assert!(ch.challengeable(C, 0, 100 + g, g));
+    }
+}

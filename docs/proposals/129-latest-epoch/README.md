@@ -108,6 +108,29 @@ Base: sum-chain `main` 2c275242. SNIP references are to `main` b4786c0b. OmniNod
 | `p5_a_reorg_across_the_boundary_recomputes_from_the_canonical_log` | Reorging away the reassignment removes the window. A reassignment at another height anchors the window there. |
 | `p5_two_reassignments_in_a_row_restart_the_window` | An archive not yet challengeable when a second reassignment keeps it assigned gets a new window from the new epoch. One already challengeable stays so. |
 | `p5_results_are_deterministic` | Identical challengeability traces on repeated runs, for each G. |
+| `p5_window_ends_saturate_instead_of_wrapping` | At the edges of `u64` (test parameters G ∈ {0, 1, 2, 10⁶, u64::MAX − 1, u64::MAX}, and an epoch starting at u64::MAX − 3), e + G saturates: the window never ends early and evaluation never panics. |
+| `p5_an_archive_reassigned_away_and_back_gets_a_fresh_window` | An archive moved off a chunk and later assigned it again is not ready: its earlier-epoch attestation does not carry over, so it waits for a new attestation or e + G. |
+| `p5_readiness_is_per_chunk` | Attesting one newly assigned chunk does not open the window for another. |
+
+**Mutation checks (2026-10-17).** Each was applied to the model, run, and reverted; each fails exactly the named test:
+- e + G computed with wrapping instead of saturating addition: `p5_window_ends_saturate_instead_of_wrapping`;
+- an attestation from any epoch counted: `p5_an_archive_reassigned_away_and_back_gets_a_fresh_window`;
+- an attestation of any chunk counted: `p5_readiness_is_per_chunk`.
+
+### Existing chain behaviour the proposal relies on
+**Source:** this branch, `crates/state/tests/retention_p5_p7_chain_preconditions.rs`, headed as tests of existing chain code written for an unratified proposal.
+- These run the real executor and the committed coverage reader. They change no production code and choose no value of G.
+- The gates are the mainnet shape: reassignment open, both PoR targeting gates unset. Unbonding is opened only so an archive leaves by its own `BeginUnstake`.
+
+| Test | Pins |
+|---|---|
+| `p7_the_coverage_flag_is_exactly_the_executors_acceptance_condition` | At every step, the coverage RPC's `reassignment_needed` equals whether the executor accepts the owner's `ReassignChunksV2` (otherwise it refuses with 334). The flag clears in the reassignment block itself, before the new assignee has attested, so an owner tool gated on it cannot submit twice. It returns when a later assignee leaves. |
+| `p7_the_flag_is_set_by_any_snapshot_departure_not_only_the_files_assignees` | The departure of an archive holding no chunk of the file sets the flag, and the executor accepts the reassignment. The assignee is unchanged, but the new latest epoch has no attestation until it attests again. |
+| `p5_below_the_targeting_gate_no_v2_file_is_challenged` | Gate unset: no challenge for a V2 file, either through the executor's interval or over 32 selection seeds, even right after a reassignment, so a readiness window would change nothing there. Gate open, same state: the unattested newcomer is the target at once (today's G = 0). |
+
+**Mutation checks (2026-10-17).** Each was applied to production code, run, and reverted with `git checkout`:
+- the coverage flag reading the first epoch's snapshot instead of the latest fails both `p7_` tests;
+- the targeting gate forced open fails `p5_below_the_targeting_gate_no_v2_file_is_challenged`.
 
 ## 4. Comparison
 
@@ -161,6 +184,11 @@ Under L, coverage after any reassignment depends on archives re-fetching and re-
   - This needs no new signing authority and no consensus or schema change. The owner-only rule already applies on mainnet.
   - A SNIP change for the owner tool is being prepared.
   - **Deferred alternative:** automatic chain-side reassignment, or letting any account submit it once the chain's own condition holds. That needs a gated executor change and a per-block bound.
+  - **Finding for this decision (tests in §3).** The chain's condition is snapshot-wide. `reassignment_needed` (`storage_metadata.rs:2902`) is set when any archive in the active snapshot at the file's latest epoch has left, not only an archive assigned a chunk of that file.
+    - So, once any archive leaves, an owner tool gated on the flag submits a reassignment for every file whose latest snapshot included that archive, paying a fee per file even where no assignee left.
+    - Under L, each such reassignment also restarts the file's count: its assignees, unchanged, must attest again in the new epoch before it counts as covered (and `since` restarts, R-S1).
+    - Under P5 with the targeting gate open, those continuing assignees are already ready, so they get no window and stay challengeable. Only archives the reassignment newly assigns get one.
+    - Options, for ratification with P7: accept this; have the tool also check that one of the file's own assignees left (a client-side filter, no chain change); or narrow the chain's condition (a gated executor change).
 - **P8. Gate state (operations).** The mainnet state of the reassignment and PoR-targeting gates is confirmed before the pool gate opens.
 
 ## 6. B, T and G: an explicit schema-evolution proposal
