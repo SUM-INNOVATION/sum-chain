@@ -84,6 +84,9 @@ section for details.
   genesis and coordinated by the operator team — a node does not join the set by
   simply connecting.
 - Generate your own validator key; never reuse another node's key.
+- Use the validator key only with the node and its own commands: never with an
+  arbitrary-message signer, a general-purpose wallet or an RPC service. See
+  [the production checklist's Security section](operations/production-checklist.md#security).
 
 ## Monitoring
 
