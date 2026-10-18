@@ -151,7 +151,7 @@ Under L, coverage after any reassignment depends on archives re-fetching and re-
 
 | Stage | sum-chain (chain side) | SNIP | OmniNode | Verdict |
 |---|---|---|---|---|
-| 1. Reassignment trigger | `ReassignChunksV2` is owner-only (code 332) and accepted only when a latest-epoch archive left the active set (`storage_metadata.rs:2902-2915, 2939-2990`). It is gated by `archive_reassignment_enabled_from_height` (`executor.rs:292-300`), dormant by default. There is an unsigned builder RPC, `storage_buildReassignChunksV2` (`rpc/src/api.rs:2339`). | No builder emits it (`sum-node/src/tx_builder.rs:972-994`). The owner tool tells the operator to invoke it externally (`ingest_v2.rs:927-949, 1197, 2116-2136`). The CLI says it is not implemented (`main.rs:1324-1341`). | No reference anywhere. | **Missing**: no SNIP or OmniNode submitter. On mainnet, the consensus configuration read on 2026-10-15 sets `archive_reassignment_enabled_from_height` to 8,900,000, so reassignment is live. |
+| 1. Reassignment trigger | `ReassignChunksV2` is owner-only (code 332) and accepted only when a latest-epoch archive left the active set (`storage_metadata.rs:2902-2915, 2939-2990`). It is gated by `archive_reassignment_enabled_from_height` (`executor.rs:292-300`), dormant by default. There is an unsigned builder RPC, `storage_buildReassignChunksV2` (`rpc/src/api.rs:2339`). | An owner-invoked command, `sum-node reassign <merkle-root-hex> [--dry-run]` (SNIP#65, merged 2026-10-17 at `60f2bc06`), submits it through the chain's builder with the owner's existing key, only when `reassignment_needed` is true. It submits the chain transaction only. | No reference anywhere. | **Partly present:** the SNIP owner command exists; OmniNode has no submitter. When to submit is open (P7-N). On mainnet, the consensus configuration read on 2026-10-15 sets `archive_reassignment_enabled_from_height` to 8,900,000, so reassignment is live. |
 | 2. Epoch discovery | Coverage RPC exposes `latest_assignment_epoch`, `reassignment_needed` and `per_epoch` (`storage_metadata.rs:570-575`). `getFileInfoV2.assignment_height` stays at the original epoch. | Decoded in `sum-types` but read by nothing outside tests. The archive learns file shape from `assignment_height` (`inbound_v2.rs:205-222`). No watcher exists. | — | **Missing**: an epoch watcher. |
 | 3. Re-fetch | — | V2 chunks arrive only by owner Push (`inbound_v2.rs:9-12`).<br>• Pushes are validated against the epoch-0 snapshot (`push_validator.rs:321-338`). New tests show a replacement archive refuses its latest-epoch chunk (`NotInSnapshot` at epoch 0, the latest snapshot never consulted), and a survivor refuses a newly assigned chunk (`NotAssigned`).<br>• The owner tool pushes to the epoch-0 snapshot (`ingest_v2.rs:1446`, resume `:2070`).<br>• `market_sync` fetch is V1-only (`market_sync.rs:1-4, 117-160`).<br>• Downloads route to epoch-0 assignees (`download_v2_routing.rs:99`; `download_private.rs:572, 923`).<br>• There is no archive-to-archive V2 fetch. | — | **Missing**: latest-epoch push validation and routing, and an archive-driven V2 re-fetch. |
 | 4. Re-attestation | `AcceptAssignmentV2` targets the latest reassignment epoch while the gate is open (`storage_metadata.rs:1866-1876`). It refuses a signer outside that epoch's snapshot (`:1912-1925`) and any index not assigned to it there (`:1945-1972`). | Attestation fires only on an owner ManifestPush (`inbound_v2.rs:14-20`), against the `assignment_height` snapshot (`:922`). The held set is in memory only; the resume is not implemented (`:22-29`). Tests show a replacement archive submits 0 attestations, and a survivor attests its epoch-0 set (indices the chain now refuses). | — | **Missing**: latest-epoch, watcher-triggered re-attestation, with the held set rebuilt from disk. |
@@ -175,20 +175,39 @@ Under L, coverage after any reassignment depends on archives re-fetching and re-
   - **Alternative:** no chain change, relying on SNIP completing P3 within the PoR response window. Whether an honest archive is penalised would then depend on fetch timing.
   - **Cost:** it amends R-E5 ("PoR targeting unchanged") for newly assigned archives only. It also needs G as a committed field (§6).
   - **Condition:** this works without a new gate only if no network has set the targeting gate. On mainnet that gate is unset.
+  - **G stays unchosen until readiness, slashing and repair behaviour are specified and tested.** That requires:
+    - **Readiness and slashing:**
+      - what a newly assigned archive owes during [e, e + G) and after it;
+      - that no challenge issued inside the window can slash it for the newly assigned chunk;
+      - that after e + G an archive that has not attested is challengeable and slashable exactly as today;
+      - what happens when a further reassignment lands inside an open window. The §3 model gives a fresh window per epoch.
+    - **Repair:** P3 re-fetch (sources, verification against the Merkle root and chunk count, retries, and an upper bound on its duration) and P4 re-attestation. Measure the time from the reassignment height to the attestation's inclusion. G must exceed that bound with margin.
+    - **Tests:** SNIP tests for P3 and P4, chain tests of the specified rule, and an end-to-end run.
+    - The §3 tests cover only the readiness rule, parametrically over G.
 - **P6. V2-aware GC (SNIP).**
   - The retained set includes every chunk the archive is assigned under the latest epoch of every non-Abandoned V2 file.
   - When ownership or retention is uncertain, data is preserved.
   - This is coordinated with separate SNIP GC work.
-- **P7. Reassignment submitter. Recommendation, awaiting ratification: the SNIP owner tool and OmniNode, using the existing owner-authorized builder.**
-  - When `reassignment_needed` is true, the file owner's tool builds the transaction with the existing `storage_buildReassignChunksV2` RPC, signs it with the owner's existing key and submits `ReassignChunksV2`. For pool output files, OmniNode does this as their owner.
-  - This needs no new signing authority and no consensus or schema change. The owner-only rule already applies on mainnet.
-  - A SNIP change for the owner tool is being prepared.
-  - **Deferred alternative:** automatic chain-side reassignment, or letting any account submit it once the chain's own condition holds. That needs a gated executor change and a per-block bound.
-  - **Finding for this decision (tests in §3).** The chain's condition is snapshot-wide. `reassignment_needed` (`storage_metadata.rs:2902`) is set when any archive in the active snapshot at the file's latest epoch has left, not only an archive assigned a chunk of that file.
-    - So, once any archive leaves, an owner tool gated on the flag submits a reassignment for every file whose latest snapshot included that archive, paying a fee per file even where no assignee left.
-    - Under L, each such reassignment also restarts the file's count: its assignees, unchanged, must attest again in the new epoch before it counts as covered (and `since` restarts, R-S1).
-    - Under P5 with the targeting gate open, those continuing assignees are already ready, so they get no window and stay challengeable. Only archives the reassignment newly assigns get one.
-    - Options, for ratification with P7: accept this; have the tool also check that one of the file's own assignees left (a client-side filter, no chain change); or narrow the chain's condition (a gated executor change).
+- **P7. Reassignment submission: two separate decisions, both awaiting ratification.**
+  - **P7-A. Who is authorized to submit.** Recommendation: the file owner only, which is today's chain rule (code 332).
+    - The owner's tool builds the transaction with the existing no-key builder `storage_buildReassignChunksV2` and signs it with the owner's existing key.
+    - SNIP's owner command does this (`sum-node reassign`, SNIP#65). It runs only when invoked, never in the background.
+    - For pool output files, OmniNode would do it as their owner. OmniNode has no submitter yet.
+    - This needs no new signing authority and no consensus or schema change.
+    - **Deferred alternatives:** let any account submit once the chain's condition holds, or have the chain reassign automatically. Each needs a gated executor change, a per-block bound and a fee rule. Either one also forces N3 below: with a non-owner submitter, a snapshot-wide condition would let anyone restart any qualifying file's coverage.
+  - **P7-N. When a reassignment is actually necessary.**
+    - **Today's chain rule** (`storage_metadata.rs:2897-2915`): the chain accepts a reassignment, and the coverage RPC reports `reassignment_needed`, when any archive in the active snapshot at the file's latest epoch has left the active set. The rule is snapshot-wide. The tests in §3 pin it.
+    - **The RPC field's doc comment** (`rpc/src/types.rs:516-517`) reads as the narrower per-file condition. Whichever option is chosen, that comment should state the actual rule.
+    - **Per-file necessity:** at least one archive assigned ≥ 1 chunk of the file under S(e_last) is no longer Active.
+
+    | Option | When the submitter submits | Chain change | Consequences |
+    |---|---|---|---|
+    | **N1. Accept today's rule** | Whenever `reassignment_needed` is true (SNIP#65 as merged) | None | Once any archive leaves, every file whose latest snapshot included it qualifies. Each submission costs that owner a fee. Under L it also restarts the file's count and `since` until its unchanged assignees attest again. Under P5 those continuing assignees get no window. |
+    | **N2. Client-side filter** | Only when the flag is true **and** the latest `per_epoch` entry lists an archive with `assigned_count > 0` and `currently_active = false`. For files above 16,384 chunks, where `assigned_count` is not returned, the tool computes the assignment locally with the `sumchain-wire` scorer. | None (a SNIP change to `sum-node reassign`) | Removes needless submissions for owners using the tool. The chain still accepts the broader rule, so an owner who submits without the filter still restarts only their own file. Under P7-A only the owner can submit, so nobody else can force it. |
+    | **N3. Narrow the chain's rule** | The chain accepts only when a departed archive held an assignment for the file at e_last. The RPC flag changes at the same height. | A gated executor change plus an RPC semantics change. It needs its own activation height, which is not authorized now. | One rule for every submitter. It is a consensus change, and it is required if P7-A is ever widened beyond owners. |
+    - The two decisions are linked:
+      - P7-A owner-only: N2 is enough, and N3 is optional.
+      - P7-A widened: N3 is required.
 - **P8. Gate state (operations).** The mainnet state of the reassignment and PoR-targeting gates is confirmed before the pool gate opens.
 
 ## 6. B, T and G: an explicit schema-evolution proposal
