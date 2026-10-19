@@ -3588,3 +3588,152 @@ pub struct NodeRegistryBuildRequest {
     #[serde(flatten)]
     pub op: NodeRegistryBuildOp,
 }
+
+// ── DocClass (non-custodial) ────────────────────────────────────────────────
+
+/// A single DocClass issuer or academic-credential operation, tagged by `op`.
+///
+/// Every field is public data: addresses base58, 32-byte values hex, the
+/// sender's PUBLIC key where the registry records it. There is no private-key
+/// field, and `docclass_buildTransaction` never signs. Optional fields are
+/// filled by the node when omitted (timestamps from the latest block, an
+/// issue's institution and jurisdiction from the sender's issuer record); a
+/// client that wants to compare the node's bytes with its own passes them all.
+/// Mirrors `sumchain_primitives::docclass_build::DocClassBuildOp`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum DocClassBuildOpRequest {
+    RegisterAcademicIssuer {
+        name: String,
+        /// ISO 3166-1 alpha-2.
+        jurisdiction: String,
+        /// Each of 810, 811, 812.
+        subcodes: Vec<u16>,
+        stake_amount: u128,
+        /// The sender's Ed25519 public key (hex, 32 bytes). Must derive to `from`.
+        public_key: String,
+        /// Milliseconds; defaults to the latest block's timestamp.
+        registered_at: Option<u64>,
+        metadata: Option<String>,
+    },
+    IssueAcademicCredential {
+        holder_address: String,
+        /// 810, 811 or 812.
+        subcode: u16,
+        subject_commitment: String,
+        schema_hash: String,
+        content_commitment: String,
+        /// Defaults to the sender's registered issuer name.
+        institution_id: Option<String>,
+        /// Defaults to the sender's first registered jurisdiction.
+        jurisdiction: Option<String>,
+        metadata: DocClassCredentialMetadataRecord,
+        /// Milliseconds; defaults to the latest block's timestamp.
+        issued_at: Option<u64>,
+        valid_from: u64,
+        /// 0 = no expiry.
+        expires_at: u64,
+        payload_hash: Option<String>,
+        payload_hint: Option<String>,
+    },
+    RevokeCredential {
+        credential_id: String,
+        /// `RevocationReason` code.
+        reason: u8,
+    },
+    SuspendCredential {
+        credential_id: String,
+        /// `RevocationReason` code.
+        reason: u8,
+    },
+    ReactivateCredential {
+        credential_id: String,
+    },
+    SupersedeCredential {
+        old_credential_id: String,
+        new_credential_id: String,
+    },
+    /// Replace the sender's issuer record with `issuer`.
+    UpdateIssuer {
+        issuer: DocClassIssuerRecord,
+    },
+    RotateIssuerKey {
+        new_key: DocClassIssuerKeyRecord,
+        old_key_id: String,
+    },
+    /// The sender itself, or any issuer when the sender is the DocClass admin.
+    DeactivateIssuer {
+        issuer_address: String,
+    },
+}
+
+/// Public credential metadata, as `CredentialMetadata` holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocClassCredentialMetadataRecord {
+    pub title: String,
+    pub credential_type: String,
+    pub program: Option<String>,
+    pub issue_date: String,
+    pub completion_date: Option<String>,
+    #[serde(default)]
+    pub attributes: Vec<DocClassAttributeRecord>,
+}
+
+/// One public (non-PII) credential attribute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocClassAttributeRecord {
+    pub name: String,
+    pub value: String,
+}
+
+/// A complete issuer record, field for field as `DocClassIssuer` stores it.
+/// Enum fields use the names `docclass_getIssuer` reports (`"Educational"`,
+/// `"Active"`, `"Ed25519"`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocClassIssuerRecord {
+    pub address: String,
+    pub name: String,
+    pub issuer_type: String,
+    pub jurisdictions: Vec<String>,
+    pub authorized_subcodes: Vec<u16>,
+    pub keys: Vec<DocClassIssuerKeyRecord>,
+    pub registered_at: u64,
+    pub updated_at: u64,
+    pub status: String,
+    pub stake_amount: u128,
+    pub metadata: Option<String>,
+}
+
+/// An issuer key, field for field as `IssuerKey` stores it. `public_key` hex.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocClassIssuerKeyRecord {
+    pub key_id: String,
+    pub public_key: String,
+    pub key_type: String,
+    pub added_at: u64,
+    pub expires_at: u64,
+    pub active: bool,
+    pub is_primary: bool,
+}
+
+/// Request for `docclass_buildTransaction`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocClassBuildRequest {
+    /// Sender/signer address (base58).
+    pub from: String,
+    pub fee: Option<u128>,
+    pub nonce: Option<u64>,
+    pub chain_id: Option<u64>,
+    #[serde(flatten)]
+    pub op: DocClassBuildOpRequest,
+}
+
+/// Response of `docclass_buildTransaction`: the shared unsigned-transaction
+/// fields, plus the id an issue creates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocClassBuildResponse {
+    #[serde(flatten)]
+    pub tx: TxBuildResponse,
+    /// For `issue_academic_credential`, the new credential's id (hex).
+    pub credential_id: Option<String>,
+}

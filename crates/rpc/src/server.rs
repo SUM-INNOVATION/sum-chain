@@ -9387,6 +9387,78 @@ impl SumChainApiServer for RpcServer {
             payload,
         )?)
     }
+
+    async fn docclass_build_transaction(
+        &self,
+        request: crate::types::DocClassBuildRequest,
+    ) -> std::result::Result<crate::types::DocClassBuildResponse, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use crate::docclass_build::{
+            needs_issuer_record, op_from_request, DocClassRequestDefaults,
+        };
+        use sumchain_primitives::docclass_build::{build_docclass_tx, DocClassTxContext};
+
+        // No keys, no signing, no execution. Reads only: the sender's nonce, the
+        // chain id, the latest block's timestamp and, for an issue that omits
+        // them, the sender's issuer record. Authority stays with the executor.
+        let from = self.parse_address(&request.from)?;
+        let fee = request.fee.unwrap_or(GOV_DEFAULT_FEE);
+        let nonce = match request.nonce {
+            Some(n) => n,
+            None => self
+                .state
+                .get_nonce(&from)
+                .map_err(|e| RpcError::Internal(format!("Failed to get nonce: {e}")))?,
+        };
+        let chain_id = request.chain_id.unwrap_or_else(|| self.state.chain_id());
+        let now_ms = match BlockStore::new(&self.db).get_latest() {
+            Ok(Some(block)) => block.header.timestamp,
+            _ => std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        };
+        let mut defaults = DocClassRequestDefaults {
+            now_ms,
+            ..Default::default()
+        };
+        if needs_issuer_record(&request.op) {
+            if let Some(issuer) = sumchain_storage::DocClassIssuerStore::new(&self.db)
+                .get(&from)
+                .map_err(|e| RpcError::Internal(format!("Failed to read issuer: {e}")))?
+            {
+                defaults.issuer_name = Some(issuer.name.clone());
+                defaults.issuer_jurisdiction = issuer.jurisdictions.first().cloned();
+            }
+        }
+        let op = op_from_request(&request.op, &defaults).map_err(RpcError::InvalidParams)?;
+        let built = build_docclass_tx(
+            &DocClassTxContext {
+                chain_id,
+                from,
+                nonce,
+                fee,
+            },
+            &op,
+        )
+        .map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+        let signing_hash = built.tx.signing_hash();
+        let unsigned = bincode::serialize(&built.tx)
+            .map_err(|e| RpcError::Internal(format!("Failed to encode tx: {e}")))?;
+        Ok(crate::types::DocClassBuildResponse {
+            tx: crate::types::TxBuildResponse {
+                unsigned_tx: format!("0x{}", hex::encode(unsigned)),
+                signing_hash: format!("0x{}", hex::encode(signing_hash.as_bytes())),
+                from: from.to_base58(),
+                nonce,
+                fee,
+                chain_id,
+            },
+            credential_id: built
+                .credential_id
+                .map(|id| format!("0x{}", hex::encode(id))),
+        })
+    }
 }
 
 // Helper methods for DocClass RPC conversions

@@ -2405,4 +2405,17 @@ pub trait SumChainApi {
         &self,
         request: crate::types::NodeRegistryBuildRequest,
     ) -> Result<crate::types::TxBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Build an unsigned DocClass issuer or academic-credential tx for one
+    /// operation. **No-key builder**: it takes the sender's address and public
+    /// fields only; no signing, no submit, no execution, no authorization. The
+    /// client signs `signing_hash` locally and submits via
+    /// `sum_sendRawTransaction`. Decodes to `TxPayload::DocClass`. Omitted
+    /// timestamps, and an issue's institution and jurisdiction, are filled from
+    /// this node's state; pass them to get bytes that depend on nothing else.
+    #[method(name = "docclass_buildTransaction")]
+    async fn docclass_build_transaction(
+        &self,
+        request: crate::types::DocClassBuildRequest,
+    ) -> Result<crate::types::DocClassBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
 }

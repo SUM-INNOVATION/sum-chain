@@ -21,6 +21,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 
 mod config;
 mod consensus_wrapper;
+mod docclass_cli;
 mod node;
 mod tx_broadcaster;
 
@@ -212,6 +213,10 @@ enum Commands {
         #[arg(long, default_value = "1000000")]
         fee: u128,
     },
+
+    /// DocClass issuer and academic-credential transactions, built and signed
+    /// locally; the key never leaves this machine
+    Docclass(docclass_cli::DocclassArgs),
 
     /// Wipe employment data (SRC-88X) from the database
     WipeEmployment {
@@ -862,6 +867,10 @@ async fn main() -> Result<()> {
 
             println!("Transaction sent successfully!");
             println!("  TX Hash: {}", tx_hash);
+        }
+
+        Commands::Docclass(args) => {
+            docclass_cli::execute(args)?;
         }
 
         Commands::WipeEmployment { data_dir, yes } => {

@@ -4,6 +4,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod docclass_build;
 pub mod governance_types;
 pub mod inference_settlement_types;
 pub mod health;

@@ -877,6 +877,7 @@ crates/sumchain-wire/src/registry_wire.rs	GRAPH_DEFINITION_TAG	EXCLUDE	unwired	r
 crates/sumchain-wire/src/registry_wire.rs	LEN	EXCLUDE	unused	RegistryRecordV1::LEN has no non-test reader (decoder reads field-by-field)
 crates/sumchain-wire/src/registry_wire.rs	MAGIC	EXCLUDE	client-only	RegistryRecordV1 codec (registry_wire.rs:166/172) decoded only by RPC crates/rpc/src/registry_types.rs:145/287
 crates/sumchain-wire/src/registry_wire.rs	SCHEMA_VERSION	EXCLUDE	client-only	RegistryRecordV1 codec (registry_wire.rs:166/172) decoded only by RPC crates/rpc/src/registry_types.rs:145/287
+crates/primitives/src/docclass_build.rs	REGISTERED_ISSUER_KEY_ID	EXCLUDE	client-only	key id the address-only builder writes into a registration it builds (docclass_build.rs); no execution path reads it, the chain stores the id the signed payload carries
 crates/sumchain-wire/src/registry_wire.rs	TOKENIZER_ID_TAG	EXCLUDE	unused	only read by registry_wire::vk_id/tokenizer_id (registry_wire.rs:43/54), which have no non-test caller
 crates/sumchain-wire/src/registry_wire.rs	VK_ID_TAG	EXCLUDE	unused	only read by registry_wire::vk_id/tokenizer_id (registry_wire.rs:43/54), which have no non-test caller
 crates/sumchain-wire/src/storage_metadata.rs	CHALLENGE_INTERVAL_BLOCKS	COMMITTED	registry	0x2248

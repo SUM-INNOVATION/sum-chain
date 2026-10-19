@@ -7,6 +7,7 @@
 // inference-attestation Ed25519 verification / receipt-bound status
 // classification layer (which bind `SignedTransaction`/`Receipt`).
 pub mod block;
+pub mod docclass_build;
 pub mod inference_attestation;
 pub mod messaging_sponsored;
 pub mod receipt;
