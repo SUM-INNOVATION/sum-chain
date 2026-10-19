@@ -92,7 +92,7 @@ SUMaillet can now call this endpoint to display all academic credentials:
 ```javascript
 // Fetch credentials for current wallet
 async function fetchAcademicCredentials(walletAddress) {
-  const response = await fetch('https://rpc.sum-chain.xyz', {
+  const response = await fetch('https://rpc.sumchain.io', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

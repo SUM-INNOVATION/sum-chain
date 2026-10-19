@@ -388,7 +388,7 @@ if (recomputed === coursesCommitment) {
 ### Test Valid Credential
 
 ```bash
-curl -X POST https://rpc.sum-chain.xyz \
+curl -X POST https://rpc.sumchain.io \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -413,7 +413,7 @@ curl -X POST https://rpc.sum-chain.xyz \
 ### Test Invalid Credential
 
 ```bash
-curl -X POST https://rpc.sum-chain.xyz \
+curl -X POST https://rpc.sumchain.io \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",

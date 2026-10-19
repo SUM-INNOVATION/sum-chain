@@ -11,7 +11,7 @@
 
 SUMaillet can now display academic credentials (diplomas, transcripts, enrollment verifications) owned by users' wallets.
 
-**Endpoint**: `https://rpc.sum-chain.xyz`
+**Endpoint**: `https://rpc.sumchain.io`
 **Status**: ✅ Live on mainnet (tested Feb 3, 2026)
 
 ---
@@ -27,7 +27,7 @@ docclass_getAcademicCredentialsByHolder
 ### Request Format
 
 ```typescript
-const response = await fetch('https://rpc.sum-chain.xyz', {
+const response = await fetch('https://rpc.sumchain.io', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
@@ -130,7 +130,7 @@ export async function fetchAcademicCredentials(
   walletAddress: string
 ): Promise<AcademicCredential[]> {
   try {
-    const response = await fetch('https://rpc.sum-chain.xyz', {
+    const response = await fetch('https://rpc.sumchain.io', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -328,7 +328,7 @@ This wallet has a test diploma credential you can use for development.
 ### Test Command (curl)
 
 ```bash
-curl -X POST https://rpc.sum-chain.xyz \
+curl -X POST https://rpc.sumchain.io \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -376,7 +376,7 @@ For now, display credentials as-is from the endpoint response.
 
 - **API Issues**: Contact blockchain team
 - **Integration Help**: Refer to [ACADEMIC-CREDENTIALS-RPC-GUIDE.md](ACADEMIC-CREDENTIALS-RPC-GUIDE.md)
-- **Production RPC**: `https://rpc.sum-chain.xyz`
+- **Production RPC**: `https://rpc.sumchain.io`
 - **Testnet RPC**: Contact DevOps for testnet endpoint
 
 ---

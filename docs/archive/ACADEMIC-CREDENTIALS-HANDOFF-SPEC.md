@@ -1,6 +1,8 @@
 # SUM Chain → SUMail Academic Credentials Handoff Specification
 
 > **Archived / historical.** Kept for history; for current truth see [docs/tokens.md](../tokens.md) and [docs/policy-accounts-and-contracts.md](../policy-accounts-and-contracts.md).
+>
+> **⚠️ Never send a private key to a server.** Request examples below that carry a `private_key` field describe server-side signing, which must not be used. Sign transactions on the client instead: [DocClass client-side signing](../subprotocols/DOCCLASS-CLIENT-SIGNING.md).
 
 ## TESTNET ONLY / FICTIONAL DEMO PROOF OF CONCEPT
 
