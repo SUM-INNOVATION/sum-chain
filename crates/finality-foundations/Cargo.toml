@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "DORMANT library code for the G2 consensus-foundation rules ratified on 2026-10-16 (#270, #268): a durable-signer safety core and bootstrap-authorization acceptance logic over abstract types, the A1 encoding conventions, and the ratified FinalityVoteV1 format with strict (E1) verification. Not wired into any node path; is not certified finality."
+description = "DORMANT library code for the G2 consensus-foundation rules ratified on 2026-10-16 (#270, #268): a durable-signer safety core and bootstrap-authorization acceptance logic over abstract types, the A1 encoding conventions, and the ratified FinalityVoteV1 and FinalityCertificateV1 formats with strict (E1) verification. Not wired into any node path; is not certified finality."
 publish = false
 
 # Deliberately no dependency on any other workspace crate: nothing here may reach

@@ -160,10 +160,12 @@ def rust_byte_literals(root):
 
 
 # Ratified constants and the one file allowed to spell them (group V,
-# ratified 2026-10-17). Anywhere else, the clash check below still refuses them.
+# ratified 2026-10-17; group C, ratified 2026-10-19). Anywhere else, the clash
+# check below still refuses them.
 RATIFIED_HOME = {
     "D_VOTE": "crates/finality-foundations/src/vote.rs",
     "M_VOTE": "crates/finality-foundations/src/vote.rs",
+    "M_CERT": "crates/finality-foundations/src/certificate.rs",
 }
 
 

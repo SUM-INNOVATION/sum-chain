@@ -5,12 +5,13 @@
 //!
 //! # This is NOT certified finality
 //!
-//! Nothing in this crate makes the chain final. There is no certificate
-//! encoding, no consensus core (rounds, timeouts, gossip), no network
-//! protocol, no signing of votes, and no activation. The A1 conventions below
-//! fix how integers and rounds are encoded and how a certificate's signer
-//! count is checked. The vote codec ([`vote`]) is the one frozen object
-//! layout: it decodes, verifies (E1) and counts votes, and nothing calls it.
+//! Nothing in this crate makes the chain final. There is no consensus core
+//! (rounds, timeouts, gossip), no network protocol, no signing of votes, no
+//! certificate storage and no activation. The A1 conventions below fix how
+//! integers and rounds are encoded and how a certificate's signer count is
+//! checked. The frozen object layouts are the vote ([`vote`]: decode, verify
+//! under E1, count) and the certificate ([`certificate`]: encode, decode,
+//! verify every reconstructed PRECOMMIT under E1). Nothing calls either.
 //! No node, consensus, storage or RPC code calls this crate, and
 //! `tests/dormant.rs` fails if any workspace crate starts depending on it.
 //! The code exists so that the ratified *semantics* are implemented and tested
@@ -35,12 +36,16 @@
 //! |--------|----------------------------------------|------------------|
 //! | `FinalityVoteV1` | 113-byte body (V-1), `D_VOTE ‖ body` 139-byte pure-Ed25519 preimage, 184-byte wire (V-5), `step = vote_type + 1` (V-2), all-zero `block_id` = nil (V-3), validator-set commitment (V-4), canonical non-small-order keys (V-6); verified under E1 (`verify_strict`) | [`vote`] |
 //!
+//! | Object | Ratified format (group C, 2026-10-19) | Implemented here |
+//! |--------|----------------------------------------|------------------|
+//! | `FinalityCertificateV1` | `FCRTv1\0`, schema 1, the field order of [`certificate`], `119 + 66·k` bytes; strictly ascending indices; the validator-set commitment resolved to the authenticated set; `q(n) ≤ k ≤ n`; non-nil `block_id`; every entry a reconstructed PRECOMMIT verified under E1; any invalid entry refuses the whole certificate. Storage is not decided. | [`certificate::FinalityCertificateV1`], [`certificate::verify_certificate`] |
+//!
 //! # Still unratified (deliberately absent)
 //!
 //! * Every other object layout: authorization manifest, handshake hint,
-//!   certificate, signer state, evidence, the validator-set commitment's
-//!   preimage, and the composition of every database key (byte groups A2–A5
-//!   and the object layouts). Types here are
+//!   signer state, evidence, the validator-set commitment's preimage, and the
+//!   composition of every database key, including how a certificate is
+//!   stored (byte groups A2–A5 and the storage forms). Types here are
 //!   plain Rust structs;
 //!   where a digest or signature is needed it is supplied by the caller or an
 //!   injected trait, and the tests use synthetic digests.
