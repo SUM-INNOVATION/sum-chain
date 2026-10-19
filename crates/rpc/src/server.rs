@@ -9494,6 +9494,95 @@ impl SumChainApiServer for RpcServer {
                 .map(|id| format!("0x{}", hex::encode(id))),
         })
     }
+
+    async fn employment_build_transaction(
+        &self,
+        request: crate::types::EmploymentBuildRequest,
+    ) -> std::result::Result<
+        crate::types::EmploymentBuildResponse,
+        jsonrpsee::types::ErrorObjectOwned,
+    > {
+        use crate::docclass_build::parse_hex32;
+        use crate::employment_build::{
+            needs_credential, needs_issuer_record, op_from_request, EmploymentRequestDefaults,
+        };
+        use sumchain_primitives::employment_build::{build_employment_tx, EmploymentTxContext};
+
+        // No keys, no signing, no execution. Reads only: the sender's nonce, the
+        // chain id, the latest block's height and timestamp, and, when the
+        // request omits them, the sender's issuer record or the credential being
+        // revoked. Authority stays with the executor.
+        let from = self.parse_address(&request.from)?;
+        let fee = request.fee.unwrap_or(GOV_DEFAULT_FEE);
+        let nonce = match request.nonce {
+            Some(n) => n,
+            None => self
+                .state
+                .get_nonce(&from)
+                .map_err(|e| RpcError::Internal(format!("Failed to get nonce: {e}")))?,
+        };
+        let chain_id = request.chain_id.unwrap_or_else(|| self.state.chain_id());
+        // The same latest-block reading the custodial methods use.
+        let (latest_height, now_ms) = match BlockStore::new(&self.db).get_latest() {
+            Ok(Some(block)) => (block.header.height, block.header.timestamp),
+            _ => (
+                0,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            ),
+        };
+        let mut defaults = EmploymentRequestDefaults {
+            now_ms,
+            latest_height,
+            ..Default::default()
+        };
+        if needs_issuer_record(&request.op) {
+            if let Some(issuer) = EmploymentIssuerStore::new(&self.db)
+                .get(&from)
+                .map_err(|e| RpcError::Internal(format!("Failed to read issuer: {e}")))?
+            {
+                defaults.issuer = Some((issuer.display_name.clone(), issuer.issuer_class));
+            }
+        }
+        if let Some(id) = needs_credential(&request.op) {
+            let id = parse_hex32("employment_id", id).map_err(RpcError::InvalidParams)?;
+            if let Some(credential) = EmploymentCredentialStore::new(&self.db)
+                .get(&id)
+                .map_err(|e| RpcError::Internal(format!("Failed to read credential: {e}")))?
+            {
+                defaults.employee_address = Some(credential.employee_address);
+            }
+        }
+        let op = op_from_request(&request.op, &defaults).map_err(RpcError::InvalidParams)?;
+        let built = build_employment_tx(
+            &EmploymentTxContext {
+                chain_id,
+                from,
+                nonce,
+                fee,
+            },
+            &op,
+        )
+        .map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+        let signing_hash = built.tx.signing_hash();
+        let unsigned = bincode::serialize(&built.tx)
+            .map_err(|e| RpcError::Internal(format!("Failed to encode tx: {e}")))?;
+        Ok(crate::types::EmploymentBuildResponse {
+            tx: crate::types::TxBuildResponse {
+                unsigned_tx: format!("0x{}", hex::encode(unsigned)),
+                signing_hash: format!("0x{}", hex::encode(signing_hash.as_bytes())),
+                from: from.to_base58(),
+                nonce,
+                fee,
+                chain_id,
+            },
+            employment_id: built
+                .employment_id
+                .map(|id| format!("0x{}", hex::encode(id))),
+        })
+    }
 }
 
 // Helper methods for DocClass RPC conversions

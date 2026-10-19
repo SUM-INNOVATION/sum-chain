@@ -3755,3 +3755,89 @@ pub struct DocClassBuildResponse {
     /// For `issue_academic_credential`, the new credential's id (hex).
     pub credential_id: Option<String>,
 }
+
+// ── Employment (non-custodial) ──────────────────────────────────────────────
+
+/// A single Employment (SRC-88X) issuer or credential operation, tagged by `op`.
+///
+/// Every field is public data: addresses base58, 32-byte values hex. There is
+/// no private-key field, and `employment_buildTransaction` never signs.
+/// Optional fields are filled by the node when omitted (heights and timestamps
+/// from the latest block, a credential's issuer name and class from the
+/// sender's issuer record, a revocation's employee from the stored credential);
+/// a client that wants to compare the node's bytes with its own passes them
+/// all. Mirrors `sumchain_primitives::employment_build::EmploymentBuildOp`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum EmploymentBuildOpRequest {
+    RegisterIssuer {
+        /// `GovernmentLabor`, `PayrollProcessor`, `RegulatedHrPlatform`, `Peo`,
+        /// `Employer`, `HrPlatform`, `StaffingAgency` or `GigPlatform`.
+        issuer_class: String,
+        display_name: String,
+        issuer_commitment: String,
+        /// ISO 3166-1 alpha-2, optionally with a subdivision.
+        jurisdiction_code: String,
+        policy_id: String,
+        /// Defaults to the latest block's height.
+        registered_at_height: Option<u64>,
+        /// Milliseconds; defaults to the latest block's timestamp.
+        registered_at: Option<u64>,
+    },
+    CreateEmployment {
+        employee_address: String,
+        employee_ref: String,
+        employer_ref: String,
+        tenure_commitment: String,
+        role_commitment: Option<String>,
+        /// `FullTime`, `PartTime`, `Contract`, `Temporary`, `Internship`,
+        /// `Freelance` or `Gig`.
+        employment_type: String,
+        valid_from: u64,
+        /// 0 = no expiry.
+        expiry: u64,
+        policy_id: String,
+        /// Defaults to the sender's registered display name.
+        issuer_name: Option<String>,
+        /// Defaults to the sender's registered issuer class.
+        issuer_class: Option<String>,
+        /// Milliseconds; defaults to the latest block's timestamp.
+        created_at: Option<u64>,
+    },
+    RevokeEmployment {
+        employment_id: String,
+        /// Defaults to the stored credential's employee.
+        employee_address: Option<String>,
+        /// Defaults to the reference the custodial method derives from the
+        /// employment id, `revoked_at` and `reason`.
+        revocation_ref: Option<String>,
+        /// Milliseconds, used only to derive an omitted `revocation_ref`;
+        /// defaults to the latest block's timestamp.
+        revoked_at: Option<u64>,
+        /// Used only to derive an omitted `revocation_ref` (hashed, never
+        /// stored).
+        reason: Option<String>,
+    },
+}
+
+/// Request for `employment_buildTransaction`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmploymentBuildRequest {
+    /// Sender/signer address (base58).
+    pub from: String,
+    pub fee: Option<u128>,
+    pub nonce: Option<u64>,
+    pub chain_id: Option<u64>,
+    #[serde(flatten)]
+    pub op: EmploymentBuildOpRequest,
+}
+
+/// Response of `employment_buildTransaction`: the shared unsigned-transaction
+/// fields, plus the id a create produces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmploymentBuildResponse {
+    #[serde(flatten)]
+    pub tx: TxBuildResponse,
+    /// For `create_employment`, the new credential's employment id (hex).
+    pub employment_id: Option<String>,
+}

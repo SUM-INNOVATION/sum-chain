@@ -6,6 +6,7 @@ pub mod api;
 pub mod auth;
 pub mod custodial;
 pub mod docclass_build;
+pub mod employment_build;
 pub mod governance_types;
 pub mod inference_settlement_types;
 pub mod health;

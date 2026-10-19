@@ -2442,4 +2442,20 @@ pub trait SumChainApi {
         &self,
         request: crate::types::DocClassBuildRequest,
     ) -> Result<crate::types::DocClassBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Build an unsigned Employment (SRC-88X) issuer or credential tx for one
+    /// operation. **No-key builder**: it takes the sender's address and public
+    /// fields only; no signing, no submit, no execution, no authorization. The
+    /// client signs `signing_hash` locally and submits via
+    /// `sum_sendRawTransaction`. Decodes to `TxPayload::Employment`. Omitted
+    /// heights and timestamps, a credential's issuer name and class, and a
+    /// revocation's employee are filled from this node's state; pass them to get
+    /// bytes that depend on nothing else. Replaces the deprecated custodial
+    /// `employment_registerIssuer`, `employment_createCredential` and
+    /// `employment_revokeCredential`.
+    #[method(name = "employment_buildTransaction")]
+    async fn employment_build_transaction(
+        &self,
+        request: crate::types::EmploymentBuildRequest,
+    ) -> Result<crate::types::EmploymentBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
 }
