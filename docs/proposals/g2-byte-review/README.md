@@ -132,6 +132,8 @@ These semantics alone are **not** complete certified finality. See §10 for what
 
 ## 4. Certificate `FinalityCertificateV1` (BL §4, unchanged): serves G2-a
 
+> **C RATIFIED (owner, 2026-10-19): wire encoding and validity.** `FCRTv1\0`, schema 1, the field order below and `119 + 66·k` bytes; strictly ascending indices; the validator-set commitment resolved to the authenticated set; quorum `q(n) ≤ k ≤ n`; a non-nil `block_id`; strict (E1) verification of each reconstructed PRECOMMIT vote; any invalid entry refuses the whole certificate. Implemented dormant in `crates/finality-foundations/src/certificate.rs`. **Storage is not decided:** the storage forms at the end of this section remain a draft, and no column family, key or migration is authorized.
+
 | Offset | Size | Field |
 |---|---|---|
 | 0 | 7 | `FCRTv1\0` |
@@ -154,7 +156,16 @@ These semantics alone are **not** complete certified finality. See §10 for what
 - any signature is bad;
 - the certificate does not name exactly the (height, block_id) being committed.
 
-**Sizes:** n = 4 with k = 3 gives 317 bytes; n = 2 with k = 2 gives 251 bytes; the maximum at n = 100 is 6,719.
+**Sizes** depend on k, not n. The minimum-quorum size (k = q(n)) and the all-signers size (k = n) differ:
+
+| n | k = q(n) (minimum quorum) | k = n (all signers) |
+|---|---|---|
+| 2 | k = 2: 251 B | k = 2: 251 B |
+| 4 | k = 3: 317 B | k = 4: 383 B |
+| 100 | k = 67: 4,541 B | k = 100: 6,719 B |
+| 65,535 | k = 43,691: 2,883,725 B | k = 65,535: 4,325,429 B |
+
+The decoder checks the total length against 119 + 66k from the header before it allocates anything for the entries.
 
 **G2-a storage forms.** #292's seam injects these as `CertifiedLayout`; they are written in **the same batch as block h's own publication**:
 - certificate CF `finality_certificates`: key = height u64 **BE** ‖ block_id (40 bytes); value = the bytes above;
