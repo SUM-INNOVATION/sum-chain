@@ -10,8 +10,8 @@ use std::rc::Rc;
 use ed25519_dalek::{Signer as _, Verifier as _};
 use sumchain_finality_foundations::signer::{
     initialize, DurableSigner, ExclusiveOwnership, Justification, Lock, OwnershipError,
-    PolkaVerifier, SignPosition, SignRequest, SignerError, SignerRecord, SignerStore, SigningKey,
-    Step, StoreError, VoteValue,
+    PolkaVerifier, SignBytes, SignPosition, SignRequest, SignerError, SignerRecord, SignerStore,
+    SigningKey, Step, StoreError, VoteValue,
 };
 use sumchain_finality_foundations::Digest;
 
@@ -361,7 +361,7 @@ fn g2b_signature_is_durable_before_it_is_released() {
     assert_eq!(*rig.events.borrow(), vec!["sign", "persist", "release"]);
     let durable = rig.disk.record().unwrap().last.unwrap();
     assert_eq!(durable.signature, sig);
-    assert_eq!(durable.payload, r.payload);
+    assert_eq!(durable.payload, SignBytes::Full(r.payload.clone()));
 
     let vk = ed25519_dalek::SigningKey::from_bytes(&rig.seed).verifying_key();
     let sig = ed25519_dalek::Signature::from_slice(&sig).unwrap();
