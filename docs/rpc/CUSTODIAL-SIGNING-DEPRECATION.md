@@ -13,6 +13,11 @@ request (the node, a proxy in front of it, a log, a crash dump) can read the
 key, and a key that has been sent once cannot be made private again. These
 methods are therefore **off by default** and deprecated.
 
+| | DocClass | Employment |
+|---|---|---|
+| Custodial methods | Off by default; opt in with `unsafe_custodial_docclass_methods` | Off by default; opt in with `unsafe_custodial_employment_methods` |
+| Client-side replacement | **Exists** (#333): `docclass_buildTransaction` and `sumchain docclass` | **Missing**: no client-side builder and no CLI yet |
+
 ## What changes
 
 - **Off by default.** A node serves neither family unless its operator opts in.
@@ -29,6 +34,23 @@ methods are therefore **off by default** and deprecated.
   outside it.
 - **Unchanged:** the request and response JSON, the transactions an enabled
   node builds, and every other RPC method. No consensus or execution change.
+- **Archived documentation.** Archived guides that showed requests carrying a
+  private key now say not to send one and point to client-side signing. The
+  RPC hostname they used, which the project no longer uses, is replaced by
+  `https://rpc.sumchain.io`.
+
+## What this does not do
+
+Turning these methods off and removing the old instructions does **not**
+revoke or protect any key that was already sent to a server or published.
+Copies in logs, proxies, backups and repository history remain. Treat such a
+key as exposed: its owner must replace it. Documentation cleanup is not key
+revocation.
+
+It also cannot stop a client from transmitting a key: the request still
+reaches the node and anything in front of it, which only refuse to use the
+key. Nothing changes on a running network until its nodes run a release
+containing this change with the defaults left off.
 
 ## For clients
 
@@ -66,7 +88,7 @@ deactivate issuer.
 
 ### Employment: no replacement yet
 
-There is no client-side builder for employment operations yet. A node operator
+There is no client-side builder and no CLI for employment operations yet. A node operator
 who must keep serving existing employment clients can re-enable that family
 alone (below). A client-side builder for employment operations is a separate,
 planned change.
