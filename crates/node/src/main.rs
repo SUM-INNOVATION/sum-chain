@@ -22,6 +22,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 mod config;
 mod consensus_wrapper;
 mod docclass_cli;
+mod employment_cli;
 mod node;
 mod tx_broadcaster;
 
@@ -227,6 +228,10 @@ enum Commands {
     /// DocClass issuer and academic-credential transactions, built and signed
     /// locally; the key never leaves this machine
     Docclass(docclass_cli::DocclassArgs),
+
+    /// Employment issuer and credential transactions, built and signed
+    /// locally; the key never leaves this machine
+    Employment(employment_cli::EmploymentArgs),
 
     /// Wipe employment data (SRC-88X) from the database
     WipeEmployment {
@@ -890,6 +895,10 @@ async fn main() -> Result<()> {
 
         Commands::Docclass(args) => {
             docclass_cli::execute(args)?;
+        }
+
+        Commands::Employment(args) => {
+            employment_cli::execute(args)?;
         }
 
         Commands::WipeEmployment { data_dir, yes } => {

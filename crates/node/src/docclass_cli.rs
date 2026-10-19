@@ -649,7 +649,12 @@ impl HttpRpc {
         }
     }
 
-    fn call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+    /// One JSON-RPC call; an error reply becomes an error naming the method.
+    pub(crate) fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         let resp: serde_json::Value = self
             .client
             .post(&self.url)
