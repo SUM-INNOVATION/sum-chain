@@ -276,7 +276,9 @@ fn the_disabled_messages_name_the_replacement_and_nothing_else() {
     assert!(DOCCLASS_CUSTODIAL_DISABLED.contains("docclass_buildTransaction"));
     assert!(DOCCLASS_CUSTODIAL_DISABLED.contains("sumchain docclass"));
     assert!(DOCCLASS_CUSTODIAL_DISABLED.contains("send_raw_transaction"));
-    assert!(EMPLOYMENT_CUSTODIAL_DISABLED.contains("no client-side builder yet"));
+    assert!(EMPLOYMENT_CUSTODIAL_DISABLED.contains("employment_buildTransaction"));
+    assert!(EMPLOYMENT_CUSTODIAL_DISABLED.contains("sumchain employment"));
+    assert!(EMPLOYMENT_CUSTODIAL_DISABLED.contains("send_raw_transaction"));
     assert!(EMPLOYMENT_CUSTODIAL_DISABLED.contains("unsafe_custodial_employment_methods"));
     for m in [DOCCLASS_CUSTODIAL_DISABLED, EMPLOYMENT_CUSTODIAL_DISABLED] {
         assert!(!m.contains("{}"), "fixed text, no formatting slot");

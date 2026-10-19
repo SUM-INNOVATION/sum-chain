@@ -16,8 +16,8 @@
 //!
 //! - DocClass: `docclass_buildTransaction` (takes an address, never a key),
 //!   local signing with `sumchain docclass`, then `send_raw_transaction`;
-//! - employment: no client-side replacement yet; the operator flag is the
-//!   compatibility path until one exists.
+//! - employment: `employment_buildTransaction` (takes an address, never a key),
+//!   local signing with `sumchain employment`, then `send_raw_transaction`.
 //!
 //! On, the node logs a deprecation warning at startup and on every call. The
 //! warning names the method and nothing from the request.
@@ -46,9 +46,11 @@ pub const DOCCLASS_CUSTODIAL_DISABLED: &str = "custodial signing is disabled on 
 /// Error returned by an employment custodial method on a node that has not
 /// opted in. Fixed text: it never includes anything from the request.
 pub const EMPLOYMENT_CUSTODIAL_DISABLED: &str = "custodial signing is disabled on this node: \
-     the server will not take a private key. Employment operations have no \
-     client-side builder yet; a node operator who must keep serving existing \
-     clients can re-enable them with [rpc] unsafe_custodial_employment_methods";
+     the server will not take a private key. Build the transaction with \
+     employment_buildTransaction (sender address, no key), sign it locally \
+     (sumchain employment), and submit it with send_raw_transaction; a node \
+     operator who must keep serving existing clients can re-enable these \
+     methods with [rpc] unsafe_custodial_employment_methods";
 
 /// Refusal for a key that is not hex (or has an odd number of digits).
 pub const CUSTODIAL_KEY_NOT_HEX: &str = "Invalid private key: expected 32 bytes as hex";

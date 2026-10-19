@@ -844,7 +844,8 @@ impl RpcServer {
         if self.custodial.employment {
             tracing::warn!(
                 "DEPRECATED: custodial employment signing methods are ENABLED \
-                 ([rpc] unsafe_custodial_employment_methods). They take a caller's private key"
+                 ([rpc] unsafe_custodial_employment_methods). They take a caller's private key; \
+                 clients should use employment_buildTransaction and sign locally"
             );
         }
         info!(
