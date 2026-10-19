@@ -105,12 +105,25 @@ pub struct SignRequest {
     pub justification: Option<Justification>,
 }
 
+/// The bytes a stored signature covers, as the store keeps them.
+///
+/// A record built by [`DurableSigner::sign`] always holds the full bytes. A
+/// store whose encoding keeps only a digest (the proposed file layout in
+/// [`crate::signer_file`]) loads [`SignBytes::Digest`] and must then answer
+/// [`SignerStore::sign_bytes_digest`], so that an identical request can still
+/// be recognised after a restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignBytes {
+    Full(Vec<u8>),
+    Digest(Digest),
+}
+
 /// The last signature this key released (or is about to release).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LastSigned {
     pub position: SignPosition,
     pub value: VoteValue,
-    pub payload: Vec<u8>,
+    pub payload: SignBytes,
     pub signature: Vec<u8>,
 }
 
@@ -190,6 +203,14 @@ pub trait SignerStore {
     /// Atomically replace the record. Must return `Ok` only once the new record
     /// is durable. On `Err` the durable record may be the old or the new one.
     fn persist(&mut self, record: &SignerRecord) -> Result<(), StoreError>;
+
+    /// The digest under which this store records `sign_bytes`, for stores that
+    /// load [`SignBytes::Digest`]. `None` (the default) means the store keeps
+    /// full bytes; a loaded digest is then never matched, which refuses an
+    /// identical request as equivocation rather than guessing.
+    fn sign_bytes_digest(&self, _sign_bytes: &[u8]) -> Option<Digest> {
+        None
+    }
 }
 
 /// Another owner holds the key, or ownership could not be established.
@@ -275,9 +296,25 @@ pub struct DurableSigner<S, K, P, G> {
     poisoned: bool,
 }
 
+/// [`initialize`] while holding the key's exclusive ownership, so that two
+/// initializations (or an initialization racing a running signer) cannot
+/// interleave. The guard is released on return.
+pub fn initialize_exclusive<S: SignerStore, L: ExclusiveOwnership>(
+    ownership: &L,
+    store: &mut S,
+    key_id: Digest,
+    floor: Option<SignPosition>,
+) -> Result<(), SignerError> {
+    let _guard = ownership
+        .try_acquire()
+        .map_err(|e| SignerError::OwnershipHeld(e.0))?;
+    initialize(store, key_id, floor)
+}
+
 /// Explicit initialization: creates the first record, and refuses if any
 /// record exists or the store cannot be read. `floor` must be at or above any
-/// position this key may already have signed.
+/// position this key may already have signed. It does not take the ownership
+/// lock itself; [`initialize_exclusive`] does.
 pub fn initialize<S: SignerStore>(
     store: &mut S,
     key_id: Digest,
@@ -384,7 +421,14 @@ where
                 });
             }
             if req.position == last.position {
-                return if last.value == req.value && last.payload == req.payload {
+                let same_bytes = match &last.payload {
+                    SignBytes::Full(bytes) => *bytes == req.payload,
+                    SignBytes::Digest(d) => self
+                        .store
+                        .sign_bytes_digest(&req.payload)
+                        .is_some_and(|x| x == *d),
+                };
+                return if last.value == req.value && same_bytes {
                     // Already durable: hand back the same bytes, sign nothing new.
                     Ok(last.signature.clone())
                 } else {
@@ -445,7 +489,7 @@ where
             last: Some(LastSigned {
                 position: req.position,
                 value: req.value,
-                payload: req.payload.clone(),
+                payload: SignBytes::Full(req.payload.clone()),
                 signature: signature.clone(),
             }),
             lock: next_lock,
