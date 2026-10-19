@@ -549,7 +549,7 @@ async fn messaging_submit_message(
 # Build a test transaction first (use web wallet or CLI tool)
 # Then submit it:
 
-curl -X POST https://rpc.sum-chain.xyz \
+curl -X POST https://rpc.sumchain.io \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -573,7 +573,7 @@ curl -X POST https://rpc.sum-chain.xyz \
 ### Test pub_key_get
 
 ```bash
-curl -X POST https://rpc.sum-chain.xyz \
+curl -X POST https://rpc.sumchain.io \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -595,7 +595,7 @@ curl -X POST https://rpc.sum-chain.xyz \
 ### Test messaging_submitMessage
 
 ```bash
-curl -X POST https://rpc.sum-chain.xyz \
+curl -X POST https://rpc.sumchain.io \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",

@@ -4,12 +4,14 @@
 > **Last verified:** 2026-06-27
 >
 > This is an integration handoff document. Current usage is in [docs/tokens.md](../tokens.md) and [docs/policy-accounts-and-contracts.md](../policy-accounts-and-contracts.md).
+>
+> **⚠️ Do not follow the request examples in this guide.** Every method it describes takes the caller's private key and signs on the server, and a private key must never be sent to a server. These custodial methods are deprecated. Build and sign DocClass transactions on the client instead: [DocClass client-side signing](../subprotocols/DOCCLASS-CLIENT-SIGNING.md).
 
 This guide explains how to use the new RPC endpoints for issuing academic credentials (SRC-810/811/812) on SUM Chain.
 
-**✅ Status**: Production-ready and tested on mainnet
+**Status**: Historical. The methods below are deprecated custodial methods; do not use them.
 **📅 Deployed**: February 3, 2026
-**🔗 RPC Endpoint**: https://rpc.sum-chain.xyz (or http://localhost:8545 for local testing)
+**RPC Endpoint**: none. Do not send a request that carries a private key to any endpoint.
 
 ---
 
@@ -20,7 +22,7 @@ Two new RPC endpoints have been added to simplify academic credential issuance:
 1. **`docclass_registerAcademicIssuer`** - Register an educational institution as an issuer
 2. **`docclass_issueAcademicCredential`** - Issue academic credentials (transcripts, diplomas, enrollment verifications)
 
-These endpoints handle all the complexity of:
+These deprecated endpoints did the following on the server, using the caller's private key:
 - Transaction creation and signing
 - Bincode serialization
 - Nonce management
@@ -36,7 +38,7 @@ These endpoints handle all the complexity of:
 docclass_registerAcademicIssuer
 ```
 
-### Request Format
+### Request Format (deprecated: carries a private key; do not send)
 
 ```json
 {
@@ -60,7 +62,7 @@ docclass_registerAcademicIssuer
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `private_key` | string | Yes | Issuer's private key in hex format (with or without 0x prefix) |
+| `private_key` | string | Yes | **Do not send.** A private key must never leave the client; use client-side signing instead |
 | `institution_name` | string | Yes | Institution name (e.g., "SUM Hypothesis Institute Technology") |
 | `institution_type` | string | Yes | Type of institution (e.g., "University", "College", "CertificationBody") |
 | `jurisdiction_code` | string | Yes | ISO 3166-1 alpha-2 country code (e.g., "US", "GB", "CN") |
@@ -97,7 +99,7 @@ docclass_registerAcademicIssuer
 docclass_issueAcademicCredential
 ```
 
-### Request Format
+### Request Format (deprecated: carries a private key; do not send)
 
 ```json
 {
@@ -143,7 +145,7 @@ docclass_issueAcademicCredential
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `private_key` | string | Yes | Issuer's private key (must be registered issuer) |
+| `private_key` | string | Yes | **Do not send.** A private key must never leave the client; use client-side signing instead |
 | `subcode` | number | Yes | 810 (Transcript), 811 (Diploma), or 812 (Enrollment) |
 | `holder_address` | string | Yes | Student's wallet address (base58) who will own the credential |
 | `subject_commitment` | string | Yes | BLAKE3 hash commitment to student identity (32 bytes hex) |
@@ -265,16 +267,16 @@ Each attribute has:
 
 ## Complete Example Workflow
 
-### Step 1: Extract Private Key
+### Step 1: Keep the key on the client
 
-If you have an encrypted keystore:
+Do not export a key to paste into a request. Build and sign locally instead, for example:
 ```bash
-./target/release/export_private_key --key keys/sumhit.json
-# Enter password when prompted
-# Copy the 0x... hex key
+sumchain docclass --key ./issuer-key.json --dry-run register-issuer --name "Example Institute" --jurisdiction US --subcodes 810,811,812
+# Without --dry-run it signs locally and submits the signed transaction;
+# the key never leaves this machine.
 ```
 
-### Step 2: Register as Issuer
+### Step 2 (deprecated, do not run): Register as Issuer
 
 ```bash
 curl -X POST http://localhost:8545 \
@@ -310,7 +312,7 @@ curl -X POST http://localhost:8545 \
   }'
 ```
 
-### Step 4: Issue Credential
+### Step 4 (deprecated, do not run): Issue Credential
 
 ```bash
 curl -X POST http://localhost:8545 \
@@ -354,10 +356,7 @@ curl -X POST http://localhost:8545 \
 ### Private Key Management
 
 1. **Never expose private keys** in logs, code, or screenshots
-2. **Use environment variables** for production:
-   ```bash
-   export ISSUER_PRIVATE_KEY="0x..."
-   ```
+2. **Keep keys on the client.** Never put a private key in a request to a server; sign locally with `sumchain docclass`.
 3. **Rotate keys** periodically using the issuer key rotation feature
 4. **Use hardware wallets** for high-value issuer accounts
 

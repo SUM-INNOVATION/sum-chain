@@ -511,7 +511,7 @@ const commitment = computeCommitment("SRC-810-COURSES-v1", courses);
 
 ```bash
 # Before 385,000: This succeeds ✅
-curl -X POST https://rpc.sum-chain.xyz \
+curl -X POST https://rpc.sumchain.io \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -688,7 +688,7 @@ await rpc.batchIssueCredentials(validatedBatch);
 **Test 1: Invalid Credential (Should Fail)**
 
 ```bash
-curl -X POST https://rpc.sum-chain.xyz \
+curl -X POST https://rpc.sumchain.io \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -730,7 +730,7 @@ curl -X POST https://rpc.sum-chain.xyz \
 **Test 2: Valid Credential (Should Succeed)**
 
 ```bash
-curl -X POST https://rpc.sum-chain.xyz \
+curl -X POST https://rpc.sumchain.io \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -779,7 +779,7 @@ curl -X POST https://rpc.sum-chain.xyz \
 **Test 3: Valid Encrypted Credential (Should Succeed)**
 
 ```bash
-curl -X POST https://rpc.sum-chain.xyz \
+curl -X POST https://rpc.sumchain.io \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",

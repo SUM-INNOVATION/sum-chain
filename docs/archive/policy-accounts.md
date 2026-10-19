@@ -3,6 +3,8 @@
 > **Archived / historical.** This is a historical / planned policy-account guide.
 > The current public guide is
 > [policy-accounts-and-contracts](../policy-accounts-and-contracts.md).
+>
+> **⚠️ Never send a private key to a server.** Request examples below that carry a private key describe a design in which the server signs; do not use that pattern. Sign transactions on the client.
 
 ## Table of Contents
 
