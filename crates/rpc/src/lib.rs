@@ -4,6 +4,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod custodial;
 pub mod docclass_build;
 pub mod governance_types;
 pub mod inference_settlement_types;
@@ -67,6 +68,14 @@ pub enum RpcError {
     /// and says it in a code a client can branch on rather than in prose.
     #[error("Page out of bounds: {0}")]
     PageOutOfBounds(String),
+
+    /// The method exists but this node does not serve it (see `custodial`).
+    ///
+    /// Its own code, so a client can tell "this node will not do that" from a
+    /// malformed request (-32602) or a missing method (-32601). The message is
+    /// fixed text and carries nothing from the request.
+    #[error("{0}")]
+    MethodDisabled(String),
 }
 
 impl From<RpcError> for jsonrpsee::types::ErrorObjectOwned {
@@ -90,6 +99,9 @@ impl From<RpcError> for jsonrpsee::types::ErrorObjectOwned {
             // a client that treats it as a malformed request is not.
             RpcError::PageOutOfBounds(msg) => {
                 jsonrpsee::types::ErrorObject::owned(-32004, msg, None::<()>)
+            }
+            RpcError::MethodDisabled(msg) => {
+                jsonrpsee::types::ErrorObject::owned(-32005, msg, None::<()>)
             }
             _ => jsonrpsee::types::ErrorObject::owned(-32603, e.to_string(), None::<()>),
         }

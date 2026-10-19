@@ -117,6 +117,9 @@ pub struct Node {
     /// Budgets for the RPC's contract executor, and how many executions it
     /// runs at once. Node-local; see [`Node::apply_local_policy`].
     rpc_contract_exec: (sumc_runtime::LocalExecutionLimits, usize),
+    /// Which deprecated custodial signing families the RPC serves. Both off
+    /// unless [`Node::apply_rpc_custodial_signing`] turns one on.
+    rpc_custodial_signing: sumchain_rpc::custodial::CustodialSigningMethods,
 }
 
 impl Node {
@@ -486,12 +489,19 @@ impl Node {
             protocol_digest,
             peer_compat: Arc::new(PeerCompatRegistry::new(protocol_digest, enforce_from)),
             rpc_contract_exec: (sumc_runtime::LocalExecutionLimits::DEFAULT, 1),
+            rpc_custodial_signing: sumchain_rpc::custodial::CustodialSigningMethods::default(),
         })
     }
 
     /// Apply the node-local contract RPC budgets. Call before `run`.
     pub fn apply_rpc_contract_limits(&mut self, rpc: &crate::config::RpcSettings) {
         self.rpc_contract_exec = (rpc.contract_exec_limits(), rpc.contract_exec_concurrency);
+    }
+
+    /// Apply the operator's choice of deprecated custodial signing families
+    /// (`[rpc] unsafe_custodial_*_methods`). Call before `run`.
+    pub fn apply_rpc_custodial_signing(&mut self, rpc: &crate::config::RpcSettings) {
+        self.rpc_custodial_signing = rpc.custodial_signing_methods();
     }
 
     /// The consensus boundary for a block a PEER supplied, as one function.
@@ -1413,6 +1423,7 @@ impl Node {
             self.metrics.clone(),
             &self.genesis,
             self.rpc_contract_exec,
+            self.rpc_custodial_signing,
         );
 
         let handle = rpc.start(self.rpc_addr).await?;
@@ -1629,6 +1640,7 @@ fn build_rpc_server(
     metrics: Arc<Metrics>,
     genesis: &Genesis,
     (contract_limits, contract_concurrency): (sumc_runtime::LocalExecutionLimits, usize),
+    custodial_signing: sumchain_rpc::custodial::CustodialSigningMethods,
 ) -> RpcServer {
     let params = genesis.params.clone();
     // Read-only, under node-local budgets: this executor serves views and
@@ -1672,6 +1684,8 @@ fn build_rpc_server(
             })
             .collect(),
     )
+    // Off unless the operator opted in (`[rpc] unsafe_custodial_*_methods`).
+    .with_custodial_signing_methods(custodial_signing)
 }
 
 #[cfg(test)]
@@ -2001,8 +2015,14 @@ mod rpc_wiring_tests {
             Arc::new(Metrics::new()),
             &genesis,
             (sumc_runtime::LocalExecutionLimits::DEFAULT, 1),
+            crate::config::RpcSettings::default().custodial_signing_methods(),
         );
 
+        assert_eq!(
+            server.custodial_signing_methods(),
+            sumchain_rpc::custodial::CustodialSigningMethods::default(),
+            "a node built from default settings must not serve the custodial signing methods"
+        );
         assert!(
             server.contract_executor_is_local() && server.contract_exec_pool_is_local(),
             "the RPC contract executors must run under local budgets"

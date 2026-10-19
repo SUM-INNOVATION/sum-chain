@@ -120,6 +120,13 @@ rate_limit_burst = 200
 # contract_exec_max_host_bytes = 16777216
 # contract_exec_concurrency = 1
 
+# DEPRECATED custodial signing methods (they take a caller's private key and
+# sign on the server). Off by default; enable only to keep serving existing
+# clients during migration. DocClass clients should use
+# docclass_buildTransaction and sign locally (sumchain docclass).
+# unsafe_custodial_docclass_methods = false
+# unsafe_custodial_employment_methods = false
+
 [mempool]
 # Node-local mempool policy (not a consensus rule).
 #
@@ -236,11 +243,29 @@ pub struct RpcSettings {
     /// Executions allowed at once; further requests wait briefly, then get a
     /// busy error.
     pub contract_exec_concurrency: usize,
+    /// Serve the deprecated DocClass custodial signing methods
+    /// (`docclass_registerAcademicIssuer`, `docclass_issueAcademicCredential`,
+    /// `docclass_revokeAcademicCredential`), which take a caller's private key.
+    /// Default false.
+    pub unsafe_custodial_docclass_methods: bool,
+    /// Serve the deprecated employment custodial signing methods
+    /// (`employment_registerIssuer`, `employment_createCredential`,
+    /// `employment_revokeCredential`), which take a caller's private key.
+    /// Default false.
+    pub unsafe_custodial_employment_methods: bool,
 }
 
 impl RpcSettings {
     /// The contract RPC budgets as the runtime takes them. The view gas cap is
     /// filled in from the chain's `max_contract_gas` where the executor is built.
+    /// The custodial signing families this node serves.
+    pub fn custodial_signing_methods(&self) -> sumchain_rpc::custodial::CustodialSigningMethods {
+        sumchain_rpc::custodial::CustodialSigningMethods {
+            docclass: self.unsafe_custodial_docclass_methods,
+            employment: self.unsafe_custodial_employment_methods,
+        }
+    }
+
     pub fn contract_exec_limits(&self) -> sumc_runtime::LocalExecutionLimits {
         sumc_runtime::LocalExecutionLimits {
             fuel: self.contract_exec_fuel,
@@ -265,6 +290,8 @@ impl Default for RpcSettings {
             contract_exec_max_host_bytes: sumc_runtime::LocalExecutionLimits::DEFAULT
                 .max_host_bytes,
             contract_exec_concurrency: 1,
+            unsafe_custodial_docclass_methods: false,
+            unsafe_custodial_employment_methods: false,
         }
     }
 }
@@ -471,6 +498,31 @@ addr = "0.0.0.0:8545"
         let cfg: NodeConfig =
             toml::from_str("[mempool]\nrefuse_contract_transactions = true\n").unwrap();
         assert!(cfg.mempool.refuse_contract_transactions);
+    }
+
+    #[test]
+    fn custodial_signing_methods_default_off_and_parse_per_family() {
+        let cfg: NodeConfig = toml::from_str("[node]\ngenesis = \"g.json\"\n").unwrap();
+        assert_eq!(
+            cfg.rpc.custodial_signing_methods(),
+            sumchain_rpc::custodial::CustodialSigningMethods::default()
+        );
+        assert!(!cfg.rpc.unsafe_custodial_docclass_methods);
+        assert!(!cfg.rpc.unsafe_custodial_employment_methods);
+        // The example config leaves both off too.
+        let example: NodeConfig = toml::from_str(&NodeConfig::example_config()).unwrap();
+        assert_eq!(
+            example.rpc.custodial_signing_methods(),
+            sumchain_rpc::custodial::CustodialSigningMethods::default()
+        );
+        let cfg: NodeConfig =
+            toml::from_str("[rpc]\nunsafe_custodial_employment_methods = true\n").unwrap();
+        let m = cfg.rpc.custodial_signing_methods();
+        assert!(m.employment && !m.docclass);
+        let cfg: NodeConfig =
+            toml::from_str("[rpc]\nunsafe_custodial_docclass_methods = true\n").unwrap();
+        let m = cfg.rpc.custodial_signing_methods();
+        assert!(m.docclass && !m.employment);
     }
 
     #[test]

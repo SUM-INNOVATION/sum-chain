@@ -100,6 +100,16 @@ enum Commands {
         #[arg(long)]
         rpc_burst: Option<u32>,
 
+        /// Serve the DEPRECATED DocClass custodial signing methods, which take a
+        /// caller's private key (overrides config; default false)
+        #[arg(long)]
+        rpc_unsafe_custodial_docclass_methods: Option<bool>,
+
+        /// Serve the DEPRECATED employment custodial signing methods, which take
+        /// a caller's private key (overrides config; default false)
+        #[arg(long)]
+        rpc_unsafe_custodial_employment_methods: Option<bool>,
+
         /// Log level (overrides config)
         #[arg(long)]
         log_level: Option<String>,
@@ -428,6 +438,8 @@ async fn main() -> Result<()> {
             rpc_rate_limit,
             rpc_rps,
             rpc_burst,
+            rpc_unsafe_custodial_docclass_methods,
+            rpc_unsafe_custodial_employment_methods,
             log_level,
             log_json,
         } => {
@@ -470,6 +482,12 @@ async fn main() -> Result<()> {
             }
             if let Some(burst) = rpc_burst {
                 cfg.rpc.rate_limit_burst = burst;
+            }
+            if let Some(on) = rpc_unsafe_custodial_docclass_methods {
+                cfg.rpc.unsafe_custodial_docclass_methods = on;
+            }
+            if let Some(on) = rpc_unsafe_custodial_employment_methods {
+                cfg.rpc.unsafe_custodial_employment_methods = on;
             }
             if let Some(level) = log_level {
                 cfg.logging.level = level;
@@ -543,6 +561,7 @@ async fn main() -> Result<()> {
                 cfg.consensus,
             )?;
             node.apply_rpc_contract_limits(&cfg.rpc);
+            node.apply_rpc_custodial_signing(&cfg.rpc);
             node.apply_mempool_policy(&cfg.mempool);
 
             // Run node

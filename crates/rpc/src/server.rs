@@ -29,6 +29,10 @@ use crate::governance_types::*;
 use crate::policy_account_types::*;
 use crate::rate_limit::{RateLimitConfig, RateLimiter};
 use crate::types::*;
+use crate::custodial::{
+    custodial_keypair, CustodialFamily, CustodialKeyError, CustodialSigningMethods,
+    CUSTODIAL_KEY_NOT_HEX, CUSTODIAL_KEY_WRONG_LENGTH,
+};
 use crate::{RpcError, Result};
 
 /// Node version constant
@@ -478,6 +482,10 @@ pub struct RpcServer {
     contract_exec_pool: Arc<parking_lot::Mutex<Vec<Arc<sumchain_state::ContractExecutorState>>>>,
     /// Free slots in `contract_exec_pool` (or the single default slot).
     contract_exec_permits: Arc<tokio::sync::Semaphore>,
+    /// Which custodial signing families (methods that take a raw private
+    /// key) this node serves. Both off unless the operator opts in; see
+    /// `crate::custodial`.
+    custodial: CustodialSigningMethods,
 }
 
 /// The consensus handle this server holds is the READ view, and nothing wider.
@@ -632,7 +640,21 @@ impl RpcServer {
             chain_params: sumchain_genesis::ChainParams::default(),
             genesis_identity: None,
             running_consensus_config: None,
+            custodial: CustodialSigningMethods::default(),
         }
+    }
+
+    /// Serve the custodial signing families `methods` enables. Off by default:
+    /// a server built without this call refuses all six methods.
+    pub fn with_custodial_signing_methods(mut self, methods: CustodialSigningMethods) -> Self {
+        self.custodial = methods;
+        self
+    }
+
+    /// Which custodial signing families this server serves. Used by the node
+    /// crate's wiring test.
+    pub fn custodial_signing_methods(&self) -> CustodialSigningMethods {
+        self.custodial
     }
 
     /// Set the consensus chain parameters this server should reference for
@@ -811,6 +833,19 @@ impl RpcServer {
             info!("RPC rate limiting is ENABLED");
         } else {
             info!("RPC rate limiting is DISABLED");
+        }
+        if self.custodial.docclass {
+            tracing::warn!(
+                "DEPRECATED: custodial DocClass signing methods are ENABLED \
+                 ([rpc] unsafe_custodial_docclass_methods). They take a caller's private key; \
+                 clients should use docclass_buildTransaction and sign locally"
+            );
+        }
+        if self.custodial.employment {
+            tracing::warn!(
+                "DEPRECATED: custodial employment signing methods are ENABLED \
+                 ([rpc] unsafe_custodial_employment_methods). They take a caller's private key"
+            );
         }
         info!(
             "RPC timeouts: request={:?}, max_connections={}",
@@ -7024,23 +7059,23 @@ impl SumChainApiServer for RpcServer {
         };
         use sumchain_primitives::{TransactionV2, TxPayload};
 
-        // Parse private key from hex
-        let key_hex = request.private_key.strip_prefix("0x").unwrap_or(&request.private_key);
-        let key_bytes = hex::decode(key_hex)
-            .map_err(|e| RpcError::InvalidParams(format!("Invalid private key hex: {}", e)))?;
-
-        if key_bytes.len() != 32 {
-            return Ok(RegisterEmploymentIssuerResponse {
-                success: false,
-                tx_hash: None,
-                issuer_address: String::new(),
-                error: Some("Private key must be 32 bytes".to_string()),
-            });
-        }
-
-        let mut key_array = [0u8; 32];
-        key_array.copy_from_slice(&key_bytes);
-        let keypair = sumchain_crypto::KeyPair::from_bytes(key_array);
+        // Off unless this node opted in: refused before the key or any other
+        // field of the request is used.
+        self.custodial.admit(CustodialFamily::Employment, "employment_registerIssuer")?;
+        let keypair = match custodial_keypair(&request.private_key) {
+            Ok(kp) => kp,
+            Err(CustodialKeyError::NotHex) => {
+                return Err(RpcError::InvalidParams(CUSTODIAL_KEY_NOT_HEX.to_string()).into());
+            }
+            Err(CustodialKeyError::WrongLength) => {
+                return Ok(RegisterEmploymentIssuerResponse {
+                    success: false,
+                    tx_hash: None,
+                    issuer_address: String::new(),
+                    error: Some(CUSTODIAL_KEY_WRONG_LENGTH.to_string()),
+                });
+            }
+        };
         let issuer_address = keypair.address();
 
         // Parse issuer class
@@ -7211,23 +7246,23 @@ impl SumChainApiServer for RpcServer {
         };
         use sumchain_primitives::{TransactionV2, TxPayload};
 
-        // Parse private key from hex
-        let key_hex = request.private_key.strip_prefix("0x").unwrap_or(&request.private_key);
-        let key_bytes = hex::decode(key_hex)
-            .map_err(|e| RpcError::InvalidParams(format!("Invalid private key hex: {}", e)))?;
-
-        if key_bytes.len() != 32 {
-            return Ok(CreateEmploymentCredentialResponse {
-                success: false,
-                tx_hash: None,
-                employment_id: None,
-                error: Some("Private key must be 32 bytes".to_string()),
-            });
-        }
-
-        let mut key_array = [0u8; 32];
-        key_array.copy_from_slice(&key_bytes);
-        let keypair = sumchain_crypto::KeyPair::from_bytes(key_array);
+        // Off unless this node opted in: refused before the key or any other
+        // field of the request is used.
+        self.custodial.admit(CustodialFamily::Employment, "employment_createCredential")?;
+        let keypair = match custodial_keypair(&request.private_key) {
+            Ok(kp) => kp,
+            Err(CustodialKeyError::NotHex) => {
+                return Err(RpcError::InvalidParams(CUSTODIAL_KEY_NOT_HEX.to_string()).into());
+            }
+            Err(CustodialKeyError::WrongLength) => {
+                return Ok(CreateEmploymentCredentialResponse {
+                    success: false,
+                    tx_hash: None,
+                    employment_id: None,
+                    error: Some(CUSTODIAL_KEY_WRONG_LENGTH.to_string()),
+                });
+            }
+        };
         let issuer_address = keypair.address();
 
         // Verify issuer is registered and active
@@ -7487,23 +7522,23 @@ impl SumChainApiServer for RpcServer {
         use sumchain_primitives::employment::{EmploymentOperation, EmploymentTxData};
         use sumchain_primitives::{TransactionV2, TxPayload};
 
-        // Parse private key from hex
-        let key_hex = request.private_key.strip_prefix("0x").unwrap_or(&request.private_key);
-        let key_bytes = hex::decode(key_hex)
-            .map_err(|e| RpcError::InvalidParams(format!("Invalid private key hex: {}", e)))?;
-
-        if key_bytes.len() != 32 {
-            return Ok(RevokeEmploymentCredentialResponse {
-                success: false,
-                tx_hash: None,
-                revocation_ref: None,
-                error: Some("Private key must be 32 bytes".to_string()),
-            });
-        }
-
-        let mut key_array = [0u8; 32];
-        key_array.copy_from_slice(&key_bytes);
-        let keypair = sumchain_crypto::KeyPair::from_bytes(key_array);
+        // Off unless this node opted in: refused before the key or any other
+        // field of the request is used.
+        self.custodial.admit(CustodialFamily::Employment, "employment_revokeCredential")?;
+        let keypair = match custodial_keypair(&request.private_key) {
+            Ok(kp) => kp,
+            Err(CustodialKeyError::NotHex) => {
+                return Err(RpcError::InvalidParams(CUSTODIAL_KEY_NOT_HEX.to_string()).into());
+            }
+            Err(CustodialKeyError::WrongLength) => {
+                return Ok(RevokeEmploymentCredentialResponse {
+                    success: false,
+                    tx_hash: None,
+                    revocation_ref: None,
+                    error: Some(CUSTODIAL_KEY_WRONG_LENGTH.to_string()),
+                });
+            }
+        };
         let caller_address = keypair.address();
 
         // Parse employment ID
@@ -7677,23 +7712,23 @@ impl SumChainApiServer for RpcServer {
         };
         use sumchain_primitives::{TransactionV2, TxPayload};
 
-        // Parse private key from hex
-        let key_hex = request.private_key.strip_prefix("0x").unwrap_or(&request.private_key);
-        let key_bytes = hex::decode(key_hex)
-            .map_err(|e| RpcError::InvalidParams(format!("Invalid private key hex: {}", e)))?;
-
-        if key_bytes.len() != 32 {
-            return Ok(RegisterAcademicIssuerResponse {
-                success: false,
-                tx_hash: None,
-                issuer_address: String::new(),
-                error: Some("Private key must be 32 bytes".to_string()),
-            });
-        }
-
-        let mut key_array = [0u8; 32];
-        key_array.copy_from_slice(&key_bytes);
-        let keypair = sumchain_crypto::KeyPair::from_bytes(key_array);
+        // Off unless this node opted in: refused before the key or any other
+        // field of the request is used.
+        self.custodial.admit(CustodialFamily::DocClass, "docclass_registerAcademicIssuer")?;
+        let keypair = match custodial_keypair(&request.private_key) {
+            Ok(kp) => kp,
+            Err(CustodialKeyError::NotHex) => {
+                return Err(RpcError::InvalidParams(CUSTODIAL_KEY_NOT_HEX.to_string()).into());
+            }
+            Err(CustodialKeyError::WrongLength) => {
+                return Ok(RegisterAcademicIssuerResponse {
+                    success: false,
+                    tx_hash: None,
+                    issuer_address: String::new(),
+                    error: Some(CUSTODIAL_KEY_WRONG_LENGTH.to_string()),
+                });
+            }
+        };
         let issuer_address = keypair.address();
 
         // Parse stake amount
@@ -7883,23 +7918,23 @@ impl SumChainApiServer for RpcServer {
         use sumchain_primitives::{TransactionV2, TxPayload};
         use sumchain_storage::DocClassIssuerStore;
 
-        // Parse private key from hex
-        let key_hex = request.private_key.strip_prefix("0x").unwrap_or(&request.private_key);
-        let key_bytes = hex::decode(key_hex)
-            .map_err(|e| RpcError::InvalidParams(format!("Invalid private key hex: {}", e)))?;
-
-        if key_bytes.len() != 32 {
-            return Ok(IssueAcademicCredentialResponse {
-                success: false,
-                tx_hash: None,
-                credential_id: None,
-                error: Some("Private key must be 32 bytes".to_string()),
-            });
-        }
-
-        let mut key_array = [0u8; 32];
-        key_array.copy_from_slice(&key_bytes);
-        let keypair = sumchain_crypto::KeyPair::from_bytes(key_array);
+        // Off unless this node opted in: refused before the key or any other
+        // field of the request is used.
+        self.custodial.admit(CustodialFamily::DocClass, "docclass_issueAcademicCredential")?;
+        let keypair = match custodial_keypair(&request.private_key) {
+            Ok(kp) => kp,
+            Err(CustodialKeyError::NotHex) => {
+                return Err(RpcError::InvalidParams(CUSTODIAL_KEY_NOT_HEX.to_string()).into());
+            }
+            Err(CustodialKeyError::WrongLength) => {
+                return Ok(IssueAcademicCredentialResponse {
+                    success: false,
+                    tx_hash: None,
+                    credential_id: None,
+                    error: Some(CUSTODIAL_KEY_WRONG_LENGTH.to_string()),
+                });
+            }
+        };
         let issuer_address = keypair.address();
 
         // Verify issuer is registered and active
@@ -8180,23 +8215,23 @@ impl SumChainApiServer for RpcServer {
         };
         use sumchain_primitives::{TransactionV2, TxPayload};
 
-        // Parse private key
-        let key_hex = request.private_key.strip_prefix("0x").unwrap_or(&request.private_key);
-        let key_bytes = hex::decode(key_hex)
-            .map_err(|e| RpcError::InvalidParams(format!("Invalid private key hex: {}", e)))?;
-
-        if key_bytes.len() != 32 {
-            return Ok(RevokeAcademicCredentialResponse {
-                success: false,
-                tx_hash: None,
-                credential_id: None,
-                error: Some("Private key must be 32 bytes".to_string()),
-            });
-        }
-
-        let mut key_array = [0u8; 32];
-        key_array.copy_from_slice(&key_bytes);
-        let keypair = sumchain_crypto::KeyPair::from_bytes(key_array);
+        // Off unless this node opted in: refused before the key or any other
+        // field of the request is used.
+        self.custodial.admit(CustodialFamily::DocClass, "docclass_revokeAcademicCredential")?;
+        let keypair = match custodial_keypair(&request.private_key) {
+            Ok(kp) => kp,
+            Err(CustodialKeyError::NotHex) => {
+                return Err(RpcError::InvalidParams(CUSTODIAL_KEY_NOT_HEX.to_string()).into());
+            }
+            Err(CustodialKeyError::WrongLength) => {
+                return Ok(RevokeAcademicCredentialResponse {
+                    success: false,
+                    tx_hash: None,
+                    credential_id: None,
+                    error: Some(CUSTODIAL_KEY_WRONG_LENGTH.to_string()),
+                });
+            }
+        };
         let caller_address = keypair.address();
 
         // Parse credential ID
