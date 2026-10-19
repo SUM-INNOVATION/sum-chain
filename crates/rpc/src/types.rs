@@ -2455,7 +2455,10 @@ pub struct EmploymentSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterEmploymentIssuerRequest {
     /// Issuer's private key (hex, 32 bytes) - used to sign the transaction
-    pub private_key: String,
+    ///
+    /// Deprecated custodial signing: off by default (see `crate::custodial`).
+    /// Held redacted and zeroized; never shown by `Debug`.
+    pub private_key: crate::custodial::CustodialKeyHex,
     /// Issuer class (e.g., "Employer", "PayrollProcessor", "GigPlatform")
     pub issuer_class: String,
     /// Display name (public, e.g., "SUM INNOVATION INC")
@@ -2485,7 +2488,10 @@ pub struct RegisterEmploymentIssuerResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateEmploymentCredentialRequest {
     /// Issuer's private key (hex, 32 bytes) - must be registered issuer
-    pub private_key: String,
+    ///
+    /// Deprecated custodial signing: off by default (see `crate::custodial`).
+    /// Held redacted and zeroized; never shown by `Debug`.
+    pub private_key: crate::custodial::CustodialKeyHex,
     /// Employee wallet address (base58) - will own the credential token
     pub employee_address: String,
     /// Employee reference (hex, 32 bytes) - commitment to employee identity
@@ -2523,7 +2529,10 @@ pub struct CreateEmploymentCredentialResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevokeEmploymentCredentialRequest {
     /// Issuer's private key (hex, 32 bytes) - must be the original issuer
-    pub private_key: String,
+    ///
+    /// Deprecated custodial signing: off by default (see `crate::custodial`).
+    /// Held redacted and zeroized; never shown by `Debug`.
+    pub private_key: crate::custodial::CustodialKeyHex,
     /// Employment ID to revoke (hex, 32 bytes)
     pub employment_id: String,
     /// Revocation reason (optional, for audit trail)
@@ -2547,7 +2556,10 @@ pub struct RevokeEmploymentCredentialResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevokeAcademicCredentialRequest {
     /// Issuer's private key (hex, 32 bytes) - must be the original issuer
-    pub private_key: String,
+    ///
+    /// Deprecated custodial signing: off by default (see `crate::custodial`).
+    /// Held redacted and zeroized; never shown by `Debug`.
+    pub private_key: crate::custodial::CustodialKeyHex,
     /// Credential ID to revoke (hex, 32 bytes)
     pub credential_id: String,
     /// Revocation reason code (0=Unspecified, 1=KeyCompromise, 2=IssuerCompromise,
@@ -2579,7 +2591,10 @@ pub struct RevokeAcademicCredentialResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterAcademicIssuerRequest {
     /// Issuer's private key (hex, 32 bytes) - used to sign the transaction
-    pub private_key: String,
+    ///
+    /// Deprecated custodial signing: off by default (see `crate::custodial`).
+    /// Held redacted and zeroized; never shown by `Debug`.
+    pub private_key: crate::custodial::CustodialKeyHex,
     /// Institution name (e.g., "SUM Hypothesis Institute Technology")
     pub institution_name: String,
     /// Institution type (e.g., "University", "College", "CertificationBody")
@@ -2637,7 +2652,10 @@ pub struct AcademicCredentialMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssueAcademicCredentialRequest {
     /// Issuer's private key (hex, 32 bytes) - must be registered issuer
-    pub private_key: String,
+    ///
+    /// Deprecated custodial signing: off by default (see `crate::custodial`).
+    /// Held redacted and zeroized; never shown by `Debug`.
+    pub private_key: crate::custodial::CustodialKeyHex,
     /// Document subcode (810=Transcript, 811=Diploma, 812=Enrollment)
     pub subcode: u16,
     /// Student/holder address (base58) - recipient of the credential

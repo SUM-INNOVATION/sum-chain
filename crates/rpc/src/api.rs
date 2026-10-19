@@ -2077,6 +2077,10 @@ pub trait SumChainApi {
 
     /// Register as an employment issuer (SRC-881)
     /// Requires signing the transaction with issuer's private key
+    ///
+    /// DEPRECATED, custodial: takes the caller's private key and signs on the
+    /// server. Off by default (`[rpc] unsafe_custodial_employment_methods`); refused
+    /// with -32005 unless the operator opts in. See `crate::custodial`.
     #[method(name = "employment_registerIssuer")]
     async fn employment_register_issuer(
         &self,
@@ -2085,6 +2089,10 @@ pub trait SumChainApi {
 
     /// Create an employment credential (SRC-882)
     /// Requires the caller to be a registered issuer
+    ///
+    /// DEPRECATED, custodial: takes the caller's private key and signs on the
+    /// server. Off by default (`[rpc] unsafe_custodial_employment_methods`); refused
+    /// with -32005 unless the operator opts in. See `crate::custodial`.
     #[method(name = "employment_createCredential")]
     async fn employment_create_credential(
         &self,
@@ -2093,6 +2101,10 @@ pub trait SumChainApi {
 
     /// Revoke an employment credential (SRC-882)
     /// Requires the caller to be the original issuer of the credential
+    ///
+    /// DEPRECATED, custodial: takes the caller's private key and signs on the
+    /// server. Off by default (`[rpc] unsafe_custodial_employment_methods`); refused
+    /// with -32005 unless the operator opts in. See `crate::custodial`.
     #[method(name = "employment_revokeCredential")]
     async fn employment_revoke_credential(
         &self,
@@ -2106,6 +2118,10 @@ pub trait SumChainApi {
     /// Register as an academic issuer (educational institution)
     /// Requires signing the transaction with issuer's private key
     /// Requires stake amount (>= 1000 Ϙ)
+    ///
+    /// DEPRECATED, custodial: takes the caller's private key and signs on the
+    /// server. Off by default (`[rpc] unsafe_custodial_docclass_methods`); refused
+    /// with -32005 unless the operator opts in. See `crate::custodial`.
     #[method(name = "docclass_registerAcademicIssuer")]
     async fn docclass_register_academic_issuer(
         &self,
@@ -2115,6 +2131,10 @@ pub trait SumChainApi {
     /// Issue an academic credential (SRC-810/811/812)
     /// Requires the caller to be a registered academic issuer
     /// Subcodes: 810=Transcript, 811=Diploma, 812=Enrollment
+    ///
+    /// DEPRECATED, custodial: takes the caller's private key and signs on the
+    /// server. Off by default (`[rpc] unsafe_custodial_docclass_methods`); refused
+    /// with -32005 unless the operator opts in. See `crate::custodial`.
     #[method(name = "docclass_issueAcademicCredential")]
     async fn docclass_issue_academic_credential(
         &self,
@@ -2123,6 +2143,10 @@ pub trait SumChainApi {
 
     /// Revoke an academic credential (SRC-810/811/812)
     /// Requires the caller to be the original issuer of the credential
+    ///
+    /// DEPRECATED, custodial: takes the caller's private key and signs on the
+    /// server. Off by default (`[rpc] unsafe_custodial_docclass_methods`); refused
+    /// with -32005 unless the operator opts in. See `crate::custodial`.
     #[method(name = "docclass_revokeAcademicCredential")]
     async fn docclass_revoke_academic_credential(
         &self,

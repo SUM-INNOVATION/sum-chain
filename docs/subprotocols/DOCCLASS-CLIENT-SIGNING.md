@@ -4,6 +4,11 @@ Academic issuers and their credentials can be managed without sending a private
 key to any server. The transaction is built and signed on the client; the node
 only sees the signed transaction.
 
+It replaces the deprecated custodial methods (`docclass_registerAcademicIssuer`,
+`docclass_issueAcademicCredential`, `docclass_revokeAcademicCredential`), which
+are off by default; see
+[`docs/rpc/CUSTODIAL-SIGNING-DEPRECATION.md`](../rpc/CUSTODIAL-SIGNING-DEPRECATION.md).
+
 Two pieces do this:
 
 - **`docclass_buildTransaction`**, a no-key RPC builder. It takes the sender's
