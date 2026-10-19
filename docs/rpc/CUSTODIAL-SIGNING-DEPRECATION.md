@@ -16,7 +16,7 @@ methods are therefore **off by default** and deprecated.
 | | DocClass | Employment |
 |---|---|---|
 | Custodial methods | Off by default; opt in with `unsafe_custodial_docclass_methods` | Off by default; opt in with `unsafe_custodial_employment_methods` |
-| Client-side replacement | **Exists** (#333): `docclass_buildTransaction` and `sumchain docclass` | **Missing**: no client-side builder and no CLI yet |
+| Client-side replacement | **Exists** (#333): `docclass_buildTransaction` and `sumchain docclass` | **Exists** (not yet in a release): `employment_buildTransaction` and `sumchain employment` |
 
 ## What changes
 
@@ -86,12 +86,37 @@ The replacement also covers operations the custodial methods never offered:
 suspend, reactivate, supersede, update issuer, rotate issuer key and
 deactivate issuer.
 
-### Employment: no replacement yet
+### Employment: use the client-side path
 
-There is no client-side builder and no CLI for employment operations yet. A node operator
-who must keep serving existing employment clients can re-enable that family
-alone (below). A client-side builder for employment operations is a separate,
-planned change.
+The same flow as DocClass:
+
+1. `employment_buildTransaction` takes the sender's **address** and the
+   operation's public fields and returns the unsigned transaction and its
+   signing hash.
+2. `sumchain employment <command>` builds the transaction, checks it against
+   the node's builder, signs it with a local key file and submits it with
+   `send_raw_transaction`. `--dry-run` shows what would be sent without
+   signing.
+
+See [`docs/subprotocols/EMPLOYMENT-CLIENT-SIGNING.md`](../subprotocols/EMPLOYMENT-CLIENT-SIGNING.md).
+
+| Custodial method | Client-side replacement |
+|---|---|
+| `employment_registerIssuer` | `register_issuer` op / `sumchain employment register-issuer` |
+| `employment_createCredential` | `create_employment` op / `sumchain employment create` |
+| `employment_revokeCredential` | `revoke_employment` op / `sumchain employment revoke` |
+
+On the same chain state the replacement has the same on-chain effect (tested
+in `crates/rpc/tests/custodial_employment_client_equivalence.rs`). Given the
+same fields, a registration or credential creation is byte-identical to the
+custodial method's transaction. A revocation carries only the two fields the
+chain reads; the custodial method also appended a time and the reason text,
+which the chain ignores. The client hashes the reason into the revocation
+reference and never sends it.
+
+Until a node runs a release containing the employment builder, an operator who
+must keep serving existing employment clients can re-enable that family alone
+(below).
 
 ## For node operators
 
@@ -119,5 +144,5 @@ working.
 | Step | When |
 |---|---|
 | Off by default; opt-in flags; warnings | This release |
-| Employment client-side builder | `<to be set>` |
+| Employment client-side builder | Implemented; release `<to be set>` |
 | Removal of the six methods | `<to be set>` (not before the employment builder ships) |
