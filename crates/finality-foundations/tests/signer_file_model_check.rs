@@ -1284,7 +1284,10 @@ fn model_check_with_unbounded_faults() {
 #[ignore]
 fn debris_canonicalisation_is_exact_up_to_two_faults() {
     let all = recoveries();
-    for k in [1, 2] {
+    // `SUMCHAIN_MC_CROSSCHECK_MAX_K` limits the bounds (diagnostics); default 2.
+    let max_k: u32 =
+        std::env::var("SUMCHAIN_MC_CROSSCHECK_MAX_K").map_or(2, |v| v.parse().unwrap());
+    for k in (1..=2).filter(|&k| k <= max_k) {
         let exact = explore_with(&Config {
             collect_image: true,
             ..Config::exact(k, &all)
