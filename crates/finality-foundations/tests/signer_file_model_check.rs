@@ -72,7 +72,7 @@
 //! what is released and persisted, not about signature validity.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use sumchain_finality_foundations::signer::{
@@ -648,6 +648,8 @@ struct Report {
     recovered_states: usize,
     /// Open states halted again after a recovery on their path.
     rehalted_states: usize,
+    /// With [`Config::collect_image`]: the canonical keys of the visited states.
+    image: HashSet<[u8; 32]>,
     violations: Vec<String>,
 }
 
@@ -915,15 +917,69 @@ fn diag_category(n: &Node) -> String {
     )
 }
 
-fn explore(max_faults: u32) -> Report {
-    explore_with(max_faults, &recoveries(), None)
+/// ABSTRACTION (used only where a run names it): in a state whose state
+/// file (volatile and durable) and mirror (volatile and durable) are one
+/// identical **halted** record, remove every `conflict-*` file.
+///
+/// Why this is exact for the signer and the store: in such a state no
+/// recovery has reached P1, so the files are debris of interrupted archive
+/// attempts. The store reads `conflict-*` files only (a) in
+/// `recovery_archive_ok`, from `persist` of a recovery, after the same call's
+/// `archive_conflict` rewrote all four (truncate, rename, sync), or from the
+/// R1 repair of a recovered state file, which exists only after such a
+/// complete rewrite and is never canonicalised (its volatile state file is
+/// not halted); and (b) in `load` when the state file and mirror are both
+/// absent, which never happens once initialized (nothing removes the state
+/// file). No property reads them in a halted state (REC3 reads the archive
+/// of a recovered state only). The claim is checked, not assumed, by
+/// `debris_canonicalisation_is_exact_up_to_two_faults`, which compares the
+/// canonical image of the exact reachable set with the canonicalised one.
+fn canonicalise_debris(m: &mut Model) {
+    let halted = |b: &[u8]| SignerState::decode(b, &B3).is_ok_and(|(st, _)| st.halted);
+    let consistent_halt = match (m.dir_vol.get(STATE_FILE), m.dir_dur.get(STATE_FILE)) {
+        (Some(&v), Some(&d)) => {
+            let bytes = &m.inodes[v].vol;
+            halted(bytes)
+                && m.inodes[d].dur == *bytes
+                && m.mirror_vol.as_deref() == Some(bytes.as_slice())
+                && m.mirror_dur.as_deref() == Some(bytes.as_slice())
+        }
+        _ => false,
+    };
+    if consistent_halt {
+        m.dir_vol.retain(|k, _| !k.starts_with("conflict-"));
+        m.dir_dur.retain(|k, _| !k.starts_with("conflict-"));
+        *m = compact(m);
+    }
 }
 
-fn explore_with(
+/// What a run explores.
+struct Config<'a> {
     max_faults: u32,
-    recovery_alphabet: &[OracleRecovery],
+    recoveries: &'a [OracleRecovery],
+    /// Stop after this many states (diagnostics only).
     max_states: Option<usize>,
-) -> Report {
+    /// Apply [`canonicalise_debris`] to every state.
+    canonical_debris: bool,
+    /// Collect the key of every visited state after [`canonicalise_debris`].
+    collect_image: bool,
+}
+
+impl Config<'_> {
+    fn exact(max_faults: u32, recoveries: &[OracleRecovery]) -> Config<'_> {
+        Config {
+            max_faults,
+            recoveries,
+            max_states: None,
+            canonical_debris: false,
+            collect_image: false,
+        }
+    }
+}
+
+fn explore_with(c: &Config) -> Report {
+    let (max_faults, recovery_alphabet, max_states) = (c.max_faults, c.recoveries, c.max_states);
+    let mut image: HashSet<[u8; 32]> = HashSet::new();
     let diag = std::env::var_os("SUMCHAIN_MC_DIAG").is_some();
     let mut hist: HashMap<String, usize> = HashMap::new();
     let t0 = std::time::Instant::now();
@@ -950,6 +1006,7 @@ fn explore_with(
         halted_states: 0,
         recovered_states: 0,
         rehalted_states: 0,
+        image: HashSet::new(),
         violations: Vec::new(),
     };
 
@@ -963,6 +1020,11 @@ fn explore_with(
         queue.pop_front()
     } {
         report.states += 1;
+        if c.collect_image {
+            let mut canon = node.clone();
+            canonicalise_debris(&mut canon.model);
+            image.insert(node_key(&canon));
+        }
         if diag {
             *hist.entry(diag_category(&node)).or_default() += 1;
             if report.states % 200_000 == 0 {
@@ -1013,8 +1075,8 @@ fn explore_with(
                     .chain(
                         recovery_alphabet
                             .iter()
-                            .cloned()
                             .filter(|_| halted)
+                            .cloned()
                             .map(Action::Recover),
                     )
                     .collect()
@@ -1036,10 +1098,13 @@ fn explore_with(
             }
         }
         report.violations.extend(v);
-        for s in successors {
+        for mut s in successors {
             report.transitions += 1;
             if s.faults > max_faults {
                 continue;
+            }
+            if c.canonical_debris {
+                canonicalise_debris(&mut s.model);
             }
             let key = node_key(&s);
             // Without a bound the fault count is irrelevant: a state seen once
@@ -1057,6 +1122,7 @@ fn explore_with(
             break;
         }
     }
+    report.image = image;
     if diag {
         let mut h: Vec<(String, usize)> = hist.into_iter().collect();
         h.sort_by(|a, b| b.1.cmp(&a.1));
@@ -1092,7 +1158,11 @@ fn model_check_diagnostics() {
             .collect(),
     };
     let t0 = std::time::Instant::now();
-    let r = explore_with(k, &set, Some(cap));
+    let r = explore_with(&Config {
+        max_states: Some(cap),
+        canonical_debris: env("SUMCHAIN_MC_CANONICAL").is_some(),
+        ..Config::exact(k, &set)
+    });
     println!(
         "diag K={k} recoveries={}: {} states ({} halted, {} recovered, {} halted again after a recovery; up to height {}), {} transitions, depth {}, {} violations, {:?}",
         set.len(),
@@ -1109,22 +1179,34 @@ fn model_check_diagnostics() {
 }
 
 fn run(max_faults: u32) -> Report {
-    let r = explore(max_faults);
+    run_with(&Config::exact(max_faults, &recoveries()))
+}
+
+fn run_with(c: &Config) -> Report {
+    let t0 = std::time::Instant::now();
+    let r = explore_with(c);
     println!(
-        "model check K={}: {} states ({} at a height above 7, up to height {}; {} halted, {} recovered), {} transitions, depth {}, up to {} released / {} issued messages, {} violations",
-        if max_faults == u32::MAX { "unbounded".to_string() } else { max_faults.to_string() },
+        "model check K={}{}: {} states ({} at a height above 7, up to height {}; {} halted, {} recovered, {} halted again after a recovery), {} transitions, depth {}, up to {} released / {} issued messages, {} violations, {:?}",
+        if c.max_faults == u32::MAX { "unbounded".to_string() } else { c.max_faults.to_string() },
+        if c.canonical_debris { " (archive debris canonicalised)" } else { "" },
         r.states,
         r.advanced_states,
         r.max_height,
         r.halted_states,
         r.recovered_states,
+        r.rehalted_states,
         r.transitions,
         r.max_depth,
         r.released,
         r.issued,
-        r.violations.len()
+        r.violations.len(),
+        t0.elapsed()
     );
     assert!(r.violations.is_empty(), "violations: {:#?}", r.violations);
+    assert_eq!(
+        r.rehalted_states, 0,
+        "no proof here can halt a recovered signer"
+    );
     r
 }
 
@@ -1180,10 +1262,54 @@ fn model_check_up_to_three_faults_per_path() {
 }
 
 /// No bound on faults per path: the whole reachable state space under any
-/// sequence of faults. The key excludes the fault count, so the search ends
-/// when no new disk/signer/history state is reachable.
+/// sequence of faults, **with archive debris canonicalised**
+/// ([`canonicalise_debris`]; exactness checked up to two faults by
+/// `debris_canonicalisation_is_exact_up_to_two_faults`). The key excludes the
+/// fault count, so the search ends when no new disk/signer/history state is
+/// reachable.
 #[test]
 #[ignore]
 fn model_check_with_unbounded_faults() {
-    run(u32::MAX);
+    run_with(&Config {
+        canonical_debris: true,
+        ..Config::exact(u32::MAX, &recoveries())
+    });
+}
+
+/// The abstraction used by the unbounded run is exact up to two faults per
+/// path: the canonical image of the exact reachable set equals the set the
+/// canonicalised search reaches, and neither search finds a violation.
+/// Release build; slow.
+#[test]
+#[ignore]
+fn debris_canonicalisation_is_exact_up_to_two_faults() {
+    let all = recoveries();
+    for k in [1, 2] {
+        let exact = explore_with(&Config {
+            collect_image: true,
+            ..Config::exact(k, &all)
+        });
+        let canon = explore_with(&Config {
+            collect_image: true,
+            canonical_debris: true,
+            ..Config::exact(k, &all)
+        });
+        println!(
+            "cross-check K={k}: exact search {} states, {} after canonicalisation; canonicalised search {} states ({} distinct); violations {} / {}",
+            exact.states,
+            exact.image.len(),
+            canon.states,
+            canon.image.len(),
+            exact.violations.len(),
+            canon.violations.len()
+        );
+        assert!(exact.violations.is_empty(), "{:#?}", exact.violations);
+        assert!(canon.violations.is_empty(), "{:#?}", canon.violations);
+        assert!(
+            exact.image == canon.image,
+            "K={k}: the canonicalisation is not exact ({} vs {} states)",
+            exact.image.len(),
+            canon.image.len()
+        );
+    }
 }
