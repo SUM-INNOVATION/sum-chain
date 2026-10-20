@@ -714,6 +714,11 @@ mod bound_tests {
 
     const VALIDATORS: u16 = 0x0003;
 
+    // The decoder's field bound binds before the finality set's u16 cap, and the
+    // list-count bound binds after both.
+    const _: () = assert!(MAX_ENCODABLE_VALIDATORS < FINALITY_SET_CAP);
+    const _: () = assert!(MAX_LIST_ITEMS as usize > FINALITY_SET_CAP);
+
     fn root_config() -> ConsensusConfig {
         let genesis =
             sumchain_genesis::Genesis::from_json(include_str!("../../../../genesis.json")).unwrap();
@@ -773,10 +778,8 @@ mod bound_tests {
         assert_eq!(MAX_ENCODABLE_VALIDATORS, 29_127);
         assert_eq!(4 + 36 * 29_127, MAX_FIELD_VALUE_BYTES as usize);
         assert!(4 + 36 * 29_128 > MAX_FIELD_VALUE_BYTES as usize);
-        // The decoder's field bound binds before the finality set's u16 cap and
-        // before the list-count bound; the effective cap is the minimum.
-        assert!(MAX_ENCODABLE_VALIDATORS < FINALITY_SET_CAP);
-        assert!(MAX_LIST_ITEMS as usize > FINALITY_SET_CAP);
+        // The effective cap is the minimum of the two bounds (the ordering is
+        // also checked at compile time below).
         assert_eq!(MAX_ENCODABLE_VALIDATORS.min(FINALITY_SET_CAP), 29_127);
     }
 
