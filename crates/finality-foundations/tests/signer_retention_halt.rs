@@ -626,12 +626,11 @@ fn crash_matrix_for_reinitialization_after_a_halt() {
             );
             rig.recover(mode);
             // Until it completes, nothing can sign.
-            match rig.open() {
-                Ok(s) => assert!(
+            if let Ok(s) = rig.open() {
+                assert!(
                     s.is_halted() || s.record().working_height() == Some(20),
                     "{ctx}"
-                ),
-                Err(_) => {}
+                );
             }
             // Running it again completes it.
             rig.store()
