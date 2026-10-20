@@ -57,7 +57,10 @@ fn many_keys(n: usize) -> Vec<[u8; 32]> {
 
 #[test]
 fn domain_and_sizes_are_as_drafted() {
-    assert_eq!(D_VALSET, b"SUMCHAIN/VALSET/v1\0");
+    assert_eq!(
+        std::str::from_utf8(D_VALSET).unwrap(),
+        "SUMCHAIN/VALSET/v1\u{0}"
+    );
     assert_eq!(
         hex::encode(D_VALSET),
         "53554d434841494e2f56414c5345542f763100"
@@ -131,7 +134,9 @@ fn order_and_domain_matter() {
     // Neither the bare keys nor the keys under another domain give the same digest.
     let bare: Vec<u8> = keys.iter().flatten().copied().collect();
     assert_ne!(*blake3::hash(&bare).as_bytes(), base);
-    let mut other = b"SUMCHAIN/VALSET/v2\0".to_vec();
+    // The same domain with its version digit changed ("…/v2\0").
+    let mut other = D_VALSET.to_vec();
+    other[17] = b'2';
     other.extend_from_slice(&4u16.to_le_bytes());
     other.extend_from_slice(&bare);
     assert_ne!(*blake3::hash(&other).as_bytes(), base);
