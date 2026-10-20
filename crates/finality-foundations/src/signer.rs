@@ -34,13 +34,23 @@
 //! * At the last signed position, the identical request returns the stored
 //!   signature (no new signature is made); any other request is refused as
 //!   equivocation.
+//! * Height (PROPOSED, unratified): the signer works at one height at a time.
+//!   Before any certified height it is the floor's next height, or else the
+//!   height of the first signature; after [`DurableSigner::advance`] it is the
+//!   certified height + 1. A request above the working height is refused: a
+//!   caller asking for a higher height never by itself discards the lock or
+//!   the last signature. Only `advance`, with a finality proof the signer
+//!   verifies itself, moves to a higher height; it raises the floor past the
+//!   proven height and only then discards the old height's lock and last
+//!   signature.
 //! * Lock (Tendermint, per height):
 //!   - a non-nil precommit for `v` in round `r` needs a verified polka for `v`
 //!     in round `r`, and locks on `(r, v)`;
 //!   - while locked on `(r_l, v_l)`, a non-nil prevote for `v != v_l` in round
 //!     `r` needs a verified polka for `v` in a round `p` with `r_l <= p < r`;
 //!   - nil prevotes and nil precommits are allowed and leave the lock as is;
-//!   - the lock applies only to its own height and is dropped at the next.
+//!   - the lock applies only to its own height; it is discarded only by
+//!     `advance` past that height.
 //!
 //! # Limits of what this core can check
 //!
@@ -135,6 +145,14 @@ pub struct Lock {
     pub value: Digest,
 }
 
+/// The highest height this signer holds a verified finality proof for, and
+/// the block that proof commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Certified {
+    pub height: u64,
+    pub block_id: Digest,
+}
+
 /// Everything the signer persists. Its byte encoding is NOT defined here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignerRecord {
@@ -146,9 +164,40 @@ pub struct SignerRecord {
     pub floor: Option<SignPosition>,
     pub last: Option<LastSigned>,
     pub lock: Option<Lock>,
+    /// Set by [`DurableSigner::advance`]: the floor is then the whole of
+    /// `certified.height` and below.
+    pub certified: Option<Certified>,
+}
+
+/// The floor position that covers every position at heights `≤ height`.
+pub fn whole_height_floor(height: u64) -> SignPosition {
+    SignPosition {
+        height,
+        round: crate::encoding::MAX_ROUND,
+        step: Step::Precommit,
+    }
 }
 
 impl SignerRecord {
+    /// The only height this record may sign at, if one is fixed yet: the
+    /// certified height + 1; else the first height above the floor; else the
+    /// height of the last signature. `None` only before anything is signed,
+    /// certified or floored.
+    pub fn working_height(&self) -> Option<u64> {
+        if let Some(c) = self.certified {
+            return c.height.checked_add(1);
+        }
+        if let Some(f) = self.floor {
+            let next = if f.round == crate::encoding::MAX_ROUND && f.step == Step::Precommit {
+                f.height.checked_add(1)
+            } else {
+                Some(f.height)
+            };
+            return next;
+        }
+        self.last.as_ref().map(|l| l.position.height)
+    }
+
     /// The highest position this record forbids signing at or below.
     pub fn high_water(&self) -> Option<SignPosition> {
         let last = self.last.as_ref().map(|l| l.position);
@@ -184,6 +233,16 @@ impl SignerRecord {
         if let Some(last) = self.last.as_ref() {
             if last.position.step == Step::Propose && last.value == VoteValue::Nil {
                 return Err("a nil proposal was recorded");
+            }
+            if let Some(w) = self.working_height() {
+                if last.position.height != w {
+                    return Err("the last signature is not at the working height");
+                }
+            }
+        }
+        if let Some(c) = self.certified {
+            if self.floor != Some(whole_height_floor(c.height)) {
+                return Err("a certified height without its floor");
             }
         }
         Ok(())
@@ -243,6 +302,15 @@ pub trait PolkaVerifier {
         value: &Digest,
         evidence: &[u8],
     ) -> Result<(), String>;
+
+    /// Verify a finality proof (PROPOSED: a `FinalityCertificateV1` checked
+    /// against the node's authenticated set for the height it names) and
+    /// return the (height, block) it proves final. The default refuses every
+    /// proof, so a signer without a finality verifier can never leave its
+    /// working height.
+    fn verify_finality(&self, _proof: &[u8]) -> Result<Certified, String> {
+        Err("no finality-proof verifier is configured".into())
+    }
 }
 
 /// Why the signer refused to open, initialize or sign.
@@ -284,6 +352,14 @@ pub enum SignerError {
     InvalidJustification(String),
     #[error("invalid request: {0}")]
     InvalidRequest(&'static str),
+    #[error("height {requested} is above the working height {working}; advance with a finality proof first")]
+    HeightNotCertified { requested: u64, working: u64 },
+    #[error("finality proof refused: {0}")]
+    InvalidFinalityProof(String),
+    #[error("finality proof for height {proof} is not above the certified history (working height {working})")]
+    StaleFinalityProof { proof: u64, working: u64 },
+    #[error("two verified finality proofs name different blocks at height {0}; the signer stops")]
+    ConflictingFinality(u64),
 }
 
 /// The signer. Holds the ownership guard for its whole life.
@@ -331,6 +407,7 @@ pub fn initialize<S: SignerStore>(
         floor,
         last: None,
         lock: None,
+        certified: None,
     };
     store
         .persist(&record)
@@ -397,6 +474,74 @@ where
         self.poisoned
     }
 
+    /// Leave the working height (PROPOSED, unratified). `proof` must convince
+    /// the signer's own verifier ([`PolkaVerifier::verify_finality`]) that a
+    /// height `H` is final; the caller's word is never enough.
+    ///
+    /// * `H` at or above the working height: the floor is raised to cover
+    ///   every position at heights `≤ H`, the last signature and the lock
+    ///   (both at a height `≤ H`) are discarded, and the record is persisted
+    ///   before anything is signed at `H + 1`.
+    /// * `H` equal to the certified height: nothing changes if the block is
+    ///   the same; a different block means two verified finality proofs
+    ///   conflict, and the signer refuses everything until it is reopened.
+    /// * `H` below the working height otherwise: refused as stale; nothing
+    ///   changes.
+    pub fn advance(&mut self, proof: &[u8]) -> Result<Certified, SignerError> {
+        if self.poisoned {
+            return Err(SignerError::Poisoned);
+        }
+        let proven = self
+            .polka
+            .verify_finality(proof)
+            .map_err(SignerError::InvalidFinalityProof)?;
+        if proven.height == u64::MAX {
+            return Err(SignerError::InvalidFinalityProof(
+                "a finality proof for the last representable height".into(),
+            ));
+        }
+        if let Some(c) = self.record.certified {
+            if proven.height == c.height {
+                if proven.block_id != c.block_id {
+                    self.poisoned = true;
+                    return Err(SignerError::ConflictingFinality(proven.height));
+                }
+                return Ok(c);
+            }
+        }
+        if let Some(working) = self.record.working_height() {
+            if proven.height < working {
+                return Err(SignerError::StaleFinalityProof {
+                    proof: proven.height,
+                    working,
+                });
+            }
+        }
+        let sequence = self
+            .record
+            .sequence
+            .checked_add(1)
+            .ok_or(SignerError::InvalidRequest("signer sequence exhausted"))?;
+        let next = SignerRecord {
+            key_id: self.record.key_id,
+            sequence,
+            floor: Some(whole_height_floor(proven.height)),
+            last: None,
+            lock: None,
+            certified: Some(proven),
+        };
+        match self.store.persist(&next) {
+            Ok(()) => {
+                self.record = next;
+                Ok(proven)
+            }
+            Err(e) => {
+                self.poisoned = true;
+                Err(SignerError::PersistFailed(e.0))
+            }
+        }
+    }
+
     /// Sign `req`, or refuse. A returned signature is always durable first.
     pub fn sign(&mut self, req: &SignRequest) -> Result<Vec<u8>, SignerError> {
         if self.poisoned {
@@ -434,6 +579,15 @@ where
                 } else {
                     Err(SignerError::Equivocation(req.position))
                 };
+            }
+        }
+
+        if let Some(working) = self.record.working_height() {
+            if req.position.height > working {
+                return Err(SignerError::HeightNotCertified {
+                    requested: req.position.height,
+                    working,
+                });
             }
         }
 
@@ -493,6 +647,7 @@ where
                 signature: signature.clone(),
             }),
             lock: next_lock,
+            certified: self.record.certified,
         };
         match self.store.persist(&next) {
             Ok(()) => {
