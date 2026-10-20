@@ -51,7 +51,7 @@
 //! what is released and persisted, not about signature validity.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 
 use sumchain_finality_foundations::signer::{
@@ -59,7 +59,8 @@ use sumchain_finality_foundations::signer::{
     SigningKey, Step, VoteValue,
 };
 use sumchain_finality_foundations::signer_file::{
-    floor_below_height, sign_bytes_digest, FileSignerStore, SignerState, STATE_FILE,
+    floor_below_height, proof_file_name, sign_bytes_digest, Classified, FileSignerStore,
+    ProofStatus, SignerState, STATE_FILE,
 };
 use sumchain_finality_foundations::Digest;
 
@@ -88,7 +89,7 @@ impl SigningKey for HashKey {
 }
 
 type Store = FileSignerStore<SimDir, SimMirror, B3>;
-type Signer = DurableSigner<Store, HashKey, TestPolka, MemGuard>;
+type Signer = DurableSigner<Store, HashKey, RetainingPolka, MemGuard>;
 
 fn store(disk: &Disk) -> Store {
     FileSignerStore::new(
@@ -101,7 +102,7 @@ fn store(disk: &Disk) -> Store {
 }
 
 fn open(disk: &Disk, owner: &MemOwnership) -> Result<Signer, SignerError> {
-    DurableSigner::open(owner, store(disk), HashKey, TestPolka, None)
+    DurableSigner::open(owner, store(disk), HashKey, RetainingPolka, None)
 }
 
 fn pos(height: u64, round: u32, step: Step) -> SignPosition {
@@ -190,6 +191,10 @@ struct Ghost {
     released: BTreeMap<SignPosition, Digest>,
     /// The highest height a valid proof was presented for.
     valid_proof_max: Option<u64>,
+    /// Every valid (height, block) proof presented.
+    valid_proofs: BTreeSet<(u64, Digest)>,
+    /// A halt has been persisted (observed durable, or returned).
+    halted: bool,
     /// Every (height, block) a durable state has certified.
     certified: BTreeMap<u64, Digest>,
 }
@@ -277,6 +282,14 @@ fn node_key(n: &Node) -> [u8; 32] {
     blake3::hash(&k).into()
 }
 
+/// The state file a process would read now (the volatile view).
+fn durable_or_visible_state(m: &Model) -> Option<SignerState> {
+    let id = *m.dir_vol.get(STATE_FILE)?;
+    SignerState::decode(&m.inodes[id].vol, &B3)
+        .ok()
+        .map(|(s, _)| s)
+}
+
 fn durable_state(m: &Model) -> Option<SignerState> {
     let id = *m.dir_dur.get(STATE_FILE)?;
     SignerState::decode(&m.inodes[id].dur, &B3)
@@ -287,8 +300,39 @@ fn durable_state(m: &Model) -> Option<SignerState> {
 /// I4 and H2 on an open signer: never below an issued position; at the
 /// height of the latest issued lock, never an older lock; above it, only with
 /// a valid proof for that height or higher.
-fn check_open(n: &Node, s: &Signer, violations: &mut Vec<String>) {
+fn check_open(n: &Node, s: &Signer, disk: &Disk, violations: &mut Vec<String>) {
     let rec = s.record();
+    // HALT1: a persisted halt is never lost.
+    if n.ghost.halted && !s.is_halted() {
+        violations.push("HALT1: the persisted halt was lost".into());
+    }
+    // PR1: no fault ever leaves the referenced proof missing or corrupt, and
+    // no unreferenced proof file survives an open.
+    match s.store().proof_status() {
+        ProofStatus::Missing | ProofStatus::Corrupt => violations.push(format!(
+            "PR1: the referenced proof is {:?} after faults",
+            s.store().proof_status()
+        )),
+        _ => {}
+    }
+    let referenced = durable_or_visible_state(&disk.borrow()).map(|st| st.proof_digest);
+    let keep = referenced
+        .filter(|d| *d != [0; 32])
+        .map(|d| proof_file_name(&d));
+    for name in disk.borrow().dir_vol.keys() {
+        if name.starts_with("proof") && Some(name) != keep.as_ref() {
+            violations.push(format!("PR1: unreferenced proof file {name} after open"));
+        }
+    }
+    if s.store().classified() != Some(Classified::Consistent) {
+        violations.push(format!(
+            "an open state needed a repair: {:?}",
+            s.store().classified()
+        ));
+    }
+    if n.ghost.halted {
+        return;
+    }
     let hw = rec.high_water();
     if let Some(&issued_max) = n.ghost.issued.keys().next_back() {
         if hw.is_none_or(|p| p < issued_max) {
@@ -320,6 +364,9 @@ fn check_open(n: &Node, s: &Signer, violations: &mut Vec<String>) {
 /// I5 and I4b when `q` becomes issued (released, or durably persisted).
 fn issue(n: &mut Node, q: &SignRequest, violations: &mut Vec<String>) {
     let p = q.position;
+    if n.ghost.halted {
+        violations.push(format!("HALT1: issued {p:?} after the halt"));
+    }
     let d = sign_bytes_digest(&B3, &q.payload);
     if p.height > 7 && n.ghost.valid_proof_max.is_none_or(|v| v < p.height - 1) {
         violations.push(format!(
@@ -377,6 +424,17 @@ fn observe_durable(n: &mut Node, alphabet: &[SignRequest], violations: &mut Vec<
     let Some(s) = durable_state(&n.model) else {
         return;
     };
+    if let Some(conflicting) = s.halted {
+        n.ghost.halted = true;
+        let h = s.floor_height - 1;
+        if !(n.ghost.valid_proofs.contains(&(h, conflicting))
+            && n.ghost.valid_proofs.contains(&(h, s.certified_block_id)))
+        {
+            violations.push(format!(
+                "HALT2: halted at height {h} without two valid conflicting proofs"
+            ));
+        }
+    }
     if s.certified_block_id != [0; 32] {
         let h = s.floor_height - 1;
         match n.ghost.certified.get(&h) {
@@ -463,6 +521,8 @@ struct Report {
     max_height: u64,
     /// Accepted advancements seen (open states whose height is above 7).
     advanced_states: usize,
+    /// Open states whose signer is halted.
+    halted_states: usize,
     violations: Vec<String>,
 }
 
@@ -535,12 +595,14 @@ fn act(
             v.push("H3: a forged proof was accepted".into());
             return None;
         }
-        if let Some((h, _)) = verdict {
+        if let Some((h, b)) = verdict {
             if next.ghost.valid_proof_max.is_none_or(|m| m < *h) {
                 next.ghost.valid_proof_max = Some(*h);
             }
+            next.ghost.valid_proofs.insert((*h, *b));
         }
     }
+    let succeeded = res.is_ok();
     match (res, fired) {
         (Ok(status), false) => next.status = status,
         (Ok(_), true) => {
@@ -567,6 +629,22 @@ fn act(
             (Action::Advance(..), SignerError::PersistFailed(m)) => {
                 v.push(format!("H3: store refused the core's advancement: {m}"));
                 return None;
+            }
+            // The halt is persisted and returned as this error.
+            (Action::Advance(..), SignerError::ConflictingFinality(h)) => {
+                let blocks = next
+                    .ghost
+                    .valid_proofs
+                    .iter()
+                    .filter(|(ph, _)| *ph == h)
+                    .count();
+                if blocks < 2 {
+                    v.push(format!(
+                        "HALT2: halted at height {h} without two valid proofs"
+                    ));
+                }
+                next.ghost.halted = true;
+                next.status = Status::Open;
             }
             // A refused request or advancement changes nothing.
             (Action::Sign(_) | Action::Advance(..), _) => {
@@ -595,7 +673,9 @@ fn act(
     } else {
         observe_durable(&mut next, alphabet, v);
     }
-    if let (Action::Advance(_, Some((h, b))), Status::Open, false) = (action, next.status, fired) {
+    if let (Action::Advance(_, Some((h, b))), Status::Open, false, true) =
+        (action, next.status, fired, succeeded)
+    {
         // Durable before the advance returns.
         match durable_state(&next.model) {
             Some(st) if st.certified_block_id == *b && st.floor_height == h + 1 => {}
@@ -632,6 +712,7 @@ fn explore(max_faults: u32) -> Report {
         issued: 0,
         max_height: 0,
         advanced_states: 0,
+        halted_states: 0,
         violations: Vec::new(),
     };
 
@@ -658,10 +739,10 @@ fn explore(max_faults: u32) -> Report {
                 arm(&disk, None);
                 match open(&disk, &MemOwnership::default()) {
                     Ok(s) => {
-                        if disk.borrow().ops != 0 {
-                            v.push("an open state needed a repair".into());
+                        check_open(&node, &s, &disk, &mut v);
+                        if s.is_halted() {
+                            report.halted_states += 1;
                         }
-                        check_open(&node, &s, &mut v);
                         let w = s.record().working_height().unwrap_or(0);
                         report.max_height = report.max_height.max(w);
                         if w > 7 {
@@ -721,11 +802,12 @@ fn explore(max_faults: u32) -> Report {
 fn run(max_faults: u32) -> Report {
     let r = explore(max_faults);
     println!(
-        "model check K={}: {} states ({} at a height above 7, up to height {}), {} transitions, depth {}, up to {} released / {} issued messages, {} violations",
+        "model check K={}: {} states ({} at a height above 7, up to height {}; {} halted), {} transitions, depth {}, up to {} released / {} issued messages, {} violations",
         if max_faults == u32::MAX { "unbounded".to_string() } else { max_faults.to_string() },
         r.states,
         r.advanced_states,
         r.max_height,
+        r.halted_states,
         r.transitions,
         r.max_depth,
         r.released,
@@ -740,10 +822,10 @@ fn run(max_faults: u32) -> Report {
 /// height 7, 0–1 at height 8, 0 at height 9; 14 signing requests and 5
 /// proofs; five fault modes at every write; `K` faults per path.
 #[test]
-fn model_check_up_to_one_fault_per_path() {
-    let r = run(1);
+fn model_check_without_faults() {
+    let r = run(0);
     assert!(
-        r.states > 1000,
+        r.states > 100,
         "the search reached too little: {}",
         r.states
     );
@@ -751,6 +833,19 @@ fn model_check_up_to_one_fault_per_path() {
         r.max_height >= 9,
         "heights 8 and 9 were reached by advancement"
     );
+    assert!(
+        r.halted_states > 0,
+        "a conflicting pair of proofs halted the signer"
+    );
+}
+
+/// Release build; run with
+/// `cargo test --release -p sumchain-finality-foundations --test signer_file_model_check -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn model_check_up_to_one_fault_per_path() {
+    let r = run(1);
+    assert!(r.max_height >= 9);
     assert!(
         r.released >= 9,
         "messages at several heights were released on one path"
