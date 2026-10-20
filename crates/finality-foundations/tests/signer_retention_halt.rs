@@ -743,6 +743,62 @@ fn initialization_refuses_while_a_conflict_archive_exists() {
     ));
 }
 
+/// Re-entry: after recovering to 9, a second halt needs two verified proofs
+/// naming different blocks at the new certified height 9; the second
+/// recovery needs a resume above 9 (W = 10) and its own evidence, and both
+/// archives are kept. Each cycle strictly raises the floor.
+#[test]
+fn a_second_conflict_needs_new_evidence_and_a_strictly_higher_resume() {
+    let rig = halted_rig();
+    let mut s = rig.open().unwrap();
+    s.recover_after_conflict(at(9, A), &finality(9, &A), None)
+        .unwrap();
+    // A stale proof for the first conflict height changes nothing.
+    assert!(matches!(
+        s.advance(&finality(7, &B)),
+        Err(SignerError::StaleFinalityProof { .. })
+    ));
+    assert!(!s.is_halted());
+    s.sign(&prevote(10, 0, A)).unwrap();
+    assert_eq!(
+        s.advance(&finality(9, &B)),
+        Err(SignerError::ConflictingFinality(9))
+    );
+    assert!(s.is_halted());
+    for (r, b) in [(9, A), (8, B)] {
+        assert!(matches!(
+            s.recover_after_conflict(at(r, b), &finality(r, &b), None),
+            Err(SignerError::RecoveryTooLow { working: 10, .. })
+        ));
+    }
+    // Evidence for the first conflict is not evidence for the second.
+    assert!(matches!(
+        s.recover_after_conflict(at(11, A), &finality(11, &A), Some(&finality(7, &B))),
+        Err(SignerError::RecoveryEvidence(_))
+    ));
+    s.recover_after_conflict(at(10, A), &finality(10, &A), None)
+        .unwrap();
+    assert_eq!(s.record().working_height(), Some(11));
+    assert!(matches!(
+        s.sign(&prevote(10, 1, A)),
+        Err(SignerError::Regression { .. })
+    ));
+    s.sign(&prevote(11, 0, A)).unwrap();
+    drop(s);
+    let s = rig.open().unwrap();
+    assert!(!s.is_halted());
+    let files = conflict_files(&rig);
+    for h in [7, 9] {
+        for suffix in ["evidence", "receipt", "resume", "state"] {
+            assert!(
+                files.contains(&format!("conflict-{h}.{suffix}")),
+                "conflict-{h}.{suffix} kept"
+            );
+        }
+    }
+    assert_eq!(rig.file("conflict-9.evidence"), Some(finality(9, &B)));
+}
+
 #[test]
 fn crash_matrix_for_recovery_after_a_conflict() {
     let rig = halted_rig();
