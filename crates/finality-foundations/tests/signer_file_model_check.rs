@@ -646,6 +646,8 @@ struct Report {
     halted_states: usize,
     /// Open states whose signer recovered from a halt.
     recovered_states: usize,
+    /// Open states halted again after a recovery on their path.
+    rehalted_states: usize,
     violations: Vec<String>,
 }
 
@@ -874,7 +876,57 @@ fn act(
 }
 
 /// Explore every state reachable with at most `max_faults` faults per path.
+/// DIAGNOSTIC: a one-line description of a state's archive debris.
+fn diag_category(n: &Node) -> String {
+    let m = &n.model;
+    let tag = |b: &[u8]| -> String {
+        if b.is_empty() {
+            "0".into()
+        } else if b.starts_with(b"final") && b.len() == 45 {
+            format!("f{}{:02x}", b[5], b[13])
+        } else if b.len() == 185 {
+            format!("r{}", b[49])
+        } else if b.len() == 413 {
+            "st".into()
+        } else {
+            format!("?{}", b.len())
+        }
+    };
+    let files: Vec<String> = m
+        .dir_vol
+        .iter()
+        .filter(|(k, _)| k.starts_with("conflict-"))
+        .map(|(k, &i)| {
+            let d = m.dir_dur.get(k) == Some(&i) && m.inodes[i].dur == m.inodes[i].vol;
+            format!(
+                "{}={}{}",
+                k.split_once('.').map_or(k.as_str(), |x| x.1),
+                tag(&m.inodes[i].vol),
+                if d { "" } else { "~" }
+            )
+        })
+        .collect();
+    format!(
+        "{:?} h={} r={:?} [{}]",
+        n.status,
+        u8::from(n.ghost.halted),
+        n.ghost.resumed,
+        files.join(",")
+    )
+}
+
 fn explore(max_faults: u32) -> Report {
+    explore_with(max_faults, &recoveries(), None)
+}
+
+fn explore_with(
+    max_faults: u32,
+    recovery_alphabet: &[OracleRecovery],
+    max_states: Option<usize>,
+) -> Report {
+    let diag = std::env::var_os("SUMCHAIN_MC_DIAG").is_some();
+    let mut hist: HashMap<String, usize> = HashMap::new();
+    let t0 = std::time::Instant::now();
     let alphabet = alphabet();
     let start = Node {
         model: Model::default(),
@@ -897,6 +949,7 @@ fn explore(max_faults: u32) -> Report {
         advanced_states: 0,
         halted_states: 0,
         recovered_states: 0,
+        rehalted_states: 0,
         violations: Vec::new(),
     };
 
@@ -910,6 +963,16 @@ fn explore(max_faults: u32) -> Report {
         queue.pop_front()
     } {
         report.states += 1;
+        if diag {
+            *hist.entry(diag_category(&node)).or_default() += 1;
+            if report.states % 200_000 == 0 {
+                eprintln!("diag: {} states, {:?}", report.states, t0.elapsed());
+            }
+        }
+        if max_states.is_some_and(|c| report.states >= c) {
+            eprintln!("diag: stopped at the state cap {}", report.states);
+            break;
+        }
         report.max_depth = report.max_depth.max(depth);
         report.released = report.released.max(node.ghost.released.len());
         report.issued = report.issued.max(node.ghost.issued.len());
@@ -928,6 +991,9 @@ fn explore(max_faults: u32) -> Report {
                         halted = s.is_halted();
                         if halted {
                             report.halted_states += 1;
+                            if node.ghost.resumed.is_some() {
+                                report.rehalted_states += 1;
+                            }
                         } else if node.ghost.resumed.is_some() {
                             report.recovered_states += 1;
                         }
@@ -945,8 +1011,9 @@ fn explore(max_faults: u32) -> Report {
                     .map(Action::Sign)
                     .chain(proofs().into_iter().map(|(p, v)| Action::Advance(p, v)))
                     .chain(
-                        recoveries()
-                            .into_iter()
+                        recovery_alphabet
+                            .iter()
+                            .cloned()
                             .filter(|_| halted)
                             .map(Action::Recover),
                     )
@@ -990,7 +1057,55 @@ fn explore(max_faults: u32) -> Report {
             break;
         }
     }
+    if diag {
+        let mut h: Vec<(String, usize)> = hist.into_iter().collect();
+        h.sort_by(|a, b| b.1.cmp(&a.1));
+        eprintln!(
+            "diag: {} categories; {} states in {:?}; top:",
+            h.len(),
+            report.states,
+            t0.elapsed()
+        );
+        for (c, n) in h.iter().take(30) {
+            eprintln!("diag: {n:>9} {c}");
+        }
+    }
     report
+}
+
+/// DIAGNOSTIC: `SUMCHAIN_MC_K` (default 1), `SUMCHAIN_MC_MAX_STATES`
+/// (default 3,000,000), `SUMCHAIN_MC_RECOVERIES` (comma-separated indices
+/// into [`recoveries`]; empty: none; unset: all), `SUMCHAIN_MC_DIAG=1`.
+#[test]
+#[ignore]
+fn model_check_diagnostics() {
+    let env = |k: &str| std::env::var(k).ok();
+    let k: u32 = env("SUMCHAIN_MC_K").map_or(1, |v| v.parse().unwrap());
+    let cap: usize = env("SUMCHAIN_MC_MAX_STATES").map_or(3_000_000, |v| v.parse().unwrap());
+    let all = recoveries();
+    let set: Vec<OracleRecovery> = match env("SUMCHAIN_MC_RECOVERIES") {
+        None => all,
+        Some(v) if v.is_empty() => Vec::new(),
+        Some(v) => v
+            .split(',')
+            .map(|i| all[i.parse::<usize>().unwrap()].clone())
+            .collect(),
+    };
+    let t0 = std::time::Instant::now();
+    let r = explore_with(k, &set, Some(cap));
+    println!(
+        "diag K={k} recoveries={}: {} states ({} halted, {} recovered, {} halted again after a recovery; up to height {}), {} transitions, depth {}, {} violations, {:?}",
+        set.len(),
+        r.states,
+        r.halted_states,
+        r.recovered_states,
+        r.rehalted_states,
+        r.max_height,
+        r.transitions,
+        r.max_depth,
+        r.violations.len(),
+        t0.elapsed()
+    );
 }
 
 fn run(max_faults: u32) -> Report {
