@@ -566,14 +566,31 @@ fn advancement_needs_a_verified_certificate_for_the_working_height_or_above() {
     s.sign(&own(VoteType::Prevote, 8, 0, Some(Y))).unwrap();
 
     // A second valid certificate for height 7 naming another block: two
-    // verified finality proofs conflict. The signer stops; nothing is written.
-    let before = rig.writes();
+    // verified finality proofs conflict. The halt is persisted, with the
+    // conflicting certificate (trimmed to a quorum) kept as evidence.
+    let conflicting = cert(4, 7, 3, Y, &[0, 1, 2, 3]).encode().unwrap();
     assert_eq!(
-        s.advance(&cert(4, 7, 3, Y, &[0, 1, 3]).encode().unwrap()),
+        s.advance(&conflicting),
         Err(SignerError::ConflictingFinality(7))
     );
-    assert_eq!(rig.writes(), before);
-    assert!(s.is_poisoned());
+    assert!(s.is_halted());
+    let halt = s.record().halt.clone().unwrap();
+    assert_eq!(
+        (halt.height, halt.certified_block, halt.conflicting_block),
+        (7, X, Y)
+    );
+    assert!(matches!(
+        s.sign(&own(VoteType::Prevote, 8, 1, Some(Y))),
+        Err(SignerError::Halted)
+    ));
+    drop(s);
+    let s = rig.open(None).unwrap();
+    assert!(s.is_halted(), "the halt is durable");
+    assert_eq!(
+        s.store().proof_status(),
+        sumchain_finality_foundations::signer_file::ProofStatus::Present,
+        "the evidence file is durable"
+    );
 }
 
 #[test]

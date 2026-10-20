@@ -526,18 +526,21 @@ fn multi_height_sequence_with_refused_and_accepted_proofs() {
         Err(SignerError::StaleFinalityProof { .. })
     ));
     assert!(rig.disk.borrow().log.is_empty(), "nothing written");
-    // A second verified proof for height 11 naming another block: the signer
-    // stops, and nothing is written.
+    // A second verified proof for height 11 naming another block: the halt is
+    // persisted (RATIFIED), and the signer refuses everything from now on.
+    rig.arm(usize::MAX, Mode::Error);
     assert_eq!(
         s.advance(&finality(11, &B)),
         Err(SignerError::ConflictingFinality(11))
     );
-    assert!(s.is_poisoned());
-    assert!(rig.disk.borrow().log.is_empty(), "nothing written");
-    assert_eq!(s.sign(&prevote(12, 0, A)), Err(SignerError::Poisoned));
+    assert!(s.is_halted());
+    assert!(!rig.disk.borrow().log.is_empty(), "the halt was written");
+    assert_eq!(s.sign(&prevote(12, 0, A)), Err(SignerError::Halted));
+    assert_eq!(s.advance(&finality(12, &A)), Err(SignerError::Halted));
     drop(s);
-    rig.disk.borrow_mut().restart();
+    rig.disk.borrow_mut().reboot();
     let s = rig.open().unwrap();
+    assert!(s.is_halted(), "the halt survives a power loss");
     assert_eq!(
         s.record().certified,
         Some(Certified {
@@ -715,7 +718,7 @@ fn i2_same_counter_requires_byte_identical_mirror() {
     // A mirror whose lock group was cleared is not even a valid record.
     let rig = prepared(&[prevote(7, 0, A), precommit(7, 0, A)]);
     let mut m = rig.mirror().unwrap();
-    m[offset::LOCK_PRESENT..offset::PREV].fill(0);
+    m[offset::LOCK_STATE..offset::PREV].fill(0);
     rig.set_mirror(Some(reseal(m)));
     assert!(
         matches!(rig.open(), Err(SignerError::Corrupt(msg)) if msg.contains("without its own lock"))
@@ -985,10 +988,10 @@ fn i6_i7_strict_decoding_refuses_each_field_class() {
             |e| *e == StateError::Checksum,
         ),
         ("short", good[..STATE_LEN - 1].to_vec(), |e| {
-            matches!(e, StateError::Length(379))
+            matches!(e, StateError::Length(411))
         }),
         ("long", [good.clone(), vec![0]].concat(), |e| {
-            matches!(e, StateError::Length(381))
+            matches!(e, StateError::Length(413))
         }),
         ("magic", set(good.clone(), 0, b"FSGNv2\0"), |e| {
             *e == StateError::Magic
@@ -999,9 +1002,11 @@ fn i6_i7_strict_decoding_refuses_each_field_class() {
         ("last flag", set(good.clone(), o::LAST_PRESENT, &[2]), |e| {
             matches!(e, StateError::Flag(_))
         }),
-        ("lock flag", set(good.clone(), o::LOCK_PRESENT, &[2]), |e| {
-            matches!(e, StateError::Flag(_))
-        }),
+        (
+            "halted shape on a locked state",
+            set(good.clone(), o::LOCK_STATE, &[2]),
+            |e| matches!(e, StateError::Inconsistent(_)),
+        ),
         (
             "absent last not zero",
             set(fresh.clone(), o::LAST_HEIGHT, &[1]),
@@ -1009,7 +1014,7 @@ fn i6_i7_strict_decoding_refuses_each_field_class() {
         ),
         (
             "absent lock not zero",
-            set(fresh.clone(), o::PREV - 1, &[1]),
+            set(fresh.clone(), o::PROOF - 1, &[1]),
             |e| matches!(e, StateError::NonCanonicalAbsent(_)),
         ),
         ("step 0", set(good.clone(), o::LAST_STEP, &[0]), |e| {
@@ -1074,7 +1079,7 @@ fn i6_i7_strict_decoding_refuses_each_field_class() {
         (
             "lock without a signature",
             {
-                let b = set(fresh.clone(), o::LOCK_PRESENT, &[1]);
+                let b = set(fresh.clone(), o::LOCK_STATE, &[1]);
                 let b = set(b, o::LOCK_HEIGHT, &7u64.to_le_bytes());
                 set(b, o::LOCK_VALUE, &A)
             },
@@ -1103,7 +1108,7 @@ fn i6_i7_strict_decoding_refuses_each_field_class() {
         (
             "nil proposal",
             {
-                let b = set(good.clone(), o::LOCK_PRESENT, &[0; 45]);
+                let b = set(good.clone(), o::LOCK_STATE, &[0; 45]);
                 let b = set(b, o::LAST_STEP, &[1]);
                 set(b, o::LAST_VALUE, &[0; 32])
             },
@@ -1112,6 +1117,21 @@ fn i6_i7_strict_decoding_refuses_each_field_class() {
         (
             "zero sign-bytes digest",
             set(good.clone(), o::LAST_DIGEST, &[0; 32]),
+            |e| matches!(e, StateError::Inconsistent(_)),
+        ),
+        (
+            "lock_state 3",
+            set(good.clone(), o::LOCK_STATE, &[3]),
+            |e| matches!(e, StateError::Flag(_)),
+        ),
+        (
+            "a retained proof without a lock",
+            set(advanced.clone(), o::PROOF, &[7; 32]),
+            |e| matches!(e, StateError::Inconsistent(_)),
+        ),
+        (
+            "a proof at counter 0",
+            set(fresh.clone(), o::PROOF, &[7; 32]),
             |e| matches!(e, StateError::Inconsistent(_)),
         ),
     ];
@@ -1126,7 +1146,7 @@ fn i6_i7_strict_decoding_refuses_each_field_class() {
         r.set_file(STATE_FILE, bytes);
         assert!(matches!(r.open(), Err(SignerError::Corrupt(_))), "{what}");
     }
-    assert_eq!(n, 28);
+    assert_eq!(n, 31);
 }
 
 // ── I10 identity; missing and corrupt files; ownership; floor ───────────────
@@ -1259,6 +1279,13 @@ impl MirrorStore for FileMirror {
         match std::fs::read(&self.0) {
             Ok(b) => Ok(Some(b)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(IoError(e.to_string())),
+        }
+    }
+    fn clear_synced(&mut self) -> Result<(), IoError> {
+        match std::fs::remove_file(&self.0) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(IoError(e.to_string())),
         }
     }

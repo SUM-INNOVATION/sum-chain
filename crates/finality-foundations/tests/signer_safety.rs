@@ -354,6 +354,8 @@ fn g2b_corrupt_or_inconsistent_state_fails_closed() {
             value: A,
         }),
         certified: None,
+        lock_proof: None,
+        halt: None,
     }));
     assert!(matches!(rig.open(None), Err(SignerError::Corrupt(_))));
 }

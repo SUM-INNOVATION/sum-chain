@@ -1,12 +1,12 @@
-//! PROPOSED, UNRATIFIED: a file-backed [`SignerStore`] for the G2-b signer.
+//! A file-backed [`SignerStore`] for the G2-b signer. Dormant: nothing calls
+//! it.
 //!
-//! This is a dormant prototype of the signer-state layout and recovery rules
-//! under review (group A2, revision 3 of the draft). Nothing calls it, the
-//! byte layout is **not ratified and not frozen**, and it exists so that every
-//! crash point of the persistence protocol can be tested against the real
-//! encoding.
+//! **Semantics RATIFIED (2026-10-20):** proof-gated height advancement, the
+//! persisted conflict halt, and `PolkaProofV1` verification of lock changes.
+//! **Bytes UNRATIFIED:** every layout and file name below is a proposal
+//! (group A2, revision 4 of the draft), not frozen.
 //!
-//! # Layout (UNRATIFIED): 380 bytes (draft 1: 284; draft 2: 348)
+//! # `SignerStateV1` layout (UNRATIFIED): 412 bytes
 //!
 //! | Offset | Width | Field |
 //! |---|---|---|
@@ -16,8 +16,8 @@
 //! | 17 | 8 | chain_id u64 LE |
 //! | 25 | 32 | genesis_block_hash |
 //! | 57 | 32 | signer_pubkey |
-//! | 89 | 8 | floor_height u64 LE (the working height; 0 = none yet) |
-//! | 97 | 32 | certified_block_id (all zero: the floor came from initialization) **draft 3** |
+//! | 89 | 8 | floor_height u64 LE: the working height W (0: none yet) |
+//! | 97 | 32 | certified_block_id (zero: W came from initialization) |
 //! | 129 | 1 | last_present (0 or 1) |
 //! | 130 | 8 | last_height u64 LE |
 //! | 138 | 4 | last_round u32 LE |
@@ -25,46 +25,51 @@
 //! | 143 | 32 | last_value (block id; all zero = nil) |
 //! | 175 | 32 | last_sign_bytes_digest = H(`D_SIGNBYTES` ‖ sign bytes) |
 //! | 207 | 64 | last_signature |
-//! | 271 | 1 | lock_present (0 or 1) |
-//! | 272 | 8 | lock_height u64 LE |
-//! | 280 | 4 | lock_round u32 LE |
-//! | 284 | 32 | lock_value |
-//! | 316 | 32 | prev_checksum (checksum of the record this one replaced) |
-//! | 348 | 32 | checksum = H(`D_SIGNER` ‖ bytes[0..348]) |
+//! | 271 | 1 | lock_state: 0 none, 1 locked, **2 HALTED** |
+//! | 272 | 8 | lock_height u64 LE (halted: the certified height W − 1) |
+//! | 280 | 4 | lock_round u32 LE (halted: 0) |
+//! | 284 | 32 | lock_value (halted: the conflicting block) |
+//! | 316 | 32 | proof_digest = H(`D_PROOF` ‖ side-file bytes); zero: none |
+//! | 348 | 32 | prev_checksum (checksum of the record this one replaced) |
+//! | 380 | 32 | checksum = H(`D_SIGNER` ‖ bytes[0..380]) |
 //!
-//! `floor_height` F > 0 is the only height the signer may sign at: heights
-//! below are refused, and heights above need a finality proof first. With a
-//! non-zero `certified_block_id`, F − 1 is the highest height the signer holds
-//! a verified finality proof for, and that is the block it commits.
+//! The halt is a defined value of the existing lock-state enum, not a new
+//! byte: it is then in the state file **and** the mirror and in the record
+//! lineage, so removing it means replacing both copies consistently (a
+//! rollback, outside what any store can detect), not deleting one marker.
 //!
-//! The mirror (kept in the node database, written with a synced WAL) is a
-//! byte-identical copy of the last fully persisted state.
+//! # Side file (UNRATIFIED): the retained proof
 //!
-//! The hash function is injected ([`StateHasher`]); the draft proposes
-//! BLAKE3-256.
+//! `proof-<64 hex digest>.v1` holds the bytes `proof_digest` names: the
+//! `PolkaProofV1` that justified the current lock, trimmed to a minimal
+//! quorum, or, in a halted state, the conflicting finality proof (evidence).
+//! At most [`MAX_RETAINED_PROOF_LEN`] bytes.
 //!
 //! # Persistence protocol
 //!
-//! * **P1:** write `signer.v1.tmp`, fsync it, rename it over `signer.v1`,
-//!   fsync the directory.
-//! * **P2:** write the mirror, durably.
-//! * The store returns `Ok` only after both; the signer releases only after
-//!   `Ok`.
+//! 0. **G:** remove the proof file the previous persist left unreferenced.
+//! 1. **P0** (only when new proof bytes are retained): write `proof.tmp`,
+//!    fsync it, rename it to its digest name, fsync the directory. The proof
+//!    is durable before any state references it.
+//! 2. **P1:** write `signer.v1.tmp`, fsync it, rename it over `signer.v1`,
+//!    fsync the directory.
+//! 3. **P2:** write the mirror, durably.
+//!
+//! The store returns `Ok` only after P2; the signer releases only after `Ok`.
 //!
 //! # Recovery at open
 //!
-//! See [`FileSignerStore::load`]: a leftover temp file is removed; then the
-//! state file and the mirror are classified, and only two repairs exist:
-//! completing an interrupted initialization, and advancing a mirror that is
-//! exactly one persist behind. Both first make the state file durable.
+//! See [`FileSignerStore::load`]: leftover temp files are removed; the state
+//! file and the mirror are classified (two repairs only, each after making
+//! the state file durable); then the referenced proof is checked
+//! ([`ProofStatus`]: a missing or corrupt proof opens **degraded**, the lock
+//! still enforced from the state) and unreferenced proof files are removed.
 //!
 //! # Limits
 //!
-//! * Restoring the state file and the mirror together (a whole data-directory
-//!   rollback) is undetectable here; only external evidence of a newer
-//!   signature catches it.
-//! * Two signers holding cloned keys, each with its own state, are
-//!   undetectable here.
+//! * A whole data-directory rollback (state, mirror and side files restored
+//!   together) is undetectable here; only external evidence catches it.
+//! * Two signers holding cloned keys are undetectable here.
 //! * The crash model tested is process crashes plus a simulated loss of
 //!   unsynced writes; real power-loss durability is untested.
 
@@ -74,8 +79,9 @@ use thiserror::Error;
 
 use crate::encoding::MAX_ROUND;
 use crate::signer::{
-    whole_height_floor, Certified, LastSigned, Lock, SignBytes, SignPosition, SignerRecord,
-    SignerStore, Step, StoreError, VoteValue,
+    initialize, whole_height_floor, Certified, ExclusiveOwnership, Halt, LastSigned, Lock,
+    ProofRef, SignBytes, SignPosition, SignerError, SignerRecord, SignerStore, Step, StoreError,
+    VoteValue,
 };
 use crate::Digest;
 
@@ -83,12 +89,14 @@ use crate::Digest;
 pub const D_SIGNER: &[u8; 28] = b"SUMCHAIN/FINALITY/SIGNER/v1\0";
 /// Sign-bytes digest domain.
 pub const D_SIGNBYTES: &[u8; 31] = b"SUMCHAIN/FINALITY/SIGNBYTES/v1\0";
+/// UNRATIFIED: retained-proof digest domain.
+pub const D_PROOF: &[u8; 34] = b"SUMCHAIN/FINALITY/SIGNER-PROOF/v1\0";
 /// Magic.
 pub const MAGIC: &[u8; 7] = b"FSGNv1\0";
 /// Schema.
 pub const SCHEMA: u16 = 1;
 
-/// Field offsets of the UNRATIFIED draft-3 layout.
+/// Field offsets of the UNRATIFIED 412-byte layout.
 pub mod offset {
     pub const COUNTER: usize = 9;
     pub const CHAIN_ID: usize = 17;
@@ -103,26 +111,57 @@ pub mod offset {
     pub const LAST_VALUE: usize = 143;
     pub const LAST_DIGEST: usize = 175;
     pub const LAST_SIGNATURE: usize = 207;
-    pub const LOCK_PRESENT: usize = 271;
+    pub const LOCK_STATE: usize = 271;
     pub const LOCK_HEIGHT: usize = 272;
     pub const LOCK_ROUND: usize = 280;
     pub const LOCK_VALUE: usize = 284;
-    pub const PREV: usize = 316;
-    pub const CHECKSUM: usize = 348;
+    pub const PROOF: usize = 316;
+    pub const PREV: usize = 348;
+    pub const CHECKSUM: usize = 380;
 }
 
+/// `lock_state` values.
+pub const LOCK_NONE: u8 = 0;
+pub const LOCK_HELD: u8 = 1;
+pub const LOCK_HALTED: u8 = 2;
+
 /// Length of an encoded state.
-pub const STATE_LEN: usize = 380;
+pub const STATE_LEN: usize = 412;
 /// Bytes covered by the checksum.
 pub const CHECKSUMMED_LEN: usize = offset::CHECKSUM;
 /// The state file.
 pub const STATE_FILE: &str = "signer.v1";
 /// The temporary file renamed over [`STATE_FILE`].
 pub const TEMP_FILE: &str = "signer.v1.tmp";
+/// The temporary file renamed to a proof's digest name.
+pub const PROOF_TEMP: &str = "proof.tmp";
+/// Where [`reinitialize_after_halt`](FileSignerStore::reinitialize_after_halt)
+/// keeps the halted state and its evidence.
+pub const ARCHIVE_FILE: &str = "signer.v1.halted";
+pub const ARCHIVE_PROOF: &str = "signer.v1.halted.proof";
+const ARCHIVE_TEMP: &str = "signer.v1.halted.tmp";
+/// The largest retained proof: a minimal quorum (43,691 of 65,535) in the
+/// 119 + 66·k framing.
+pub const MAX_RETAINED_PROOF_LEN: usize = 119 + 66 * 43_691;
 
 const ZERO: Digest = [0u8; 32];
 
-/// The hash used for the checksum and the sign-bytes digest.
+/// The side-file name of a retained proof.
+pub fn proof_file_name(digest: &Digest) -> String {
+    let mut s = String::with_capacity(6 + 64 + 3);
+    s.push_str("proof-");
+    for b in digest {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s.push_str(".v1");
+    s
+}
+
+fn is_proof_file(name: &str) -> bool {
+    name == PROOF_TEMP || (name.starts_with("proof-") && name.ends_with(".v1"))
+}
+
+/// The hash used for the checksum and the digests.
 pub trait StateHasher {
     fn hash(&self, data: &[u8]) -> Digest;
 }
@@ -149,20 +188,23 @@ pub struct StateLast {
 pub struct SignerState {
     pub counter: u64,
     pub identity: Identity,
-    /// The working height: below it nothing is signed, above it nothing is
-    /// signed without a finality proof first. 0: no height fixed yet.
+    /// The working height W. 0: no height fixed yet.
     pub floor_height: u64,
-    /// Non-zero: `floor_height − 1` was proven final, committing this block.
+    /// Non-zero: W − 1 was proven final, committing this block.
     pub certified_block_id: Digest,
     pub last: Option<StateLast>,
     pub lock: Option<Lock>,
+    /// Lock state 2: halted; the block the conflicting proof named.
+    pub halted: Option<Digest>,
+    /// H(`D_PROOF` ‖ side-file bytes), or zero.
+    pub proof_digest: Digest,
     pub prev_checksum: Digest,
 }
 
 /// Why bytes were refused as a state, or a transition as a successor.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum StateError {
-    #[error("length {0}, expected 380")]
+    #[error("length {0}, expected 412")]
     Length(usize),
     #[error("bad magic")]
     Magic,
@@ -170,7 +212,7 @@ pub enum StateError {
     Schema(u16),
     #[error("checksum mismatch")]
     Checksum,
-    #[error("{0} is not 0 or 1")]
+    #[error("{0} is not a defined value")]
     Flag(&'static str),
     #[error("absent {0} is not all zero")]
     NonCanonicalAbsent(&'static str),
@@ -252,48 +294,16 @@ fn lock_position(lock: &Lock) -> SignPosition {
     }
 }
 
+/// H(`D_PROOF` ‖ bytes).
+pub fn proof_digest<H: StateHasher>(hasher: &H, bytes: &[u8]) -> Digest {
+    let mut pre = Vec::with_capacity(D_PROOF.len() + bytes.len());
+    pre.extend_from_slice(D_PROOF);
+    pre.extend_from_slice(bytes);
+    hasher.hash(&pre)
+}
+
 impl SignerState {
-    /// Rules every single record must satisfy (canonical absence, last/lock
-    /// consistency, the working height, bounds). Decoding applies them; so
-    /// does persisting.
-    pub fn check(&self) -> Result<(), StateError> {
-        if self.certified_block_id != ZERO && self.floor_height == 0 {
-            return Err(StateError::Inconsistent(
-                "a certified block without a floor",
-            ));
-        }
-        if self.counter == 0 {
-            if self.last.is_some() || self.lock.is_some() {
-                return Err(StateError::Inconsistent(
-                    "counter 0 (just initialized) with a signature or lock",
-                ));
-            }
-            if self.prev_checksum != ZERO {
-                return Err(StateError::Inconsistent(
-                    "counter 0 with a predecessor checksum",
-                ));
-            }
-            if self.certified_block_id != ZERO {
-                return Err(StateError::Inconsistent("counter 0 with a certified block"));
-            }
-            return Ok(());
-        }
-        if self.prev_checksum == ZERO {
-            return Err(StateError::Inconsistent(
-                "counter above 0 without a predecessor checksum",
-            ));
-        }
-        let Some(last) = self.last.as_ref() else {
-            if self.lock.is_some() {
-                return Err(StateError::Inconsistent("a lock without a signature"));
-            }
-            if self.certified_block_id == ZERO {
-                return Err(StateError::Inconsistent(
-                    "counter above 0 with neither a signature nor a certified height",
-                ));
-            }
-            return Ok(());
-        };
+    fn check_last(&self, last: &StateLast) -> Result<(), StateError> {
         if last.position.round > MAX_ROUND {
             return Err(StateError::Round("last", last.position.round));
         }
@@ -311,6 +321,70 @@ impl SignerState {
         if last.sign_bytes_digest == ZERO {
             return Err(StateError::Inconsistent("a zero sign-bytes digest"));
         }
+        Ok(())
+    }
+
+    /// Rules every single record must satisfy. Decoding applies them; so does
+    /// persisting.
+    pub fn check(&self) -> Result<(), StateError> {
+        if self.certified_block_id != ZERO && self.floor_height == 0 {
+            return Err(StateError::Inconsistent(
+                "a certified block without a floor",
+            ));
+        }
+        if self.counter == 0 {
+            if self.last.is_some() || self.lock.is_some() || self.halted.is_some() {
+                return Err(StateError::Inconsistent(
+                    "counter 0 (just initialized) with a signature, lock or halt",
+                ));
+            }
+            if self.prev_checksum != ZERO
+                || self.certified_block_id != ZERO
+                || self.proof_digest != ZERO
+            {
+                return Err(StateError::Inconsistent(
+                    "counter 0 with a predecessor, certified block or proof",
+                ));
+            }
+            return Ok(());
+        }
+        if self.prev_checksum == ZERO {
+            return Err(StateError::Inconsistent(
+                "counter above 0 without a predecessor checksum",
+            ));
+        }
+        if let Some(conflicting) = self.halted {
+            if self.lock.is_some() {
+                return Err(StateError::Inconsistent("a halted state keeps a lock"));
+            }
+            if self.certified_block_id == ZERO {
+                return Err(StateError::Inconsistent("a halt without a certified block"));
+            }
+            if conflicting == ZERO || conflicting == self.certified_block_id {
+                return Err(StateError::Inconsistent(
+                    "a halt without a conflicting block",
+                ));
+            }
+            if let Some(last) = self.last.as_ref() {
+                self.check_last(last)?;
+            }
+            return Ok(());
+        }
+        if self.proof_digest != ZERO && self.lock.is_none() {
+            return Err(StateError::Inconsistent("a retained proof without a lock"));
+        }
+        let Some(last) = self.last.as_ref() else {
+            if self.lock.is_some() {
+                return Err(StateError::Inconsistent("a lock without a signature"));
+            }
+            if self.certified_block_id == ZERO {
+                return Err(StateError::Inconsistent(
+                    "counter above 0 with neither a signature nor a certified height",
+                ));
+            }
+            return Ok(());
+        };
+        self.check_last(last)?;
         if let Some(lock) = self.lock.as_ref() {
             if lock.value == ZERO {
                 return Err(StateError::Inconsistent("a lock on the nil value"));
@@ -375,11 +449,17 @@ impl SignerState {
             b[o::LAST_SIGNATURE..o::LAST_SIGNATURE + 64].copy_from_slice(&last.signature);
         }
         if let Some(lock) = self.lock.as_ref() {
-            b[o::LOCK_PRESENT] = 1;
+            b[o::LOCK_STATE] = LOCK_HELD;
             b[o::LOCK_HEIGHT..o::LOCK_HEIGHT + 8].copy_from_slice(&lock.height.to_le_bytes());
             b[o::LOCK_ROUND..o::LOCK_ROUND + 4].copy_from_slice(&lock.round.to_le_bytes());
             b[o::LOCK_VALUE..o::LOCK_VALUE + 32].copy_from_slice(&lock.value);
+        } else if let Some(conflicting) = self.halted {
+            b[o::LOCK_STATE] = LOCK_HALTED;
+            let h = self.floor_height - 1;
+            b[o::LOCK_HEIGHT..o::LOCK_HEIGHT + 8].copy_from_slice(&h.to_le_bytes());
+            b[o::LOCK_VALUE..o::LOCK_VALUE + 32].copy_from_slice(&conflicting);
         }
+        b[o::PROOF..o::PROOF + 32].copy_from_slice(&self.proof_digest);
         b[o::PREV..o::PREV + 32].copy_from_slice(&self.prev_checksum);
         let sum = checksum(hasher, &b[..CHECKSUMMED_LEN]);
         b[o::CHECKSUM..o::CHECKSUM + 32].copy_from_slice(&sum);
@@ -416,12 +496,10 @@ impl SignerState {
             genesis_block_hash: d_at(o::GENESIS),
             signer_pubkey: d_at(o::PUBKEY),
         };
+        let floor_height = u64_at(o::FLOOR);
         let last = match bytes[o::LAST_PRESENT] {
             0 => {
-                if bytes[o::LAST_HEIGHT..o::LOCK_PRESENT]
-                    .iter()
-                    .any(|&x| x != 0)
-                {
+                if bytes[o::LAST_HEIGHT..o::LOCK_STATE].iter().any(|&x| x != 0) {
                     return Err(StateError::NonCanonicalAbsent("last signature"));
                 }
                 None
@@ -447,33 +525,48 @@ impl SignerState {
             }
             _ => return Err(StateError::Flag("last_present")),
         };
-        let lock = match bytes[o::LOCK_PRESENT] {
-            0 => {
-                if bytes[o::LOCK_HEIGHT..o::PREV].iter().any(|&x| x != 0) {
+        let (lock, halted) = match bytes[o::LOCK_STATE] {
+            LOCK_NONE => {
+                if bytes[o::LOCK_HEIGHT..o::PROOF].iter().any(|&x| x != 0) {
                     return Err(StateError::NonCanonicalAbsent("lock"));
                 }
-                None
+                (None, None)
             }
-            1 => {
+            LOCK_HELD => {
                 let round = u32_at(o::LOCK_ROUND);
                 if round > MAX_ROUND {
                     return Err(StateError::Round("lock", round));
                 }
-                Some(Lock {
-                    height: u64_at(o::LOCK_HEIGHT),
-                    round,
-                    value: d_at(o::LOCK_VALUE),
-                })
+                (
+                    Some(Lock {
+                        height: u64_at(o::LOCK_HEIGHT),
+                        round,
+                        value: d_at(o::LOCK_VALUE),
+                    }),
+                    None,
+                )
             }
-            _ => return Err(StateError::Flag("lock_present")),
+            LOCK_HALTED => {
+                if Some(u64_at(o::LOCK_HEIGHT)) != floor_height.checked_sub(1)
+                    || u32_at(o::LOCK_ROUND) != 0
+                {
+                    return Err(StateError::Inconsistent(
+                        "a halt that does not name the certified height",
+                    ));
+                }
+                (None, Some(d_at(o::LOCK_VALUE)))
+            }
+            _ => return Err(StateError::Flag("lock_state")),
         };
         let state = SignerState {
             counter: u64_at(o::COUNTER),
             identity,
-            floor_height: u64_at(o::FLOOR),
+            floor_height,
             certified_block_id: d_at(o::CERTIFIED),
             last,
             lock,
+            halted,
+            proof_digest: d_at(o::PROOF),
             prev_checksum: d_at(o::PREV),
         };
         state.check()?;
@@ -481,17 +574,17 @@ impl SignerState {
     }
 
     /// Whether `next` is exactly one persist after `self` (whose checksum is
-    /// `self_checksum`), under the signer's rules. Two kinds exist:
+    /// `self_checksum`). Three kinds exist:
     ///
     /// * **signing:** same floor and certified block; a new signature at the
-    ///   working height, strictly above the last; the lock rules;
+    ///   working height, strictly above the last; the lock rules; the
+    ///   retained proof carried unless the lock changed;
     /// * **advancement:** the floor strictly raised, a non-zero certified
-    ///   block, and no signature and no lock left (they belonged to the
-    ///   heights the finality proof closed). It is the only transition that
-    ///   discards a lock or a signature, or changes the height.
-    ///
-    /// Used to allow a one-ahead mirror repair and to refuse persisting an
-    /// invalid transition.
+    ///   block, and nothing left of the closed heights (no signature, no
+    ///   lock, no proof): the only transition that discards a lock;
+    /// * **halt:** the floor, the certified block and the last signature
+    ///   unchanged, and the lock replaced by the halt. A halted state has no
+    ///   successor at all.
     pub fn check_successor(
         &self,
         self_checksum: &Digest,
@@ -509,10 +602,23 @@ impl SignerState {
                 "predecessor checksum does not name the previous state",
             ));
         }
+        if self.halted.is_some() {
+            return Err(StateError::NotSuccessor("a halted state has no successor"));
+        }
+        if next.halted.is_some() {
+            if next.floor_height != self.floor_height
+                || next.certified_block_id != self.certified_block_id
+                || next.last != self.last
+            {
+                return Err(StateError::NotSuccessor(
+                    "a halt changed the floor, the certified block or the last signature",
+                ));
+            }
+            return Ok(());
+        }
         if next.floor_height != self.floor_height
             || next.certified_block_id != self.certified_block_id
         {
-            // Advancement.
             if next.floor_height <= self.floor_height {
                 return Err(StateError::NotSuccessor("the floor did not rise"));
             }
@@ -521,14 +627,13 @@ impl SignerState {
                     "the floor rose without a certified block",
                 ));
             }
-            if next.last.is_some() || next.lock.is_some() {
+            if next.last.is_some() || next.lock.is_some() || next.proof_digest != ZERO {
                 return Err(StateError::NotSuccessor(
-                    "an advancement kept a signature or a lock",
+                    "an advancement kept a signature, a lock or a proof",
                 ));
             }
             return Ok(());
         }
-        // Signing.
         let Some(n_last) = next.last.as_ref() else {
             return Err(StateError::NotSuccessor("no new signature"));
         };
@@ -574,15 +679,21 @@ impl SignerState {
                 }
             }
         }
+        if next.lock == self.lock && next.proof_digest != self.proof_digest {
+            return Err(StateError::NotSuccessor(
+                "the retained proof changed without a lock change",
+            ));
+        }
         Ok(())
     }
 
+    /// The state for `record`, and the proof bytes it newly retains.
     fn from_record<H: StateHasher>(
         record: &SignerRecord,
         identity: Identity,
         prev_checksum: Digest,
         hasher: &H,
-    ) -> Result<SignerState, StateError> {
+    ) -> Result<(SignerState, Option<Vec<u8>>), StateError> {
         if record.key_id != identity.signer_pubkey {
             return Err(StateError::Identity("record key is not the signer key"));
         }
@@ -617,18 +728,53 @@ impl SignerState {
                     .map_err(|_| StateError::Unrepresentable("signature is not 64 bytes"))?,
             }),
         };
-        Ok(SignerState {
-            counter: record.sequence,
-            identity,
-            floor_height,
-            certified_block_id,
-            last,
-            lock: record.lock,
-            prev_checksum,
-        })
+        let reference = |p: &Option<ProofRef>| match p {
+            None => (ZERO, None),
+            Some(ProofRef::Digest(d)) => (*d, None),
+            Some(ProofRef::Bytes(b)) => (proof_digest(hasher, b), Some(b.clone())),
+        };
+        let (halted, (digest, new_bytes)) = match record.halt.as_ref() {
+            None => (None, reference(&record.lock_proof)),
+            Some(h) => {
+                if record.lock.is_some() || record.lock_proof.is_some() {
+                    return Err(StateError::Unrepresentable("a halt with a lock"));
+                }
+                if h.height.checked_add(1) != Some(floor_height)
+                    || h.certified_block != certified_block_id
+                {
+                    return Err(StateError::Unrepresentable(
+                        "a halt that does not name the certified height and block",
+                    ));
+                }
+                (Some(h.conflicting_block), reference(&h.evidence))
+            }
+        };
+        if new_bytes
+            .as_ref()
+            .is_some_and(|b| b.len() > MAX_RETAINED_PROOF_LEN)
+        {
+            return Err(StateError::Unrepresentable(
+                "a retained proof above the bound",
+            ));
+        }
+        Ok((
+            SignerState {
+                counter: record.sequence,
+                identity,
+                floor_height,
+                certified_block_id,
+                last,
+                lock: record.lock,
+                halted,
+                proof_digest: digest,
+                prev_checksum,
+            },
+            new_bytes,
+        ))
     }
 
     fn to_record(&self) -> SignerRecord {
+        let proof = (self.proof_digest != ZERO).then_some(ProofRef::Digest(self.proof_digest));
         SignerRecord {
             key_id: self.identity.signer_pubkey,
             sequence: self.counter,
@@ -643,6 +789,17 @@ impl SignerState {
             certified: (self.certified_block_id != ZERO).then(|| Certified {
                 height: self.floor_height - 1,
                 block_id: self.certified_block_id,
+            }),
+            lock_proof: if self.halted.is_none() {
+                proof.clone()
+            } else {
+                None
+            },
+            halt: self.halted.map(|conflicting| Halt {
+                height: self.floor_height - 1,
+                certified_block: self.certified_block_id,
+                conflicting_block: conflicting,
+                evidence: proof,
             }),
         }
     }
@@ -683,6 +840,8 @@ pub trait SignerDir {
     fn sync_dir(&mut self) -> Result<(), IoError>;
     /// Remove `name`; absent is not an error.
     fn remove(&mut self, name: &str) -> Result<(), IoError>;
+    /// The names of the directory's files.
+    fn list(&mut self) -> Result<Vec<String>, IoError>;
 }
 
 /// The mirror record in the node database (`finality/signer-mirror/v1`).
@@ -690,6 +849,9 @@ pub trait MirrorStore {
     fn read(&mut self) -> Result<Option<Vec<u8>>, IoError>;
     /// Returns `Ok` only once the bytes are durable (synced WAL write).
     fn write_synced(&mut self, bytes: &[u8]) -> Result<(), IoError>;
+    /// Remove the record durably. Used only by the operator's
+    /// re-initialization after a halt.
+    fn clear_synced(&mut self) -> Result<(), IoError>;
 }
 
 /// How the last [`FileSignerStore::load`] classified the state.
@@ -706,8 +868,23 @@ pub enum Classified {
     AdvancedMirror,
 }
 
-/// The proposed file-backed store. One per signer; reopen by creating a new
-/// one over the same directory and mirror.
+/// The retained proof the loaded state references.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProofStatus {
+    /// The state references no proof.
+    NotReferenced,
+    /// The proof file is present and matches its digest.
+    Present,
+    /// Degraded: the referenced proof file is missing. The lock (or halt) is
+    /// still enforced from the state; only the evidence is gone.
+    Missing,
+    /// Degraded: the referenced proof file does not match its digest, or is
+    /// above the bound. Kept in place; the lock (or halt) is still enforced.
+    Corrupt,
+}
+
+/// The file-backed store. One per signer; reopen by creating a new one over
+/// the same directory and mirror.
 pub struct FileSignerStore<D, M, H> {
     dir: D,
     mirror: M,
@@ -717,6 +894,13 @@ pub struct FileSignerStore<D, M, H> {
     current: Option<(SignerState, Digest)>,
     classified: Option<Classified>,
     removed_temp: bool,
+    proof_status: ProofStatus,
+    removed_orphans: Vec<String>,
+    /// The proof file the last persist left unreferenced, removed at the
+    /// start of the next one (or at the next open).
+    pending_gc: Option<String>,
+    /// Set only inside `reinitialize_after_halt`.
+    allow_after_archive: bool,
 }
 
 impl<D: SignerDir, M: MirrorStore, H: StateHasher> FileSignerStore<D, M, H> {
@@ -730,6 +914,10 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> FileSignerStore<D, M, H> {
             current: None,
             classified: None,
             removed_temp: false,
+            proof_status: ProofStatus::NotReferenced,
+            removed_orphans: Vec::new(),
+            pending_gc: None,
+            allow_after_archive: false,
         }
     }
 
@@ -741,6 +929,16 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> FileSignerStore<D, M, H> {
     /// Whether the last load removed a leftover temp file.
     pub fn removed_temp(&self) -> bool {
         self.removed_temp
+    }
+
+    /// The referenced proof's status after the last load.
+    pub fn proof_status(&self) -> ProofStatus {
+        self.proof_status
+    }
+
+    /// Unreferenced proof files the last load removed.
+    pub fn removed_orphans(&self) -> &[String] {
+        &self.removed_orphans
     }
 
     fn decode_checked(
@@ -779,15 +977,176 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> FileSignerStore<D, M, H> {
     fn io(step: &str, e: IoError) -> StoreError {
         StoreError(format!("{step}: {e}"))
     }
+
+    /// Check the referenced proof, then remove every unreferenced proof file.
+    fn settle_proofs(&mut self, referenced: Digest) -> Result<(), StoreError> {
+        let keep = (referenced != ZERO).then(|| proof_file_name(&referenced));
+        self.proof_status = match keep.as_deref() {
+            None => ProofStatus::NotReferenced,
+            Some(name) => match self.dir.read(name).map_err(|e| Self::io("read proof", e))? {
+                None => ProofStatus::Missing,
+                Some(b)
+                    if b.len() <= MAX_RETAINED_PROOF_LEN
+                        && proof_digest(&self.hasher, &b) == referenced =>
+                {
+                    ProofStatus::Present
+                }
+                Some(_) => ProofStatus::Corrupt,
+            },
+        };
+        let mut removed = Vec::new();
+        for name in self.dir.list().map_err(|e| Self::io("list", e))? {
+            if is_proof_file(&name) && Some(&name) != keep.as_ref() {
+                self.dir
+                    .remove(&name)
+                    .map_err(|e| Self::io("remove orphan proof", e))?;
+                removed.push(name);
+            }
+        }
+        if !removed.is_empty() {
+            self.dir
+                .sync_dir()
+                .map_err(|e| Self::io("sync directory", e))?;
+        }
+        self.removed_orphans = removed;
+        Ok(())
+    }
+
+    /// The operator's explicit re-initialization after a halt (RATIFIED
+    /// semantics, dormant). It holds the key's ownership and, in this order:
+    ///
+    /// 1. opens the halted state (repairing a one-behind mirror), refusing
+    ///    unless it is halted;
+    /// 2. archives it as [`ARCHIVE_FILE`] (temp, fsync, rename, fsync the
+    ///    directory) and its evidence as [`ARCHIVE_PROOF`];
+    /// 3. removes the state file, then clears the mirror;
+    /// 4. initializes at `floor_height`, which must be **above** the halted
+    ///    working height (the key may have signed there).
+    ///
+    /// Every step is resumable: run it again after a crash. While it is
+    /// incomplete the signer cannot open (state file missing with a mirror,
+    /// or an archive without an initialized state). Plain initialization
+    /// refuses while an archive exists, so the floor check cannot be skipped.
+    pub fn reinitialize_after_halt<L: ExclusiveOwnership>(
+        &mut self,
+        ownership: &L,
+        key_id: Digest,
+        floor_height: u64,
+    ) -> Result<(), SignerError> {
+        let _guard = ownership
+            .try_acquire()
+            .map_err(|e| SignerError::OwnershipHeld(e.0))?;
+        let corrupt = |m: String| SignerError::Corrupt(m);
+        let io = |step: &str, e: IoError| SignerError::PersistFailed(format!("{step}: {e}"));
+        let file = self.dir.read(STATE_FILE).map_err(|e| io("read state", e))?;
+        if file.is_some() {
+            self.allow_after_archive = true;
+            let loaded = self.load();
+            self.allow_after_archive = false;
+            let record = loaded.map_err(|e| corrupt(e.0))?;
+            match record {
+                Some(r) if r.halt.is_some() => {}
+                // A previous run already initialized the new state.
+                Some(r)
+                    if r.sequence == 0
+                        && r.floor == floor_below_height(floor_height)
+                        && self
+                            .dir
+                            .read(ARCHIVE_FILE)
+                            .map_err(|e| io("read archive", e))?
+                            .is_some() =>
+                {
+                    return Ok(());
+                }
+                _ => {
+                    return Err(corrupt(
+                        "re-initialization after a halt needs a halted state".into(),
+                    ))
+                }
+            }
+            let (state, _) = self.current.clone().expect("loaded");
+            let bytes = state
+                .encode(&self.hasher)
+                .map_err(|e| corrupt(e.to_string()))?;
+            self.dir
+                .write_new(ARCHIVE_TEMP, &bytes)
+                .map_err(|e| io("write archive", e))?;
+            self.dir
+                .sync_file(ARCHIVE_TEMP)
+                .map_err(|e| io("sync archive", e))?;
+            self.dir
+                .rename(ARCHIVE_TEMP, ARCHIVE_FILE)
+                .map_err(|e| io("rename archive", e))?;
+            if state.proof_digest != ZERO {
+                let name = proof_file_name(&state.proof_digest);
+                if self
+                    .dir
+                    .read(&name)
+                    .map_err(|e| io("read evidence", e))?
+                    .is_some()
+                {
+                    self.dir
+                        .rename(&name, ARCHIVE_PROOF)
+                        .map_err(|e| io("archive evidence", e))?;
+                }
+            }
+            self.dir.sync_dir().map_err(|e| io("sync directory", e))?;
+            self.dir
+                .remove(STATE_FILE)
+                .map_err(|e| io("remove state", e))?;
+            self.dir.sync_dir().map_err(|e| io("sync directory", e))?;
+        }
+        let archive = self
+            .dir
+            .read(ARCHIVE_FILE)
+            .map_err(|e| io("read archive", e))?
+            .ok_or_else(|| corrupt("no halted state to re-initialize from".into()))?;
+        let (halted, _) = self
+            .decode_checked("archive", &archive)
+            .map_err(|e| corrupt(e.0))?;
+        if halted.halted.is_none() {
+            return Err(corrupt("the archive is not a halted state".into()));
+        }
+        if halted.identity.signer_pubkey != key_id {
+            return Err(SignerError::KeyMismatch);
+        }
+        if floor_height <= halted.floor_height {
+            return Err(corrupt(format!(
+                "the new floor {floor_height} must be above the halted working height {}",
+                halted.floor_height
+            )));
+        }
+        match self.mirror.read().map_err(|e| io("read mirror", e))? {
+            None => {}
+            Some(m) if m == archive => {
+                self.mirror
+                    .clear_synced()
+                    .map_err(|e| io("clear mirror", e))?;
+            }
+            Some(_) => {
+                return Err(corrupt(
+                    "the mirror is neither absent nor the archived halted state".into(),
+                ))
+            }
+        }
+        self.allow_after_archive = true;
+        let result = initialize(self, key_id, floor_below_height(floor_height));
+        self.allow_after_archive = false;
+        result
+    }
 }
 
 impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerStore<D, M, H> {
     /// Classify the durable state. Refusals are `Err`; the only repairs are R0
-    /// and R1 ([`Classified`]).
+    /// and R1 ([`Classified`]). Then the referenced proof is checked and
+    /// unreferenced proof files are removed.
     fn load(&mut self) -> Result<Option<SignerRecord>, StoreError> {
         self.current = None;
         self.classified = None;
         self.removed_temp = false;
+        self.proof_status = ProofStatus::NotReferenced;
+        self.removed_orphans.clear();
+        self.pending_gc = None;
         if self
             .dir
             .read(TEMP_FILE)
@@ -809,14 +1168,29 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
             .read(STATE_FILE)
             .map_err(|e| Self::io("read state file", e))?;
         let mirror = self.mirror.read().map_err(|e| Self::io("read mirror", e))?;
-        match (file, mirror) {
+        let (fs, fsum) = match (file, mirror) {
             (None, None) => {
+                if !self.allow_after_archive
+                    && self
+                        .dir
+                        .read(ARCHIVE_FILE)
+                        .map_err(|e| Self::io("read archive", e))?
+                        .is_some()
+                {
+                    return Err(StoreError(
+                        "a halted state is archived: re-initialize with reinitialize_after_halt"
+                            .into(),
+                    ));
+                }
+                self.settle_proofs(ZERO)?;
                 self.classified = Some(Classified::Uninitialized);
-                Ok(None)
+                return Ok(None);
             }
-            (None, Some(_)) => Err(StoreError(
-                "state file missing while the mirror exists".into(),
-            )),
+            (None, Some(_)) => {
+                return Err(StoreError(
+                    "state file missing while the mirror exists".into(),
+                ))
+            }
             (Some(f), None) => {
                 let (fs, fsum) = self.decode_checked("state file", &f)?;
                 if fs.counter != 0 {
@@ -829,9 +1203,7 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
                     .write_synced(&f)
                     .map_err(|e| Self::io("repair: write mirror", e))?;
                 self.classified = Some(Classified::CompletedInitialization);
-                let record = fs.to_record();
-                self.current = Some((fs, fsum));
-                Ok(Some(record))
+                (fs, fsum)
             }
             (Some(f), Some(m)) => {
                 let (fs, fsum) = self.decode_checked("state file", &f)?;
@@ -865,15 +1237,18 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
                         "state file is more than one persist ahead of the mirror".into(),
                     ));
                 }
-                let record = fs.to_record();
-                self.current = Some((fs, fsum));
-                Ok(Some(record))
+                (fs, fsum)
             }
-        }
+        };
+        self.settle_proofs(fs.proof_digest)?;
+        let record = fs.to_record();
+        self.current = Some((fs, fsum));
+        Ok(Some(record))
     }
 
-    /// P1 then P2; `Ok` only after both. Refuses to write a record that is not
-    /// the exact successor of the current one.
+    /// G, P0 (if a proof is newly retained), P1, P2; `Ok` only after all.
+    /// Refuses to write a record that is not the exact successor of the
+    /// current one.
     fn persist(&mut self, record: &SignerRecord) -> Result<(), StoreError> {
         let identity = Identity {
             chain_id: self.chain_id,
@@ -888,7 +1263,7 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
             (None, _) => return Err(StoreError("no current state to succeed".into())),
             (Some((_, sum)), _) => *sum,
         };
-        let next = SignerState::from_record(record, identity, prev, &self.hasher)
+        let (next, new_proof) = SignerState::from_record(record, identity, prev, &self.hasher)
             .map_err(|e| StoreError(format!("encode: {e}")))?;
         if let Some((cur, sum)) = &self.current {
             cur.check_successor(sum, &next)
@@ -897,6 +1272,29 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
         let bytes = next
             .encode(&self.hasher)
             .map_err(|e| StoreError(format!("encode: {e}")))?;
+        if let Some(old) = self.pending_gc.clone() {
+            if old != proof_file_name(&next.proof_digest) {
+                self.dir
+                    .remove(&old)
+                    .map_err(|e| Self::io("G remove unreferenced proof", e))?;
+            }
+            self.pending_gc = None;
+        }
+        if let Some(proof) = new_proof.as_deref() {
+            let name = proof_file_name(&next.proof_digest);
+            self.dir
+                .write_new(PROOF_TEMP, proof)
+                .map_err(|e| Self::io("P0 write proof", e))?;
+            self.dir
+                .sync_file(PROOF_TEMP)
+                .map_err(|e| Self::io("P0 sync proof", e))?;
+            self.dir
+                .rename(PROOF_TEMP, &name)
+                .map_err(|e| Self::io("P0 rename proof", e))?;
+            self.dir
+                .sync_dir()
+                .map_err(|e| Self::io("P0 sync directory", e))?;
+        }
         self.dir
             .write_new(TEMP_FILE, &bytes)
             .map_err(|e| Self::io("P1 write temp file", e))?;
@@ -912,9 +1310,20 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
         self.mirror
             .write_synced(&bytes)
             .map_err(|e| Self::io("P2 write mirror", e))?;
+        let old_proof = self.current.as_ref().map(|(s, _)| s.proof_digest);
+        if let Some(old) = old_proof {
+            if old != ZERO && old != next.proof_digest {
+                self.pending_gc = Some(proof_file_name(&old));
+            }
+        }
         let sum: Digest = bytes[offset::CHECKSUM..offset::CHECKSUM + 32]
             .try_into()
             .expect("32 bytes");
+        if new_proof.is_some() {
+            self.proof_status = ProofStatus::Present;
+        } else if next.proof_digest == ZERO {
+            self.proof_status = ProofStatus::NotReferenced;
+        }
         self.current = Some((next, sum));
         Ok(())
     }
@@ -990,5 +1399,17 @@ impl SignerDir for StdSignerDir {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(io_err(e)),
         }
+    }
+
+    fn list(&mut self) -> Result<Vec<String>, IoError> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&self.path).map_err(io_err)? {
+            let entry = entry.map_err(io_err)?;
+            if let Some(name) = entry.file_name().to_str() {
+                out.push(name.to_string());
+            }
+        }
+        out.sort();
+        Ok(out)
     }
 }

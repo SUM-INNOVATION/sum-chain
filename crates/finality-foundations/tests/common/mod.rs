@@ -187,6 +187,13 @@ impl SignerDir for SimDir {
             Ok(())
         })
     }
+    fn list(&mut self) -> Result<Vec<String>, IoError> {
+        let m = self.0.borrow();
+        if m.dead {
+            return Err(IoError("process crashed".into()));
+        }
+        Ok(m.dir_vol.keys().cloned().collect())
+    }
 }
 
 impl MirrorStore for SimMirror {
@@ -202,6 +209,13 @@ impl MirrorStore for SimMirror {
         self.0.borrow_mut().step(Op::Mirror, move |m| {
             m.mirror_vol = Some(bytes.clone());
             m.mirror_dur = Some(bytes);
+            Ok(())
+        })
+    }
+    fn clear_synced(&mut self) -> Result<(), IoError> {
+        self.0.borrow_mut().step(Op::Mirror, |m| {
+            m.mirror_vol = None;
+            m.mirror_dur = None;
             Ok(())
         })
     }
@@ -276,4 +290,39 @@ pub fn finality(height: u64, block: &Digest) -> Vec<u8> {
     p.extend_from_slice(&height.to_le_bytes());
     p.extend_from_slice(block);
     p
+}
+
+/// The test verifier, retaining what it accepts (as `ConsensusProofs` does
+/// with real proofs): the evidence of a quorum, and a finality proof.
+pub struct RetainingPolka;
+
+impl PolkaVerifier for RetainingPolka {
+    fn verify_polka(
+        &self,
+        height: u64,
+        round: u32,
+        value: &Digest,
+        evidence: &[u8],
+    ) -> Result<(), String> {
+        TestPolka.verify_polka(height, round, value, evidence)
+    }
+    fn verify_finality(&self, proof: &[u8]) -> Result<Certified, String> {
+        TestPolka.verify_finality(proof)
+    }
+    fn retained_polka(
+        &self,
+        height: u64,
+        round: u32,
+        value: &Digest,
+        evidence: &[u8],
+    ) -> Option<Vec<u8>> {
+        TestPolka
+            .verify_polka(height, round, value, evidence)
+            .ok()?;
+        Some(evidence.to_vec())
+    }
+    fn retained_finality(&self, proof: &[u8]) -> Option<Vec<u8>> {
+        TestPolka.verify_finality(proof).ok()?;
+        Some(proof.to_vec())
+    }
 }

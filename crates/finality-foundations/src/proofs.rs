@@ -17,8 +17,9 @@
 use thiserror::Error;
 
 use crate::certificate::{
-    certificate_len, check_signers, verify_certificate, CertificateEntry, CertificateSigners,
-    FinalityCertificateV1, SignerSetError, CERT_ENTRY_LEN, CERT_HEADER_LEN, MAX_VALIDATORS,
+    certificate_len, check_signers, quorum, verify_certificate, CertificateEntry,
+    CertificateSigners, FinalityCertificateV1, SignerSetError, CERT_ENTRY_LEN, CERT_HEADER_LEN,
+    MAX_VALIDATORS,
 };
 use crate::encoding::{LeReader, LeWriter, Round, RoundOutOfRange};
 use crate::signer::{Certified, PolkaVerifier};
@@ -352,5 +353,33 @@ impl<C: VoteContext> PolkaVerifier for ConsensusProofs<C> {
             height: cert.height,
             block_id: cert.block_id,
         })
+    }
+
+    /// The accepted prevote quorum trimmed to its `q(n)` lowest-index
+    /// entries, returned only if the trimmed proof still verifies.
+    fn retained_polka(
+        &self,
+        height: u64,
+        round: u32,
+        value: &Digest,
+        evidence: &[u8],
+    ) -> Option<Vec<u8>> {
+        let mut proof = PolkaProofV1::decode(evidence).ok()?;
+        let n = self.context.validator_set(height)?.len();
+        proof.entries.truncate(usize::from(quorum(n)));
+        let bytes = proof.encode().ok()?;
+        decode_and_verify_polka_proof(&bytes, height, round, value, &self.context).ok()?;
+        Some(bytes)
+    }
+
+    /// The accepted finality certificate trimmed the same way.
+    fn retained_finality(&self, proof: &[u8]) -> Option<Vec<u8>> {
+        let mut cert = FinalityCertificateV1::decode(proof).ok()?;
+        let n = self.context.validator_set(cert.height)?.len();
+        cert.entries.truncate(usize::from(quorum(n)));
+        let bytes = cert.encode().ok()?;
+        let again = FinalityCertificateV1::decode(&bytes).ok()?;
+        verify_certificate(&again, again.height, &again.block_id, &self.context).ok()?;
+        Some(bytes)
     }
 }
