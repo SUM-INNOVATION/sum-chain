@@ -12,9 +12,11 @@
 //! * **No bytes are frozen.** A certificate is opaque bytes checked by an
 //!   injected [`CertificateVerifier`]; where the certificate and the finalized
 //!   pointer live, and how the pointer is encoded, come from an injected
-//!   [`CertifiedLayout`]. Neither trait has a production implementation. The
-//!   tests use a test-only certificate and a test-only layout, which are not a
-//!   proposal for either encoding.
+//!   [`CertifiedLayout`]. The verifier has no production implementation. The
+//!   one layout is the dormant v1 layout in [`crate::certified_meta`]
+//!   (versioned keys in the existing `meta` family), which nothing calls
+//!   outside its tests. The tests in `tests/certified_commit.rs` use a
+//!   test-only certificate and a test-only layout.
 //! * **The commit rule is ratified; its wiring is not.** Commit-on-certificate
 //!   (G2-a, ratified 2026-10-16; formerly decision F-1) says a block is
 //!   published as canonical only together with a verified certificate, its
