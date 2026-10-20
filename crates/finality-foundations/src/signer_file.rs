@@ -3,10 +3,12 @@
 //!
 //! **Semantics RATIFIED (2026-10-20):** proof-gated height advancement, the
 //! persisted conflict halt, and `PolkaProofV1` verification of lock changes.
-//! **Bytes UNRATIFIED:** every layout and file name below is a proposal
-//! (group A2, revision 4 of the draft), not frozen.
+//! **Semantics PROPOSED:** recovery from a conflict halt (the conflict
+//! archive below). **Bytes UNRATIFIED:** every layout and file name below is
+//! a proposal (group A2, revision 5 of the draft: the owner's choice of a
+//! separate halt flag), not frozen.
 //!
-//! # `SignerStateV1` layout (UNRATIFIED): 412 bytes
+//! # `SignerStateV1` layout (UNRATIFIED): 413 bytes
 //!
 //! | Offset | Width | Field |
 //! |---|---|---|
@@ -25,18 +27,19 @@
 //! | 143 | 32 | last_value (block id; all zero = nil) |
 //! | 175 | 32 | last_sign_bytes_digest = H(`D_SIGNBYTES` ‖ sign bytes) |
 //! | 207 | 64 | last_signature |
-//! | 271 | 1 | lock_state: 0 none, 1 locked, **2 HALTED** |
-//! | 272 | 8 | lock_height u64 LE (halted: the certified height W − 1) |
-//! | 280 | 4 | lock_round u32 LE (halted: 0) |
-//! | 284 | 32 | lock_value (halted: the conflicting block) |
-//! | 316 | 32 | proof_digest = H(`D_PROOF` ‖ side-file bytes); zero: none |
-//! | 348 | 32 | prev_checksum (checksum of the record this one replaced) |
-//! | 380 | 32 | checksum = H(`D_SIGNER` ‖ bytes[0..380]) |
+//! | 271 | 1 | lock_state: 0 none, 1 locked |
+//! | 272 | 8 | lock_height u64 LE |
+//! | 280 | 4 | lock_round u32 LE |
+//! | 284 | 32 | lock_value |
+//! | 316 | 1 | **halt: 0 running, 1 HALTED** (a separate flag) |
+//! | 317 | 32 | proof_digest = H(`D_PROOF` ‖ side-file bytes); zero: none |
+//! | 349 | 32 | prev_checksum (checksum of the record this one replaced) |
+//! | 381 | 32 | checksum = H(`D_SIGNER` ‖ bytes[0..381]) |
 //!
-//! The halt is a defined value of the existing lock-state enum, not a new
-//! byte: it is then in the state file **and** the mirror and in the record
-//! lineage, so removing it means replacing both copies consistently (a
-//! rollback, outside what any store can detect), not deleting one marker.
+//! Halted (`halt` = 1): the conflict was at W − 1, where `certified_block_id`
+//! is the block first certified; the conflicting proof is the side file
+//! `proof_digest` names (it is the only place the conflicting block is kept);
+//! no lock; the last signature, if any, is kept as evidence.
 //!
 //! # Side file (UNRATIFIED): the retained proof
 //!
@@ -44,6 +47,15 @@
 //! `PolkaProofV1` that justified the current lock, trimmed to a minimal
 //! quorum, or, in a halted state, the conflicting finality proof (evidence).
 //! At most [`MAX_RETAINED_PROOF_LEN`] bytes.
+//!
+//! # Conflict archive (UNRATIFIED): written before a recovery
+//!
+//! `conflict-<H>.state` (the halted record), `.evidence` (the conflicting
+//! proof), `.resume` (the verified resume certificate), and last
+//! `.receipt` ([`RecoveryReceipt`]), each written with temp, fsync, rename
+//! and a directory fsync. The recovered record is accepted (written, or
+//! repaired into the mirror) only when this archive matches it. The archive
+//! is kept: initialization refuses while any `conflict-*` file exists.
 //!
 //! # Persistence protocol
 //!
@@ -67,9 +79,11 @@
 //!
 //! # Limits
 //!
-//! * A whole data-directory rollback (state, mirror and side files restored
-//!   together) is undetectable here; only external evidence catches it.
-//! * Two signers holding cloned keys are undetectable here.
+//! * A whole data-directory rollback (state, mirror, side files and conflict
+//!   archive restored together) is undetectable here; only external evidence
+//!   catches it. Restoring a pre-halt snapshot also forgets the halt.
+//! * Two signers holding cloned keys are undetectable here; recovering one
+//!   copy says nothing about the other.
 //! * The crash model tested is process crashes plus a simulated loss of
 //!   unsynced writes; real power-loss durability is untested.
 
@@ -79,9 +93,8 @@ use thiserror::Error;
 
 use crate::encoding::MAX_ROUND;
 use crate::signer::{
-    initialize, whole_height_floor, Certified, ExclusiveOwnership, Halt, LastSigned, Lock,
-    ProofRef, SignBytes, SignPosition, SignerError, SignerRecord, SignerStore, Step, StoreError,
-    VoteValue,
+    whole_height_floor, Certified, Halt, LastSigned, Lock, ProofRef, SignBytes, SignPosition,
+    SignerRecord, SignerStore, Step, StoreError, VoteValue,
 };
 use crate::Digest;
 
@@ -96,7 +109,7 @@ pub const MAGIC: &[u8; 7] = b"FSGNv1\0";
 /// Schema.
 pub const SCHEMA: u16 = 1;
 
-/// Field offsets of the UNRATIFIED 412-byte layout.
+/// Field offsets of the UNRATIFIED 413-byte layout.
 pub mod offset {
     pub const COUNTER: usize = 9;
     pub const CHAIN_ID: usize = 17;
@@ -115,18 +128,21 @@ pub mod offset {
     pub const LOCK_HEIGHT: usize = 272;
     pub const LOCK_ROUND: usize = 280;
     pub const LOCK_VALUE: usize = 284;
-    pub const PROOF: usize = 316;
-    pub const PREV: usize = 348;
-    pub const CHECKSUM: usize = 380;
+    pub const HALT: usize = 316;
+    pub const PROOF: usize = 317;
+    pub const PREV: usize = 349;
+    pub const CHECKSUM: usize = 381;
 }
 
 /// `lock_state` values.
 pub const LOCK_NONE: u8 = 0;
 pub const LOCK_HELD: u8 = 1;
-pub const LOCK_HALTED: u8 = 2;
+/// `halt` values.
+pub const HALT_NONE: u8 = 0;
+pub const HALT_SET: u8 = 1;
 
 /// Length of an encoded state.
-pub const STATE_LEN: usize = 412;
+pub const STATE_LEN: usize = 413;
 /// Bytes covered by the checksum.
 pub const CHECKSUMMED_LEN: usize = offset::CHECKSUM;
 /// The state file.
@@ -135,11 +151,18 @@ pub const STATE_FILE: &str = "signer.v1";
 pub const TEMP_FILE: &str = "signer.v1.tmp";
 /// The temporary file renamed to a proof's digest name.
 pub const PROOF_TEMP: &str = "proof.tmp";
-/// Where [`reinitialize_after_halt`](FileSignerStore::reinitialize_after_halt)
-/// keeps the halted state and its evidence.
-pub const ARCHIVE_FILE: &str = "signer.v1.halted";
-pub const ARCHIVE_PROOF: &str = "signer.v1.halted.proof";
-const ARCHIVE_TEMP: &str = "signer.v1.halted.tmp";
+/// UNRATIFIED: recovery-receipt checksum domain.
+pub const D_RECEIPT: &[u8; 37] = b"SUMCHAIN/FINALITY/SIGNER-RECOVERY/v1\0";
+/// UNRATIFIED: recovery-receipt magic.
+pub const RECEIPT_MAGIC: &[u8; 7] = b"FRCVv1\0";
+/// Length of a [`RecoveryReceipt`].
+pub const RECEIPT_LEN: usize = 185;
+
+/// The conflict archive's file for `height` with `suffix`
+/// (`state`, `evidence`, `resume`, `receipt`).
+pub fn conflict_file_name(height: u64, suffix: &str) -> String {
+    format!("conflict-{height}.{suffix}")
+}
 /// The largest retained proof: a minimal quorum (43,691 of 65,535) in the
 /// 119 + 66·k framing.
 pub const MAX_RETAINED_PROOF_LEN: usize = 119 + 66 * 43_691;
@@ -194,8 +217,8 @@ pub struct SignerState {
     pub certified_block_id: Digest,
     pub last: Option<StateLast>,
     pub lock: Option<Lock>,
-    /// Lock state 2: halted; the block the conflicting proof named.
-    pub halted: Option<Digest>,
+    /// The halt flag: a conflict halt is in force.
+    pub halted: bool,
     /// H(`D_PROOF` ‖ side-file bytes), or zero.
     pub proof_digest: Digest,
     pub prev_checksum: Digest,
@@ -204,7 +227,7 @@ pub struct SignerState {
 /// Why bytes were refused as a state, or a transition as a successor.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum StateError {
-    #[error("length {0}, expected 412")]
+    #[error("length {0}, expected 413")]
     Length(usize),
     #[error("bad magic")]
     Magic,
@@ -333,7 +356,7 @@ impl SignerState {
             ));
         }
         if self.counter == 0 {
-            if self.last.is_some() || self.lock.is_some() || self.halted.is_some() {
+            if self.last.is_some() || self.lock.is_some() || self.halted {
                 return Err(StateError::Inconsistent(
                     "counter 0 (just initialized) with a signature, lock or halt",
                 ));
@@ -353,17 +376,12 @@ impl SignerState {
                 "counter above 0 without a predecessor checksum",
             ));
         }
-        if let Some(conflicting) = self.halted {
+        if self.halted {
             if self.lock.is_some() {
                 return Err(StateError::Inconsistent("a halted state keeps a lock"));
             }
             if self.certified_block_id == ZERO {
                 return Err(StateError::Inconsistent("a halt without a certified block"));
-            }
-            if conflicting == ZERO || conflicting == self.certified_block_id {
-                return Err(StateError::Inconsistent(
-                    "a halt without a conflicting block",
-                ));
             }
             if let Some(last) = self.last.as_ref() {
                 self.check_last(last)?;
@@ -453,12 +471,8 @@ impl SignerState {
             b[o::LOCK_HEIGHT..o::LOCK_HEIGHT + 8].copy_from_slice(&lock.height.to_le_bytes());
             b[o::LOCK_ROUND..o::LOCK_ROUND + 4].copy_from_slice(&lock.round.to_le_bytes());
             b[o::LOCK_VALUE..o::LOCK_VALUE + 32].copy_from_slice(&lock.value);
-        } else if let Some(conflicting) = self.halted {
-            b[o::LOCK_STATE] = LOCK_HALTED;
-            let h = self.floor_height - 1;
-            b[o::LOCK_HEIGHT..o::LOCK_HEIGHT + 8].copy_from_slice(&h.to_le_bytes());
-            b[o::LOCK_VALUE..o::LOCK_VALUE + 32].copy_from_slice(&conflicting);
         }
+        b[o::HALT] = if self.halted { HALT_SET } else { HALT_NONE };
         b[o::PROOF..o::PROOF + 32].copy_from_slice(&self.proof_digest);
         b[o::PREV..o::PREV + 32].copy_from_slice(&self.prev_checksum);
         let sum = checksum(hasher, &b[..CHECKSUMMED_LEN]);
@@ -525,38 +539,30 @@ impl SignerState {
             }
             _ => return Err(StateError::Flag("last_present")),
         };
-        let (lock, halted) = match bytes[o::LOCK_STATE] {
+        let lock = match bytes[o::LOCK_STATE] {
             LOCK_NONE => {
-                if bytes[o::LOCK_HEIGHT..o::PROOF].iter().any(|&x| x != 0) {
+                if bytes[o::LOCK_HEIGHT..o::HALT].iter().any(|&x| x != 0) {
                     return Err(StateError::NonCanonicalAbsent("lock"));
                 }
-                (None, None)
+                None
             }
             LOCK_HELD => {
                 let round = u32_at(o::LOCK_ROUND);
                 if round > MAX_ROUND {
                     return Err(StateError::Round("lock", round));
                 }
-                (
-                    Some(Lock {
-                        height: u64_at(o::LOCK_HEIGHT),
-                        round,
-                        value: d_at(o::LOCK_VALUE),
-                    }),
-                    None,
-                )
-            }
-            LOCK_HALTED => {
-                if Some(u64_at(o::LOCK_HEIGHT)) != floor_height.checked_sub(1)
-                    || u32_at(o::LOCK_ROUND) != 0
-                {
-                    return Err(StateError::Inconsistent(
-                        "a halt that does not name the certified height",
-                    ));
-                }
-                (None, Some(d_at(o::LOCK_VALUE)))
+                Some(Lock {
+                    height: u64_at(o::LOCK_HEIGHT),
+                    round,
+                    value: d_at(o::LOCK_VALUE),
+                })
             }
             _ => return Err(StateError::Flag("lock_state")),
+        };
+        let halted = match bytes[o::HALT] {
+            HALT_NONE => false,
+            HALT_SET => true,
+            _ => return Err(StateError::Flag("halt")),
         };
         let state = SignerState {
             counter: u64_at(o::COUNTER),
@@ -602,10 +608,31 @@ impl SignerState {
                 "predecessor checksum does not name the previous state",
             ));
         }
-        if self.halted.is_some() {
-            return Err(StateError::NotSuccessor("a halted state has no successor"));
+        if self.halted {
+            // Recovery: the only successor of a halted state. Its archive is
+            // checked by the store (`recovery_archive_ok`).
+            if next.halted {
+                return Err(StateError::NotSuccessor(
+                    "a halted state stays halted only by not changing",
+                ));
+            }
+            if next.floor_height <= self.floor_height {
+                return Err(StateError::NotSuccessor(
+                    "a recovery must raise the floor above the halted working height",
+                ));
+            }
+            if next.certified_block_id == ZERO
+                || next.last.is_some()
+                || next.lock.is_some()
+                || next.proof_digest != ZERO
+            {
+                return Err(StateError::NotSuccessor(
+                    "a recovery keeps nothing but the resume certificate's height and block",
+                ));
+            }
+            return Ok(());
         }
-        if next.halted.is_some() {
+        if next.halted {
             if next.floor_height != self.floor_height
                 || next.certified_block_id != self.certified_block_id
                 || next.last != self.last
@@ -734,7 +761,7 @@ impl SignerState {
             Some(ProofRef::Bytes(b)) => (proof_digest(hasher, b), Some(b.clone())),
         };
         let (halted, (digest, new_bytes)) = match record.halt.as_ref() {
-            None => (None, reference(&record.lock_proof)),
+            None => (false, reference(&record.lock_proof)),
             Some(h) => {
                 if record.lock.is_some() || record.lock_proof.is_some() {
                     return Err(StateError::Unrepresentable("a halt with a lock"));
@@ -746,7 +773,12 @@ impl SignerState {
                         "a halt that does not name the certified height and block",
                     ));
                 }
-                (Some(h.conflicting_block), reference(&h.evidence))
+                if h.conflicting_block == Some(certified_block_id) {
+                    return Err(StateError::Unrepresentable(
+                        "a halt naming the certified block as the conflicting one",
+                    ));
+                }
+                (true, reference(&h.evidence))
             }
         };
         if new_bytes
@@ -790,15 +822,11 @@ impl SignerState {
                 height: self.floor_height - 1,
                 block_id: self.certified_block_id,
             }),
-            lock_proof: if self.halted.is_none() {
-                proof.clone()
-            } else {
-                None
-            },
-            halt: self.halted.map(|conflicting| Halt {
+            lock_proof: if self.halted { None } else { proof.clone() },
+            halt: self.halted.then(|| Halt {
                 height: self.floor_height - 1,
                 certified_block: self.certified_block_id,
-                conflicting_block: conflicting,
+                conflicting_block: None,
                 evidence: proof,
             }),
         }
@@ -818,6 +846,76 @@ pub fn sign_bytes_digest<H: StateHasher>(hasher: &H, sign_bytes: &[u8]) -> Diges
     pre.extend_from_slice(D_SIGNBYTES);
     pre.extend_from_slice(sign_bytes);
     hasher.hash(&pre)
+}
+
+/// UNRATIFIED: the receipt that closes a conflict archive, 185 bytes.
+///
+/// | Offset | Width | Field |
+/// |---|---|---|
+/// | 0 | 7 | magic `FRCVv1\0` |
+/// | 7 | 2 | schema u16 LE = 1 |
+/// | 9 | 32 | halted_checksum: checksum of the archived halted record |
+/// | 41 | 8 | conflict_height u64 LE (W − 1 of the halted record) |
+/// | 49 | 8 | resume_height u64 LE (R) |
+/// | 57 | 32 | resume_block |
+/// | 89 | 32 | evidence_digest = H(`D_PROOF` ‖ conflicting proof) |
+/// | 121 | 32 | resume_digest = H(`D_PROOF` ‖ resume certificate) |
+/// | 153 | 32 | checksum = H(`D_RECEIPT` ‖ bytes[0..153]) |
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryReceipt {
+    pub halted_checksum: Digest,
+    pub conflict_height: u64,
+    pub resume_height: u64,
+    pub resume_block: Digest,
+    pub evidence_digest: Digest,
+    pub resume_digest: Digest,
+}
+
+impl RecoveryReceipt {
+    pub fn encode<H: StateHasher>(&self, hasher: &H) -> [u8; RECEIPT_LEN] {
+        let mut b = [0u8; RECEIPT_LEN];
+        b[0..7].copy_from_slice(RECEIPT_MAGIC);
+        b[7..9].copy_from_slice(&SCHEMA.to_le_bytes());
+        b[9..41].copy_from_slice(&self.halted_checksum);
+        b[41..49].copy_from_slice(&self.conflict_height.to_le_bytes());
+        b[49..57].copy_from_slice(&self.resume_height.to_le_bytes());
+        b[57..89].copy_from_slice(&self.resume_block);
+        b[89..121].copy_from_slice(&self.evidence_digest);
+        b[121..153].copy_from_slice(&self.resume_digest);
+        let mut pre = D_RECEIPT.to_vec();
+        pre.extend_from_slice(&b[..153]);
+        let sum = hasher.hash(&pre);
+        b[153..185].copy_from_slice(&sum);
+        b
+    }
+
+    pub fn decode<H: StateHasher>(bytes: &[u8], hasher: &H) -> Result<Self, StateError> {
+        if bytes.len() != RECEIPT_LEN {
+            return Err(StateError::Length(bytes.len()));
+        }
+        if &bytes[0..7] != RECEIPT_MAGIC {
+            return Err(StateError::Magic);
+        }
+        let schema = u16::from_le_bytes([bytes[7], bytes[8]]);
+        if schema != SCHEMA {
+            return Err(StateError::Schema(schema));
+        }
+        let mut pre = D_RECEIPT.to_vec();
+        pre.extend_from_slice(&bytes[..153]);
+        if hasher.hash(&pre)[..] != bytes[153..185] {
+            return Err(StateError::Checksum);
+        }
+        let d = |at: usize| -> Digest { bytes[at..at + 32].try_into().expect("32") };
+        let u = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().expect("8"));
+        Ok(RecoveryReceipt {
+            halted_checksum: d(9),
+            conflict_height: u(41),
+            resume_height: u(49),
+            resume_block: d(57),
+            evidence_digest: d(89),
+            resume_digest: d(121),
+        })
+    }
 }
 
 /// A file-system operation failed.
@@ -849,9 +947,6 @@ pub trait MirrorStore {
     fn read(&mut self) -> Result<Option<Vec<u8>>, IoError>;
     /// Returns `Ok` only once the bytes are durable (synced WAL write).
     fn write_synced(&mut self, bytes: &[u8]) -> Result<(), IoError>;
-    /// Remove the record durably. Used only by the operator's
-    /// re-initialization after a halt.
-    fn clear_synced(&mut self) -> Result<(), IoError>;
 }
 
 /// How the last [`FileSignerStore::load`] classified the state.
@@ -899,8 +994,6 @@ pub struct FileSignerStore<D, M, H> {
     /// The proof file the last persist left unreferenced, removed at the
     /// start of the next one (or at the next open).
     pending_gc: Option<String>,
-    /// Set only inside `reinitialize_after_halt`.
-    allow_after_archive: bool,
 }
 
 impl<D: SignerDir, M: MirrorStore, H: StateHasher> FileSignerStore<D, M, H> {
@@ -917,7 +1010,6 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> FileSignerStore<D, M, H> {
             proof_status: ProofStatus::NotReferenced,
             removed_orphans: Vec::new(),
             pending_gc: None,
-            allow_after_archive: false,
         }
     }
 
@@ -1012,127 +1104,68 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> FileSignerStore<D, M, H> {
         Ok(())
     }
 
-    /// The operator's explicit re-initialization after a halt (RATIFIED
-    /// semantics, dormant). It holds the key's ownership and, in this order:
-    ///
-    /// 1. opens the halted state (repairing a one-behind mirror), refusing
-    ///    unless it is halted;
-    /// 2. archives it as [`ARCHIVE_FILE`] (temp, fsync, rename, fsync the
-    ///    directory) and its evidence as [`ARCHIVE_PROOF`];
-    /// 3. removes the state file, then clears the mirror;
-    /// 4. initializes at `floor_height`, which must be **above** the halted
-    ///    working height (the key may have signed there).
-    ///
-    /// Every step is resumable: run it again after a crash. While it is
-    /// incomplete the signer cannot open (state file missing with a mirror,
-    /// or an archive without an initialized state). Plain initialization
-    /// refuses while an archive exists, so the floor check cannot be skipped.
-    pub fn reinitialize_after_halt<L: ExclusiveOwnership>(
+    /// Write `name` durably: temp, fsync, rename, fsync the directory.
+    fn write_durable(&mut self, name: &str, bytes: &[u8]) -> Result<(), StoreError> {
+        let tmp = format!("{name}.tmp");
+        self.dir
+            .write_new(&tmp, bytes)
+            .map_err(|e| Self::io("archive write", e))?;
+        self.dir
+            .sync_file(&tmp)
+            .map_err(|e| Self::io("archive sync", e))?;
+        self.dir
+            .rename(&tmp, name)
+            .map_err(|e| Self::io("archive rename", e))?;
+        self.dir
+            .sync_dir()
+            .map_err(|e| Self::io("archive sync directory", e))
+    }
+
+    /// A recovered record is accepted only when the conflict archive for its
+    /// halted predecessor exists and matches: the receipt names the halted
+    /// record's checksum and the recovered height and block, and the archived
+    /// state, evidence and resume certificate match the receipt.
+    fn recovery_archive_ok(
         &mut self,
-        ownership: &L,
-        key_id: Digest,
-        floor_height: u64,
-    ) -> Result<(), SignerError> {
-        let _guard = ownership
-            .try_acquire()
-            .map_err(|e| SignerError::OwnershipHeld(e.0))?;
-        let corrupt = |m: String| SignerError::Corrupt(m);
-        let io = |step: &str, e: IoError| SignerError::PersistFailed(format!("{step}: {e}"));
-        let file = self.dir.read(STATE_FILE).map_err(|e| io("read state", e))?;
-        if file.is_some() {
-            self.allow_after_archive = true;
-            let loaded = self.load();
-            self.allow_after_archive = false;
-            let record = loaded.map_err(|e| corrupt(e.0))?;
-            match record {
-                Some(r) if r.halt.is_some() => {}
-                // A previous run already initialized the new state.
-                Some(r)
-                    if r.sequence == 0
-                        && r.floor == floor_below_height(floor_height)
-                        && self
-                            .dir
-                            .read(ARCHIVE_FILE)
-                            .map_err(|e| io("read archive", e))?
-                            .is_some() =>
-                {
-                    return Ok(());
-                }
-                _ => {
-                    return Err(corrupt(
-                        "re-initialization after a halt needs a halted state".into(),
-                    ))
-                }
-            }
-            let (state, _) = self.current.clone().expect("loaded");
-            let bytes = state
-                .encode(&self.hasher)
-                .map_err(|e| corrupt(e.to_string()))?;
+        halted: &SignerState,
+        halted_sum: &Digest,
+        next: &SignerState,
+    ) -> Result<(), StoreError> {
+        let h = halted.floor_height - 1;
+        let refuse = |m: &str| StoreError(format!("recovery archive for height {h}: {m}"));
+        let mut read = |suffix: &str| -> Result<Vec<u8>, StoreError> {
             self.dir
-                .write_new(ARCHIVE_TEMP, &bytes)
-                .map_err(|e| io("write archive", e))?;
-            self.dir
-                .sync_file(ARCHIVE_TEMP)
-                .map_err(|e| io("sync archive", e))?;
-            self.dir
-                .rename(ARCHIVE_TEMP, ARCHIVE_FILE)
-                .map_err(|e| io("rename archive", e))?;
-            if state.proof_digest != ZERO {
-                let name = proof_file_name(&state.proof_digest);
-                if self
-                    .dir
-                    .read(&name)
-                    .map_err(|e| io("read evidence", e))?
-                    .is_some()
-                {
-                    self.dir
-                        .rename(&name, ARCHIVE_PROOF)
-                        .map_err(|e| io("archive evidence", e))?;
-                }
-            }
-            self.dir.sync_dir().map_err(|e| io("sync directory", e))?;
-            self.dir
-                .remove(STATE_FILE)
-                .map_err(|e| io("remove state", e))?;
-            self.dir.sync_dir().map_err(|e| io("sync directory", e))?;
+                .read(&conflict_file_name(h, suffix))
+                .map_err(|e| Self::io("read archive", e))?
+                .ok_or_else(|| refuse(&format!("{suffix} missing")))
+        };
+        let receipt_bytes = read("receipt")?;
+        let state_bytes = read("state")?;
+        let evidence = read("evidence")?;
+        let resume = read("resume")?;
+        let receipt = RecoveryReceipt::decode(&receipt_bytes, &self.hasher)
+            .map_err(|e| refuse(&format!("receipt: {e}")))?;
+        if receipt.halted_checksum != *halted_sum || receipt.conflict_height != h {
+            return Err(refuse("the receipt names another halted record"));
         }
-        let archive = self
-            .dir
-            .read(ARCHIVE_FILE)
-            .map_err(|e| io("read archive", e))?
-            .ok_or_else(|| corrupt("no halted state to re-initialize from".into()))?;
-        let (halted, _) = self
-            .decode_checked("archive", &archive)
-            .map_err(|e| corrupt(e.0))?;
-        if halted.halted.is_none() {
-            return Err(corrupt("the archive is not a halted state".into()));
+        if receipt.resume_height.checked_add(1) != Some(next.floor_height)
+            || receipt.resume_block != next.certified_block_id
+        {
+            return Err(refuse("the receipt names another resume height or block"));
         }
-        if halted.identity.signer_pubkey != key_id {
-            return Err(SignerError::KeyMismatch);
+        let (_, archived_sum) = SignerState::decode(&state_bytes, &self.hasher)
+            .map_err(|e| refuse(&format!("state: {e}")))?;
+        if archived_sum != *halted_sum {
+            return Err(refuse("the archived state is not the halted record"));
         }
-        if floor_height <= halted.floor_height {
-            return Err(corrupt(format!(
-                "the new floor {floor_height} must be above the halted working height {}",
-                halted.floor_height
-            )));
+        if proof_digest(&self.hasher, &evidence) != receipt.evidence_digest
+            || proof_digest(&self.hasher, &resume) != receipt.resume_digest
+        {
+            return Err(refuse(
+                "evidence or resume certificate does not match the receipt",
+            ));
         }
-        match self.mirror.read().map_err(|e| io("read mirror", e))? {
-            None => {}
-            Some(m) if m == archive => {
-                self.mirror
-                    .clear_synced()
-                    .map_err(|e| io("clear mirror", e))?;
-            }
-            Some(_) => {
-                return Err(corrupt(
-                    "the mirror is neither absent nor the archived halted state".into(),
-                ))
-            }
-        }
-        self.allow_after_archive = true;
-        let result = initialize(self, key_id, floor_below_height(floor_height));
-        self.allow_after_archive = false;
-        result
+        Ok(())
     }
 }
 
@@ -1170,15 +1203,17 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
         let mirror = self.mirror.read().map_err(|e| Self::io("read mirror", e))?;
         let (fs, fsum) = match (file, mirror) {
             (None, None) => {
-                if !self.allow_after_archive
-                    && self
-                        .dir
-                        .read(ARCHIVE_FILE)
-                        .map_err(|e| Self::io("read archive", e))?
-                        .is_some()
+                // Initializing over a conflict archive would clear a halt
+                // without its evidence: refused.
+                if self
+                    .dir
+                    .list()
+                    .map_err(|e| Self::io("list", e))?
+                    .iter()
+                    .any(|n| n.starts_with("conflict-"))
                 {
                     return Err(StoreError(
-                        "a halted state is archived: re-initialize with reinitialize_after_halt"
+                        "a conflict archive exists: a halted signer is re-enabled only by recovery"
                             .into(),
                     ));
                 }
@@ -1223,6 +1258,9 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
                 } else if ms.counter.checked_add(1) == Some(fs.counter) {
                     ms.check_successor(&msum, &fs)
                         .map_err(|e| StoreError(format!("one-ahead state file: {e}")))?;
+                    if ms.halted {
+                        self.recovery_archive_ok(&ms, &msum, &fs)?;
+                    }
                     self.make_state_durable()?;
                     self.mirror
                         .write_synced(&f)
@@ -1265,9 +1303,12 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
         };
         let (next, new_proof) = SignerState::from_record(record, identity, prev, &self.hasher)
             .map_err(|e| StoreError(format!("encode: {e}")))?;
-        if let Some((cur, sum)) = &self.current {
-            cur.check_successor(sum, &next)
+        if let Some((cur, sum)) = self.current.clone() {
+            cur.check_successor(&sum, &next)
                 .map_err(|e| StoreError(format!("refused transition: {e}")))?;
+            if cur.halted {
+                self.recovery_archive_ok(&cur, &sum, &next)?;
+            }
         }
         let bytes = next
             .encode(&self.hasher)
@@ -1330,6 +1371,64 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
 
     fn sign_bytes_digest(&self, sign_bytes: &[u8]) -> Option<Digest> {
         Some(sign_bytes_digest(&self.hasher, sign_bytes))
+    }
+
+    /// Archive the conflict: `state`, `evidence`, `resume`, then `receipt`,
+    /// each durable before the next. Without supplied evidence, the store's
+    /// own retained copy is used, and must be present and intact.
+    fn archive_conflict(
+        &mut self,
+        evidence: Option<&[u8]>,
+        resume_certificate: &[u8],
+        resume: Certified,
+    ) -> Result<(), StoreError> {
+        let (cur, sum) = self
+            .current
+            .clone()
+            .ok_or_else(|| StoreError("no state loaded".into()))?;
+        if !cur.halted {
+            return Err(StoreError("the state is not halted".into()));
+        }
+        let h = cur.floor_height - 1;
+        let evidence = match evidence {
+            Some(e) => e.to_vec(),
+            None => {
+                if cur.proof_digest == ZERO {
+                    return Err(StoreError(
+                        "no conflict evidence is retained: supply it".into(),
+                    ));
+                }
+                match self
+                    .dir
+                    .read(&proof_file_name(&cur.proof_digest))
+                    .map_err(|e| Self::io("read evidence", e))?
+                {
+                    Some(b) if proof_digest(&self.hasher, &b) == cur.proof_digest => b,
+                    _ => {
+                        return Err(StoreError(
+                            "the retained conflict evidence is missing or corrupt: supply it"
+                                .into(),
+                        ))
+                    }
+                }
+            }
+        };
+        let state_bytes = cur
+            .encode(&self.hasher)
+            .map_err(|e| StoreError(format!("encode: {e}")))?;
+        let receipt = RecoveryReceipt {
+            halted_checksum: sum,
+            conflict_height: h,
+            resume_height: resume.height,
+            resume_block: resume.block_id,
+            evidence_digest: proof_digest(&self.hasher, &evidence),
+            resume_digest: proof_digest(&self.hasher, resume_certificate),
+        };
+        self.write_durable(&conflict_file_name(h, "state"), &state_bytes)?;
+        self.write_durable(&conflict_file_name(h, "evidence"), &evidence)?;
+        self.write_durable(&conflict_file_name(h, "resume"), resume_certificate)?;
+        let rb = receipt.encode(&self.hasher);
+        self.write_durable(&conflict_file_name(h, "receipt"), &rb)
     }
 }
 

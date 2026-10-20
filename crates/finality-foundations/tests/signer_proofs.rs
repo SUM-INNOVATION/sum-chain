@@ -9,6 +9,10 @@
 //!   set, wrong height, stale and conflicting.
 //! * Lock changes justified by a real `PolkaProofV1`.
 //! * The evidence floor at open, taken from a verified certificate.
+//! * Recovery after a conflict halt: refused for an insufficient, forged,
+//!   wrong-fork, non-certificate or too-low resume certificate and for bad
+//!   evidence; accepted for a verified certificate at or above the halted
+//!   working height.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -577,7 +581,7 @@ fn advancement_needs_a_verified_certificate_for_the_working_height_or_above() {
     let halt = s.record().halt.clone().unwrap();
     assert_eq!(
         (halt.height, halt.certified_block, halt.conflicting_block),
-        (7, X, Y)
+        (7, X, Some(Y))
     );
     assert!(matches!(
         s.sign(&own(VoteType::Prevote, 8, 1, Some(Y))),
@@ -708,4 +712,122 @@ fn evidence_floor_from_a_verified_certificate_catches_a_rolled_back_state() {
     ));
     // Without the evidence it is not (the stated limit).
     assert!(rig.open(None).is_ok());
+}
+
+fn at(height: u64, block_id: Digest) -> Certified {
+    Certified { height, block_id }
+}
+
+/// Halted at working height 8: height 7 certified with X, then a valid
+/// certificate for 7 naming Y.
+fn halted_real() -> (Rig, RealSigner) {
+    let (rig, mut s) = locked();
+    s.advance(&cert(4, 7, 0, X, &[0, 2, 3]).encode().unwrap())
+        .unwrap();
+    s.sign(&own(VoteType::Prevote, 8, 0, Some(Y))).unwrap();
+    assert_eq!(
+        s.advance(&cert(4, 7, 3, Y, &[0, 1, 3]).encode().unwrap()),
+        Err(SignerError::ConflictingFinality(7))
+    );
+    (rig, s)
+}
+
+#[test]
+fn recovery_refuses_insufficient_forged_wrong_fork_and_too_low_certificates() {
+    let (rig, mut s) = halted_real();
+    let before_all = rig.writes();
+    let with = |f: fn(&mut FinalityCertificateV1)| {
+        let mut c = cert(4, 9, 0, X, &[0, 1, 2]);
+        f(&mut c);
+        c.encode().unwrap()
+    };
+    let refused: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "insufficient: k < q(n)",
+            cert(4, 9, 0, X, &[0, 1]).encode().unwrap(),
+        ),
+        ("forged signature", with(|c| c.entries[0].signature[3] ^= 1)),
+        // The other fork: its config commitment is not this node's.
+        (
+            "wrong fork (config commitment)",
+            with(|c| c.consensus_config_commitment = [0xc1; 32]),
+        ),
+        (
+            "wrong set commitment",
+            with(|c| c.validator_set_commitment = valset_commitment(5)),
+        ),
+        (
+            "a prevote quorum, not a certificate",
+            polka(4, 9, 0, X, &[0, 1, 2]).encode().unwrap(),
+        ),
+        (
+            "unknown height",
+            cert(4, 99, 0, X, &[0, 1, 2]).encode().unwrap(),
+        ),
+    ];
+    for (what, proof) in refused {
+        let before = rig.writes();
+        assert!(
+            matches!(
+                s.recover_after_conflict(at(9, X), &proof, None),
+                Err(SignerError::InvalidFinalityProof(_))
+            ),
+            "{what}"
+        );
+        assert_eq!(rig.writes(), before, "{what}: nothing written");
+        assert!(s.is_halted(), "{what}");
+    }
+    for low in [6u64, 7] {
+        assert!(matches!(
+            s.recover_after_conflict(
+                at(low, X),
+                &cert(4, low, 0, X, &[0, 1, 2]).encode().unwrap(),
+                None
+            ),
+            Err(SignerError::RecoveryTooLow { working: 8, .. })
+        ));
+    }
+    // Same validator set and configuration on both forks: a valid certificate
+    // for the other fork's block at 9 is refused because the node follows X.
+    assert!(matches!(
+        s.recover_after_conflict(
+            at(9, X),
+            &cert(4, 9, 0, Y, &[0, 1, 2]).encode().unwrap(),
+            None
+        ),
+        Err(SignerError::RecoveryWrongFork { .. })
+    ));
+    assert_eq!(rig.writes(), before_all, "nothing written by any refusal");
+    // Evidence supplied by the operator must be a verified conflicting certificate.
+    let bad_evidence = cert(4, 7, 0, X, &[0, 2, 3]).encode().unwrap();
+    assert!(matches!(
+        s.recover_after_conflict(
+            at(9, X),
+            &cert(4, 9, 0, X, &[0, 1, 2]).encode().unwrap(),
+            Some(&bad_evidence)
+        ),
+        Err(SignerError::RecoveryEvidence(_))
+    ));
+    // A certificate at height 8 (the halted working height) on this node's
+    // fork recovers; the floor is then 9.
+    s.recover_after_conflict(
+        at(8, X),
+        &cert(4, 8, 1, X, &[1, 2, 3]).encode().unwrap(),
+        None,
+    )
+    .unwrap();
+    assert!(!s.is_halted());
+    assert_eq!(s.record().working_height(), Some(9));
+    assert!(matches!(
+        s.sign(&own(VoteType::Prevote, 8, 2, Some(X))),
+        Err(SignerError::Regression { .. })
+    ));
+    s.sign(&own(VoteType::Prevote, 9, 0, Some(X))).unwrap();
+    // The archived evidence is the conflicting certificate, trimmed to a quorum.
+    let evidence = {
+        let d = rig.disk.borrow();
+        d.inodes[d.dir_vol["conflict-7.evidence"]].vol.clone()
+    };
+    let c = FinalityCertificateV1::decode(&evidence).unwrap();
+    assert_eq!((c.height, c.block_id, c.entries.len()), (7, Y, 3));
 }

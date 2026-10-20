@@ -1,6 +1,7 @@
-//! PROPOSED signer persistence (A2 draft 3, UNRATIFIED): a bounded,
-//! explicit-state model check of the recovery protocol and of proof-gated
-//! height advancement.
+//! PROPOSED signer persistence (UNRATIFIED 413-byte record): a bounded,
+//! explicit-state model check of the recovery protocol, of proof-gated
+//! height advancement, of the persisted conflict halt (its own flag in the
+//! record) and of the operator's recovery from it.
 //!
 //! The system is the ratified G2-b signer core over the proposed file-backed
 //! store and the disk model in `common` (volatile and durable file data,
@@ -8,13 +9,18 @@
 //! empty disk, a breadth-first search enumerates every reachable state under:
 //!
 //! * initialization, open and every request of a fixed alphabet over heights
-//!   7, 8 and 9 (lock, relock, conflicting bytes, conflicting values,
+//!   7 to 10 (lock, relock, conflicting bytes, conflicting values,
 //!   justified and unjustified lock-changing prevotes, nil precommit, votes
 //!   at the next heights);
 //! * every height advancement of a fixed proof alphabet, verified by an
 //!   oracle that answers valid or invalid: valid proofs for heights 7 and 8,
 //!   a second valid proof for height 7 naming another block (two verified
 //!   proofs in conflict), a stale proof for height 6, and a forged one;
+//! * in a halted state, every recovery of a fixed alphabet: valid resume
+//!   proofs for heights 8 and 9 naming the followed block (with the retained
+//!   conflict evidence, or with evidence supplied: either block at height 7,
+//!   so one of the two is refused), and the refusals: too low (height 7),
+//!   the other fork's block, forged;
 //! * at every mutating operation of each action, each of five faults: error,
 //!   effect-then-error, crash before, crash after, and crash after with the
 //!   directory entries persisted; a crash then loses everything unsynced;
@@ -40,11 +46,26 @@
 //!   valid proof for that height or higher;
 //! * **H3:** a forged proof never changes the state, and the block certified
 //!   for a height never changes;
+//! * **HALT1:** while halted nothing is issued, and the halt (the record's
+//!   own flag) is never lost except by a recovery REC1 allows; **HALT2:** a
+//!   halt needs two valid proofs naming different blocks at its height;
+//! * **REC1:** a halt ends only by a recovery with a valid resume proof that
+//!   names the followed block at a height above the conflict height, and a
+//!   recovery returns only once it is durable; an allowed recovery is never
+//!   refused without a fault;
+//! * **REC2:** after a recovery, nothing is issued at or below its resume
+//!   height (so nothing at or below the conflict height or the halted
+//!   working height);
+//! * **REC3:** a recovered signer's conflict archive is durable: the halted
+//!   record, the conflicting evidence (a valid proof naming another block at
+//!   the conflict height), the resume certificate and the receipt naming the
+//!   resume height;
 //! * **liveness of recovery:** no fault sequence leaves a state that refuses
 //!   to open.
 //!
 //! Assumptions: one process; ownership is the lock trait; the oracle is sound
-//! (a "valid" answer means a real certificate exists); the disk model's
+//! (a "valid" answer means a real certificate exists); the operator's
+//! `followed` block is what the node's chain holds; the disk model's
 //! durability rules; no whole-directory rollback; no cloned keys.
 //!
 //! Signatures here are a keyed hash, not Ed25519: the properties are about
@@ -55,12 +76,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 
 use sumchain_finality_foundations::signer::{
-    initialize_exclusive, DurableSigner, Justification, SignPosition, SignRequest, SignerError,
-    SigningKey, Step, VoteValue,
+    initialize_exclusive, Certified, DurableSigner, Justification, PolkaVerifier, SignPosition,
+    SignRequest, SignerError, SigningKey, Step, VoteValue,
 };
 use sumchain_finality_foundations::signer_file::{
-    floor_below_height, proof_file_name, sign_bytes_digest, Classified, FileSignerStore,
-    ProofStatus, SignerState, STATE_FILE,
+    conflict_file_name, floor_below_height, proof_file_name, sign_bytes_digest, Classified,
+    FileSignerStore, ProofStatus, RecoveryReceipt, SignerState, STATE_FILE,
 };
 use sumchain_finality_foundations::Digest;
 
@@ -132,8 +153,8 @@ fn req(
     }
 }
 
-/// The request alphabet: eleven requests over seven positions, exercising
-/// every lock rule.
+/// The request alphabet: fifteen requests over twelve positions, exercising
+/// every lock rule; height 10 is reachable only by a recovery.
 fn alphabet() -> Vec<SignRequest> {
     use Step::{Precommit, Prevote};
     use VoteValue::{Block, Nil};
@@ -152,6 +173,7 @@ fn alphabet() -> Vec<SignRequest> {
         req(8, 0, Precommit, Block(B), "x", Some((0, B))),
         req(8, 1, Prevote, Block(A), "unjustified", None),
         req(9, 0, Prevote, Block(A), "x", None),
+        req(10, 0, Prevote, Block(A), "x", None),
     ]
 }
 
@@ -159,6 +181,42 @@ fn alphabet() -> Vec<SignRequest> {
 /// a valid proof, `None` for a forged one.
 /// A proof and the oracle's verdict on it.
 type OracleProof = (Vec<u8>, Option<(u64, Digest)>);
+
+/// A recovery: the followed block, the resume proof, supplied evidence, and
+/// the oracle's verdict on the resume proof.
+type OracleRecovery = (Certified, Vec<u8>, Option<Vec<u8>>, Option<(u64, Digest)>);
+
+fn recoveries() -> Vec<OracleRecovery> {
+    let at = |height, block_id| Certified { height, block_id };
+    vec![
+        (at(9, A), finality(9, &A), None, Some((9, A))),
+        (at(8, B), finality(8, &B), None, Some((8, B))),
+        // Supplied evidence: allowed only when it names the block not
+        // certified at the conflict height.
+        (
+            at(9, A),
+            finality(9, &A),
+            Some(finality(7, &B)),
+            Some((9, A)),
+        ),
+        (
+            at(9, A),
+            finality(9, &A),
+            Some(finality(7, &A)),
+            Some((9, A)),
+        ),
+        // Refused: too low (the conflict height), the other fork's block,
+        // forged.
+        (at(7, A), finality(7, &A), None, Some((7, A))),
+        (at(9, A), finality(9, &B), None, Some((9, B))),
+        (
+            at(9, A),
+            b"forged finality for height 9".to_vec(),
+            None,
+            None,
+        ),
+    ]
+}
 
 fn proofs() -> Vec<OracleProof> {
     vec![
@@ -193,8 +251,16 @@ struct Ghost {
     valid_proof_max: Option<u64>,
     /// Every valid (height, block) proof presented.
     valid_proofs: BTreeSet<(u64, Digest)>,
-    /// A halt has been persisted (observed durable, or returned).
+    /// The signer is halted: a halt was persisted (observed durable, or
+    /// returned) and has not ended since.
     halted: bool,
+    /// The height of the latest persisted conflict.
+    conflict: Option<u64>,
+    /// The recoveries the rules allow, as (resume height, block): a valid
+    /// resume proof naming the followed block above the conflict height.
+    allowed_recoveries: BTreeSet<(u64, Digest)>,
+    /// The resume height of the latest completed recovery.
+    resumed: Option<u64>,
     /// Every (height, block) a durable state has certified.
     certified: BTreeMap<u64, Digest>,
 }
@@ -333,6 +399,9 @@ fn check_open(n: &Node, s: &Signer, disk: &Disk, violations: &mut Vec<String>) {
     if n.ghost.halted {
         return;
     }
+    if let (Some(r), Some(h)) = (n.ghost.resumed, n.ghost.conflict) {
+        check_archive(n, &disk.borrow(), h, r, violations);
+    }
     let hw = rec.high_water();
     if let Some(&issued_max) = n.ghost.issued.keys().next_back() {
         if hw.is_none_or(|p| p < issued_max) {
@@ -361,11 +430,45 @@ fn check_open(n: &Node, s: &Signer, disk: &Disk, violations: &mut Vec<String>) {
     }
 }
 
+/// REC3: the conflict archive of a recovery is durable and names it.
+fn check_archive(n: &Node, m: &Model, h: u64, r: u64, violations: &mut Vec<String>) {
+    let durable = |suffix: &str| -> Option<Vec<u8>> {
+        let name = conflict_file_name(h, suffix);
+        let (&d, &v) = (m.dir_dur.get(&name)?, m.dir_vol.get(&name)?);
+        (d == v && m.inodes[d].dur == m.inodes[d].vol && !m.inodes[d].dur.is_empty())
+            .then(|| m.inodes[d].dur.clone())
+    };
+    let files = ["state", "evidence", "resume", "receipt"].map(durable);
+    let [Some(_), Some(evidence), Some(_), Some(receipt)] = files else {
+        violations.push(format!("REC3: the archive for height {h} is not durable"));
+        return;
+    };
+    match RecoveryReceipt::decode(&receipt, &B3) {
+        Ok(rc) if rc.conflict_height == h && rc.resume_height == r => {}
+        other => violations.push(format!(
+            "REC3: the receipt does not name the recovery: {other:?}"
+        )),
+    }
+    let certified = n.ghost.certified.get(&h).copied();
+    match RetainingPolka.verify_finality(&evidence) {
+        Ok(c) if c.height == h && Some(c.block_id) != certified => {}
+        other => violations.push(format!(
+            "REC3: the archived evidence is not a conflict: {other:?}"
+        )),
+    }
+}
+
 /// I5 and I4b when `q` becomes issued (released, or durably persisted).
 fn issue(n: &mut Node, q: &SignRequest, violations: &mut Vec<String>) {
     let p = q.position;
     if n.ghost.halted {
         violations.push(format!("HALT1: issued {p:?} after the halt"));
+    }
+    if n.ghost.resumed.is_some_and(|r| p.height <= r) {
+        violations.push(format!(
+            "REC2: issued {p:?} at or below the resume height {:?}",
+            n.ghost.resumed
+        ));
     }
     let d = sign_bytes_digest(&B3, &q.payload);
     if p.height > 7 && n.ghost.valid_proof_max.is_none_or(|v| v < p.height - 1) {
@@ -424,16 +527,34 @@ fn observe_durable(n: &mut Node, alphabet: &[SignRequest], violations: &mut Vec<
     let Some(s) = durable_state(&n.model) else {
         return;
     };
-    if let Some(conflicting) = s.halted {
-        n.ghost.halted = true;
+    if s.halted {
         let h = s.floor_height - 1;
-        if !(n.ghost.valid_proofs.contains(&(h, conflicting))
-            && n.ghost.valid_proofs.contains(&(h, s.certified_block_id)))
-        {
+        let conflicting = n
+            .ghost
+            .valid_proofs
+            .iter()
+            .any(|&(ph, b)| ph == h && b != s.certified_block_id);
+        if !(conflicting && n.ghost.valid_proofs.contains(&(h, s.certified_block_id))) {
             violations.push(format!(
                 "HALT2: halted at height {h} without two valid conflicting proofs"
             ));
         }
+        n.ghost.halted = true;
+        n.ghost.conflict = Some(h);
+    } else if n.ghost.halted {
+        // The halt ended: only by an allowed recovery.
+        let r = s.floor_height - 1;
+        if !n
+            .ghost
+            .allowed_recoveries
+            .contains(&(r, s.certified_block_id))
+        {
+            violations.push(format!(
+                "REC1: the halt ended without an allowed recovery (resume at {r})"
+            ));
+        }
+        n.ghost.halted = false;
+        n.ghost.resumed = Some(r);
     }
     if s.certified_block_id != [0; 32] {
         let h = s.floor_height - 1;
@@ -523,6 +644,8 @@ struct Report {
     advanced_states: usize,
     /// Open states whose signer is halted.
     halted_states: usize,
+    /// Open states whose signer recovered from a halt.
+    recovered_states: usize,
     violations: Vec<String>,
 }
 
@@ -533,6 +656,8 @@ enum Action {
     Sign(SignRequest),
     /// A height advancement, with the oracle's verdict on the proof.
     Advance(Vec<u8>, Option<(u64, Digest)>),
+    /// The operator's recovery from a halt (see [`recoveries`]).
+    Recover(OracleRecovery),
 }
 
 /// Run `action` from `node` under `plan`; return the successor (if any) and
@@ -581,6 +706,18 @@ fn act(
             arm(&disk, plan);
             s.advance(proof).map(|_| Status::Open)
         }
+        Action::Recover((followed, proof, evidence, _)) => {
+            let mut s = match open(&disk, &owner) {
+                Ok(s) => s,
+                Err(e) => {
+                    v.push(format!("an open state does not reopen: {e}"));
+                    return None;
+                }
+            };
+            arm(&disk, plan);
+            s.recover_after_conflict(*followed, proof, evidence.as_deref())
+                .map(|_| Status::Open)
+        }
     };
     let ops = disk.borrow().ops;
     let fired = plan.is_some_and(|(k, _)| k < ops);
@@ -600,6 +737,33 @@ fn act(
                 next.ghost.valid_proof_max = Some(*h);
             }
             next.ghost.valid_proofs.insert((*h, *b));
+        }
+    }
+    let mut recovery_allowed = false;
+    if let Action::Recover((followed, _, evidence, verdict)) = action {
+        if let (Ok(_), None) = (&res, verdict) {
+            v.push("REC1: a forged resume proof was accepted".into());
+            return None;
+        }
+        if let Some((h, b)) = verdict {
+            if next.ghost.valid_proof_max.is_none_or(|m| m < *h) {
+                next.ghost.valid_proof_max = Some(*h);
+            }
+            next.ghost.valid_proofs.insert((*h, *b));
+            let conflict = next.ghost.conflict;
+            let evidence_ok = evidence.as_ref().is_none_or(|e| {
+                let c = RetainingPolka.verify_finality(e);
+                c.is_ok_and(|c| {
+                    Some(c.height) == conflict
+                        && next.ghost.certified.get(&c.height) != Some(&c.block_id)
+                })
+            });
+            recovery_allowed = (*h, *b) == (followed.height, followed.block_id)
+                && conflict.is_some_and(|c| *h > c)
+                && evidence_ok;
+            if recovery_allowed {
+                next.ghost.allowed_recoveries.insert((*h, *b));
+            }
         }
     }
     let succeeded = res.is_ok();
@@ -630,6 +794,10 @@ fn act(
                 v.push(format!("H3: store refused the core's advancement: {m}"));
                 return None;
             }
+            (Action::Recover(..), e) if recovery_allowed => {
+                v.push(format!("REC1: an allowed recovery was refused: {e}"));
+                return None;
+            }
             // The halt is persisted and returned as this error.
             (Action::Advance(..), SignerError::ConflictingFinality(h)) => {
                 let blocks = next
@@ -644,10 +812,11 @@ fn act(
                     ));
                 }
                 next.ghost.halted = true;
+                next.ghost.conflict = Some(h);
                 next.status = Status::Open;
             }
-            // A refused request or advancement changes nothing.
-            (Action::Sign(_) | Action::Advance(..), _) => {
+            // A refused request, advancement or recovery changes nothing.
+            (Action::Sign(_) | Action::Advance(..) | Action::Recover(..), _) => {
                 if ops != 0 {
                     v.push("H3: a refused action wrote to disk".into());
                 }
@@ -687,6 +856,20 @@ fn act(
             )),
         }
     }
+    if let (Action::Recover((_, _, _, Some((h, b)))), Status::Open, false, true) =
+        (action, next.status, fired, succeeded)
+    {
+        match durable_state(&next.model) {
+            Some(st) if !st.halted && st.certified_block_id == *b && st.floor_height == h + 1 => {}
+            other => v.push(format!(
+                "REC1: recovery to {h} returned before it was durable ({:?})",
+                other.map(|s| (s.halted, s.floor_height))
+            )),
+        }
+        if next.ghost.halted || next.ghost.resumed != Some(*h) {
+            v.push("REC1: a returned recovery was not observed durable".into());
+        }
+    }
     Some((next, ops))
 }
 
@@ -713,6 +896,7 @@ fn explore(max_faults: u32) -> Report {
         max_height: 0,
         advanced_states: 0,
         halted_states: 0,
+        recovered_states: 0,
         violations: Vec::new(),
     };
 
@@ -737,11 +921,15 @@ fn explore(max_faults: u32) -> Report {
                 // I4 on the running signer (an open of this disk, no repair).
                 let disk = fresh(&node.model);
                 arm(&disk, None);
+                let mut halted = false;
                 match open(&disk, &MemOwnership::default()) {
                     Ok(s) => {
                         check_open(&node, &s, &disk, &mut v);
-                        if s.is_halted() {
+                        halted = s.is_halted();
+                        if halted {
                             report.halted_states += 1;
+                        } else if node.ghost.resumed.is_some() {
+                            report.recovered_states += 1;
                         }
                         let w = s.record().working_height().unwrap_or(0);
                         report.max_height = report.max_height.max(w);
@@ -756,6 +944,12 @@ fn explore(max_faults: u32) -> Report {
                     .cloned()
                     .map(Action::Sign)
                     .chain(proofs().into_iter().map(|(p, v)| Action::Advance(p, v)))
+                    .chain(
+                        recoveries()
+                            .into_iter()
+                            .filter(|_| halted)
+                            .map(Action::Recover),
+                    )
                     .collect()
             }
         };
@@ -802,12 +996,13 @@ fn explore(max_faults: u32) -> Report {
 fn run(max_faults: u32) -> Report {
     let r = explore(max_faults);
     println!(
-        "model check K={}: {} states ({} at a height above 7, up to height {}; {} halted), {} transitions, depth {}, up to {} released / {} issued messages, {} violations",
+        "model check K={}: {} states ({} at a height above 7, up to height {}; {} halted, {} recovered), {} transitions, depth {}, up to {} released / {} issued messages, {} violations",
         if max_faults == u32::MAX { "unbounded".to_string() } else { max_faults.to_string() },
         r.states,
         r.advanced_states,
         r.max_height,
         r.halted_states,
+        r.recovered_states,
         r.transitions,
         r.max_depth,
         r.released,
@@ -818,9 +1013,10 @@ fn run(max_faults: u32) -> Report {
     r
 }
 
-/// Bounds of every run: heights 7–9 (initial working height 7), rounds 0–2 at
-/// height 7, 0–1 at height 8, 0 at height 9; 14 signing requests and 5
-/// proofs; five fault modes at every write; `K` faults per path.
+/// Bounds of every run: heights 7–10 (initial working height 7), rounds 0–2
+/// at height 7, 0–1 at height 8, 0 at heights 9 and 10; 15 signing requests,
+/// 5 proofs and, in halted states, 7 recoveries; five fault modes at every
+/// write; `K` faults per path.
 #[test]
 fn model_check_without_faults() {
     let r = run(0);
@@ -837,6 +1033,8 @@ fn model_check_without_faults() {
         r.halted_states > 0,
         "a conflicting pair of proofs halted the signer"
     );
+    assert!(r.recovered_states > 0, "a halted signer recovered");
+    assert!(r.max_height >= 10, "height 10 was reached by recovery");
 }
 
 /// Release build; run with
