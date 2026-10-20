@@ -156,7 +156,10 @@ fn alphabet() -> Vec<SignRequest> {
 
 /// The proof alphabet, with the oracle's verdict: `Some((height, block))` for
 /// a valid proof, `None` for a forged one.
-fn proofs() -> Vec<(Vec<u8>, Option<(u64, Digest)>)> {
+/// A proof and the oracle's verdict on it.
+type OracleProof = (Vec<u8>, Option<(u64, Digest)>);
+
+fn proofs() -> Vec<OracleProof> {
     vec![
         (finality(7, &A), Some((7, A))),
         (finality(7, &B), Some((7, B))),
@@ -632,7 +635,15 @@ fn explore(max_faults: u32) -> Report {
         violations: Vec::new(),
     };
 
-    while let Some((node, depth)) = queue.pop_front() {
+    // Breadth-first for a fault bound (so the fewest-faults rule is exact);
+    // depth-first without one, which keeps the frontier small. Either way
+    // every reachable state is visited once.
+    let depth_first = max_faults == u32::MAX;
+    while let Some((node, depth)) = if depth_first {
+        queue.pop_back()
+    } else {
+        queue.pop_front()
+    } {
         report.states += 1;
         report.max_depth = report.max_depth.max(depth);
         report.released = report.released.max(node.ghost.released.len());
@@ -689,7 +700,12 @@ fn explore(max_faults: u32) -> Report {
                 continue;
             }
             let key = node_key(&s);
-            if seen.get(&key).is_some_and(|&f| f <= s.faults) {
+            // Without a bound the fault count is irrelevant: a state seen once
+            // is done.
+            if seen
+                .get(&key)
+                .is_some_and(|&f| depth_first || f <= s.faults)
+            {
                 continue;
             }
             seen.insert(key, s.faults);
