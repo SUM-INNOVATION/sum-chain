@@ -1,13 +1,14 @@
 //! The retained lock proof and the persisted conflict halt (semantics
-//! RATIFIED 2026-10-20; the 412-byte layout and the side files UNRATIFIED),
+//! RATIFIED 2026-10-20; the 413-byte layout, the side files and the conflict
+//! archive UNRATIFIED),
 //! over the file-backed store and the disk model in `common`.
 //!
-//! * KAT vectors for the 412-byte `SignerStateV1` proposal.
+//! * KAT vectors for the 413-byte `SignerStateV1` proposal (separate halt flag).
 //! * Crash matrices across the proof, state and mirror writes for a first
 //!   lock, a relock, a lock-keeping prevote, an advancement and a halt.
 //! * Orphan, missing and corrupt proof files; a forged justification.
-//! * The halt across crashes; the operator's re-initialization, with a fault
-//!   at each of its steps.
+//! * The halt across crashes; the operator's recovery with verified evidence,
+//!   with a fault at each of its writes, and its refusals.
 //!
 //! Keys, payloads and proofs are synthetic.
 
@@ -21,8 +22,7 @@ use sumchain_finality_foundations::signer::{
 };
 use sumchain_finality_foundations::signer_file::{
     floor_below_height, offset, proof_digest, proof_file_name, FileSignerStore, ProofStatus,
-    SignerState, ARCHIVE_FILE, ARCHIVE_PROOF, LOCK_HALTED, MAX_RETAINED_PROOF_LEN, STATE_FILE,
-    STATE_LEN,
+    SignerState, HALT_SET, MAX_RETAINED_PROOF_LEN, STATE_FILE, STATE_LEN,
 };
 use sumchain_finality_foundations::Digest;
 
@@ -206,9 +206,9 @@ fn assert_proofs_settled(rig: &Rig, s: &Signer, ctx: &str) {
     assert_eq!(s.store().proof_status(), want, "{ctx}: proof status");
 }
 
-// ── KAT vectors: the 412-byte proposal ──────────────────────────────────────
+// ── KAT vectors: the 413-byte proposal ──────────────────────────────────────
 
-const STATE_VECTORS: &str = include_str!("vectors/signer_state_412.json");
+const STATE_VECTORS: &str = include_str!("vectors/signer_state_413.json");
 
 fn kat_states() -> Vec<(&'static str, Vec<Act>)> {
     vec![
@@ -260,7 +260,7 @@ fn state_kat_json() -> Value {
         })
         .collect();
     json!({
-        "title": "SignerStateV1 412-byte proposal: known-answer vectors",
+        "title": "SignerStateV1 413-byte proposal (separate halt flag): known-answer vectors",
         "status": "UNRATIFIED PROPOSAL. SYNTHETIC: test Ed25519 seed [0x07;32]; chain id 4242; genesis 11…; synthetic payloads and proofs; hash BLAKE3-256.",
         "vectors": vectors,
     })
@@ -268,12 +268,12 @@ fn state_kat_json() -> Value {
 
 /// Regenerate: `SUMCHAIN_WRITE_SIGNER_STATE_VECTORS=1 cargo test ...`.
 #[test]
-fn signer_state_412_kat_vectors_match_and_decode() {
+fn signer_state_413_kat_vectors_match_and_decode() {
     let generated = state_kat_json();
     if std::env::var_os("SUMCHAIN_WRITE_SIGNER_STATE_VECTORS").is_some() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/vectors/signer_state_412.json"
+            "/tests/vectors/signer_state_413.json"
         );
         std::fs::write(
             path,
@@ -296,7 +296,8 @@ fn signer_state_412_kat_vectors_match_and_decode() {
         }
     }
     let halted = hex::decode(committed["vectors"][3]["hex"].as_str().unwrap()).unwrap();
-    assert_eq!(halted[offset::LOCK_STATE], LOCK_HALTED);
+    assert_eq!(halted[offset::HALT], HALT_SET);
+    assert_eq!(halted[offset::LOCK_STATE], 0, "lock_state is 0 or 1 only");
     assert_eq!(MAX_RETAINED_PROOF_LEN, 2_883_725);
 }
 
@@ -484,7 +485,11 @@ fn halt_is_persisted_first_and_survives_every_crash_and_restart() {
         Err(SignerError::ConflictingFinality(7))
     );
     let st = decoded(&rig);
-    assert_eq!(st.halted, Some(B));
+    assert!(st.halted);
+    assert_eq!(
+        (st.floor_height, st.certified_block_id, st.lock),
+        (8, A, None)
+    );
     assert_eq!(
         st.last.as_ref().map(|l| l.position),
         Some(pos(8, 0, Step::Prevote)),
@@ -524,6 +529,13 @@ fn halt_is_persisted_first_and_survives_every_crash_and_restart() {
     assert!(rig.open().unwrap().is_halted());
 }
 
+/// (what, followed, resume certificate, supplied evidence).
+type RecoveryCase = (&'static str, Certified, Vec<u8>, Option<Vec<u8>>);
+
+fn at(height: u64, block_id: Digest) -> Certified {
+    Certified { height, block_id }
+}
+
 fn halted_rig() -> Rig {
     let rig = prepared(&[
         Act::Sign(prevote(7, 0, A)),
@@ -539,57 +551,189 @@ fn halted_rig() -> Rig {
     rig
 }
 
-#[test]
-fn reinitialization_after_a_halt_is_explicit_and_checked() {
-    let rig = halted_rig();
-    let key = rig.key().key_id();
-    // Not while a signer runs; not at or below the halted working height (8).
-    let s = rig.open().unwrap();
-    assert!(matches!(
-        rig.store().reinitialize_after_halt(&rig.owner, key, 20),
-        Err(SignerError::OwnershipHeld(_))
-    ));
-    drop(s);
-    for floor in [7, 8] {
-        assert!(matches!(
-            rig.store().reinitialize_after_halt(&rig.owner, key, floor),
-            Err(SignerError::Corrupt(_))
-        ));
-    }
-    // Not for a state that is not halted.
-    let other = prepared(&[Act::Sign(prevote(7, 0, A))]);
-    assert!(other
-        .store()
-        .reinitialize_after_halt(&other.owner, key, 20)
-        .is_err());
-
-    rig.store()
-        .reinitialize_after_halt(&rig.owner, key, 20)
-        .unwrap();
-    let mut s = rig.open().unwrap();
-    assert!(!s.is_halted());
-    assert_eq!(s.record().working_height(), Some(20));
-    assert!(
-        rig.file(ARCHIVE_FILE).is_some(),
-        "the halted state is archived"
-    );
-    assert_eq!(
-        rig.file(ARCHIVE_PROOF),
-        Some(finality(7, &B)),
-        "with its evidence"
-    );
-    s.sign(&prevote(20, 0, A)).unwrap();
+/// The conflict was at height 7 (certified A, conflicting B); the halted
+/// working height is 8, where the key signed a prevote.
+fn conflict_files(rig: &Rig) -> Vec<String> {
+    rig.files()
+        .into_iter()
+        .filter(|n| n.starts_with("conflict-"))
+        .collect()
 }
 
 #[test]
-fn plain_initialization_refuses_while_a_halted_state_is_archived() {
+fn recovery_needs_verified_evidence_at_or_above_the_halted_height() {
+    let rig = halted_rig();
+    let mut s = rig.open().unwrap();
+    // Never automatic: an advancement does not recover.
+    assert_eq!(s.advance(&finality(9, &A)), Err(SignerError::Halted));
+    rig.arm(usize::MAX, Mode::Error);
+    // Refused without writing anything.
+    let refused: Vec<RecoveryCase> = vec![
+        (
+            "forged resume certificate",
+            at(9, A),
+            b"forged".to_vec(),
+            None,
+        ),
+        (
+            "resume at the conflict height",
+            at(7, A),
+            finality(7, &A),
+            None,
+        ),
+        ("resume at a lower height", at(5, A), finality(5, &A), None),
+        ("the other fork's block", at(9, A), finality(9, &B), None),
+        (
+            "another height than the followed one",
+            at(10, A),
+            finality(9, &A),
+            None,
+        ),
+        (
+            "evidence naming the certified block",
+            at(9, A),
+            finality(9, &A),
+            Some(finality(7, &A)),
+        ),
+        (
+            "evidence for another height",
+            at(9, A),
+            finality(9, &A),
+            Some(finality(6, &B)),
+        ),
+        (
+            "forged evidence",
+            at(9, A),
+            finality(9, &A),
+            Some(b"forged".to_vec()),
+        ),
+    ];
+    for (what, followed, resume, evidence) in refused {
+        let r = s.recover_after_conflict(followed, &resume, evidence.as_deref());
+        assert!(r.is_err(), "{what}: {r:?}");
+        assert!(s.is_halted(), "{what}");
+        assert_eq!(rig.ops(), 0, "{what}: nothing written");
+    }
+    assert!(matches!(
+        s.recover_after_conflict(at(7, A), &finality(7, &A), None),
+        Err(SignerError::RecoveryTooLow {
+            resume: 7,
+            working: 8
+        })
+    ));
+    assert!(matches!(
+        s.recover_after_conflict(at(9, A), &finality(9, &B), None),
+        Err(SignerError::RecoveryWrongFork { .. })
+    ));
+    // A verified certificate at or above the halted working height recovers.
+    assert_eq!(
+        s.recover_after_conflict(at(9, A), &finality(9, &A), None)
+            .unwrap(),
+        Certified {
+            height: 9,
+            block_id: A
+        }
+    );
+    assert!(!s.is_halted());
+    assert_eq!(s.record().working_height(), Some(10));
+    for (h, r) in [(8, 1), (9, 0)] {
+        assert!(
+            matches!(
+                s.sign(&prevote(h, r, A)),
+                Err(SignerError::Regression { .. })
+            ),
+            "height {h} is closed"
+        );
+    }
+    s.sign(&prevote(10, 0, A)).unwrap();
+    drop(s);
+    let s = rig.open().unwrap();
+    assert_eq!(
+        conflict_files(&rig),
+        vec![
+            "conflict-7.evidence".to_string(),
+            "conflict-7.receipt".to_string(),
+            "conflict-7.resume".to_string(),
+            "conflict-7.state".to_string(),
+        ],
+        "the conflict archive is retained"
+    );
+    assert_eq!(rig.file("conflict-7.evidence"), Some(finality(7, &B)));
+    assert_proofs_settled(&rig, &s, "after recovery");
+    // A state that is not halted has nothing to recover from.
+    let other = prepared(&[Act::Sign(prevote(7, 0, A))]);
+    let mut o = other.open().unwrap();
+    assert_eq!(
+        o.recover_after_conflict(at(9, A), &finality(9, &A), None),
+        Err(SignerError::NotHalted)
+    );
+}
+
+#[test]
+fn recovery_without_retained_evidence_needs_it_supplied() {
+    let rig = halted_rig();
+    let evidence_file = proof_file_name(&decoded(&rig).proof_digest);
+    rig.remove_file(&evidence_file);
+    let mut s = rig.open().unwrap();
+    assert_eq!(
+        s.store().proof_status(),
+        ProofStatus::Missing,
+        "degraded, still halted"
+    );
+    assert!(s.is_halted());
+    assert!(matches!(
+        s.recover_after_conflict(at(9, A), &finality(9, &A), None),
+        Err(SignerError::RecoveryArchive(m)) if m.contains("supply it")
+    ));
+    assert!(s.is_halted());
+    s.recover_after_conflict(at(9, A), &finality(9, &A), Some(&finality(7, &B)))
+        .unwrap();
+    assert_eq!(rig.file("conflict-7.evidence"), Some(finality(7, &B)));
+}
+
+#[test]
+fn a_recovered_state_without_its_archive_is_refused() {
+    let rig = halted_rig();
+    let mut s = rig.open().unwrap();
+    // Fail the mirror write: the recovered state file is one ahead of the
+    // halted mirror.
+    let writes_before_mirror = {
+        let probe = halted_rig();
+        let mut p = probe.open().unwrap();
+        probe.arm(usize::MAX, Mode::Error);
+        p.recover_after_conflict(at(9, A), &finality(9, &A), None)
+            .unwrap();
+        probe.ops()
+    };
+    rig.arm(writes_before_mirror - 1, Mode::Error);
+    assert!(s
+        .recover_after_conflict(at(9, A), &finality(9, &A), None)
+        .is_err());
+    drop(s);
+    rig.disk.borrow_mut().restart();
+    // With the archive, the repair completes.
+    let probe_receipt = rig.file("conflict-7.receipt").unwrap();
+    rig.remove_file("conflict-7.receipt");
+    assert!(
+        matches!(rig.open(), Err(SignerError::Corrupt(m)) if m.contains("recovery archive")),
+        "no receipt, no recovery"
+    );
+    rig.set_file("conflict-7.receipt", probe_receipt);
+    let s = rig.open().unwrap();
+    assert!(!s.is_halted());
+    assert_eq!(s.record().working_height(), Some(10));
+}
+
+#[test]
+fn initialization_refuses_while_a_conflict_archive_exists() {
     let rig = halted_rig();
     let key = rig.key().key_id();
-    rig.store()
-        .reinitialize_after_halt(&rig.owner, key, 20)
+    let mut s = rig.open().unwrap();
+    s.recover_after_conflict(at(9, A), &finality(9, &A), None)
         .unwrap();
-    // Wipe the new state and mirror: a plain initialization could now choose
-    // any floor, so it is refused while the archive exists.
+    drop(s);
+    // Wipe the state and the mirror: initializing now could choose any floor,
+    // clearing the conflict's history without evidence.
     rig.remove_file(STATE_FILE);
     rig.disk.borrow_mut().mirror_vol = None;
     rig.disk.borrow_mut().mirror_dur = None;
@@ -600,45 +744,58 @@ fn plain_initialization_refuses_while_a_halted_state_is_archived() {
 }
 
 #[test]
-fn crash_matrix_for_reinitialization_after_a_halt() {
-    let key = {
-        let r = Rig::new();
-        r.key().key_id()
-    };
+fn crash_matrix_for_recovery_after_a_conflict() {
     let rig = halted_rig();
+    let halted = decoded(&rig);
+    let mut s = rig.open().unwrap();
     rig.arm(usize::MAX, Mode::Error);
-    rig.store()
-        .reinitialize_after_halt(&rig.owner, key, 20)
+    s.recover_after_conflict(at(9, A), &finality(9, &A), None)
         .unwrap();
     let writes = rig.ops();
-    assert!(writes >= 8, "{writes}");
+    drop(s);
+    let recovered = decoded(&rig);
+    assert!(writes >= 4 * 4 + 5, "{writes}");
     let mut cases = 0;
     for k in 0..writes {
         for mode in MODES {
-            let ctx = format!("reinit / write {k} / {mode:?}");
+            let ctx = format!("recovery / write {k} / {mode:?}");
             let rig = halted_rig();
+            let mut s = rig.open().unwrap();
             rig.arm(k, mode);
             assert!(
-                rig.store()
-                    .reinitialize_after_halt(&rig.owner, key, 20)
+                s.recover_after_conflict(at(9, A), &finality(9, &A), None)
                     .is_err(),
                 "{ctx}"
             );
+            drop(s);
             rig.recover(mode);
-            // Until it completes, nothing can sign.
-            if let Ok(s) = rig.open() {
-                assert!(
-                    s.is_halted() || s.record().working_height() == Some(20),
+            let mut s = rig
+                .open()
+                .unwrap_or_else(|e| panic!("{ctx}: reopen refused: {e}"));
+            let now = decoded(&rig);
+            assert!(
+                now == halted || now == recovered,
+                "{ctx}: neither halted nor recovered"
+            );
+            assert_eq!(s.is_halted(), now == halted, "{ctx}");
+            if now == halted {
+                // Still halted: nothing signs; running the recovery again completes it.
+                assert_eq!(
+                    s.sign(&prevote(10, 0, A)),
+                    Err(SignerError::Halted),
                     "{ctx}"
                 );
+                s.recover_after_conflict(at(9, A), &finality(9, &A), None)
+                    .unwrap_or_else(|e| panic!("{ctx}: resume: {e}"));
             }
-            // Running it again completes it.
-            rig.store()
-                .reinitialize_after_halt(&rig.owner, key, 20)
-                .unwrap_or_else(|e| panic!("{ctx}: resume: {e}"));
-            let mut s = rig.open().unwrap();
-            assert_eq!(s.record().working_height(), Some(20), "{ctx}");
-            s.sign(&prevote(20, 0, A)).unwrap();
+            s.sign(&prevote(10, 0, A)).unwrap();
+            drop(s);
+            rig.disk.borrow_mut().reboot();
+            let s = rig
+                .open()
+                .unwrap_or_else(|e| panic!("{ctx}: after power loss: {e}"));
+            assert!(!s.is_halted(), "{ctx}");
+            assert_eq!(s.record().working_height(), Some(10), "{ctx}");
             cases += 1;
         }
     }

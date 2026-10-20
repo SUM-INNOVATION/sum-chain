@@ -212,13 +212,6 @@ impl MirrorStore for SimMirror {
             Ok(())
         })
     }
-    fn clear_synced(&mut self) -> Result<(), IoError> {
-        self.0.borrow_mut().step(Op::Mirror, |m| {
-            m.mirror_vol = None;
-            m.mirror_dur = None;
-            Ok(())
-        })
-    }
 }
 
 // ── signer doubles ──────────────────────────────────────────────────────────

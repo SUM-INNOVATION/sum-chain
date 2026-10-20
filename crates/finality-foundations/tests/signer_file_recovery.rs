@@ -988,10 +988,10 @@ fn i6_i7_strict_decoding_refuses_each_field_class() {
             |e| *e == StateError::Checksum,
         ),
         ("short", good[..STATE_LEN - 1].to_vec(), |e| {
-            matches!(e, StateError::Length(411))
+            matches!(e, StateError::Length(412))
         }),
         ("long", [good.clone(), vec![0]].concat(), |e| {
-            matches!(e, StateError::Length(413))
+            matches!(e, StateError::Length(414))
         }),
         ("magic", set(good.clone(), 0, b"FSGNv2\0"), |e| {
             *e == StateError::Magic
@@ -1003,8 +1003,21 @@ fn i6_i7_strict_decoding_refuses_each_field_class() {
             matches!(e, StateError::Flag(_))
         }),
         (
-            "halted shape on a locked state",
+            "lock_state 2 (no longer defined)",
             set(good.clone(), o::LOCK_STATE, &[2]),
+            |e| matches!(e, StateError::Flag("lock_state")),
+        ),
+        ("halt flag 2", set(good.clone(), o::HALT, &[2]), |e| {
+            matches!(e, StateError::Flag("halt"))
+        }),
+        (
+            "halted at counter 0",
+            set(fresh.clone(), o::HALT, &[1]),
+            |e| matches!(e, StateError::Inconsistent(_)),
+        ),
+        (
+            "halted while locked",
+            set(good.clone(), o::HALT, &[1]),
             |e| matches!(e, StateError::Inconsistent(_)),
         ),
         (
@@ -1014,7 +1027,7 @@ fn i6_i7_strict_decoding_refuses_each_field_class() {
         ),
         (
             "absent lock not zero",
-            set(fresh.clone(), o::PROOF - 1, &[1]),
+            set(fresh.clone(), o::HALT - 1, &[1]),
             |e| matches!(e, StateError::NonCanonicalAbsent(_)),
         ),
         ("step 0", set(good.clone(), o::LAST_STEP, &[0]), |e| {
@@ -1146,7 +1159,7 @@ fn i6_i7_strict_decoding_refuses_each_field_class() {
         r.set_file(STATE_FILE, bytes);
         assert!(matches!(r.open(), Err(SignerError::Corrupt(_))), "{what}");
     }
-    assert_eq!(n, 31);
+    assert_eq!(n, 34);
 }
 
 // ── I10 identity; missing and corrupt files; ownership; floor ───────────────
@@ -1279,13 +1292,6 @@ impl MirrorStore for FileMirror {
         match std::fs::read(&self.0) {
             Ok(b) => Ok(Some(b)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(IoError(e.to_string())),
-        }
-    }
-    fn clear_synced(&mut self) -> Result<(), IoError> {
-        match std::fs::remove_file(&self.0) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(IoError(e.to_string())),
         }
     }

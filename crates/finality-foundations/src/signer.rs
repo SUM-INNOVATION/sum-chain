@@ -140,13 +140,15 @@ pub enum ProofRef {
 
 /// RATIFIED semantics (2026-10-20), dormant: a persisted conflict halt. Two
 /// verified finality proofs for `height` named different blocks. A halted
-/// signer never signs or advances again; only an explicit operator
-/// re-initialization (see `signer_file::reinitialize_after_halt`) ends it.
+/// signer never signs or advances again; only the operator's explicit
+/// [`DurableSigner::recover_after_conflict`] (PROPOSED), with verified
+/// evidence, ends it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Halt {
     pub height: u64,
     pub certified_block: Digest,
-    pub conflicting_block: Digest,
+    /// Known when the halt is made; after a reload it is in the evidence.
+    pub conflicting_block: Option<Digest>,
     /// The conflicting proof, retained as evidence if the verifier retains.
     pub evidence: Option<ProofRef>,
 }
@@ -288,7 +290,7 @@ impl SignerRecord {
             {
                 return Err("a halt that does not name the certified height and block");
             }
-            if h.conflicting_block == h.certified_block {
+            if h.conflicting_block == Some(h.certified_block) {
                 return Err("a halt without a conflicting block");
             }
         }
@@ -316,6 +318,19 @@ pub trait SignerStore {
     /// identical request as equivocation rather than guessing.
     fn sign_bytes_digest(&self, _sign_bytes: &[u8]) -> Option<Digest> {
         None
+    }
+
+    /// Durably archive a conflict before recovery: the halted record, the
+    /// conflicting proof (`evidence`, or the store's own retained copy when
+    /// `None`) and the verified resume certificate, which proves `resume`.
+    /// The default refuses: a store that cannot archive cannot recover.
+    fn archive_conflict(
+        &mut self,
+        _evidence: Option<&[u8]>,
+        _resume_certificate: &[u8],
+        _resume: Certified,
+    ) -> Result<(), StoreError> {
+        Err(StoreError("this store cannot archive a conflict".into()))
     }
 }
 
@@ -426,8 +441,25 @@ pub enum SignerError {
     StaleFinalityProof { proof: u64, working: u64 },
     #[error("two verified finality proofs name different blocks at height {0}; the halt is persisted and the signer stops")]
     ConflictingFinality(u64),
-    #[error("the signer is halted by conflicting finality proofs; only operator re-initialization ends it")]
+    #[error("the signer is halted by conflicting finality proofs; only operator recovery with evidence ends it")]
     Halted,
+    #[error("the signer is not halted; there is nothing to recover from")]
+    NotHalted,
+    #[error(
+        "the resume certificate's height {resume} is below the halted working height {working}"
+    )]
+    RecoveryTooLow { resume: u64, working: u64 },
+    #[error(
+        "the resume certificate names {certified:?}, not the block the node follows {followed:?}"
+    )]
+    RecoveryWrongFork {
+        followed: Certified,
+        certified: Certified,
+    },
+    #[error("conflict evidence refused: {0}")]
+    RecoveryEvidence(String),
+    #[error("the conflict archive was not written; the signer stays halted: {0}")]
+    RecoveryArchive(String),
 }
 
 /// The signer. Holds the ownership guard for its whole life.
@@ -574,7 +606,7 @@ where
             halt: Some(Halt {
                 height: c.height,
                 certified_block: c.block_id,
-                conflicting_block: conflicting,
+                conflicting_block: Some(conflicting),
                 evidence: self.polka.retained_finality(proof).map(ProofRef::Bytes),
             }),
         };
@@ -590,6 +622,117 @@ where
         }
     }
 
+    /// The operator's explicit recovery from a conflict halt (PROPOSED,
+    /// dormant; never automatic: `sign` and `advance` refuse while halted).
+    ///
+    /// Required, all verified by the signer itself:
+    ///
+    /// * `followed`: the height `R` and block the node's own chain holds (the
+    ///   fork it now follows), as read from the node's store by the operator.
+    ///   It only narrows: the certificate must name exactly this block.
+    /// * `resume_certificate`: a `FinalityCertificateV1` that verifies against
+    ///   the node's context for `R` (a certificate made under another
+    ///   configuration or validator set is refused) and names `followed`,
+    ///   with `R` at or above the halted working height `W`. The conflict was
+    ///   at `W − 1` and the key may have signed at `W` (never above: signing
+    ///   above `W` needs a certificate, and the halt refuses advancement); the
+    ///   new floor covers every position at heights `≤ R`, so the next
+    ///   signature is at `R + 1`, above both.
+    /// * conflict evidence: `conflict_evidence` if given, which must verify
+    ///   as a finality proof for the conflict height naming a block other
+    ///   than the certified one; otherwise the store's retained copy, which
+    ///   must be present and intact.
+    ///
+    /// Order: verify everything (nothing is written on a refusal); archive the
+    /// halted record, the evidence and the resume certificate durably, the
+    /// receipt last; then persist the recovered record (floor raised past
+    /// `R`, certified `R`, nothing else kept). The store accepts the
+    /// recovered record only over its matching archive. A crash or error at
+    /// any step leaves the halted state (recovery may be retried) or the
+    /// recovered one.
+    pub fn recover_after_conflict(
+        &mut self,
+        followed: Certified,
+        resume_certificate: &[u8],
+        conflict_evidence: Option<&[u8]>,
+    ) -> Result<Certified, SignerError> {
+        if self.poisoned {
+            return Err(SignerError::Poisoned);
+        }
+        let Some(halt) = self.record.halt.clone() else {
+            return Err(SignerError::NotHalted);
+        };
+        let resume = self
+            .polka
+            .verify_finality(resume_certificate)
+            .map_err(SignerError::InvalidFinalityProof)?;
+        if resume != followed {
+            return Err(SignerError::RecoveryWrongFork {
+                followed,
+                certified: resume,
+            });
+        }
+        let working = halt.height + 1;
+        if resume.height < working {
+            return Err(SignerError::RecoveryTooLow {
+                resume: resume.height,
+                working,
+            });
+        }
+        if resume.height == u64::MAX {
+            return Err(SignerError::InvalidFinalityProof(
+                "a finality proof for the last representable height".into(),
+            ));
+        }
+        let evidence = match conflict_evidence {
+            None => None,
+            Some(e) => {
+                let c = self
+                    .polka
+                    .verify_finality(e)
+                    .map_err(SignerError::RecoveryEvidence)?;
+                if c.height != halt.height || c.block_id == halt.certified_block {
+                    return Err(SignerError::RecoveryEvidence(
+                        "the evidence does not name another block at the conflict height".into(),
+                    ));
+                }
+                Some(
+                    self.polka
+                        .retained_finality(e)
+                        .unwrap_or_else(|| e.to_vec()),
+                )
+            }
+        };
+        self.store
+            .archive_conflict(evidence.as_deref(), resume_certificate, resume)
+            .map_err(|e| SignerError::RecoveryArchive(e.0))?;
+        let sequence = self
+            .record
+            .sequence
+            .checked_add(1)
+            .ok_or(SignerError::InvalidRequest("signer sequence exhausted"))?;
+        let next = SignerRecord {
+            key_id: self.record.key_id,
+            sequence,
+            floor: Some(whole_height_floor(resume.height)),
+            last: None,
+            lock: None,
+            certified: Some(resume),
+            lock_proof: None,
+            halt: None,
+        };
+        match self.store.persist(&next) {
+            Ok(()) => {
+                self.record = next;
+                Ok(resume)
+            }
+            Err(e) => {
+                self.poisoned = true;
+                Err(SignerError::PersistFailed(e.0))
+            }
+        }
+    }
+
     /// Leave the working height (RATIFIED semantics 2026-10-20; dormant). `proof` must convince
     /// the signer's own verifier ([`PolkaVerifier::verify_finality`]) that a
     /// height `H` is final; the caller's word is never enough.
@@ -600,7 +743,9 @@ where
     ///   before anything is signed at `H + 1`.
     /// * `H` equal to the certified height: nothing changes if the block is
     ///   the same; a different block means two verified finality proofs
-    ///   conflict, and the signer refuses everything until it is reopened.
+    ///   conflict: the halt is persisted first, and the signer then refuses
+    ///   to sign or advance until the operator's recovery
+    ///   ([`DurableSigner::recover_after_conflict`]).
     /// * `H` below the working height otherwise: refused as stale; nothing
     ///   changes.
     pub fn advance(&mut self, proof: &[u8]) -> Result<Certified, SignerError> {
