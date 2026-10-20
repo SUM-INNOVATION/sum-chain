@@ -58,6 +58,18 @@ pub const MAX_LIST_ITEMS: u32 = 65_536;
 /// Largest whole encoding the decoder will look at.
 pub const MAX_ENCODING_BYTES: usize = 4 << 20;
 
+/// The most validators field `0x0003 validators` can hold in a decodable
+/// encoding: its value is a `u32` count followed by `u32` length ‖ 32-byte key
+/// per validator, so `4 + 36·n ≤` [`MAX_FIELD_VALUE_BYTES`] gives `n ≤ 29,127`.
+///
+/// The encoder refuses a larger list ([`ConsensusConfig`] construction checks
+/// every field against the decoder's bounds), so no configuration this binary
+/// builds is one its decoder would refuse. The dormant finality validator set
+/// has its own `u16` cap of 65,535 (`MAX_VALIDATORS`); the effective cap of a
+/// chain is the minimum of the two, 29,127. Changing either bound is a separate,
+/// ratified decision.
+pub const MAX_ENCODABLE_VALIDATORS: usize = (MAX_FIELD_VALUE_BYTES as usize - 4) / (4 + 32);
+
 const HEADER_LEN: usize = MAGIC.len() + 2 + 2;
 
 /// One typed field value.
@@ -109,6 +121,22 @@ impl Value {
             Value::Digest(_) => Ty::Digest,
             Value::List(_) => Ty::List,
         })
+    }
+
+    /// The length of the bytes [`Value::write_value`] produces, without
+    /// producing them.
+    pub(crate) fn encoded_len(&self) -> usize {
+        match self {
+            Value::Absent => 0,
+            Value::U8(_) | Value::Bool(_) => 1,
+            Value::U16(_) => 2,
+            Value::U32(_) => 4,
+            Value::U64(_) => 8,
+            Value::U128(_) => 16,
+            Value::Bytes(b) => b.len(),
+            Value::Digest(_) => 32,
+            Value::List(items) => 4 + items.iter().map(|i| 4 + i.len()).sum::<usize>(),
+        }
     }
 
     fn write_value(&self, out: &mut Vec<u8>) {
@@ -194,6 +222,15 @@ impl ConsensusConfig {
     ) -> Result<Self, ConfigError> {
         fields.sort_by_key(|f| f.id);
         check_against_registry(schema, &fields)?;
+        // The decoder refuses a whole encoding above MAX_ENCODING_BYTES; never
+        // build one (each field's own bound is checked in `check_value`).
+        let len = encoded_len(&fields);
+        if len > MAX_ENCODING_BYTES {
+            return Err(ConfigError::malformed(format!(
+                "the configuration encodes to {len} bytes, above the \
+                 {MAX_ENCODING_BYTES} byte bound the decoder enforces"
+            )));
+        }
         Ok(Self { schema, fields })
     }
 
@@ -401,6 +438,16 @@ impl ConsensusConfig {
     }
 }
 
+/// The length of the encoding of `fields`: the header (magic, schema, field
+/// count) and, per field, its 7-byte id ‖ tag ‖ length prefix and value.
+fn encoded_len(fields: &[Field]) -> usize {
+    HEADER_LEN
+        + fields
+            .iter()
+            .map(|f| 7 + f.value.encoded_len())
+            .sum::<usize>()
+}
+
 /// The commitment to an encoding.
 pub fn commitment_of(encoding: &[u8]) -> Hash {
     let mut data = Vec::with_capacity(COMMITMENT_DOMAIN.len() + encoding.len());
@@ -468,6 +515,16 @@ fn check_value(n: u16, spec: &FieldSpec, value: &Value) -> Result<(), ConfigErro
             spec.name, spec.id, ty, spec.ty
         ))),
         Some(_) => {
+            // The decoder refuses a field value above MAX_FIELD_VALUE_BYTES, so
+            // the encoder must never produce one.
+            let len = value.encoded_len();
+            if len > MAX_FIELD_VALUE_BYTES as usize {
+                return Err(ConfigError::malformed(format!(
+                    "field {} encodes to {len} bytes, above the {MAX_FIELD_VALUE_BYTES} \
+                     byte bound the decoder enforces",
+                    spec.name
+                )));
+            }
             if let Value::List(items) = value {
                 if items.len() > MAX_LIST_ITEMS as usize {
                     return Err(ConfigError::malformed(format!(
@@ -641,5 +698,168 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes(
             self.take(4)?.try_into().expect("4 bytes"),
         ))
+    }
+}
+
+#[cfg(test)]
+mod bound_tests {
+    //! The encoder never builds a configuration its own decoder refuses, and the
+    //! effective validator cap that follows from the decoder's field bound.
+
+    use super::*;
+
+    /// The dormant finality validator set's `u16` cap (`MAX_VALIDATORS` in the
+    /// dormant finality crate, which no workspace crate may name).
+    const FINALITY_SET_CAP: usize = 65_535;
+
+    const VALIDATORS: u16 = 0x0003;
+
+    fn root_config() -> ConsensusConfig {
+        let genesis =
+            sumchain_genesis::Genesis::from_json(include_str!("../../../../genesis.json")).unwrap();
+        crate::consensus_config::build(&genesis).unwrap()
+    }
+
+    /// `n` distinct 32-byte items (the codec does not check that they are keys).
+    fn items(n: usize) -> Vec<Vec<u8>> {
+        (0..n)
+            .map(|i| {
+                let mut k = vec![0u8; 32];
+                k[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                k
+            })
+            .collect()
+    }
+
+    fn with_validators(c: &ConsensusConfig, n: usize) -> Vec<Field> {
+        c.fields
+            .iter()
+            .cloned()
+            .map(|mut f| {
+                if f.id == VALIDATORS {
+                    f.value = Value::List(items(n));
+                }
+                f
+            })
+            .collect()
+    }
+
+    #[test]
+    fn encoded_len_is_the_length_write_value_produces() {
+        let samples = [
+            Value::Absent,
+            Value::U8(1),
+            Value::U16(2),
+            Value::U32(3),
+            Value::U64(4),
+            Value::U128(5),
+            Value::Bool(true),
+            Value::Bytes(vec![7; 13]),
+            Value::Digest([8; 32]),
+            Value::List(vec![]),
+            Value::List(vec![vec![1; 32], vec![2; 5]]),
+        ];
+        let c = root_config();
+        for v in samples.iter().chain(c.fields.iter().map(|f| &f.value)) {
+            let mut buf = Vec::new();
+            v.write_value(&mut buf);
+            assert_eq!(v.encoded_len(), buf.len(), "{v:?}");
+        }
+        assert_eq!(encoded_len(&c.fields), c.encode().len());
+    }
+
+    #[test]
+    fn the_effective_validator_cap_is_the_minimum_of_the_two_bounds() {
+        assert_eq!(MAX_ENCODABLE_VALIDATORS, 29_127);
+        assert_eq!(4 + 36 * 29_127, MAX_FIELD_VALUE_BYTES as usize);
+        assert!(4 + 36 * 29_128 > MAX_FIELD_VALUE_BYTES as usize);
+        // The decoder's field bound binds before the finality set's u16 cap and
+        // before the list-count bound; the effective cap is the minimum.
+        assert!(MAX_ENCODABLE_VALIDATORS < FINALITY_SET_CAP);
+        assert!(MAX_LIST_ITEMS as usize > FINALITY_SET_CAP);
+        assert_eq!(MAX_ENCODABLE_VALIDATORS.min(FINALITY_SET_CAP), 29_127);
+    }
+
+    #[test]
+    fn a_configuration_at_the_cap_builds_and_round_trips() {
+        let c = root_config();
+        let at_cap =
+            ConsensusConfig::from_fields(c.schema, with_validators(&c, MAX_ENCODABLE_VALIDATORS))
+                .unwrap();
+        assert_eq!(
+            at_cap.get(VALIDATORS).unwrap().encoded_len(),
+            MAX_FIELD_VALUE_BYTES as usize
+        );
+        let bytes = at_cap.encode();
+        assert!(bytes.len() < MAX_ENCODING_BYTES, "{}", bytes.len());
+        assert_eq!(ConsensusConfig::decode(&bytes).unwrap(), at_cap);
+    }
+
+    #[test]
+    fn one_validator_over_the_cap_is_refused_by_the_encoder_as_the_decoder_refuses_it() {
+        let c = root_config();
+        let over = with_validators(&c, MAX_ENCODABLE_VALIDATORS + 1);
+        // Built without the checks, the encoding is one the decoder refuses...
+        let unchecked = ConsensusConfig {
+            schema: c.schema,
+            fields: over.clone(),
+        };
+        let decoded = ConsensusConfig::decode(&unchecked.encode());
+        assert!(
+            matches!(&decoded, Err(ConfigError::Malformed(m)) if m.contains("byte bound")),
+            "{decoded:?}"
+        );
+        // ...so the encoder refuses to build it.
+        let built = ConsensusConfig::from_fields(c.schema, over);
+        assert!(
+            matches!(&built, Err(ConfigError::Malformed(m))
+                if m.contains("validators") && m.contains("byte bound the decoder enforces")),
+            "{built:?}"
+        );
+        // The finality set's cap is far beyond it.
+        assert!(
+            ConsensusConfig::from_fields(c.schema, with_validators(&c, FINALITY_SET_CAP)).is_err()
+        );
+    }
+
+    #[test]
+    fn a_configuration_above_the_whole_encoding_bound_is_refused() {
+        let c = root_config();
+        // Five byte-string fields at the per-field bound: each field passes on
+        // its own, the whole encoding exceeds MAX_ENCODING_BYTES.
+        let big: Vec<u16> = c
+            .fields
+            .iter()
+            .filter(|f| {
+                matches!(f.value, Value::Bytes(_))
+                    && c.spec(f.id).is_some_and(|s| s.item_width.is_none())
+            })
+            .map(|f| f.id)
+            .take(5)
+            .collect();
+        assert_eq!(big.len(), 5, "five variable-length byte fields");
+        let fields: Vec<Field> = c
+            .fields
+            .iter()
+            .cloned()
+            .map(|mut f| {
+                if big.contains(&f.id) {
+                    f.value = Value::Bytes(vec![0x5a; MAX_FIELD_VALUE_BYTES as usize]);
+                }
+                f
+            })
+            .collect();
+        assert!(encoded_len(&fields) > MAX_ENCODING_BYTES);
+        let unchecked = ConsensusConfig {
+            schema: c.schema,
+            fields: fields.clone(),
+        };
+        assert!(ConsensusConfig::decode(&unchecked.encode()).is_err());
+        let built = ConsensusConfig::from_fields(c.schema, fields);
+        assert!(
+            matches!(&built, Err(ConfigError::Malformed(m))
+                if m.contains("configuration encodes to") && m.contains("byte bound the decoder enforces")),
+            "{built:?}"
+        );
     }
 }
