@@ -33,6 +33,7 @@ crates/consensus/src/branch_switch.rs	PRODUCTION	EXCLUDE	local-fail-stop	read vi
 crates/consensus/src/consensus_config/codec.rs	COMMITMENT_DOMAIN	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/codec.rs	HEADER_LEN	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/codec.rs	MAGIC	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/codec.rs	MAX_ENCODABLE_VALIDATORS	EXCLUDE	consensus-config-self	derived from MAX_FIELD_VALUE_BYTES: the configuration format's own bound on field 0x0003 (29,127)
 crates/consensus/src/consensus_config/codec.rs	MAX_ENCODING_BYTES	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/codec.rs	MAX_FIELD_VALUE_BYTES	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/codec.rs	MAX_LIST_ITEMS	EXCLUDE	consensus-config-self	the configuration format itself
