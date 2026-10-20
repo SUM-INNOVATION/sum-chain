@@ -168,6 +168,12 @@ RATIFIED_HOME = {
     "M_CERT": "crates/finality-foundations/src/certificate.rs",
 }
 
+# PROPOSED, UNRATIFIED constants a local review branch implements, each in one
+# file. Checked like RATIFIED_HOME so that no other file spells them.
+PROPOSED_HOME = {
+    "D_VALSET": "crates/finality-foundations/src/vote.rs",
+}
+
 
 def main():
     # 1. BLAKE3.
@@ -349,7 +355,9 @@ def main():
     named = {**g.DOMAINS, **g.MAGICS}
     for name, home in sorted(RATIFIED_HOME.items()):
         check(lits.get(named[name]) == {home}, f"ratified {name} is spelled only in {home}")
-    homed = {named[n] for n in RATIFIED_HOME}
+    for name, home in sorted(PROPOSED_HOME.items()):
+        check(lits.get(named[name]) == {home}, f"proposed (unratified) {name} is spelled only in {home}")
+    homed = {named[n] for n in (*RATIFIED_HOME, *PROPOSED_HOME)}
     reused = {x for x in set(news)
               if any((lit == x and x not in homed) or (lit != x and lit.startswith(x))
                      or (lit and lit != x and x.startswith(lit) and lit.endswith(b"\0"))
