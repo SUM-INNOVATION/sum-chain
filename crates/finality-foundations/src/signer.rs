@@ -34,7 +34,8 @@
 //! * At the last signed position, the identical request returns the stored
 //!   signature (no new signature is made); any other request is refused as
 //!   equivocation.
-//! * Height (PROPOSED, unratified): the signer works at one height at a time.
+//! * Height (RATIFIED semantics 2026-10-20, dormant): the signer works at
+//!   one height at a time.
 //!   Before any certified height it is the floor's next height, or else the
 //!   height of the first signature; after [`DurableSigner::advance`] it is the
 //!   certified height + 1. A request above the working height is refused: a
@@ -128,6 +129,28 @@ pub enum SignBytes {
     Digest(Digest),
 }
 
+/// A retained proof as the store keeps it (§16 of the proposal): the bytes
+/// when newly retained, or the digest a store loaded. The bytes' encoding
+/// is the verifier's; the core never interprets them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProofRef {
+    Bytes(Vec<u8>),
+    Digest(Digest),
+}
+
+/// RATIFIED semantics (2026-10-20), dormant: a persisted conflict halt. Two
+/// verified finality proofs for `height` named different blocks. A halted
+/// signer never signs or advances again; only an explicit operator
+/// re-initialization (see `signer_file::reinitialize_after_halt`) ends it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Halt {
+    pub height: u64,
+    pub certified_block: Digest,
+    pub conflicting_block: Digest,
+    /// The conflicting proof, retained as evidence if the verifier retains.
+    pub evidence: Option<ProofRef>,
+}
+
 /// The last signature this key released (or is about to release).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LastSigned {
@@ -167,6 +190,11 @@ pub struct SignerRecord {
     /// Set by [`DurableSigner::advance`]: the floor is then the whole of
     /// `certified.height` and below.
     pub certified: Option<Certified>,
+    /// The retained proof that justified the current lock, if the verifier
+    /// retains proofs.
+    pub lock_proof: Option<ProofRef>,
+    /// Set once two verified finality proofs conflict; terminal.
+    pub halt: Option<Halt>,
 }
 
 /// The floor position that covers every position at heights `≤ height`.
@@ -245,6 +273,25 @@ impl SignerRecord {
                 return Err("a certified height without its floor");
             }
         }
+        if self.lock_proof.is_some() && self.lock.is_none() {
+            return Err("a retained lock proof without a lock");
+        }
+        if let Some(h) = self.halt.as_ref() {
+            if self.lock.is_some() || self.lock_proof.is_some() {
+                return Err("a halted record keeps a lock");
+            }
+            if self.certified
+                != Some(Certified {
+                    height: h.height,
+                    block_id: h.certified_block,
+                })
+            {
+                return Err("a halt that does not name the certified height and block");
+            }
+            if h.conflicting_block == h.certified_block {
+                return Err("a halt without a conflicting block");
+            }
+        }
         Ok(())
     }
 }
@@ -311,6 +358,25 @@ pub trait PolkaVerifier {
     fn verify_finality(&self, _proof: &[u8]) -> Result<Certified, String> {
         Err("no finality-proof verifier is configured".into())
     }
+
+    /// The bytes to retain for a prevote quorum this verifier accepted
+    /// (PROPOSED §16: trimmed to a minimal quorum that still verifies).
+    /// `None`: this verifier retains nothing.
+    fn retained_polka(
+        &self,
+        _height: u64,
+        _round: u32,
+        _value: &Digest,
+        _evidence: &[u8],
+    ) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// The bytes to retain for a finality proof this verifier accepted,
+    /// kept as evidence when two proofs conflict. `None`: nothing retained.
+    fn retained_finality(&self, _proof: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// Why the signer refused to open, initialize or sign.
@@ -358,8 +424,10 @@ pub enum SignerError {
     InvalidFinalityProof(String),
     #[error("finality proof for height {proof} is not above the certified history (working height {working})")]
     StaleFinalityProof { proof: u64, working: u64 },
-    #[error("two verified finality proofs name different blocks at height {0}; the signer stops")]
+    #[error("two verified finality proofs name different blocks at height {0}; the halt is persisted and the signer stops")]
     ConflictingFinality(u64),
+    #[error("the signer is halted by conflicting finality proofs; only operator re-initialization ends it")]
+    Halted,
 }
 
 /// The signer. Holds the ownership guard for its whole life.
@@ -408,6 +476,8 @@ pub fn initialize<S: SignerStore>(
         last: None,
         lock: None,
         certified: None,
+        lock_proof: None,
+        halt: None,
     };
     store
         .persist(&record)
@@ -474,7 +544,53 @@ where
         self.poisoned
     }
 
-    /// Leave the working height (PROPOSED, unratified). `proof` must convince
+    /// The store, for its status reports.
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
+    /// Whether the record carries a persisted conflict halt.
+    pub fn is_halted(&self) -> bool {
+        self.record.halt.is_some()
+    }
+
+    /// Persist the halt before anything else. On success the halt is durable
+    /// and the signer refuses everything from now on; if the write fails the
+    /// signer is poisoned, the halt is not durable, and the conflict is
+    /// detected again when either proof is presented again.
+    fn persist_halt(&mut self, c: Certified, conflicting: Digest, proof: &[u8]) -> SignerError {
+        let Some(sequence) = self.record.sequence.checked_add(1) else {
+            self.poisoned = true;
+            return SignerError::InvalidRequest("signer sequence exhausted");
+        };
+        let next = SignerRecord {
+            key_id: self.record.key_id,
+            sequence,
+            floor: self.record.floor,
+            last: self.record.last.clone(),
+            lock: None,
+            certified: self.record.certified,
+            lock_proof: None,
+            halt: Some(Halt {
+                height: c.height,
+                certified_block: c.block_id,
+                conflicting_block: conflicting,
+                evidence: self.polka.retained_finality(proof).map(ProofRef::Bytes),
+            }),
+        };
+        match self.store.persist(&next) {
+            Ok(()) => {
+                self.record = next;
+                SignerError::ConflictingFinality(c.height)
+            }
+            Err(e) => {
+                self.poisoned = true;
+                SignerError::PersistFailed(e.0)
+            }
+        }
+    }
+
+    /// Leave the working height (RATIFIED semantics 2026-10-20; dormant). `proof` must convince
     /// the signer's own verifier ([`PolkaVerifier::verify_finality`]) that a
     /// height `H` is final; the caller's word is never enough.
     ///
@@ -491,6 +607,9 @@ where
         if self.poisoned {
             return Err(SignerError::Poisoned);
         }
+        if self.record.halt.is_some() {
+            return Err(SignerError::Halted);
+        }
         let proven = self
             .polka
             .verify_finality(proof)
@@ -503,8 +622,7 @@ where
         if let Some(c) = self.record.certified {
             if proven.height == c.height {
                 if proven.block_id != c.block_id {
-                    self.poisoned = true;
-                    return Err(SignerError::ConflictingFinality(proven.height));
+                    return Err(self.persist_halt(c, proven.block_id, proof));
                 }
                 return Ok(c);
             }
@@ -529,6 +647,8 @@ where
             last: None,
             lock: None,
             certified: Some(proven),
+            lock_proof: None,
+            halt: None,
         };
         match self.store.persist(&next) {
             Ok(()) => {
@@ -546,6 +666,9 @@ where
     pub fn sign(&mut self, req: &SignRequest) -> Result<Vec<u8>, SignerError> {
         if self.poisoned {
             return Err(SignerError::Poisoned);
+        }
+        if self.record.halt.is_some() {
+            return Err(SignerError::Halted);
         }
         if req.position.step == Step::Propose && req.value == VoteValue::Nil {
             return Err(SignerError::InvalidRequest("a proposal must name a block"));
@@ -593,6 +716,7 @@ where
 
         let lock_here = self.record.lock.filter(|l| l.height == req.position.height);
         let mut next_lock = lock_here;
+        let mut next_lock_proof = self.record.lock_proof.clone();
         match (req.position.step, req.value) {
             (Step::Prevote, VoteValue::Block(v)) => {
                 if let Some(lock) = lock_here {
@@ -626,6 +750,10 @@ where
                     round: req.position.round,
                     value: v,
                 });
+                next_lock_proof = self
+                    .polka
+                    .retained_polka(req.position.height, j.polka_round, &v, &j.evidence)
+                    .map(ProofRef::Bytes);
             }
             (Step::Prevote | Step::Precommit, VoteValue::Nil) | (Step::Propose, _) => {}
         }
@@ -648,6 +776,8 @@ where
             }),
             lock: next_lock,
             certified: self.record.certified,
+            lock_proof: next_lock_proof,
+            halt: None,
         };
         match self.store.persist(&next) {
             Ok(()) => {
