@@ -56,8 +56,11 @@
 //!
 //! # Not here
 //!
-//! * How the validator-set commitment is computed (draft §2): the caller
-//!   supplies the commitment of the set it authenticated.
+//! * A RATIFIED validator-set commitment. [`validator_set_commitment`] and
+//!   [`AuthenticatedValidatorSet::from_keys`] implement the PROPOSED, UNRATIFIED
+//!   draft §2 derivation, `BLAKE3-256(D_VALSET ‖ n:u16 LE ‖ keys)`, for review
+//!   only; [`AuthenticatedValidatorSet::new`] still takes the caller's
+//!   commitment unchecked.
 //! * The certificate layout, evidence layout (A3) and signer state (A2). The
 //!   durable signer does not yet decode its payload as a vote; binding it is a
 //!   follow-up once A2 is ratified.
@@ -294,6 +297,86 @@ pub enum ValidatorSetError {
     SmallOrder { index: u16 },
     #[error("validator keys {first} and {second} are the same key")]
     Duplicate { first: u16, second: u16 },
+    #[error("the expected validator-set commitment does not match the commitment of the keys")]
+    CommitmentMismatch,
+}
+
+/// Domain of the validator-set commitment (draft §2). PROPOSED, UNRATIFIED.
+pub const D_VALSET: &[u8; 19] = b"SUMCHAIN/VALSET/v1\0";
+
+/// Length of the validator-set commitment preimage for `n` validators:
+/// `19 + 2 + 32·n` (85 B at n = 2, 149 B at n = 4, 2,097,141 B at n = 65,535).
+/// PROPOSED, UNRATIFIED.
+pub const fn validator_set_preimage_len(n: u16) -> usize {
+    D_VALSET.len() + 2 + 32 * n as usize
+}
+
+/// The validator-set commitment preimage `D_VALSET ‖ n:u16 LE ‖ key_0 ‖ … ‖
+/// key_{n-1}`, the keys in authenticated order exactly as given. Refused as
+/// [`AuthenticatedValidatorSet::from_keys`] refuses. PROPOSED, UNRATIFIED:
+/// exposed for vectors and review; [`validator_set_commitment`] hashes the same
+/// bytes without building them.
+pub fn validator_set_preimage(keys: &[[u8; 32]]) -> Result<Vec<u8>, ValidatorSetError> {
+    let n = checked_keys(keys)?.1;
+    let mut out = Vec::with_capacity(validator_set_preimage_len(n));
+    out.extend_from_slice(D_VALSET);
+    out.extend_from_slice(&n.to_le_bytes());
+    for key in keys {
+        out.extend_from_slice(key);
+    }
+    Ok(out)
+}
+
+/// The validator-set commitment `BLAKE3-256(D_VALSET ‖ n:u16 LE ‖ keys)` of a
+/// set that passes every construction rule (count `1 ≤ n ≤ 65,535`, each key
+/// decodable, canonically encoded and not of small order, no duplicate).
+/// Order matters: the keys are taken in authenticated order (under G2-d the
+/// static genesis order, ConsensusConfig field `0x0003 validators`). PROPOSED,
+/// UNRATIFIED.
+pub fn validator_set_commitment(keys: &[[u8; 32]]) -> Result<Digest, ValidatorSetError> {
+    let n = checked_keys(keys)?.1;
+    Ok(commit(n, keys))
+}
+
+fn commit(n: u16, keys: &[[u8; 32]]) -> Digest {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(D_VALSET);
+    hasher.update(&n.to_le_bytes());
+    for key in keys {
+        hasher.update(key);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+/// Every construction rule, in order: the count before any key is looked at,
+/// then each key (decode, canonical, small order, duplicate).
+fn checked_keys(keys: &[[u8; 32]]) -> Result<(Vec<VerifyingKey>, u16), ValidatorSetError> {
+    let n = checked_validator_count(keys.len()).map_err(|e| match e {
+        ValidatorCountError::Empty => ValidatorSetError::Empty,
+        ValidatorCountError::TooMany { n } => ValidatorSetError::TooMany { n },
+    })?;
+    let mut seen: BTreeMap<[u8; 32], u16> = BTreeMap::new();
+    let mut decoded = Vec::with_capacity(keys.len());
+    for (i, bytes) in keys.iter().enumerate() {
+        let index = u16::try_from(i).expect("the size was checked above");
+        let key = VerifyingKey::from_bytes(bytes)
+            .map_err(|_| ValidatorSetError::Undecodable { index })?;
+        if key.to_edwards().compress().to_bytes() != *bytes {
+            return Err(ValidatorSetError::NonCanonical { index });
+        }
+        if key.is_weak() {
+            return Err(ValidatorSetError::SmallOrder { index });
+        }
+        if let Some(&first) = seen.get(bytes) {
+            return Err(ValidatorSetError::Duplicate {
+                first,
+                second: index,
+            });
+        }
+        seen.insert(*bytes, index);
+        decoded.push(key);
+    }
+    Ok((decoded, n))
 }
 
 /// The validator set authenticated for a height, in authenticated order, with
@@ -309,40 +392,44 @@ impl AuthenticatedValidatorSet {
     /// A set from its commitment and its keys in authenticated order. Refused:
     /// a count outside `1 ≤ n ≤ 65,535` ([`checked_validator_count`]), a key
     /// that does not decode, is not canonically encoded or is of small order
-    /// (V-6), and a duplicate.
+    /// (V-6), and a duplicate. The commitment is taken as given and is not
+    /// checked against the keys; [`AuthenticatedValidatorSet::from_keys`] and
+    /// [`AuthenticatedValidatorSet::with_expected_commitment`] derive it.
     pub fn new(
         commitment: Digest,
         keys: &[[u8; 32]],
     ) -> Result<AuthenticatedValidatorSet, ValidatorSetError> {
-        checked_validator_count(keys.len()).map_err(|e| match e {
-            ValidatorCountError::Empty => ValidatorSetError::Empty,
-            ValidatorCountError::TooMany { n } => ValidatorSetError::TooMany { n },
-        })?;
-        let mut seen: BTreeMap<[u8; 32], u16> = BTreeMap::new();
-        let mut decoded = Vec::with_capacity(keys.len());
-        for (i, bytes) in keys.iter().enumerate() {
-            let index = u16::try_from(i).expect("the size was checked above");
-            let key = VerifyingKey::from_bytes(bytes)
-                .map_err(|_| ValidatorSetError::Undecodable { index })?;
-            if key.to_edwards().compress().to_bytes() != *bytes {
-                return Err(ValidatorSetError::NonCanonical { index });
-            }
-            if key.is_weak() {
-                return Err(ValidatorSetError::SmallOrder { index });
-            }
-            if let Some(&first) = seen.get(bytes) {
-                return Err(ValidatorSetError::Duplicate {
-                    first,
-                    second: index,
-                });
-            }
-            seen.insert(*bytes, index);
-            decoded.push(key);
-        }
+        let (decoded, _) = checked_keys(keys)?;
         Ok(AuthenticatedValidatorSet {
             commitment,
             keys: decoded,
         })
+    }
+
+    /// A set from its keys in authenticated order, named by the commitment
+    /// derived from them ([`validator_set_commitment`]). Refused as
+    /// [`AuthenticatedValidatorSet::new`] refuses. PROPOSED, UNRATIFIED.
+    pub fn from_keys(keys: &[[u8; 32]]) -> Result<AuthenticatedValidatorSet, ValidatorSetError> {
+        let (decoded, n) = checked_keys(keys)?;
+        Ok(AuthenticatedValidatorSet {
+            commitment: commit(n, keys),
+            keys: decoded,
+        })
+    }
+
+    /// [`AuthenticatedValidatorSet::from_keys`], refused with
+    /// [`ValidatorSetError::CommitmentMismatch`] unless the derived commitment
+    /// equals `expected`. A commitment is never accepted without its keys.
+    /// PROPOSED, UNRATIFIED.
+    pub fn with_expected_commitment(
+        expected: Digest,
+        keys: &[[u8; 32]],
+    ) -> Result<AuthenticatedValidatorSet, ValidatorSetError> {
+        let set = AuthenticatedValidatorSet::from_keys(keys)?;
+        if set.commitment != expected {
+            return Err(ValidatorSetError::CommitmentMismatch);
+        }
+        Ok(set)
     }
 
     /// The commitment that names this set.
