@@ -799,6 +799,98 @@ fn a_second_conflict_needs_new_evidence_and_a_strictly_higher_resume() {
     assert_eq!(rig.file("conflict-9.evidence"), Some(finality(9, &B)));
 }
 
+/// The model's growth dimension, checked directly: two interrupted
+/// recovery attempts with **different** inputs ((8, B), then (9, A)), each
+/// faulted at every write in every mode, leave the halted state file and
+/// mirror byte-identical (no reset, no lost halt) and only `conflict-*`
+/// debris; a final clean recovery to (9, A) then ends in exactly the state
+/// file, mirror and archive of a recovery with no debris at all.
+#[test]
+fn interrupted_recoveries_leave_only_debris_that_never_changes_the_outcome() {
+    let snapshot = |rig: &Rig| {
+        let d = rig.disk.borrow();
+        let files: Vec<(String, Vec<u8>)> = d
+            .dir_dur
+            .iter()
+            .map(|(k, &i)| (k.clone(), d.inodes[i].dur.clone()))
+            .collect();
+        (files, d.mirror_dur.clone())
+    };
+    let durable_halted = |rig: &Rig| {
+        let (files, mirror) = snapshot(rig);
+        let state = files
+            .iter()
+            .find(|(k, _)| k == STATE_FILE)
+            .map(|(_, b)| b.clone());
+        (state, mirror)
+    };
+    // Reference: no debris.
+    let reference = {
+        let rig = halted_rig();
+        rig.open()
+            .unwrap()
+            .recover_after_conflict(at(9, A), &finality(9, &A), None)
+            .unwrap();
+        rig.disk.borrow_mut().reboot();
+        rig.open().unwrap();
+        snapshot(&rig)
+    };
+    let halted = durable_halted(&halted_rig());
+    let attempt_writes = |r: u64, b: Digest| {
+        let rig = halted_rig();
+        let mut s = rig.open().unwrap();
+        rig.arm(usize::MAX, Mode::Error);
+        s.recover_after_conflict(at(r, b), &finality(r, &b), None)
+            .unwrap();
+        rig.ops()
+    };
+    // Faults at the archive writes only: a fault at P1/P2 may complete the
+    // first attempt, which is the crash matrix's subject.
+    let (w8, w9) = (attempt_writes(8, B) - 5, attempt_writes(9, A) - 5);
+    let mut cases = 0;
+    for k1 in 0..w8 {
+        for m1 in MODES {
+            for k2 in 0..w9 {
+                for m2 in MODES {
+                    let ctx = format!("(8,B) write {k1} {m1:?}; (9,A) write {k2} {m2:?}");
+                    let rig = halted_rig();
+                    for (k, m, r, b) in [(k1, m1, 8, B), (k2, m2, 9, A)] {
+                        let mut s = rig.open().unwrap_or_else(|e| panic!("{ctx}: {e}"));
+                        rig.arm(k, m);
+                        assert!(
+                            s.recover_after_conflict(at(r, b), &finality(r, &b), None)
+                                .is_err(),
+                            "{ctx}"
+                        );
+                        drop(s);
+                        rig.recover(m);
+                        rig.disk.borrow_mut().reboot();
+                        assert_eq!(
+                            durable_halted(&rig),
+                            halted,
+                            "{ctx}: the halted record changed"
+                        );
+                        assert!(rig.open().unwrap().is_halted(), "{ctx}");
+                    }
+                    let mut s = rig.open().unwrap();
+                    s.recover_after_conflict(at(9, A), &finality(9, &A), None)
+                        .unwrap_or_else(|e| panic!("{ctx}: final recovery: {e}"));
+                    drop(s);
+                    rig.disk.borrow_mut().reboot();
+                    rig.open().unwrap();
+                    assert_eq!(
+                        snapshot(&rig),
+                        reference,
+                        "{ctx}: debris changed the outcome"
+                    );
+                    cases += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(cases, w8 * w9 * 25);
+}
+
 #[test]
 fn crash_matrix_for_recovery_after_a_conflict() {
     let rig = halted_rig();
