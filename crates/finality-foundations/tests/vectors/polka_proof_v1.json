@@ -1,0 +1,58 @@
+{
+  "magic": "46504f4c763100",
+  "status": "UNRATIFIED PROPOSAL. SYNTHETIC: test-only Ed25519 seeds [0x01;32]..[0x04;32]; config, set commitment and block are synthetic.",
+  "title": "PolkaProofV1 (UNRATIFIED) known-answer vectors",
+  "vectors": [
+    {
+      "block_id": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "consensus_config_commitment": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "height": 7,
+      "hex": "46504f4c7631000100c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c00700000000000000b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b10100000004005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a03000000a61b41daeb62bb45f15718b3342e55692add5665de9d33d4854b8cfdc5aed37dff48af93c4dea62e118590c33f57d229b3b80486e538053cc5d2e674ab86100d01002e344c76c6e726080e633e00760a204c8f824cc0188cbba2fa9eeecf653ecb111835004383a82ea8cc7f49eed558aac46a50526015611d48e0874f2b49de2b0403005012ebd66e083129bee75113c3f4e0ddf69bcdac1dfdd1fd6d0c57bc827421e0837582eaee84fa122f262a9b990023a71ba2be2ea99498f26ce5f85a110dba09",
+      "k": 3,
+      "length": 317,
+      "n": 4,
+      "name": "polka n=4 h=7 r=1 signers {0,1,3} (minimum quorum k=3)",
+      "round": 1,
+      "signers": [
+        0,
+        1,
+        3
+      ],
+      "validator_set_commitment": "04005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+    },
+    {
+      "block_id": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "consensus_config_commitment": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "height": 7,
+      "hex": "46504f4c7631000100c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c00700000000000000b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b10100000004005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a04000000a61b41daeb62bb45f15718b3342e55692add5665de9d33d4854b8cfdc5aed37dff48af93c4dea62e118590c33f57d229b3b80486e538053cc5d2e674ab86100d01002e344c76c6e726080e633e00760a204c8f824cc0188cbba2fa9eeecf653ecb111835004383a82ea8cc7f49eed558aac46a50526015611d48e0874f2b49de2b040200055969da56a4cc68f940bbcdcb5fa956cac01e278627d63c7001009fbf3c49e4108ae58b59a78f1637965c64c22b4a447baa08894f9f896ed06b54fc46cdcc0603005012ebd66e083129bee75113c3f4e0ddf69bcdac1dfdd1fd6d0c57bc827421e0837582eaee84fa122f262a9b990023a71ba2be2ea99498f26ce5f85a110dba09",
+      "k": 4,
+      "length": 383,
+      "n": 4,
+      "name": "polka n=4 h=7 r=1 signers {0,1,2,3} (all signers k=4)",
+      "round": 1,
+      "signers": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "validator_set_commitment": "04005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+    },
+    {
+      "block_id": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "consensus_config_commitment": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "height": 7,
+      "hex": "46504f4c7631000100c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c00700000000000000b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b10000000002005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a020000001f07badda45e83911a5a673bf239b3f6dd72412089b37288b56ce158b892ce36437699ae11709a0c90e130062ec2734f499fea582c5e0f13f404086205fe34060100f408d6609dc68c1d4975ab3576c540e0260d237ec702087cd9e7e031f61ab4f76bee9c832dd900553185a489a742c82db1f7fe1abce21055250543340078a00a",
+      "k": 2,
+      "length": 251,
+      "n": 2,
+      "name": "polka n=2 h=7 r=0 signers {0,1} (k=2)",
+      "round": 0,
+      "signers": [
+        0,
+        1
+      ],
+      "validator_set_commitment": "02005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+    }
+  ]
+}

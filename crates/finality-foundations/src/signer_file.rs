@@ -1,11 +1,12 @@
 //! PROPOSED, UNRATIFIED: a file-backed [`SignerStore`] for the G2-b signer.
 //!
 //! This is a dormant prototype of the signer-state layout and recovery rules
-//! under review (group A2, revision 2 of the draft). Nothing calls it, the
-//! byte layout is not frozen, and it exists so that every crash point of the
-//! persistence protocol can be tested against the real encoding.
+//! under review (group A2, revision 3 of the draft). Nothing calls it, the
+//! byte layout is **not ratified and not frozen**, and it exists so that every
+//! crash point of the persistence protocol can be tested against the real
+//! encoding.
 //!
-//! # Layout: 348 bytes (draft 1 was 284)
+//! # Layout (UNRATIFIED): 380 bytes (draft 1: 284; draft 2: 348)
 //!
 //! | Offset | Width | Field |
 //! |---|---|---|
@@ -15,25 +16,29 @@
 //! | 17 | 8 | chain_id u64 LE |
 //! | 25 | 32 | genesis_block_hash |
 //! | 57 | 32 | signer_pubkey |
-//! | 89 | 8 | floor_height u64 LE |
-//! | 97 | 1 | last_present (0 or 1) |
-//! | 98 | 8 | last_height u64 LE |
-//! | 106 | 4 | last_round u32 LE |
-//! | 110 | 1 | last_step (1 proposal, 2 prevote, 3 precommit) |
-//! | 111 | 32 | last_value (block id; all zero = nil) **new** |
-//! | 143 | 32 | last_sign_bytes_digest = H(`D_SIGNBYTES` ‖ sign bytes) |
-//! | 175 | 64 | last_signature |
-//! | 239 | 1 | lock_present (0 or 1) |
-//! | 240 | 8 | lock_height u64 LE |
-//! | 248 | 4 | lock_round u32 LE |
-//! | 252 | 32 | lock_value |
-//! | 284 | 32 | prev_checksum (checksum of the record this one replaced) **new** |
-//! | 316 | 32 | checksum = H(`D_SIGNER` ‖ bytes[0..316]) |
+//! | 89 | 8 | floor_height u64 LE (the working height; 0 = none yet) |
+//! | 97 | 32 | certified_block_id (all zero: the floor came from initialization) **draft 3** |
+//! | 129 | 1 | last_present (0 or 1) |
+//! | 130 | 8 | last_height u64 LE |
+//! | 138 | 4 | last_round u32 LE |
+//! | 142 | 1 | last_step (1 proposal, 2 prevote, 3 precommit) |
+//! | 143 | 32 | last_value (block id; all zero = nil) |
+//! | 175 | 32 | last_sign_bytes_digest = H(`D_SIGNBYTES` ‖ sign bytes) |
+//! | 207 | 64 | last_signature |
+//! | 271 | 1 | lock_present (0 or 1) |
+//! | 272 | 8 | lock_height u64 LE |
+//! | 280 | 4 | lock_round u32 LE |
+//! | 284 | 32 | lock_value |
+//! | 316 | 32 | prev_checksum (checksum of the record this one replaced) |
+//! | 348 | 32 | checksum = H(`D_SIGNER` ‖ bytes[0..348]) |
+//!
+//! `floor_height` F > 0 is the only height the signer may sign at: heights
+//! below are refused, and heights above need a finality proof first. With a
+//! non-zero `certified_block_id`, F − 1 is the highest height the signer holds
+//! a verified finality proof for, and that is the block it commits.
 //!
 //! The mirror (kept in the node database, written with a synced WAL) is a
-//! byte-identical copy of the last fully persisted state, so equal counters
-//! are compared over every byte, and a one-ahead state can be checked as the
-//! exact successor of the mirrored one.
+//! byte-identical copy of the last fully persisted state.
 //!
 //! The hash function is injected ([`StateHasher`]); the draft proposes
 //! BLAKE3-256.
@@ -69,8 +74,8 @@ use thiserror::Error;
 
 use crate::encoding::MAX_ROUND;
 use crate::signer::{
-    LastSigned, Lock, SignBytes, SignPosition, SignerRecord, SignerStore, Step, StoreError,
-    VoteValue,
+    whole_height_floor, Certified, LastSigned, Lock, SignBytes, SignPosition, SignerRecord,
+    SignerStore, Step, StoreError, VoteValue,
 };
 use crate::Digest;
 
@@ -82,10 +87,34 @@ pub const D_SIGNBYTES: &[u8; 31] = b"SUMCHAIN/FINALITY/SIGNBYTES/v1\0";
 pub const MAGIC: &[u8; 7] = b"FSGNv1\0";
 /// Schema.
 pub const SCHEMA: u16 = 1;
+
+/// Field offsets of the UNRATIFIED draft-3 layout.
+pub mod offset {
+    pub const COUNTER: usize = 9;
+    pub const CHAIN_ID: usize = 17;
+    pub const GENESIS: usize = 25;
+    pub const PUBKEY: usize = 57;
+    pub const FLOOR: usize = 89;
+    pub const CERTIFIED: usize = 97;
+    pub const LAST_PRESENT: usize = 129;
+    pub const LAST_HEIGHT: usize = 130;
+    pub const LAST_ROUND: usize = 138;
+    pub const LAST_STEP: usize = 142;
+    pub const LAST_VALUE: usize = 143;
+    pub const LAST_DIGEST: usize = 175;
+    pub const LAST_SIGNATURE: usize = 207;
+    pub const LOCK_PRESENT: usize = 271;
+    pub const LOCK_HEIGHT: usize = 272;
+    pub const LOCK_ROUND: usize = 280;
+    pub const LOCK_VALUE: usize = 284;
+    pub const PREV: usize = 316;
+    pub const CHECKSUM: usize = 348;
+}
+
 /// Length of an encoded state.
-pub const STATE_LEN: usize = 348;
+pub const STATE_LEN: usize = 380;
 /// Bytes covered by the checksum.
-pub const CHECKSUMMED_LEN: usize = 316;
+pub const CHECKSUMMED_LEN: usize = offset::CHECKSUM;
 /// The state file.
 pub const STATE_FILE: &str = "signer.v1";
 /// The temporary file renamed over [`STATE_FILE`].
@@ -120,8 +149,11 @@ pub struct StateLast {
 pub struct SignerState {
     pub counter: u64,
     pub identity: Identity,
-    /// Heights below this are never signed. 0: no floor.
+    /// The working height: below it nothing is signed, above it nothing is
+    /// signed without a finality proof first. 0: no height fixed yet.
     pub floor_height: u64,
+    /// Non-zero: `floor_height − 1` was proven final, committing this block.
+    pub certified_block_id: Digest,
     pub last: Option<StateLast>,
     pub lock: Option<Lock>,
     pub prev_checksum: Digest,
@@ -130,7 +162,7 @@ pub struct SignerState {
 /// Why bytes were refused as a state, or a transition as a successor.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum StateError {
-    #[error("length {0}, expected 348")]
+    #[error("length {0}, expected 380")]
     Length(usize),
     #[error("bad magic")]
     Magic,
@@ -196,11 +228,7 @@ fn bytes_value(d: Digest) -> VoteValue {
 /// The core's floor position for a floor height: every position below height
 /// `floor_height` is refused, signing at `floor_height` itself is allowed.
 pub fn floor_below_height(floor_height: u64) -> Option<SignPosition> {
-    floor_height.checked_sub(1).map(|h| SignPosition {
-        height: h,
-        round: MAX_ROUND,
-        step: Step::Precommit,
-    })
+    floor_height.checked_sub(1).map(whole_height_floor)
 }
 
 fn height_of_floor(floor: Option<SignPosition>) -> Result<u64, StateError> {
@@ -226,8 +254,14 @@ fn lock_position(lock: &Lock) -> SignPosition {
 
 impl SignerState {
     /// Rules every single record must satisfy (canonical absence, last/lock
-    /// consistency, bounds). Decoding applies them; so does persisting.
+    /// consistency, the working height, bounds). Decoding applies them; so
+    /// does persisting.
     pub fn check(&self) -> Result<(), StateError> {
+        if self.certified_block_id != ZERO && self.floor_height == 0 {
+            return Err(StateError::Inconsistent(
+                "a certified block without a floor",
+            ));
+        }
         if self.counter == 0 {
             if self.last.is_some() || self.lock.is_some() {
                 return Err(StateError::Inconsistent(
@@ -239,6 +273,9 @@ impl SignerState {
                     "counter 0 with a predecessor checksum",
                 ));
             }
+            if self.certified_block_id != ZERO {
+                return Err(StateError::Inconsistent("counter 0 with a certified block"));
+            }
             return Ok(());
         }
         if self.prev_checksum == ZERO {
@@ -247,15 +284,26 @@ impl SignerState {
             ));
         }
         let Some(last) = self.last.as_ref() else {
-            return Err(StateError::Inconsistent(
-                "counter above 0 without a signature (every persist after init signs)",
-            ));
+            if self.lock.is_some() {
+                return Err(StateError::Inconsistent("a lock without a signature"));
+            }
+            if self.certified_block_id == ZERO {
+                return Err(StateError::Inconsistent(
+                    "counter above 0 with neither a signature nor a certified height",
+                ));
+            }
+            return Ok(());
         };
         if last.position.round > MAX_ROUND {
             return Err(StateError::Round("last", last.position.round));
         }
         if last.position.height < self.floor_height {
             return Err(StateError::BelowFloor("last signature"));
+        }
+        if self.floor_height != 0 && last.position.height != self.floor_height {
+            return Err(StateError::Inconsistent(
+                "the last signature is above the working height",
+            ));
         }
         if last.position.step == Step::Propose && last.value == VoteValue::Nil {
             return Err(StateError::Inconsistent("a nil proposal was recorded"));
@@ -305,33 +353,36 @@ impl SignerState {
     /// Encode, computing the checksum. Refuses a record that fails
     /// [`SignerState::check`].
     pub fn encode<H: StateHasher>(&self, hasher: &H) -> Result<[u8; STATE_LEN], StateError> {
+        use offset as o;
         self.check()?;
         let mut b = [0u8; STATE_LEN];
         b[0..7].copy_from_slice(MAGIC);
         b[7..9].copy_from_slice(&SCHEMA.to_le_bytes());
-        b[9..17].copy_from_slice(&self.counter.to_le_bytes());
-        b[17..25].copy_from_slice(&self.identity.chain_id.to_le_bytes());
-        b[25..57].copy_from_slice(&self.identity.genesis_block_hash);
-        b[57..89].copy_from_slice(&self.identity.signer_pubkey);
-        b[89..97].copy_from_slice(&self.floor_height.to_le_bytes());
+        b[o::COUNTER..o::COUNTER + 8].copy_from_slice(&self.counter.to_le_bytes());
+        b[o::CHAIN_ID..o::CHAIN_ID + 8].copy_from_slice(&self.identity.chain_id.to_le_bytes());
+        b[o::GENESIS..o::GENESIS + 32].copy_from_slice(&self.identity.genesis_block_hash);
+        b[o::PUBKEY..o::PUBKEY + 32].copy_from_slice(&self.identity.signer_pubkey);
+        b[o::FLOOR..o::FLOOR + 8].copy_from_slice(&self.floor_height.to_le_bytes());
+        b[o::CERTIFIED..o::CERTIFIED + 32].copy_from_slice(&self.certified_block_id);
         if let Some(last) = self.last.as_ref() {
-            b[97] = 1;
-            b[98..106].copy_from_slice(&last.position.height.to_le_bytes());
-            b[106..110].copy_from_slice(&last.position.round.to_le_bytes());
-            b[110] = step_byte(last.position.step);
-            b[111..143].copy_from_slice(&value_bytes(last.value)?);
-            b[143..175].copy_from_slice(&last.sign_bytes_digest);
-            b[175..239].copy_from_slice(&last.signature);
+            b[o::LAST_PRESENT] = 1;
+            b[o::LAST_HEIGHT..o::LAST_HEIGHT + 8]
+                .copy_from_slice(&last.position.height.to_le_bytes());
+            b[o::LAST_ROUND..o::LAST_ROUND + 4].copy_from_slice(&last.position.round.to_le_bytes());
+            b[o::LAST_STEP] = step_byte(last.position.step);
+            b[o::LAST_VALUE..o::LAST_VALUE + 32].copy_from_slice(&value_bytes(last.value)?);
+            b[o::LAST_DIGEST..o::LAST_DIGEST + 32].copy_from_slice(&last.sign_bytes_digest);
+            b[o::LAST_SIGNATURE..o::LAST_SIGNATURE + 64].copy_from_slice(&last.signature);
         }
         if let Some(lock) = self.lock.as_ref() {
-            b[239] = 1;
-            b[240..248].copy_from_slice(&lock.height.to_le_bytes());
-            b[248..252].copy_from_slice(&lock.round.to_le_bytes());
-            b[252..284].copy_from_slice(&lock.value);
+            b[o::LOCK_PRESENT] = 1;
+            b[o::LOCK_HEIGHT..o::LOCK_HEIGHT + 8].copy_from_slice(&lock.height.to_le_bytes());
+            b[o::LOCK_ROUND..o::LOCK_ROUND + 4].copy_from_slice(&lock.round.to_le_bytes());
+            b[o::LOCK_VALUE..o::LOCK_VALUE + 32].copy_from_slice(&lock.value);
         }
-        b[284..316].copy_from_slice(&self.prev_checksum);
+        b[o::PREV..o::PREV + 32].copy_from_slice(&self.prev_checksum);
         let sum = checksum(hasher, &b[..CHECKSUMMED_LEN]);
-        b[316..348].copy_from_slice(&sum);
+        b[o::CHECKSUM..o::CHECKSUM + 32].copy_from_slice(&sum);
         Ok(b)
     }
 
@@ -340,6 +391,7 @@ impl SignerState {
         bytes: &[u8],
         hasher: &H,
     ) -> Result<(SignerState, Digest), StateError> {
+        use offset as o;
         if bytes.len() != STATE_LEN {
             return Err(StateError::Length(bytes.len()));
         }
@@ -350,79 +402,96 @@ impl SignerState {
         if schema != SCHEMA {
             return Err(StateError::Schema(schema));
         }
-        let stored: Digest = bytes[316..348].try_into().expect("32 bytes");
+        let stored: Digest = bytes[o::CHECKSUM..o::CHECKSUM + 32]
+            .try_into()
+            .expect("32 bytes");
         if checksum(hasher, &bytes[..CHECKSUMMED_LEN]) != stored {
             return Err(StateError::Checksum);
         }
-        let u64_at = |o: usize| u64::from_le_bytes(bytes[o..o + 8].try_into().expect("8"));
-        let u32_at = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().expect("4"));
-        let d_at = |o: usize| -> Digest { bytes[o..o + 32].try_into().expect("32") };
+        let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().expect("8"));
+        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4"));
+        let d_at = |at: usize| -> Digest { bytes[at..at + 32].try_into().expect("32") };
         let identity = Identity {
-            chain_id: u64_at(17),
-            genesis_block_hash: d_at(25),
-            signer_pubkey: d_at(57),
+            chain_id: u64_at(o::CHAIN_ID),
+            genesis_block_hash: d_at(o::GENESIS),
+            signer_pubkey: d_at(o::PUBKEY),
         };
-        let last = match bytes[97] {
+        let last = match bytes[o::LAST_PRESENT] {
             0 => {
-                if bytes[98..239].iter().any(|&x| x != 0) {
+                if bytes[o::LAST_HEIGHT..o::LOCK_PRESENT]
+                    .iter()
+                    .any(|&x| x != 0)
+                {
                     return Err(StateError::NonCanonicalAbsent("last signature"));
                 }
                 None
             }
             1 => {
-                let step = byte_step(bytes[110])?;
-                let round = u32_at(106);
+                let step = byte_step(bytes[o::LAST_STEP])?;
+                let round = u32_at(o::LAST_ROUND);
                 if round > MAX_ROUND {
                     return Err(StateError::Round("last", round));
                 }
                 Some(StateLast {
                     position: SignPosition {
-                        height: u64_at(98),
+                        height: u64_at(o::LAST_HEIGHT),
                         round,
                         step,
                     },
-                    value: bytes_value(d_at(111)),
-                    sign_bytes_digest: d_at(143),
-                    signature: bytes[175..239].try_into().expect("64"),
+                    value: bytes_value(d_at(o::LAST_VALUE)),
+                    sign_bytes_digest: d_at(o::LAST_DIGEST),
+                    signature: bytes[o::LAST_SIGNATURE..o::LAST_SIGNATURE + 64]
+                        .try_into()
+                        .expect("64"),
                 })
             }
             _ => return Err(StateError::Flag("last_present")),
         };
-        let lock = match bytes[239] {
+        let lock = match bytes[o::LOCK_PRESENT] {
             0 => {
-                if bytes[240..284].iter().any(|&x| x != 0) {
+                if bytes[o::LOCK_HEIGHT..o::PREV].iter().any(|&x| x != 0) {
                     return Err(StateError::NonCanonicalAbsent("lock"));
                 }
                 None
             }
             1 => {
-                let round = u32_at(248);
+                let round = u32_at(o::LOCK_ROUND);
                 if round > MAX_ROUND {
                     return Err(StateError::Round("lock", round));
                 }
                 Some(Lock {
-                    height: u64_at(240),
+                    height: u64_at(o::LOCK_HEIGHT),
                     round,
-                    value: d_at(252),
+                    value: d_at(o::LOCK_VALUE),
                 })
             }
             _ => return Err(StateError::Flag("lock_present")),
         };
         let state = SignerState {
-            counter: u64_at(9),
+            counter: u64_at(o::COUNTER),
             identity,
-            floor_height: u64_at(89),
+            floor_height: u64_at(o::FLOOR),
+            certified_block_id: d_at(o::CERTIFIED),
             last,
             lock,
-            prev_checksum: d_at(284),
+            prev_checksum: d_at(o::PREV),
         };
         state.check()?;
         Ok((state, stored))
     }
 
     /// Whether `next` is exactly one persist after `self` (whose checksum is
-    /// `self_checksum`), under the signer's rules. Used to allow a one-ahead
-    /// mirror repair and to refuse persisting an invalid transition.
+    /// `self_checksum`), under the signer's rules. Two kinds exist:
+    ///
+    /// * **signing:** same floor and certified block; a new signature at the
+    ///   working height, strictly above the last; the lock rules;
+    /// * **advancement:** the floor strictly raised, a non-zero certified
+    ///   block, and no signature and no lock left (they belonged to the
+    ///   heights the finality proof closed). It is the only transition that
+    ///   discards a lock or a signature, or changes the height.
+    ///
+    /// Used to allow a one-ahead mirror repair and to refuse persisting an
+    /// invalid transition.
     pub fn check_successor(
         &self,
         self_checksum: &Digest,
@@ -432,9 +501,6 @@ impl SignerState {
         if next.identity != self.identity {
             return Err(StateError::NotSuccessor("identity changed"));
         }
-        if next.floor_height != self.floor_height {
-            return Err(StateError::NotSuccessor("floor changed"));
-        }
         if self.counter.checked_add(1) != Some(next.counter) {
             return Err(StateError::NotSuccessor("counter is not exactly one ahead"));
         }
@@ -443,6 +509,26 @@ impl SignerState {
                 "predecessor checksum does not name the previous state",
             ));
         }
+        if next.floor_height != self.floor_height
+            || next.certified_block_id != self.certified_block_id
+        {
+            // Advancement.
+            if next.floor_height <= self.floor_height {
+                return Err(StateError::NotSuccessor("the floor did not rise"));
+            }
+            if next.certified_block_id == ZERO {
+                return Err(StateError::NotSuccessor(
+                    "the floor rose without a certified block",
+                ));
+            }
+            if next.last.is_some() || next.lock.is_some() {
+                return Err(StateError::NotSuccessor(
+                    "an advancement kept a signature or a lock",
+                ));
+            }
+            return Ok(());
+        }
+        // Signing.
         let Some(n_last) = next.last.as_ref() else {
             return Err(StateError::NotSuccessor("no new signature"));
         };
@@ -450,6 +536,11 @@ impl SignerState {
             if n_last.position <= p_last.position {
                 return Err(StateError::NotSuccessor(
                     "the signed position did not increase",
+                ));
+            }
+            if n_last.position.height != p_last.position.height {
+                return Err(StateError::NotSuccessor(
+                    "the height changed without a finality proof",
                 ));
             }
         }
@@ -465,12 +556,10 @@ impl SignerState {
                     ));
                 }
             }
-            (Some(p), None) => {
-                if n_last.position.height <= p.height {
-                    return Err(StateError::NotSuccessor(
-                        "the lock was dropped within its height",
-                    ));
-                }
+            (Some(_), None) => {
+                return Err(StateError::NotSuccessor(
+                    "the lock was dropped without a finality proof",
+                ));
             }
             (Some(p), Some(n)) => {
                 if n != p {
@@ -479,7 +568,7 @@ impl SignerState {
                             "the lock changed without a new precommit",
                         ));
                     }
-                    if n.height == p.height && n.round <= p.round {
+                    if n.round <= p.round {
                         return Err(StateError::NotSuccessor("relock is not at a higher round"));
                     }
                 }
@@ -497,6 +586,21 @@ impl SignerState {
         if record.key_id != identity.signer_pubkey {
             return Err(StateError::Identity("record key is not the signer key"));
         }
+        let floor_height = height_of_floor(record.floor)?;
+        let certified_block_id = match record.certified {
+            None => ZERO,
+            Some(c) => {
+                if c.block_id == ZERO {
+                    return Err(StateError::Unrepresentable("a certified nil block"));
+                }
+                if c.height.checked_add(1) != Some(floor_height) {
+                    return Err(StateError::Unrepresentable(
+                        "the certified height is not the floor's previous height",
+                    ));
+                }
+                c.block_id
+            }
+        };
         let last = match record.last.as_ref() {
             None => None,
             Some(l) => Some(StateLast {
@@ -516,7 +620,8 @@ impl SignerState {
         Ok(SignerState {
             counter: record.sequence,
             identity,
-            floor_height: height_of_floor(record.floor)?,
+            floor_height,
+            certified_block_id,
             last,
             lock: record.lock,
             prev_checksum,
@@ -535,6 +640,10 @@ impl SignerState {
                 signature: l.signature.to_vec(),
             }),
             lock: self.lock,
+            certified: (self.certified_block_id != ZERO).then(|| Certified {
+                height: self.floor_height - 1,
+                block_id: self.certified_block_id,
+            }),
         }
     }
 }
@@ -727,9 +836,9 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
             (Some(f), Some(m)) => {
                 let (fs, fsum) = self.decode_checked("state file", &f)?;
                 let (ms, msum) = self.decode_checked("mirror", &m)?;
-                if fs.identity != ms.identity || fs.floor_height != ms.floor_height {
+                if fs.identity != ms.identity {
                     return Err(StoreError(
-                        "state file and mirror name different identities or floors".into(),
+                        "state file and mirror name different identities".into(),
                     ));
                 }
                 if fs.counter == ms.counter {
@@ -803,7 +912,9 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
         self.mirror
             .write_synced(&bytes)
             .map_err(|e| Self::io("P2 write mirror", e))?;
-        let sum: Digest = bytes[316..348].try_into().expect("32 bytes");
+        let sum: Digest = bytes[offset::CHECKSUM..offset::CHECKSUM + 32]
+            .try_into()
+            .expect("32 bytes");
         self.current = Some((next, sum));
         Ok(())
     }

@@ -12,11 +12,11 @@ use std::rc::Rc;
 use ed25519_dalek::{Signer as _, Verifier as _};
 use sumchain_finality_foundations::encoding::MAX_ROUND;
 use sumchain_finality_foundations::signer::{
-    initialize_exclusive, DurableSigner, Justification, Lock, SignBytes, SignPosition, SignRequest,
-    SignerError, SignerRecord, SignerStore, SigningKey, Step, VoteValue,
+    initialize_exclusive, Certified, DurableSigner, Justification, Lock, SignBytes, SignPosition,
+    SignRequest, SignerError, SignerRecord, SignerStore, SigningKey, Step, VoteValue,
 };
 use sumchain_finality_foundations::signer_file::{
-    floor_below_height, sign_bytes_digest, Classified, FileSignerStore, Identity, IoError,
+    floor_below_height, offset, sign_bytes_digest, Classified, FileSignerStore, Identity, IoError,
     MirrorStore, SignerState, StateError, StateLast, StdSignerDir, CHECKSUMMED_LEN, D_SIGNER,
     STATE_FILE, STATE_LEN, TEMP_FILE,
 };
@@ -198,6 +198,30 @@ fn decode(b: &[u8]) -> Result<(SignerState, Digest), StateError> {
 }
 
 /// A fresh rig, initialized at floor 7, with `setup` signed without faults.
+#[derive(Clone)]
+enum Act {
+    Sign(SignRequest),
+    Advance(Vec<u8>),
+}
+
+/// A fresh rig, initialized at floor 7, with `acts` performed without faults.
+fn prepared_acts(acts: &[Act]) -> Rig {
+    let rig = Rig::new();
+    rig.init().unwrap();
+    let mut s = rig.open().unwrap();
+    for a in acts {
+        match a {
+            Act::Sign(r) => {
+                s.sign(r).unwrap();
+            }
+            Act::Advance(p) => {
+                s.advance(p).unwrap();
+            }
+        }
+    }
+    rig
+}
+
 fn prepared(setup: &[SignRequest]) -> Rig {
     let rig = Rig::new();
     rig.init().unwrap();
@@ -216,13 +240,13 @@ fn record_now(rig: &Rig) -> SignerRecord {
 
 struct Transition {
     name: &'static str,
-    setup: Vec<SignRequest>,
+    setup: Vec<Act>,
     request: SignRequest,
     lock_after: Option<Lock>,
 }
 
 fn transitions() -> Vec<Transition> {
-    let locked = vec![prevote(7, 0, A), precommit(7, 0, A)];
+    let locked = vec![Act::Sign(prevote(7, 0, A)), Act::Sign(precommit(7, 0, A))];
     let lock_a = Lock {
         height: 7,
         round: 0,
@@ -237,7 +261,7 @@ fn transitions() -> Vec<Transition> {
         },
         Transition {
             name: "lock",
-            setup: vec![prevote(7, 0, A)],
+            setup: vec![Act::Sign(prevote(7, 0, A))],
             request: precommit(7, 0, A),
             lock_after: Some(lock_a),
         },
@@ -258,8 +282,8 @@ fn transitions() -> Vec<Transition> {
             lock_after: Some(lock_a),
         },
         Transition {
-            name: "next height (lock dropped)",
-            setup: locked,
+            name: "first sign at the next height, after a verified advancement",
+            setup: [locked, vec![Act::Advance(finality(7, &A))]].concat(),
             request: prevote(8, 0, B),
             lock_after: None,
         },
@@ -270,7 +294,7 @@ fn transitions() -> Vec<Transition> {
 /// 3 sync dir, 4 mirror) in `mode`, then recovery, then the invariants.
 fn run_sign_case(t: &Transition, op: usize, mode: Mode) {
     let ctx = format!("{} / op {op} / {mode:?}", t.name);
-    let rig = prepared(&t.setup);
+    let rig = prepared_acts(&t.setup);
     let before = record_now(&rig);
     let c = before.sequence;
 
@@ -359,7 +383,7 @@ fn crash_point_matrix_for_every_signing_transition() {
             }
         }
         // Released, then power loss: the signature is durable.
-        let rig = prepared(&t.setup);
+        let rig = prepared_acts(&t.setup);
         let mut s = rig.open().unwrap();
         let sig = s.sign(&t.request).unwrap();
         drop(s);
@@ -370,6 +394,157 @@ fn crash_point_matrix_for_every_signing_transition() {
         cases += 1;
     }
     assert_eq!(cases, 5 * 5 * 5 + 5);
+}
+
+/// Height advancement: a fault at every persistence step of `advance`, from
+/// a state locked at height 7. Recovery yields either the old state (still
+/// at height 7, lock and last intact) or the new one (height 8, certified
+/// (7, A), nothing left of height 7). Never a state at height 8 without the
+/// proof, and never height 7 without its lock.
+#[test]
+fn crash_point_matrix_for_height_advancement() {
+    let lock_a = Lock {
+        height: 7,
+        round: 0,
+        value: A,
+    };
+    let mut cases = 0;
+    for op in 0..5 {
+        for mode in MODES {
+            let ctx = format!("advance / op {op} / {mode:?}");
+            let rig = prepared(&[prevote(7, 0, A), precommit(7, 0, A)]);
+            let c = record_now(&rig).sequence;
+            let mut s = rig.open().unwrap();
+            rig.arm(op, mode);
+            assert!(s.advance(&finality(7, &A)).is_err(), "{ctx}");
+            assert!(s.is_poisoned(), "{ctx}");
+            drop(s);
+            rig.recover(mode);
+
+            let mut s = rig
+                .open()
+                .unwrap_or_else(|e| panic!("{ctx}: reopen refused: {e}"));
+            let rec = s.record().clone();
+            if rec.sequence == c + 1 {
+                assert_eq!(rec.lock, None, "{ctx}");
+                assert_eq!(rec.last, None, "{ctx}");
+                assert_eq!(
+                    rec.certified,
+                    Some(Certified {
+                        height: 7,
+                        block_id: A
+                    }),
+                    "{ctx}"
+                );
+                assert_eq!(rec.working_height(), Some(8), "{ctx}");
+            } else {
+                assert_eq!(rec.sequence, c, "{ctx}");
+                assert_eq!(rec.lock, Some(lock_a), "{ctx}: the lock survives");
+                assert_eq!(rec.working_height(), Some(7), "{ctx}");
+                assert_eq!(
+                    s.sign(&prevote(8, 0, B)),
+                    Err(SignerError::HeightNotCertified {
+                        requested: 8,
+                        working: 7
+                    }),
+                    "{ctx}"
+                );
+                s.advance(&finality(7, &A))
+                    .unwrap_or_else(|e| panic!("{ctx}: retry advance: {e}"));
+            }
+            s.sign(&prevote(8, 0, B)).unwrap();
+            assert!(
+                matches!(
+                    s.sign(&prevote(7, 3, A)),
+                    Err(SignerError::Regression { .. })
+                ),
+                "{ctx}: height 7 is closed"
+            );
+            drop(s);
+            rig.disk.borrow_mut().reboot();
+            let s = rig
+                .open()
+                .unwrap_or_else(|e| panic!("{ctx}: refused after a later power loss: {e}"));
+            assert_eq!(s.record().working_height(), Some(8), "{ctx}");
+            assert_eq!(
+                s.record().last.as_ref().map(|l| l.position),
+                Some(pos(8, 0, Step::Prevote)),
+                "{ctx}"
+            );
+            cases += 1;
+        }
+    }
+    assert_eq!(cases, 25);
+}
+
+/// Across several heights: a request for a higher height never moves the
+/// signer; only a verified proof does, and stale or conflicting proofs
+/// change nothing on disk.
+#[test]
+fn multi_height_sequence_with_refused_and_accepted_proofs() {
+    let rig = prepared(&[prevote(7, 0, A), precommit(7, 0, A)]);
+    let mut s = rig.open().unwrap();
+    // No proof, a forged proof, a proof for a lower height: nothing moves.
+    assert!(matches!(
+        s.sign(&prevote(8, 0, B)),
+        Err(SignerError::HeightNotCertified {
+            requested: 8,
+            working: 7
+        })
+    ));
+    assert!(matches!(
+        s.advance(b"forged"),
+        Err(SignerError::InvalidFinalityProof(_))
+    ));
+    assert!(matches!(
+        s.advance(&finality(6, &B)),
+        Err(SignerError::StaleFinalityProof {
+            proof: 6,
+            working: 7
+        })
+    ));
+    assert_eq!(s.record().lock.map(|l| l.height), Some(7));
+    // Height 7 → 8.
+    s.advance(&finality(7, &A)).unwrap();
+    s.sign(&prevote(8, 0, B)).unwrap();
+    s.sign(&precommit(8, 0, B)).unwrap();
+    // Catch-up: a proof for height 11 moves straight to 12.
+    s.advance(&finality(11, &A)).unwrap();
+    assert_eq!(s.record().working_height(), Some(12));
+    assert_eq!(s.record().lock, None);
+    // The same certified height again is a no-op; a stale one is refused.
+    rig.arm(0, Mode::Error);
+    assert_eq!(
+        s.advance(&finality(11, &A)).unwrap(),
+        Certified {
+            height: 11,
+            block_id: A
+        }
+    );
+    assert!(matches!(
+        s.advance(&finality(9, &B)),
+        Err(SignerError::StaleFinalityProof { .. })
+    ));
+    assert!(rig.disk.borrow().log.is_empty(), "nothing written");
+    // A second verified proof for height 11 naming another block: the signer
+    // stops, and nothing is written.
+    assert_eq!(
+        s.advance(&finality(11, &B)),
+        Err(SignerError::ConflictingFinality(11))
+    );
+    assert!(s.is_poisoned());
+    assert!(rig.disk.borrow().log.is_empty(), "nothing written");
+    assert_eq!(s.sign(&prevote(12, 0, A)), Err(SignerError::Poisoned));
+    drop(s);
+    rig.disk.borrow_mut().restart();
+    let s = rig.open().unwrap();
+    assert_eq!(
+        s.record().certified,
+        Some(Certified {
+            height: 11,
+            block_id: A
+        })
+    );
 }
 
 #[test]
@@ -522,9 +697,9 @@ fn i2_same_counter_requires_byte_identical_mirror() {
             "differ at the same counter",
         ),
         (
-            "floor",
-            |m| m.floor_height -= 1,
-            "different identities or floors",
+            "certified block",
+            |m| m.certified_block_id = B,
+            "differ at the same counter",
         ),
     ];
     for (what, mutate, expect) in mutations {
@@ -540,7 +715,7 @@ fn i2_same_counter_requires_byte_identical_mirror() {
     // A mirror whose lock group was cleared is not even a valid record.
     let rig = prepared(&[prevote(7, 0, A), precommit(7, 0, A)]);
     let mut m = rig.mirror().unwrap();
-    m[239..284].fill(0);
+    m[offset::LOCK_PRESENT..offset::PREV].fill(0);
     rig.set_mirror(Some(reseal(m)));
     assert!(
         matches!(rig.open(), Err(SignerError::Corrupt(msg)) if msg.contains("without its own lock"))
@@ -754,7 +929,11 @@ fn i4_the_store_refuses_to_persist_a_transition_that_drops_a_lock() {
         signature: vec![1; 64],
     });
     let err = store.persist(&next).unwrap_err();
-    assert!(err.0.contains("dropped within its height"), "{}", err.0);
+    assert!(
+        err.0.contains("dropped without a finality proof"),
+        "{}",
+        err.0
+    );
     assert!(rig.file(TEMP_FILE).is_none(), "nothing written");
 }
 
@@ -790,21 +969,26 @@ fn i6_i7_strict_decoding_refuses_each_field_class() {
         b[at..at + bytes.len()].copy_from_slice(bytes);
         reseal(b)
     };
+    use offset as o;
+    let advanced = {
+        let r = prepared_acts(&[Act::Sign(prevote(7, 0, A)), Act::Advance(finality(7, &A))]);
+        r.file(STATE_FILE).unwrap()
+    };
     let cases: Vec<(&'static str, Vec<u8>, Expect)> = vec![
         (
             "checksum",
             {
                 let mut b = good.clone();
-                b[100] ^= 1;
+                b[o::LAST_HEIGHT] ^= 1;
                 b
             },
             |e| *e == StateError::Checksum,
         ),
         ("short", good[..STATE_LEN - 1].to_vec(), |e| {
-            matches!(e, StateError::Length(347))
+            matches!(e, StateError::Length(379))
         }),
         ("long", [good.clone(), vec![0]].concat(), |e| {
-            matches!(e, StateError::Length(349))
+            matches!(e, StateError::Length(381))
         }),
         ("magic", set(good.clone(), 0, b"FSGNv2\0"), |e| {
             *e == StateError::Magic
@@ -812,93 +996,122 @@ fn i6_i7_strict_decoding_refuses_each_field_class() {
         ("schema", set(good.clone(), 7, &2u16.to_le_bytes()), |e| {
             *e == StateError::Schema(2)
         }),
-        ("last flag", set(good.clone(), 97, &[2]), |e| {
+        ("last flag", set(good.clone(), o::LAST_PRESENT, &[2]), |e| {
             matches!(e, StateError::Flag(_))
         }),
-        ("lock flag", set(good.clone(), 239, &[2]), |e| {
+        ("lock flag", set(good.clone(), o::LOCK_PRESENT, &[2]), |e| {
             matches!(e, StateError::Flag(_))
         }),
-        ("absent last not zero", set(fresh.clone(), 98, &[1]), |e| {
-            matches!(e, StateError::NonCanonicalAbsent(_))
-        }),
-        ("absent lock not zero", set(fresh.clone(), 283, &[1]), |e| {
-            matches!(e, StateError::NonCanonicalAbsent(_))
-        }),
-        ("step 0", set(good.clone(), 110, &[0]), |e| {
+        (
+            "absent last not zero",
+            set(fresh.clone(), o::LAST_HEIGHT, &[1]),
+            |e| matches!(e, StateError::NonCanonicalAbsent(_)),
+        ),
+        (
+            "absent lock not zero",
+            set(fresh.clone(), o::PREV - 1, &[1]),
+            |e| matches!(e, StateError::NonCanonicalAbsent(_)),
+        ),
+        ("step 0", set(good.clone(), o::LAST_STEP, &[0]), |e| {
             *e == StateError::Step(0)
         }),
-        ("step 4", set(good.clone(), 110, &[4]), |e| {
+        ("step 4", set(good.clone(), o::LAST_STEP, &[4]), |e| {
             *e == StateError::Step(4)
         }),
         (
             "last round",
-            set(good.clone(), 106, &(MAX_ROUND + 1).to_le_bytes()),
+            set(good.clone(), o::LAST_ROUND, &(MAX_ROUND + 1).to_le_bytes()),
             |e| matches!(e, StateError::Round("last", _)),
         ),
         (
             "lock round",
-            set(good.clone(), 248, &(MAX_ROUND + 1).to_le_bytes()),
+            set(good.clone(), o::LOCK_ROUND, &(MAX_ROUND + 1).to_le_bytes()),
             |e| matches!(e, StateError::Round("lock", _)),
         ),
         (
             "below floor",
-            set(good.clone(), 89, &8u64.to_le_bytes()),
+            set(good.clone(), o::FLOOR, &8u64.to_le_bytes()),
             |e| matches!(e, StateError::BelowFloor(_)),
         ),
         (
+            "above the working height",
+            set(good.clone(), o::FLOOR, &6u64.to_le_bytes()),
+            |e| matches!(e, StateError::Inconsistent(_)),
+        ),
+        (
+            "certified block at counter 0",
+            set(fresh.clone(), o::CERTIFIED, &A),
+            |e| matches!(e, StateError::Inconsistent(_)),
+        ),
+        (
+            "certified block without a floor",
+            {
+                let b = set(advanced.clone(), o::FLOOR, &0u64.to_le_bytes());
+                set(b, o::CERTIFIED, &A)
+            },
+            |e| matches!(e, StateError::Inconsistent(_)),
+        ),
+        (
+            "neither a signature nor a certified height above counter 0",
+            set(advanced.clone(), o::CERTIFIED, &[0; 32]),
+            |e| matches!(e, StateError::Inconsistent(_)),
+        ),
+        (
             "counter 0 with a signature",
-            set(good.clone(), 9, &0u64.to_le_bytes()),
+            set(good.clone(), o::COUNTER, &0u64.to_le_bytes()),
             |e| matches!(e, StateError::Inconsistent(_)),
         ),
         (
             "predecessor zero above counter 0",
-            set(good.clone(), 284, &[0; 32]),
+            set(good.clone(), o::PREV, &[0; 32]),
             |e| matches!(e, StateError::Inconsistent(_)),
         ),
         (
             "predecessor at counter 0",
-            set(fresh.clone(), 284, &[1; 32]),
+            set(fresh.clone(), o::PREV, &[1; 32]),
             |e| matches!(e, StateError::Inconsistent(_)),
         ),
         (
             "lock without a signature",
             {
-                let b = set(fresh.clone(), 239, &[1]);
-                let b = set(b, 240, &7u64.to_le_bytes());
-                set(b, 252, &A)
+                let b = set(fresh.clone(), o::LOCK_PRESENT, &[1]);
+                let b = set(b, o::LOCK_HEIGHT, &7u64.to_le_bytes());
+                set(b, o::LOCK_VALUE, &A)
             },
             |e| matches!(e, StateError::Inconsistent(_)),
         ),
         (
             "lock at another height",
-            set(good.clone(), 240, &6u64.to_le_bytes()),
+            set(good.clone(), o::LOCK_HEIGHT, &6u64.to_le_bytes()),
             |e| matches!(e, StateError::Inconsistent(_)),
         ),
         (
             "lock above the last signature",
-            set(good.clone(), 248, &1u32.to_le_bytes()),
+            set(good.clone(), o::LOCK_ROUND, &1u32.to_le_bytes()),
             |e| matches!(e, StateError::Inconsistent(_)),
         ),
         (
             "locking precommit names another value",
-            set(good.clone(), 252, &B),
+            set(good.clone(), o::LOCK_VALUE, &B),
             |e| matches!(e, StateError::Inconsistent(_)),
         ),
-        ("lock on nil", set(good.clone(), 252, &[0; 32]), |e| {
-            matches!(e, StateError::Inconsistent(_))
-        }),
+        (
+            "lock on nil",
+            set(good.clone(), o::LOCK_VALUE, &[0; 32]),
+            |e| matches!(e, StateError::Inconsistent(_)),
+        ),
         (
             "nil proposal",
             {
-                let b = set(good.clone(), 239, &[0; 45]);
-                let b = set(b, 110, &[1]);
-                set(b, 111, &[0; 32])
+                let b = set(good.clone(), o::LOCK_PRESENT, &[0; 45]);
+                let b = set(b, o::LAST_STEP, &[1]);
+                set(b, o::LAST_VALUE, &[0; 32])
             },
             |e| matches!(e, StateError::Inconsistent(_)),
         ),
         (
             "zero sign-bytes digest",
-            set(good.clone(), 143, &[0; 32]),
+            set(good.clone(), o::LAST_DIGEST, &[0; 32]),
             |e| matches!(e, StateError::Inconsistent(_)),
         ),
     ];
@@ -913,7 +1126,7 @@ fn i6_i7_strict_decoding_refuses_each_field_class() {
         r.set_file(STATE_FILE, bytes);
         assert!(matches!(r.open(), Err(SignerError::Corrupt(_))), "{what}");
     }
-    assert_eq!(n, 24);
+    assert_eq!(n, 28);
 }
 
 // ── I10 identity; missing and corrupt files; ownership; floor ───────────────
@@ -1028,7 +1241,7 @@ fn round_trip_and_digest_only_storage() {
     let bytes = rig.file(STATE_FILE).unwrap();
     let (st, sum) = decode(&bytes).unwrap();
     assert_eq!(st.encode(&B3).unwrap().to_vec(), bytes);
-    assert_eq!(&bytes[316..], &sum);
+    assert_eq!(&bytes[offset::CHECKSUM..], &sum);
     let rec = record_now(&rig);
     let last = rec.last.unwrap();
     assert_eq!(

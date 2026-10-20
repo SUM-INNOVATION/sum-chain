@@ -9,7 +9,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use sumchain_finality_foundations::signer::{ExclusiveOwnership, OwnershipError, PolkaVerifier};
+use sumchain_finality_foundations::signer::{
+    Certified, ExclusiveOwnership, OwnershipError, PolkaVerifier,
+};
 use sumchain_finality_foundations::signer_file::{IoError, MirrorStore, SignerDir, StateHasher};
 use sumchain_finality_foundations::Digest;
 
@@ -256,4 +258,22 @@ impl PolkaVerifier for TestPolka {
             Err("not a quorum of prevotes".into())
         }
     }
+    /// The finality oracle: accepts exactly `final ‖ height LE ‖ block`.
+    fn verify_finality(&self, proof: &[u8]) -> Result<Certified, String> {
+        match proof.strip_prefix(b"final".as_slice()) {
+            Some(rest) if rest.len() == 40 => Ok(Certified {
+                height: u64::from_le_bytes(rest[..8].try_into().expect("8")),
+                block_id: rest[8..].try_into().expect("32"),
+            }),
+            _ => Err("not a finality proof".into()),
+        }
+    }
+}
+
+/// A finality proof the test oracle accepts.
+pub fn finality(height: u64, block: &Digest) -> Vec<u8> {
+    let mut p = b"final".to_vec();
+    p.extend_from_slice(&height.to_le_bytes());
+    p.extend_from_slice(block);
+    p
 }
