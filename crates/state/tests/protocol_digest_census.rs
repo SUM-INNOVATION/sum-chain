@@ -67,6 +67,14 @@ const EXCLUDED: &[(&str, &str)] = &[
         "node-local undo journal; gates whether a node can revert, not what a \
          block computes. A mismatch stalls one node, it does not fork the chain",
     ),
+    // ── Dormant certified storage layout. `certified_meta.rs` keeps finality
+    //    certificates under cf::META keys, which no committed digest reads, and
+    //    nothing in block execution or consensus calls it.
+    (
+        "CERTIFICATE_KEY_PREFIX",
+        "cf::META key prefix of the dormant v1 certified storage layout; \
+         node-local, never hashed into a block",
+    ),
     // ── Node-local snapshot artefacts. `snapshot.rs` states snapshots are
     //    "node-local artefacts — never hashed into a block".
     ("SNAPSHOT_VERSION", "node-local snapshot artefact"),
