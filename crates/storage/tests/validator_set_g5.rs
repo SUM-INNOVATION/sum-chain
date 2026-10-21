@@ -1,9 +1,15 @@
-//! **PROPOSED, NOT RATIFIED.** Tests for the dormant G5 transition module
-//! (`validator_set_g5`, #266): the ledger's G5 recommendations Q0, Q1, Q2, Q4
-//! and Q5, and the boundary rules B1–B5 (two of them open sub-questions
-//! G5-S1/G5-S2), as code, so they can be reviewed before a decision. Nothing
-//! here activates dynamic membership or selects an epoch length or activation
-//! height: every schedule below is synthetic, as is all data.
+//! **G5 validator-set transitions (#266): semantics ratified 2026-10-21;
+//! dormant; no values; not activated.**
+//!
+//! Tests for `validator_set_g5`. They cover:
+//! * Q0, Q1, Q2, Q4 (N_min = 5, `max_validators` ≤ 29,127) and Q5;
+//! * the named exceptions to the missing-row rule, S1(a) and S2(a);
+//! * the derived properties (overflow, who certifies a transition block,
+//!   stored rows).
+//!
+//! Nothing here activates dynamic membership or selects an epoch length,
+//! activation height, stake minimum or `max_validators`. Every schedule below
+//! is synthetic, as is all data.
 
 use std::path::{Path, PathBuf};
 
@@ -15,15 +21,17 @@ use sumchain_storage::db::{cf, Database};
 use sumchain_storage::schema::{ValidatorSetStore, ACCOUNT_KEY_PREFIX};
 use sumchain_storage::validator_set_g5::{
     check_stored_rows, require_transition_certified, resolve_set, select_members,
-    stage_transition_row, Candidate, EpochSchedule, G5Error, Selection, VsetLayout,
+    stage_transition_row, Candidate, EpochSchedule, G5Error, RowlessEpoch, Selection, VsetLayout,
+    EFFECTIVE_VALIDATOR_CAP,
 };
 use sumchain_storage::validator_set_record::ValidatorSetRecord;
+use sumchain_storage::validator_set_state::StateError;
 use tempfile::TempDir;
 
 const LIMIT: u64 = 1 << 22;
-/// N_min = 5 is the ledger's PROPOSAL (the ratified product minimum). The
-/// module takes it as a parameter; it defines no value.
-const PROPOSED_N_MIN: usize = 5;
+/// N_min = 5, ratified 2026-10-21 (the product minimum). The module takes it as
+/// a parameter; the wiring passes `pool_topology::PRODUCT_MINIMUM`.
+const RATIFIED_N_MIN: usize = 5;
 
 fn db() -> (Database, TempDir) {
     let dir = TempDir::new().unwrap();
@@ -131,7 +139,7 @@ fn cand(b: u8, total: u128) -> Candidate {
 
 #[test]
 fn q1_only_the_last_block_of_an_epoch_writes_the_next_epochs_row() {
-    // L = 1 is B1 (below): there block 0 would be a transition block.
+    // L = 1 is S1(a) (below): there block 0 would be a transition block.
     for l in [2u64, 3, 4, 10] {
         let s = from_genesis(l);
         for t in 0..(5 * l) {
@@ -259,7 +267,7 @@ fn q4_orders_by_total_descending_then_pubkey_ascending() {
         cand(5, 100),
         cand(2, 60),
     ];
-    let s = select_members(&cands, 0, 10, PROPOSED_N_MIN, &genesis()).unwrap();
+    let s = select_members(&cands, 0, 10, RATIFIED_N_MIN, &genesis()).unwrap();
     assert_eq!(
         s,
         Selection::Selected(vec![key(3), key(5), key(7), key(1), key(2), key(9)])
@@ -281,7 +289,7 @@ fn q4_filters_inactive_jailed_and_below_minimum_and_counts_delegations() {
 #[test]
 fn q4_truncates_to_max_validators() {
     let cands: Vec<Candidate> = (1..=9).map(|b| cand(b, 100 + u128::from(b))).collect();
-    let s = select_members(&cands, 0, 6, PROPOSED_N_MIN, &genesis()).unwrap();
+    let s = select_members(&cands, 0, 6, RATIFIED_N_MIN, &genesis()).unwrap();
     assert_eq!(
         s.members(),
         &[key(9), key(8), key(7), key(6), key(5), key(4)]
@@ -292,7 +300,7 @@ fn q4_truncates_to_max_validators() {
 fn q4_below_n_min_the_previous_set_carries_forward_never_genesis() {
     let previous: Vec<[u8; 32]> = (21..=26).map(key).collect();
     let cands: Vec<Candidate> = (1..=4).map(|b| cand(b, 100)).collect();
-    let s = select_members(&cands, 0, 10, PROPOSED_N_MIN, &previous).unwrap();
+    let s = select_members(&cands, 0, 10, RATIFIED_N_MIN, &previous).unwrap();
     assert_eq!(
         s,
         Selection::CarriedForward {
@@ -304,12 +312,12 @@ fn q4_below_n_min_the_previous_set_carries_forward_never_genesis() {
     // Exactly N_min eligible: a new set.
     let cands: Vec<Candidate> = (1..=5).map(|b| cand(b, 100)).collect();
     assert!(matches!(
-        select_members(&cands, 0, 10, PROPOSED_N_MIN, &previous).unwrap(),
+        select_members(&cands, 0, 10, RATIFIED_N_MIN, &previous).unwrap(),
         Selection::Selected(_)
     ));
     // No previous set to carry: refused.
     assert!(matches!(
-        select_members(&[], 0, 10, PROPOSED_N_MIN, &[]),
+        select_members(&[], 0, 10, RATIFIED_N_MIN, &[]),
         Err(G5Error::EmptyPrevious)
     ));
 }
@@ -347,16 +355,22 @@ fn q5_rows_live_in_state_under_vset_and_never_in_the_account_range() {
     assert!(VsetLayout::row_key(255) < VsetLayout::row_key(256));
 }
 
-// ── B1: L = 1, the boundary at genesis (open sub-question G5-S1) ────────────
+// ── S1(a): L = 1, the boundary at genesis ───────────────────────────────────
 
 #[test]
-fn b1_l1_the_genesis_block_never_transitions_and_block_1_writes_row_2() {
+fn s1_l1_the_genesis_block_never_transitions_and_block_1_writes_row_2() {
     let (d, _t) = db();
     let s = from_genesis(1);
     let g = genesis();
     assert_eq!((s.first_dynamic_block(), s.anchor_epoch()), (1, 1));
     // Read literally, Q1 would make block 0 write row[1]; block 0 is never
-    // executed, so it is not a transition block and epochs 0 and 1 are anchors.
+    // executed, so it is not a transition block and epochs 0 and 1 are rowless.
+    assert_eq!(s.rowless(0), Some(RowlessEpoch::Genesis));
+    assert_eq!(
+        s.rowless(1),
+        Some(RowlessEpoch::GenesisBlockNeverTransitions)
+    );
+    assert_eq!(s.rowless(2), None);
     assert_eq!(s.transition_epoch(0).unwrap(), None);
     assert_eq!(s.transition_block(1).unwrap(), None);
     assert_eq!(s.transition_epoch(1).unwrap(), Some(2));
@@ -390,10 +404,10 @@ fn b1_l1_the_genesis_block_never_transitions_and_block_1_writes_row_2() {
     assert_eq!(s.transition_epoch(9).unwrap(), Some(10));
 }
 
-// ── B2: checked arithmetic ──────────────────────────────────────────────────
+// ── Derived: checked arithmetic ─────────────────────────────────────────────
 
 #[test]
-fn b2_t_plus_one_is_checked_and_a_block_at_u64_max_is_refused() {
+fn overflow_t_plus_one_is_checked_and_a_block_at_u64_max_is_refused() {
     for l in [1u64, 2, 3, 4, 1 << 32, 1 << 63, u64::MAX] {
         for a in [0u64, 1, u64::MAX] {
             let s = EpochSchedule::new(l, a).unwrap();
@@ -439,7 +453,7 @@ fn b2_t_plus_one_is_checked_and_a_block_at_u64_max_is_refused() {
 }
 
 #[test]
-fn b2_e_times_l_minus_one_is_checked() {
+fn overflow_e_times_l_minus_one_is_checked() {
     let overflow = |s: EpochSchedule, e: u64| matches!(s.transition_block(e), Err(G5Error::EpochOverflow { epoch, .. }) if epoch == e);
     assert!(overflow(from_genesis(2), u64::MAX));
     assert!(overflow(from_genesis(u64::MAX), 2));
@@ -473,11 +487,12 @@ fn b2_e_times_l_minus_one_is_checked() {
     }
 }
 
-// ── B3: activation after genesis (open sub-question G5-S2) ──────────────────
+// ── S2(a): activation after genesis ─────────────────────────────────────────
 
-/// B1, B3 and B5 over every small schedule, against the closed forms.
+/// S1, S2 and the certifying set over every small schedule, against the closed
+/// forms.
 #[test]
-fn b3_every_small_schedule_anchors_the_epoch_containing_activation() {
+fn s2_every_small_schedule_anchors_the_epoch_containing_activation() {
     for l in 1u64..=6 {
         for a in 0u64..=20 {
             let s = EpochSchedule::new(l, a).unwrap();
@@ -493,13 +508,27 @@ fn b3_every_small_schedule_anchors_the_epoch_containing_activation() {
                 if let Some(e) = got {
                     assert!(e > anchor, "never an anchor epoch's row");
                     assert_eq!(s.transition_block(e).unwrap(), Some(t));
-                    // B5: T is governed (so certified) by the preceding epoch.
+                    // T is governed (so certified) by the preceding epoch.
                     assert_eq!(s.governing_epoch(t), e - 1);
                     assert_eq!(s.governing_epoch(t + 1), e);
                 }
             }
-            for e in 0..=anchor {
-                assert_eq!(s.transition_block(e).unwrap(), None, "anchor epoch {e}");
+            for e in 0..=anchor + 2 {
+                // The three named exceptions, and nothing else, are rowless.
+                let want = if e == 0 {
+                    Some(RowlessEpoch::Genesis)
+                } else if e > anchor {
+                    None
+                } else if l == 1 && e == 1 {
+                    Some(RowlessEpoch::GenesisBlockNeverTransitions)
+                } else {
+                    Some(RowlessEpoch::ActivationAnchor)
+                };
+                assert_eq!(s.rowless(e), want, "L={l} A={a} e={e}");
+                assert_eq!(s.transition_block(e).unwrap().is_none(), want.is_some());
+            }
+            if a == 0 && l >= 2 {
+                assert!((1..=anchor + 2).all(|e| s.rowless(e).is_none()));
             }
             // The first transition block is the first boundary at or after F,
             // and every height up to it is governed by an anchor epoch.
@@ -520,7 +549,7 @@ fn b3_every_small_schedule_anchors_the_epoch_containing_activation() {
 }
 
 #[test]
-fn b3_activation_between_boundaries_writes_nothing_and_the_first_transition_writes_the_first_row() {
+fn s2_activation_between_boundaries_writes_nothing_and_the_first_transition_writes_the_first_row() {
     let (d, _t) = db();
     let g = genesis();
     // Synthetic: L = 10, activation at 25, between the boundaries 20 and 30.
@@ -547,7 +576,7 @@ fn b3_activation_between_boundaries_writes_nothing_and_the_first_transition_writ
     // Block 29 is the first transition: Q4 over its post-state, with the
     // genesis list as `previous`, writes row[3].
     let cands: Vec<Candidate> = (31..=36).map(|b| cand(b, 100)).collect();
-    let selected = select_members(&cands, 0, 10, PROPOSED_N_MIN, &g).unwrap();
+    let selected = select_members(&cands, 0, 10, RATIFIED_N_MIN, &g).unwrap();
     publish_transition(&d, tip, 29, &s, selected.members().to_vec()).unwrap();
     for h in 30..40 {
         assert_eq!(
@@ -556,7 +585,7 @@ fn b3_activation_between_boundaries_writes_nothing_and_the_first_transition_writ
             "h={h}"
         );
     }
-    // B5: block 29 is certified by the genesis list, not by the row it wrote.
+    // Block 29 is certified by the anchor membership, not by the row it wrote.
     assert_eq!(resolve_set(&d, &g, 29, &s).unwrap(), g);
     assert!(require_transition_certified(30, &s, Some(28)).is_err());
     require_transition_certified(30, &s, Some(29)).unwrap();
@@ -564,7 +593,7 @@ fn b3_activation_between_boundaries_writes_nothing_and_the_first_transition_writ
     // forward (it is the previous set), never an invented set.
     let few: Vec<Candidate> = (31..=34).map(|b| cand(b, 100)).collect();
     assert_eq!(
-        select_members(&few, 0, 10, PROPOSED_N_MIN, &g).unwrap(),
+        select_members(&few, 0, 10, RATIFIED_N_MIN, &g).unwrap(),
         Selection::CarriedForward {
             members: g.clone(),
             eligible: 4
@@ -579,10 +608,150 @@ fn b3_activation_between_boundaries_writes_nothing_and_the_first_transition_writ
     assert_eq!(s.transition_block(4).unwrap(), Some(39));
 }
 
-// ── B4: legacy rows ─────────────────────────────────────────────────────────
+/// S1(a) and S2(a) with activation immediately before, exactly on and
+/// immediately after a boundary, for L = 1 (around boundary 5) and L = 10
+/// (around boundary 30), plus A = 0 for both. Every expectation is written out
+/// by hand, not computed by the module.
+#[test]
+fn s1_s2_activation_immediately_before_exactly_on_and_after_a_boundary() {
+    use RowlessEpoch::{ActivationAnchor as S2, Genesis as G0, GenesisBlockNeverTransitions as S1};
+    struct Case {
+        l: u64,
+        a: u64,
+        /// The rowless epochs 0, 1, … and which exception makes each rowless.
+        rowless: &'static [RowlessEpoch],
+        /// The block that writes the first row, and that row's epoch.
+        first_block: u64,
+        first_row: u64,
+    }
+    #[rustfmt::skip]
+    let cases = [
+        Case { l: 1, a: 0, rowless: &[G0, S1], first_block: 1, first_row: 2 },
+        Case { l: 1, a: 4, rowless: &[G0, S1, S2, S2, S2], first_block: 4, first_row: 5 },
+        Case { l: 1, a: 5, rowless: &[G0, S1, S2, S2, S2, S2], first_block: 5, first_row: 6 },
+        Case { l: 1, a: 6, rowless: &[G0, S1, S2, S2, S2, S2, S2], first_block: 6, first_row: 7 },
+        Case { l: 10, a: 0, rowless: &[G0], first_block: 9, first_row: 1 },
+        Case { l: 10, a: 29, rowless: &[G0, S2, S2], first_block: 29, first_row: 3 },
+        Case { l: 10, a: 30, rowless: &[G0, S2, S2, S2], first_block: 39, first_row: 4 },
+        Case { l: 10, a: 31, rowless: &[G0, S2, S2, S2], first_block: 39, first_row: 4 },
+    ];
+    let g = genesis();
+    for c in cases {
+        let what = format!("L={} A={}", c.l, c.a);
+        let s = EpochSchedule::new(c.l, c.a).unwrap();
+        for (e, why) in c.rowless.iter().enumerate() {
+            assert_eq!(s.rowless(e as u64), Some(*why), "{what} e={e}");
+        }
+        assert_eq!(s.rowless(c.first_row), None, "{what}");
+        assert_eq!(c.rowless.len() as u64, c.first_row, "{what}");
+
+        // No block before the first transition block writes: not block 0, and
+        // not the Q1 boundary blocks that ran before activation.
+        for t in 0..c.first_block {
+            assert_eq!(s.transition_epoch(t).unwrap(), None, "{what} T={t}");
+        }
+        let (d, _t) = db();
+        let tip = publish_plain_range(&d, block(Hash::ZERO, 0, 0).hash(), 1, c.first_block);
+        check_stored_rows(&d, &s).unwrap();
+        // Through the first transition block the anchor membership governs,
+        // with no row and no certificate.
+        for h in 0..=c.first_block {
+            assert_eq!(resolve_set(&d, &g, h, &s).unwrap(), g, "{what} h={h}");
+            require_transition_certified(h, &s, None).unwrap();
+        }
+        // The first height outside the exceptions needs the first row: the
+        // missing-row error fires here and not before.
+        let after = c.first_block + 1;
+        assert!(
+            matches!(
+                resolve_set(&d, &g, after, &s),
+                Err(G5Error::Row(StateError::Missing { key })) if key == c.first_row
+            ),
+            "{what}"
+        );
+        // The first transition block writes it, by Q4 with the anchor
+        // membership as `previous`; it governs from the next height once that
+        // block is certified.
+        let cands: Vec<Candidate> = (41..=46).map(|b| cand(b, 100)).collect();
+        let next = select_members(&cands, 0, 10, RATIFIED_N_MIN, &g).unwrap();
+        publish_transition(&d, tip, c.first_block, &s, next.members().to_vec()).unwrap();
+        for h in after..after + c.l {
+            assert_eq!(
+                resolve_set(&d, &g, h, &s).unwrap(),
+                next.members(),
+                "{what} h={h}"
+            );
+        }
+        assert!(require_transition_certified(after, &s, Some(c.first_block - 1)).is_err());
+        require_transition_certified(after, &s, Some(c.first_block)).unwrap();
+        // The epoch after it is outside the exceptions too.
+        assert!(
+            matches!(
+                resolve_set(&d, &g, after + c.l, &s),
+                Err(G5Error::Row(StateError::Missing { key })) if key == c.first_row + 1
+            ),
+            "{what}"
+        );
+        check_stored_rows(&d, &s).unwrap();
+    }
+}
 
 #[test]
-fn b4_a_static_membership_database_passes_with_nothing_to_migrate() {
+fn q4_max_validators_above_the_effective_cap_is_refused() {
+    // The ratified bound is field 0x0003's: 4 + 36 · 29,127 = 2^20 exactly, so
+    // one more validator does not fit; it is below the 65,535 vote cap.
+    assert_eq!(EFFECTIVE_VALIDATOR_CAP, 29_127);
+    assert_eq!(4 + 36 * EFFECTIVE_VALIDATOR_CAP, 1 << 20);
+    let cands: Vec<Candidate> = (1..=6).map(|b| cand(b, 100)).collect();
+    for max in [RATIFIED_N_MIN, 6, EFFECTIVE_VALIDATOR_CAP] {
+        select_members(&cands, 0, max, RATIFIED_N_MIN, &genesis()).unwrap();
+    }
+    // Refused whatever the candidates would give, including a carry-forward.
+    for max in [EFFECTIVE_VALIDATOR_CAP + 1, 65_535, usize::MAX] {
+        for c in [&cands[..], &cands[..2]] {
+            assert!(
+                matches!(
+                    select_members(c, 0, max, RATIFIED_N_MIN, &genesis()),
+                    Err(G5Error::MaxValidatorsAboveCap { configured, cap: 29_127 })
+                        if configured == max
+                ),
+                "max={max}"
+            );
+        }
+    }
+    // At the cap, one more eligible validator than fits is truncated away.
+    let many: Vec<Candidate> = (0..=EFFECTIVE_VALIDATOR_CAP as u32)
+        .map(|i| {
+            let mut pubkey = [0u8; 32];
+            pubkey[..4].copy_from_slice(&i.to_be_bytes());
+            Candidate {
+                pubkey,
+                active: true,
+                jailed: false,
+                self_stake: 100,
+                delegated: 0,
+            }
+        })
+        .collect();
+    let s = select_members(
+        &many,
+        0,
+        EFFECTIVE_VALIDATOR_CAP,
+        RATIFIED_N_MIN,
+        &genesis(),
+    )
+    .unwrap();
+    assert_eq!(s.members().len(), EFFECTIVE_VALIDATOR_CAP);
+    assert_eq!(
+        s.members().last(),
+        Some(&many[EFFECTIVE_VALIDATOR_CAP - 1].pubkey)
+    );
+}
+
+// ── Q5: stored rows ─────────────────────────────────────────────────────────
+
+#[test]
+fn q5_a_static_membership_database_passes_with_nothing_to_migrate() {
     let (d, _t) = db();
     publish_plain_range(&d, block(Hash::ZERO, 0, 0).hash(), 1, 13);
     assert!(d.iter(cf::VALIDATOR_SETS).unwrap().next().is_none());
@@ -592,7 +761,7 @@ fn b4_a_static_membership_database_passes_with_nothing_to_migrate() {
 }
 
 #[test]
-fn b4_any_entry_in_the_legacy_family_is_refused_whatever_its_bytes() {
+fn q5_any_entry_in_the_legacy_family_is_refused_whatever_its_bytes() {
     let s = from_genesis(4);
     // A real pre-#266 row, written through the legacy store.
     let (d, _t) = db();
@@ -628,20 +797,26 @@ fn b4_any_entry_in_the_legacy_family_is_refused_whatever_its_bytes() {
 }
 
 #[test]
-fn b4_g5_rows_in_an_anchor_epoch_or_under_a_malformed_key_are_refused() {
-    let s = EpochSchedule::new(10, 25).unwrap();
+fn q5_rows_for_rowless_epochs_or_under_a_malformed_key_are_refused() {
     let row = |e: u64| ValidatorSetRecord::new(e, genesis()).unwrap().encode();
-    for e in 0..=2u64 {
+    for (l, a, e, why) in [
+        (10, 25, 0, RowlessEpoch::Genesis),
+        (10, 25, 1, RowlessEpoch::ActivationAnchor),
+        (10, 25, 2, RowlessEpoch::ActivationAnchor),
+        (1, 0, 1, RowlessEpoch::GenesisBlockNeverTransitions),
+    ] {
+        let s = EpochSchedule::new(l, a).unwrap();
         let (d, _t) = db();
         d.put(cf::STATE, &VsetLayout::row_key(e), &row(e)).unwrap();
         assert!(
             matches!(
                 check_stored_rows(&d, &s),
-                Err(G5Error::RowInAnchorEpoch { epoch, anchor: 2 }) if epoch == e
+                Err(G5Error::RowForRowlessEpoch { epoch, why: w }) if epoch == e && w == why
             ),
-            "epoch {e}"
+            "L={l} A={a} epoch {e}"
         );
     }
+    let s = EpochSchedule::new(10, 25).unwrap();
     for len in [0usize, 7, 9] {
         let (d, _t) = db();
         let mut k = VsetLayout::prefix().to_vec();
@@ -666,10 +841,10 @@ fn b4_g5_rows_in_an_anchor_epoch_or_under_a_malformed_key_are_refused() {
     check_stored_rows(&d, &s).unwrap();
 }
 
-// ── B5: the preceding set certifies the transition block ────────────────────
+// ── Derived: the preceding set certifies the transition block ───────────────
 
 #[test]
-fn b5_a_transition_block_is_certified_by_the_set_before_the_one_it_writes() {
+fn certifier_a_transition_block_is_certified_by_the_set_before_the_one_it_writes() {
     let (d, _t) = db();
     let l = 4;
     let s = from_genesis(l);
@@ -705,10 +880,10 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Nothing outside `sumchain-storage`, and nothing else inside it, names the
-/// PROPOSED module. Wiring it is a ratified, authorized change that deletes or
-/// rewrites this test.
+/// G5 module. Its semantics are ratified, but wiring (activating) it is a
+/// separate, authorized change that deletes or rewrites this test.
 #[test]
-fn the_proposed_g5_module_is_dormant() {
+fn the_g5_module_is_dormant() {
     let storage = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     for entry in std::fs::read_dir(storage.join("..")).unwrap() {
@@ -741,7 +916,7 @@ fn the_proposed_g5_module_is_dormant() {
         .collect();
     assert!(
         hits.is_empty(),
-        "the PROPOSED G5 module is referenced: {hits:?}"
+        "the dormant G5 module is referenced: {hits:?}"
     );
     let lib = std::fs::read_to_string(storage.join("src/lib.rs")).unwrap();
     let uses: Vec<&str> = lib

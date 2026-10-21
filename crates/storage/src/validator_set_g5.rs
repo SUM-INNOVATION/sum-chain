@@ -1,45 +1,86 @@
-//! **PROPOSED, NOT RATIFIED — G5 validator-set transitions (#266), DORMANT.**
+//! **G5 validator-set transitions (#266): semantics ratified 2026-10-21;
+//! dormant; no values; not activated.**
 //!
-//! This module implements the *recommendations* recorded in the decision
-//! ledger's G5 table (Q0, Q1, Q2, Q4, Q5) so they can be reviewed as code. None
-//! of them is ratified. Nothing calls this module: no crate outside
-//! `sumchain-storage` names it, no module of this crate other than the two
-//! dormant validator-set seams it builds on refers to it, and
-//! `tests/validator_set_record_dormant.rs` / `tests/validator_set_g5_proposed.rs`
-//! fail if that changes. Membership is still the static genesis list
-//! (protocol v1, #272): the consensus engine refuses `staking.epoch_length != 0`
-//! and stake-weighted selection, and refuses a database holding a legacy
-//! stored epoch set. Nothing here activates dynamic membership.
+//! This module implements the G5 semantics the owner ratified on 2026-10-21:
+//! * Q0, Q1, Q2 and Q4 with N_min = 5;
+//! * Q5;
+//! * `max_validators` ≤ 29,127;
+//! * S1(a) and S2(a).
 //!
-//! # The proposed rules
+//! The ratification selects no activation height, stake minimum, epoch length
+//! or `max_validators` value, and nothing here does either.
 //!
-//! | id | PROPOSED rule (ledger §G5) | here |
-//! |----|-----------------------------|------|
+//! **Nothing calls this module.**
+//! * No crate outside `sumchain-storage` names it.
+//! * No module of this crate refers to it, other than the two dormant
+//!   validator-set seams it builds on.
+//! * `tests/validator_set_record_dormant.rs` and `tests/validator_set_g5.rs`
+//!   fail if that changes.
+//!
+//! Membership is still the static genesis list (protocol v1, #272). The
+//! consensus engine refuses `staking.epoch_length != 0` and stake-weighted
+//! selection, and it refuses a database holding a legacy stored epoch set.
+//! Nothing here activates dynamic membership.
+//!
+//! # The ratified rules
+//!
+//! L is `staking.epoch_length` > 0. A is the activation height, the first
+//! height these rules govern (A = 0 is "from genesis"). F = max(A, 1) is the
+//! first block executed under them. E_a = ⌊F / L⌋ is the *anchor epoch*.
+//!
+//! | id | rule | here |
+//! |----|------|------|
 //! | Q0 | The set in block T's post-state governs T+1 onward; a certificate for height h verifies against `set(h)`. | [`EpochSchedule::governing_epoch`], [`resolve_set`] |
-//! | Q1 | With L = `staking.epoch_length` > 0, only the block T where (T+1) mod L = 0 writes `row[(T+1)/L]`. Epoch 0 is the genesis list. A missing row for h ≥ L is an error. | [`EpochSchedule::transition_epoch`], [`stage_transition_row`], [`resolve_set`] |
-//! | Q2 | A set governs blocks only once its transition block is certified. | [`EpochSchedule::transition_block`], [`require_transition_certified`] |
-//! | Q4 | Eligible: Active, not jailed, self-stake + delegations ≥ `min_validator_stake`. Order by that total descending, then public key ascending; truncate to `max_validators`. A read error fails the block. Below N_min the previous set carries forward, never the genesis list. N_min = 5 (PROPOSED; the ratified product minimum). | [`select_members`], [`read_candidates`] |
-//! | Q5 | Rows in the `STATE` family under `vset/` ‖ epoch (u64 big-endian). | [`VsetLayout`] |
+//! | Q1 | Only a block T where (T+1) mod L = 0 writes `row[(T+1)/L]`. Epoch numbers are absolute: epoch(h) = ⌊h/L⌋. Epoch 0 is the genesis list. A missing row is an error, except for the named exceptions below. | [`EpochSchedule::transition_epoch`], [`stage_transition_row`], [`resolve_set`] |
+//! | Q2 | A set governs blocks only once its transition block e·L − 1 is certified. | [`EpochSchedule::transition_block`], [`require_transition_certified`] |
+//! | Q4 | Eligible: Active, not jailed, self-stake + delegations ≥ `min_validator_stake`. Order by that total descending, then public key ascending; truncate to `max_validators`, which must be ≤ [`EFFECTIVE_VALIDATOR_CAP`] (29,127). A read error fails the block. Below N_min = 5 the previous set carries forward, never the genesis list. | [`select_members`], [`read_candidates`] |
+//! | Q5 | Rows in the `STATE` family under `vset/` ‖ epoch (u64 big-endian). A database holding legacy rows resynchronizes from genesis. | [`VsetLayout`], [`check_stored_rows`] |
 //!
-//! # Boundary rules (PROPOSED; for review before ratification)
+//! ## Exceptions to the missing-row rule ([`RowlessEpoch`])
 //!
-//! Notation: A is the activation height (the first height these rules govern;
-//! A = 0 is "from genesis"), F = max(A, 1), and E_a = ⌊F / L⌋ is the *anchor
-//! epoch*. With A = 0 and L ≥ 2, E_a = 0 and B1–B5 reduce exactly to Q0–Q2 as
-//! the ledger records them. B1 and B3 go beyond the ledger and are open
-//! sub-questions (below).
+//! An epoch e is *rowless* exactly when e ≤ E_a, i.e. its transition block
+//! e·L − 1 would precede F. A rowless epoch is governed by the anchor
+//! membership: it has no row, needs no certificate, and no block writes it.
+//! Every other epoch's row is required, and a missing one is an error, never a
+//! fallback. There are exactly three cases, checked in this order:
 //!
-//! * **B1, L = 1.** Read literally, Q1 makes the genesis block (T = 0) the
-//!   transition block of epoch 1. But block 0 is created by genesis
-//!   initialization, not executed, so nothing would write `row[1]`, and no
-//!   certificate exists for it. Proposed (G5-S1): block 0 is never a transition
-//!   block, and the first transition block is the first *executed* block under
-//!   these rules, F. For L = 1 and A = 0, epochs 0 and 1 are therefore anchor
-//!   epochs: heights 0 and 1 run on the genesis list, and block 1 writes
-//!   `row[2]`.
-//! * **B2, arithmetic.** Every step that can overflow is checked:
+//! * [`RowlessEpoch::Genesis`] (Q1): epoch 0.
+//! * [`RowlessEpoch::GenesisBlockNeverTransitions`] (S1(a)): L = 1 and e = 1.
+//!   Its transition block would be block 0, which genesis initialization
+//!   creates and nothing executes. So with L = 1, heights 0 and 1 use the
+//!   genesis membership and block 1 writes `row[2]`.
+//! * [`RowlessEpoch::ActivationAnchor`] (S2(a)): 1 ≤ e ≤ E_a otherwise, so
+//!   e·L − 1 < A. Its transition block ran before activation and wrote nothing.
+//!   Activation itself writes nothing. The first row is `row[E_a + 1]`, written
+//!   by block (E_a + 1)·L − 1, the first boundary at or after F. Q4 computes it
+//!   over that block's post-state, with the anchor membership as `previous`.
+//!   * If A is one block before a boundary, block A itself is that first
+//!     transition.
+//!   * If A is on a boundary, the whole epoch A/L is an anchor.
+//!   * If A is after a boundary, the anchor covers the rest of its epoch.
+//!
+//! With A = 0 and L ≥ 2, only [`RowlessEpoch::Genesis`] occurs, and the rules
+//! are the ledger's Q0–Q2 as written.
+//!
+//! ## The anchor membership (assumption)
+//!
+//! The anchor is the authenticated static membership that precedes
+//! activation. Under G2-d (protocol v1) that is the genesis list: the
+//! ConsensusConfigV1 field 0x0003 (`validators`, declared order) that the
+//! node's ConsensusConfig commitment authenticates (#268). It cannot change
+//! before activation, because the engine refuses `staking.epoch_length != 0`
+//! and stake-weighted selection.
+//!
+//! This module does not authenticate the list. The `genesis` argument of
+//! [`resolve_set`] and the anchor `previous` of [`select_members`] must be
+//! exactly that list. If static membership could ever change before G5
+//! activates, this assumption would have to be revisited.
+//!
+//! ## Derived properties
+//!
+//! * **Overflow.** Every step that can overflow is checked:
 //!   * T + 1 (`checked_add`). T = `u64::MAX` is refused with
-//!     [`G5Error::HeightOverflow`], since the height it would govern doesn't
+//!     [`G5Error::HeightOverflow`], since the height it would govern does not
 //!     exist.
 //!   * e·L − 1 (`checked_mul`, `checked_sub`), refused with
 //!     [`G5Error::EpochOverflow`].
@@ -47,28 +88,17 @@
 //!   ⌊h/L⌋, (T+1) mod L, ⌊(T+1)/L⌋ and ⌊F/L⌋ cannot overflow, and L = 0 is
 //!   unrepresentable ([`EpochSchedule::new`] refuses it). No step saturates or
 //!   wraps.
-//! * **B3, activation after genesis.** Proposed (G5-S2):
-//!   * Epochs keep the genesis-anchored numbering ⌊h/L⌋.
-//!   * Every epoch ≤ E_a is governed by the genesis list (the static set in
-//!     force when the rules activate). It has no row and needs no certificate.
-//!   * Activation writes nothing.
-//!   * The first row is `row[E_a + 1]`. It is written by block
-//!     (E_a + 1)·L − 1, the first transition block at or after F, by Q4 over
-//!     that block's post-state, with the genesis list as `previous`.
-//!   * If A falls between boundaries, the genesis list governs the rest of
-//!     epoch E_a (1 to L heights from A).
-//!   * If A is a boundary, the genesis list governs all of epoch E_a, whose own
-//!     transition block, A − 1, ran before activation and wrote nothing.
-//!
-//!   No activation height or epoch length is chosen here.
-//! * **B4, legacy rows.** [`check_stored_rows`] runs before these rules first
-//!   govern a database and at every start after that. It refuses:
+//! * **Certifying a transition block.** Block T = e·L − 1 lies in epoch e − 1
+//!   (T < e·L). By Q0 its certificate verifies against the epoch e − 1 set
+//!   (the anchor membership if e − 1 is rowless), never against the `row[e]`
+//!   it writes. By Q2, `row[e]` governs from e·L only once that preceding set
+//!   has certified T.
+//! * **Stored rows (Q5).** [`check_stored_rows`] runs before these rules first
+//!   govern a database, and at every start after that. It refuses:
 //!   * any entry in the pre-#266 `validator_sets` column family, whatever its
-//!     key and value and whether or not it decodes, with "resynchronize from
-//!     genesis" ([`G5Error::LegacyEpochSet`]);
-//!   * a `vset/` key that is not 13 bytes ([`G5Error::MalformedRowKey`]);
-//!   * a `vset/` row for an epoch ≤ E_a ([`G5Error::RowInAnchorEpoch`]), which
-//!     no transition block writes.
+//!     key and value, decodable or not ("resynchronize from genesis");
+//!   * a `vset/` key that is not 13 bytes;
+//!   * a `vset/` row for a rowless epoch.
 //!
 //!   A static-membership database holds none of these, so it passes with
 //!   nothing to migrate:
@@ -76,55 +106,24 @@
 //!     returns before writing when L = 0;
 //!   * protocol v1 refuses L ≠ 0 at construction;
 //!   * nothing writes `vset/` rows while this module is dormant.
-//! * **B5, who certifies a transition block.** Block T = e·L − 1 lies in epoch
-//!   e − 1 (T < e·L). By Q0 its certificate verifies against `set(T)`, the
-//!   epoch e − 1 set (the genesis list if e − 1 ≤ E_a), never against the
-//!   `row[e]` it writes. By Q2, `row[e]` governs from e·L only once that
-//!   preceding set has certified T. A set never certifies its own creation.
 //!
-//! # Open G5 sub-questions (options; nothing here selects one)
+//! # Not in this module
 //!
-//! * **G5-S1: when the boundary is genesis (L = 1), who writes the first
-//!   row?**
-//!   * (a) *Recommended:* block 0 is never a transition block (B1). There is
-//!     no genesis-time write, no certificate for block 0, and one rule for
-//!     every L.
-//!   * (b) Genesis initialization writes `row[1]` = the genesis list, and block
-//!     0 counts as certified by construction. This adds a second row writer and
-//!     a certification axiom.
-//!   * (c) Refuse L = 1 when the configuration is validated. This is
-//!     compatible with (a) and worth weighing when L is chosen: with L = 1
-//!     every block is a transition block, so by Q2 no block can be validated
-//!     until its parent is certified.
-//! * **G5-S2: activation after genesis.**
-//!   * (a) *Recommended:* the anchor epoch E_a (B3). Epoch numbers and row keys
-//!     are unchanged, and A = 0 is the ledger's rule.
-//!   * (b) As (a), but A must also be an epoch boundary. That is only a
-//!     restriction on the activation value; (a) already handles it.
-//!   * (c) Re-number epochs from A, epoch(h) = ⌊(h − A)/L⌋. Every reader of
-//!     an epoch number then depends on A.
-//!   * (d) Write the first row at activation (block A, or an upgrade
-//!     migration). That is a second writer of rows, outside transition blocks,
-//!     with no certified transition block behind it.
-//!
-//! # What this module deliberately does NOT decide
-//!
-//! * **Values.** No `epoch_length`, activation height, stake minimum,
-//!   `max_validators` or N_min is defined here: every one is a parameter the
-//!   caller supplies. N_min = 5 is the ledger's proposal; it is passed in,
-//!   not hard-coded.
+//! * **Values.** No `epoch_length`, activation height, stake minimum or
+//!   `max_validators` is chosen here; each one is a parameter.
+//!   [`EFFECTIVE_VALIDATOR_CAP`] is a ratified upper bound, not a value for
+//!   `max_validators`.
+//!   N_min is a parameter too. The ratified value, 5, is
+//!   `pool_topology::PRODUCT_MINIMUM` in `sumchain-consensus`, which this crate
+//!   cannot name, so the wiring passes it.
+//! * **Activation, heights and gates.** None.
 //! * **Q3-commit.** Rows stay uncommitted application state (#313, D2). Folding
 //!   a set digest into the state root is a separate, gated decision.
-//! * **Activation, heights and gates.** None.
-//! * **The validator cap interaction.** Truncation uses the caller's
-//!   `max_validators`. Whether that must also respect the unresolved VS-6
-//!   encodable cap (29,127) or the 65,535 vote cap is not decided here.
 //! * **Execution reads.** [`read_candidates`] reads committed state through a
-//!   [`Database`]; a wired transition must read the block's own
-//!   [`crate::exec_view::ExecutionView`] instead. That is part of wiring.
-//! * **The legacy-row refusal.** The engine's existing startup refusal of a
-//!   stored legacy epoch set is unchanged. [`check_stored_rows`] is the
-//!   proposed G5 counterpart (B4), applied when this is wired.
+//!   [`Database`]. A wired transition must read the block's own
+//!   [`crate::exec_view::ExecutionView`] instead; that is part of wiring.
+//! * **The engine's legacy-row refusal.** It is unchanged.
+//!   [`check_stored_rows`] is its G5 counterpart, applied when this is wired.
 
 use std::cmp::Ordering;
 
@@ -139,7 +138,14 @@ use crate::validator_set_state::{
 };
 use crate::StorageError;
 
-/// PROPOSED Q5 layout: `STATE` family, key `vset/` ‖ epoch (u64 big-endian).
+/// The ratified upper bound on `max_validators` (VS-6 option (a),
+/// 2026-10-21): the most validators the ConsensusConfigV1 field 0x0003 can
+/// encode under its 1 MiB field bound, 4 + 36 · 29,127 = 2^20
+/// (`consensus_config::codec::MAX_ENCODABLE_VALIDATORS`, #338). It is below
+/// the 65,535 vote/certificate cap. A bound, not a chosen `max_validators`.
+pub const EFFECTIVE_VALIDATOR_CAP: usize = 29_127;
+
+/// Q5 layout: `STATE` family, key `vset/` ‖ epoch (u64 big-endian).
 ///
 /// Disjoint from the account rows (`acct` ‖ address), the only range the
 /// `STATE` family's readers and the account-root digest scan, because no key
@@ -168,7 +174,7 @@ impl ValidatorSetLayout for VsetLayout {
     }
 }
 
-/// Why a PROPOSED G5 step refused.
+/// Why a G5 step refused.
 #[derive(Debug, thiserror::Error)]
 pub enum G5Error {
     #[error("staking.epoch_length is 0: protocol v1 static membership, no transitions")]
@@ -194,10 +200,10 @@ pub enum G5Error {
     #[error("validator-set row key {key:02x?} is not `vset/` followed by an 8-byte epoch")]
     MalformedRowKey { key: Vec<u8> },
     #[error(
-        "a validator-set row is stored for epoch {epoch}, at or below the anchor epoch {anchor}; \
-         no transition block writes it"
+        "a validator-set row is stored for epoch {epoch}, which is rowless ({why:?}); no \
+         transition block writes it"
     )]
-    RowInAnchorEpoch { epoch: u64, anchor: u64 },
+    RowForRowlessEpoch { epoch: u64, why: RowlessEpoch },
     #[error("scanning stored validator-set rows failed: {0}")]
     Scan(StorageError),
     #[error(
@@ -218,12 +224,28 @@ pub enum G5Error {
     StakingRead(StorageError),
     #[error("the previous set is empty; a carried-forward set must have members")]
     EmptyPrevious,
+    #[error("max_validators {configured} is above the effective validator cap {cap}")]
+    MaxValidatorsAboveCap { configured: usize, cap: usize },
 }
 
-/// When the PROPOSED rules apply: epoch length L > 0 and activation height A.
+/// Why an epoch has no row: the named exceptions to Q1's missing-row rule. Any
+/// epoch that is none of these needs its row, and a missing one is an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowlessEpoch {
+    /// Q1: epoch 0 is the genesis list.
+    Genesis,
+    /// S1(a): with L = 1, epoch 1's transition block would be block 0, which
+    /// genesis initialization creates and nothing executes.
+    GenesisBlockNeverTransitions,
+    /// S2(a): an epoch e ≥ 1 whose transition block e·L − 1 ran before
+    /// activation (e ≤ E_a), including the epoch containing activation.
+    ActivationAnchor,
+}
+
+/// When the rules apply: epoch length L > 0 and activation height A.
 ///
-/// Both are the caller's values (a #268 upgrade would select them); none is
-/// chosen here. Protocol v1 static membership has no schedule:
+/// Both are the caller's values (a #268 upgrade would select them); the
+/// ratification chose neither, and nothing here does. Protocol v1 static membership has no schedule:
 /// [`EpochSchedule::new`] refuses L = 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EpochSchedule {
@@ -250,17 +272,30 @@ impl EpochSchedule {
         self.activation
     }
 
-    /// B1: F = max(A, 1), the first block executed under these rules. Block 0
-    /// is created by genesis initialization and never executed, so it is never
-    /// a transition block.
+    /// F = max(A, 1), the first block executed under these rules. Block 0 is
+    /// created by genesis initialization and never executed, so it is never a
+    /// transition block (S1(a)).
     pub fn first_dynamic_block(&self) -> BlockHeight {
         self.activation.max(1)
     }
 
-    /// B3: E_a = ⌊F / L⌋. It and every earlier epoch are governed by the
-    /// genesis list; no row is written or read for them.
+    /// E_a = ⌊F / L⌋: it and every earlier epoch are rowless.
     pub fn anchor_epoch(&self) -> u64 {
         self.first_dynamic_block() / self.epoch_length
+    }
+
+    /// Which exception, if any, makes `epoch` rowless; `None` means its row is
+    /// required.
+    pub fn rowless(&self, epoch: u64) -> Option<RowlessEpoch> {
+        if epoch == 0 {
+            Some(RowlessEpoch::Genesis)
+        } else if epoch > self.anchor_epoch() {
+            None
+        } else if self.epoch_length == 1 && epoch == 1 {
+            Some(RowlessEpoch::GenesisBlockNeverTransitions)
+        } else {
+            Some(RowlessEpoch::ActivationAnchor)
+        }
     }
 
     /// Q0 + Q1: the epoch whose set governs `height`, ⌊height / L⌋.
@@ -268,10 +303,10 @@ impl EpochSchedule {
         height / self.epoch_length
     }
 
-    /// Q1 + B1 + B2: the epoch whose row block `height` writes, if it is a
-    /// transition block: a block at or after F with (T+1) mod L = 0 writes
-    /// `row[(T+1)/L]`, always an epoch after E_a. `None` for every other block,
-    /// including every block before activation. T = `u64::MAX` is refused.
+    /// Q1: the epoch whose row block `height` writes, if it is a transition
+    /// block. A block at or after F with (T+1) mod L = 0 writes `row[(T+1)/L]`,
+    /// never a rowless epoch's. `None` for every other block, including block
+    /// 0 and every block before activation. T = `u64::MAX` is refused.
     pub fn transition_epoch(&self, height: BlockHeight) -> Result<Option<u64>, G5Error> {
         if height < self.first_dynamic_block() {
             return Ok(None);
@@ -282,10 +317,11 @@ impl EpochSchedule {
         Ok((next % self.epoch_length == 0).then_some(next / self.epoch_length))
     }
 
-    /// Q2 + B2: the block that writes `epoch`'s row, e·L − 1 (the block T with
-    /// T+1 = e·L). `None` for an anchor epoch, which has no row.
+    /// Q2: the block that writes `epoch`'s row, e·L − 1 (the block T with
+    /// T+1 = e·L). `None` for a rowless epoch. An unrepresentable e·L − 1 is
+    /// refused.
     pub fn transition_block(&self, epoch: u64) -> Result<Option<BlockHeight>, G5Error> {
-        if epoch <= self.anchor_epoch() {
+        if self.rowless(epoch).is_some() {
             return Ok(None);
         }
         epoch
@@ -299,13 +335,14 @@ impl EpochSchedule {
     }
 }
 
-/// Q0 + Q1 + B3: the ordered set that validates `height`, read from `rows`
+/// Q0 + Q1: the ordered set that validates `height`, read from `rows`
 /// (committed state, or a block's own view).
 ///
-/// An anchor epoch (≤ E_a) is `genesis`. For any later epoch the row is
-/// required: a missing, corrupt or foreign row is an error, never "fall back
-/// to genesis". B5: for a transition block e·L − 1 this is the epoch e − 1
-/// set, the one that certifies it.
+/// A rowless epoch ([`RowlessEpoch`]) is governed by `genesis`, which must be
+/// the authenticated anchor membership (module docs). For every other epoch
+/// the row is required: a missing, corrupt or foreign row is an error, never
+/// "fall back to genesis". For a transition block e·L − 1 this is the epoch
+/// e − 1 set, the one that certifies it.
 pub fn resolve_set<S>(
     rows: &S,
     genesis: &[[u8; 32]],
@@ -316,7 +353,7 @@ where
     S: RowSource + ?Sized,
 {
     let epoch = schedule.governing_epoch(height);
-    if epoch <= schedule.anchor_epoch() {
+    if schedule.rowless(epoch).is_some() {
         return Ok(genesis.to_vec());
     }
     let record = read(rows, &VsetLayout, epoch, Presence::Required)?
@@ -324,8 +361,8 @@ where
     Ok(record.members().to_vec())
 }
 
-/// Q2 + B5: the set for `height` may govern only once its transition block is
-/// certified (by the preceding set). An anchor epoch needs no transition.
+/// Q2: the set for `height` may govern only once its transition block is
+/// certified (by the preceding set). A rowless epoch needs no transition.
 pub fn require_transition_certified(
     height: BlockHeight,
     schedule: &EpochSchedule,
@@ -384,14 +421,14 @@ impl Selection {
     }
 }
 
-/// Q4 (PROPOSED): the members of the next set.
+/// Q4: the members of the next set.
 ///
 /// Eligible: active, not jailed, self-stake + delegations ≥ `min_stake`.
 /// Ordered by that total descending, then public key ascending (so equal
-/// totals have one order on every node), truncated to `max_validators`. Below
-/// `n_min` eligible validators the `previous` set carries forward unchanged.
-/// At the first transition after activation, `previous` is the genesis list
-/// (B3).
+/// totals have one order on every node), truncated to `max_validators`, which
+/// is refused above [`EFFECTIVE_VALIDATOR_CAP`]. Below `n_min` (ratified: 5)
+/// eligible validators the `previous` set carries forward unchanged. At the
+/// first transition after activation, `previous` is the anchor membership.
 pub fn select_members(
     candidates: &[Candidate],
     min_stake: Balance,
@@ -399,6 +436,12 @@ pub fn select_members(
     n_min: usize,
     previous: &[[u8; 32]],
 ) -> Result<Selection, G5Error> {
+    if max_validators > EFFECTIVE_VALIDATOR_CAP {
+        return Err(G5Error::MaxValidatorsAboveCap {
+            configured: max_validators,
+            cap: EFFECTIVE_VALIDATOR_CAP,
+        });
+    }
     let mut eligible: Vec<&Candidate> = candidates
         .iter()
         .filter(|c| c.active && !c.jailed && c.total() >= min_stake)
@@ -446,7 +489,7 @@ pub fn read_candidates(db: &Database) -> Result<Vec<Candidate>, G5Error> {
     Ok(out)
 }
 
-/// Q1 write (PROPOSED): stage `members` as the row block `height` writes.
+/// Q1 write: stage `members` as the row block `height` writes.
 ///
 /// Refuses a block that is not a transition block (including every block
 /// before activation, and block 0), and (through the seam) an occupied row:
@@ -469,12 +512,12 @@ pub fn stage_transition_row(
     Ok(epoch)
 }
 
-/// B4 (PROPOSED): the stored-row preconditions for running these rules over
-/// `db`, checked before they first govern it and at every start after that.
+/// Q5: the stored-row preconditions for running these rules over `db`,
+/// checked before they first govern it and at every start after that.
 ///
 /// Refuses any entry at all in the legacy `validator_sets` family (a key-only
 /// scan, so an undecodable value refuses too), a `vset/` key that is not
-/// `vset/` ‖ 8 bytes, and a row for an anchor epoch. A static-membership
+/// `vset/` ‖ 8 bytes, and a row for a rowless epoch. A static-membership
 /// database has none of these and passes with nothing to migrate. Read errors
 /// are propagated, never read as "no rows".
 pub fn check_stored_rows(db: &Database, schedule: &EpochSchedule) -> Result<(), G5Error> {
@@ -497,11 +540,8 @@ pub fn check_stored_rows(db: &Database, schedule: &EpochSchedule) -> Result<(), 
         let epoch = <[u8; 8]>::try_from(suffix)
             .map(u64::from_be_bytes)
             .map_err(|_| G5Error::MalformedRowKey { key: key.to_vec() })?;
-        if epoch <= schedule.anchor_epoch() {
-            return Err(G5Error::RowInAnchorEpoch {
-                epoch,
-                anchor: schedule.anchor_epoch(),
-            });
+        if let Some(why) = schedule.rowless(epoch) {
+            return Err(G5Error::RowForRowlessEpoch { epoch, why });
         }
     }
     Ok(())
