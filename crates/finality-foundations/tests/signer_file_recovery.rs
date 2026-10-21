@@ -1485,3 +1485,126 @@ fn std_directory_conflict_halt_and_recovery() {
     ));
     std::fs::remove_dir_all(&base).unwrap();
 }
+
+/// Requests outside the ratified V ranges are refused before anything else:
+/// nothing is written and the signer stays usable. Without the round bound,
+/// a round above 2^20 at a closed height would sit above the whole-height
+/// floor `(H, 2^20, precommit)`.
+#[test]
+fn requests_outside_the_v_ranges_are_refused_without_writing() {
+    let rig = prepared(&[prevote(7, 0, A)]);
+    let mut s = rig.open().unwrap();
+    s.advance(&finality(7, &A)).unwrap();
+    rig.arm(usize::MAX, Mode::Error);
+    for (q, why) in [
+        (
+            req(7, MAX_ROUND + 1, Step::Prevote, VoteValue::Block(A), "x"),
+            "a round above the maximum",
+        ),
+        (
+            req(8, MAX_ROUND + 1, Step::Prevote, VoteValue::Block(A), "x"),
+            "a round above the maximum",
+        ),
+        (
+            req(8, 0, Step::Prevote, VoteValue::Block([0; 32]), "x"),
+            "a zero block id",
+        ),
+    ] {
+        assert_eq!(s.sign(&q), Err(SignerError::InvalidRequest(why)));
+    }
+    assert_eq!(rig.disk.borrow().ops, 0, "nothing written");
+    s.sign(&prevote(8, 0, A)).expect("not poisoned");
+}
+
+/// Initialized without a floor, the working height is the first signed
+/// one. A one-ahead "advancement" whose floor does not close that height is
+/// not an exact successor: the repair refuses it.
+#[test]
+fn a_one_ahead_advancement_must_close_every_signed_height() {
+    let rig = Rig::new();
+    initialize_exclusive(&rig.owner, &mut rig.store(), rig.pubkey(), None).unwrap();
+    rig.open().unwrap().sign(&prevote(7, 0, A)).unwrap();
+    let (m_state, m_sum) = state_now(&rig);
+    assert_eq!(m_state.floor_height, 0);
+    let advanced = |floor_height: u64| {
+        let mut f = m_state.clone();
+        f.counter += 1;
+        f.prev_checksum = m_sum;
+        f.floor_height = floor_height;
+        f.certified_block_id = B;
+        f.last = None;
+        f.encode(&B3).unwrap().to_vec()
+    };
+    for floor_height in [3u64, 7] {
+        rig.set_file(STATE_FILE, advanced(floor_height));
+        assert!(
+            matches!(rig.open(), Err(SignerError::Corrupt(m)) if m.contains("above the last signed height")),
+            "floor height {floor_height}"
+        );
+    }
+    rig.set_file(STATE_FILE, advanced(8));
+    let s = rig.open().unwrap();
+    assert_eq!(s.store().classified(), Some(Classified::AdvancedMirror));
+    assert_eq!(s.record().working_height(), Some(8));
+}
+
+/// The store writes an initial record only after a load that found no
+/// state: never over existing state, and never after a failed load.
+#[test]
+fn initialization_needs_a_load_that_found_nothing() {
+    let rig = prepared(&[prevote(7, 0, A)]);
+    let before = (rig.file(STATE_FILE), rig.mirror());
+    let record = SignerRecord {
+        key_id: rig.pubkey(),
+        sequence: 0,
+        floor: floor_below_height(FLOOR),
+        last: None,
+        lock: None,
+        certified: None,
+        lock_proof: None,
+        halt: None,
+    };
+    let mut st = rig.store();
+    assert!(st.persist(&record).is_err(), "no load");
+    rig.set_mirror(Some(vec![0; 7]));
+    assert!(st.load().is_err());
+    assert!(st.persist(&record).is_err(), "a failed load");
+    rig.set_mirror(before.1.clone());
+    assert_eq!(
+        (rig.file(STATE_FILE), rig.mirror()),
+        before,
+        "nothing overwritten"
+    );
+}
+
+/// A directory holding an earlier signer's conflict archive or retained
+/// proofs is never initialized over, and an interrupted initialization never
+/// completes beside them: the halt or its evidence would be lost.
+#[test]
+fn initialization_never_runs_over_an_earlier_signers_files() {
+    for name in [
+        proof_file_name(&[0x11; 32]),
+        "proof.tmp".to_string(),
+        conflict_file_name(7, "receipt"),
+        conflict_file_name(7, "state.tmp"),
+    ] {
+        let rig = Rig::new();
+        rig.set_file(&name, b"x".to_vec());
+        assert!(
+            matches!(rig.init(), Err(SignerError::Corrupt(m)) if m.contains("earlier signer")),
+            "{name}"
+        );
+        assert_eq!(rig.file(&name), Some(b"x".to_vec()), "{name} is kept");
+        assert_eq!(rig.file(STATE_FILE), None);
+
+        let rig = Rig::new();
+        rig.init().unwrap();
+        rig.set_mirror(None);
+        rig.set_file(&name, b"x".to_vec());
+        assert!(
+            matches!(rig.open(), Err(SignerError::Corrupt(m)) if m.contains("earlier signer")),
+            "R0 beside {name}"
+        );
+        assert_eq!(rig.mirror(), None, "R0 did not complete");
+    }
+}

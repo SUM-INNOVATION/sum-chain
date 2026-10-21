@@ -22,7 +22,7 @@ use sumchain_finality_foundations::signer::{
 };
 use sumchain_finality_foundations::signer_file::{
     floor_below_height, offset, proof_digest, proof_file_name, FileSignerStore, ProofStatus,
-    SignerState, HALT_SET, MAX_RETAINED_PROOF_LEN, STATE_FILE, STATE_LEN,
+    RecoveryReceipt, SignerState, HALT_SET, MAX_RETAINED_PROOF_LEN, STATE_FILE, STATE_LEN,
 };
 use sumchain_finality_foundations::Digest;
 
@@ -719,6 +719,117 @@ fn a_recovered_state_without_its_archive_is_refused() {
         "no receipt, no recovery"
     );
     rig.set_file("conflict-7.receipt", probe_receipt);
+    let s = rig.open().unwrap();
+    assert!(!s.is_halted());
+    assert_eq!(s.record().working_height(), Some(10));
+}
+
+/// A change made to a rig's files.
+type Tamper = Box<dyn Fn(&Rig)>;
+
+/// The recovered state file one ahead of the halted mirror (the last write,
+/// P2, failed): the R1 repair needs the matching archive. Every mismatch is
+/// refused; the untouched archive completes the repair.
+#[test]
+fn every_archive_mismatch_refuses_the_recovered_state() {
+    let writes = {
+        let probe = halted_rig();
+        let mut p = probe.open().unwrap();
+        probe.arm(usize::MAX, Mode::Error);
+        p.recover_after_conflict(at(9, A), &finality(9, &A), None)
+            .unwrap();
+        probe.ops()
+    };
+    let setup = || {
+        let rig = halted_rig();
+        let mut s = rig.open().unwrap();
+        rig.arm(writes - 1, Mode::Error);
+        assert!(s
+            .recover_after_conflict(at(9, A), &finality(9, &A), None)
+            .is_err());
+        drop(s);
+        rig.disk.borrow_mut().restart();
+        rig
+    };
+    let receipt =
+        |rig: &Rig| RecoveryReceipt::decode(&rig.file("conflict-7.receipt").unwrap(), &B3).unwrap();
+    let with_receipt = |f: fn(&mut RecoveryReceipt)| {
+        move |rig: &Rig| {
+            let mut r = receipt(rig);
+            f(&mut r);
+            rig.set_file("conflict-7.receipt", r.encode(&B3).to_vec());
+        }
+    };
+    let cases: Vec<(&str, Tamper)> = vec![
+        (
+            "receipt: another halted record",
+            Box::new(with_receipt(|r| r.halted_checksum[0] ^= 1)),
+        ),
+        (
+            "receipt: another conflict height",
+            Box::new(with_receipt(|r| r.conflict_height = 6)),
+        ),
+        (
+            "receipt: another resume height",
+            Box::new(with_receipt(|r| r.resume_height = 10)),
+        ),
+        (
+            "receipt: another resume block",
+            Box::new(with_receipt(|r| r.resume_block = B)),
+        ),
+        (
+            "receipt: another evidence digest",
+            Box::new(with_receipt(|r| r.evidence_digest[0] ^= 1)),
+        ),
+        (
+            "receipt: another resume digest",
+            Box::new(with_receipt(|r| r.resume_digest[0] ^= 1)),
+        ),
+        (
+            "receipt: broken checksum",
+            Box::new(|rig: &Rig| {
+                let mut b = rig.file("conflict-7.receipt").unwrap();
+                b[184] ^= 1;
+                rig.set_file("conflict-7.receipt", b);
+            }),
+        ),
+        (
+            "evidence replaced",
+            Box::new(|rig: &Rig| rig.set_file("conflict-7.evidence", finality(7, &A))),
+        ),
+        (
+            "resume certificate replaced",
+            Box::new(|rig: &Rig| rig.set_file("conflict-7.resume", finality(9, &B))),
+        ),
+        (
+            "archived state is not the halted record",
+            Box::new(|rig: &Rig| {
+                let recovered = rig.file(STATE_FILE).unwrap();
+                rig.set_file("conflict-7.state", recovered);
+            }),
+        ),
+        (
+            "state missing",
+            Box::new(|rig: &Rig| rig.remove_file("conflict-7.state")),
+        ),
+        (
+            "evidence missing",
+            Box::new(|rig: &Rig| rig.remove_file("conflict-7.evidence")),
+        ),
+        (
+            "resume missing",
+            Box::new(|rig: &Rig| rig.remove_file("conflict-7.resume")),
+        ),
+    ];
+    for (what, tamper) in &cases {
+        let rig = setup();
+        tamper(&rig);
+        assert!(
+            matches!(rig.open(), Err(SignerError::Corrupt(m)) if m.contains("recovery archive")),
+            "{what}"
+        );
+    }
+    let rig = setup();
     let s = rig.open().unwrap();
     assert!(!s.is_halted());
     assert_eq!(s.record().working_height(), Some(10));
