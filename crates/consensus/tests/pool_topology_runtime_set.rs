@@ -3,14 +3,19 @@
 //! #126 asks for a guard over the *live* validator membership. Under protocol
 //! v1 (G2-d, ratified) the canonical runtime membership is the static genesis
 //! list at every height: the engine refuses dynamic staking epochs and
-//! stake-weighted selection, and refuses a database holding a stored epoch set.
+//! stake-weighted selection (asserted below), and refuses a database holding a
+//! stored epoch set (asserted in `round_robin_proposer.rs`,
+//! `a_database_holding_a_stored_epoch_set_is_refused_at_load`).
 //! The guard in `sumchain_genesis::pool_topology` counts the genesis list. What
 //! this file pins, on real engines and real databases, is that the two are the
 //! same set, so the genesis-time guard is the runtime guard for as long as
 //! protocol v1 holds:
 //!
 //! * the engine's validator set (`ConsensusQuery::validators`) is the genesis
-//!   list, in declared order, at genesis, after blocks and after a restart;
+//!   list, in declared order, at genesis, after blocks and after a restart,
+//!   including for a deliberately permuted declared order that differs from
+//!   the sorted order (so an engine that sorted or deduplicated through a set
+//!   would fail);
 //! * every proposer the engine schedules is a member of that set, and the
 //!   schedule covers all of it;
 //! * the guard returns the same verdict over the engine's set as over the
@@ -287,4 +292,61 @@ fn the_guards_premise_protocol_v1_still_refuses_dynamic_membership() {
             "{label}: genesis validation must refuse it"
         );
     }
+}
+
+/// The declared order, not a sorted or set order, is the set the engine runs.
+/// The keys are declared deliberately out of order, and the fixture first
+/// checks that this order differs from the sorted and reverse-sorted orders,
+/// so an engine that sorted (or rebuilt the set through a map) cannot pass.
+#[tokio::test]
+async fn a_permuted_declared_order_is_kept_at_genesis_across_blocks_and_a_restart() {
+    let order: [u8; 5] = [3, 1, 4, 2, 5];
+    let keys: Vec<KeyPair> = order.iter().map(|&i| key(i)).collect();
+    let g = raw_genesis(&keys, ChainParams::default());
+    let declared = g.validator_pubkeys().unwrap();
+    assert_eq!(declared, keys.iter().map(pubkey).collect::<Vec<_>>());
+    let mut sorted = declared.clone();
+    sorted.sort();
+    assert_ne!(declared, sorted, "the fixture must not already be sorted");
+    let mut reversed = sorted.clone();
+    reversed.reverse();
+    assert_ne!(declared, reversed, "nor reverse-sorted");
+
+    let nodes: Vec<Node> = order.iter().map(|&i| Node::new(&g, Some(key(i)))).collect();
+    for node in &nodes {
+        assert_eq!(node.engine.validators(), declared, "at genesis");
+    }
+    let n = declared.len() as u64;
+    for h in 1..=(2 * n) {
+        let expected = declared[(h % n) as usize];
+        let producer = nodes
+            .iter()
+            .zip(&keys)
+            .find(|(_, k)| pubkey(k) == expected)
+            .map(|(node, _)| node)
+            .unwrap();
+        assert_eq!(producer.engine.get_proposer(h), expected, "h={h}");
+        let block = producer
+            .engine
+            .propose_block(Vec::new())
+            .await
+            .expect("the rightful proposer produces");
+        assert_eq!(block.header.proposer_pubkey, expected);
+        for node in &nodes {
+            if !Arc::ptr_eq(&node.engine, &producer.engine) {
+                node.engine
+                    .import_block(block.clone())
+                    .await
+                    .expect("peers accept it");
+            }
+            assert_eq!(node.engine.validators(), declared, "h={h}");
+        }
+    }
+    let reopened = engine_on(&nodes[0].db, &g, Some(key(order[0])));
+    reopened.load_chain().unwrap();
+    assert_eq!(reopened.validators(), declared, "after restart");
+    assert_eq!(
+        check_pool_activation(&reopened.validators()),
+        check_pool_activation(&declared)
+    );
 }
