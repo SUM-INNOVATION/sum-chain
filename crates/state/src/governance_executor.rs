@@ -24,10 +24,13 @@
 //! - `318` invalid equity vote (bad merkle proof / bad/mismatched controller
 //!   signature / root not frozen for this proposal)
 //!
-//! C5 registry ingress (#242, PROPOSED, dormant), operations 8 and 9: no new
-//! code. `302` (pre-semantic) while a named parameter or the genesis block hash
-//! is missing, or the payload does not decode; `303` (semantic) for every
-//! refusal after that. See [`crate::registry_ingress`].
+//! C5 registry ingress (#242, PROPOSED, dormant): [`execute_registry_ingress`],
+//! reached by no transaction decode (operations 8 and 9 are NOT
+//! `GovernanceOperation` variants; adding them is the separately authorized
+//! activation change). No new code: `302` (pre-semantic) while a named
+//! parameter or the genesis block hash is missing, or the payload does not
+//! decode; `303` (semantic) for every refusal after that. See
+//! [`crate::registry_ingress`].
 //!
 //! Treasury execution (P6b): a passed `TreasurySpend` + `OnChain` proposal pays
 //! a single native-Koppa amount from `GovernanceParams::treasury` to the
@@ -65,7 +68,7 @@ use sumchain_storage::{equity_merkle_verify, EquityClassRoot, QualifyingAsset};
 pub const NATIVE_PASS_THRESHOLD_BPS: u128 = 6667;
 
 use crate::equity_executor::EquityExecutor;
-use crate::registry_ingress::{self, RegistryIngressContext};
+use crate::registry_ingress::{self, RegistryIngressContext, RegistryIngressOp};
 use sumchain_wire::registry_ingress::{RegistryDisableV1, RegistryRegisterV1};
 use sumchain_wire::registry_wire::RegistryRecordV1;
 use crate::token_executor::TokenExecutor;
@@ -185,9 +188,6 @@ pub fn execute(
     // consensus). Validator-gated actions authorize against exactly this set —
     // never StakingStore/ValidatorSetStore.
     active_validator_pubkeys: &[[u8; 32]],
-    // C5 registry ingress (operations 8 and 9): named parameters and the
-    // genesis block hash. Both operations refuse unless all are present.
-    registry: RegistryIngressContext<'_>,
 ) -> Result<TxExecutionResult> {
     // ── Pre-semantic: gate / params / decode (no fee, no nonce, no state) ────
     if !gate_open(params, block_height) {
@@ -260,43 +260,6 @@ pub fn execute(
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
             Ok(req) => validate_equity_vote(view, gp, from, chain_id, block_height, &req),
         },
-        // C5 (#242, PROPOSED). Unready (a named parameter or the genesis hash
-        // missing) is pre-semantic, like an undecodable payload.
-        GovernanceOperation::RegistryRegister => {
-            let Some(ready) = registry_ingress::ready(&registry) else {
-                return Ok(result(tx_hash, TxStatus::Failed(302), 0));
-            };
-            match RegistryRegisterV1::decode_exact(&gov.data) {
-                Err(_) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
-                Ok(req) => registry_ingress::validate_register(
-                    view,
-                    gp,
-                    &ready,
-                    chain_id,
-                    block_height,
-                    active_validator_pubkeys,
-                    &req,
-                )
-                .map(Prepared::RegistryRecord),
-            }
-        }
-        GovernanceOperation::RegistryDisable => {
-            let Some(ready) = registry_ingress::ready(&registry) else {
-                return Ok(result(tx_hash, TxStatus::Failed(302), 0));
-            };
-            match RegistryDisableV1::decode_exact(&gov.data) {
-                Err(_) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
-                Ok(req) => registry_ingress::validate_disable(
-                    view,
-                    &ready,
-                    chain_id,
-                    block_height,
-                    active_validator_pubkeys,
-                    &req,
-                )
-                .map(Prepared::RegistryRecord),
-            }
-        }
     };
 
     // A storage failure during validation fails execution: no receipt, no fee,
@@ -307,6 +270,92 @@ pub fn execute(
         Err(Stop::Storage(e)) => return Err(e),
     };
 
+    settle(view, from, fee, proposer, block_height, tx_hash, validated)
+}
+
+/// C5 registry ingress (#242, PROPOSED, dormant): governance-v1's handling of
+/// a register or disable, with the same gate, parameters and Policy-B
+/// settlement as [`execute`].
+///
+/// No transaction decode reaches this: `GovernanceOperation` has no variant for
+/// either operation, so a governance transaction naming 8 or 9 is refused at
+/// decode exactly as before, and a block holding one is rejected. Only a direct
+/// call (the tests) runs it. Wiring it to the wire is the separately
+/// authorized activation change.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_registry_ingress(
+    view: &mut ExecutionView<'_, '_>,
+    chain_id: sumchain_primitives::ChainId,
+    params: &ChainParams,
+    op: RegistryIngressOp,
+    data: &[u8],
+    from: &Address,
+    fee: Balance,
+    proposer: &Address,
+    block_height: u64,
+    tx_hash: Hash,
+    active_validator_pubkeys: &[[u8; 32]],
+    registry: RegistryIngressContext<'_>,
+) -> Result<TxExecutionResult> {
+    // ── Pre-semantic (no fee, no nonce, no state) ────────────────────────────
+    if !gate_open(params, block_height) {
+        return Ok(result(tx_hash, TxStatus::Failed(300), 0));
+    }
+    let Some(gp) = params.governance.as_ref() else {
+        return Ok(result(tx_hash, TxStatus::Failed(301), 0));
+    };
+    // Unready (a named parameter or the genesis hash missing) is
+    // pre-semantic, like an undecodable payload.
+    let Some(ready) = registry_ingress::ready(&registry) else {
+        return Ok(result(tx_hash, TxStatus::Failed(302), 0));
+    };
+    let validated = match op {
+        RegistryIngressOp::Register => match RegistryRegisterV1::decode_exact(data) {
+            Err(_) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
+            Ok(req) => registry_ingress::validate_register(
+                view,
+                gp,
+                &ready,
+                chain_id,
+                block_height,
+                active_validator_pubkeys,
+                &req,
+            ),
+        },
+        RegistryIngressOp::Disable => match RegistryDisableV1::decode_exact(data) {
+            Err(_) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
+            Ok(req) => registry_ingress::validate_disable(
+                view,
+                &ready,
+                chain_id,
+                block_height,
+                active_validator_pubkeys,
+                &req,
+            ),
+        },
+    };
+    settle(
+        view,
+        from,
+        fee,
+        proposer,
+        block_height,
+        tx_hash,
+        validated.map(Prepared::RegistryRecord),
+    )
+}
+
+/// The semantic half of every governance operation: Policy-B fee and nonce,
+/// then the staged writes.
+fn settle(
+    view: &mut ExecutionView<'_, '_>,
+    from: &Address,
+    fee: Balance,
+    proposer: &Address,
+    block_height: u64,
+    tx_hash: Hash,
+    validated: std::result::Result<Prepared, u32>,
+) -> Result<TxExecutionResult> {
     // ── Semantic: apply Policy-B fee/nonce ───────────────────────────────────
     let balance = StateManager::v_get_balance(view, from)?;
     let fee_affordable = balance >= fee;
