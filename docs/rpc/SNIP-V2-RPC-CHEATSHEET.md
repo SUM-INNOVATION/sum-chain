@@ -287,7 +287,7 @@ Codes `20`/`21` (generic NodeRegistryV2 / StorageMetadataV2 fail) currently fall
   - Top-level `per_archive` stays **epoch-0-only** (backward-compatible).
   - `assignment_epochs: [u64]` — all epoch heights, ascending (`[assignment_height, ...reassign]`).
   - `latest_assignment_epoch: u64` — the newest epoch height.
-  - `reassignment_needed: bool` — true iff an owner `ReassignChunksV2` would be accepted right now.
+  - `reassignment_needed: bool` — the coverage-gap predicate: true iff an archive in the latest assignment epoch's snapshot is no longer currently active (exit / slash / unbonding). `ReassignChunksV2` requires it, but also requires the reassignment activation gate (330), an existing file (331), the file owner as sender (332), a non-`Abandoned` file (333) and no reassignment of the same file at the same height (334), so `true` does not by itself mean a reassignment would be accepted.
   - `per_epoch: [{ epoch_height, is_epoch_zero, covered_count, per_archive }]` — self-consistent per-epoch detail. Re-derive each epoch's assignment with `assigned_archives_presorted(merkle_root, storage_getActiveNodesAtHeight(epoch_height), idx, R)`.
 
 ### Tooling (issue #80)
