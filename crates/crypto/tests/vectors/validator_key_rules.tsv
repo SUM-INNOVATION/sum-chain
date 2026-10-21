@@ -1,0 +1,32 @@
+# Validator-key construction rules (VS-5, ratified 2026-10-21): one 32-byte
+# Ed25519 public-key encoding per line, with the verdict every implementation
+# of the rules must give. Rules apply in order: decode, canonical, small order.
+#
+# Read by crates/crypto/tests/validator_key_rules.rs (check_validator_key),
+# crates/finality-foundations/tests/validator_key_rules.rs
+# (AuthenticatedValidatorSet) and crates/genesis/tests/validator_key_rules.rs
+# (Genesis::validate), so the three agree.
+#
+# verdict	hex	what
+ok	5866666666666666666666666666666666666666666666666666666666666666	base point B
+ok	c9a3f86aae465f0e56513864510f3997561fa2c9e85ea21dc2292309f3cd6022	2B
+ok	9599999999999999999999999999999999999999999999999999999999999999	B + order-2 point (mixed order; only small order is refused)
+ok	da99e28ba529cdde35a25fba9059e78ecaee239f99755b9b1aa4f65df00803e2	B + order-8 point (mixed order)
+undecodable	0200000000000000000000000000000000000000000000000000000000000000	y = 2, not on the curve
+undecodable	0200000000000000000000000000000000000000000000000000000000000080	y = 2 with the sign bit set
+undecodable	0700000000000000000000000000000000000000000000000000000000000000	y = 7, not on the curve
+undecodable	efffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f	y = p + 2 (2 is not on the curve)
+non_canonical	f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f	y = p + 3, a large-order point
+non_canonical	f1ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f	y = p + 4, a large-order point
+non_canonical	edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f	y = p, the order-4 point y = 0 (non-canonical before small order)
+non_canonical	eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f	y = p + 1, the identity
+non_canonical	0100000000000000000000000000000000000000000000000000000000000080	identity with the sign bit set (x = 0)
+non_canonical	ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff	order-2 point with the sign bit set (x = 0)
+small_order	0100000000000000000000000000000000000000000000000000000000000000	identity
+small_order	ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f	order 2: y = p - 1
+small_order	0000000000000000000000000000000000000000000000000000000000000000	order 4: y = 0
+small_order	0000000000000000000000000000000000000000000000000000000000000080	order 4: y = 0, other x
+small_order	26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05	order 8
+small_order	26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85	order 8, other x
+small_order	c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a	order 8
+small_order	c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa	order 8, other x
