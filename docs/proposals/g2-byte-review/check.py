@@ -17,7 +17,8 @@ Checks:
 6. Domains and magics: NUL only at the end, distinct, prefix-free, and no
    clash with retired drafts or with any byte-string literal under `crates/`.
    A ratified constant may be spelled exactly, and only, in its implementation
-   file (`RATIFIED_HOME`).
+   file (`RATIFIED_HOME`); so may a proposed constant implemented dormant but
+   not ratified (`PROPOSED_HOME`).
 7. Determinism: two builds are identical and equal `vectors.json`.
 8. Every 32-byte-or-longer hex string in README.md appears in `vectors.json`
    or the cross-check file.
@@ -169,6 +170,14 @@ RATIFIED_HOME = {
     "M_CERT": "crates/finality-foundations/src/certificate.rs",
     # VS-1, settled by the owner, 2026-10-21 (decision ledger).
     "D_VALSET": "crates/finality-foundations/src/vote.rs",
+}
+
+# Implemented dormant but NOT ratified (the signer-persistence draft): each is
+# spelled only in its one home; on ratification it moves to RATIFIED_HOME.
+PROPOSED_HOME = {
+    "D_SIGNER": "crates/finality-foundations/src/signer_file.rs",
+    "D_SIGNBYTES": "crates/finality-foundations/src/signer_file.rs",
+    "M_SIGNER": "crates/finality-foundations/src/signer_file.rs",
 }
 
 
@@ -352,7 +361,10 @@ def main():
     named = {**g.DOMAINS, **g.MAGICS}
     for name, home in sorted(RATIFIED_HOME.items()):
         check(lits.get(named[name]) == {home}, f"ratified {name} is spelled only in {home}")
-    homed = {named[n] for n in RATIFIED_HOME}
+    for name, home in sorted(PROPOSED_HOME.items()):
+        check(lits.get(named[name]) == {home},
+              f"proposed (unratified) {name} is spelled only in {home}")
+    homed = {named[n] for n in {**RATIFIED_HOME, **PROPOSED_HOME}}
     reused = {x for x in set(news)
               if any((lit == x and x not in homed) or (lit != x and lit.startswith(x))
                      or (lit and lit != x and x.startswith(lit) and lit.endswith(b"\0"))

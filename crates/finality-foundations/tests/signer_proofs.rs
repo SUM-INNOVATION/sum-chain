@@ -20,7 +20,7 @@ use std::rc::Rc;
 use ed25519_dalek::{Signer as _, SigningKey as EdSigningKey};
 use serde_json::{json, Value};
 use sumchain_finality_foundations::certificate::{
-    certificate_len, quorum, CertificateEntry, FinalityCertificateV1, MAX_VALIDATORS,
+    certificate_len, quorum, CertificateEntry, FinalityCertificateV1, CERT_MAGIC, MAX_VALIDATORS,
 };
 use sumchain_finality_foundations::encoding::{Round, MAX_ROUND};
 use sumchain_finality_foundations::proofs::{
@@ -278,7 +278,7 @@ fn polka_refusals() {
         PolkaDecodeError::ShortHeader { actual: 118 }
     );
     let mut b = bytes.clone();
-    b[0..7].copy_from_slice(b"FCRTv1\0");
+    b[0..7].copy_from_slice(&CERT_MAGIC);
     assert_eq!(
         dec(&b),
         PolkaDecodeError::Magic,

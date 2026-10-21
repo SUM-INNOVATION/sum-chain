@@ -309,6 +309,8 @@ Only full manifest bytes can produce this record; a hint never does.
 
 ## 8. Signer state `SignerStateV1` and mirror (new; replace BL §6): serve G2-b
 
+> **Superseded draft (group A2).** The 284-byte record and 21-byte mirror below are draft 1. The current proposal, still UNRATIFIED and not frozen, is a 413-byte record (with a separate halt byte) whose mirror is a full byte-identical copy; it is documented in `crates/finality-foundations/src/signer_file.rs`. Nothing in this section is ratified.
+
 **File** `<data_dir>/finality/signer.v1`. It lives outside RocksDB, so deleting or restoring the chain database never touches it. Ownership is a non-blocking exclusive `flock` on `<data_dir>/finality/signer.v1.lock`, held for the signer's lifetime. That lock is a zero-byte OS lock file, not a record.
 
 | Offset | Size | Field |
