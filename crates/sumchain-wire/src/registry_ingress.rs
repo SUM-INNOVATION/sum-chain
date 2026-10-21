@@ -1,5 +1,10 @@
-//! C5 registry ingress (#242): governance-v1 operations `RegistryRegister = 8`
-//! and `RegistryDisable = 9`.
+//! C5 registry ingress (#242): the payloads of the proposed governance-v1
+//! operations 8 (register) and 9 (disable).
+//!
+//! UNWIRED: [`crate::governance::GovernanceOperation`] has no variant 8 or 9,
+//! so no transaction decodes to these payloads. Adding the two wire variants is
+//! the separately authorized activation change (a coordinated, same-window
+//! upgrade).
 //!
 //! PROPOSED, NOT RATIFIED. The mechanism, layouts, signing domains, threshold
 //! source and lifecycle rules are those of the C5 proposal (mechanism B). The
