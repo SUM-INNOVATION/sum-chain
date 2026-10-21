@@ -17,12 +17,13 @@ use std::rc::Rc;
 use ed25519_dalek::Signer as _;
 use serde_json::{json, Value};
 use sumchain_finality_foundations::signer::{
-    initialize_exclusive, Certified, DurableSigner, Justification, Lock, SignPosition, SignRequest,
-    SignerError, SigningKey, Step, VoteValue,
+    initialize_exclusive, Certified, DurableSigner, Justification, Lock, ProofRef,
+    RetainedProofCheck, SignPosition, SignRequest, SignerError, SigningKey, Step, VoteValue,
 };
 use sumchain_finality_foundations::signer_file::{
-    floor_below_height, offset, proof_digest, proof_file_name, FileSignerStore, ProofStatus,
-    RecoveryReceipt, SignerState, HALT_SET, MAX_RETAINED_PROOF_LEN, STATE_FILE, STATE_LEN,
+    floor_below_height, offset, proof_digest, proof_file_name, FileSignerStore, ProofPurpose,
+    ProofStatus, RecoveryReceipt, SignerState, HALT_SET, MAX_RETAINED_PROOF_LEN, STATE_FILE,
+    STATE_LEN,
 };
 use sumchain_finality_foundations::Digest;
 
@@ -836,6 +837,292 @@ fn every_archive_mismatch_refuses_the_recovered_state() {
     let s = rig.open().unwrap();
     assert!(!s.is_halted());
     assert_eq!(s.record().working_height(), Some(10));
+}
+
+/// Write `st` as the current record in both copies (same counter).
+fn rewrite_record(rig: &Rig, st: &SignerState) {
+    let bytes = st.encode(&B3).unwrap().to_vec();
+    rig.set_file(STATE_FILE, bytes.clone());
+    let mut d = rig.disk.borrow_mut();
+    d.mirror_vol = Some(bytes.clone());
+    d.mirror_dur = Some(bytes);
+}
+
+/// The digest binds the purpose and context: the same bytes kept for one
+/// lock or halt never pass for another. At open the signer also verifies
+/// the retained bytes for their purpose.
+#[test]
+fn a_retained_proof_is_bound_to_its_purpose_and_context() {
+    let bytes = finality(7, &B);
+    let digests = [
+        ProofPurpose::ConflictEvidence {
+            height: 7,
+            certified: A,
+        },
+        ProofPurpose::ConflictEvidence {
+            height: 7,
+            certified: B,
+        },
+        ProofPurpose::ConflictEvidence {
+            height: 6,
+            certified: A,
+        },
+        ProofPurpose::LockJustification {
+            height: 7,
+            round: 0,
+            value: A,
+        },
+        ProofPurpose::LockJustification {
+            height: 7,
+            round: 1,
+            value: A,
+        },
+        ProofPurpose::ResumeCertificate {
+            height: 7,
+            block: A,
+        },
+    ]
+    .map(|p| proof_digest(&B3, &p, &bytes));
+    for i in 0..digests.len() {
+        for j in 0..i {
+            assert_ne!(digests[i], digests[j], "purposes {i} and {j}");
+        }
+    }
+
+    // Locked and halted records: present and verified.
+    let locked = prepared(&[Act::Sign(prevote(7, 0, A)), Act::Sign(precommit(7, 0, A))]);
+    let s = locked.open().unwrap();
+    assert_eq!(s.store().proof_status(), ProofStatus::Present);
+    assert_eq!(s.retained_proof_check(), &RetainedProofCheck::Verified);
+    let lock_bytes = locked
+        .file(&proof_file_name(&decoded(&locked).proof_digest))
+        .unwrap();
+    let rig = halted_rig();
+    let s = rig.open().unwrap();
+    assert_eq!(s.retained_proof_check(), &RetainedProofCheck::Verified);
+    drop(s);
+
+    // The lock's proof under the halt's evidence name: the digest (bound to
+    // the conflict, not the lock) does not match. Degraded, still halted.
+    let evidence_name = proof_file_name(&decoded(&rig).proof_digest);
+    rig.set_file(&evidence_name, lock_bytes);
+    let mut s = rig.open().unwrap();
+    assert_eq!(s.store().proof_status(), ProofStatus::Corrupt);
+    assert_eq!(s.retained_proof_check(), &RetainedProofCheck::Unavailable);
+    assert!(s.is_halted());
+    assert!(matches!(
+        s.recover_after_conflict(&at(9, A), &finality(9, &A), None),
+        Err(SignerError::RecoveryArchive(_))
+    ));
+    drop(s);
+
+    // Digest-consistent bytes that do not verify for the purpose (a proof
+    // naming the certified block, not a conflicting one): refused by the
+    // signer's own check; the halt stands; recovery needs real evidence.
+    let rig = halted_rig();
+    let mut st = decoded(&rig);
+    let wrong = finality(7, &A);
+    st.proof_digest = proof_digest(&B3, &st.proof_purpose().unwrap(), &wrong);
+    rig.set_file(&proof_file_name(&st.proof_digest), wrong);
+    rewrite_record(&rig, &st);
+    let mut s = rig.open().unwrap();
+    assert_eq!(s.store().proof_status(), ProofStatus::Present);
+    assert!(matches!(
+        s.retained_proof_check(),
+        RetainedProofCheck::Refused(_)
+    ));
+    assert!(s.is_halted());
+    assert!(matches!(
+        s.recover_after_conflict(&at(9, A), &finality(9, &A), None),
+        Err(SignerError::RecoveryEvidence(_))
+    ));
+    s.recover_after_conflict(&at(9, A), &finality(9, &A), Some(&finality(7, &B)))
+        .unwrap();
+}
+
+/// No stored object exceeds 2,883,725 bytes: a retained proof above the
+/// bound cannot be persisted, and an archive object above it is refused
+/// before anything is written.
+#[test]
+fn every_stored_object_is_within_the_bound() {
+    use sumchain_finality_foundations::signer::SignerStore as _;
+    let rig = prepared(&[Act::Sign(prevote(7, 0, A)), Act::Sign(precommit(7, 0, A))]);
+    let mut record = rig.open().unwrap().record().clone();
+    record.sequence += 1;
+    record.lock_proof = Some(ProofRef::Bytes(vec![0; MAX_RETAINED_PROOF_LEN + 1]));
+    let mut st = rig.store();
+    st.load().unwrap();
+    let before = rig.ops();
+    let e = st.persist(&record).unwrap_err();
+    assert!(e.0.contains("above the bound"), "{}", e.0);
+    assert_eq!(rig.ops(), before, "nothing written");
+
+    let rig = halted_rig();
+    let mut st = rig.store();
+    st.load().unwrap();
+    let big = vec![0; MAX_RETAINED_PROOF_LEN + 1];
+    let at9 = Certified {
+        height: 9,
+        block_id: A,
+    };
+    for (evidence, resume) in [
+        (big.as_slice(), &finality(9, &A)[..]),
+        (&finality(7, &B)[..], big.as_slice()),
+    ] {
+        let before = rig.ops();
+        let e = st.archive_conflict(evidence, resume, at9).unwrap_err();
+        assert!(e.0.contains("above the bound"), "{}", e.0);
+        assert_eq!(rig.ops(), before, "nothing written");
+    }
+    assert!(conflict_files(&rig).is_empty());
+}
+
+/// Recovery keeps the signing history: the halted record, with its last
+/// signature, is archived, and nothing at or below the resume height can be
+/// signed again, the identical request included.
+#[test]
+fn recovery_preserves_the_signing_history() {
+    let rig = halted_rig();
+    let before = decoded(&rig);
+    let last = before.last.clone().expect("prevote (8, 0, B) was signed");
+    let mut s = rig.open().unwrap();
+    s.recover_after_conflict(&at(9, A), &finality(9, &A), None)
+        .unwrap();
+    let (archived, _) = SignerState::decode(&rig.file("conflict-7.state").unwrap(), &B3).unwrap();
+    assert_eq!(
+        archived, before,
+        "the halted record, last signature included, is archived"
+    );
+    assert_eq!(archived.last.as_ref(), Some(&last));
+    for q in [
+        prevote(8, 0, B),
+        prevote(8, 0, A),
+        prevote(8, 5, B),
+        prevote(9, 0, A),
+    ] {
+        assert!(
+            matches!(s.sign(&q), Err(SignerError::Regression { .. })),
+            "{:?}",
+            q.position
+        );
+    }
+    let hw = s.record().high_water().unwrap();
+    assert!(hw > last.position && hw.height == 9);
+    s.sign(&prevote(10, 0, A)).unwrap();
+}
+
+/// No repair at open and no missing or corrupt proof ever clears a halt or
+/// weakens a lock.
+#[test]
+fn no_repair_or_missing_proof_clears_a_halt_or_weakens_a_lock() {
+    let sum_of = |rig: &Rig| SignerState::decode(&rig.file(STATE_FILE).unwrap(), &B3).unwrap();
+    // Halt: evidence missing or corrupt; the halted state over the pre-halt
+    // mirror (R1 completes the halt); R0 refused (counter > 0); one-ahead
+    // states that drop the halt without a recovery archive refused.
+    for case in 0..6 {
+        let rig = halted_rig();
+        let (halted, halted_sum) = sum_of(&rig);
+        let evidence = proof_file_name(&halted.proof_digest);
+        match case {
+            0 => rig.remove_file(&evidence),
+            1 => {
+                let mut b = rig.file(&evidence).unwrap();
+                b[0] ^= 1;
+                rig.set_file(&evidence, b);
+            }
+            2 => {
+                // The halt's own persist reached P1 only: R1 completes it.
+                let pre = prepared(&[
+                    Act::Sign(prevote(7, 0, A)),
+                    Act::Sign(precommit(7, 0, A)),
+                    Act::Advance(finality(7, &A)),
+                    Act::Sign(prevote(8, 0, B)),
+                ]);
+                let m = pre.disk.borrow().mirror_vol.clone();
+                rig.disk.borrow_mut().mirror_vol = m.clone();
+                rig.disk.borrow_mut().mirror_dur = m;
+            }
+            3 => {
+                rig.disk.borrow_mut().mirror_vol = None;
+                rig.disk.borrow_mut().mirror_dur = None;
+            }
+            _ => {
+                let mut next = halted.clone();
+                next.counter += 1;
+                next.prev_checksum = halted_sum;
+                next.halted = false;
+                next.proof_digest = [0; 32];
+                if case == 5 {
+                    // A recovery-shaped successor, but no archive exists.
+                    next.floor_height = 10;
+                    next.certified_block_id = A;
+                    next.last = None;
+                }
+                rig.set_file(STATE_FILE, next.encode(&B3).unwrap().to_vec());
+            }
+        }
+        match rig.open() {
+            Ok(mut s) => {
+                assert!(case <= 2, "case {case} opened");
+                assert!(s.is_halted(), "case {case}: the halt stands");
+                assert_eq!(
+                    s.sign(&prevote(8, 1, B)),
+                    Err(SignerError::Halted),
+                    "case {case}"
+                );
+            }
+            Err(e) => {
+                assert!(case >= 3, "case {case}: {e}");
+                assert!(matches!(e, SignerError::Corrupt(_)), "case {case}: {e}");
+            }
+        }
+    }
+    // Lock: proof missing or corrupt keeps the lock; a one-ahead state that
+    // drops or rewrites the lock is refused.
+    for case in 0..4 {
+        let rig = prepared(&[Act::Sign(prevote(7, 0, A)), Act::Sign(precommit(7, 0, A))]);
+        let (locked, locked_sum) = sum_of(&rig);
+        let proof = proof_file_name(&locked.proof_digest);
+        match case {
+            0 => rig.remove_file(&proof),
+            1 => {
+                let mut b = rig.file(&proof).unwrap();
+                b[0] ^= 1;
+                rig.set_file(&proof, b);
+            }
+            _ => {
+                let mut next = locked.clone();
+                next.counter += 1;
+                next.prev_checksum = locked_sum;
+                let l = next.last.as_mut().unwrap();
+                l.position.round = 1;
+                l.position.step = Step::Prevote;
+                l.value = VoteValue::Block(B);
+                l.signature[0] ^= 1;
+                if case == 2 {
+                    next.lock = None;
+                    next.proof_digest = [0; 32];
+                } else {
+                    next.lock.as_mut().unwrap().value = B;
+                }
+                rig.set_file(STATE_FILE, next.encode(&B3).unwrap().to_vec());
+            }
+        }
+        match rig.open() {
+            Ok(mut s) => {
+                assert!(case <= 1, "case {case} opened");
+                assert_eq!(s.record().lock.map(|l| l.value), Some(A), "case {case}");
+                assert!(matches!(
+                    s.sign(&prevote(7, 1, B)),
+                    Err(SignerError::LockedOnOtherValue(_))
+                ));
+            }
+            Err(e) => assert!(
+                case >= 2 && matches!(e, SignerError::Corrupt(_)),
+                "case {case}: {e}"
+            ),
+        }
+    }
 }
 
 #[test]
