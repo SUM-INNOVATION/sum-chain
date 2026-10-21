@@ -81,6 +81,24 @@ fn governance_txdata_bincode_round_trip() {
     assert_eq!(GovernanceOperation::from_u8(2), Some(GovernanceOperation::CastVote));
 }
 
+/// C5 registry ingress (#242, PROPOSED): operations 8 and 9 are appended after
+/// `CastEquityVote = 7`, and bincode tags each by its declaration ordinal as a
+/// u32 little-endian, ahead of the `data` length (u64 little-endian).
+#[test]
+fn governance_operations_8_and_9_are_appended() {
+    for (op, n) in [
+        (GovernanceOperation::CastEquityVote, 7u8),
+        (GovernanceOperation::RegistryRegister, 8),
+        (GovernanceOperation::RegistryDisable, 9),
+    ] {
+        assert_eq!(op as u8, n);
+        assert_eq!(GovernanceOperation::from_u8(n), Some(op));
+        let bytes = bincode::serialize(&GovernanceTxData { operation: op, data: vec![0xAB] }).unwrap();
+        assert_eq!(bytes, [&[n, 0, 0, 0][..], &1u64.to_le_bytes(), &[0xAB]].concat());
+    }
+    assert_eq!(GovernanceOperation::from_u8(10), None);
+}
+
 // ───────────────────── v1 data-model round-trips (P2) ────────────────────────
 
 use sumchain_primitives::governance::{
