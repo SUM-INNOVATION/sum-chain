@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use sumchain_crypto::PublicKey;
+use sumchain_crypto::{check_validator_key, PublicKey, ValidatorKeyRule};
 use sumchain_primitives::{
     Address, Balance, Block, ChainId, GovernanceParams, Hash, StakingParams, Timestamp,
     DEFAULT_DAILY_QUOTA, DEFAULT_MAX_MESSAGE_SIZE, DEFAULT_MIN_TRUST_STAKE,
@@ -18,6 +18,17 @@ use thiserror::Error;
 pub mod compute_pool_retention;
 pub mod compute_pool_retention_inputs;
 pub mod pool_topology;
+
+/// The most validators a genesis may list (VS-6 option (a), ratified
+/// 2026-10-21).
+///
+/// ConsensusConfigV1 field 0x0003 encodes a u32 count followed by, for each
+/// validator, a u32 length and 32 key bytes. Under the 1 MiB field bound,
+/// 4 + 36 · 29,127 = 2^20. This is `MAX_ENCODABLE_VALIDATORS` in
+/// `sumchain-consensus`'s ConsensusConfig codec, which this crate cannot name;
+/// `crates/consensus/tests/genesis_validator_rules.rs` pins the two equal. It
+/// is below the 65,535 vote and certificate cap.
+pub const MAX_GENESIS_VALIDATORS: usize = 29_127;
 
 /// Genesis configuration errors
 #[derive(Debug, Error)]
@@ -50,6 +61,22 @@ pub enum GenesisError {
 
     #[error("No validators specified")]
     NoValidators,
+
+    /// More validators than ConsensusConfig field 0x0003 can encode (VS-6).
+    #[error(
+        "genesis lists {n} validators; a validator set holds at most {max} (the ConsensusConfig \
+         validator field's bound)"
+    )]
+    TooManyValidators { n: usize, max: usize },
+
+    /// A validator key breaks a per-key construction rule (VS-5): it does not
+    /// decode, is not canonically encoded, or is a small-order point.
+    #[error("invalid genesis validator key: validator[{index}] {key} {rule}")]
+    InvalidValidatorKey {
+        index: usize,
+        key: String,
+        rule: ValidatorKeyRule,
+    },
 
     #[error("Genesis already initialized")]
     AlreadyInitialized,
@@ -4638,20 +4665,7 @@ impl Genesis {
 
     /// Validate the genesis configuration
     pub fn validate(&self) -> Result<()> {
-        if self.validators.is_empty() {
-            return Err(GenesisError::NoValidators);
-        }
-
-        // Validate all validator public keys
-        for (i, v) in self.validators.iter().enumerate() {
-            PublicKey::from_base58(v)
-                .map_err(|_| GenesisError::InvalidValidator(format!("validator[{}]: {}", i, v)))?;
-        }
-
-        // The declared order is the canonical round-robin order, so a validator
-        // listed twice would get extra turns. Refused, not deduplicated.
-        sumchain_primitives::proposer::check_validator_set(&self.validator_pubkeys()?)
-            .map_err(GenesisError::InvalidValidatorSet)?;
+        self.check_validator_rules()?;
 
         // Every allocation key parses, and no account is allocated twice under
         // any spelling (#276).
@@ -4663,6 +4677,59 @@ impl Genesis {
         let validators = self.validator_pubkeys()?;
         self.params.validate_over(Some(&validators))?;
 
+        Ok(())
+    }
+
+    /// The validator construction rules (VS-5 and VS-6(a), ratified
+    /// 2026-10-21).
+    ///
+    /// The count is checked first, before any key is looked at: 1 to
+    /// [`MAX_GENESIS_VALIDATORS`]. Then each key is checked in declared order:
+    /// * it is base58 for 32 bytes;
+    /// * it decodes to a curve point, is that point's canonical encoding, and
+    ///   is not of small order ([`check_validator_key`]);
+    /// * it is not a repeat of an earlier key.
+    ///
+    /// The first failure is refused, naming the index, the key and the rule.
+    /// Nothing is repaired or dropped.
+    ///
+    /// The declared order is the canonical round-robin order, so a validator
+    /// listed twice would get extra turns. A repeat is refused with the same
+    /// error and positions as `proposer::check_validator_set`, in one pass
+    /// rather than its quadratic one.
+    fn check_validator_rules(&self) -> Result<()> {
+        let n = self.validators.len();
+        if n == 0 {
+            return Err(GenesisError::NoValidators);
+        }
+        if n > MAX_GENESIS_VALIDATORS {
+            return Err(GenesisError::TooManyValidators {
+                n,
+                max: MAX_GENESIS_VALIDATORS,
+            });
+        }
+        let mut seen: HashMap<[u8; 32], usize> = HashMap::with_capacity(n);
+        for (i, v) in self.validators.iter().enumerate() {
+            let bytes: [u8; 32] = bs58::decode(v)
+                .into_vec()
+                .ok()
+                .and_then(|b| b.try_into().ok())
+                .ok_or_else(|| GenesisError::InvalidValidator(format!("validator[{i}]: {v}")))?;
+            check_validator_key(&bytes).map_err(|rule| GenesisError::InvalidValidatorKey {
+                index: i,
+                key: v.clone(),
+                rule,
+            })?;
+            if let Some(&first) = seen.get(&bytes) {
+                return Err(GenesisError::InvalidValidatorSet(
+                    sumchain_primitives::proposer::ProposerSelectionError::DuplicateValidator {
+                        first,
+                        second: i,
+                    },
+                ));
+            }
+            seen.insert(bytes, i);
+        }
         Ok(())
     }
 

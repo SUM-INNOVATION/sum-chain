@@ -12,6 +12,7 @@
 pub mod keypair;
 pub mod messaging;
 pub mod signature;
+pub mod validator_key;
 
 pub use keypair::{KeyPair, PrivateKey, PublicKey};
 pub use messaging::{
@@ -20,6 +21,7 @@ pub use messaging::{
     DecryptedMessage, LOW_ORDER_X25519_POINTS,
 };
 pub use signature::{sign, verify, verify_bytes, Signature};
+pub use validator_key::{check_validator_key, ValidatorKeyRule};
 
 use thiserror::Error;
 
