@@ -111,6 +111,12 @@ jobs:
       - name: cargo-audit — RustSec advisories (fails on any advisory not tracked in .cargo/audit.toml)
         run: cargo audit
 
+      # The scoped RUSTSEC-2026-0381 / -0383 exceptions in .cargo/audit.toml hold
+      # only while their premises do (reviewed shim releases, fixed 1.x data,
+      # no shipped-target path). This fails the job as soon as one stops holding.
+      - name: webpki 0.26 shim guard (scoped RUSTSEC-2026-0381 / -0383 exceptions)
+        run: bash scripts/check-webpki-shims.sh
+
       # #306: cargo audit (and cargo deny) match no advisory against a path
       # crate, so the vendored object 0.32.2 is audited as the crates.io crate
       # it is apart from its default features. vendored-object.yml also runs

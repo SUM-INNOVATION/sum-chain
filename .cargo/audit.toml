@@ -46,4 +46,30 @@ ignore = [
     #   crate, so `scripts/check-vendored-object.sh advisories` audits its
     #   crates.io identity (object 0.32.2) against this same file, in
     #   supply-chain-audit and daily; see docs/security/DEPENDENCY-AUDIT.md.
+    #
+    # ── SCOPED EXCEPTIONS (2026-10-21), guarded by scripts/check-webpki-shims.sh ──
+    # Both are 0.26.11 compatibility shims whose whole API is a re-export of the
+    # 1.x crate, which Cargo.lock resolves to the fixed 1.0.10 (no emSign ECC Root
+    # CA - G3). The 1.x copies of both crates are at 1.0.10, so neither advisory
+    # applies to them. cargo-audit ignores are per ID: the guard fails CI if any
+    # premise below stops holding, including any 1.x copy dropping below 1.0.10.
+    # Review by 2026-11-21 (or the next release decision, whichever is first).
+    #
+    # RUSTSEC-2026-0381, webpki-roots 0.26.11 ONLY (src/lib.rs:33
+    #   `pub use parent::TLS_SERVER_ROOTS`; parent = webpki-roots "1" -> 1.0.10).
+    #   Path: ureq 2.12.1 <- [build-dependencies] wasmer 5.0.6 <- sumc-runtime.
+    #   No normal-dependency path on any target. ureq runs only in wasmer's
+    #   build.rs, and its calls (build.rs:44, :192) are under the "wamr"/"v8"
+    #   features, which are not enabled.
+    #   Remove when: wasmer leaves 5.0.6 (a separate engine/MSRV decision) or
+    #   ureq leaves wasmer's build-dependencies.
+    "RUSTSEC-2026-0381",
+    # RUSTSEC-2026-0383, webpki-root-certs 0.26.11 ONLY (src/lib.rs:31
+    #   `pub use parent::TLS_SERVER_ROOT_CERTS`; parent = webpki-root-certs "1"
+    #   -> 1.0.10). Path: rustls-platform-verifier 0.5.3 (a wasm32-only
+    #   dependency, its Cargo.toml:118-119) <- jsonrpsee-http-client 0.26 <-
+    #   node/rpc/wallet. Not built for any shipped target.
+    #   Remove when: a jsonrpsee release depends on rustls-platform-verifier
+    #   >= 0.6 (1.x roots) within MSRV 1.88, and sum-chain moves to it.
+    "RUSTSEC-2026-0383",
 ]
