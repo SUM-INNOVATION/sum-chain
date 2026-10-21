@@ -12,9 +12,9 @@ const NEEDLES: &[&str] = &[
     "ValidatorSetLayout",
 ];
 
-/// The two dormant modules, which may name each other, and the PROPOSED (not
-/// ratified) G5 transition module built on them, which is itself dormant:
-/// `tests/validator_set_g5_proposed.rs` fails if anything names it.
+/// The two dormant modules, which may name each other, and the G5 transition
+/// module built on them (semantics ratified 2026-10-21; not activated), which
+/// is itself dormant: `tests/validator_set_g5.rs` fails if anything names it.
 const MODULES: &[&str] = &[
     "validator_set_record.rs",
     "validator_set_state.rs",
