@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use sumchain_finality_foundations::signer::{
-    Certified, ExclusiveOwnership, OwnershipError, PolkaVerifier,
+    Certified, ChainView, ExclusiveOwnership, OwnershipError, PolkaVerifier,
 };
 use sumchain_finality_foundations::signer_file::{IoError, MirrorStore, SignerDir, StateHasher};
 use sumchain_finality_foundations::Digest;
@@ -274,6 +274,16 @@ impl PolkaVerifier for TestPolka {
             }),
             _ => Err("not a finality proof".into()),
         }
+    }
+}
+
+/// A node chain that holds `block` at `height` (and nothing else known).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChainPoint(pub u64, pub Digest);
+
+impl ChainView for ChainPoint {
+    fn block_at(&self, height: u64) -> Option<Digest> {
+        (height == self.0).then_some(self.1)
     }
 }
 

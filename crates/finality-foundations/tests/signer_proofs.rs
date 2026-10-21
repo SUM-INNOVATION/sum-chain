@@ -714,8 +714,8 @@ fn evidence_floor_from_a_verified_certificate_catches_a_rolled_back_state() {
     assert!(rig.open(None).is_ok());
 }
 
-fn at(height: u64, block_id: Digest) -> Certified {
-    Certified { height, block_id }
+fn at(height: u64, block_id: Digest) -> ChainPoint {
+    ChainPoint(height, block_id)
 }
 
 /// Halted at working height 8: height 7 certified with X, then a valid
@@ -769,7 +769,7 @@ fn recovery_refuses_insufficient_forged_wrong_fork_and_too_low_certificates() {
         let before = rig.writes();
         assert!(
             matches!(
-                s.recover_after_conflict(at(9, X), &proof, None),
+                s.recover_after_conflict(&at(9, X), &proof, None),
                 Err(SignerError::InvalidFinalityProof(_))
             ),
             "{what}"
@@ -780,7 +780,7 @@ fn recovery_refuses_insufficient_forged_wrong_fork_and_too_low_certificates() {
     for low in [6u64, 7] {
         assert!(matches!(
             s.recover_after_conflict(
-                at(low, X),
+                &at(low, X),
                 &cert(4, low, 0, X, &[0, 1, 2]).encode().unwrap(),
                 None
             ),
@@ -791,7 +791,7 @@ fn recovery_refuses_insufficient_forged_wrong_fork_and_too_low_certificates() {
     // for the other fork's block at 9 is refused because the node follows X.
     assert!(matches!(
         s.recover_after_conflict(
-            at(9, X),
+            &at(9, X),
             &cert(4, 9, 0, Y, &[0, 1, 2]).encode().unwrap(),
             None
         ),
@@ -802,7 +802,7 @@ fn recovery_refuses_insufficient_forged_wrong_fork_and_too_low_certificates() {
     let bad_evidence = cert(4, 7, 0, X, &[0, 2, 3]).encode().unwrap();
     assert!(matches!(
         s.recover_after_conflict(
-            at(9, X),
+            &at(9, X),
             &cert(4, 9, 0, X, &[0, 1, 2]).encode().unwrap(),
             Some(&bad_evidence)
         ),
@@ -811,7 +811,7 @@ fn recovery_refuses_insufficient_forged_wrong_fork_and_too_low_certificates() {
     // A certificate at height 8 (the halted working height) on this node's
     // fork recovers; the floor is then 9.
     s.recover_after_conflict(
-        at(8, X),
+        &at(8, X),
         &cert(4, 8, 1, X, &[1, 2, 3]).encode().unwrap(),
         None,
     )

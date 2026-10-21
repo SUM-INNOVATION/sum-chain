@@ -32,7 +32,7 @@
 //! | 280 | 4 | lock_round u32 LE |
 //! | 284 | 32 | lock_value |
 //! | 316 | 1 | **halt: 0 running, 1 HALTED** (a separate flag) |
-//! | 317 | 32 | proof_digest = H(`D_PROOF` ‖ side-file bytes); zero: none |
+//! | 317 | 32 | proof_digest = [`proof_digest`]: H(`D_PROOF` ‖ purpose ‖ context ‖ side-file bytes); zero: none |
 //! | 349 | 32 | prev_checksum (checksum of the record this one replaced) |
 //! | 381 | 32 | checksum = H(`D_SIGNER` ‖ bytes[0..381]) |
 //!
@@ -44,8 +44,12 @@
 //! # Side file (UNRATIFIED): the retained proof
 //!
 //! `proof-<64 hex digest>.v1` holds the bytes `proof_digest` names: the
-//! `PolkaProofV1` that justified the current lock, trimmed to a minimal
-//! quorum, or, in a halted state, the conflicting finality proof (evidence).
+//! `PolkaProofV1` that justified the current lock, or, in a halted state, the
+//! conflicting finality proof (evidence). The verifier trims either to
+//! exactly q(n) entries, the lowest validator indices (the entries are
+//! strictly ascending), and re-verifies the trimmed bytes before they are
+//! retained. The digest binds the purpose and its context ([`ProofPurpose`]),
+//! so bytes kept for one lock or halt never pass for another.
 //! At most [`MAX_RETAINED_PROOF_LEN`] bytes.
 //!
 //! # Conflict archive (UNRATIFIED): written before a recovery
@@ -317,15 +321,73 @@ fn lock_position(lock: &Lock) -> SignPosition {
     }
 }
 
-/// H(`D_PROOF` ‖ bytes).
-pub fn proof_digest<H: StateHasher>(hasher: &H, bytes: &[u8]) -> Digest {
-    let mut pre = Vec::with_capacity(D_PROOF.len() + bytes.len());
+/// What a retained or archived object is for (UNRATIFIED). Its context is
+/// part of the object's digest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProofPurpose {
+    /// Kind 1: the `PolkaProofV1` that justified the lock at
+    /// (`height`, `round`) on `value`.
+    LockJustification {
+        height: u64,
+        round: u32,
+        value: Digest,
+    },
+    /// Kind 2: a finality proof for the conflict height `height` naming a
+    /// block other than `certified`.
+    ConflictEvidence { height: u64, certified: Digest },
+    /// Kind 3: the resume certificate of a recovery, for `height` and `block`.
+    ResumeCertificate { height: u64, block: Digest },
+}
+
+impl ProofPurpose {
+    /// kind (1 B) ‖ height (u64 LE) ‖ round (u32 LE; 0 for kinds 2 and 3) ‖
+    /// block (32 B): 45 bytes.
+    pub fn context(&self) -> [u8; 45] {
+        let (kind, height, round, block) = match *self {
+            ProofPurpose::LockJustification {
+                height,
+                round,
+                value,
+            } => (1u8, height, round, value),
+            ProofPurpose::ConflictEvidence { height, certified } => (2, height, 0, certified),
+            ProofPurpose::ResumeCertificate { height, block } => (3, height, 0, block),
+        };
+        let mut c = [0u8; 45];
+        c[0] = kind;
+        c[1..9].copy_from_slice(&height.to_le_bytes());
+        c[9..13].copy_from_slice(&round.to_le_bytes());
+        c[13..45].copy_from_slice(&block);
+        c
+    }
+}
+
+/// H(`D_PROOF` ‖ purpose context (45 B) ‖ bytes): the digest of a stored
+/// object, bound to what it is for.
+pub fn proof_digest<H: StateHasher>(hasher: &H, purpose: &ProofPurpose, bytes: &[u8]) -> Digest {
+    let mut pre = Vec::with_capacity(D_PROOF.len() + 45 + bytes.len());
     pre.extend_from_slice(D_PROOF);
+    pre.extend_from_slice(&purpose.context());
     pre.extend_from_slice(bytes);
     hasher.hash(&pre)
 }
 
 impl SignerState {
+    /// The purpose of the object `proof_digest` names: the lock's
+    /// justification, or a halted state's conflict evidence.
+    pub fn proof_purpose(&self) -> Option<ProofPurpose> {
+        if self.halted {
+            return Some(ProofPurpose::ConflictEvidence {
+                height: self.floor_height.checked_sub(1)?,
+                certified: self.certified_block_id,
+            });
+        }
+        self.lock.map(|l| ProofPurpose::LockJustification {
+            height: l.height,
+            round: l.round,
+            value: l.value,
+        })
+    }
+
     fn check_last(&self, last: &StateLast) -> Result<(), StateError> {
         if last.position.round > MAX_ROUND {
             return Err(StateError::Round("last", last.position.round));
@@ -772,13 +834,33 @@ impl SignerState {
                     .map_err(|_| StateError::Unrepresentable("signature is not 64 bytes"))?,
             }),
         };
-        let reference = |p: &Option<ProofRef>| match p {
-            None => (ZERO, None),
-            Some(ProofRef::Digest(d)) => (*d, None),
-            Some(ProofRef::Bytes(b)) => (proof_digest(hasher, b), Some(b.clone())),
+        let reference = |p: &Option<ProofRef>, purpose: Option<ProofPurpose>| match p {
+            None => Ok((ZERO, None)),
+            Some(ProofRef::Digest(d)) => Ok((*d, None)),
+            Some(ProofRef::Bytes(b)) => {
+                if b.len() > MAX_RETAINED_PROOF_LEN {
+                    return Err(StateError::Unrepresentable(
+                        "a retained proof above the bound",
+                    ));
+                }
+                let purpose = purpose.ok_or(StateError::Unrepresentable(
+                    "a retained proof without its purpose",
+                ))?;
+                Ok((proof_digest(hasher, &purpose, b), Some(b.clone())))
+            }
         };
         let (halted, (digest, new_bytes)) = match record.halt.as_ref() {
-            None => (false, reference(&record.lock_proof)),
+            None => (
+                false,
+                reference(
+                    &record.lock_proof,
+                    record.lock.map(|l| ProofPurpose::LockJustification {
+                        height: l.height,
+                        round: l.round,
+                        value: l.value,
+                    }),
+                )?,
+            ),
             Some(h) => {
                 if record.lock.is_some() || record.lock_proof.is_some() {
                     return Err(StateError::Unrepresentable("a halt with a lock"));
@@ -795,7 +877,16 @@ impl SignerState {
                         "a halt naming the certified block as the conflicting one",
                     ));
                 }
-                (true, reference(&h.evidence))
+                (
+                    true,
+                    reference(
+                        &h.evidence,
+                        Some(ProofPurpose::ConflictEvidence {
+                            height: h.height,
+                            certified: h.certified_block,
+                        }),
+                    )?,
+                )
             }
         };
         if new_bytes
@@ -875,8 +966,8 @@ pub fn sign_bytes_digest<H: StateHasher>(hasher: &H, sign_bytes: &[u8]) -> Diges
 /// | 41 | 8 | conflict_height u64 LE (W − 1 of the halted record) |
 /// | 49 | 8 | resume_height u64 LE (R) |
 /// | 57 | 32 | resume_block |
-/// | 89 | 32 | evidence_digest = H(`D_PROOF` ‖ conflicting proof) |
-/// | 121 | 32 | resume_digest = H(`D_PROOF` ‖ resume certificate) |
+/// | 89 | 32 | evidence_digest = [`proof_digest`] with [`ProofPurpose::ConflictEvidence`] (H, certified block) |
+/// | 121 | 32 | resume_digest = [`proof_digest`] with [`ProofPurpose::ResumeCertificate`] (R, resume block) |
 /// | 153 | 32 | checksum = H(`D_RECEIPT` ‖ bytes[0..153]) |
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryReceipt {
@@ -1088,7 +1179,11 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> FileSignerStore<D, M, H> {
     }
 
     /// Check the referenced proof, then remove every unreferenced proof file.
-    fn settle_proofs(&mut self, referenced: Digest) -> Result<(), StoreError> {
+    /// Check the proof `state` references (its digest binds the state's
+    /// purpose and context), then remove every unreferenced proof file.
+    fn settle_proofs(&mut self, state: Option<&SignerState>) -> Result<(), StoreError> {
+        let referenced = state.map_or(ZERO, |s| s.proof_digest);
+        let purpose = state.and_then(SignerState::proof_purpose);
         let keep = (referenced != ZERO).then(|| proof_file_name(&referenced));
         self.proof_status = match keep.as_deref() {
             None => ProofStatus::NotReferenced,
@@ -1096,7 +1191,8 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> FileSignerStore<D, M, H> {
                 None => ProofStatus::Missing,
                 Some(b)
                     if b.len() <= MAX_RETAINED_PROOF_LEN
-                        && proof_digest(&self.hasher, &b) == referenced =>
+                        && purpose
+                            .is_some_and(|p| proof_digest(&self.hasher, &p, &b) == referenced) =>
                 {
                     ProofStatus::Present
                 }
@@ -1191,8 +1287,19 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> FileSignerStore<D, M, H> {
         if archived_sum != *halted_sum {
             return Err(refuse("the archived state is not the halted record"));
         }
-        if proof_digest(&self.hasher, &evidence) != receipt.evidence_digest
-            || proof_digest(&self.hasher, &resume) != receipt.resume_digest
+        if evidence.len() > MAX_RETAINED_PROOF_LEN || resume.len() > MAX_RETAINED_PROOF_LEN {
+            return Err(refuse("an archived object above the bound"));
+        }
+        let evidence_purpose = ProofPurpose::ConflictEvidence {
+            height: h,
+            certified: halted.certified_block_id,
+        };
+        let resume_purpose = ProofPurpose::ResumeCertificate {
+            height: receipt.resume_height,
+            block: receipt.resume_block,
+        };
+        if proof_digest(&self.hasher, &evidence_purpose, &evidence) != receipt.evidence_digest
+            || proof_digest(&self.hasher, &resume_purpose, &resume) != receipt.resume_digest
         {
             return Err(refuse(
                 "evidence or resume certificate does not match the receipt",
@@ -1239,7 +1346,7 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
                 // Initializing over an earlier signer's conflict archive or
                 // retained proofs would clear a halt or its evidence: refused.
                 self.refuse_earlier_signer_files()?;
-                self.settle_proofs(ZERO)?;
+                self.settle_proofs(None)?;
                 self.classified = Some(Classified::Uninitialized);
                 return Ok(None);
             }
@@ -1302,7 +1409,7 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
                 (fs, fsum)
             }
         };
-        self.settle_proofs(fs.proof_digest)?;
+        self.settle_proofs(Some(&fs))?;
         let record = fs.to_record();
         self.current = Some((fs, fsum));
         Ok(Some(record))
@@ -1404,7 +1511,11 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
 
     /// The proof file the current record names, if present and intact.
     fn retained_proof(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
-        let Some(digest) = self.current.as_ref().map(|(s, _)| s.proof_digest) else {
+        let Some((digest, Some(purpose))) = self
+            .current
+            .as_ref()
+            .map(|(s, _)| (s.proof_digest, s.proof_purpose()))
+        else {
             return Ok(None);
         };
         if digest == ZERO {
@@ -1415,7 +1526,8 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
             .read(&proof_file_name(&digest))
             .map_err(|e| Self::io("read retained proof", e))?
             .filter(|b| {
-                b.len() <= MAX_RETAINED_PROOF_LEN && proof_digest(&self.hasher, b) == digest
+                b.len() <= MAX_RETAINED_PROOF_LEN
+                    && proof_digest(&self.hasher, &purpose, b) == digest
             }))
     }
 
@@ -1436,6 +1548,13 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
             return Err(StoreError("the state is not halted".into()));
         }
         let h = cur.floor_height - 1;
+        if evidence.len() > MAX_RETAINED_PROOF_LEN
+            || resume_certificate.len() > MAX_RETAINED_PROOF_LEN
+        {
+            return Err(StoreError(format!(
+                "an archived object above the bound of {MAX_RETAINED_PROOF_LEN} bytes"
+            )));
+        }
         let state_bytes = cur
             .encode(&self.hasher)
             .map_err(|e| StoreError(format!("encode: {e}")))?;
@@ -1444,8 +1563,22 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
             conflict_height: h,
             resume_height: resume.height,
             resume_block: resume.block_id,
-            evidence_digest: proof_digest(&self.hasher, evidence),
-            resume_digest: proof_digest(&self.hasher, resume_certificate),
+            evidence_digest: proof_digest(
+                &self.hasher,
+                &ProofPurpose::ConflictEvidence {
+                    height: h,
+                    certified: cur.certified_block_id,
+                },
+                evidence,
+            ),
+            resume_digest: proof_digest(
+                &self.hasher,
+                &ProofPurpose::ResumeCertificate {
+                    height: resume.height,
+                    block: resume.block_id,
+                },
+                resume_certificate,
+            ),
         };
         self.write_durable(&conflict_file_name(h, "state"), &state_bytes)?;
         self.write_durable(&conflict_file_name(h, "evidence"), evidence)?;

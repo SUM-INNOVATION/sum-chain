@@ -292,7 +292,10 @@ fn signer_state_413_kat_vectors_match_and_decode() {
         let (st, _) = SignerState::decode(&bytes, &B3).unwrap();
         assert_eq!(st.encode(&B3).unwrap().to_vec(), bytes, "canonical");
         if let Some(p) = v["proof_hex"].as_str() {
-            assert_eq!(proof_digest(&B3, &hex::decode(p).unwrap()), st.proof_digest);
+            assert_eq!(
+                proof_digest(&B3, &st.proof_purpose().unwrap(), &hex::decode(p).unwrap()),
+                st.proof_digest
+            );
         }
     }
     let halted = hex::decode(committed["vectors"][3]["hex"].as_str().unwrap()).unwrap();
@@ -530,10 +533,10 @@ fn halt_is_persisted_first_and_survives_every_crash_and_restart() {
 }
 
 /// (what, followed, resume certificate, supplied evidence).
-type RecoveryCase = (&'static str, Certified, Vec<u8>, Option<Vec<u8>>);
+type RecoveryCase = (&'static str, ChainPoint, Vec<u8>, Option<Vec<u8>>);
 
-fn at(height: u64, block_id: Digest) -> Certified {
-    Certified { height, block_id }
+fn at(height: u64, block_id: Digest) -> ChainPoint {
+    ChainPoint(height, block_id)
 }
 
 fn halted_rig() -> Rig {
@@ -609,25 +612,25 @@ fn recovery_needs_verified_evidence_at_or_above_the_halted_height() {
         ),
     ];
     for (what, followed, resume, evidence) in refused {
-        let r = s.recover_after_conflict(followed, &resume, evidence.as_deref());
+        let r = s.recover_after_conflict(&followed, &resume, evidence.as_deref());
         assert!(r.is_err(), "{what}: {r:?}");
         assert!(s.is_halted(), "{what}");
         assert_eq!(rig.ops(), 0, "{what}: nothing written");
     }
     assert!(matches!(
-        s.recover_after_conflict(at(7, A), &finality(7, &A), None),
+        s.recover_after_conflict(&at(7, A), &finality(7, &A), None),
         Err(SignerError::RecoveryTooLow {
             resume: 7,
             working: 8
         })
     ));
     assert!(matches!(
-        s.recover_after_conflict(at(9, A), &finality(9, &B), None),
+        s.recover_after_conflict(&at(9, A), &finality(9, &B), None),
         Err(SignerError::RecoveryWrongFork { .. })
     ));
     // A verified certificate at or above the halted working height recovers.
     assert_eq!(
-        s.recover_after_conflict(at(9, A), &finality(9, &A), None)
+        s.recover_after_conflict(&at(9, A), &finality(9, &A), None)
             .unwrap(),
         Certified {
             height: 9,
@@ -664,7 +667,7 @@ fn recovery_needs_verified_evidence_at_or_above_the_halted_height() {
     let other = prepared(&[Act::Sign(prevote(7, 0, A))]);
     let mut o = other.open().unwrap();
     assert_eq!(
-        o.recover_after_conflict(at(9, A), &finality(9, &A), None),
+        o.recover_after_conflict(&at(9, A), &finality(9, &A), None),
         Err(SignerError::NotHalted)
     );
 }
@@ -682,11 +685,11 @@ fn recovery_without_retained_evidence_needs_it_supplied() {
     );
     assert!(s.is_halted());
     assert!(matches!(
-        s.recover_after_conflict(at(9, A), &finality(9, &A), None),
+        s.recover_after_conflict(&at(9, A), &finality(9, &A), None),
         Err(SignerError::RecoveryArchive(m)) if m.contains("supply it")
     ));
     assert!(s.is_halted());
-    s.recover_after_conflict(at(9, A), &finality(9, &A), Some(&finality(7, &B)))
+    s.recover_after_conflict(&at(9, A), &finality(9, &A), Some(&finality(7, &B)))
         .unwrap();
     assert_eq!(rig.file("conflict-7.evidence"), Some(finality(7, &B)));
 }
@@ -701,13 +704,13 @@ fn a_recovered_state_without_its_archive_is_refused() {
         let probe = halted_rig();
         let mut p = probe.open().unwrap();
         probe.arm(usize::MAX, Mode::Error);
-        p.recover_after_conflict(at(9, A), &finality(9, &A), None)
+        p.recover_after_conflict(&at(9, A), &finality(9, &A), None)
             .unwrap();
         probe.ops()
     };
     rig.arm(writes_before_mirror - 1, Mode::Error);
     assert!(s
-        .recover_after_conflict(at(9, A), &finality(9, &A), None)
+        .recover_after_conflict(&at(9, A), &finality(9, &A), None)
         .is_err());
     drop(s);
     rig.disk.borrow_mut().restart();
@@ -736,7 +739,7 @@ fn every_archive_mismatch_refuses_the_recovered_state() {
         let probe = halted_rig();
         let mut p = probe.open().unwrap();
         probe.arm(usize::MAX, Mode::Error);
-        p.recover_after_conflict(at(9, A), &finality(9, &A), None)
+        p.recover_after_conflict(&at(9, A), &finality(9, &A), None)
             .unwrap();
         probe.ops()
     };
@@ -745,7 +748,7 @@ fn every_archive_mismatch_refuses_the_recovered_state() {
         let mut s = rig.open().unwrap();
         rig.arm(writes - 1, Mode::Error);
         assert!(s
-            .recover_after_conflict(at(9, A), &finality(9, &A), None)
+            .recover_after_conflict(&at(9, A), &finality(9, &A), None)
             .is_err());
         drop(s);
         rig.disk.borrow_mut().restart();
@@ -840,7 +843,7 @@ fn initialization_refuses_while_a_conflict_archive_exists() {
     let rig = halted_rig();
     let key = rig.key().key_id();
     let mut s = rig.open().unwrap();
-    s.recover_after_conflict(at(9, A), &finality(9, &A), None)
+    s.recover_after_conflict(&at(9, A), &finality(9, &A), None)
         .unwrap();
     drop(s);
     // Wipe the state and the mirror: initializing now could choose any floor,
@@ -862,7 +865,7 @@ fn initialization_refuses_while_a_conflict_archive_exists() {
 fn a_second_conflict_needs_new_evidence_and_a_strictly_higher_resume() {
     let rig = halted_rig();
     let mut s = rig.open().unwrap();
-    s.recover_after_conflict(at(9, A), &finality(9, &A), None)
+    s.recover_after_conflict(&at(9, A), &finality(9, &A), None)
         .unwrap();
     // A stale proof for the first conflict height changes nothing.
     assert!(matches!(
@@ -878,16 +881,16 @@ fn a_second_conflict_needs_new_evidence_and_a_strictly_higher_resume() {
     assert!(s.is_halted());
     for (r, b) in [(9, A), (8, B)] {
         assert!(matches!(
-            s.recover_after_conflict(at(r, b), &finality(r, &b), None),
+            s.recover_after_conflict(&at(r, b), &finality(r, &b), None),
             Err(SignerError::RecoveryTooLow { working: 10, .. })
         ));
     }
     // Evidence for the first conflict is not evidence for the second.
     assert!(matches!(
-        s.recover_after_conflict(at(11, A), &finality(11, &A), Some(&finality(7, &B))),
+        s.recover_after_conflict(&at(11, A), &finality(11, &A), Some(&finality(7, &B))),
         Err(SignerError::RecoveryEvidence(_))
     ));
-    s.recover_after_conflict(at(10, A), &finality(10, &A), None)
+    s.recover_after_conflict(&at(10, A), &finality(10, &A), None)
         .unwrap();
     assert_eq!(s.record().working_height(), Some(11));
     assert!(matches!(
@@ -940,7 +943,7 @@ fn interrupted_recoveries_leave_only_debris_that_never_changes_the_outcome() {
         let rig = halted_rig();
         rig.open()
             .unwrap()
-            .recover_after_conflict(at(9, A), &finality(9, &A), None)
+            .recover_after_conflict(&at(9, A), &finality(9, &A), None)
             .unwrap();
         rig.disk.borrow_mut().reboot();
         rig.open().unwrap();
@@ -951,7 +954,7 @@ fn interrupted_recoveries_leave_only_debris_that_never_changes_the_outcome() {
         let rig = halted_rig();
         let mut s = rig.open().unwrap();
         rig.arm(usize::MAX, Mode::Error);
-        s.recover_after_conflict(at(r, b), &finality(r, &b), None)
+        s.recover_after_conflict(&at(r, b), &finality(r, &b), None)
             .unwrap();
         rig.ops()
     };
@@ -969,7 +972,7 @@ fn interrupted_recoveries_leave_only_debris_that_never_changes_the_outcome() {
                         let mut s = rig.open().unwrap_or_else(|e| panic!("{ctx}: {e}"));
                         rig.arm(k, m);
                         assert!(
-                            s.recover_after_conflict(at(r, b), &finality(r, &b), None)
+                            s.recover_after_conflict(&at(r, b), &finality(r, &b), None)
                                 .is_err(),
                             "{ctx}"
                         );
@@ -984,7 +987,7 @@ fn interrupted_recoveries_leave_only_debris_that_never_changes_the_outcome() {
                         assert!(rig.open().unwrap().is_halted(), "{ctx}");
                     }
                     let mut s = rig.open().unwrap();
-                    s.recover_after_conflict(at(9, A), &finality(9, &A), None)
+                    s.recover_after_conflict(&at(9, A), &finality(9, &A), None)
                         .unwrap_or_else(|e| panic!("{ctx}: final recovery: {e}"));
                     drop(s);
                     rig.disk.borrow_mut().reboot();
@@ -1008,7 +1011,7 @@ fn crash_matrix_for_recovery_after_a_conflict() {
     let halted = decoded(&rig);
     let mut s = rig.open().unwrap();
     rig.arm(usize::MAX, Mode::Error);
-    s.recover_after_conflict(at(9, A), &finality(9, &A), None)
+    s.recover_after_conflict(&at(9, A), &finality(9, &A), None)
         .unwrap();
     let writes = rig.ops();
     drop(s);
@@ -1022,7 +1025,7 @@ fn crash_matrix_for_recovery_after_a_conflict() {
             let mut s = rig.open().unwrap();
             rig.arm(k, mode);
             assert!(
-                s.recover_after_conflict(at(9, A), &finality(9, &A), None)
+                s.recover_after_conflict(&at(9, A), &finality(9, &A), None)
                     .is_err(),
                 "{ctx}"
             );
@@ -1044,7 +1047,7 @@ fn crash_matrix_for_recovery_after_a_conflict() {
                     Err(SignerError::Halted),
                     "{ctx}"
                 );
-                s.recover_after_conflict(at(9, A), &finality(9, &A), None)
+                s.recover_after_conflict(&at(9, A), &finality(9, &A), None)
                     .unwrap_or_else(|e| panic!("{ctx}: resume: {e}"));
             }
             s.sign(&prevote(10, 0, A)).unwrap();
