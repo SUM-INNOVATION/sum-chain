@@ -29,6 +29,7 @@ pub mod pruner;
 pub mod schema;
 pub mod subsystem_journal;
 pub mod tax_store;
+pub mod validator_set_g5;
 pub mod validator_set_record;
 pub mod validator_set_state;
 

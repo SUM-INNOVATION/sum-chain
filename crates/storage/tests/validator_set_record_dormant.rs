@@ -12,8 +12,14 @@ const NEEDLES: &[&str] = &[
     "ValidatorSetLayout",
 ];
 
-/// The two dormant modules, which may name each other.
-const MODULES: &[&str] = &["validator_set_record.rs", "validator_set_state.rs"];
+/// The two dormant modules, which may name each other, and the PROPOSED (not
+/// ratified) G5 transition module built on them, which is itself dormant:
+/// `tests/validator_set_g5_proposed.rs` fails if anything names it.
+const MODULES: &[&str] = &[
+    "validator_set_record.rs",
+    "validator_set_state.rs",
+    "validator_set_g5.rs",
+];
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
