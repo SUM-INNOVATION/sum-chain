@@ -1418,13 +1418,12 @@ fn std_directory_conflict_halt_and_recovery() {
     let mut s = open().unwrap();
     assert!(s.is_halted());
     assert_eq!(s.sign(&prevote(8, 1, A)), Err(SignerError::Halted));
-    let followed = Certified {
-        height: 9,
-        block_id: A,
-    };
     assert_eq!(
-        s.recover_after_conflict(followed, &finality(9, &A), None),
-        Ok(followed)
+        s.recover_after_conflict(&ChainPoint(9, A), &finality(9, &A), None),
+        Ok(Certified {
+            height: 9,
+            block_id: A
+        })
     );
     drop(s);
     let names: Vec<String> = std::fs::read_dir(&dir)

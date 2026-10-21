@@ -56,6 +56,9 @@
 //! * **REC2:** after a recovery, nothing is issued at or below its resume
 //!   height (so nothing at or below the conflict height or the halted
 //!   working height);
+//! * **PR2:** at every open, the referenced proof verifies for the purpose
+//!   and context the record gives it (the lock's quorum, or a finality proof
+//!   for another block at the conflict height);
 //! * **REC3:** a recovered signer's conflict archive is durable: the halted
 //!   record, the conflicting evidence (a valid proof naming another block at
 //!   the conflict height), the resume certificate and the receipt naming the
@@ -76,8 +79,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use sumchain_finality_foundations::signer::{
-    initialize_exclusive, Certified, DurableSigner, Justification, PolkaVerifier, SignPosition,
-    SignRequest, SignerError, SigningKey, Step, VoteValue,
+    initialize_exclusive, DurableSigner, Justification, PolkaVerifier, RetainedProofCheck,
+    SignPosition, SignRequest, SignerError, SigningKey, Step, VoteValue,
 };
 use sumchain_finality_foundations::signer_file::{
     conflict_file_name, floor_below_height, proof_file_name, sign_bytes_digest, Classified,
@@ -184,10 +187,10 @@ type OracleProof = (Vec<u8>, Option<(u64, Digest)>);
 
 /// A recovery: the followed block, the resume proof, supplied evidence, and
 /// the oracle's verdict on the resume proof.
-type OracleRecovery = (Certified, Vec<u8>, Option<Vec<u8>>, Option<(u64, Digest)>);
+type OracleRecovery = (ChainPoint, Vec<u8>, Option<Vec<u8>>, Option<(u64, Digest)>);
 
 fn recoveries() -> Vec<OracleRecovery> {
-    let at = |height, block_id| Certified { height, block_id };
+    let at = ChainPoint;
     vec![
         (at(9, A), finality(9, &A), None, Some((9, A))),
         (at(8, B), finality(8, &B), None, Some((8, B))),
@@ -380,6 +383,11 @@ fn check_open(n: &Node, s: &Signer, disk: &Disk, violations: &mut Vec<String>) {
             s.store().proof_status()
         )),
         _ => {}
+    }
+    // PR2: the signer's own check of the referenced proof, for its purpose.
+    match s.retained_proof_check() {
+        RetainedProofCheck::NotReferenced | RetainedProofCheck::Verified => {}
+        other => violations.push(format!("PR2: the retained proof check is {other:?}")),
     }
     let referenced = durable_or_visible_state(&disk.borrow()).map(|st| st.proof_digest);
     let keep = referenced
@@ -719,7 +727,7 @@ fn act(
                 }
             };
             arm(&disk, plan);
-            s.recover_after_conflict(*followed, proof, evidence.as_deref())
+            s.recover_after_conflict(followed, proof, evidence.as_deref())
                 .map(|_| Status::Open)
         }
     };
@@ -762,7 +770,7 @@ fn act(
                         && next.ghost.certified.get(&c.height) != Some(&c.block_id)
                 })
             });
-            recovery_allowed = (*h, *b) == (followed.height, followed.block_id)
+            recovery_allowed = (*h, *b) == (followed.0, followed.1)
                 && conflict.is_some_and(|c| *h > c)
                 && evidence_ok;
             if recovery_allowed {

@@ -209,6 +209,27 @@ pub fn whole_height_floor(height: u64) -> SignPosition {
     }
 }
 
+/// Verify a retained proof for the purpose its record gives it.
+fn check_retained<P: PolkaVerifier>(
+    polka: &P,
+    record: &SignerRecord,
+    bytes: &[u8],
+) -> RetainedProofCheck {
+    let verdict = match (record.lock.as_ref(), record.halt.as_ref()) {
+        (Some(l), _) => polka.verify_polka(l.height, l.round, &l.value, bytes),
+        (None, Some(h)) => match polka.verify_finality(bytes) {
+            Ok(c) if c.height == h.height && c.block_id != h.certified_block => Ok(()),
+            Ok(_) => Err("not a finality proof for another block at the conflict height".into()),
+            Err(e) => Err(e),
+        },
+        (None, None) => Err("a retained proof without a lock or a halt".into()),
+    };
+    match verdict {
+        Ok(()) => RetainedProofCheck::Verified,
+        Err(e) => RetainedProofCheck::Refused(e),
+    }
+}
+
 impl SignerRecord {
     /// The only height this record may sign at, if one is fixed yet: the
     /// certified height + 1; else the first height above the floor; else the
@@ -405,6 +426,34 @@ pub trait PolkaVerifier {
     }
 }
 
+/// The node's own chain as its block store holds it (PROPOSED; dormant).
+/// After conflicting finality the operator brings the node onto one branch
+/// (for example by resyncing it); this is that branch. The signer trusts it
+/// as it trusts the authenticated context its verifier uses: both are the
+/// node's own state, never taken from a proof or typed by an operator.
+pub trait ChainView {
+    /// The block the node's chain holds at `height`, if it has one.
+    fn block_at(&self, height: u64) -> Option<Digest>;
+}
+
+/// The signer's own check, at open, of the proof its record references
+/// (accountability only: the lock or the halt is enforced from the record
+/// either way).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetainedProofCheck {
+    /// The record references no proof.
+    NotReferenced,
+    /// Present, and verified for the record's purpose and context: the
+    /// lock's prevote quorum, or a finality proof for the conflict height
+    /// naming another block.
+    Verified,
+    /// The store keeps none, or the referenced file is missing or does not
+    /// match its digest.
+    Unavailable,
+    /// Present and digest-intact, but it does not verify for its purpose.
+    Refused(String),
+}
+
 /// Why the signer refused to open, initialize or sign.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SignerError {
@@ -460,12 +509,10 @@ pub enum SignerError {
         "the resume certificate's height {resume} is below the halted working height {working}"
     )]
     RecoveryTooLow { resume: u64, working: u64 },
-    #[error(
-        "the resume certificate names {certified:?}, not the block the node follows {followed:?}"
-    )]
+    #[error("the resume certificate names {certified:?}; the node's chain holds {chain:?} at that height")]
     RecoveryWrongFork {
-        followed: Certified,
         certified: Certified,
+        chain: Option<Digest>,
     },
     #[error("conflict evidence refused: {0}")]
     RecoveryEvidence(String),
@@ -481,6 +528,7 @@ pub struct DurableSigner<S, K, P, G> {
     _ownership: G,
     record: SignerRecord,
     poisoned: bool,
+    retained: RetainedProofCheck,
 }
 
 /// [`initialize`] while holding the key's exclusive ownership, so that two
@@ -568,6 +616,19 @@ where
                 return Err(SignerError::StaleState { recorded, evidence });
             }
         }
+        let referenced = record.lock_proof.is_some()
+            || record.halt.as_ref().is_some_and(|h| h.evidence.is_some());
+        let retained = if !referenced {
+            RetainedProofCheck::NotReferenced
+        } else {
+            match store
+                .retained_proof()
+                .map_err(|e| SignerError::Corrupt(e.0))?
+            {
+                None => RetainedProofCheck::Unavailable,
+                Some(bytes) => check_retained(&polka, &record, &bytes),
+            }
+        };
         Ok(Self {
             store,
             key,
@@ -575,7 +636,13 @@ where
             _ownership: guard,
             record,
             poisoned: false,
+            retained,
         })
+    }
+
+    /// The check, at open, of the proof the record references.
+    pub fn retained_proof_check(&self) -> &RetainedProofCheck {
+        &self.retained
     }
 
     /// The state as last made durable by this signer.
@@ -640,13 +707,13 @@ where
     ///
     /// Required, all verified by the signer itself:
     ///
-    /// * `followed`: the height `R` and block the node's own chain holds (the
-    ///   fork it now follows), as read from the node's store by the operator.
-    ///   It only narrows: the certificate must name exactly this block.
+    /// * `chain`: the node's own chain ([`ChainView`]), the branch it now
+    ///   follows. It only narrows: the certificate must name exactly the
+    ///   block the chain holds at `R`.
     /// * `resume_certificate`: a `FinalityCertificateV1` that verifies against
     ///   the node's context for `R` (a certificate made under another
-    ///   configuration or validator set is refused) and names `followed`,
-    ///   with `R` at or above the halted working height `W`. The conflict was
+    ///   configuration or validator set is refused) and names the chain's
+    ///   block at `R`, with `R` at or above the halted working height `W`. The conflict was
     ///   at `W − 1` and the key may have signed at `W` (never above: signing
     ///   above `W` needs a certificate, and the halt refuses advancement); the
     ///   new floor covers every position at heights `≤ R`, so the next
@@ -663,9 +730,9 @@ where
     /// recovered record only over its matching archive. A crash or error at
     /// any step leaves the halted state (recovery may be retried) or the
     /// recovered one.
-    pub fn recover_after_conflict(
+    pub fn recover_after_conflict<C: ChainView>(
         &mut self,
-        followed: Certified,
+        chain: &C,
         resume_certificate: &[u8],
         conflict_evidence: Option<&[u8]>,
     ) -> Result<Certified, SignerError> {
@@ -679,10 +746,11 @@ where
             .polka
             .verify_finality(resume_certificate)
             .map_err(SignerError::InvalidFinalityProof)?;
-        if resume != followed {
+        let held = chain.block_at(resume.height);
+        if held != Some(resume.block_id) {
             return Err(SignerError::RecoveryWrongFork {
-                followed,
                 certified: resume,
+                chain: held,
             });
         }
         let working = halt
@@ -730,9 +798,14 @@ where
             .sequence
             .checked_add(1)
             .ok_or(SignerError::InvalidRequest("signer sequence exhausted"))?;
+        // Kept trimmed to a quorum, like every stored proof.
+        let resume_bytes = self
+            .polka
+            .retained_finality(resume_certificate)
+            .unwrap_or_else(|| resume_certificate.to_vec());
         // Every check has passed: only now is anything written.
         self.store
-            .archive_conflict(&evidence, resume_certificate, resume)
+            .archive_conflict(&evidence, &resume_bytes, resume)
             .map_err(|e| SignerError::RecoveryArchive(e.0))?;
         let next = SignerRecord {
             key_id: self.record.key_id,
