@@ -2,8 +2,9 @@
 //! fork choice and rollback never cross the certified block recorded under
 //! `finality/finalized/v1`.
 //!
-//! * reading the pointer is fail-closed: absent means none, anything unreadable
-//!   is refused, never "no finality";
+//! * reading the pointer is fail-closed: absent means none only when no
+//!   certificate row exists; anything unreadable, and certificate rows without a
+//!   pointer, are refused, never "no finality";
 //! * a reorg is refused exactly when it forks below the certified height, forks
 //!   at it on another block, or unwinds a block at or below it (checked
 //!   exhaustively over a small grid against an independent oracle);
@@ -21,7 +22,9 @@ use sumchain_storage::certified_guard::{
     certified_block, refuse_reorg_crossing, refuse_rollback_crossing, CertifiedBlock,
     CrossingRefusal,
 };
-use sumchain_storage::certified_meta::{encode_pointer, FINALIZED_POINTER_KEY};
+use sumchain_storage::certified_meta::{
+    certificate_key, encode_pointer, CERTIFICATE_KEY_PREFIX, FINALIZED_POINTER_KEY,
+};
 use sumchain_storage::db::{cf, Database};
 use tempfile::TempDir;
 
@@ -97,6 +100,66 @@ fn an_undecodable_pointer_is_refused_not_treated_as_absent() {
             ),
         }
     }
+}
+
+#[test]
+fn certificate_rows_without_a_pointer_are_refused() {
+    let (_d, db) = db();
+    db.put(cf::META, &certificate_key(7, &canonical(7)), b"cert")
+        .unwrap();
+    assert_eq!(
+        certified_block(&db),
+        Err(CrossingRefusal::CertificatesWithoutPointer { height: Some(7) })
+    );
+    let msg = certified_block(&db).unwrap_err().to_string();
+    assert!(msg.contains("pointer is absent"), "{msg}");
+}
+
+#[test]
+fn a_malformed_row_under_the_prefix_without_a_pointer_is_refused() {
+    let (_d, db) = db();
+    // Keys are built from the prefix: no `finality/` literal outside the layout.
+    let malformed = [CERTIFICATE_KEY_PREFIX, b"xyz"].concat();
+    db.put(cf::META, &malformed, b"cert").unwrap();
+    assert_eq!(
+        certified_block(&db),
+        Err(CrossingRefusal::CertificatesWithoutPointer { height: None })
+    );
+}
+
+#[test]
+fn keys_outside_the_prefix_do_not_count_as_certificates() {
+    let (_d, db) = db();
+    // Neighbours that sort after the prefix but are not under it, built from
+    // the prefix (`.../cert/v2/...` and `...certz`).
+    let mut v2 = CERTIFICATE_KEY_PREFIX.to_vec();
+    let n = v2.len();
+    v2[n - 2] = b'2';
+    v2.extend_from_slice(b"0000");
+    let certz = [&CERTIFICATE_KEY_PREFIX[..n - 4], b"z"].concat();
+    assert!(!v2.starts_with(CERTIFICATE_KEY_PREFIX) && !certz.starts_with(CERTIFICATE_KEY_PREFIX));
+    assert!(v2.as_slice() > CERTIFICATE_KEY_PREFIX && certz.as_slice() > CERTIFICATE_KEY_PREFIX);
+    db.put(cf::META, &v2, b"x").unwrap();
+    db.put(cf::META, &certz, b"x").unwrap();
+    db.put(cf::META, b"finalized_height", &9u64.to_be_bytes())
+        .unwrap();
+    assert_eq!(certified_block(&db).unwrap(), None);
+}
+
+#[test]
+fn a_pointer_with_its_certificate_rows_reads_normally() {
+    let (_d, db) = db();
+    for h in [3u64, 5, 7] {
+        db.put(cf::META, &certificate_key(h, &canonical(h)), b"cert")
+            .unwrap();
+    }
+    let p = FinalizedPointer {
+        height: 7,
+        hash: canonical(7),
+    };
+    db.put(cf::META, FINALIZED_POINTER_KEY, &encode_pointer(&p))
+        .unwrap();
+    assert_eq!(certified_block(&db).unwrap(), Some(certified(7)));
 }
 
 #[test]
@@ -279,10 +342,11 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Nothing outside `sumchain-storage` calls the guard: the reorg planner and
-/// the rollback command still use the legacy local-depth `finalized_height`,
-/// and wiring this in is a separate, authorized change that must delete this
-/// test.
+/// Nothing calls the guard: no crate outside `sumchain-storage`, and no
+/// module inside it other than its own declaration in `lib.rs`. The reorg
+/// planner and the rollback command still use the legacy local-depth
+/// `finalized_height`; wiring this in is a separate, authorized change that
+/// must delete this test.
 #[test]
 fn the_guard_is_dormant() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -310,4 +374,25 @@ fn the_guard_is_dormant() {
         .map(|f| f.display().to_string())
         .collect();
     assert!(hits.is_empty(), "the dormant guard is referenced: {hits:?}");
+
+    let storage_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut own = Vec::new();
+    rust_files(&storage_src, &mut own);
+    let mut inside = Vec::new();
+    for f in own {
+        if f.ends_with("certified_guard.rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&f).unwrap();
+        for line in text.lines().filter(|l| l.contains("certified_guard")) {
+            let declaration = f.ends_with("lib.rs") && line.trim() == "pub mod certified_guard;";
+            if !declaration {
+                inside.push(format!("{}: {}", f.display(), line.trim()));
+            }
+        }
+    }
+    assert!(
+        inside.is_empty(),
+        "the guard is called inside storage: {inside:?}"
+    );
 }
