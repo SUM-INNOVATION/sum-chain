@@ -49,6 +49,7 @@ pub mod policy_account_view;
 pub mod property_executor;
 pub mod property_view;
 pub mod protocol_digest;
+pub mod registry_ingress;
 pub mod reorg_undo;
 pub mod retention_tracker_store;
 pub mod schema_validator;

@@ -398,6 +398,13 @@ pub struct BlockExecutor {
     /// after. `None` while dormant (production default) — then the beacon dispatch is
     /// byte/state-identical to the fail-closed seam.
     beacon_block: parking_lot::Mutex<Option<crate::beacon_manager::BeaconBlockState>>,
+    /// C5 registry ingress (#242, PROPOSED, dormant): the named parameters
+    /// governance operations 8 and 9 run with, `REGISTRY_INGRESS_PARAMS`
+    /// (every one unset) unless [`Self::with_registry_ingress`] replaced them.
+    registry_ingress_params: sumchain_wire::registry_ingress::RegistryIngressParams,
+    /// The genesis block hash those operations' approvals bind. `None` (what
+    /// [`Self::new`] installs, and what the consensus engines leave) refuses them.
+    genesis_block_hash: Option<[u8; 32]>,
 }
 
 /// Everything one block's execution produced, INCLUDING the unpublished
@@ -481,7 +488,26 @@ impl BlockExecutor {
             contract_executor,
             inference_settlement_executor,
             beacon_block: parking_lot::Mutex::new(None),
+            registry_ingress_params: crate::registry_ingress::REGISTRY_INGRESS_PARAMS,
+            genesis_block_hash: None,
         }
+    }
+
+    /// Run C5 registry ingress (governance operations 8 and 9) with `params`
+    /// and `genesis_block_hash`.
+    ///
+    /// PROPOSED, dormant: no production code calls this, so a node executes
+    /// with every named parameter unset and no genesis hash, and both
+    /// operations refuse. A parameter left `None` here still refuses them;
+    /// nothing defaults it.
+    pub fn with_registry_ingress(
+        mut self,
+        params: sumchain_wire::registry_ingress::RegistryIngressParams,
+        genesis_block_hash: [u8; 32],
+    ) -> Self {
+        self.registry_ingress_params = params;
+        self.genesis_block_hash = Some(genesis_block_hash);
+        self
     }
 
     /// Validate a transaction without executing it
@@ -1991,6 +2017,10 @@ impl BlockExecutor {
                             block_timestamp,
                             tx_hash,
                             active_validator_pubkeys,
+                            crate::registry_ingress::RegistryIngressContext {
+                                params: &self.registry_ingress_params,
+                                genesis_block_hash: self.genesis_block_hash.as_ref(),
+                            },
                         )
                     }
                     TxPayload::Supply(supply_data) => {
