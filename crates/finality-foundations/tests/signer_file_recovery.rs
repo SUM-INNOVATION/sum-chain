@@ -1,6 +1,7 @@
-//! PROPOSED signer persistence (A2 draft 2, unratified): the recovery
+//! PROPOSED signer persistence (UNRATIFIED 413-byte record): the recovery
 //! invariants and the crash-point matrix, over the file-backed store in
-//! `signer_file` and the ratified G2-b signer core.
+//! `signer_file` and the ratified G2-b signer core; on Unix, round trips
+//! through a real directory, including a conflict halt and its recovery.
 //!
 //! The disk below is a model: each file has volatile and durable contents,
 //! the directory has volatile and durable entries, and a simulated crash
@@ -16,9 +17,9 @@ use sumchain_finality_foundations::signer::{
     SignRequest, SignerError, SignerRecord, SignerStore, SigningKey, Step, VoteValue,
 };
 use sumchain_finality_foundations::signer_file::{
-    floor_below_height, offset, sign_bytes_digest, Classified, FileSignerStore, Identity, IoError,
-    MirrorStore, SignerState, StateError, StateLast, StdSignerDir, CHECKSUMMED_LEN, D_SIGNER,
-    STATE_FILE, STATE_LEN, TEMP_FILE,
+    conflict_file_name, floor_below_height, offset, proof_file_name, sign_bytes_digest, Classified,
+    FileSignerStore, Identity, IoError, MirrorStore, RecoveryReceipt, SignerState, StateError,
+    StateLast, StdSignerDir, CHECKSUMMED_LEN, D_SIGNER, HALT_SET, STATE_FILE, STATE_LEN, TEMP_FILE,
 };
 use sumchain_finality_foundations::Digest;
 
@@ -1348,5 +1349,139 @@ fn std_directory_round_trip() {
     let mut s = DurableSigner::open(&owner, store(), key(), TestPolka, None).unwrap();
     assert_eq!(s.sign(&r).unwrap(), sig);
     drop(s);
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+/// A conflict halt and its recovery through a real directory: the halt byte
+/// on disk in both copies, the retained evidence, the archive with its
+/// receipt and no temp files left, the evidence file removed at the next
+/// open, signing above the resume height, and initialization refused while
+/// the archive exists.
+#[cfg(unix)]
+#[test]
+fn std_directory_conflict_halt_and_recovery() {
+    let base = std::env::temp_dir().join(format!(
+        "sumchain-signer-recovery-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let dir = base.join("finality");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mirror = base.join("mirror.bin");
+    let owner = MemOwnership::default();
+    let key = || EdKey(ed25519_dalek::SigningKey::from_bytes(&SEED));
+    let store = || {
+        FileSignerStore::new(
+            StdSignerDir::new(dir.clone()),
+            FileMirror(mirror.clone()),
+            B3,
+            CHAIN,
+            GENESIS,
+        )
+    };
+    let open = || DurableSigner::open(&owner, store(), key(), RetainingPolka, None);
+    initialize_exclusive(
+        &owner,
+        &mut store(),
+        key().key_id(),
+        floor_below_height(FLOOR),
+    )
+    .unwrap();
+    {
+        let mut s = open().unwrap();
+        s.sign(&prevote(7, 0, A)).unwrap();
+        s.advance(&finality(7, &A)).unwrap();
+        s.sign(&prevote(8, 0, A)).unwrap();
+        assert_eq!(
+            s.advance(&finality(7, &B)),
+            Err(SignerError::ConflictingFinality(7))
+        );
+    }
+    let state = std::fs::read(dir.join(STATE_FILE)).unwrap();
+    assert_eq!(state.len(), STATE_LEN);
+    assert_eq!(
+        (state[offset::HALT], state[offset::LOCK_STATE]),
+        (HALT_SET, 0)
+    );
+    assert_eq!(
+        std::fs::read(&mirror).unwrap(),
+        state,
+        "the halt is in both copies"
+    );
+    let (halted, _) = SignerState::decode(&state, &B3).unwrap();
+    let evidence = dir.join(proof_file_name(&halted.proof_digest));
+    assert_eq!(std::fs::read(&evidence).unwrap(), finality(7, &B));
+
+    let mut s = open().unwrap();
+    assert!(s.is_halted());
+    assert_eq!(s.sign(&prevote(8, 1, A)), Err(SignerError::Halted));
+    let followed = Certified {
+        height: 9,
+        block_id: A,
+    };
+    assert_eq!(
+        s.recover_after_conflict(followed, &finality(9, &A), None),
+        Ok(followed)
+    );
+    drop(s);
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    for suffix in ["state", "evidence", "resume", "receipt"] {
+        assert!(names.contains(&conflict_file_name(7, suffix)), "{suffix}");
+    }
+    assert!(!names.iter().any(|n| n.ends_with(".tmp")), "{names:?}");
+    let receipt = RecoveryReceipt::decode(
+        &std::fs::read(dir.join(conflict_file_name(7, "receipt"))).unwrap(),
+        &B3,
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            receipt.conflict_height,
+            receipt.resume_height,
+            receipt.resume_block
+        ),
+        (7, 9, A)
+    );
+    assert_eq!(
+        std::fs::read(dir.join(conflict_file_name(7, "state"))).unwrap(),
+        state,
+        "the archived record is the halted one"
+    );
+
+    let mut s = open().unwrap();
+    assert!(!s.is_halted());
+    assert!(
+        !evidence.exists(),
+        "the unreferenced evidence file is removed at open"
+    );
+    assert_eq!(s.record().working_height(), Some(10));
+    assert!(matches!(
+        s.sign(&prevote(9, 0, A)),
+        Err(SignerError::Regression { .. })
+    ));
+    s.sign(&prevote(10, 0, A)).unwrap();
+    drop(s);
+    assert_eq!(
+        std::fs::read(dir.join(STATE_FILE)).unwrap(),
+        std::fs::read(&mirror).unwrap()
+    );
+
+    std::fs::remove_file(dir.join(STATE_FILE)).unwrap();
+    std::fs::remove_file(&mirror).unwrap();
+    assert!(matches!(
+        initialize_exclusive(
+            &owner,
+            &mut store(),
+            key().key_id(),
+            floor_below_height(FLOOR)
+        ),
+        Err(SignerError::Corrupt(_))
+    ));
     std::fs::remove_dir_all(&base).unwrap();
 }
