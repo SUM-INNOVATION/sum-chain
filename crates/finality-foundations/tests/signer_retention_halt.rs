@@ -1292,6 +1292,113 @@ fn interrupted_recoveries_leave_only_debris_that_never_changes_the_outcome() {
     assert_eq!(cases, w8 * w9 * 25);
 }
 
+/// The files of the archive for conflict height `h`, with their bytes.
+fn archive_of(rig: &Rig, h: u64) -> Vec<(String, Vec<u8>)> {
+    ["state", "evidence", "resume", "receipt"]
+        .iter()
+        .map(|suffix| {
+            let name = format!("conflict-{h}.{suffix}");
+            let bytes = rig.file(&name).unwrap_or_else(|| panic!("{name} missing"));
+            (name, bytes)
+        })
+        .collect()
+}
+
+/// Two conflicts on one signer. A conflict at 7 is followed by an
+/// interrupted recovery, then a successful recovery to 9. A later conflict
+/// at 9 (a higher height) is followed by an interrupted recovery, then a
+/// successful recovery to 11. Both completed archives and their receipts are
+/// kept byte-identical through the later conflict, its recovery and every
+/// open. Orphan proof cleanup removes only proof files and never touches an
+/// archive. The archive names are per conflict height, and a later conflict
+/// is always at a strictly higher height, so no archive is overwritten.
+#[test]
+fn two_conflicts_keep_both_completed_archives() {
+    let rig = halted_rig();
+    // First conflict (H = 7): an attempt interrupted after the evidence file's
+    // rename (a crash, then power loss), then a successful recovery to 9.
+    let mut s = rig.open().unwrap();
+    rig.arm(6, Mode::CrashAfter);
+    assert!(s
+        .recover_after_conflict(&at(9, A), &finality(9, &A), None)
+        .is_err());
+    drop(s);
+    rig.recover(Mode::CrashAfter);
+    let mut s = rig.open().unwrap();
+    assert!(s.is_halted(), "the interrupted attempt changed nothing");
+    s.recover_after_conflict(&at(9, A), &finality(9, &A), None)
+        .unwrap();
+    s.sign(&prevote(10, 0, A)).unwrap();
+    let first = archive_of(&rig, 7);
+    let r1 = RecoveryReceipt::decode(&first[3].1, &B3).unwrap();
+    assert_eq!(
+        (r1.conflict_height, r1.resume_height, r1.resume_block),
+        (7, 9, A)
+    );
+
+    // Second conflict, at the new certified height 9 (> 7).
+    assert_eq!(
+        s.advance(&finality(9, &B)),
+        Err(SignerError::ConflictingFinality(9))
+    );
+    let second_halted = state_bytes(&rig);
+    // An attempt interrupted before the receipt's rename is durable.
+    rig.arm(14, Mode::CrashBefore);
+    assert!(s
+        .recover_after_conflict(&at(11, A), &finality(11, &A), None)
+        .is_err());
+    drop(s);
+    rig.recover(Mode::CrashBefore);
+    assert_eq!(archive_of(&rig, 7), first, "the first archive is untouched");
+    let mut s = rig.open().unwrap();
+    assert!(s.is_halted());
+    assert_eq!(s.record().working_height(), Some(10));
+    s.recover_after_conflict(&at(11, A), &finality(11, &A), None)
+        .unwrap();
+    drop(s);
+
+    // Orphans beside both archives: removed at open; the archives are not.
+    rig.set_file(&proof_file_name(&[0x77; 32]), b"orphan".to_vec());
+    rig.set_file("proof.tmp", b"orphan".to_vec());
+    let mut s = rig.open().unwrap();
+    assert!(rig.proof_files().is_empty(), "{:?}", rig.proof_files());
+    assert_eq!(archive_of(&rig, 7), first, "the first archive is untouched");
+    let second = archive_of(&rig, 9);
+    assert_eq!(second[0].1, second_halted, "the second halted record");
+    assert_eq!(second[1].1, finality(9, &B), "the second evidence");
+    let r2 = RecoveryReceipt::decode(&second[3].1, &B3).unwrap();
+    assert_eq!(
+        (r2.conflict_height, r2.resume_height, r2.resume_block),
+        (9, 11, A)
+    );
+    let mut names = conflict_files(&rig);
+    names.sort();
+    assert_eq!(
+        names,
+        [7, 9]
+            .iter()
+            .flat_map(
+                |h| ["evidence", "receipt", "resume", "state"].map(|x| format!("conflict-{h}.{x}"))
+            )
+            .collect::<Vec<_>>(),
+        "exactly the two completed archives, no temp files"
+    );
+
+    // Signing resumes above 11 only; reopening (after power loss) keeps both.
+    for h in [9, 10, 11] {
+        assert!(matches!(
+            s.sign(&prevote(h, 7, A)),
+            Err(SignerError::Regression { .. })
+        ));
+    }
+    s.sign(&prevote(12, 0, A)).unwrap();
+    drop(s);
+    rig.disk.borrow_mut().reboot();
+    rig.open().unwrap();
+    assert_eq!(archive_of(&rig, 7), first);
+    assert_eq!(archive_of(&rig, 9), second);
+}
+
 #[test]
 fn crash_matrix_for_recovery_after_a_conflict() {
     let rig = halted_rig();
