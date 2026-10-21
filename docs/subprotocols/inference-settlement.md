@@ -176,12 +176,12 @@ decision from enabling settlement.
 Gated behind the parameters below (fresh chains default to `None`; the mainnet
 values are noted inline):
 
-- `inference_settlement_enabled_from_height: Option<u64>` (fresh-chain default `None`) — base settlement gate. **On mainnet set to 8,900,000 — active** (the chain has crossed it). This is base inference settlement; consistency and verifier bonding below are separate post-supply extensions at height 9,200,000.
+- `inference_settlement_enabled_from_height: Option<u64>` (fresh-chain default `None`) — base settlement gate. **On mainnet set to 8,900,000 — active** (the chain has crossed it). This is base inference settlement; consistency and verifier bonding below are separate extensions, **not set on mainnet** (see below).
 - `inference_settlement_max_dispute_window_blocks: u64` — ceiling on a session's dispute window.
 - `inference_settlement_max_session_duration_blocks: u64` — ceiling on escrow lock-up.
 - `inference_settlement_dispute_threshold_bps: Option<u16>` (default `None`) — validator-quorum threshold (basis points of the active validator set) that must sign `ResolveDispute`; disputes disabled when unset (`None`). **On mainnet this is set to `6667`** (both validators of the current 2-validator net must sign).
-- `inference_settlement_consistency_enabled_from_height: Option<u64>` (fresh-chain default `None`) — consistency/plurality mode gate (issue #77). When unreached, a session cannot opt into a consistency rule (`Failed(361)`); single-verifier v1 claims are unaffected. **On mainnet, deployed in runtime genesis and activation-gated at height 9,200,000** — one of the seven post-supply gates, a separate extension of base settlement; not usable before that height, then auto-activates.
-- `inference_verifier_bonding_enabled_from_height: Option<u64>` (fresh-chain default `None`) — verifier bonding + slashing gate (issue #78). When unreached, bond-registry ops and bond-requiring `OpenSession` fail `Failed(364)`; sessions without a bond requirement are unaffected. **On mainnet, deployed in runtime genesis and activation-gated at height 9,200,000** — a separate post-supply extension of base settlement. These two gates are not exposed by `chain_getChainParams`, so runtime genesis is the source of truth.
+- `inference_settlement_consistency_enabled_from_height: Option<u64>` (fresh-chain default `None`) — consistency/plurality mode gate (issue #77). When unreached, a session cannot opt into a consistency rule (`Failed(361)`); single-verifier v1 claims are unaffected. **Not set on mainnet:** the public `chain_getChainParams` reports `null` (read 2026-10-16, recorded on #135), so a session cannot opt into a consistency rule today. #113 states 9,200,000 as the intended height; that is not the live configuration.
+- `inference_verifier_bonding_enabled_from_height: Option<u64>` (fresh-chain default `None`) — verifier bonding + slashing gate (issue #78). When unreached, bond-registry ops and bond-requiring `OpenSession` fail `Failed(364)`; sessions without a bond requirement are unaffected. **Not set on mainnet:** the public `chain_getChainParams` reports `null` (read 2026-10-16, recorded on #135), so bonding is not active. #113 states 9,200,000 as the intended height. Both this gate and the consistency gate are exposed by `chain_getChainParams` on the deployed binary (since #122), so the live RPC is the source of truth for them.
 - `inference_verifier_unbonding_period_blocks: u64` (default ~201,600 ≈ 7 days) — delay between `BeginVerifierUnbond` and a permitted `WithdrawVerifierBond`.
 
 Below the gate, all settlement operations are rejected with `Failed(350)` (no
@@ -272,7 +272,9 @@ status. Dispute evidence is an opaque commitment, never plaintext.
 > auto-activates when the chain crosses 8,900,000. The consistency
 > (`inference_settlement_consistency_enabled_from_height`) and verifier-bonding
 > (`inference_verifier_bonding_enabled_from_height`) gates are **not** part of
-> that 8,900,000 cohort: they are separate post-supply extensions, deployed in
-> runtime genesis and **activation-gated at height 9,200,000**, and auto-activate
-> when the chain crosses 9,200,000. These two gates are not exposed by
-> `chain_getChainParams`, so runtime genesis is the source of truth.
+> that 8,900,000 cohort, and they are **not set on mainnet**: the public
+> `chain_getChainParams`, which exposes both on the deployed binary (since #122),
+> reports `null` for both (read 2026-10-16, recorded on #135). Consistency mode
+> and verifier bonding are therefore not active. #113 states 9,200,000 as their
+> intended height; that is not the live configuration, and setting it is a
+> separate configuration change.
