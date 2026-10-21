@@ -38,6 +38,12 @@ pub enum GovernanceOperation {
     RegisterEquityClass = 6,
     /// Cast an SRC-833 controller-attested equity vote (#92).
     CastEquityVote = 7,
+    /// C5 registry ingress (#242), PROPOSED: register a `RegistryRecordV1`
+    /// (validator-quorum). `data` is `registry_ingress::RegistryRegisterV1`.
+    RegistryRegister = 8,
+    /// C5 registry ingress (#242), PROPOSED: disable a registered record
+    /// (validator-quorum). `data` is `registry_ingress::RegistryDisableV1`.
+    RegistryDisable = 9,
 }
 
 impl GovernanceOperation {
@@ -51,6 +57,8 @@ impl GovernanceOperation {
             5 => Some(GovernanceOperation::RegisterQualifyingAsset),
             6 => Some(GovernanceOperation::RegisterEquityClass),
             7 => Some(GovernanceOperation::CastEquityVote),
+            8 => Some(GovernanceOperation::RegistryRegister),
+            9 => Some(GovernanceOperation::RegistryDisable),
             _ => None,
         }
     }

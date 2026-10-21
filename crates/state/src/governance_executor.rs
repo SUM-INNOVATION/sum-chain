@@ -24,6 +24,11 @@
 //! - `318` invalid equity vote (bad merkle proof / bad/mismatched controller
 //!   signature / root not frozen for this proposal)
 //!
+//! C5 registry ingress (#242, PROPOSED, dormant), operations 8 and 9: no new
+//! code. `302` (pre-semantic) while a named parameter or the genesis block hash
+//! is missing, or the payload does not decode; `303` (semantic) for every
+//! refusal after that. See [`crate::registry_ingress`].
+//!
 //! Treasury execution (P6b): a passed `TreasurySpend` + `OnChain` proposal pays
 //! a single native-Koppa amount from `GovernanceParams::treasury` to the
 //! proposal's beneficiary and moves to `Executed`. It is the only auto-exec
@@ -60,6 +65,9 @@ use sumchain_storage::{equity_merkle_verify, EquityClassRoot, QualifyingAsset};
 pub const NATIVE_PASS_THRESHOLD_BPS: u128 = 6667;
 
 use crate::equity_executor::EquityExecutor;
+use crate::registry_ingress::{self, RegistryIngressContext};
+use sumchain_wire::registry_ingress::{RegistryDisableV1, RegistryRegisterV1};
+use sumchain_wire::registry_wire::RegistryRecordV1;
 use crate::token_executor::TokenExecutor;
 use crate::executor::TxExecutionResult;
 use crate::governance_view as gv;
@@ -141,6 +149,8 @@ enum Prepared {
     RegisterEquityClass(GovAsset),
     /// A controller-attested equity vote + its commitment dedup mark (#92).
     CastEquityVote { vote: GovVote, holder_commitment: [u8; 32] },
+    /// A registered record, or a disabled one replacing its stored row (C5).
+    RegistryRecord(RegistryRecordV1),
     ProposalUpdate {
         proposal: GovProposal,
         settlement: BondSettlement,
@@ -175,6 +185,9 @@ pub fn execute(
     // consensus). Validator-gated actions authorize against exactly this set —
     // never StakingStore/ValidatorSetStore.
     active_validator_pubkeys: &[[u8; 32]],
+    // C5 registry ingress (operations 8 and 9): named parameters and the
+    // genesis block hash. Both operations refuse unless all are present.
+    registry: RegistryIngressContext<'_>,
 ) -> Result<TxExecutionResult> {
     // ── Pre-semantic: gate / params / decode (no fee, no nonce, no state) ────
     if !gate_open(params, block_height) {
@@ -247,6 +260,43 @@ pub fn execute(
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
             Ok(req) => validate_equity_vote(view, gp, from, chain_id, block_height, &req),
         },
+        // C5 (#242, PROPOSED). Unready (a named parameter or the genesis hash
+        // missing) is pre-semantic, like an undecodable payload.
+        GovernanceOperation::RegistryRegister => {
+            let Some(ready) = registry_ingress::ready(&registry) else {
+                return Ok(result(tx_hash, TxStatus::Failed(302), 0));
+            };
+            match RegistryRegisterV1::decode_exact(&gov.data) {
+                Err(_) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
+                Ok(req) => registry_ingress::validate_register(
+                    view,
+                    gp,
+                    &ready,
+                    chain_id,
+                    block_height,
+                    active_validator_pubkeys,
+                    &req,
+                )
+                .map(Prepared::RegistryRecord),
+            }
+        }
+        GovernanceOperation::RegistryDisable => {
+            let Some(ready) = registry_ingress::ready(&registry) else {
+                return Ok(result(tx_hash, TxStatus::Failed(302), 0));
+            };
+            match RegistryDisableV1::decode_exact(&gov.data) {
+                Err(_) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
+                Ok(req) => registry_ingress::validate_disable(
+                    view,
+                    &ready,
+                    chain_id,
+                    block_height,
+                    active_validator_pubkeys,
+                    &req,
+                )
+                .map(Prepared::RegistryRecord),
+            }
+        }
     };
 
     // A storage failure during validation fails execution: no receipt, no fee,
@@ -429,6 +479,7 @@ fn apply(view: &mut ExecutionView<'_, '_>, prepared: Prepared) -> Result<()> {
         Prepared::CastEquityVote { vote, holder_commitment } => {
             gv::v_record_equity_vote(view, &vote, &holder_commitment)?
         }
+        Prepared::RegistryRecord(record) => registry_ingress::v_put_record(view, &record)?,
         Prepared::ProposalUpdate { proposal, .. } => gv::v_put_proposal(view, &proposal)?,
     }
     Ok(())
