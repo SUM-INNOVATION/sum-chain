@@ -2,16 +2,17 @@
 
 **This is a proposal for byte review. It is not a byte ratification, and nothing in it is frozen.** It specifies the dormant implementation in this pull request completely enough to be checked against the code and the vectors. Every value marked *fixture* or *synthetic* is a test value, not a proposed parameter.
 
-- **Mechanism:** B of the C5 decision document. Governance-v1 operations `RegistryRegister = 8` and `RegistryDisable = 9` inside `TxType::Governance = 23`. There is no new transaction type, no `RegistryWireOp` namespace, no new gate and no new receipt code (`Failed(418)` stays unallocated).
+- **Mechanism:** B of the C5 decision document. Governance-v1 operations 8 (register) and 9 (disable) inside `TxType::Governance = 23`. There is no new transaction type, no `RegistryWireOp` namespace, no new gate and no new receipt code (`Failed(418)` stays unallocated).
+- **Not on the wire:** this PR does **not** add the two `GovernanceOperation` variants. A governance transaction naming 8 or 9 is refused at decode exactly as on the base, and a block holding one is rejected (§13). The codecs and the executor logic are reached only through `governance_executor::execute_registry_ingress`, which nothing but the tests calls. Adding the wire variants is part of the separately authorized activation change.
 - **Authorization:** a quorum of the active PoA validator set at the execution height, verified by the existing `validator_quorum::verify_validator_quorum`. The threshold source is B2 (§7). `tx.from` only pays the fee.
-- **State:** dormant. All four named parameters are unset (§9), and the consensus engines supply no genesis block hash, so both operations refuse with `302` before reading their payload.
+- **State:** dormant and unwired. Even by direct call, both operations refuse with `302` before reading their payload: all four named parameters are unset (§9), and nothing supplies a genesis block hash.
 - **Refs:** #242, #128. Base: `main` `e3b8ff81`.
 
 | File | Contents |
 |---|---|
 | `crates/sumchain-wire/src/registry_ingress.rs` | codecs, signing preimages, named-parameter type, height rules, commit-side check |
 | `crates/state/src/registry_ingress.rs` | validation, record state, `REGISTRY_INGRESS_PARAMS` (UNSET) |
-| `crates/state/src/governance_executor.rs` | the two operation arms behind the governance-v1 gate |
+| `crates/state/src/governance_executor.rs` | `execute_registry_ingress`: the governance-v1 gate, parameters and Policy-B settlement for the two operations, reached by no transaction decode |
 | `crates/state/tests/registry_ingress.rs` | executor tests and the vector check |
 | `docs/proposals/c5-registry-ingress/vectors.txt` | synthetic vectors |
 
@@ -24,7 +25,9 @@
 
 ## 2. The transaction envelope
 
-The operations travel in the existing envelope. It is bincode 1.3.3 with its default (legacy) configuration: fixed-width little-endian integers, a `u32` variant index for an enum, and a `u64` length before a `Vec<u8>`.
+**Prospective.** This is the envelope the operations will use once the activation change adds their `GovernanceOperation` variants. On this binary, every such envelope is refused at decode (§13); the tests check this against the vectors.
+
+It is the existing envelope: bincode 1.3.3 with its default (legacy) configuration, meaning fixed-width little-endian integers, a `u32` variant index for an enum, and a `u64` length before a `Vec<u8>`.
 
 | Offset | Size | Field | Value |
 |---|---|---|---|
@@ -33,7 +36,7 @@ The operations travel in the existing envelope. It is bincode 1.3.3 with its def
 | 8 | 8 | `data` length L, u64 | `173 + 96·k` or `51 + 96·k` |
 | 16 | L | `data` | §3 |
 
-The `GovernanceTxData` vectors start at offset 4 of this table. **Correction to the decision document:** it describes `operation` as a `u8`. On the wire it is the bincode `u32` variant index; the Rust discriminant is a `u8`. `crates/primitives/tests/governance_fixtures.rs` pins indices 7, 8 and 9.
+The `prospective_governance_tx_data` vectors start at offset 4 of this table. **Correction to the decision document:** it describes `operation` as a `u8`. On the wire it is the bincode `u32` variant index; the Rust discriminant is a `u8`.
 
 ## 3. Operation payloads
 
@@ -118,7 +121,7 @@ Validators sign the preimage itself (PureEdDSA, no prehash).
 ### 4.3 Notes on the preimages
 
 - **`chain_id`** is the executing node's chain id, the same value transactions are checked against.
-- **`genesis_block_hash`** is `Genesis::create_genesis_block().hash()`, the value the consensus configuration commits as field `0x0005`. The executor receives it through `BlockExecutor::with_registry_ingress`; without it, both operations refuse (open question Q7).
+- **`genesis_block_hash`** is `Genesis::create_genesis_block().hash()`, the value the consensus configuration commits as field `0x0005`. `execute_registry_ingress` receives it in its `RegistryIngressContext`; nothing supplies it in production, and without it both operations refuse (open question Q7).
 - **Domain separation:** both domains contain exactly one NUL, which is their last byte. The two domains, the registry KDF tags (`…/VK/v1\0`, `…/TOKENIZER/v1\0`, `…/GRAPHDEF/v1\0`) and the governance and settlement quorum domains (`SRC-GOV-VALQUORUM:…`, `OMNINODE-SETTLE-VALQUORUM:…`) are pairwise prefix-free. A test enforces this.
 - **Fixed lengths:** each preimage has a fixed length and fixed field positions, so no two field assignments of one domain produce the same bytes.
 - **Re-encoding:** the record's re-encoding equals the carried bytes because the codec is canonical (§1). The implementation re-encodes it.
@@ -201,7 +204,7 @@ On acceptance, the stored record's `status` becomes Disabled; every other byte i
 
 ## 9. Named parameters (unvalued)
 
-`RegistryIngressParams` holds one `Option` per parameter. Execution obtains values only through `complete()`, which returns `None` unless all four are `Some`. A missing value therefore cannot be defaulted on its way to execution. The binary's value is `REGISTRY_INGRESS_PARAMS = RegistryIngressParams::UNSET`.
+`RegistryIngressParams` holds one `Option` per parameter. Execution obtains values only through `complete()`, which returns `None` unless all four are `Some`. A missing value therefore cannot be defaulted on its way to execution. The binary's value is `REGISTRY_INGRESS_PARAMS = RegistryIngressParams::UNSET`, and no production code reads it.
 
 | Parameter | Type | Read by | While unset |
 |---|---|---|---|
@@ -216,7 +219,7 @@ The genesis block hash is a precondition of the same kind: without it, both oper
 
 ## 10. Receipts and fee policy
 
-No code is allocated. The order is: gate, then governance parameters, then registry readiness, then decode, then the semantic rules.
+No code is allocated. On this binary, a transaction naming operation 8 or 9 does not decode, so it has no receipt and a block holding it is rejected, as before. The table below is what `execute_registry_ingress` returns, and so what the operations would return once wired. The order is: gate, then governance parameters, then registry readiness, then decode, then the semantic rules.
 
 | Condition | Status | Fee | Nonce | State |
 |---|---|---|---|---|
@@ -249,8 +252,11 @@ No code is allocated. The order is: gate, then governance parameters, then regis
 
 ## 13. Consequences and activation prerequisites
 
-1. **Wire decoding changes now, whatever the parameters.** Adding variants 8 and 9 to `GovernanceOperation` means this binary decodes transactions that earlier binaries cannot. A block holding operation 8 or 9 is undecodable to an earlier binary. This binary records the transaction as `Failed(300)`, `(301)` or `(302)`. **Merging is therefore a coordinated, same-window upgrade even with every parameter unset.** The decision document does not state this (Q14).
+1. **This PR changes no decoding.** `GovernanceOperation` keeps exactly its eight variants (0 to 7). A governance transaction naming 8 or 9 fails to decode with the same error as on the base (`invalid value: integer 8, expected variant index 0 <= i < 8`), and a block holding one is rejected whole. `governance_operations_8_and_9_do_not_decode` pins this for the payload, the signed transaction and the block. An upgraded and a non-upgraded node therefore agree on every block.
+
+   **Adding the two wire variants belongs to the activation change.** It is a coordinated, same-window upgrade: once a binary decodes operation 8 or 9, an earlier binary rejects any block that holds one. If an operation that refuses before semantics (`300`–`302`, no fee) could be included in a block, it would also take block space for free. The decision document does not state either point (Q14).
 2. **Activation needs all of the following:**
+   - the two `GovernanceOperation` variants and a dispatch to `execute_registry_ingress`, released as a coordinated upgrade;
    - governance-v1 activation with `ChainParams::governance`;
    - ratified values for all four parameters;
    - their registration in the consensus configuration, under a new schema, because schema 2 is frozen (Q5, Q6);
@@ -279,7 +285,7 @@ The code takes no position on these, or takes only the provisional one stated. E
 | Q11 | A bound on k below `u16::MAX` | None |
 | Q12 | Whether registry rows enter a committed digest | No (governance-v1 precedent) |
 | Q13 | Storage location: a new family, or an injected layout as recent dormant seams use | A new family (governance-v1 precedent) |
-| Q14 | Mechanism B's wire-decoding consequence (§13.1) | Stated; it is not a choice |
+| Q14 | Mechanism B's wire-decoding consequence (§13.1) | Resolved for this PR: no wire variant is added, decoding is unchanged and tested. Adding the variants is the activation change, which is a coordinated upgrade. |
 | Q15 | The decision record says a departed validator's approval "doesn't count"; the quorum rule refuses the operation | The quorum rule (refuse) |
 | Q16 | Unordered or duplicate approvals as a decode refusal (`302`) or a quorum refusal (`303`) | `302`, derived from §2 and §6 of the decision document |
 | Q17 | Whether registry needs its own threshold value instead of the governance-wide one | The governance value under B2, once the source is set |
@@ -290,9 +296,9 @@ The code takes no position on these, or takes only the provisional one stated. E
 **`vectors.txt`.** Synthetic. Chain id 4242, genesis hash `0x47 × 32`, validator seeds `[i; 32]`, fixture governance threshold 6667, fixture `T_min = 10` and `W = 100`. It holds, for k = 1 and k = q(4) = 3:
 - the record;
 - both preimages;
-- each payload, and its `GovernanceTxData` and `TxPayload` envelopes.
+- each payload, and its prospective `GovernanceTxData` and `TxPayload` envelopes (§2).
 
-`vectors_are_reproduced_and_execute` regenerates the file and requires byte equality (comment lines excluded). It also executes every payload: k = 1 against the active set {1}, and k = 3 against {1, 2, 3, 4}. Both must reach `Success`.
+`vectors_are_reproduced_and_execute` regenerates the file and requires byte equality (comment lines excluded). It runs every payload through `execute_registry_ingress`: k = 1 against the active set {1}, and k = 3 against {1, 2, 3, 4}. Both must reach `Success`. It also requires every prospective envelope to fail decode on this binary.
 
 **Tests.** The wire unit tests are in `crates/sumchain-wire/src/registry_ingress.rs`. The executor tests are in `crates/state/tests/registry_ingress.rs`. Each required case, with the test that checks it:
 
@@ -314,4 +320,4 @@ The code takes no position on these, or takes only the provisional one stated. E
 | Pre-timelock commit; disable-after semantics in one block | `commit_side_timelock_and_disable_after_semantics` |
 | Each missing parameter; production defaults; gate and params first | `any_single_missing_named_parameter_refuses_free`, `production_defaults_refuse_…`, `governance_gate_and_params_still_come_first` |
 | Non-canonical `S` | `signature_convention_refuses_a_non_canonical_s` |
-| Variant indices 8 and 9 on the wire | `governance_fixtures.rs::governance_operations_8_and_9_are_appended` |
+| Operations 8 and 9 still refused at decode (payload, transaction, block), same error as on the base | `governance_fixtures.rs::governance_operations_8_and_9_do_not_decode`, `vectors_are_reproduced_and_execute` |

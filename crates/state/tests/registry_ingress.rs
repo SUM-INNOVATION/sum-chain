@@ -1,5 +1,8 @@
-//! C5 registry ingress (#242), PROPOSED and dormant: governance-v1 operations
-//! 8 (`RegistryRegister`) and 9 (`RegistryDisable`) through the block executor.
+//! C5 registry ingress (#242), PROPOSED and dormant: the proposed governance-v1
+//! operations 8 (register) and 9 (disable), run through
+//! `governance_executor::execute_registry_ingress` by direct call. No
+//! transaction decodes to them (`governance_fixtures.rs` pins that), so these
+//! tests are the only way in.
 //!
 //! Every parameter value below is a TEST FIXTURE, not a proposal: the named
 //! parameters are unvalued (`REGISTRY_INGRESS_PARAMS` is UNSET), and nothing
@@ -13,11 +16,14 @@ use std::sync::Arc;
 use common::{candidate, fund};
 use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::ChainParams;
-use sumchain_primitives::governance::{GovernanceOperation, GovernanceParams, GovernanceTxData};
+use sumchain_primitives::governance::GovernanceParams;
 use sumchain_primitives::validator_authority::{required_approvals, ValidatorApproval};
-use sumchain_primitives::{Address, SignedTransaction, TransactionV2, TxPayload, TxStatus};
-use sumchain_state::executor::{BlockExecutor, TxExecutionResult};
-use sumchain_state::registry_ingress::{v_check_commit, v_get_record, REGISTRY_INGRESS_PARAMS};
+use sumchain_primitives::{Address, Hash, TxPayload, TxStatus};
+use sumchain_state::governance_executor::execute_registry_ingress;
+use sumchain_state::registry_ingress::{
+    v_check_commit, v_get_record, RegistryIngressContext, RegistryIngressOp,
+    REGISTRY_INGRESS_PARAMS,
+};
 use sumchain_state::state::StateManager;
 use sumchain_storage::candidate::CandidateExecution;
 use sumchain_storage::Database;
@@ -67,18 +73,27 @@ fn chain_params(gov_bps: u16) -> ChainParams {
 struct Node {
     db: Arc<Database>,
     _dir: TempDir,
-    exec: BlockExecutor,
+    params: ChainParams,
+    registry: RegistryIngressParams,
+    genesis: Option<[u8; 32]>,
 }
 
+/// `registry: None` is what this binary has: every parameter unset and no
+/// genesis block hash.
 fn node_with(params: ChainParams, registry: Option<RegistryIngressParams>) -> Node {
     let dir = TempDir::new().unwrap();
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
-    let state = Arc::new(StateManager::new(db.clone(), CHAIN));
-    let mut exec = BlockExecutor::new(state, db.clone(), params);
-    if let Some(p) = registry {
-        exec = exec.with_registry_ingress(p, GENESIS);
+    let (registry, genesis) = match registry {
+        Some(p) => (p, Some(GENESIS)),
+        None => (REGISTRY_INGRESS_PARAMS, None),
+    };
+    Node {
+        db,
+        _dir: dir,
+        params,
+        registry,
+        genesis,
     }
-    Node { db, _dir: dir, exec }
 }
 
 fn node() -> Node {
@@ -160,34 +175,16 @@ fn disable(valid_until: u64, id: u8, signers: &[u8]) -> Vec<u8> {
     disable_bytes(CHAIN, &GENESIS, valid_until, id, signers)
 }
 
-fn payload(op: GovernanceOperation, data: Vec<u8>) -> TxPayload {
-    TxPayload::Governance(GovernanceTxData { operation: op, data })
-}
-
-fn signed(kp: &KeyPair, nonce: u64, payload: TxPayload) -> SignedTransaction {
-    let tx = TransactionV2 {
-        chain_id: CHAIN,
-        from: kp.address(),
-        fee: FEE,
-        nonce,
-        payload,
-    };
-    let h = tx.signing_hash();
-    let sig = sign(h.as_bytes(), kp.private_key());
-    SignedTransaction::new_v2(tx, *sig.as_bytes(), *kp.public_key().as_bytes())
-}
-
 /// A fee payer that is not a validator: authority comes from the approvals.
 struct Submitter {
     kp: KeyPair,
-    nonce: u64,
 }
 
 impl Submitter {
     fn new(db: &Database) -> Self {
         let kp = KeyPair::from_bytes([0x5A; 32]);
         fund(db, &kp, 1_000_000);
-        Self { kp, nonce: 0 }
+        Self { kp }
     }
 
     /// Execute one operation at `height` against `active`, checking the fee
@@ -197,25 +194,30 @@ impl Submitter {
         &mut self,
         n: &Node,
         c: &mut CandidateExecution<'_>,
-        op: GovernanceOperation,
+        op: RegistryIngressOp,
         data: Vec<u8>,
         height: u64,
         active: &[[u8; 32]],
     ) -> TxStatus {
         let before = StateManager::v_get_nonce(&c.view(), &self.kp.address()).unwrap();
-        let tx = signed(&self.kp, self.nonce, payload(op, data));
-        let r: TxExecutionResult = n
-            .exec
-            .execute_tx_with_validators(
-                &mut c.view(),
-                &tx,
-                &Address::new([0x99; 20]),
-                height,
-                1_000,
-                0,
-                active,
-            )
-            .unwrap();
+        let r = execute_registry_ingress(
+            &mut c.view(),
+            CHAIN,
+            &n.params,
+            op,
+            &data,
+            &self.kp.address(),
+            FEE,
+            &Address::new([0x99; 20]),
+            height,
+            Hash::ZERO,
+            active,
+            RegistryIngressContext {
+                params: &n.registry,
+                genesis_block_hash: n.genesis.as_ref(),
+            },
+        )
+        .unwrap();
         let after = StateManager::v_get_nonce(&c.view(), &self.kp.address()).unwrap();
         if matches!(r.status, TxStatus::Failed(300..=302)) {
             assert_eq!(r.fee_paid, 0, "{:?} must be free", r.status);
@@ -223,13 +225,12 @@ impl Submitter {
         } else {
             assert_eq!(r.fee_paid, FEE, "{:?} must charge the fee", r.status);
             assert_eq!(after, before + 1, "{:?} must advance the nonce", r.status);
-            self.nonce += 1;
         }
         r.status
     }
 }
 
-use GovernanceOperation::{RegistryDisable as DIS, RegistryRegister as REG};
+use RegistryIngressOp::{Disable as DIS, Register as REG};
 
 fn stored(c: &mut CandidateExecution<'_>, id: u8) -> Option<RegistryRecordV1> {
     v_get_record(&c.view(), &[id; 32]).unwrap()
@@ -240,7 +241,7 @@ fn stored(c: &mut CandidateExecution<'_>, id: u8) -> Option<RegistryRecordV1> {
 #[test]
 fn production_defaults_refuse_both_operations_free_and_write_nothing() {
     assert_eq!(REGISTRY_INGRESS_PARAMS, RegistryIngressParams::UNSET);
-    // `BlockExecutor::new` alone: the parameters this binary ships, no genesis hash.
+    // What this binary has: every parameter unset, no genesis block hash.
     let n = node_with(chain_params(GOV_BPS), None);
     let mut c = candidate(&n.db);
     let mut s = Submitter::new(&n.db);
@@ -675,6 +676,13 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// The `GovernanceTxData` bytes operation `op` WOULD have once the activation
+/// change adds its wire variant: u32 variant index ‖ u64 length ‖ data
+/// (bincode 1, fixint little-endian). Built by hand: no type encodes it today.
+fn prospective_governance_tx_data(op: u32, data: &[u8]) -> Vec<u8> {
+    [&op.to_le_bytes()[..], &(data.len() as u64).to_le_bytes(), data].concat()
+}
+
 /// Build the vector file's content. Every value is synthetic.
 fn vectors() -> String {
     let until = H + 50;
@@ -703,18 +711,15 @@ fn vectors() -> String {
     );
     for (name, signers) in [("k1", &[1u8][..]), ("k3", &[1u8, 2, 3][..])] {
         for (op, opname, data) in [
-            (REG, "register", register(until, &rec, signers)),
-            (DIS, "disable", disable(until, 0x11, signers)),
+            (8u32, "register", register(until, &rec, signers)),
+            (9u32, "disable", disable(until, 0x11, signers)),
         ] {
-            let g = GovernanceTxData { operation: op, data: data.clone() };
+            let g = prospective_governance_tx_data(op, &data);
             line(&format!("{opname}.{name}.data"), hex(&data));
+            line(&format!("{opname}.{name}.prospective_governance_tx_data"), hex(&g));
             line(
-                &format!("{opname}.{name}.governance_tx_data"),
-                hex(&bincode::serialize(&g).unwrap()),
-            );
-            line(
-                &format!("{opname}.{name}.tx_payload"),
-                hex(&bincode::serialize(&TxPayload::Governance(g)).unwrap()),
+                &format!("{opname}.{name}.prospective_tx_payload"),
+                hex(&[&23u32.to_le_bytes()[..], &g].concat()),
             );
         }
     }
@@ -748,9 +753,25 @@ fn vectors_are_reproduced_and_execute() {
             .find_map(|l| l.strip_prefix(&format!("{k} = ")).map(str::to_string))
             .unwrap()
     };
-    assert!(field("register.k1.governance_tx_data").starts_with("08000000"));
-    assert!(field("disable.k1.governance_tx_data").starts_with("09000000"));
-    assert!(field("register.k3.tx_payload").starts_with("1700000008000000"));
+    assert!(field("register.k1.prospective_governance_tx_data").starts_with("08000000"));
+    assert!(field("disable.k1.prospective_governance_tx_data").starts_with("09000000"));
+    assert!(field("register.k3.prospective_tx_payload").starts_with("1700000008000000"));
+    // Prospective only: on this binary every such envelope is refused at
+    // decode, exactly as an unknown operation always was.
+    for op in ["register", "disable"] {
+        for k in ["k1", "k3"] {
+            let hexed = field(&format!("{op}.{k}.prospective_tx_payload"));
+            let bytes: Vec<u8> = (0..hexed.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hexed[i..i + 2], 16).unwrap())
+                .collect();
+            let err = bincode::deserialize::<TxPayload>(&bytes).unwrap_err();
+            assert!(
+                err.to_string().contains("expected variant index 0 <= i < 8"),
+                "{op}.{k}: {err}"
+            );
+        }
+    }
     assert_eq!(field("register.k1.data").len(), 2 * (173 + 96));
     assert_eq!(field("register.k3.data").len(), 2 * (173 + 3 * 96));
     assert_eq!(field("disable.k3.data").len(), 2 * (51 + 3 * 96));

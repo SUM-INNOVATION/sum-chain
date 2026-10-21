@@ -155,10 +155,11 @@ path (§6), from the dedicated `treasury` address. Token-holder governance (this
 spec) is **separate** but a passed token-holder proposal can **authorize** a
 validator-quorum admin action.
 
-**PROPOSED, not ratified (C5, #242):** operations `RegistryRegister = 8` and
-`RegistryDisable = 9` admit and disable C5 registry records under this same
-validator-quorum authority. They are dormant: every named parameter is unset and
-both operations refuse. Bytes, rules and open questions:
+**PROPOSED, not ratified (C5, #242):** operations 8 (register) and 9 (disable)
+would admit and disable C5 registry records under this same validator-quorum
+authority. They are not wire variants: a transaction naming either is refused at
+decode, and the dormant logic is reached only by direct call. Every named
+parameter is unset. Bytes, rules and open questions:
 [`docs/proposals/c5-registry-ingress/README.md`](../proposals/c5-registry-ingress/README.md).
 
 ## 8. Activation & migration

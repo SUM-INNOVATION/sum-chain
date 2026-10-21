@@ -1,13 +1,16 @@
-//! C5 registry ingress (#242): validation and state for governance-v1
-//! operations 8 (`RegistryRegister`) and 9 (`RegistryDisable`).
+//! C5 registry ingress (#242): validation and state for the proposed
+//! governance-v1 operations 8 (register) and 9 (disable).
 //!
-//! PROPOSED, NOT RATIFIED, DORMANT. The governance executor dispatches both
-//! operations behind the governance-v1 gate and `ChainParams::governance`, and
-//! then refuses them (`302`, no fee, no nonce) unless every named parameter
-//! and the genesis block hash are present. This binary runs with
-//! [`REGISTRY_INGRESS_PARAMS`] = [`RegistryIngressParams::UNSET`], and the
-//! consensus engines supply no genesis block hash, so both operations always
-//! refuse there. Specification: `docs/proposals/c5-registry-ingress/README.md`.
+//! PROPOSED, NOT RATIFIED, DORMANT, UNWIRED. Nothing on the wire reaches this
+//! module: `GovernanceOperation` has no variant 8 or 9, so a transaction
+//! naming either is refused at decode exactly as before this module existed.
+//! Only `governance_executor::execute_registry_ingress`, called directly by
+//! tests, runs it. That entry applies the governance-v1 gate and
+//! `ChainParams::governance`, then refuses (`302`, no fee, no nonce) unless
+//! every named parameter and the genesis block hash are present. Adding the
+//! wire variants, supplying [`REGISTRY_INGRESS_PARAMS`] with ratified values
+//! and the genesis hash, is the separately authorized activation change.
+//! Specification: `docs/proposals/c5-registry-ingress/README.md`.
 //!
 //! Once ready, every refusal below is semantic: `303`, with the Policy-B fee
 //! and nonce. The checks are independent, so their order changes no receipt;
@@ -28,9 +31,20 @@ use sumchain_wire::registry_wire::{RegistryRecordV1, RegistryStatus};
 use crate::validator_quorum::{check_threshold_bps, verify_validator_quorum};
 use crate::{Result, StateError};
 
-/// The named parameters this binary executes with: every one unset, so
-/// operations 8 and 9 refuse. A ratified value is a reviewed change here.
+/// The named parameters of this binary: every one unset, so the operations
+/// would refuse even if something reached them. A ratified value is a
+/// reviewed change here, part of the activation change.
 pub const REGISTRY_INGRESS_PARAMS: RegistryIngressParams = RegistryIngressParams::UNSET;
+
+/// Which proposed operation an internal call runs. Deliberately not a
+/// `GovernanceOperation` variant: no transaction decodes to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryIngressOp {
+    /// Proposed operation 8; `data` is a `RegistryRegisterV1`.
+    Register,
+    /// Proposed operation 9; `data` is a `RegistryDisableV1`.
+    Disable,
+}
 
 /// What operations 8 and 9 need beyond `ChainParams`.
 #[derive(Debug, Clone, Copy)]
