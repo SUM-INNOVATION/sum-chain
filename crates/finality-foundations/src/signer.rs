@@ -8,8 +8,8 @@
 //!
 //! * [`SignerStore`]: loads and atomically persists one [`SignerRecord`].
 //!   `persist` may return `Ok` only once the record is durable (data and
-//!   directory entry fsynced). This crate defines no on-disk encoding; the
-//!   record's bytes are part of the unratified signer-state layout.
+//!   directory entry fsynced). The core defines no on-disk encoding;
+//!   `signer_file` proposes one (UNRATIFIED).
 //! * [`ExclusiveOwnership`]: one owner per key. The guard is held for the
 //!   signer's whole life.
 //! * [`SigningKey`] and [`PolkaVerifier`]: the key, and the check of a
@@ -195,7 +195,8 @@ pub struct SignerRecord {
     /// The retained proof that justified the current lock, if the verifier
     /// retains proofs.
     pub lock_proof: Option<ProofRef>,
-    /// Set once two verified finality proofs conflict; terminal.
+    /// Set once two verified finality proofs conflict; ended only by the
+    /// operator's [`DurableSigner::recover_after_conflict`].
     pub halt: Option<Halt>,
 }
 
@@ -271,6 +272,9 @@ impl SignerRecord {
             }
         }
         if let Some(c) = self.certified {
+            if c.height == u64::MAX {
+                return Err("a certified height at the end of the height range");
+            }
             if self.floor != Some(whole_height_floor(c.height)) {
                 return Err("a certified height without its floor");
             }
@@ -320,13 +324,20 @@ pub trait SignerStore {
         None
     }
 
+    /// The retained proof the current record names, if the store keeps one
+    /// and it is intact (the conflict evidence of a halted record). The
+    /// signer verifies it before using it. The default keeps none.
+    fn retained_proof(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        Ok(None)
+    }
+
     /// Durably archive a conflict before recovery: the halted record, the
-    /// conflicting proof (`evidence`, or the store's own retained copy when
-    /// `None`) and the verified resume certificate, which proves `resume`.
-    /// The default refuses: a store that cannot archive cannot recover.
+    /// verified conflicting proof `evidence` and the verified resume
+    /// certificate, which proves `resume`. The default refuses: a store that
+    /// cannot archive cannot recover.
     fn archive_conflict(
         &mut self,
-        _evidence: Option<&[u8]>,
+        _evidence: &[u8],
         _resume_certificate: &[u8],
         _resume: Certified,
     ) -> Result<(), StoreError> {
@@ -587,8 +598,10 @@ where
     }
 
     /// Persist the halt before anything else. On success the halt is durable
-    /// and the signer refuses everything from now on; if the write fails the
-    /// signer is poisoned, the halt is not durable, and the conflict is
+    /// and the signer refuses to sign or advance until the operator's
+    /// recovery. If a write fails the signer is poisoned and signs nothing;
+    /// the halt may still become durable (a failure after P1 is completed by
+    /// the R1 repair at the next open), and if it was lost, the conflict is
     /// detected again when either proof is presented again.
     fn persist_halt(&mut self, c: Certified, conflicting: Digest, proof: &[u8]) -> SignerError {
         let Some(sequence) = self.record.sequence.checked_add(1) else {
@@ -672,7 +685,12 @@ where
                 certified: resume,
             });
         }
-        let working = halt.height + 1;
+        let working = halt
+            .height
+            .checked_add(1)
+            .ok_or(SignerError::InvalidRequest(
+                "a halt at the last representable height",
+            ))?;
         if resume.height < working {
             return Err(SignerError::RecoveryTooLow {
                 resume: resume.height,
@@ -684,33 +702,38 @@ where
                 "a finality proof for the last representable height".into(),
             ));
         }
+        // The evidence, supplied or retained, is verified the same way.
         let evidence = match conflict_evidence {
-            None => None,
-            Some(e) => {
-                let c = self
-                    .polka
-                    .verify_finality(e)
-                    .map_err(SignerError::RecoveryEvidence)?;
-                if c.height != halt.height || c.block_id == halt.certified_block {
-                    return Err(SignerError::RecoveryEvidence(
-                        "the evidence does not name another block at the conflict height".into(),
-                    ));
-                }
-                Some(
-                    self.polka
-                        .retained_finality(e)
-                        .unwrap_or_else(|| e.to_vec()),
-                )
-            }
+            Some(e) => e.to_vec(),
+            None => self
+                .store
+                .retained_proof()
+                .map_err(|e| SignerError::RecoveryArchive(e.0))?
+                .ok_or_else(|| {
+                    SignerError::RecoveryArchive(
+                        "no intact retained conflict evidence: supply it".into(),
+                    )
+                })?,
         };
-        self.store
-            .archive_conflict(evidence.as_deref(), resume_certificate, resume)
-            .map_err(|e| SignerError::RecoveryArchive(e.0))?;
+        let c = self
+            .polka
+            .verify_finality(&evidence)
+            .map_err(SignerError::RecoveryEvidence)?;
+        if c.height != halt.height || c.block_id == halt.certified_block {
+            return Err(SignerError::RecoveryEvidence(
+                "the evidence does not name another block at the conflict height".into(),
+            ));
+        }
+        let evidence = self.polka.retained_finality(&evidence).unwrap_or(evidence);
         let sequence = self
             .record
             .sequence
             .checked_add(1)
             .ok_or(SignerError::InvalidRequest("signer sequence exhausted"))?;
+        // Every check has passed: only now is anything written.
+        self.store
+            .archive_conflict(&evidence, resume_certificate, resume)
+            .map_err(|e| SignerError::RecoveryArchive(e.0))?;
         let next = SignerRecord {
             key_id: self.record.key_id,
             sequence,
@@ -814,6 +837,12 @@ where
         }
         if self.record.halt.is_some() {
             return Err(SignerError::Halted);
+        }
+        if req.position.round > crate::encoding::MAX_ROUND {
+            return Err(SignerError::InvalidRequest("a round above the maximum"));
+        }
+        if req.value == VoteValue::Block([0u8; 32]) {
+            return Err(SignerError::InvalidRequest("a zero block id"));
         }
         if req.position.step == Step::Propose && req.value == VoteValue::Nil {
             return Err(SignerError::InvalidRequest("a proposal must name a block"));

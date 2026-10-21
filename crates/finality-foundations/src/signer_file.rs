@@ -580,17 +580,29 @@ impl SignerState {
     }
 
     /// Whether `next` is exactly one persist after `self` (whose checksum is
-    /// `self_checksum`). Three kinds exist:
+    /// `self_checksum`). Four kinds exist:
     ///
     /// * **signing:** same floor and certified block; a new signature at the
     ///   working height, strictly above the last; the lock rules; the
     ///   retained proof carried unless the lock changed;
-    /// * **advancement:** the floor strictly raised, a non-zero certified
-    ///   block, and nothing left of the closed heights (no signature, no
-    ///   lock, no proof): the only transition that discards a lock;
+    /// * **advancement:** the floor strictly raised, above every signed
+    ///   height too, a non-zero certified block, and nothing left of the
+    ///   closed heights (no signature, no lock, no proof);
     /// * **halt:** the floor, the certified block and the last signature
-    ///   unchanged, and the lock replaced by the halt. A halted state has no
-    ///   successor at all.
+    ///   unchanged; the halt flag set and the lock cleared;
+    /// * **recovery:** the only successor of a halted state: not halted, the
+    ///   floor raised above the halted working height and every signed
+    ///   height, a non-zero certified block, nothing else kept. Its archive
+    ///   is checked by the store.
+    ///
+    /// Only an advancement, a halt or a recovery discards a lock.
+    /// Whether `next`'s floor covers every height `self` signed at.
+    fn floor_above_last(&self, next: &SignerState) -> bool {
+        self.last
+            .as_ref()
+            .is_none_or(|l| next.floor_height > l.position.height)
+    }
+
     pub fn check_successor(
         &self,
         self_checksum: &Digest,
@@ -616,7 +628,7 @@ impl SignerState {
                     "a halted state stays halted only by not changing",
                 ));
             }
-            if next.floor_height <= self.floor_height {
+            if next.floor_height <= self.floor_height || !self.floor_above_last(next) {
                 return Err(StateError::NotSuccessor(
                     "a recovery must raise the floor above the halted working height",
                 ));
@@ -648,6 +660,11 @@ impl SignerState {
         {
             if next.floor_height <= self.floor_height {
                 return Err(StateError::NotSuccessor("the floor did not rise"));
+            }
+            if !self.floor_above_last(next) {
+                return Err(StateError::NotSuccessor(
+                    "the floor did not rise above the last signed height",
+                ));
             }
             if next.certified_block_id == ZERO {
                 return Err(StateError::NotSuccessor(
@@ -1104,6 +1121,22 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> FileSignerStore<D, M, H> {
         Ok(())
     }
 
+    /// Refuse when the directory holds a conflict archive or retained proof
+    /// files: they belong to an earlier signer whose state was removed.
+    fn refuse_earlier_signer_files(&mut self) -> Result<(), StoreError> {
+        let names = self.dir.list().map_err(|e| Self::io("list", e))?;
+        if let Some(n) = names
+            .iter()
+            .find(|n| n.starts_with("conflict-") || is_proof_file(n))
+        {
+            return Err(StoreError(format!(
+                "{n} belongs to an earlier signer: a halted signer is re-enabled only by \
+                 recovery, and evidence is never discarded by initialization"
+            )));
+        }
+        Ok(())
+    }
+
     /// Write `name` durably: temp, fsync, rename, fsync the directory.
     fn write_durable(&mut self, name: &str, bytes: &[u8]) -> Result<(), StoreError> {
         let tmp = format!("{name}.tmp");
@@ -1203,20 +1236,9 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
         let mirror = self.mirror.read().map_err(|e| Self::io("read mirror", e))?;
         let (fs, fsum) = match (file, mirror) {
             (None, None) => {
-                // Initializing over a conflict archive would clear a halt
-                // without its evidence: refused.
-                if self
-                    .dir
-                    .list()
-                    .map_err(|e| Self::io("list", e))?
-                    .iter()
-                    .any(|n| n.starts_with("conflict-"))
-                {
-                    return Err(StoreError(
-                        "a conflict archive exists: a halted signer is re-enabled only by recovery"
-                            .into(),
-                    ));
-                }
+                // Initializing over an earlier signer's conflict archive or
+                // retained proofs would clear a halt or its evidence: refused.
+                self.refuse_earlier_signer_files()?;
                 self.settle_proofs(ZERO)?;
                 self.classified = Some(Classified::Uninitialized);
                 return Ok(None);
@@ -1233,6 +1255,8 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
                         "mirror missing for a state that has signed".into(),
                     ));
                 }
+                // An interrupted initialization never coexists with these.
+                self.refuse_earlier_signer_files()?;
                 self.make_state_durable()?;
                 self.mirror
                     .write_synced(&f)
@@ -1294,7 +1318,12 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
             signer_pubkey: record.key_id,
         };
         let prev = match (&self.current, record.sequence) {
-            (None, 0) => ZERO,
+            (None, 0) if self.classified == Some(Classified::Uninitialized) => ZERO,
+            (None, 0) => {
+                return Err(StoreError(
+                    "initialization only after a load that found no state".into(),
+                ));
+            }
             (Some(_), 0) => {
                 return Err(StoreError("initialization over existing state".into()));
             }
@@ -1373,12 +1402,29 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
         Some(sign_bytes_digest(&self.hasher, sign_bytes))
     }
 
+    /// The proof file the current record names, if present and intact.
+    fn retained_proof(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        let Some(digest) = self.current.as_ref().map(|(s, _)| s.proof_digest) else {
+            return Ok(None);
+        };
+        if digest == ZERO {
+            return Ok(None);
+        }
+        Ok(self
+            .dir
+            .read(&proof_file_name(&digest))
+            .map_err(|e| Self::io("read retained proof", e))?
+            .filter(|b| {
+                b.len() <= MAX_RETAINED_PROOF_LEN && proof_digest(&self.hasher, b) == digest
+            }))
+    }
+
     /// Archive the conflict: `state`, `evidence`, `resume`, then `receipt`,
-    /// each durable before the next. Without supplied evidence, the store's
-    /// own retained copy is used, and must be present and intact.
+    /// each durable before the next. The signer has verified `evidence` and
+    /// the resume certificate.
     fn archive_conflict(
         &mut self,
-        evidence: Option<&[u8]>,
+        evidence: &[u8],
         resume_certificate: &[u8],
         resume: Certified,
     ) -> Result<(), StoreError> {
@@ -1390,29 +1436,6 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
             return Err(StoreError("the state is not halted".into()));
         }
         let h = cur.floor_height - 1;
-        let evidence = match evidence {
-            Some(e) => e.to_vec(),
-            None => {
-                if cur.proof_digest == ZERO {
-                    return Err(StoreError(
-                        "no conflict evidence is retained: supply it".into(),
-                    ));
-                }
-                match self
-                    .dir
-                    .read(&proof_file_name(&cur.proof_digest))
-                    .map_err(|e| Self::io("read evidence", e))?
-                {
-                    Some(b) if proof_digest(&self.hasher, &b) == cur.proof_digest => b,
-                    _ => {
-                        return Err(StoreError(
-                            "the retained conflict evidence is missing or corrupt: supply it"
-                                .into(),
-                        ))
-                    }
-                }
-            }
-        };
         let state_bytes = cur
             .encode(&self.hasher)
             .map_err(|e| StoreError(format!("encode: {e}")))?;
@@ -1421,11 +1444,11 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> SignerStore for FileSignerSto
             conflict_height: h,
             resume_height: resume.height,
             resume_block: resume.block_id,
-            evidence_digest: proof_digest(&self.hasher, &evidence),
+            evidence_digest: proof_digest(&self.hasher, evidence),
             resume_digest: proof_digest(&self.hasher, resume_certificate),
         };
         self.write_durable(&conflict_file_name(h, "state"), &state_bytes)?;
-        self.write_durable(&conflict_file_name(h, "evidence"), &evidence)?;
+        self.write_durable(&conflict_file_name(h, "evidence"), evidence)?;
         self.write_durable(&conflict_file_name(h, "resume"), resume_certificate)?;
         let rb = receipt.encode(&self.hasher);
         self.write_durable(&conflict_file_name(h, "receipt"), &rb)
