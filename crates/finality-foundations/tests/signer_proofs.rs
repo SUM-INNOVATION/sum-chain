@@ -28,10 +28,12 @@ use sumchain_finality_foundations::proofs::{
     PolkaProofV1, PolkaVerifyError, MAX_POLKA_LEN, POLKA_MAGIC,
 };
 use sumchain_finality_foundations::signer::{
-    initialize_exclusive, Certified, DurableSigner, Justification, SignPosition, SignRequest,
-    SignerError, SigningKey, Step, VoteValue,
+    initialize_exclusive, Certified, DurableSigner, Justification, RetainedProofCheck,
+    SignPosition, SignRequest, SignerError, SigningKey, Step, VoteValue,
 };
-use sumchain_finality_foundations::signer_file::{floor_below_height, FileSignerStore};
+use sumchain_finality_foundations::signer_file::{
+    floor_below_height, FileSignerStore, MAX_RETAINED_PROOF_LEN,
+};
 use sumchain_finality_foundations::vote::{
     AuthenticatedValidatorSet, FinalityVoteV1, VoteContext, VoteType,
 };
@@ -726,7 +728,7 @@ fn halted_real() -> (Rig, RealSigner) {
         .unwrap();
     s.sign(&own(VoteType::Prevote, 8, 0, Some(Y))).unwrap();
     assert_eq!(
-        s.advance(&cert(4, 7, 3, Y, &[0, 1, 3]).encode().unwrap()),
+        s.advance(&cert(4, 7, 3, Y, &[0, 1, 2, 3]).encode().unwrap()),
         Err(SignerError::ConflictingFinality(7))
     );
     (rig, s)
@@ -812,7 +814,7 @@ fn recovery_refuses_insufficient_forged_wrong_fork_and_too_low_certificates() {
     // fork recovers; the floor is then 9.
     s.recover_after_conflict(
         &at(8, X),
-        &cert(4, 8, 1, X, &[1, 2, 3]).encode().unwrap(),
+        &cert(4, 8, 1, X, &[0, 1, 2, 3]).encode().unwrap(),
         None,
     )
     .unwrap();
@@ -828,6 +830,29 @@ fn recovery_refuses_insufficient_forged_wrong_fork_and_too_low_certificates() {
         let d = rig.disk.borrow();
         d.inodes[d.dir_vol["conflict-7.evidence"]].vol.clone()
     };
+    // Both archived certificates are trimmed to q(4) = 3 entries, the lowest
+    // indices, and still verify.
     let c = FinalityCertificateV1::decode(&evidence).unwrap();
     assert_eq!((c.height, c.block_id, c.entries.len()), (7, Y, 3));
+    let resume = {
+        let d = rig.disk.borrow();
+        d.inodes[d.dir_vol["conflict-7.resume"]].vol.clone()
+    };
+    let r = FinalityCertificateV1::decode(&resume).unwrap();
+    assert_eq!((r.height, r.block_id), (8, X));
+    assert_eq!(
+        r.entries
+            .iter()
+            .map(|e| e.validator_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert!(resume.len() <= MAX_RETAINED_PROOF_LEN);
+    // A reopened signer verifies nothing is referenced now, and verified its
+    // halted evidence before.
+    drop(s);
+    assert_eq!(
+        rig.open(None).unwrap().retained_proof_check(),
+        &RetainedProofCheck::NotReferenced
+    );
 }
