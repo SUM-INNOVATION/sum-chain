@@ -24,9 +24,21 @@ name: release-native
 #   publish  environment `release` (Mike-Mans, self-review prevented, main
 #            only, admin bypass off) -- the ONLY job that writes anything.
 #            Writes the record and SHA256SUMS, verifies every asset, refuses an
-#            existing tag or release, attests every asset and both binaries,
-#            creates the release, then downloads it back and verifies it again,
-#            attestations included.
+#            existing tag, release or draft, attests every asset and both
+#            binaries, uploads everything as an UNPUBLISHED DRAFT, downloads the
+#            draft back and verifies it (digests, attestations, both binaries
+#            from the downloaded archives), creates the tag at the commit and
+#            checks it resolves there, and only then publishes the draft against
+#            that tag, re-checking the tag and the asset ids, sizes and digests
+#            afterwards. This is VERIFY BEFORE PUBLICATION, not a transaction:
+#            GitHub has none spanning the tag, the assets, the attestations and
+#            publication, so a failure between two calls leaves an intermediate
+#            state (an unpublished draft; a draft and its tag; a published
+#            release whose post-check failed). Each is reported with its
+#            recovery in docs/operations/release-native.md. GitHub records this
+#            job as a deployment to the `release` environment because the
+#            environment gates it: that record is the release publication (its
+#            URL is the published release), not a deployment to any node.
 #   verify   read-only. One NATIVE job per architecture downloads the
 #            published release, installs it with install-native.sh
 #            --verify-attestation, and smoke-tests the installed binary.
@@ -131,13 +143,17 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: publish the GitHub Release (protected)
+    name: publish GitHub Release release-${{ inputs.commit }} (release publication; deploys no node)
     needs: [gate, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # Environment "release": Mike-Mans must approve, and cannot approve a run he
     # dispatched; main only; admin bypass disabled. The only job that writes.
-    environment: release
+    # GitHub records the job as a deployment to this environment; the URL makes
+    # that record point at the published release (empty if nothing was published).
+    environment:
+      name: release
+      url: ${{ steps.publish.outputs.url }}
     permissions:
       contents: write
       id-token: write
@@ -176,14 +192,19 @@ jobs:
             tar -xzf "$r/sumchain-$COMMIT-$t.tar.gz" -C "$RUNNER_TEMP/bins/$t" --strip-components=1
           done
 
-      - name: Refuse an existing tag or release (both are immutable)
+      - name: Refuse an existing tag, release or draft (all are immutable)
         run: |
           set -euo pipefail
           if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
             echo "::error::tag $TAG already exists; it is never moved or reused"; exit 1
           fi
-          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::error::release $TAG already exists; its assets are never overwritten"; exit 1
+          # A draft has no tag yet, so the tag lookup cannot see one: list every
+          # release, drafts included. A failed run's draft is never reused or
+          # overwritten; a person inspects it and removes it deliberately.
+          existing=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq ".[] | select(.tag_name == \"$TAG\") | \"\(.id) draft=\(.draft)\"")
+          if [[ -n $existing ]]; then
+            echo "::error::a release or draft for $TAG already exists ($existing); it is never overwritten or reused"; exit 1
           fi
 
       - name: Attest every asset and both binaries
@@ -198,27 +219,122 @@ jobs:
             ${{ runner.temp }}/bins/*/sumchain
             ${{ runner.temp }}/bins/*/sumchain-wallet
 
-      - name: Create the release (no overwrite)
+      - name: Upload the release as an unpublished draft (no overwrite)
+        id: draft
         run: |
           set -euo pipefail
           r="$RUNNER_TEMP/release"
-          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$COMMIT" \
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --draft --target "$COMMIT" \
             --title "sumchain $COMMIT" --notes-file "$r/release-record.txt" --latest=false \
             "$r"/*
+          ids=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq ".[] | select(.tag_name == \"$TAG\" and .draft) | .id")
+          [[ $(grep -c . <<<"$ids") -eq 1 ]] \
+            || { echo "::error::expected exactly one draft for $TAG after uploading it, found: ${ids:-none}"; exit 1; }
+          echo "id=$ids" >> "$GITHUB_OUTPUT"
 
-      - name: Download it back and verify it, attestations included
+      - name: Read the draft back and verify it, attestations included (nothing is public yet)
+        env:
+          RELEASE_ID: ${{ steps.draft.outputs.id }}
         run: |
           set -euo pipefail
-          d="$RUNNER_TEMP/readback"
-          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D "$d"
+          d="$RUNNER_TEMP/readback"; mkdir -p "$d"
+          # The identity of what is verified (asset id, name, size, digest) is
+          # recorded once, here, and compared again right before and right after
+          # publication. Assets are downloaded by these ids.
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            --jq '[.assets[] | {id, name, size, digest}] | sort_by(.name)' > "$RUNNER_TEMP/assets.verified.json"
+          jq -r '.[] | "\(.id) \(.name)"' "$RUNNER_TEMP/assets.verified.json" |
+            while read -r aid name; do
+              [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::unexpected asset name '$name'"; exit 1; }
+              gh api -H "Accept: application/octet-stream" \
+                "repos/$GITHUB_REPOSITORY/releases/assets/$aid" > "$d/$name"
+            done
           python3 tools/release/native-release.py verify "$d" --commit "$COMMIT"
-          for f in "$d"/*; do bash tools/release/verify-attestation.sh --file "$f" "$COMMIT"; done
+          # Every file, and both binaries inside each downloaded archive, is checked
+          # even after one fails, so the result states exactly what was verified and
+          # what remains unverified. Any unverified item fails the step.
+          verified=() unverified=()
+          attest() {  # <path> <label>
+            local rc=0
+            bash tools/release/verify-attestation.sh --file "$1" "$COMMIT" || rc=$?
+            case $rc in
+              0) verified+=("$2") ;;
+              3) unverified+=("$2 (attestation service unavailable)") ;;
+              *) unverified+=("$2 (rejected or failed, exit $rc)") ;;
+            esac
+          }
+          for f in "$d"/*; do attest "$f" "$(basename "$f")"; done
           for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            mkdir -p "$RUNNER_TEMP/readback-bins/$t"
+            tar -xzf "$d/sumchain-$COMMIT-$t.tar.gz" -C "$RUNNER_TEMP/readback-bins/$t" --strip-components=1
             for b in sumchain sumchain-wallet; do
-              bash tools/release/verify-attestation.sh --file "$RUNNER_TEMP/bins/$t/$b" "$COMMIT"
+              attest "$RUNNER_TEMP/readback-bins/$t/$b" "$t/$b (inside the downloaded archive)"
             done
           done
-          { echo '```'; cat "$d/release-record.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          total=$(( ${#verified[@]} + ${#unverified[@]} ))
+          {
+            echo "### Draft read-back: ${#verified[@]} of $total verified"
+            for x in "${verified[@]+"${verified[@]}"}"; do echo "- verified: $x"; done
+            for x in "${unverified[@]+"${unverified[@]}"}"; do echo "- **NOT verified**: $x"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+          if (( ${#unverified[@]} > 0 )); then
+            echo "::error::${#unverified[@]} of $total not verified; the draft stays unpublished. NOT verified: $(IFS=';'; echo "${unverified[*]}"). Verified: $(IFS=';'; echo "${verified[*]+"${verified[*]}"}"). Recovery: docs/operations/release-native.md#draft-left"
+            exit 1
+          fi
+
+      - name: Publish the verified draft (the release becomes public only now)
+        id: publish
+        env:
+          RELEASE_ID: ${{ steps.draft.outputs.id }}
+        run: |
+          set -euo pipefail
+          # Verify before publication. GitHub has no transaction spanning the tag,
+          # the assets, the attestations and publication: each is a separate call,
+          # ordered so nothing is public before it is verified and re-checked after.
+          # Recovery for every intermediate state: docs/operations/release-native.md.
+          api="repos/$GITHUB_REPOSITORY"
+          doc=docs/operations/release-native.md
+          snapshot() { gh api "$api/releases/$RELEASE_ID" --jq '[.assets[] | {id, name, size, digest}] | sort_by(.name)'; }
+          peeled() {  # the commit $TAG resolves to (annotated tags followed)
+            local o
+            o=$(gh api "$api/git/ref/tags/$TAG" --jq '"\(.object.type) \(.object.sha)"') || return 1
+            while [[ ${o%% *} == tag ]]; do
+              o=$(gh api "$api/git/tags/${o#* }" --jq '"\(.object.type) \(.object.sha)"') || return 1
+            done
+            [[ ${o%% *} == commit ]] && echo "${o#* }"
+          }
+          # 1. The draft is still exactly what was verified.
+          snapshot > "$RUNNER_TEMP/assets.prepublish.json"
+          cmp -s "$RUNNER_TEMP/assets.verified.json" "$RUNNER_TEMP/assets.prepublish.json" \
+            || { echo "::error::the draft's assets changed after they were verified; not publishing. Recovery: $doc#draft-left"; exit 1; }
+          # 2. The tag: absent, then created at the commit, then resolving to it.
+          if gh api "$api/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::tag $TAG appeared while the draft was being verified; not publishing. Recovery: $doc#existing-draft-or-tag"; exit 1
+          fi
+          gh api -X POST "$api/git/refs" -f ref="refs/tags/$TAG" -f sha="$COMMIT" >/dev/null \
+            || { echo "::error::could not create tag $TAG at $COMMIT; not publishing. Recovery: $doc#draft-left"; exit 1; }
+          [[ $(peeled || true) == "$COMMIT" ]] \
+            || { echo "::error::tag $TAG does not resolve to $COMMIT; not publishing. Recovery: $doc#draft-and-tag-left"; exit 1; }
+          # 3. Publish the draft against that tag. From here on, the release is public.
+          url=$(gh api -X PATCH "$api/releases/$RELEASE_ID" -f tag_name="$TAG" -F draft=false \
+                  -f make_latest=false --jq .html_url) \
+            || { echo "::error::publishing failed; the verified draft and tag $TAG remain. Recovery: $doc#draft-and-tag-left"; exit 1; }
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          # 4. Confirm: published as that tag, the tag still at the commit, the assets unchanged.
+          problems=()
+          state=$(gh api "$api/releases/$RELEASE_ID" --jq '"\(.draft) \(.tag_name)"') || state="unreadable"
+          [[ $state == "false $TAG" ]] || problems+=("release $RELEASE_ID is not published as $TAG ($state)")
+          [[ $(peeled || true) == "$COMMIT" ]] || problems+=("tag $TAG no longer resolves to $COMMIT")
+          { snapshot > "$RUNNER_TEMP/assets.published.json" \
+              && cmp -s "$RUNNER_TEMP/assets.verified.json" "$RUNNER_TEMP/assets.published.json"; } \
+            || problems+=("the published assets differ from the verified ones")
+          if (( ${#problems[@]} > 0 )); then
+            echo "::error::$url was published, but its post-publication check failed: $(IFS=';'; echo "${problems[*]}"). Recovery: $doc#published-post-check-failed"
+            exit 1
+          fi
+          { echo "Published $url (tag $TAG at $COMMIT; assets identical to the verified draft)"
+            echo '```'; cat "$RUNNER_TEMP/readback/release-record.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   verify:
     name: install and run ${{ matrix.arch }} from the release (native, read-only)
