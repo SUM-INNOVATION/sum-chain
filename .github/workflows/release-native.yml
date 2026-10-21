@@ -21,8 +21,9 @@ name: release-native
 #            pinned build environment, pinned toolchain, --locked, GIT_HASH,
 #            --version, ELF, libraries, the native smoke test (health,
 #            readiness, metrics, graceful SIGTERM), deterministic archive.
-#   publish  environment `release` (Mike-Mans, self-review prevented, main
-#            only, admin bypass off) -- the ONLY job that writes anything.
+#   publish  environment `release` (required reviewer suminnovationadmin,
+#            self-review prevented, main only, admin bypass off) -- the ONLY
+#            job that writes anything.
 #            Writes the record and SHA256SUMS, verifies every asset, refuses an
 #            existing tag, release or draft, attests every asset and both
 #            binaries, uploads everything as an UNPUBLISHED DRAFT, downloads the
@@ -147,8 +148,9 @@ jobs:
     needs: [gate, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    # Environment "release": Mike-Mans must approve, and cannot approve a run he
-    # dispatched; main only; admin bypass disabled. The only job that writes.
+    # Environment "release": suminnovationadmin must approve, and cannot approve
+    # a run they dispatched (self-review prevented); main only; admin bypass
+    # disabled. The only job that writes.
     # GitHub records the job as a deployment to this environment; the URL makes
     # that record point at the published release (empty if nothing was published).
     environment:
