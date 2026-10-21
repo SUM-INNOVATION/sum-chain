@@ -1607,3 +1607,86 @@ fn initialization_never_runs_over_an_earlier_signers_files() {
         assert_eq!(rig.mirror(), None, "R0 did not complete");
     }
 }
+
+/// The two-conflict sequence on a real directory: both completed archives
+/// and receipts are on disk after the second recovery, the first is
+/// byte-identical to what the first recovery wrote, and orphan proof files
+/// are removed at open without touching either archive.
+#[cfg(unix)]
+#[test]
+fn std_directory_two_conflicts_keep_both_archives() {
+    let base = std::env::temp_dir().join(format!(
+        "sumchain-signer-two-conflicts-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let dir = base.join("finality");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mirror = base.join("mirror.bin");
+    let owner = MemOwnership::default();
+    let key = || EdKey(ed25519_dalek::SigningKey::from_bytes(&SEED));
+    let store = || {
+        FileSignerStore::new(
+            StdSignerDir::new(dir.clone()),
+            FileMirror(mirror.clone()),
+            B3,
+            CHAIN,
+            GENESIS,
+        )
+    };
+    let open = || DurableSigner::open(&owner, store(), key(), RetainingPolka, None);
+    let read = |name: String| std::fs::read(dir.join(name)).unwrap();
+    let archive =
+        |h: u64| ["state", "evidence", "resume", "receipt"].map(|x| read(conflict_file_name(h, x)));
+    initialize_exclusive(
+        &owner,
+        &mut store(),
+        key().key_id(),
+        floor_below_height(FLOOR),
+    )
+    .unwrap();
+    {
+        let mut s = open().unwrap();
+        s.sign(&prevote(7, 0, A)).unwrap();
+        s.advance(&finality(7, &A)).unwrap();
+        assert_eq!(
+            s.advance(&finality(7, &B)),
+            Err(SignerError::ConflictingFinality(7))
+        );
+        s.recover_after_conflict(&ChainPoint(9, A), &finality(9, &A), None)
+            .unwrap();
+        s.sign(&prevote(10, 0, A)).unwrap();
+    }
+    let first = archive(7);
+    {
+        let mut s = open().unwrap();
+        assert_eq!(
+            s.advance(&finality(9, &B)),
+            Err(SignerError::ConflictingFinality(9))
+        );
+        s.recover_after_conflict(&ChainPoint(11, A), &finality(11, &A), None)
+            .unwrap();
+    }
+    std::fs::write(dir.join(proof_file_name(&[0x77; 32])), b"orphan").unwrap();
+    std::fs::write(dir.join("proof.tmp"), b"orphan").unwrap();
+    let mut s = open().unwrap();
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert!(!names.iter().any(|n| n.starts_with("proof")), "{names:?}");
+    assert!(!names.iter().any(|n| n.ends_with(".tmp")), "{names:?}");
+    assert_eq!(archive(7), first, "the first archive is byte-identical");
+    let second = archive(9);
+    for (receipt, want) in [(&first[3], (7, 9)), (&second[3], (9, 11))] {
+        let r = RecoveryReceipt::decode(receipt, &B3).unwrap();
+        assert_eq!((r.conflict_height, r.resume_height), want);
+    }
+    assert_eq!(second[1], finality(9, &B));
+    s.sign(&prevote(12, 0, A)).unwrap();
+    drop(s);
+    std::fs::remove_dir_all(&base).unwrap();
+}
