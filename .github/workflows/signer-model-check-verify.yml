@@ -1,0 +1,121 @@
+name: Signer model check (verification only)
+
+# VERIFICATION ONLY. NOT FOR MERGE. This file is the only change on top of
+# fcb6107a (draft #340). It runs the dormant signer's bounded model checks on
+# GitHub-hosted runners, so that the results name that exact source. Each job
+# checks that crates/, Cargo.toml, Cargo.lock and rust-toolchain.toml are
+# identical to fcb6107a, records the blobs of the signer and model files,
+# measures CPU, wall time and peak memory with GNU time, enforces a wall
+# limit, and uploads its logs. Read-only token; no secrets.
+
+on:
+  push:
+    branches: [verify/signer-mc-fcb6107a]
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REV: fcb6107a566175563d4ac5843d08fd32442853f6
+
+jobs:
+  model-check:
+    name: ${{ matrix.check.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.check.job_minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        check:
+          - name: K1-reduced
+            test: model_check_diagnostics
+            bounds: SUMCHAIN_MC_K=1 SUMCHAIN_MC_CANONICAL=1 SUMCHAIN_MC_MAX_STATES=1000000000
+            limit_seconds: 1800
+            job_minutes: 50
+          - name: K2-reduced
+            test: model_check_diagnostics
+            bounds: SUMCHAIN_MC_K=2 SUMCHAIN_MC_CANONICAL=1 SUMCHAIN_MC_MAX_STATES=1000000000
+            limit_seconds: 3600
+            job_minutes: 80
+          - name: K1-exact-vs-reduced
+            test: debris_canonicalisation_is_exact_up_to_two_faults
+            bounds: SUMCHAIN_MC_CROSSCHECK_MAX_K=1
+            limit_seconds: 3600
+            job_minutes: 80
+          - name: K3-reduced
+            test: model_check_diagnostics
+            bounds: SUMCHAIN_MC_K=3 SUMCHAIN_MC_CANONICAL=1 SUMCHAIN_MC_MAX_STATES=1000000000
+            limit_seconds: 18000
+            job_minutes: 330
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Source identity
+        run: |
+          mkdir -p out
+          {
+            echo "commit $(git rev-parse HEAD); parent $(git rev-parse HEAD^)"
+            test "$(git rev-parse HEAD^)" = "$SOURCE_REV"
+            git diff --exit-code --stat "$SOURCE_REV" HEAD -- crates Cargo.toml Cargo.lock rust-toolchain.toml
+            echo "crates/, Cargo.toml, Cargo.lock, rust-toolchain.toml identical to $SOURCE_REV"
+            for f in crates/finality-foundations/src/signer.rs \
+                     crates/finality-foundations/src/signer_file.rs \
+                     crates/finality-foundations/src/proofs.rs \
+                     crates/finality-foundations/tests/signer_file_model_check.rs \
+                     crates/finality-foundations/tests/common/mod.rs; do
+              echo "blob $(git rev-parse "HEAD:$f") $f"
+            done
+          } | tee out/identity.txt
+
+      - name: Toolchain and runner
+        run: |
+          rustup show
+          {
+            rustc --version; cargo --version
+            echo "runner: ${{ runner.os }} ${{ runner.arch }} $(nproc) CPUs, $(free -g | awk '/Mem:/{print $2}') GiB"
+            echo "check: ${{ matrix.check.name }}; test ${{ matrix.check.test }}; bounds ${{ matrix.check.bounds }}; limit ${{ matrix.check.limit_seconds }} s; job timeout ${{ matrix.check.job_minutes }} min"
+          } | tee out/environment.txt
+          test -x /usr/bin/time
+
+      - name: Build (release)
+        run: |
+          cargo test --release --locked -p sumchain-finality-foundations \
+            --test signer_file_model_check --no-run --message-format=json > build.json
+          bin=$(jq -r 'select(.reason == "compiler-artifact" and .executable != null
+                       and .target.name == "signer_file_model_check") | .executable' build.json | tail -1)
+          test -x "$bin"
+          echo "BIN=$bin" >> "$GITHUB_ENV"
+
+      - name: Run ${{ matrix.check.name }}
+        run: |
+          set +e
+          env ${{ matrix.check.bounds }} /usr/bin/time -v -o out/time.txt \
+            timeout --signal=TERM ${{ matrix.check.limit_seconds }} \
+            "$BIN" --exact ${{ matrix.check.test }} --ignored --nocapture > out/run.log 2>&1
+          rc=$?
+          set -e
+          case $rc in
+            0) status=COMPLETED ;;
+            124) status="INCOMPLETE (limit ${{ matrix.check.limit_seconds }} s reached)" ;;
+            *) status="FAILED (exit $rc)" ;;
+          esac
+          {
+            echo "### ${{ matrix.check.name }} at $SOURCE_REV (source)"
+            echo '```'
+            grep -E "^(diag K=|model check|cross-check)|violations: \[|panicked" out/run.log || true
+            grep -E "User time|System time|Elapsed|Maximum resident" out/time.txt || true
+            echo "exit $rc: $status"
+            echo '```'
+          } | tee out/summary.md >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signer-mc-${{ matrix.check.name }}
+          path: out/
+          retention-days: 90
