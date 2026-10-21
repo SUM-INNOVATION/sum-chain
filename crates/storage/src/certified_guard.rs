@@ -14,7 +14,21 @@
 //! * a rollback whose target is below the certified height, or at it on a
 //!   different block, is refused;
 //! * a stored pointer that cannot be read or decoded is refused (fail-closed),
-//!   never treated as "no finality".
+//!   never treated as "no finality";
+//! * an ABSENT pointer is trusted as "nothing certified" only when no
+//!   certificate row exists under `finality/cert/v1/`: certificates without a
+//!   pointer mean the pointer was lost, and are refused.
+//!
+//! # Relationship to `recover_v1`
+//!
+//! [`crate::certified_meta::recover_v1`] is the full start-up audit: pointer,
+//! canonical block, every certificate re-verified, namespace checked.
+//! [`certified_block`] is the cheap read a reorg or rollback check performs at
+//! the moment of the decision: it decodes the pointer and refuses the one
+//! absence that cannot mean "never certified" (certificate rows with no
+//! pointer). It does not re-verify certificates or the canonical chain; it
+//! relies on `recover_v1` having passed at start-up, which wiring must
+//! guarantee.
 //!
 //! The check relies on one invariant the seam already guarantees and
 //! [`crate::certified_meta::recover_v1`] re-verifies at start-up: the certified
@@ -34,7 +48,9 @@ use std::fmt;
 
 use sumchain_primitives::{BlockHeight, Hash};
 
-use crate::certified_meta::{decode_pointer, FINALIZED_POINTER_KEY};
+use crate::certified_meta::{
+    decode_pointer, parse_certificate_key, CERTIFICATE_KEY_PREFIX, FINALIZED_POINTER_KEY,
+};
 use crate::db::{cf, Database};
 
 /// The certified finalized block a reorg or rollback must not cross.
@@ -49,6 +65,10 @@ pub struct CertifiedBlock {
 pub enum CrossingRefusal {
     /// The stored pointer could not be read or decoded. Fail-closed.
     UnreadablePointer(String),
+    /// The pointer is absent but certificate rows exist: the pointer was
+    /// lost, so "nothing certified" cannot be assumed. `height` is that of the
+    /// first row found, when its key parses.
+    CertificatesWithoutPointer { height: Option<BlockHeight> },
     /// The reorg forks below the certified height.
     ForkBelowCertified {
         fork_height: BlockHeight,
@@ -83,6 +103,12 @@ impl fmt::Display for CrossingRefusal {
                 f,
                 "the certified finalized pointer cannot be read ({e}); refusing rather than \
                  treating finality as absent"
+            ),
+            Self::CertificatesWithoutPointer { height } => write!(
+                f,
+                "certificate rows exist under finality/cert/v1/ (first at height {height:?}) but \
+                 the finalized pointer is absent; refusing rather than treating history as \
+                 uncertified"
             ),
             Self::ForkBelowCertified {
                 fork_height,
@@ -125,13 +151,27 @@ impl fmt::Display for CrossingRefusal {
 impl std::error::Error for CrossingRefusal {}
 
 /// The certified finalized block recorded under `finality/finalized/v1`, if
-/// any. `Ok(None)` only when the key is absent. Any read or decode failure is
-/// an error, never "no finality".
+/// any. `Ok(None)` only when the key is absent AND no certificate row exists
+/// under `finality/cert/v1/`. Any read or decode failure, and certificate rows
+/// without a pointer, are errors, never "no finality".
 pub fn certified_block(db: &Database) -> Result<Option<CertifiedBlock>, CrossingRefusal> {
     let bytes = db
         .get(cf::META, FINALIZED_POINTER_KEY)
         .map_err(|e| CrossingRefusal::UnreadablePointer(e.to_string()))?;
     let Some(bytes) = bytes else {
+        // One step of the prefix scan is enough: any row under the prefix
+        // means certificates were committed, so the pointer was lost.
+        let mut rows = db
+            .prefix_iter_checked(cf::META, CERTIFICATE_KEY_PREFIX)
+            .map_err(|e| CrossingRefusal::UnreadablePointer(e.to_string()))?;
+        if let Some(entry) = rows.next() {
+            let (key, _) = entry.map_err(|e| CrossingRefusal::UnreadablePointer(e.to_string()))?;
+            if key.starts_with(CERTIFICATE_KEY_PREFIX) {
+                return Err(CrossingRefusal::CertificatesWithoutPointer {
+                    height: parse_certificate_key(&key).map(|(h, _)| h),
+                });
+            }
+        }
         return Ok(None);
     };
     let pointer = decode_pointer(&bytes).map_err(CrossingRefusal::UnreadablePointer)?;
