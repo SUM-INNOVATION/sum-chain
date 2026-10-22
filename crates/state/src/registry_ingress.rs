@@ -23,8 +23,8 @@ use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::StorageError;
 use sumchain_wire::registry_ingress::{
     admitted_proof_systems, approval_window_open, check_commit, registry_disable_signing_bytes,
-    registry_register_signing_bytes, timelock_satisfied, RegistryCommitRefusal, RegistryDisableV1,
-    RegistryIngressParams, RegistryIngressValues, RegistryRegisterV1, RegistryThresholdSource,
+    registry_register_signing_bytes, timelock_satisfied, unset_commitments, RegistryCommitRefusal,
+    RegistryDisableV1, RegistryIngressParams, RegistryIngressValues, RegistryRegisterV1,
 };
 use sumchain_wire::registry_wire::{RegistryRecordV1, RegistryStatus};
 
@@ -88,13 +88,14 @@ pub(crate) fn validate_register(
     if record.status != RegistryStatus::Enabled
         || check_threshold_bps(record.approval_threshold_bps).is_err()
         || !admitted_proof_systems().contains(&record.proof_system_id)
+        || !unset_commitments(record).is_empty()
         || !timelock_satisfied(record.activation_height, height, v.min_timelock_blocks)
     {
         return Err(303);
     }
-    let threshold = match v.threshold_source {
-        RegistryThresholdSource::GovernanceThenRecord => gp.validator_authority_threshold_bps,
-    };
+    // Q17 (owner, 2026-10-22): the authenticated governance threshold, from
+    // chain parameters, never from the operation or a tooling default.
+    let threshold = gp.validator_authority_threshold_bps;
     if record.approval_threshold_bps < threshold {
         return Err(303);
     }
@@ -130,9 +131,9 @@ pub(crate) fn validate_disable(
     if stored.status != RegistryStatus::Enabled {
         return Err(303);
     }
-    let threshold = match v.threshold_source {
-        RegistryThresholdSource::GovernanceThenRecord => stored.approval_threshold_bps,
-    };
+    // B2 (PROPOSED): the stored record's own threshold, authenticated when the
+    // record was registered.
+    let threshold = stored.approval_threshold_bps;
     let signing =
         registry_disable_signing_bytes(chain_id, &ready.genesis_block_hash, req.valid_until, &req.id);
     verify_validator_quorum(&req.approvals, &signing, active_validator_pubkeys, threshold)
@@ -205,13 +206,10 @@ pub fn v_check_commit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sumchain_wire::registry_ingress::RegistryThresholdSource;
 
     fn full() -> RegistryIngressParams {
         RegistryIngressParams {
             registry_min_timelock_blocks: Some(1),
-            registry_threshold_source: Some(RegistryThresholdSource::GovernanceThenRecord),
-            registry_record_default_approval_threshold_bps: Some(1),
             registry_max_approval_window: Some(1),
         }
     }

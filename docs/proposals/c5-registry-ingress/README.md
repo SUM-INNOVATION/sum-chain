@@ -1,11 +1,11 @@
 # PROPOSED, NOT RATIFIED: C5 registry ingress (#242), byte specification
 
-**This is a proposal for byte review. It is not a byte ratification, and nothing in it is frozen.** It specifies the dormant implementation in this pull request completely enough to be checked against the code and the vectors. Every value marked *fixture* or *synthetic* is a test value, not a proposed parameter.
+**This is a proposal for byte review. It is not a byte ratification, and nothing in it is frozen.** The owner decided Q3, Q8/Q18, Q9 and Q17 on 2026-10-22 (§14). The byte layouts stay PROPOSED until every C5 decision is settled. It specifies the dormant implementation in this pull request completely enough to be checked against the code and the vectors. Every value marked *fixture* or *synthetic* is a test value, not a proposed parameter.
 
 - **Mechanism:** B of the C5 decision document. Governance-v1 operations 8 (register) and 9 (disable) inside `TxType::Governance = 23`. There is no new transaction type, no `RegistryWireOp` namespace, no new gate and no new receipt code (`Failed(418)` stays unallocated).
 - **Not on the wire:** this PR does **not** add the two `GovernanceOperation` variants. A governance transaction naming 8 or 9 is refused at decode exactly as on the base, and a block holding one is rejected (§13). The codecs and the executor logic are reached only through `governance_executor::execute_registry_ingress`, which nothing but the tests calls. Adding the wire variants is part of the separately authorized activation change.
-- **Authorization:** a quorum of the active PoA validator set at the execution height, verified by the existing `validator_quorum::verify_validator_quorum`. The threshold source is B2 (§7). `tx.from` only pays the fee.
-- **State:** dormant and unwired. Even by direct call, both operations refuse with `302` before reading their payload: all four named parameters are unset (§9), and nothing supplies a genesis block hash.
+- **Authorization:** a quorum of the active PoA validator set at the execution height, verified by the existing `validator_quorum::verify_validator_quorum`. Register uses the authenticated governance threshold (Q17, decided); disable uses the stored record's threshold (B2). `tx.from` only pays the fee.
+- **State:** dormant and unwired. Even by direct call, both operations refuse with `302` before reading their payload: both named parameters are unset (§9), and nothing supplies a genesis block hash.
 - **Refs:** #242, #128. Base: `main` `e3b8ff81`.
 
 | File | Contents |
@@ -147,7 +147,23 @@ The active set **V** is the list of validator pubkeys consensus supplies for the
 5. every signature verifies (§5);
 6. k ≥ `required`, where k is the number of approvals and `required = ceil(n·t / 10000) = (n·t + 9999) div 10000`.
 
-**Arithmetic:** it is computed in `u64`. With n < 2^32 and t ≤ 10000, `n·t + 9999 < 2^46`, so it cannot overflow, and `required ≤ n` fits in a `u32`. The comparison is `≥`. Validators that do not sign stay in the denominator. For t ≥ 1 and n ≥ 1, `required ≥ 1`.
+**The rule, verbatim (Q17, decided 2026-10-22).** Register reuses the existing governance rule unchanged:
+- `required_approvals` (`crates/sumchain-wire/src/validator_authority.rs:119-123`):
+  `let num = (active_count as u64) * (threshold_bps as u64); ((num + 9999) / 10000) as u32`.
+- `verify_validator_quorum` (`crates/state/src/validator_quorum.rs:59-90`) applies it as listed above. `check_threshold_bps` is line 40; `required` is computed at line 70; `if valid < required` at line 86 refuses.
+
+**Arithmetic:** computed in `u64`. With n ≤ `u32::MAX` and t ≤ 10000, `n·t + 9999 < 2^46`, so it cannot overflow, and `required ≤ n` fits in a `u32`. The comparison is `≥`. Validators that do not sign stay in the denominator. For t ≥ 1 and n ≥ 1, `required ≥ 1`. It equals the exact ceiling `⌈n·t / 10000⌉`; a test checks this in `u128`.
+
+**Boundaries.** Each is tested (`quorum_arithmetic_at_its_boundaries`, `register_refuses_one_approval_short_and_accepts_exactly_required`, `the_largest_validator_set_counts_every_member`), and the `prospective_quorum.*` vectors record the counts:
+
+| Case | n | t | required | k = required − 1 | k = required |
+|---|---|---|---|---|---|
+| smallest set | 1 | 1 or 10000 | 1 | refused (`303`) | accepted |
+| four validators | 4 | 1 / 6667 / 10000 | 1 / 3 / 4 | refused | accepted |
+| largest set (VS-6(a) cap) | 29,127 | 1 | 3 | refused | accepted |
+| largest set | 29,127 | 10000 | 29,127 | refused (tested with k = 3) | n/a |
+| type limit, no overflow | `u32::MAX` | 1 / 10000 | 429,497 / `u32::MAX` | arithmetic only | arithmetic only |
+| t outside range | any | 0 or 10001 | not computed | refused (`InvalidThreshold`, `303`) | refused |
 
 | n \ t | 1 | 3334 | 5000 | 5001 | 6667 | 10000 |
 |---|---|---|---|---|---|---|
@@ -161,7 +177,7 @@ The set is the one **at execution**, not at signing. An approval from a validato
 
 ## 7. Operation rules
 
-Every check below is semantic: a refusal is `303`, charges the fee and advances the nonce (Policy-B, §10). The checks are independent, so their order changes no receipt. The implementation verifies signatures last.
+Every check below is semantic: a refusal is `303`. It charges the fee and advances the nonce when the sender's balance covers the fee; otherwise it is `303` with fee 0 (Policy-B, `governance_executor.rs:353-363`, §10). Codes `300` (gate closed) and `301` (governance unconfigured) come first. The checks are independent, so their order changes no receipt. The implementation verifies signatures last.
 
 ### Register, executed at height h
 
@@ -171,8 +187,9 @@ Accepted only if **all** of these hold:
 2. **Status:** `record.status = Enabled (0)`.
 3. **Record threshold range:** `1 ≤ record.approval_threshold_bps ≤ 10000` (`check_threshold_bps`).
 4. **Proof system:** `record.proof_system_id ∈ admitted_proof_systems()`, which is {2, RISC0}, fixed by B0-FINAL. `registry_dryRunAdmit` reads the same function.
+4a. **Commitments set (Q9, decided 2026-10-22):** none of `audit_commitment`, `source_commitment` and `ceremony_commitment` is 32 zero bytes (`unset_commitments`). `registry_dryRunAdmit` refuses exactly the same names (`commitment_unset`), and a test checks that they agree.
 5. **Timelock floor:** `activation_height ≥ h + T_min`, in exact arithmetic (§8).
-6. **Threshold source B2:** `t = GovernanceParams.validator_authority_threshold_bps` from chain state. Then `record.approval_threshold_bps ≥ t`.
+6. **Threshold (Q17, decided 2026-10-22):** `t = GovernanceParams.validator_authority_threshold_bps`, the authenticated governance threshold from chain parameters. It is never taken from the operation or from a tooling default. Then `record.approval_threshold_bps ≥ t`.
 7. **New id:** no record with `record.id` exists, Enabled or Disabled.
 8. **Quorum:** §6 over the §4.1 preimage at threshold `t`.
 
@@ -204,16 +221,18 @@ On acceptance, the stored record's `status` becomes Disabled; every other byte i
 
 ## 9. Named parameters (unvalued)
 
-`RegistryIngressParams` holds one `Option` per parameter. Execution obtains values only through `complete()`, which returns `None` unless all four are `Some`. A missing value therefore cannot be defaulted on its way to execution. The binary's value is `REGISTRY_INGRESS_PARAMS = RegistryIngressParams::UNSET`, and no production code reads it.
+`RegistryIngressParams` holds one `Option` per parameter. Execution obtains values only through `complete()`, which returns `None` unless both are `Some`. A missing value therefore cannot be defaulted on its way to execution. The binary's value is `REGISTRY_INGRESS_PARAMS = RegistryIngressParams::UNSET`, and no production code reads it.
 
 | Parameter | Type | Read by | While unset |
 |---|---|---|---|
 | `registry_min_timelock_blocks` (T_min; #217 B6, #212) | `Option<u64>` | register rule 5 | both operations refuse `302` |
-| `registry_threshold_source` | `Option<RegistryThresholdSource>` | register rule 6, disable rule 3 | both operations refuse `302` |
-| `registry_record_default_approval_threshold_bps` (#212) | `Option<u16>` | nothing (open question Q3) | both operations refuse `302` |
 | `registry_max_approval_window` (W) | `Option<u64>` | rule 1 of both | both operations refuse `302` |
 
-The threshold source has a single variant, `GovernanceThenRecord` (B2). B1 is not implemented. Setting the source accepts `GovernanceParams.validator_authority_threshold_bps` as the registry's register threshold, which answers the decision record's "value for registry use" (Q17).
+Two items left this set on 2026-10-22:
+- **Q17** fixed register's threshold to the authenticated governance threshold, so there is no threshold-source parameter.
+- **Q3** made the record default threshold a tooling-only default. No consensus path has or reads one, and `no_consensus_path_reads_a_tooling_default` checks that.
+
+Where the values would live and how they would be committed is §14.1.
 
 The genesis block hash is a precondition of the same kind: without it, both operations refuse `302`.
 
@@ -228,6 +247,7 @@ No code is allocated. On this binary, a transaction naming operation 8 or 9 does
 | a named parameter unset, or no genesis block hash (Q1) | `Failed(302)` | none | unchanged | none |
 | payload does not decode (§3) | `Failed(302)` | none | unchanged | none |
 | any §7 refusal, including expiry and window (Q2) | `Failed(303)` | charged if affordable | +1 if charged | none |
+| all-zero commitment at register (Q9, rule 4a) | `Failed(303)` | charged if affordable (Policy-B) | +1 if charged | none: no record written |
 | accepted | `Success` | charged | +1 | one `cf::META` row under `registry/record/v1/` |
 
 ## 11. Replay protection
@@ -247,6 +267,7 @@ No code is allocated. On this binary, a transaction naming operation 8 or 9 does
   - Value: the 154-byte `RegistryRecordV1` encoding.
   - A stored row that does not decode, or names another `id`, is an error, never "no record".
 - **No committed digest:** `cf::META` is not folded into any committed digest (Q12).
+- **Recommended placement (§14.1, part 3, not implemented):** `cf::STATE` under `registry/v1/` ‖ id, folded into the block state root behind the registry activation gate.
 - **Undo:** rows are staged in the block's candidate. Where the generic application journal is active, it records their pre-images like any other row's.
 
 ## 13. Consequences and activation prerequisites
@@ -257,7 +278,7 @@ No code is allocated. On this binary, a transaction naming operation 8 or 9 does
 2. **Activation needs all of the following:**
    - the two `GovernanceOperation` variants and a dispatch to `execute_registry_ingress`, released as a coordinated upgrade;
    - governance-v1 activation with `ChainParams::governance`;
-   - ratified values for all four parameters;
+   - ratified values for both parameters;
    - their registration in the consensus configuration, under a new schema, because schema 2 is frozen (Q5, Q6);
    - the engines supplying the genesis block hash (Q7);
    - a release.
@@ -267,12 +288,17 @@ No code is allocated. On this binary, a transaction naming operation 8 or 9 does
 
 ## 14. Questions, consolidated
 
-There are three groups: (a) settled by the decision ledger (`DECISION-RECORD-20261016.md`) or by an owner instruction; (b) routine implementation choices, resolved in this PR; (c) protocol decisions for ratification, each with a recommendation. No resolution in (b) changes dormancy.
+There are three groups: (a) settled by the decision ledger (`DECISION-RECORD-20261016.md`, including its appendix "2026-10-22 owner decisions") or by an owner instruction; (b) routine implementation choices, resolved in this PR; (c) protocol decisions still open, each with a recommendation. No resolution in (b) changes dormancy.
 
 | Grp | Q | Resolution or recommendation | Consequence or citation |
 |---|---|---|---|
-| a | Q5 consensus-config registration | Schema 2 is fixed. New committed fields need an explicit schema-evolution proposal, which belongs to the activation change. | Ledger G3, "Placement: CORRECTED", 2026-10-16 |
+| a | Q3 record default threshold | A tooling-only default. Removed from the parameter set and from every consensus path, which derives thresholds from authenticated state. | Owner 2026-10-22. Guarded by `no_consensus_path_reads_a_tooling_default`. |
+| a | Q5 consensus-config registration | Schema 2 is fixed. New committed fields need an explicit schema-evolution proposal (§14.1). | Ledger G3, "Placement: CORRECTED", 2026-10-16 |
+| a | Q8 commit consumers | Decided with the first proof consumer (#128). Until then nothing in production calls `v_check_commit`, `check_commit` or `execute_registry_ingress`. | Owner 2026-10-22. Guarded by `no_production_code_calls_the_commit_check_or_the_registry_entry`. |
+| a | Q18 `id` derivation | Bound to Q8: the consumer checks that its verifier material derives to the record `id`. Register cannot, because the record does not carry the manifest hash. | Owner 2026-10-22 |
+| a | Q9 all-zero commitments | Refused at register: `303`, fee charged per Policy-B, no state change (rule 4a, §10). The dry run refuses the same names. | Owner 2026-10-22. Tests `register_refuses_any_all_zero_commitment` and `registry_dry_run_agrees.rs`. |
 | a | Q13 storage | Versioned `cf::META` keys, no new column family. Applied: `registry/record/v1/` ‖ id; `ALL_CFS` equals main's (tested). | Settled by owner instruction plus precedent: the owner's 2026-10-21 instruction "Keep #348 dormant". The certificate-storage entries are precedent only: ledger 2026-10-19 (L508, "not authorized: a new storage column family") and 2026-10-20 (L540, versioned META keys, #337). |
+| a | Q17 register threshold | The authenticated governance threshold, `validator_authority_threshold_bps`, under the existing rule verbatim (§6) | Owner 2026-10-22. Boundary tests and `prospective_quorum.*` vectors. |
 | b | Q1 missing parameter | `302`, pre-semantic | Defensive only: the ledger's C5 note (2026-10-21) makes activation with a missing value impossible |
 | b | Q2 expiry and window | `303`, fee charged | Height-dependent, like every other authorization refusal |
 | b | Q7 genesis hash | The activation change supplies `create_genesis_block().hash()` (config field `0x0005`) | Refuses until then |
@@ -281,14 +307,96 @@ There are three groups: (a) settled by the decision ledger (`DECISION-RECORD-202
 | b | Q14 wire decoding | No wire variants. Decoding is unchanged and tested for the payload, transaction, block, sync response and RPC. | Adding the variants is the activation change, a coordinated same-window upgrade |
 | b | Q15 departed approvals | The `verify_validator_quorum` rule named by the proposal: an approval from any key outside the execution-height set refuses the whole operation (`303`); it is not ignored | Submitters must drop departed approvals |
 | b | Q16 approval order | Decode refusal (`302`) | The order is part of the §3 layout |
-| c | Q3 record default threshold | **Recommend:** a tooling default, not consensus, removed from the activation-required set | Three values to ratify, not four. B2's floor (record ≥ governance) already bounds every record. |
-| c | Q4 signature rule | **Recommend:** keep governance-v1 `verify` | One rule for every validator-quorum action. VS-5 already excludes small-order and non-canonical keys from the set. Moving governance to E1 later is one change covering all of them. |
-| c | Q6 where values live | **Recommend:** `GovernanceParams` fields in genesis, registered by the Q5 proposal, like `validator_authority_threshold_bps` | The values are committed in the consensus configuration; changing them is a coordinated upgrade |
-| c | Q8 commit consumers | **Recommend:** decide with the first proof-verifying consumer (#128). It calls `v_check_commit` and maps a refusal to its own existing invalid-input code. | No new code. Until then, nothing enforces the commit-side timelock. |
-| c | Q18 `id` derivation (depends on Q8) | **Recommend:** decide with Q8. The consumer checks that the verifier material it uses derives to the record `id`. Register cannot check this, because `vk_id` needs the manifest hash, which the record does not carry. | Until Q8 is decided, nothing binds `id` to verifier material |
-| c | Q9 all-zero commitments | **Recommend:** refuse at register (`303`), as `registry_dryRunAdmit` does under #217 B1 | Dry run and execution agree; one more register rule |
-| c | Q12 committed digest | **Recommend:** fold registry rows into the block state digest at activation, as compute-pool and beacon state are, and carry them in snapshots | One more digest byte table to ratify. Divergent registry state then shows as a root mismatch, not a silent fork. |
-| c | Q17 register threshold | **Recommend:** B2 as proposed (the governance threshold) | Registry admission moves with governance; a record can still require more for its own disable |
+| c | Q4 signature rule | **Recommend:** keep governance-v1 `verify` (§14.1, part 1) | One rule for every governance quorum action. Under VS-5, `verify` and `verify_strict` accept the same signatures from real approvers. Condition: VS-5 is in effect on every node before activation. |
+| c | Q6 where values live | **Recommend:** genesis `GovernanceParams` fields, as draft schema-3 entries `0x0609`/`0x060a`, in the range `1..=u32::MAX`, with no defaults, plus the present-only protocol-digest trailer (§14.1, part 2) | Every existing digest and commitment stays byte-identical; changing a value is a coordinated same-window upgrade |
+| c | Q12 committed digest | **Recommend:** move the records to `cf::STATE` under `registry/v1/` ‖ id, with a gated registry state fold after the beacon digest. `"state:registry"` joins the fast-sync families at activation (§14.1, part 3). | Roots stay byte-identical while dormant. Divergence becomes a root mismatch, and the registry fold byte table must be ratified. |
+
+### 14.1 Recommendation (PROPOSED)
+
+**PROPOSED.** Nothing here is ratified, and nothing beyond what this PR already contains is implemented. The parameters, signatures and storage parts stay unimplemented until the owner decides. The byte layouts stay PROPOSED until every C5 decision is settled. This section matches the sprint decision record `C5-RECOMMENDATION-20261022.md` (2026-10-22), which consolidates three inputs: the parameters analysis; the signatures and storage/digest analysis, read-only on `e3b8ff81` and this PR at `f9031df8`; and a cross-check of both, with its corrections applied.
+
+Already directed by the owner on 2026-10-22, and implemented in this PR: Q3 (a tooling-only default), Q8/Q18 (decided with the first consumer, unreachable until then), Q9 (all-zero commitments refused, code 303) and Q17 (the governance threshold, with exact rounding).
+
+#### The recommendation: one rule set
+
+The three parts are one design. Register and disable verify approvals exactly as every other governance quorum action does. Their parameters live in the consensus configuration, and are bound across nodes once present. Their records are consensus state, committed in the block state root once activated. While dormant, every byte is identical to today.
+
+##### 1. Signatures: keep governance-v1 `verify` for operations 8 and 9
+
+Approvals go through `verify_validator_quorum` → `crypto::verify_bytes` → ed25519-dalek `verify`, which is not strict, exactly as for existing governance actions. Existing operations are unchanged.
+
+Behaviour on malformed input:
+
+| Input | Result |
+|---|---|
+| Wrong signature or key length | decode refusal **302**, no fee |
+| Non-canonical S | **303**, fee charged*; `verify` and `verify_strict` both refuse |
+| Non-canonical R | **303**, fee charged*; both refuse, because R is compared by encoding |
+| Signature over the wrong message | **303**, fee charged* |
+| Approver outside the execution-height set, or a duplicate approver | **303**, fee charged* |
+| Small-order R or A | refused by `verify_strict` only |
+
+\* Charged only when the balance covers the fee; otherwise the result is 303 with fee 0 (`governance_executor.rs:353-363`). Codes that come before these checks are unchanged: 300 when the gate is closed, 301 when governance is unconfigured (`:294-302`).
+
+The small-order case does not matter for approvers. Under VS-5 (#338), every validator key is canonical and of prime order. A small-order R then verifies only by solving a discrete log, so for real approvers the two rules accept exactly the same signatures.
+
+**Condition:** VS-5 genesis validation must be in effect on every node before the registry is activated. #338 enforces it at every node start.
+
+**Consequence:** there is one quorum rule for every governance action. Moving governance to strict verification later is a single, governance-wide, coordinated change. Mixing rules now would split tooling and vectors for no security gain.
+
+##### 2. Parameters: ConsensusConfig schema 3, no defaults, bound once present
+
+- **Fields.** Two genesis `GovernanceParams` fields, placed as `validator_authority_threshold_bps` is: `registry_min_timelock_blocks` (T_min) and `registry_max_approval_window` (W). Each is `Option<u64>` with `#[serde(default)]` and **no default**. Absent means register and disable refuse (302). The Q3 record default is tooling-only, so it is not a consensus parameter.
+- **Schema 3.** Schema 2 is frozen. The new fields are 0x0609 T_min (U64) and 0x060a W (U64), plus constants 0x2900–0x2904 (two domains, two magics, the schema version), present only while both values are set. Schema 3 is a **draft** until activation: `knows` includes it, `writes` stays schema 2, and absent draft fields are dropped by `project()`. Schema-2 records and commitments stay byte-identical.
+- **Validation in `Genesis::validate`, and in the configuration build:**
+  - both values are set, or neither;
+  - **1 ≤ T_min ≤ u32::MAX and 1 ≤ W ≤ u32::MAX** (chosen in consolidation; the parameters analysis marked the cap optional). The cap catches misconfiguration and leaves no legitimate value out. It is checked at genesis load, with beacon `epoch_length ≥ 1` (`lib.rs:3701`) as the precedent; the fields stay `Ty::U64`, like 0x0604;
+  - setting them without `governance_enabled_from_height` is refused;
+  - a partial set is refused.
+- **Arithmetic:** h + T_min is computed exactly (u128); a result above u64::MAX is 303. The window check is h ≤ valid_until and valid_until − h ≤ W, via `checked_sub`. Each failure is 303: fee charged, nonce + 1, no state change. T_min and W need no relation to each other, because they constrain different fields (activation_height and valid_until).
+- **Binding: the gap, and the fix.** On `e3b8ff81`, the protocol digest covers `chain_id`, the genesis activation digest (validators, allocations, activation heights) and the compiled `consensus_limits`. **No GovernanceParams value is covered**, and neither is the genesis block hash. Today the only binding is each node's local configuration baseline plus operator acknowledgement, the same as for 0x0601. For existing governance actions this is tolerable, because their effects land in the state root. Registry effects do not land there today (see §3), so a T_min mismatch would split silently.
+- **Recommended binding:**
+  - **(a)** When **both** registry values are set, append one trailer to `protocol_digest_with_limits` that folds T_min, W **and the governance threshold that register uses (0x0601)**. The trigger is the registry values, never 0x0601 alone, so every existing digest stays byte-identical. It cannot go through `activation_heights()`, because an absent value still adds a byte (`lib.rs:4815`), nor through `consensus_limits()`, which holds compiled-in values only. Folding 0x0601 is safe: block validation never reads the digest, and governance reads the threshold directly.
+  - **What (a) does and does not give** (cross-check, `peer_compat.rs:33-36`, `:234`; `node.rs:544/1128/1252`): a peer that **declares** a different digest is refused in both phases, meaning its blocks and votes are ignored; it is not disconnected. A binary that declares nothing is refused only from `peer_protocol_declaration_required_from_height`, which mainnet genesis does not set. So (a) catches misconfigured current binaries early, and (b) below is the guarantee.
+  - **(b)** The registry state fold in §3 turns any remaining divergence into a state-root mismatch at the block where it occurs.
+  - A configuration commitment in block headers would be stronger, but it is a header change beyond C5.
+- **Upgrade:** activation is one coordinated same-window release. It carries the wire variants 8/9, schema 3 as `writes` with the schema and configuration acknowledgements, the values, the registry state fold and the dry-run alignment. Older binaries refuse the genesis (unknown fields) and op-8/9 blocks. Changing a value later is another coordinated same-window change, with acknowledgement and a changed digest. Records already accepted are unaffected, because T_min and W are checked only at register and disable.
+
+##### 3. Storage and digest: consensus state, folded at activation
+
+Three of the four requirements already hold for writes through `ExecutionView`:
+- **(a) Historical execution:** execution happens only at the head, and import executes each block once. Reorg and rollback unwind, then re-execute forward. No state is served at past heights.
+- **(b) Atomic commit:** `ExecutionView` writes, the block, receipts, journals and head pointer go out in one batch. That is stronger than #337's certificate seam.
+- **(c) Rollback:** the operator rollback is the reorg unwind. It replays the generic journal, which holds pre-images for every family, so a record written at h is removed by a rollback below h.
+
+The fourth is the gap:
+- **(d) Consensus digest:** `compute_block_state_root` folds contracts, supply, compute-pool and beacon state behind their gates, but **not** the registry. Snapshots carry only `state:accounts`.
+
+Recommendation:
+- **Placement.** Move the records from META (node-local by convention) to the existing `cf::STATE` under `registry/v1/` ‖ id. There is still no new column family. The analysis confirmed that no production code scans all of STATE: the account root, snapshot export and legacy revert scan only the `acct` prefix, and the pruner reads STATE_DIFFS. The generic journal covers STATE rows. A test pins disjointness from `acct` and from G5's `vset/` prefix.
+- **Fold.** Behind the registry activation gate, append after the beacon digest:
+  `BLAKE3("SUMCHAIN/REGISTRY/STATE/v1\0" ‖ n ‖ (id ‖ record)* in ascending id)`.
+  The integer encoding and record bytes go in the C5 byte table (PROPOSED). The cost is linear in the registry size, which is bounded by governance admission.
+- **Fast sync.** Add `"state:registry"` to `REQUIRED_FAST_SYNC_FAMILIES`. Fast sync is already refused today, because snapshots carry only accounts. The entry does change visible output, though: the RPC `chain_getSyncCapability` missing list, the startup log and the restore error text. So it belongs to the **activation change**, not to dormant #348.
+- **Consequence.** Roots stay byte-identical while dormant. Divergence becomes a root mismatch at the block, never a silent fork. There is one more digest byte table to ratify (Q12, now concrete).
+
+#### What lands in #348 dormant if the owner accepts this, and what waits for activation
+
+| Dormant in #348 (no active behaviour changes) | Activation change (coordinated, same window) |
+|---|---|
+| `#[serde(default)]` GovernanceParams fields and their validation; schema 3 as a draft (`knows` only) | Wire variants 8/9; `writes` = schema 3 plus acknowledgements |
+| The present-only protocol-digest fold of T_min, W and 0x0601 | The values themselves; the registry activation gate |
+| STATE placement `registry/v1/`; the gated registry state fold (gate unset) | The state fold enabled; `"state:registry"` in `REQUIRED_FAST_SYNC_FAMILIES`; snapshots carrying registry rows; dry-run alignment to h + T_min |
+| Vectors labelled `prospective_*`; byte tables PROPOSED | VS-5 deployed on every validator (#338) |
+
+#### Decision requested (one)
+
+Adopt §1–§3 as the C5 design:
+- governance-v1 `verify`;
+- schema-3 optional parameters with no defaults, the range 1..=u32::MAX, and the present-only protocol-digest binding of T_min, W and 0x0601;
+- STATE placement with the gated registry state fold.
+
+#348 then implements the dormant column of the table above, and the C5 byte tables (record, approvals, registry fold) become the last C5 item for byte ratification.
 
 ## 15. Vectors and tests
 
@@ -322,4 +430,7 @@ There are three groups: (a) settled by the decision ledger (`DECISION-RECORD-202
 | Operations 8 and 9 still refused at decode (payload, transaction, block), same error as on the base | `governance_fixtures.rs::governance_operations_8_and_9_do_not_decode`, `vectors_are_reproduced_and_execute` |
 | The same through block sync (`SyncCodec::read_response`), with operation 7 as the control | `crates/p2p/tests/governance_ops_8_9_sync.rs` |
 | `send_raw_transaction` refuses operations 8 and 9 at decode; the mempool stays empty | `crates/rpc/tests/governance_ops_8_9_rpc.rs` |
+| Q17 boundaries: arithmetic, k = required − 1 refused and k = required accepted, the largest set | `quorum_arithmetic_at_its_boundaries`, `register_refuses_one_approval_short_and_accepts_exactly_required`, `the_largest_validator_set_counts_every_member` |
+| Q9: all-zero commitments refused, and the dry run agrees | `register_refuses_any_all_zero_commitment`, `crates/rpc/tests/registry_dry_run_agrees.rs` |
+| Q3 and Q8 guards: no tooling default, no production caller | `no_consensus_path_reads_a_tooling_default`, `no_production_code_calls_the_commit_check_or_the_registry_entry` |
 | `ALL_CFS` byte-identical to main; a record is one META row under its prefix; the prefix is disjoint from every META key | `the_column_families_are_exactly_mains`, `a_record_is_one_meta_row_under_its_prefix`, `the_record_prefix_is_disjoint_from_every_meta_key_in_the_repository` |

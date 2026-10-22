@@ -171,17 +171,13 @@ pub fn dry_run_admit(bytes: &[u8], ctx: DryRunContext<'_>) -> DryRunResult {
         });
     }
 
-    // Fixed source order, so the sequence is stable.
-    for (which, commitment) in [
-        ("audit_commitment", &record.audit_commitment),
-        ("source_commitment", &record.source_commitment),
-        ("ceremony_commitment", &record.ceremony_commitment),
-    ] {
-        if commitment.iter().all(|&b| b == 0) {
-            refusals.push(RefusalReason::CommitmentUnset {
-                which: which.to_string(),
-            });
-        }
+    // Fixed source order, so the sequence is stable. The same function the
+    // (dormant, PROPOSED) register operation refuses with, so the dry run and
+    // execution cannot disagree about which commitments are unset.
+    for which in sumchain_wire::registry_ingress::unset_commitments(&record) {
+        refusals.push(RefusalReason::CommitmentUnset {
+            which: which.to_string(),
+        });
     }
 
     if record.status != RegistryStatus::Enabled {
