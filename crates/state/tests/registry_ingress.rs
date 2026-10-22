@@ -21,9 +21,10 @@ use sumchain_primitives::validator_authority::{required_approvals, ValidatorAppr
 use sumchain_primitives::{Address, Hash, TxPayload, TxStatus};
 use sumchain_state::governance_executor::execute_registry_ingress;
 use sumchain_state::registry_ingress::{
-    v_check_commit, v_get_record, RegistryIngressContext, RegistryIngressOp,
-    REGISTRY_INGRESS_PARAMS,
+    registry_record_key, v_check_commit, v_get_record, RegistryIngressContext, RegistryIngressOp,
+    REGISTRY_INGRESS_PARAMS, REGISTRY_RECORD_KEY_PREFIX,
 };
+use sumchain_storage::cf;
 use sumchain_state::state::StateManager;
 use sumchain_storage::candidate::CandidateExecution;
 use sumchain_storage::Database;
@@ -788,6 +789,351 @@ fn vectors_are_reproduced_and_execute() {
         assert_eq!(
             s.run(&n, &mut c, DIS, disable(H + 50, 0x11, signers), H, &active),
             TxStatus::Success
+        );
+    }
+}
+
+// ── Storage: no new column family ───────────────────────────────────────────
+
+/// `ALL_CFS` on `e3b8ff81`, names and order. A family a binary does not name
+/// makes the volume unopenable by that binary, so C5 adds none: records live
+/// under a versioned `cf::META` key prefix instead.
+const MAIN_ALL_CFS: &[&str] = &[
+    "blocks",
+    "block_height",
+    "state",
+    "transactions",
+    "receipts",
+    "meta",
+    "state_diffs",
+    "nft_collections",
+    "nft_tokens",
+    "nft_owner_index",
+    "nft_collection_index",
+    "issuer_registry",
+    "tokens",
+    "token_balances",
+    "token_allowances",
+    "token_holder_index",
+    "validators",
+    "delegations",
+    "unbonding_delegations",
+    "delegation_validator_index",
+    "slashing_records",
+    "validator_signing_info",
+    "missed_blocks",
+    "validator_sets",
+    "account_encryption_keys",
+    "active_archive_nodes_history",
+    "archive_unbonding",
+    "challengeable_files_v2",
+    "supply",
+    "storage_metadata_v2",
+    "assignment_attestations_v2",
+    "file_reassignments",
+    "assignment_attestations_v2_epoch",
+    "inference_attestations",
+    "inference_attestations_by_session",
+    "inference_attestation_sponsors",
+    "inference_sessions",
+    "inference_claims",
+    "inference_disputes",
+    "inference_verifiers",
+    "edu_catalog_entries",
+    "edu_catalog_prerequisites",
+    "edu_catalog_accreditation",
+    "edu_catalog_content_items",
+    "edu_catalog_by_institution",
+    "edu_catalog_by_code",
+    "edu_catalog_by_status",
+    "edu_offerings",
+    "edu_instructor_bindings",
+    "edu_content_items",
+    "edu_assessments",
+    "edu_enrollment_links",
+    "edu_submissions",
+    "edu_grades",
+    "edu_offering_by_catalog",
+    "edu_offering_by_status",
+    "edu_submission_by_student_commitment",
+    "docclass_identity_roots",
+    "docclass_eligibility",
+    "docclass_credentials",
+    "docclass_revocations",
+    "docclass_issuers",
+    "docclass_subject_index",
+    "docclass_issuer_index",
+    "docclass_events",
+    "messaging_config",
+    "messaging_sender_nonces",
+    "messaging_daily_counts",
+    "messaging_stakes",
+    "messaging_spam_scores",
+    "messaging_inbox_filters",
+    "messaging_contacts",
+    "messaging_blocked",
+    "messaging_pending_payments",
+    "messaging_events",
+    "messaging_sender_events",
+    "messaging_payments_by_recipient",
+    "messaging_public_keys",
+    "contract_code",
+    "contract_storage",
+    "contract_metadata",
+    "contract_state_diffs",
+    "tax_claim_types",
+    "tax_issuers",
+    "tax_policies",
+    "tax_proofs",
+    "tax_disclosures",
+    "tax_subject_index",
+    "tax_issuer_index",
+    "tax_events",
+    "equity_entities",
+    "equity_governance",
+    "equity_tokens",
+    "equity_balances",
+    "equity_controllers",
+    "equity_corporate_actions",
+    "equity_snapshots",
+    "equity_proofs",
+    "equity_entity_index",
+    "equity_holder_index",
+    "equity_events",
+    "agreement_commitments",
+    "agreement_signatures",
+    "agreement_attestations",
+    "agreement_ip_actions",
+    "agreement_executor_links",
+    "agreement_proofs",
+    "agreement_party_index",
+    "agreement_executor_index",
+    "agreement_events",
+    "legal_cases",
+    "legal_events",
+    "legal_orders",
+    "legal_benefits",
+    "legal_proofs",
+    "legal_case_event_index",
+    "legal_case_order_index",
+    "legal_jurisdiction_index",
+    "legal_system_events",
+    "property_assets",
+    "property_title_events",
+    "property_encumbrances",
+    "property_coverage",
+    "property_claims",
+    "property_proofs",
+    "property_asset_title_index",
+    "property_asset_encumbrance_index",
+    "property_asset_coverage_index",
+    "property_coverage_claim_index",
+    "property_jurisdiction_index",
+    "property_system_events",
+    "healthcare_providers",
+    "healthcare_memberships",
+    "healthcare_consents",
+    "healthcare_prescriptions",
+    "healthcare_proofs",
+    "healthcare_provider_network_index",
+    "healthcare_member_index",
+    "healthcare_subject_consent_index",
+    "healthcare_patient_rx_index",
+    "healthcare_prescriber_rx_index",
+    "healthcare_system_events",
+    "healthcare_member_address_index",
+    "healthcare_subject_address_index",
+    "healthcare_patient_address_index",
+    "employment_issuers",
+    "employment_credentials",
+    "employment_income_attestations",
+    "employment_proofs",
+    "employment_employee_index",
+    "employment_employee_address_index",
+    "employment_income_holder_address_index",
+    "employment_employer_index",
+    "employment_subject_income_index",
+    "employment_system_events",
+    "finance_issuers",
+    "finance_address_proofs",
+    "finance_bank_standings",
+    "finance_kyc_attestations",
+    "finance_proofs",
+    "finance_subject_address_index",
+    "finance_subject_bank_index",
+    "finance_subject_kyc_index",
+    "finance_holder_address_proof_index",
+    "finance_holder_bank_index",
+    "finance_holder_kyc_index",
+    "finance_jurisdiction_index",
+    "finance_system_events",
+    "policy_accounts",
+    "policy_proposals",
+    "gov_registry",
+    "gov_proposals",
+    "gov_votes",
+    "gov_snapshots",
+    "gov_proposal_index",
+    "gov_qualifying_assets",
+    "gov_equity_class_roots",
+    "gov_equity_used_commitments",
+    "node_registry",
+    "storage_metadata",
+    "active_challenges",
+    "tx_by_sender",
+    "tx_by_recipient",
+    "compute_pool_state",
+    "compute_pool_state_diffs",
+    "beacon_state",
+    "beacon_state_diffs",
+    "application_journal",
+];
+
+#[test]
+fn the_column_families_are_exactly_mains() {
+    assert_eq!(sumchain_storage::db::ALL_CFS, MAIN_ALL_CFS);
+}
+
+#[test]
+fn a_record_is_one_meta_row_under_its_prefix() {
+    let n = node();
+    let mut c = candidate(&n.db);
+    let mut s = Submitter::new(&n.db);
+    let four = vset(&[1, 2, 3, 4]);
+    assert_eq!(
+        s.run(&n, &mut c, REG, register(H + 50, &record(1), &[1, 2, 3]), H, &four),
+        TxStatus::Success
+    );
+    let view = c.view();
+    let rows: Vec<(Vec<u8>, Vec<u8>)> = view
+        .prefix_iter(cf::META, REGISTRY_RECORD_KEY_PREFIX)
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(rows.len(), 1);
+    let (key, value) = &rows[0];
+    assert_eq!(key, &registry_record_key(&[1; 32]));
+    assert_eq!(key.len(), REGISTRY_RECORD_KEY_PREFIX.len() + 32);
+    assert_eq!(value, &record(1).try_encode().unwrap());
+}
+
+/// Every `b"…"` literal in `src` (simple escapes only), as
+/// `storage/tests/certified_meta_v1.rs` collects them.
+fn byte_literals(src: &str) -> Vec<Vec<u8>> {
+    let bytes = src.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        let starts = bytes[i] == b'b'
+            && bytes[i + 1] == b'"'
+            && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'));
+        if !starts {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 2;
+        let mut lit = Vec::new();
+        while j < bytes.len() && bytes[j] != b'"' {
+            if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                match bytes[j + 1] {
+                    b'0' => lit.push(0),
+                    b'n' => lit.push(b'\n'),
+                    b't' => lit.push(b'\t'),
+                    b'x' if j + 3 < bytes.len() => {
+                        let h = std::str::from_utf8(&bytes[j + 2..j + 4]).unwrap_or("00");
+                        lit.push(u8::from_str_radix(h, 16).unwrap_or(0));
+                        j += 2;
+                    }
+                    c => lit.push(c),
+                }
+                j += 2;
+            } else {
+                lit.push(bytes[j]);
+                j += 1;
+            }
+        }
+        out.push(lit);
+        i = j + 1;
+    }
+    out
+}
+
+fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == "target") {
+                continue;
+            }
+            rust_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// The `registry/` namespace of `cf::META` is this module's alone, and the
+/// record prefix overlaps no other META key: no existing exact read or prefix
+/// scan can see a registry row, and no registry scan can see another row.
+#[test]
+fn the_record_prefix_is_disjoint_from_every_meta_key_in_the_repository() {
+    use sumchain_storage::certified_meta::{CERTIFICATE_KEY_PREFIX, FINALIZED_POINTER_KEY};
+    use sumchain_storage::schema::meta_keys;
+
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&crates).unwrap() {
+        let dir = entry.unwrap().path();
+        for sub in ["src", "tests"] {
+            let d = dir.join(sub);
+            if d.is_dir() {
+                rust_files(&d, &mut files);
+            }
+        }
+    }
+    assert!(files.len() > 100, "the scan found too few files to mean anything");
+    // This module, its tests, and the certified-commit list that names it.
+    let own = [
+        "state/src/registry_ingress.rs",
+        "state/tests/registry_ingress.rs",
+        "storage/tests/certified_meta_v1.rs",
+    ];
+    let mut literals = std::collections::BTreeSet::new();
+    for f in &files {
+        if own.iter().any(|o| f.ends_with(o)) {
+            continue;
+        }
+        literals.extend(byte_literals(&std::fs::read_to_string(f).unwrap()));
+    }
+
+    let p = REGISTRY_RECORD_KEY_PREFIX;
+    let reserved: Vec<String> = literals
+        .iter()
+        .filter(|l| l.starts_with(b"registry/"))
+        .map(|l| String::from_utf8_lossy(l).into_owned())
+        .collect();
+    assert!(reserved.is_empty(), "other literals in registry/: {reserved:?}");
+    let prefixes: Vec<String> = literals
+        .iter()
+        .filter(|l| l.ends_with(b"/") && p.starts_with(l))
+        .map(|l| String::from_utf8_lossy(l).into_owned())
+        .collect();
+    assert!(prefixes.is_empty(), "literals that prefix {p:?}: {prefixes:?}");
+    for key in [
+        meta_keys::LATEST_BLOCK_HASH,
+        meta_keys::LATEST_BLOCK_HEIGHT,
+        meta_keys::GENESIS_HASH,
+        meta_keys::CHAIN_ID,
+        meta_keys::FINALIZED_HEIGHT,
+        meta_keys::FINALIZED_HASH,
+        CERTIFICATE_KEY_PREFIX,
+        FINALIZED_POINTER_KEY,
+        &b"messaging/registry_seed_v1"[..],
+    ] {
+        assert!(
+            !key.starts_with(p) && !p.starts_with(key),
+            "{} overlaps the registry prefix",
+            String::from_utf8_lossy(key)
         );
     }
 }

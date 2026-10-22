@@ -228,7 +228,7 @@ No code is allocated. On this binary, a transaction naming operation 8 or 9 does
 | a named parameter unset, or no genesis block hash (Q1) | `Failed(302)` | none | unchanged | none |
 | payload does not decode (§3) | `Failed(302)` | none | unchanged | none |
 | any §7 refusal, including expiry and window (Q2) | `Failed(303)` | charged if affordable | +1 if charged | none |
-| accepted | `Success` | charged | +1 | one row in `registry_records` |
+| accepted | `Success` | charged | +1 | one `cf::META` row under `registry/record/v1/` |
 
 ## 11. Replay protection
 
@@ -242,17 +242,16 @@ No code is allocated. On this binary, a transaction naming operation 8 or 9 does
 
 ## 12. State
 
-- **Family:** records live in a new column family, `registry_records`.
-  - Key: `id` (32 bytes).
+- **No new column family.** Records are versioned keys in the existing `cf::META`, as #337 stores certificates. `ALL_CFS` is byte-identical to `e3b8ff81`, and a test checks this. A family a binary does not name makes the volume unopenable by that binary, and the 0.2.0-era binary would auto-repair it to empty. Keys in an existing family carry no such hazard.
+  - Key: `REGISTRY_RECORD_KEY_PREFIX` `"registry/record/v1/"` (19 bytes) ‖ `id` (32), 51 bytes. The `registry/` namespace is prefix-free with every META key in the repository; a test scans the source to check this, as #337's does.
   - Value: the 154-byte `RegistryRecordV1` encoding.
   - A stored row that does not decode, or names another `id`, is an error, never "no record".
-- **No committed digest:** like every governance family, it is not folded into any committed digest (Q12).
-- **Undo:** rows are staged in the block's candidate like every governance family. Where the generic application journal is active, it records their pre-images like any other family's; it keeps no per-family list.
-- **Older binaries:** once this binary has opened a database, the database contains the family, and an older binary will not open it (Q13).
+- **No committed digest:** `cf::META` is not folded into any committed digest (Q12).
+- **Undo:** rows are staged in the block's candidate. Where the generic application journal is active, it records their pre-images like any other row's.
 
 ## 13. Consequences and activation prerequisites
 
-1. **This PR changes no decoding.** `GovernanceOperation` keeps exactly its eight variants (0 to 7). A governance transaction naming 8 or 9 fails to decode with the same error as on the base (`invalid value: integer 8, expected variant index 0 <= i < 8`), and a block holding one is rejected whole. `governance_operations_8_and_9_do_not_decode` pins this for the payload, the signed transaction and the block. An upgraded and a non-upgraded node therefore agree on every block.
+1. **This PR changes no decoding.** `GovernanceOperation` keeps exactly its eight variants (0 to 7). A governance transaction naming 8 or 9 fails to decode with the same error as on the base (`invalid value: integer 8, expected variant index 0 <= i < 8`), and a block holding one is rejected whole. Tests pin this for the payload, the signed transaction and the block (`governance_operations_8_and_9_do_not_decode`), for a synced `SyncResponse::Blocks`, and for `send_raw_transaction`, which leaves the mempool empty. An upgraded and a non-upgraded node therefore agree on every block.
 
    **Adding the two wire variants belongs to the activation change.** It is a coordinated, same-window upgrade: once a binary decodes operation 8 or 9, an earlier binary rejects any block that holds one. If an operation that refuses before semantics (`300`–`302`, no fee) could be included in a block, it would also take block space for free. The decision document does not state either point (Q14).
 2. **Activation needs all of the following:**
@@ -266,30 +265,30 @@ No code is allocated. On this binary, a transaction naming operation 8 or 9 does
    None of this is done here.
 3. **The validator signing tool must include the genesis hash and `valid_until`.**
 
-## 14. Open questions (protocol choices not in the proposal)
+## 14. Questions, consolidated
 
-The code takes no position on these, or takes only the provisional one stated. Each is for the ratification review.
+There are three groups: (a) settled by the decision ledger (`DECISION-RECORD-20261016.md`); (b) routine implementation choices, resolved in this PR; (c) protocol decisions for ratification, each with a recommendation. No resolution in (b) changes dormancy.
 
-| # | Question | What this PR does |
-|---|---|---|
-| Q1 | Which code, and which fee policy, applies when a named parameter or the genesis hash is missing | `302`, pre-semantic (Policy-B's "params" class; §5's "unsupported operation"). The alternatives are `301`, or `303` with fee. |
-| Q2 | Which code applies to an expired or out-of-window `valid_until` (not in §5) | `303`, semantic, because it depends on height |
-| Q3 | What the record `approval_threshold_bps` default means: a floor, an exact requirement, or a tooling default | It is required to be set, and is otherwise unread |
-| Q4 | Governance-v1 `verify` or E1 `verify_strict` for registry approvals | The governance-v1 convention (§5) |
-| Q5 | Registering the parameters and the new constants in the consensus configuration (#268; a schema 3) | Not done. The census marks each constant `EXCLUDE unratified-unset`, on the condition that the change that sets values commits them first. |
-| Q6 | Where ratified values live: a compiled constant (now) or genesis `GovernanceParams` fields | A compiled `UNSET` constant |
-| Q7 | Supplying the genesis block hash in production | Not wired. The engines leave it `None`, and the operations refuse. |
-| Q8 | Which transactions are the commit-side consumers, and with which receipt | `v_check_commit` exists; nothing calls it |
-| Q9 | Whether all-zero commitments are refused. `registry_dryRunAdmit` refuses them; the proposal's register rules do not. | Accepted, as the proposal states. Dry run and execution disagree on this. |
-| Q10 | Dry run requires `activation_height > chain height`; register requires `≥ h + T_min` | Per the proposal. They agree only if T_min ≥ 1. |
-| Q11 | A bound on k below `u16::MAX` | None |
-| Q12 | Whether registry rows enter a committed digest | No (governance-v1 precedent) |
-| Q13 | Storage location: a new family, or an injected layout as recent dormant seams use | A new family (governance-v1 precedent) |
-| Q14 | Mechanism B's wire-decoding consequence (§13.1) | Resolved for this PR: no wire variant is added, decoding is unchanged and tested. Adding the variants is the activation change, which is a coordinated upgrade. |
-| Q15 | The decision record says a departed validator's approval "doesn't count"; the quorum rule refuses the operation | The quorum rule (refuse) |
-| Q16 | Unordered or duplicate approvals as a decode refusal (`302`) or a quorum refusal (`303`) | `302`, derived from §2 and §6 of the decision document |
-| Q17 | Whether registry needs its own threshold value instead of the governance-wide one | The governance value under B2, once the source is set |
-| Q18 | Whether register checks how `id` is derived (for example `vk_id`) | No check, as in the proposal |
+| Grp | Q | Resolution or recommendation | Consequence or citation |
+|---|---|---|---|
+| a | Q5 consensus-config registration | Schema 2 is fixed. New committed fields need an explicit schema-evolution proposal, which belongs to the activation change. | Ledger G3, "Placement: CORRECTED", 2026-10-16 |
+| a | Q13 storage | Versioned `cf::META` keys, no new column family. Applied: `registry/record/v1/` ‖ id; `ALL_CFS` equals main's (tested). | Ledger 2026-10-19 ("not authorized: a new storage column family") and 2026-10-20 (certificate storage direction, #337) |
+| b | Q1 missing parameter | `302`, pre-semantic | Defensive only: the ledger's C5 note (2026-10-21) makes activation with a missing value impossible |
+| b | Q2 expiry and window | `303`, fee charged | Height-dependent, like every other authorization refusal |
+| b | Q7 genesis hash | The activation change supplies `create_genesis_block().hash()` (config field `0x0005`) | Refuses until then |
+| b | Q10 dry-run activation check | Unchanged now; the activation change aligns `registry_dryRunAdmit` to `h + T_min` | Non-consensus RPC |
+| b | Q11 bound on k | None beyond `u16` | Every approval must be a distinct active validator, so a valid k ≤ n ≤ 29,127 (VS-6(a)); entries are length-checked before allocation |
+| b | Q14 wire decoding | No wire variants. Decoding is unchanged and tested for the payload, transaction, block, sync response and RPC. | Adding the variants is the activation change, a coordinated same-window upgrade |
+| b | Q15 departed approvals | The `verify_validator_quorum` rule named by the proposal: the operation is refused | Submitters drop departed approvals |
+| b | Q16 approval order | Decode refusal (`302`) | The order is part of the §3 layout |
+| b | Q18 `id` derivation | No check | Not checkable: `vk_id` needs the manifest hash, which the record does not carry |
+| c | Q3 record default threshold | **Recommend:** a tooling default, not consensus, removed from the activation-required set | Three values to ratify, not four. B2's floor (record ≥ governance) already bounds every record. |
+| c | Q4 signature rule | **Recommend:** keep governance-v1 `verify` | One rule for every validator-quorum action. VS-5 already excludes small-order and non-canonical keys from the set. Moving governance to E1 later is one change covering all of them. |
+| c | Q6 where values live | **Recommend:** `GovernanceParams` fields in genesis, registered by the Q5 proposal, like `validator_authority_threshold_bps` | The values are committed in the consensus configuration; changing them is a coordinated upgrade |
+| c | Q8 commit consumers | **Recommend:** decide with the first proof-verifying consumer (#128). It calls `v_check_commit` and maps a refusal to its own existing invalid-input code. | No new code. Until then, nothing enforces the commit-side timelock. |
+| c | Q9 all-zero commitments | **Recommend:** refuse at register (`303`), as `registry_dryRunAdmit` does under #217 B1 | Dry run and execution agree; one more register rule |
+| c | Q12 committed digest | **Recommend:** fold registry rows into the block state digest at activation, as compute-pool and beacon state are, and carry them in snapshots | One more digest byte table to ratify. Divergent registry state then shows as a root mismatch, not a silent fork. |
+| c | Q17 register threshold | **Recommend:** B2 as proposed (the governance threshold) | Registry admission moves with governance; a record can still require more for its own disable |
 
 ## 15. Vectors and tests
 
@@ -321,3 +320,6 @@ The code takes no position on these, or takes only the provisional one stated. E
 | Each missing parameter; production defaults; gate and params first | `any_single_missing_named_parameter_refuses_free`, `production_defaults_refuse_…`, `governance_gate_and_params_still_come_first` |
 | Non-canonical `S` | `signature_convention_refuses_a_non_canonical_s` |
 | Operations 8 and 9 still refused at decode (payload, transaction, block), same error as on the base | `governance_fixtures.rs::governance_operations_8_and_9_do_not_decode`, `vectors_are_reproduced_and_execute` |
+| The same through block sync (`SyncCodec::read_response`), with operation 7 as the control | `crates/p2p/tests/governance_ops_8_9_sync.rs` |
+| `send_raw_transaction` refuses operations 8 and 9 at decode; the mempool stays empty | `crates/rpc/tests/governance_ops_8_9_rpc.rs` |
+| `ALL_CFS` byte-identical to main; a record is one META row under its prefix; the prefix is disjoint from every META key | `the_column_families_are_exactly_mains`, `a_record_is_one_meta_row_under_its_prefix`, `the_record_prefix_is_disjoint_from_every_meta_key_in_the_repository` |
