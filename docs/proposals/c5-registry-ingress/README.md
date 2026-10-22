@@ -4,7 +4,7 @@
 
 - **Mechanism:** B of the C5 decision document. Governance-v1 operations 8 (register) and 9 (disable) inside `TxType::Governance = 23`. There is no new transaction type, no `RegistryWireOp` namespace, no new gate and no new receipt code (`Failed(418)` stays unallocated).
 - **Not on the wire:** this PR does **not** add the two `GovernanceOperation` variants. A governance transaction naming 8 or 9 is refused at decode exactly as on the base, and a block holding one is rejected (§13). The codecs and the executor logic are reached only through `governance_executor::execute_registry_ingress`, which nothing but the tests calls. Adding the wire variants is part of the separately authorized activation change.
-- **Authorization:** a quorum of the active PoA validator set at the execution height, verified by the existing `validator_quorum::verify_validator_quorum`. Register uses the authenticated governance threshold (Q17, decided); disable uses the stored record's threshold (B2). `tx.from` only pays the fee.
+- **Authorization:** a quorum of the active PoA validator set at the execution height, verified by the existing `validator_quorum::verify_validator_quorum`. Register uses the authenticated governance threshold (Q17, decided). The register floor and disable's stored-record threshold are B2, PROPOSED and not owner-decided. `tx.from` only pays the fee.
 - **State:** dormant and unwired. Even by direct call, both operations refuse with `302` before reading their payload: both named parameters are unset (§9), and nothing supplies a genesis block hash.
 - **Refs:** #242, #128. Base: `main` `e3b8ff81`.
 
@@ -142,7 +142,7 @@ The active set **V** is the list of validator pubkeys consensus supplies for the
 
 1. `1 ≤ t ≤ 10000`;
 2. n ≥ 1;
-3. every approval's pubkey is in V. **An approval from a key outside V refuses the whole operation; it is not ignored** (open question Q15 on the decision document's wording);
+3. every approval's pubkey is in V. **An approval from a key outside V refuses the whole operation; it is not ignored** (Q15, resolved in group (b) of §14);
 4. no pubkey repeats (already excluded by §3.4);
 5. every signature verifies (§5);
 6. k ≥ `required`, where k is the number of approvals and `required = ceil(n·t / 10000) = (n·t + 9999) div 10000`.
@@ -189,7 +189,7 @@ Accepted only if **all** of these hold:
 4. **Proof system:** `record.proof_system_id ∈ admitted_proof_systems()`, which is {2, RISC0}, fixed by B0-FINAL. `registry_dryRunAdmit` reads the same function.
 4a. **Commitments set (Q9, decided 2026-10-22):** none of `audit_commitment`, `source_commitment` and `ceremony_commitment` is 32 zero bytes (`unset_commitments`). `registry_dryRunAdmit` refuses exactly the same names (`commitment_unset`), and a test checks that they agree.
 5. **Timelock floor:** `activation_height ≥ h + T_min`, in exact arithmetic (§8).
-6. **Threshold (Q17, decided 2026-10-22):** `t = GovernanceParams.validator_authority_threshold_bps`, the authenticated governance threshold from chain parameters. It is never taken from the operation or from a tooling default. Then `record.approval_threshold_bps ≥ t`.
+6. **Threshold (Q17, decided 2026-10-22):** `t = GovernanceParams.validator_authority_threshold_bps`, the authenticated governance threshold from chain parameters. It is never taken from the operation or from a tooling default. **Floor (B2, PROPOSED, not owner-decided):** `record.approval_threshold_bps ≥ t`. Q17 decides only what t is.
 7. **New id:** no record with `record.id` exists, Enabled or Disabled.
 8. **Quorum:** §6 over the §4.1 preimage at threshold `t`.
 
@@ -201,7 +201,7 @@ Accepted only if **all** of these hold:
 
 1. **Approval window:** as for register.
 2. **Record:** the record `id` exists and is Enabled.
-3. **Quorum:** §6 over the §4.2 preimage at `t = stored.approval_threshold_bps` (B2). Neither threshold is ever read from the operation bytes.
+3. **Quorum (B2, PROPOSED, not owner-decided):** §6 over the §4.2 preimage at `t = stored.approval_threshold_bps`. Q17 covers register only. Neither threshold is ever read from the operation bytes.
 
 On acceptance, the stored record's `status` becomes Disabled; every other byte is unchanged. **Disabled is terminal:** there is no re-enable, and because the row remains, rule 7 refuses any later register of that `id`.
 
@@ -297,7 +297,7 @@ There are three groups: (a) settled by the decision ledger (`DECISION-RECORD-202
 | a | Q8 commit consumers | Decided with the first proof consumer (#128). Until then nothing in production calls `v_check_commit`, `check_commit` or `execute_registry_ingress`. | Owner 2026-10-22. Guarded by `no_production_code_calls_the_commit_check_or_the_registry_entry`. |
 | a | Q18 `id` derivation | Bound to Q8: the consumer checks that its verifier material derives to the record `id`. Register cannot, because the record does not carry the manifest hash. | Owner 2026-10-22 |
 | a | Q9 all-zero commitments | Refused at register: `303`, fee charged per Policy-B, no state change (rule 4a, §10). The dry run refuses the same names. | Owner 2026-10-22. Tests `register_refuses_any_all_zero_commitment` and `registry_dry_run_agrees.rs`. |
-| a | Q13 storage | Versioned `cf::META` keys, no new column family. Applied: `registry/record/v1/` ‖ id; `ALL_CFS` equals main's (tested). | Settled by owner instruction plus precedent: the owner's 2026-10-21 instruction "Keep #348 dormant". The certificate-storage entries are precedent only: ledger 2026-10-19 (L508, "not authorized: a new storage column family") and 2026-10-20 (L540, versioned META keys, #337). |
+| a | Q13 storage | The current dormant placement is `cf::META` under `registry/record/v1/` ‖ id, with no new column family and `ALL_CFS` equal to main's (tested). It is superseded if the §14.1 storage recommendation (STATE plus the fold) is adopted. | Settled by owner instruction plus precedent: the owner's 2026-10-21 instruction "Keep #348 dormant". The certificate-storage entries are precedent only: ledger 2026-10-19 (L508, "not authorized: a new storage column family") and 2026-10-20 (L540, versioned META keys, #337). |
 | a | Q17 register threshold | The authenticated governance threshold, `validator_authority_threshold_bps`, under the existing rule verbatim (§6) | Owner 2026-10-22. Boundary tests and `prospective_quorum.*` vectors. |
 | b | Q1 missing parameter | `302`, pre-semantic | Defensive only: the ledger's C5 note (2026-10-21) makes activation with a missing value impossible |
 | b | Q2 expiry and window | `303`, fee charged | Height-dependent, like every other authorization refusal |
@@ -309,6 +309,7 @@ There are three groups: (a) settled by the decision ledger (`DECISION-RECORD-202
 | b | Q16 approval order | Decode refusal (`302`) | The order is part of the §3 layout |
 | c | Q4 signature rule | **Recommend:** keep governance-v1 `verify` (§14.1, part 1) | One rule for every governance quorum action. Under VS-5, `verify` and `verify_strict` accept the same signatures from real approvers. Condition: VS-5 is in effect on every node before activation. |
 | c | Q6 where values live | **Recommend:** genesis `GovernanceParams` fields, as draft schema-3 entries `0x0609`/`0x060a`, in the range `1..=u32::MAX`, with no defaults, plus the present-only protocol-digest trailer (§14.1, part 2) | Every existing digest and commitment stays byte-identical; changing a value is a coordinated same-window upgrade |
+| c | B2 thresholds | **Recommend:** keep B2. Register requires `record.approval_threshold_bps ≥` the governance threshold, and disable is authorized at the stored record's threshold. Both come from authenticated state (chain parameters and a quorum-registered record), as Q3 requires. | A record can demand more for its own disable than governance requires. Neither threshold is read from operation bytes or a tooling default. |
 | c | Q12 committed digest | **Recommend:** move the records to `cf::STATE` under `registry/v1/` ‖ id, with a gated registry state fold after the beacon digest. `"state:registry"` joins the fast-sync families at activation (§14.1, part 3). | Roots stay byte-identical while dormant. Divergence becomes a root mismatch, and the registry fold byte table must be ratified. |
 
 ### 14.1 Recommendation (PROPOSED)
