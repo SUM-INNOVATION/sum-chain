@@ -539,14 +539,6 @@ pub mod cf {
     /// `proposal_id (32) || holder_commitment (32)` (64). Value: `&[]` (presence).
     pub const GOV_EQUITY_USED_COMMITMENTS: &str = "gov_equity_used_commitments";
 
-    // C5 registry ingress (#242), PROPOSED and dormant: governance-v1
-    // operations 8 and 9 refuse while their named parameters are unset, so no
-    // binary with unset parameters writes a row here. Not folded into any
-    // committed digest, like every governance family.
-    /// Registry records. Key: the record `id` (32). Value: the frozen 154-byte
-    /// `RegistryRecordV1` encoding; a disable rewrites it with `status = 1`.
-    pub const REGISTRY_RECORDS: &str = "registry_records";
-
     // C1 dormant compute-pool state (issue #130). DORMANT: no gate, no wire
     // ordinal, no consensus commitment. These rows never participate in a state
     // root; they exist only for local persistence + reorg revert, exactly like
@@ -784,8 +776,6 @@ pub const ALL_CFS: &[&str] = &[
     cf::GOV_QUALIFYING_ASSETS,
     cf::GOV_EQUITY_CLASS_ROOTS,
     cf::GOV_EQUITY_USED_COMMITMENTS,
-    // C5 registry ingress (#242, PROPOSED, dormant)
-    cf::REGISTRY_RECORDS,
     // Node Registry
     cf::NODE_REGISTRY,
     // Storage Metadata
