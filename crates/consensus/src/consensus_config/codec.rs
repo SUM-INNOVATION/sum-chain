@@ -66,8 +66,8 @@ pub const MAX_ENCODING_BYTES: usize = 4 << 20;
 /// every field against the decoder's bounds), so no configuration this binary
 /// builds is one its decoder would refuse. The dormant finality validator set
 /// has its own `u16` cap of 65,535 (`MAX_VALIDATORS`); the effective cap of a
-/// chain is the minimum of the two, 29,127. Changing either bound is a separate,
-/// ratified decision.
+/// chain is the minimum of the two, 29,127 (VS-6(a), ratified 2026-10-21).
+/// Changing either bound is a separate, ratified decision.
 pub const MAX_ENCODABLE_VALIDATORS: usize = (MAX_FIELD_VALUE_BYTES as usize - 4) / (4 + 32);
 
 const HEADER_LEN: usize = MAGIC.len() + 2 + 2;

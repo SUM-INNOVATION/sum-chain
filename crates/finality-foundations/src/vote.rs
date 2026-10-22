@@ -56,11 +56,18 @@
 //!
 //! # Not here
 //!
-//! * A RATIFIED validator-set commitment. [`validator_set_commitment`] and
-//!   [`AuthenticatedValidatorSet::from_keys`] implement the PROPOSED, UNRATIFIED
-//!   draft §2 derivation, `BLAKE3-256(D_VALSET ‖ n:u16 LE ‖ keys)`, for review
-//!   only; [`AuthenticatedValidatorSet::new`] still takes the caller's
-//!   commitment unchecked.
+//! * A live caller of the validator-set commitment.
+//!   [`validator_set_commitment`] and [`AuthenticatedValidatorSet::from_keys`]
+//!   implement `BLAKE3-256(D_VALSET ‖ n:u16 LE ‖ keys)` (VS-1).
+//!   * It is computed only over a set that passes the construction rules
+//!     (VS-3).
+//!   * It is always derived from the keys (VS-4).
+//!   * The keys are in the static genesis declared order of field `0x0003`
+//!     (G2-d).
+//!
+//!   These are settled by the owner, 2026-10-21 (decision ledger), and are
+//!   dormant: no live caller. [`AuthenticatedValidatorSet::new`] still takes
+//!   the caller's commitment unchecked.
 //! * The certificate layout, evidence layout (A3) and signer state (A2). The
 //!   durable signer does not yet decode its payload as a vote; binding it is a
 //!   follow-up once A2 is ratified.
@@ -301,21 +308,24 @@ pub enum ValidatorSetError {
     CommitmentMismatch,
 }
 
-/// Domain of the validator-set commitment (draft §2). PROPOSED, UNRATIFIED.
+/// Domain of the validator-set commitment (VS-1): settled by the owner,
+/// 2026-10-21 (decision ledger); dormant — no live caller.
 pub const D_VALSET: &[u8; 19] = b"SUMCHAIN/VALSET/v1\0";
 
 /// Length of the validator-set commitment preimage for `n` validators:
 /// `19 + 2 + 32·n` (85 B at n = 2, 149 B at n = 4, 2,097,141 B at n = 65,535).
-/// PROPOSED, UNRATIFIED.
+/// VS-1: settled by the owner, 2026-10-21 (decision ledger); dormant — no live
+/// caller.
 pub const fn validator_set_preimage_len(n: u16) -> usize {
     D_VALSET.len() + 2 + 32 * n as usize
 }
 
 /// The validator-set commitment preimage `D_VALSET ‖ n:u16 LE ‖ key_0 ‖ … ‖
 /// key_{n-1}`, the keys in authenticated order exactly as given. Refused as
-/// [`AuthenticatedValidatorSet::from_keys`] refuses. PROPOSED, UNRATIFIED:
-/// exposed for vectors and review; [`validator_set_commitment`] hashes the same
-/// bytes without building them.
+/// [`AuthenticatedValidatorSet::from_keys`] refuses. VS-1: settled by the
+/// owner, 2026-10-21 (decision ledger); dormant — no live caller. Exposed for
+/// vectors and review; [`validator_set_commitment`] hashes the same bytes
+/// without building them.
 pub fn validator_set_preimage(keys: &[[u8; 32]]) -> Result<Vec<u8>, ValidatorSetError> {
     let n = checked_keys(keys)?.1;
     let mut out = Vec::with_capacity(validator_set_preimage_len(n));
@@ -329,10 +339,11 @@ pub fn validator_set_preimage(keys: &[[u8; 32]]) -> Result<Vec<u8>, ValidatorSet
 
 /// The validator-set commitment `BLAKE3-256(D_VALSET ‖ n:u16 LE ‖ keys)` of a
 /// set that passes every construction rule (count `1 ≤ n ≤ 65,535`, each key
-/// decodable, canonically encoded and not of small order, no duplicate).
-/// Order matters: the keys are taken in authenticated order (under G2-d the
-/// static genesis order, ConsensusConfig field `0x0003 validators`). PROPOSED,
-/// UNRATIFIED.
+/// decodable, canonically encoded and not of small order, no duplicate). Order
+/// matters: the keys are taken in authenticated order (under G2-d the static
+/// genesis order, ConsensusConfig field `0x0003 validators`). VS-1, VS-3, VS-4
+/// and G2-d: settled by the owner, 2026-10-21 (decision ledger); dormant — no
+/// live caller.
 pub fn validator_set_commitment(keys: &[[u8; 32]]) -> Result<Digest, ValidatorSetError> {
     let n = checked_keys(keys)?.1;
     Ok(commit(n, keys))
@@ -408,7 +419,8 @@ impl AuthenticatedValidatorSet {
 
     /// A set from its keys in authenticated order, named by the commitment
     /// derived from them ([`validator_set_commitment`]). Refused as
-    /// [`AuthenticatedValidatorSet::new`] refuses. PROPOSED, UNRATIFIED.
+    /// [`AuthenticatedValidatorSet::new`] refuses. VS-4: settled by the owner,
+    /// 2026-10-21 (decision ledger); dormant — no live caller.
     pub fn from_keys(keys: &[[u8; 32]]) -> Result<AuthenticatedValidatorSet, ValidatorSetError> {
         let (decoded, n) = checked_keys(keys)?;
         Ok(AuthenticatedValidatorSet {
@@ -420,7 +432,8 @@ impl AuthenticatedValidatorSet {
     /// [`AuthenticatedValidatorSet::from_keys`], refused with
     /// [`ValidatorSetError::CommitmentMismatch`] unless the derived commitment
     /// equals `expected`. A commitment is never accepted without its keys.
-    /// PROPOSED, UNRATIFIED.
+    /// VS-4: settled by the owner, 2026-10-21 (decision ledger); dormant — no
+    /// live caller.
     pub fn with_expected_commitment(
         expected: Digest,
         keys: &[[u8; 32]],
