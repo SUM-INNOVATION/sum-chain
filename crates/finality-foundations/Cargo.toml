@@ -17,8 +17,9 @@ thiserror = { workspace = true }
 # `legacy_compatibility` feature must never be enabled anywhere in the
 # workspace: `tests/vote_v1.rs` fails if a manifest names it.
 ed25519-dalek = { workspace = true }
-# The PROPOSED validator-set commitment (`vote::validator_set_commitment`,
-# BLAKE3-256 over draft §2's preimage). Already a workspace dependency.
+# The validator-set commitment (`vote::validator_set_commitment`, BLAKE3-256
+# over the VS-1 preimage; settled by the owner, 2026-10-21, decision ledger;
+# dormant, no live caller). Already a workspace dependency.
 blake3 = { workspace = true }
 
 [dev-dependencies]

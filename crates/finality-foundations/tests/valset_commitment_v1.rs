@@ -1,4 +1,5 @@
-//! The PROPOSED, UNRATIFIED validator-set commitment (draft §2):
+//! The validator-set commitment (VS-1, VS-3, VS-4; settled by the owner,
+//! 2026-10-21 (decision ledger); dormant — no live caller):
 //! `BLAKE3-256(D_VALSET ‖ n:u16 LE ‖ key_0 ‖ … ‖ key_{n-1})`, keys in
 //! authenticated order. Every vector here is SYNTHETIC (test seeds
 //! `[0x01;32]`..`[0x04;32]`) and reproduces `docs/proposals/g2-byte-review/`.
@@ -56,7 +57,7 @@ fn many_keys(n: usize) -> Vec<[u8; 32]> {
 // ------------------------------------------------------------- vectors ----
 
 #[test]
-fn domain_and_sizes_are_as_drafted() {
+fn domain_and_sizes_are_as_settled() {
     assert_eq!(
         std::str::from_utf8(D_VALSET).unwrap(),
         "SUMCHAIN/VALSET/v1\u{0}"
