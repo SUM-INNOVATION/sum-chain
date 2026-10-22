@@ -1299,48 +1299,162 @@ fn register_refuses_any_all_zero_commitment() {
     );
 }
 
+/// Q9's underfunded branch: a sender who cannot cover the fee gets `303` with
+/// fee 0 (`governance_executor.rs:356-363`). Nothing is charged, the nonce is
+/// unchanged, and no record is written.
+#[test]
+fn an_underfunded_zero_commitment_register_is_303_with_no_fee() {
+    let n = node();
+    let mut c = candidate(&n.db);
+    let poor = KeyPair::from_bytes([0x5B; 32]);
+    fund(&n.db, &poor, FEE - 1);
+    let proposer = Address::new([0x99; 20]);
+    let rec = with(|r| r.audit_commitment = [0; 32]);
+    let r = execute_registry_ingress(
+        &mut c.view(),
+        CHAIN,
+        &n.params,
+        REG,
+        &register(H + 50, &rec, &[1, 2, 3]),
+        &poor.address(),
+        FEE,
+        &proposer,
+        H,
+        Hash::ZERO,
+        &vset(&[1, 2, 3, 4]),
+        RegistryIngressContext {
+            params: &n.registry,
+            genesis_block_hash: n.genesis.as_ref(),
+        },
+    )
+    .unwrap();
+    assert_eq!(r.status, TxStatus::Failed(303));
+    assert_eq!(r.fee_paid, 0);
+    assert_eq!(StateManager::v_get_nonce(&c.view(), &poor.address()).unwrap(), 0);
+    assert_eq!(StateManager::v_get_balance(&c.view(), &poor.address()).unwrap(), FEE - 1);
+    assert_eq!(StateManager::v_get_balance(&c.view(), &proposer).unwrap(), 0);
+    assert_eq!(stored(&mut c, 1), None);
+}
+
 // ── Guards: no tooling default, no reachable consumer ───────────────────────
 
-/// Production source of every crate under `crates/`, as (repo-relative path,
-/// code): `#[cfg(test)] mod …` bodies cut, comment lines dropped.
+/// Every workspace member's non-test source, as (repo-relative path, text).
+///
+/// The members are read from the workspace `Cargo.toml`, so a new member is
+/// scanned without editing this list. Skipped: `tests/` and `target/`
+/// directories, and in Rust files each `#[cfg(test)]` item by its own brace
+/// span (not everything after the first one) and `//` comment lines. Shell
+/// and Python files (the `scripts` member's) are kept whole.
 fn production_code() -> Vec<(String, String)> {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest = std::fs::read_to_string(repo.join("Cargo.toml")).unwrap();
+    let start = manifest.find("members = [").expect("workspace members");
+    let end = start + manifest[start..].find(']').unwrap();
+    let members: Vec<&str> = manifest[start..end].split('"').skip(1).step_by(2).collect();
+    assert!(members.len() > 20 && members.contains(&"scripts"), "{members:?}");
     let mut files = Vec::new();
-    for entry in std::fs::read_dir(&root).unwrap() {
-        let src = entry.unwrap().path().join("src");
-        if src.is_dir() {
-            rust_files(&src, &mut files);
-        }
+    for member in &members {
+        member_files(&repo.join(member), &mut files);
     }
     files.sort();
     assert!(files.len() > 100, "the scan found too few files to mean anything");
     files
         .into_iter()
         .map(|f| {
-            let s = std::fs::read_to_string(&f).unwrap();
-            let cut = s.find("#[cfg(test)]\nmod ").unwrap_or(s.len());
-            let code: String = s[..cut]
-                .lines()
-                .filter(|l| !l.trim_start().starts_with("//"))
-                .map(|l| format!("{l}\n"))
-                .collect();
-            let rel = f.strip_prefix(&root).unwrap().to_string_lossy().into_owned();
-            (format!("crates/{rel}"), code)
+            let text = std::fs::read_to_string(&f).unwrap();
+            let code = if f.extension().is_some_and(|e| e == "rs") {
+                without_test_items(&text)
+            } else {
+                text
+            };
+            let rel = f.strip_prefix(&repo).unwrap().to_string_lossy().into_owned();
+            (rel, code)
         })
         .collect()
 }
 
-/// Occurrences of `name(` not preceded by an identifier character.
-fn calls(code: &str, name: &str) -> usize {
-    let pat = format!("{name}(");
-    code.match_indices(&pat)
+fn member_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            if !path.file_name().is_some_and(|n| n == "target" || n == "tests") {
+                member_files(&path, out);
+            }
+        } else if path.extension().is_some_and(|e| e == "rs" || e == "sh" || e == "py") {
+            out.push(path);
+        }
+    }
+}
+
+/// `src` without its `#[cfg(test)]` items and `//` comment lines. An item
+/// is skipped from its first line to the line that closes the braces that
+/// line opened (or just that line, for `mod tests;`).
+fn without_test_items(src: &str) -> String {
+    let is_test_attr = |t: &str| {
+        t.starts_with("#[cfg(test)]")
+            || t.starts_with("#[cfg(any(test")
+            || t.starts_with("#[cfg(all(test")
+    };
+    let mut out = String::new();
+    let mut depth: i64 = 0;
+    let mut skip_to: Option<i64> = None;
+    let mut pending = false;
+    for line in src.lines() {
+        let t = line.trim_start();
+        let delta = line.matches('{').count() as i64 - line.matches('}').count() as i64;
+        if let Some(d) = skip_to {
+            depth += delta;
+            if depth <= d {
+                skip_to = None;
+            }
+            continue;
+        }
+        let item = if is_test_attr(t) {
+            let rest = t[t.find(']').unwrap() + 1..].trim();
+            if rest.is_empty() {
+                pending = true;
+                continue;
+            }
+            true
+        } else if pending && !(t.is_empty() || t.starts_with("#[") || t.starts_with("//")) {
+            pending = false;
+            true
+        } else {
+            false
+        };
+        if item {
+            if delta > 0 {
+                skip_to = Some(depth);
+            }
+            depth += delta;
+            continue;
+        }
+        depth += delta;
+        if !pending && !t.starts_with("//") {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Every reference to `name` as a whole identifier: a call, an import or a path.
+fn references(code: &str, name: &str) -> usize {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    code.match_indices(name)
         .filter(|(i, _)| {
-            code[..*i]
-                .chars()
-                .next_back()
-                .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+            code[..*i].chars().next_back().is_none_or(|c| !ident(c))
+                && code[*i + name.len()..].chars().next().is_none_or(|c| !ident(c))
         })
         .count()
+}
+
+#[test]
+fn the_test_item_filter_keeps_production_and_drops_only_test_spans() {
+    let src = "fn a() {}\n#[cfg(test)]\nmod t {\n    fn hidden() {}\n}\nfn b() {}\n#[cfg(test)]\nfn c() {\n}\nfn d() {}\n// note e\n";
+    let kept = without_test_items(src);
+    assert_eq!(kept, "fn a() {}\nfn b() {}\nfn d() {}\n");
+    assert_eq!(references("x v_check_commit check_commit(y) check_commits", "check_commit"), 1);
 }
 
 /// Q3 (owner, 2026-10-22): the record default threshold is a tooling-only
@@ -1366,15 +1480,17 @@ fn no_consensus_path_reads_a_tooling_default() {
 }
 
 /// Q8/Q18 (owner, 2026-10-22): commit-side checks are decided with the first
-/// proof consumer (#128), so nothing in production may reach one yet. Each
-/// name below occurs only where it is defined (and `check_commit` once more,
-/// inside `v_check_commit`'s own body). A new caller anywhere fails this test.
+/// proof consumer (#128), so nothing in production may reach one yet. Every
+/// reference to these names (a call, an import, a path) in any workspace
+/// member's non-test source is counted. Each occurs only at its definition,
+/// plus `check_commit`'s import and single call inside `v_check_commit`. A new
+/// reference anywhere fails this test.
 #[test]
 fn no_production_code_calls_the_commit_check_or_the_registry_entry() {
     let allowed: [(&str, &str, usize); 4] = [
         ("crates/sumchain-wire/src/registry_ingress.rs", "check_commit", 1),
         ("crates/state/src/registry_ingress.rs", "v_check_commit", 1),
-        ("crates/state/src/registry_ingress.rs", "check_commit", 1),
+        ("crates/state/src/registry_ingress.rs", "check_commit", 2),
         ("crates/state/src/governance_executor.rs", "execute_registry_ingress", 1),
     ];
     for (file, code) in production_code() {
@@ -1383,7 +1499,7 @@ fn no_production_code_calls_the_commit_check_or_the_registry_entry() {
                 .iter()
                 .find(|(f, n, _)| *f == file && *n == name)
                 .map_or(0, |(_, _, k)| *k);
-            assert_eq!(calls(&code, name), want, "{file}: {name}");
+            assert_eq!(references(&code, name), want, "{file}: {name}");
         }
     }
 }
