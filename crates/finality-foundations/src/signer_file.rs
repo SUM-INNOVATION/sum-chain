@@ -3,12 +3,13 @@
 //!
 //! **Semantics RATIFIED (2026-10-20):** proof-gated height advancement, the
 //! persisted conflict halt, and `PolkaProofV1` verification of lock changes.
-//! **Semantics PROPOSED:** recovery from a conflict halt (the conflict
-//! archive below). **Bytes UNRATIFIED:** every layout and file name below is
-//! a proposal (group A2, revision 5 of the draft: the owner's choice of a
-//! separate halt flag), not frozen.
+//! **Format ratified by the owner, 2026-10-22 (decision ledger); dormant, no node wiring; production durability and activation separate:** the format described in #340: every layout,
+//! digest, side file, archive name and the recovery rules below (group A2,
+//! revision 5 of the draft, with the owner's choice of a separate halt
+//! flag). Verified only within the bounds and limits of the ratification
+//! packet (§6–§7, summarised in #340).
 //!
-//! # `SignerStateV1` layout (UNRATIFIED): 413 bytes
+//! # `SignerStateV1` layout: 413 bytes
 //!
 //! | Offset | Width | Field |
 //! |---|---|---|
@@ -41,7 +42,7 @@
 //! `proof_digest` names (it is the only place the conflicting block is kept);
 //! no lock; the last signature, if any, is kept as evidence.
 //!
-//! # Side file (UNRATIFIED): the retained proof
+//! # Side file: the retained proof
 //!
 //! `proof-<64 hex digest>.v1` holds the bytes `proof_digest` names: the
 //! `PolkaProofV1` that justified the current lock, or, in a halted state, the
@@ -52,7 +53,7 @@
 //! so bytes kept for one lock or halt never pass for another.
 //! At most [`MAX_RETAINED_PROOF_LEN`] bytes.
 //!
-//! # Conflict archive (UNRATIFIED): written before a recovery
+//! # Conflict archive: written before a recovery
 //!
 //! `conflict-<H>.state` (the halted record), `.evidence` (the conflicting
 //! proof), `.resume` (the verified resume certificate), and last
@@ -106,14 +107,14 @@ use crate::Digest;
 pub const D_SIGNER: &[u8; 28] = b"SUMCHAIN/FINALITY/SIGNER/v1\0";
 /// Sign-bytes digest domain.
 pub const D_SIGNBYTES: &[u8; 31] = b"SUMCHAIN/FINALITY/SIGNBYTES/v1\0";
-/// UNRATIFIED: retained-proof digest domain.
+/// Retained-proof digest domain.
 pub const D_PROOF: &[u8; 34] = b"SUMCHAIN/FINALITY/SIGNER-PROOF/v1\0";
 /// Magic.
 pub const MAGIC: &[u8; 7] = b"FSGNv1\0";
 /// Schema.
 pub const SCHEMA: u16 = 1;
 
-/// Field offsets of the UNRATIFIED 413-byte layout.
+/// Field offsets of the 413-byte layout.
 pub mod offset {
     pub const COUNTER: usize = 9;
     pub const CHAIN_ID: usize = 17;
@@ -155,9 +156,9 @@ pub const STATE_FILE: &str = "signer.v1";
 pub const TEMP_FILE: &str = "signer.v1.tmp";
 /// The temporary file renamed to a proof's digest name.
 pub const PROOF_TEMP: &str = "proof.tmp";
-/// UNRATIFIED: recovery-receipt checksum domain.
+/// Recovery-receipt checksum domain.
 pub const D_RECEIPT: &[u8; 37] = b"SUMCHAIN/FINALITY/SIGNER-RECOVERY/v1\0";
-/// UNRATIFIED: recovery-receipt magic.
+/// Recovery-receipt magic.
 pub const RECEIPT_MAGIC: &[u8; 7] = b"FRCVv1\0";
 /// Length of a [`RecoveryReceipt`].
 pub const RECEIPT_LEN: usize = 185;
@@ -321,7 +322,7 @@ fn lock_position(lock: &Lock) -> SignPosition {
     }
 }
 
-/// What a retained or archived object is for (UNRATIFIED). Its context is
+/// What a retained or archived object is for. Its context is
 /// part of the object's digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProofPurpose {
@@ -956,7 +957,7 @@ pub fn sign_bytes_digest<H: StateHasher>(hasher: &H, sign_bytes: &[u8]) -> Diges
     hasher.hash(&pre)
 }
 
-/// UNRATIFIED: the receipt that closes a conflict archive, 185 bytes.
+/// The receipt that closes a conflict archive, 185 bytes.
 ///
 /// | Offset | Width | Field |
 /// |---|---|---|

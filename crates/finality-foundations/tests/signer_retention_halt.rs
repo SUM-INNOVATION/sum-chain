@@ -1,9 +1,9 @@
 //! The retained lock proof and the persisted conflict halt (semantics
 //! RATIFIED 2026-10-20; the 413-byte layout, the side files and the conflict
-//! archive UNRATIFIED),
+//! archive ratified by the owner, 2026-10-22 (decision ledger); dormant, no node wiring; production durability and activation separate),
 //! over the file-backed store and the disk model in `common`.
 //!
-//! * KAT vectors for the 413-byte `SignerStateV1` proposal (separate halt flag).
+//! * KAT vectors for the 413-byte `SignerStateV1` (separate halt flag).
 //! * Crash matrices across the proof, state and mirror writes for a first
 //!   lock, a relock, a lock-keeping prevote, an advancement and a halt.
 //! * Orphan, missing and corrupt proof files; a forged justification.
