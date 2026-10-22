@@ -1,11 +1,11 @@
-//! PROPOSED, UNRATIFIED: the consensus proofs the signer verifies itself.
+//! The consensus proofs the signer verifies itself (format ratified by the owner, 2026-10-22 (decision ledger); dormant, no node wiring; production durability and activation separate).
 //!
 //! * [`PolkaProofV1`]: a prevote quorum for (height, round, block), the
 //!   justification V left opaque. It is the ratified `FinalityCertificateV1`
 //!   layout with its own magic `FPOLv1\0` and PREVOTE entries; every entry
 //!   signs the ratified `FinalityVoteV1` preimage with `vote_type = 1`, so the
 //!   signatures are exactly the gossiped prevotes and no new signing domain
-//!   exists. The bytes are not ratified.
+//!   exists.
 //! * [`ConsensusProofs`]: the signer's [`PolkaVerifier`] over a node's
 //!   [`VoteContext`]. It verifies a [`PolkaProofV1`] for a lock change and a
 //!   ratified [`FinalityCertificateV1`] for a height advancement, each against
@@ -26,9 +26,9 @@ use crate::signer::{Certified, PolkaVerifier};
 use crate::vote::{verify_e1, FinalityVoteV1, VoteContext, VoteType, NIL_BLOCK_ID};
 use crate::Digest;
 
-/// UNRATIFIED: the prevote-quorum wire magic, `FPOLv1\0` (`46504f4c763100`).
+/// The prevote-quorum wire magic, `FPOLv1\0` (`46504f4c763100`).
 pub const POLKA_MAGIC: [u8; 7] = *b"FPOLv1\0";
-/// UNRATIFIED: the only accepted schema.
+/// The only accepted schema.
 pub const POLKA_SCHEMA: u16 = 1;
 /// Fixed header through the signer count `k` (as the certificate).
 pub const POLKA_HEADER_LEN: usize = CERT_HEADER_LEN;

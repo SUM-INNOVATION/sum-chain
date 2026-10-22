@@ -1,4 +1,4 @@
-//! PROPOSED signer persistence (UNRATIFIED 413-byte record): the recovery
+//! Signer persistence (the 413-byte record; format ratified by the owner, 2026-10-22 (decision ledger); dormant, no node wiring; production durability and activation separate): the recovery
 //! invariants and the crash-point matrix, over the file-backed store in
 //! `signer_file` and the ratified G2-b signer core; on Unix, round trips
 //! through a real directory, including a conflict halt and its recovery.

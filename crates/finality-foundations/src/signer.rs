@@ -9,12 +9,12 @@
 //! * [`SignerStore`]: loads and atomically persists one [`SignerRecord`].
 //!   `persist` may return `Ok` only once the record is durable (data and
 //!   directory entry fsynced). The core defines no on-disk encoding;
-//!   `signer_file` proposes one (UNRATIFIED).
+//!   `signer_file` implements one (format ratified by the owner, 2026-10-22 (decision ledger); dormant, no node wiring; production durability and activation separate).
 //! * [`ExclusiveOwnership`]: one owner per key. The guard is held for the
 //!   signer's whole life.
 //! * [`SigningKey`] and [`PolkaVerifier`]: the key, and the check of a
-//!   quorum-of-prevotes justification. The justification bytes are unratified;
-//!   no production verifier exists.
+//!   quorum-of-prevotes justification: a `PolkaProofV1` (format ratified by the owner, 2026-10-22 (decision ledger); dormant, no node wiring; production durability and activation separate),
+//!   checked by `proofs::ConsensusProofs`, which no node path calls.
 //!
 //! # Signing order
 //!
@@ -58,8 +58,8 @@
 //! * The payload bytes are opaque: the signer trusts the caller's declared
 //!   position and value to match the payload. The vote format is now ratified
 //!   ([`crate::vote`]); decoding the payload as exactly `D_VOTE ‖ body` and
-//!   binding it to the requested position and value is a follow-up together
-//!   with the signer-state layout (A2, unratified).
+//!   binding it to the requested position and value is a follow-up (the
+//!   signer-state layout, A2, was ratified by the owner on 2026-10-22).
 //! * Restoring an old copy of the state is detected only against external
 //!   evidence: [`DurableSigner::open`] takes the highest position at which this
 //!   key's signature is known to exist (for example in certificates on the
@@ -141,7 +141,7 @@ pub enum ProofRef {
 /// RATIFIED semantics (2026-10-20), dormant: a persisted conflict halt. Two
 /// verified finality proofs for `height` named different blocks. A halted
 /// signer never signs or advances again; only the operator's explicit
-/// [`DurableSigner::recover_after_conflict`] (PROPOSED), with verified
+/// [`DurableSigner::recover_after_conflict`], with verified
 /// evidence, ends it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Halt {
@@ -386,8 +386,8 @@ pub trait SigningKey {
     fn sign(&self, payload: &[u8]) -> Vec<u8>;
 }
 
-/// Checks a quorum-of-prevotes justification. No production implementation
-/// exists: the evidence encoding is unratified.
+/// Checks a quorum-of-prevotes justification. The implementation over the
+/// `PolkaProofV1` encoding is `proofs::ConsensusProofs`; no node path calls it.
 pub trait PolkaVerifier {
     fn verify_polka(
         &self,
@@ -397,7 +397,7 @@ pub trait PolkaVerifier {
         evidence: &[u8],
     ) -> Result<(), String>;
 
-    /// Verify a finality proof (PROPOSED: a `FinalityCertificateV1` checked
+    /// Verify a finality proof (a `FinalityCertificateV1` checked
     /// against the node's authenticated set for the height it names) and
     /// return the (height, block) it proves final. The default refuses every
     /// proof, so a signer without a finality verifier can never leave its
@@ -407,7 +407,7 @@ pub trait PolkaVerifier {
     }
 
     /// The bytes to retain for a prevote quorum this verifier accepted
-    /// (PROPOSED §16: trimmed to a minimal quorum that still verifies).
+    /// (trimmed to a minimal quorum that still verifies).
     /// `None`: this verifier retains nothing.
     fn retained_polka(
         &self,
@@ -426,7 +426,7 @@ pub trait PolkaVerifier {
     }
 }
 
-/// The node's own chain as its block store holds it (PROPOSED; dormant).
+/// The node's own chain as its block store holds it (dormant).
 /// After conflicting finality the operator brings the node onto one branch
 /// (for example by resyncing it); this is that branch. The signer trusts it
 /// as it trusts the authenticated context its verifier uses: both are the
@@ -702,8 +702,8 @@ where
         }
     }
 
-    /// The operator's explicit recovery from a conflict halt (PROPOSED,
-    /// dormant; never automatic: `sign` and `advance` refuse while halted).
+    /// The operator's explicit recovery from a conflict halt (dormant;
+    /// never automatic: `sign` and `advance` refuse while halted).
     ///
     /// Required, all verified by the signer itself:
     ///
