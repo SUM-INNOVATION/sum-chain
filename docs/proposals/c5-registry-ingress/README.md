@@ -267,25 +267,25 @@ No code is allocated. On this binary, a transaction naming operation 8 or 9 does
 
 ## 14. Questions, consolidated
 
-There are three groups: (a) settled by the decision ledger (`DECISION-RECORD-20261016.md`); (b) routine implementation choices, resolved in this PR; (c) protocol decisions for ratification, each with a recommendation. No resolution in (b) changes dormancy.
+There are three groups: (a) settled by the decision ledger (`DECISION-RECORD-20261016.md`) or by an owner instruction; (b) routine implementation choices, resolved in this PR; (c) protocol decisions for ratification, each with a recommendation. No resolution in (b) changes dormancy.
 
 | Grp | Q | Resolution or recommendation | Consequence or citation |
 |---|---|---|---|
 | a | Q5 consensus-config registration | Schema 2 is fixed. New committed fields need an explicit schema-evolution proposal, which belongs to the activation change. | Ledger G3, "Placement: CORRECTED", 2026-10-16 |
-| a | Q13 storage | Versioned `cf::META` keys, no new column family. Applied: `registry/record/v1/` ‖ id; `ALL_CFS` equals main's (tested). | Ledger 2026-10-19 ("not authorized: a new storage column family") and 2026-10-20 (certificate storage direction, #337) |
+| a | Q13 storage | Versioned `cf::META` keys, no new column family. Applied: `registry/record/v1/` ‖ id; `ALL_CFS` equals main's (tested). | Settled by owner instruction plus precedent: the owner's 2026-10-21 instruction "Keep #348 dormant". The certificate-storage entries are precedent only: ledger 2026-10-19 (L508, "not authorized: a new storage column family") and 2026-10-20 (L540, versioned META keys, #337). |
 | b | Q1 missing parameter | `302`, pre-semantic | Defensive only: the ledger's C5 note (2026-10-21) makes activation with a missing value impossible |
 | b | Q2 expiry and window | `303`, fee charged | Height-dependent, like every other authorization refusal |
 | b | Q7 genesis hash | The activation change supplies `create_genesis_block().hash()` (config field `0x0005`) | Refuses until then |
 | b | Q10 dry-run activation check | Unchanged now; the activation change aligns `registry_dryRunAdmit` to `h + T_min` | Non-consensus RPC |
-| b | Q11 bound on k | None beyond `u16` | Every approval must be a distinct active validator, so a valid k ≤ n ≤ 29,127 (VS-6(a)); entries are length-checked before allocation |
+| b | Q11 bound on k | None beyond `u16` | The transaction size limit bounds k. No block may exceed `max_block_bytes`, so no includable payload exceeds it, and k < `max_block_bytes` / 96 (10,416 at the 1,000,000-byte default). Every approval must also be a distinct active validator, so a valid k ≤ n ≤ 29,127 (VS-6(a)). Entries are length-checked before allocation. |
 | b | Q14 wire decoding | No wire variants. Decoding is unchanged and tested for the payload, transaction, block, sync response and RPC. | Adding the variants is the activation change, a coordinated same-window upgrade |
-| b | Q15 departed approvals | The `verify_validator_quorum` rule named by the proposal: the operation is refused | Submitters drop departed approvals |
+| b | Q15 departed approvals | The `verify_validator_quorum` rule named by the proposal: an approval from any key outside the execution-height set refuses the whole operation (`303`); it is not ignored | Submitters must drop departed approvals |
 | b | Q16 approval order | Decode refusal (`302`) | The order is part of the §3 layout |
-| b | Q18 `id` derivation | No check | Not checkable: `vk_id` needs the manifest hash, which the record does not carry |
 | c | Q3 record default threshold | **Recommend:** a tooling default, not consensus, removed from the activation-required set | Three values to ratify, not four. B2's floor (record ≥ governance) already bounds every record. |
 | c | Q4 signature rule | **Recommend:** keep governance-v1 `verify` | One rule for every validator-quorum action. VS-5 already excludes small-order and non-canonical keys from the set. Moving governance to E1 later is one change covering all of them. |
 | c | Q6 where values live | **Recommend:** `GovernanceParams` fields in genesis, registered by the Q5 proposal, like `validator_authority_threshold_bps` | The values are committed in the consensus configuration; changing them is a coordinated upgrade |
 | c | Q8 commit consumers | **Recommend:** decide with the first proof-verifying consumer (#128). It calls `v_check_commit` and maps a refusal to its own existing invalid-input code. | No new code. Until then, nothing enforces the commit-side timelock. |
+| c | Q18 `id` derivation (depends on Q8) | **Recommend:** decide with Q8. The consumer checks that the verifier material it uses derives to the record `id`. Register cannot check this, because `vk_id` needs the manifest hash, which the record does not carry. | Until Q8 is decided, nothing binds `id` to verifier material |
 | c | Q9 all-zero commitments | **Recommend:** refuse at register (`303`), as `registry_dryRunAdmit` does under #217 B1 | Dry run and execution agree; one more register rule |
 | c | Q12 committed digest | **Recommend:** fold registry rows into the block state digest at activation, as compute-pool and beacon state are, and carry them in snapshots | One more digest byte table to ratify. Divergent registry state then shows as a root mismatch, not a silent fork. |
 | c | Q17 register threshold | **Recommend:** B2 as proposed (the governance threshold) | Registry admission moves with governance; a record can still require more for its own disable |
