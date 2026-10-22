@@ -96,6 +96,7 @@ pub(crate) fn validate_register(
     // Q17 (owner, 2026-10-22): the authenticated governance threshold, from
     // chain parameters, never from the operation or a tooling default.
     let threshold = gp.validator_authority_threshold_bps;
+    // The floor is B2 (PROPOSED, not owner-decided): Q17 decides only `t`.
     if record.approval_threshold_bps < threshold {
         return Err(303);
     }

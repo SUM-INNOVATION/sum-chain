@@ -133,22 +133,38 @@ fn register_and_the_dry_run_refuse_the_same_zero_commitments() {
     .admissible);
     assert_eq!(register(&record()), TxStatus::Success);
 
-    let zeroes: [fn(&mut RegistryRecordV1); 4] = [
+    // Every non-empty subset of the three commitments: 3 singles, 3 pairs, all.
+    let zeroes: [fn(&mut RegistryRecordV1); 7] = [
         |r| r.audit_commitment = [0; 32],
         |r| r.source_commitment = [0; 32],
         |r| r.ceremony_commitment = [0; 32],
         |r| {
             r.audit_commitment = [0; 32];
             r.source_commitment = [0; 32];
+        },
+        |r| {
+            r.audit_commitment = [0; 32];
+            r.ceremony_commitment = [0; 32];
+        },
+        |r| {
+            r.source_commitment = [0; 32];
+            r.ceremony_commitment = [0; 32];
+        },
+        |r| {
+            r.audit_commitment = [0; 32];
+            r.source_commitment = [0; 32];
             r.ceremony_commitment = [0; 32];
         },
     ];
+    let mut seen = std::collections::BTreeSet::new();
     for zero in zeroes {
         let mut rec = record();
         zero(&mut rec);
         let names: Vec<String> = unset_commitments(&rec).iter().map(|s| s.to_string()).collect();
         assert!(!names.is_empty());
+        seen.insert(names.clone());
         assert_eq!(dry_run_unset(&rec), names, "the dry run names the same commitments");
         assert_eq!(register(&rec), TxStatus::Failed(303), "register refuses {names:?}");
     }
+    assert_eq!(seen.len(), 7, "every non-empty subset, once");
 }

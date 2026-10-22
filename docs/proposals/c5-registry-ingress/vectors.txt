@@ -11,10 +11,12 @@
 # activation change adds their GovernanceOperation variants. On this binary they
 # are refused at decode, like any unknown operation.
 #
-# prospective_quorum.n<n>.bps<bps>.required is the PROPOSED register/disable
-# quorum rule at its boundaries (Q17): required_approvals(n, bps) =
-# (n*bps + 9999) div 10000 in u64 (validator_authority.rs:119-123). k = required
-# is accepted and k = required - 1 refused (tests in registry_ingress.rs).
+# prospective_quorum.n<n>.bps<bps>.required is the quorum rule at its
+# boundaries: required_approvals(n, bps) = (n*bps + 9999) div 10000 in u64
+# (validator_authority.rs:119-123). k = required is accepted and k = required - 1
+# refused (tests in registry_ingress.rs). For register, bps is the governance
+# threshold (Q17, owner-decided). For disable, bps is the stored record's
+# threshold (B2, PROPOSED, not owner-decided).
 #
 # Checked by crates/state/tests/registry_ingress.rs::vectors_are_reproduced_and_execute:
 # the file must equal what the code generates (comment lines excluded), every
