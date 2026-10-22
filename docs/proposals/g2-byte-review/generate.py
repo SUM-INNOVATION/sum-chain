@@ -222,7 +222,7 @@ def ed25519_verify(pub: bytes, msg: bytes, sig: bytes) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# Constants (PROPOSED; see README.md)
+# Constants (proposed unless README.md §1 records them as settled)
 # --------------------------------------------------------------------------- #
 D_VALSET = b"SUMCHAIN/VALSET/v1\0"
 D_VOTE = b"SUMCHAIN/FINALITY/VOTE/v1\0"

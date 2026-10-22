@@ -2,7 +2,8 @@
 """Mechanical checks for the G2 byte-review draft. Exits nonzero on any failure.
 
 UNRATIFIED BYTE-REVIEW DRAFT. Semantics ratified 2026-10-16 (G2); bytes not
-ratified. Every vector is SYNTHETIC/UNRATIFIED.
+ratified, except the constants in `RATIFIED_HOME` (D_VALSET: VS-1, settled by
+the owner, 2026-10-21, decision ledger). Every vector is SYNTHETIC/UNRATIFIED.
 
 Checks:
 1. BLAKE3 against the official test vectors.
