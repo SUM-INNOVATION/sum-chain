@@ -54,35 +54,25 @@ pub fn admitted_proof_systems() -> [u16; 1] {
 
 // ── Named parameters (PROPOSED, unvalued) ───────────────────────────────────
 
-/// Where each operation's quorum threshold comes from.
-///
-/// Only the proposal's recommendation exists. B1 (both operations at the
-/// governance threshold) is not implemented.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RegistryThresholdSource {
-    /// B2: register is authorized at `GovernanceParams.validator_authority_threshold_bps`
-    /// and the record's `approval_threshold_bps` must be at least that value;
-    /// disable is authorized at the stored record's `approval_threshold_bps`.
-    GovernanceThenRecord,
-}
-
 /// The C5 named parameters. `None` is "not ratified".
 ///
 /// No field has a value in this binary, and none is invented here. Operations
 /// 8 and 9 refuse unless every field is `Some` ([`Self::complete`]).
+///
+/// Decided by the owner on 2026-10-22, and therefore not parameters:
+/// - **Q17:** register is authorized at the authenticated governance threshold,
+///   `GovernanceParams.validator_authority_threshold_bps`. Disable is authorized
+///   at the stored record's `approval_threshold_bps` (B2, PROPOSED with the
+///   layouts).
+/// - **Q3:** a record `approval_threshold_bps` default is a tooling-only
+///   convenience. No consensus path has or reads one: the applicable threshold
+///   always comes from authenticated state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegistryIngressParams {
     /// `T_min`: register at height `h` needs `activation_height ≥ h + T_min`
     /// (#217 B6, #212).
     pub registry_min_timelock_blocks: Option<u64>,
-    /// The threshold source, and with it the use of
-    /// `validator_authority_threshold_bps` for registry approvals.
-    pub registry_threshold_source: Option<RegistryThresholdSource>,
-    /// The record `approval_threshold_bps` default (#212). The proposal gives it
-    /// no consensus rule; it is required to be set and is otherwise unread.
-    pub registry_record_default_approval_threshold_bps: Option<u16>,
-    /// The approval window: the largest `valid_until − h` accepted. `u64::MAX`
-    /// would express "no bound".
+    /// The approval window: the largest `valid_until − h` accepted.
     pub registry_max_approval_window: Option<u64>,
 }
 
@@ -91,8 +81,6 @@ pub struct RegistryIngressParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegistryIngressValues {
     pub min_timelock_blocks: u64,
-    pub threshold_source: RegistryThresholdSource,
-    pub record_default_approval_threshold_bps: u16,
     pub max_approval_window: u64,
 }
 
@@ -100,22 +88,34 @@ impl RegistryIngressParams {
     /// Every parameter unset: operations 8 and 9 refuse.
     pub const UNSET: Self = Self {
         registry_min_timelock_blocks: None,
-        registry_threshold_source: None,
-        registry_record_default_approval_threshold_bps: None,
         registry_max_approval_window: None,
     };
 
-    /// All four values, or `None` if any is missing. A missing value can
+    /// Both values, or `None` if either is missing. A missing value can
     /// therefore never be defaulted on the way to execution.
     pub fn complete(&self) -> Option<RegistryIngressValues> {
         Some(RegistryIngressValues {
             min_timelock_blocks: self.registry_min_timelock_blocks?,
-            threshold_source: self.registry_threshold_source?,
-            record_default_approval_threshold_bps: self
-                .registry_record_default_approval_threshold_bps?,
             max_approval_window: self.registry_max_approval_window?,
         })
     }
+}
+
+/// The record's provenance commitments that are all zero, by name, in a fixed
+/// order. #217 B1 makes all three mandatory; a zero commitment commits to
+/// nothing. Register refuses a record with any (Q9, owner 2026-10-22), and
+/// `registry_dryRunAdmit` reports exactly these names, so the two cannot
+/// disagree.
+pub fn unset_commitments(record: &RegistryRecordV1) -> Vec<&'static str> {
+    [
+        ("audit_commitment", &record.audit_commitment),
+        ("source_commitment", &record.source_commitment),
+        ("ceremony_commitment", &record.ceremony_commitment),
+    ]
+    .into_iter()
+    .filter(|(_, c)| c.iter().all(|&b| b == 0))
+    .map(|(name, _)| name)
+    .collect()
 }
 
 // ── Approvals ───────────────────────────────────────────────────────────────
@@ -672,20 +672,33 @@ mod tests {
         assert_eq!(RegistryIngressParams::UNSET.complete(), None);
         let full = RegistryIngressParams {
             registry_min_timelock_blocks: Some(1),
-            registry_threshold_source: Some(RegistryThresholdSource::GovernanceThenRecord),
-            registry_record_default_approval_threshold_bps: Some(1),
             registry_max_approval_window: Some(1),
         };
         assert!(full.complete().is_some());
-        let missing: [RegistryIngressParams; 4] = [
+        let missing: [RegistryIngressParams; 2] = [
             RegistryIngressParams { registry_min_timelock_blocks: None, ..full },
-            RegistryIngressParams { registry_threshold_source: None, ..full },
-            RegistryIngressParams { registry_record_default_approval_threshold_bps: None, ..full },
             RegistryIngressParams { registry_max_approval_window: None, ..full },
         ];
         for p in missing {
             assert_eq!(p.complete(), None, "{p:?}");
         }
+    }
+
+    #[test]
+    fn unset_commitments_names_each_zero_commitment_in_order() {
+        assert!(unset_commitments(&record()).is_empty());
+        let mut r = record();
+        r.source_commitment = [0; 32];
+        assert_eq!(unset_commitments(&r), ["source_commitment"]);
+        r.audit_commitment = [0; 32];
+        r.ceremony_commitment = [0; 32];
+        assert_eq!(
+            unset_commitments(&r),
+            ["audit_commitment", "source_commitment", "ceremony_commitment"]
+        );
+        // One non-zero byte anywhere is set.
+        r.ceremony_commitment[31] = 1;
+        assert_eq!(unset_commitments(&r), ["audit_commitment", "source_commitment"]);
     }
 
     #[test]
