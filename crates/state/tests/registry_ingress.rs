@@ -29,8 +29,8 @@ use sumchain_state::state::StateManager;
 use sumchain_storage::candidate::CandidateExecution;
 use sumchain_storage::Database;
 use sumchain_wire::registry_ingress::{
-    registry_disable_signing_bytes, registry_register_signing_bytes, RegistryCommitRefusal,
-    RegistryDisableV1, RegistryIngressParams, RegistryRegisterV1, RegistryThresholdSource,
+    registry_disable_signing_bytes, registry_register_signing_bytes, unset_commitments,
+    RegistryCommitRefusal, RegistryDisableV1, RegistryIngressParams, RegistryRegisterV1,
 };
 use sumchain_wire::registry_wire::{RegistryRecordV1, RegistryStatus};
 use tempfile::TempDir;
@@ -49,8 +49,6 @@ const FEE: u128 = 100;
 fn fixture_params() -> RegistryIngressParams {
     RegistryIngressParams {
         registry_min_timelock_blocks: Some(T_MIN),
-        registry_threshold_source: Some(RegistryThresholdSource::GovernanceThenRecord),
-        registry_record_default_approval_threshold_bps: Some(GOV_BPS),
         registry_max_approval_window: Some(WINDOW),
     }
 }
@@ -263,8 +261,6 @@ fn any_single_missing_named_parameter_refuses_free() {
     let full = fixture_params();
     for missing in [
         RegistryIngressParams { registry_min_timelock_blocks: None, ..full },
-        RegistryIngressParams { registry_threshold_source: None, ..full },
-        RegistryIngressParams { registry_record_default_approval_threshold_bps: None, ..full },
         RegistryIngressParams { registry_max_approval_window: None, ..full },
     ] {
         let n = node_with(chain_params(GOV_BPS), Some(missing));
@@ -724,8 +720,30 @@ fn vectors() -> String {
             );
         }
     }
+    // The proposed quorum rule's required approval counts at its boundaries
+    // (Q17): `required_approvals`, `validator_authority.rs:119-123`.
+    for (n, bps) in QUORUM_BOUNDARIES {
+        line(
+            &format!("prospective_quorum.n{n}.bps{bps}.required"),
+            required_approvals(n, bps).to_string(),
+        );
+    }
     out
 }
+
+/// (n, bps) boundaries of the quorum rule: n = 1, the effective validator cap
+/// 29,127 (VS-6(a)) and `u32::MAX` (the type's limit); bps at 1 and 10000.
+const QUORUM_BOUNDARIES: [(u32, u16); 9] = [
+    (1, 1),
+    (1, 10_000),
+    (4, 1),
+    (4, 6_667),
+    (4, 10_000),
+    (29_127, 1),
+    (29_127, 10_000),
+    (u32::MAX, 1),
+    (u32::MAX, 10_000),
+];
 
 const VECTORS_PATH: &str = "../../docs/proposals/c5-registry-ingress/vectors.txt";
 
@@ -1135,5 +1153,237 @@ fn the_record_prefix_is_disjoint_from_every_meta_key_in_the_repository() {
             "{} overlaps the registry prefix",
             String::from_utf8_lossy(key)
         );
+    }
+}
+
+// ── Q17: the quorum rule at its boundaries ───────────────────────────────────
+
+/// The rule register uses, verbatim (`validator_authority.rs:119-123`,
+/// `validator_quorum.rs:59-90`): `required = (n·bps + 9999) div 10000` in
+/// `u64`, accepted iff `1 ≤ bps ≤ 10000`, n ≥ 1, every approval valid, and
+/// `k ≥ required`.
+#[test]
+fn quorum_arithmetic_at_its_boundaries() {
+    use sumchain_state::validator_quorum::check_threshold_bps;
+    let expected: [u32; 9] = [1, 1, 1, 3, 4, 3, 29_127, 429_497, u32::MAX];
+    for ((n, bps), want) in QUORUM_BOUNDARIES.into_iter().zip(expected) {
+        assert_eq!(required_approvals(n, bps), want, "n {n}, bps {bps}");
+        // Exact: the smallest k with k·10000 ≥ n·bps, computed in u128.
+        let exact = ((n as u128) * (bps as u128)).div_ceil(10_000) as u32;
+        assert_eq!(want, exact, "n {n}, bps {bps}");
+    }
+    // No overflow at the type's limits: n·bps + 9999 < 2^46.
+    assert!((u32::MAX as u64) * 10_000 + 9_999 < 1u64 << 46);
+    // bps outside 1..=10000 is refused before any counting.
+    assert!(check_threshold_bps(0).is_err());
+    assert!(check_threshold_bps(10_001).is_err());
+    assert!(check_threshold_bps(1).is_ok());
+    assert!(check_threshold_bps(10_000).is_ok());
+}
+
+/// k = required − 1 is refused (`303`, fee charged), k = required accepted, at
+/// n = 1 and n = 4, with the governance threshold at 1 and at 10000 bps.
+#[test]
+fn register_refuses_one_approval_short_and_accepts_exactly_required() {
+    for (ids, bps) in [
+        (&[1u8][..], 1u16),
+        (&[1u8][..], 10_000),
+        (&[1u8, 2, 3, 4][..], 1),
+        (&[1u8, 2, 3, 4][..], 10_000),
+    ] {
+        let n = node_with(chain_params(bps), Some(fixture_params()));
+        let mut c = candidate(&n.db);
+        let mut s = Submitter::new(&n.db);
+        let active = vset(ids);
+        let required = required_approvals(ids.len() as u32, bps) as usize;
+        let mut rec = record(1);
+        rec.approval_threshold_bps = bps;
+        assert_eq!(
+            s.run(&n, &mut c, REG, register(H + 50, &rec, &ids[..required - 1]), H, &active),
+            TxStatus::Failed(303),
+            "n {}, bps {bps}, k = required - 1",
+            ids.len()
+        );
+        assert_eq!(
+            s.run(&n, &mut c, REG, register(H + 50, &rec, &ids[..required]), H, &active),
+            TxStatus::Success,
+            "n {}, bps {bps}, k = required",
+            ids.len()
+        );
+    }
+}
+
+/// The largest set (29,127, VS-6(a)). Three real validators sign; the other
+/// entries are distinct synthetic keys that never sign, so they are never
+/// parsed. Non-signers stay in the denominator.
+#[test]
+fn the_largest_validator_set_counts_every_member() {
+    let mut active = vset(&[1, 2, 3]);
+    for i in 0..29_124u32 {
+        let mut k = [0xEE; 32];
+        k[28..].copy_from_slice(&i.to_be_bytes());
+        active.push(k);
+    }
+    assert_eq!(active.len(), 29_127);
+
+    // 1 bps: required 3. Two approvals are refused; three are accepted.
+    let n = node_with(chain_params(1), Some(fixture_params()));
+    let mut c = candidate(&n.db);
+    let mut s = Submitter::new(&n.db);
+    let mut rec = record(1);
+    rec.approval_threshold_bps = 1;
+    assert_eq!(
+        s.run(&n, &mut c, REG, register(H + 50, &rec, &[1, 2]), H, &active),
+        TxStatus::Failed(303)
+    );
+    assert_eq!(
+        s.run(&n, &mut c, REG, register(H + 50, &rec, &[1, 2, 3]), H, &active),
+        TxStatus::Success
+    );
+
+    // 10000 bps: required 29,127; three approvals are refused.
+    let n = node_with(chain_params(10_000), Some(fixture_params()));
+    let mut c = candidate(&n.db);
+    let mut s = Submitter::new(&n.db);
+    let mut rec = record(2);
+    rec.approval_threshold_bps = 10_000;
+    assert_eq!(
+        s.run(&n, &mut c, REG, register(H + 50, &rec, &[1, 2, 3]), H, &active),
+        TxStatus::Failed(303)
+    );
+}
+
+// ── Q9: all-zero commitments ────────────────────────────────────────────────
+
+/// A register whose record has any all-zero commitment is refused: `303`,
+/// fee charged and nonce advanced (Policy-B, checked by `Submitter::run`), and
+/// no record. `unset_commitments` is also what `registry_dryRunAdmit` reports
+/// (`crates/rpc/tests/registry_dry_run_agrees.rs`).
+#[test]
+fn register_refuses_any_all_zero_commitment() {
+    let n = node();
+    let mut c = candidate(&n.db);
+    let mut s = Submitter::new(&n.db);
+    let four = vset(&[1, 2, 3, 4]);
+    let q = [1u8, 2, 3];
+    let cases: [(&str, RegistryRecordV1); 4] = [
+        ("audit", with(|r| r.audit_commitment = [0; 32])),
+        ("source", with(|r| r.source_commitment = [0; 32])),
+        ("ceremony", with(|r| r.ceremony_commitment = [0; 32])),
+        (
+            "all three",
+            with(|r| {
+                r.audit_commitment = [0; 32];
+                r.source_commitment = [0; 32];
+                r.ceremony_commitment = [0; 32];
+            }),
+        ),
+    ];
+    for (what, rec) in cases {
+        assert!(!unset_commitments(&rec).is_empty());
+        assert_eq!(
+            s.run(&n, &mut c, REG, register(H + 50, &rec, &q), H, &four),
+            TxStatus::Failed(303),
+            "{what}"
+        );
+        assert_eq!(stored(&mut c, 1), None, "{what}");
+    }
+    // One non-zero byte is a set commitment.
+    let rec = with(|r| {
+        r.audit_commitment = [0; 32];
+        r.audit_commitment[0] = 1;
+    });
+    assert_eq!(
+        s.run(&n, &mut c, REG, register(H + 50, &rec, &q), H, &four),
+        TxStatus::Success
+    );
+}
+
+// ── Guards: no tooling default, no reachable consumer ───────────────────────
+
+/// Production source of every crate under `crates/`, as (repo-relative path,
+/// code): `#[cfg(test)] mod …` bodies cut, comment lines dropped.
+fn production_code() -> Vec<(String, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&root).unwrap() {
+        let src = entry.unwrap().path().join("src");
+        if src.is_dir() {
+            rust_files(&src, &mut files);
+        }
+    }
+    files.sort();
+    assert!(files.len() > 100, "the scan found too few files to mean anything");
+    files
+        .into_iter()
+        .map(|f| {
+            let s = std::fs::read_to_string(&f).unwrap();
+            let cut = s.find("#[cfg(test)]\nmod ").unwrap_or(s.len());
+            let code: String = s[..cut]
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .map(|l| format!("{l}\n"))
+                .collect();
+            let rel = f.strip_prefix(&root).unwrap().to_string_lossy().into_owned();
+            (format!("crates/{rel}"), code)
+        })
+        .collect()
+}
+
+/// Occurrences of `name(` not preceded by an identifier character.
+fn calls(code: &str, name: &str) -> usize {
+    let pat = format!("{name}(");
+    code.match_indices(&pat)
+        .filter(|(i, _)| {
+            code[..*i]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+        })
+        .count()
+}
+
+/// Q3 (owner, 2026-10-22): the record default threshold is a tooling-only
+/// default. No production code of any crate names one, and the parameter set
+/// is exactly T_min and W (this literal does not compile with a third field).
+#[test]
+fn no_consensus_path_reads_a_tooling_default() {
+    let p = RegistryIngressParams {
+        registry_min_timelock_blocks: Some(1),
+        registry_max_approval_window: Some(1),
+    };
+    assert!(p.complete().is_some());
+    for (file, code) in production_code() {
+        for needle in [
+            "record_default",
+            "default_approval_threshold",
+            "threshold_source",
+            "ThresholdSource",
+        ] {
+            assert!(!code.contains(needle), "{file} names {needle}");
+        }
+    }
+}
+
+/// Q8/Q18 (owner, 2026-10-22): commit-side checks are decided with the first
+/// proof consumer (#128), so nothing in production may reach one yet. Each
+/// name below occurs only where it is defined (and `check_commit` once more,
+/// inside `v_check_commit`'s own body). A new caller anywhere fails this test.
+#[test]
+fn no_production_code_calls_the_commit_check_or_the_registry_entry() {
+    let allowed: [(&str, &str, usize); 4] = [
+        ("crates/sumchain-wire/src/registry_ingress.rs", "check_commit", 1),
+        ("crates/state/src/registry_ingress.rs", "v_check_commit", 1),
+        ("crates/state/src/registry_ingress.rs", "check_commit", 1),
+        ("crates/state/src/governance_executor.rs", "execute_registry_ingress", 1),
+    ];
+    for (file, code) in production_code() {
+        for name in ["check_commit", "v_check_commit", "execute_registry_ingress"] {
+            let want = allowed
+                .iter()
+                .find(|(f, n, _)| *f == file && *n == name)
+                .map_or(0, |(_, _, k)| *k);
+            assert_eq!(calls(&code, name), want, "{file}: {name}");
+        }
     }
 }
