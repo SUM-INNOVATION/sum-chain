@@ -23,7 +23,8 @@
   - canonical, non-small-order validator keys at set construction (V-6).
 
   Dormant code is in `crates/finality-foundations` (`vote`); its tests and E1 edge-case vectors are `tests/vote_v1.rs` and `tests/vectors/finality_vote_v1.json`. Nothing calls it and nothing is active. Historical signature verification is unchanged. Ratifying the vote froze no other object layout: not the certificate, not the validator-set commitment preimage (§2), and no database key.
-- **Still unresolved:** D3, D5, D6, M1–M5, H1 and S1 (groups A2–A5), and every object layout and key composition in this draft other than the vote.
+- **Settled since drafting (owner, 2026-10-21, decision ledger): VS-1, the validator-set commitment of §2.** It is `BLAKE3-256(D_VALSET ‖ n u16 LE ‖ 32·n keys)`. Dormant code is in `crates/finality-foundations` (`vote`); nothing calls it. The header's "bytes not ratified" covers every other object in this draft, not §2.
+- **Still unresolved:** D3, D5, D6, M1–M5, H1 and S1 (groups A2–A5), and every object layout and key composition in this draft other than the vote and the §2 validator-set commitment.
 
 These semantics alone are **not** complete certified finality. See §10 for what is still missing.
 
@@ -71,11 +72,11 @@ These semantics alone are **not** complete certified finality. See §10 for what
 | Decoding | Exact length. Every enum and flag byte is checked. An absent group must be all zero. Trailing bytes are refused. `schema` u16 = 1, and anything else is refused (no forward-compatible parsing, no defaults). |
 | Round | u32, with the validity rule `round ≤ 2^20` (D4) on every round field |
 
-**Domains and magics proposed here.** `check.py` confirms they are distinct, prefix-free, and clash with no retired draft and no byte-string literal under `crates/`. The one exception is a ratified constant in its implementation file: `D_VOTE` and `FVOTv1\0` are spelled exactly, and only, in `crates/finality-foundations/src/vote.rs`.
+**Domains and magics proposed here.** `check.py` confirms they are distinct, prefix-free, and clash with no retired draft and no byte-string literal under `crates/`. The exceptions are settled constants in their implementation file: `D_VOTE`, `FVOTv1\0` and `D_VALSET` are spelled exactly, and only, in `crates/finality-foundations/src/vote.rs`.
 
 | Constant | Bytes | Length | Use |
 |---|---|---|---|
-| `D_VALSET` | `SUMCHAIN/VALSET/v1\0` | 19 | validator-set commitment (BL §1, unchanged) |
+| `D_VALSET` | `SUMCHAIN/VALSET/v1\0` | 19 | validator-set commitment (BL §1, unchanged). VS-1: settled by the owner, 2026-10-21 (decision ledger) |
 | `D_VOTE` | `SUMCHAIN/FINALITY/VOTE/v1\0` | 26 | vote preimage (BL §3, unchanged) |
 | `D_MDIGEST` | `SUMCHAIN/CONSENSUS-UPGRADE-MANIFEST/v1\0` | 39 | manifest digest |
 | `D_MSIGN` | `SUMCHAIN/CONSENSUS-UPGRADE-MANIFEST/SIGN/v1\0` | 44 | manifest signature message |
@@ -89,7 +90,7 @@ These semantics alone are **not** complete certified finality. See §10 for what
 - **Repository audit (2026-10-17, sum-chain `d8130ead` with SNIP and OmniNode at their then-current `main`):** no repository-controlled production signing path can sign a message beginning with any of these domains. Each production signature covers a 32-byte hash, a fixed-length layout of another length on a path not wired into any binary, or bytes with a fixed non-consensus prefix; the only other signer is the dormant consensus signer itself. The audit is re-run at the commits proposed for activation.
 - **Operational rule (adopted):** paths outside repository control remain, for example contracts can verify Ed25519 signatures over arbitrary bytes. So a validator key is never given to an arbitrary-message signer, a general-purpose wallet or an RPC service; see `docs/operations/production-checklist.md` § Security. Block signing is unchanged.
 
-## 2. Validator-set commitment (BL §1, unchanged)
+## 2. Validator-set commitment (BL §1, unchanged). VS-1: settled by the owner, 2026-10-21 (decision ledger)
 
 | Offset | Size | Field |
 |---|---|---|
@@ -470,7 +471,7 @@ Run `python3 check.py` (standard library only; under a minute). It exits nonzero
 - Ed25519 against RFC 8032 TEST 1, plus a negative case;
 - byte-for-byte reproduction of the dalek-produced 2026-09-29 vectors: 4 public keys, the valset bytes and both commitments, the stand-in commitment, the vote preimage, signature and wire, the nil prevote, the n = 4 certificate, the evidence, and the storage key and pointer;
 - every length in these tables;
-- that each ratified constant (`D_VOTE`, `FVOTv1\0`) is spelled only in its implementation file, and every other domain and magic nowhere under `crates/`;
+- that each settled constant (`D_VOTE`, `FVOTv1\0`, `D_VALSET`) is spelled only in its implementation file, and every other domain and magic nowhere under `crates/`;
 - that every vector passes its strict decoder or verifier;
 - that **every single-byte flip**, truncation and trailing byte is refused, for:
   - the vote, both certificates, the equivocation evidence, both manifests, the upgrade-conflict evidence and both signer states;
