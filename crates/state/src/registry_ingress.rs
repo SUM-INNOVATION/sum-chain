@@ -144,6 +144,21 @@ pub(crate) fn validate_disable(
 }
 
 // ── State ───────────────────────────────────────────────────────────────────
+//
+// Versioned keys in the EXISTING `meta` column family, exactly as the
+// certified-commit seam stores certificates (`sumchain_storage::certified_meta`):
+// a binary that does not name a column family cannot open a volume on which a
+// newer binary created one, so this module adds none. Keys in an existing
+// family carry no such hazard: an older binary opens the volume and never
+// reads them. `meta` is not folded into any committed digest.
+
+/// Prefix of every registry record key in `cf::META`.
+pub const REGISTRY_RECORD_KEY_PREFIX: &[u8] = b"registry/record/v1/";
+
+/// The key of the record with `id`: prefix ‖ id (32), 51 bytes.
+pub fn registry_record_key(id: &[u8; 32]) -> Vec<u8> {
+    [REGISTRY_RECORD_KEY_PREFIX, id].concat()
+}
 
 /// The record stored under `id`, as this block's candidate sees it. A row that
 /// does not decode, or names another id, is an error, never "no record".
@@ -152,7 +167,7 @@ pub fn v_get_record(
     id: &[u8; 32],
 ) -> Result<Option<RegistryRecordV1>> {
     let Some(bytes) = view
-        .get(cf::REGISTRY_RECORDS, id)
+        .get(cf::META, &registry_record_key(id))
         .map_err(StateError::Storage)?
     else {
         return Ok(None);
@@ -172,7 +187,7 @@ pub fn v_put_record(view: &mut ExecutionView<'_, '_>, record: &RegistryRecordV1)
     let bytes = record
         .try_encode()
         .map_err(|e| StateError::Storage(StorageError::InvalidData(format!("registry record: {e}"))))?;
-    view.put(cf::REGISTRY_RECORDS, &record.id, &bytes)
+    view.put(cf::META, &registry_record_key(&record.id), &bytes)
         .map_err(StateError::Storage)
 }
 
