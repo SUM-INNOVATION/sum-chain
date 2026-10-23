@@ -13,10 +13,12 @@ use sumchain_primitives::validator_authority::ValidatorApproval;
 use sumchain_primitives::{Address, Hash, TxStatus};
 use sumchain_rpc::registry_types::{dry_run_admit, DryRunContext, RefusalReason};
 use sumchain_state::governance_executor::execute_registry_ingress;
-use sumchain_state::registry_ingress::{RegistryIngressContext, RegistryIngressOp};
+use sumchain_state::registry_ingress::{
+    registry_record_key, RegistryIngressContext, RegistryIngressOp, MAX_REGISTRY_RECORDS,
+};
 use sumchain_storage::candidate::CandidateExecution;
 use sumchain_storage::schema::AccountState;
-use sumchain_storage::{Database, StateStore};
+use sumchain_storage::{cf, Database, StateStore};
 use sumchain_wire::registry_ingress::{
     admitted_proof_systems, registry_register_signing_bytes, unset_commitments,
     RegistryIngressParams, RegistryRegisterV1,
@@ -44,8 +46,25 @@ fn record() -> RegistryRecordV1 {
 
 /// Execute a register of `rec`, approved by the single validator `[1; 32]`.
 fn register(rec: &RegistryRecordV1) -> TxStatus {
+    register_with_stored(rec, 0)
+}
+
+/// [`register`] with `stored` other records already in the registry.
+fn register_with_stored(rec: &RegistryRecordV1, stored: u64) -> TxStatus {
     let dir = TempDir::new().unwrap();
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
+    for i in 0..stored {
+        let mut other = record();
+        other.id = [0; 32];
+        other.id[0] = 0xF0;
+        other.id[1..5].copy_from_slice(&u32::try_from(i).unwrap().to_be_bytes());
+        db.put(
+            cf::STATE,
+            &registry_record_key(&other.id),
+            &other.try_encode().unwrap(),
+        )
+        .unwrap();
+    }
     let payer = Address::new([0x5A; 20]);
     StateStore::new(&db)
         .put_account(&payer, &AccountState { balance: 1_000_000, nonce: 0 })
@@ -167,4 +186,32 @@ fn register_and_the_dry_run_refuse_the_same_zero_commitments() {
         assert_eq!(register(&rec), TxStatus::Failed(303), "register refuses {names:?}");
     }
     assert_eq!(seen.len(), 7, "every non-empty subset, once");
+}
+
+/// The registry size bound (owner, 2026-10-23). `registry_dryRunAdmit` checks
+/// the record alone and reads no registry state (neither id uniqueness nor the
+/// count), so at the limit it reports an otherwise valid record admissible.
+/// Execution refuses the register with 303. This pins the documented
+/// difference (README §12.1).
+#[test]
+fn at_the_size_bound_the_dry_run_reports_the_record_alone() {
+    let admitted = admitted_proof_systems();
+    let ctx = || DryRunContext {
+        chain_height: H - 1,
+        allowed_proof_systems: &admitted,
+    };
+    let bytes = record().try_encode().unwrap();
+    assert!(dry_run_admit(&bytes, ctx()).admissible);
+    assert_eq!(
+        register_with_stored(&record(), MAX_REGISTRY_RECORDS - 1),
+        TxStatus::Success
+    );
+    assert!(
+        dry_run_admit(&bytes, ctx()).admissible,
+        "the dry run reads no count"
+    );
+    assert_eq!(
+        register_with_stored(&record(), MAX_REGISTRY_RECORDS),
+        TxStatus::Failed(303)
+    );
 }
