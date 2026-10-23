@@ -736,6 +736,17 @@ fn vectors() -> String {
         "prospective_strict_refused.identity_r.register.k1.data",
         hex(&identity_r.try_encode().unwrap()),
     );
+    let noncanonical_r = RegistryRegisterV1 {
+        approvals: vec![ValidatorApproval {
+            pubkey: *validator(1).public_key().as_bytes(),
+            signature: noncanonical_identity_r_signature(1, &msg),
+        }],
+        ..identity_r
+    };
+    line(
+        "prospective_both_refuse.noncanonical_r.register.k1.data",
+        hex(&noncanonical_r.try_encode().unwrap()),
+    );
     // The proposed quorum rule's required approval counts at its boundaries
     // (Q17): `required_approvals`, `validator_authority.rs:119-123`.
     for (n, bps) in QUORUM_BOUNDARIES {
@@ -811,16 +822,21 @@ fn vectors_are_reproduced_and_execute() {
     assert_eq!(field("register.k3.data").len(), 2 * (173 + 3 * 96));
     assert_eq!(field("disable.k3.data").len(), 2 * (51 + 3 * 96));
 
-    // The identity-R register executes as 303: strict verification refuses it.
-    let hexed = field("prospective_strict_refused.identity_r.register.k1.data");
-    let bytes: Vec<u8> = (0..hexed.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hexed[i..i + 2], 16).unwrap())
-        .collect();
-    let n = node();
-    let mut c = candidate(&n.db);
-    let mut s = Submitter::new(&n.db);
-    assert_eq!(s.run(&n, &mut c, REG, bytes, H, &vset(&[1])), TxStatus::Failed(303));
+    // The identity-R and non-canonical-R registers execute as 303.
+    for key in [
+        "prospective_strict_refused.identity_r.register.k1.data",
+        "prospective_both_refuse.noncanonical_r.register.k1.data",
+    ] {
+        let hexed = field(key);
+        let bytes: Vec<u8> = (0..hexed.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hexed[i..i + 2], 16).unwrap())
+            .collect();
+        let n = node();
+        let mut c = candidate(&n.db);
+        let mut s = Submitter::new(&n.db);
+        assert_eq!(s.run(&n, &mut c, REG, bytes, H, &vset(&[1])), TxStatus::Failed(303), "{key}");
+    }
 
     for (signers, ids) in [(&[1u8][..], &[1u8][..]), (&[1u8, 2, 3][..], &[1u8, 2, 3, 4][..])] {
         let n = node();
@@ -1578,6 +1594,31 @@ fn identity_r_signature(i: u8, msg: &[u8]) -> [u8; 64] {
     sig
 }
 
+/// The identity point's non-canonical encoding: y = p + 1 (EE FF … FF 7F).
+const IDENTITY_NONCANONICAL: [u8; 32] = {
+    let mut b = [0xFF; 32];
+    b[0] = 0xEE;
+    b[31] = 0x7F;
+    b
+};
+
+/// Validator `i`'s signature on `msg` with R = the identity's NON-canonical
+/// encoding, and s recomputed over those R bytes: k = H(R' ‖ A ‖ M), s = k·a.
+/// The equation holds ([s]B − [k]A is the identity), so only R's encoding is
+/// wrong. `verify` refuses it because it compares the canonical encoding of
+/// the recomputed point with R's bytes. `verify_strict` refuses it earlier:
+/// R' decodes, because the high bit is masked and canonicity is not checked,
+/// to the identity, a small-order point.
+fn noncanonical_identity_r_signature(i: u8, msg: &[u8]) -> [u8; 64] {
+    let a = *validator(i).public_key().as_bytes();
+    let secret = ExpandedSecretKey::from(&[i; 32]);
+    let s = challenge(&IDENTITY_NONCANONICAL, &a, msg) * secret.scalar;
+    let mut sig = [0u8; 64];
+    sig[..32].copy_from_slice(&IDENTITY_NONCANONICAL);
+    sig[32..].copy_from_slice(s.as_bytes());
+    sig
+}
+
 /// A small-order public key (the identity point, which VS-5 would refuse at
 /// genesis) and a signature `verify` accepts under it for ANY message:
 /// [k]A = identity, so R = [s]B for an arbitrary s.
@@ -1618,12 +1659,26 @@ fn the_two_rules_on_each_distinguishing_signature() {
     let honest = sign(msg, validator(1).private_key()).to_bytes();
     let identity_r = identity_r_signature(1, msg);
     let (weak_key, weak_sig) = small_order_key_and_signature();
-    // Non-canonical R: y = p + 1 (bytes EE FF … FF 7F) encodes the identity
-    // point, but is not its canonical encoding.
-    let mut noncanon_r = identity_r;
-    noncanon_r[..32].copy_from_slice(&[0xFF; 32]);
-    noncanon_r[0] = 0xEE;
-    noncanon_r[31] = 0x7F;
+    // Non-canonical R, with s recomputed over the non-canonical bytes, so the
+    // equation holds and only the encoding is wrong.
+    let noncanon_r = noncanonical_identity_r_signature(1, msg);
+    {
+        use curve25519_dalek::edwards::CompressedEdwardsY;
+        use curve25519_dalek::traits::IsIdentity;
+        let point_a = CompressedEdwardsY(a).decompress().unwrap();
+        let k = challenge(&IDENTITY_NONCANONICAL, &a, msg);
+        let s = Scalar::from_canonical_bytes(noncanon_r[32..].try_into().unwrap()).unwrap();
+        let recomputed = EdwardsPoint::vartime_double_scalar_mul_basepoint(&k, &(-point_a), &s);
+        // `verify`'s comparison: the recomputed point's canonical encoding is
+        // the identity's, 01 00 … 00, not R's bytes.
+        assert!(recomputed.is_identity());
+        assert_eq!(recomputed.compress().to_bytes(), IDENTITY);
+        assert_ne!(IDENTITY, IDENTITY_NONCANONICAL);
+        // `verify_strict`'s earlier check: R decodes to the identity, which is
+        // small-order.
+        let r = CompressedEdwardsY(IDENTITY_NONCANONICAL).decompress().unwrap();
+        assert!(r.is_identity() && r.is_small_order());
+    }
 
     // A small-order R other than the identity: the point of order 2,
     // y = p - 1 (bytes EC FF ... FF 7F). With a prime-order A, [s]B - [k]A is
@@ -1650,7 +1705,7 @@ fn the_two_rules_on_each_distinguishing_signature() {
         ("small-order R other than identity", msg, order_two_r, a, false, false),
         ("small-order public key", b"any message at all", weak_sig, weak_key, true, false),
         ("non-canonical S (S + l)", msg, with_s_plus_ell(honest), a, false, false),
-        ("non-canonical R (y = p + 1)", msg, noncanon_r, a, false, false),
+        ("non-canonical R (y = p + 1, s over those bytes)", msg, noncanon_r, a, false, false),
         ("wrong message", b"another message", honest, a, false, false),
         ("undecodable public key", msg, honest, undecodable, false, false),
     ];
@@ -1693,6 +1748,11 @@ fn operations_8_and_9_refuse_approvals_only_the_old_rule_accepts() {
     let (weak_key, weak_sig) = small_order_key_and_signature();
     assert_eq!(
         s.run(&n, &mut c, REG, with_sig(weak_key, weak_sig), H, &[weak_key]),
+        TxStatus::Failed(303)
+    );
+    // The non-canonical identity R, s recomputed over its bytes.
+    assert_eq!(
+        s.run(&n, &mut c, REG, with_sig(a, noncanonical_identity_r_signature(1, &msg)), H, &one),
         TxStatus::Failed(303)
     );
     // Non-canonical S, and a signature over another message.

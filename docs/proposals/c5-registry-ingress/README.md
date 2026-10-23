@@ -8,7 +8,7 @@
 
 The byte layouts stay PROPOSED until every C5 decision is settled. It specifies the dormant implementation in this pull request completely enough to be checked against the code and the vectors. Every value marked *fixture* or *synthetic* is a test value, not a proposed parameter.
 
-- **Mechanism:** B of the C5 decision document. Governance-v1 operations 8 (register) and 9 (disable) inside `TxType::Governance = 23`. There is no new transaction type, no `RegistryWireOp` namespace, no new gate and no new receipt code (`Failed(418)` stays unallocated).
+- **Mechanism:** B of the C5 proposal (#242). Governance-v1 operations 8 (register) and 9 (disable) inside `TxType::Governance = 23`. There is no new transaction type, no `RegistryWireOp` namespace, no new gate and no new receipt code (`Failed(418)` stays unallocated).
 - **Not on the wire:** this PR does **not** add the two `GovernanceOperation` variants. A governance transaction naming 8 or 9 is refused at decode exactly as on the base, and a block holding one is rejected (§13). The codecs and the executor logic are reached only through `governance_executor::execute_registry_ingress`, which nothing but the tests calls. Adding the wire variants is part of the separately authorized activation change.
 - **Authorization:** a quorum of the active PoA validator set at the execution height, verified **strictly** by `validator_quorum::verify_validator_quorum_strict` (§5). Register uses the authenticated governance threshold (Q17). Disable uses the stored record's threshold (B2, adopted 2026-10-23). `tx.from` only pays the fee.
 - **State:** dormant and unwired. Even by direct call, both operations refuse with `302` before reading their payload: both named parameters are unset (§9), and nothing supplies a genesis block hash. Records live in `cf::STATE` under `registry/v1/` (§12).
@@ -42,7 +42,7 @@ It is the existing envelope: bincode 1.3.3 with its default (legacy) configurati
 | 8 | 8 | `data` length L, u64 | `173 + 96·k` or `51 + 96·k` |
 | 16 | L | `data` | §3 |
 
-The `prospective_governance_tx_data` vectors start at offset 4 of this table. **Correction to the decision document:** it describes `operation` as a `u8`. On the wire it is the bincode `u32` variant index; the Rust discriminant is a `u8`.
+The `prospective_governance_tx_data` vectors start at offset 4 of this table. **Correction to the earlier proposal text:** it describes `operation` as a `u8`. On the wire it is the bincode `u32` variant index; the Rust discriminant is a `u8`.
 
 ## 3. Operation payloads
 
@@ -91,7 +91,7 @@ The offsets are relative to the record, then absolute within the register payloa
 Each entry is 96 bytes: the approving validator's Ed25519 public key (32 bytes, a compressed Edwards point) followed by its signature (64 bytes, `R ‖ S` as in RFC 8032).
 
 - Entries are in **strictly ascending order of pubkey**, compared as unsigned byte strings from byte 0 (`memcmp` order).
-- A pubkey equal to the one before it is a duplicate and is refused. A smaller one is out of order and is refused. Both are decode failures (`302`): the order is part of the §2 layout of the decision document, whose §6 lists them with the other byte-level negatives (Q16).
+- A pubkey equal to the one before it is a duplicate and is refused. A smaller one is out of order and is refused. Both are decode failures (`302`): the order is part of the proposed layout, which lists them with the other byte-level negatives (Q16).
 - k = 0 decodes. No quorum can then be met, so the operation refuses with `303`.
 - The decoder checks that all `96·k` bytes are present before allocating for them.
 - k has no bound other than `u16` (open question Q11). Every approval must come from an active validator (§6), so a valid k never exceeds the active set's size.
@@ -155,7 +155,7 @@ It is a thin wrapper in `crypto`, not new cryptography, because `state` does not
 | any other small-order R, prime-order A | refuses (cannot satisfy the equation) | refuses | `303` |
 | small-order A (outside VS-5), R = [s]B, any message | **accepts** | refuses | `303` |
 | non-canonical S (S + ℓ) | refuses | refuses | `303` |
-| non-canonical R (y = p + 1 for the identity) | refuses (R is compared by encoding) | refuses | `303` |
+| non-canonical R: y = p + 1 for the identity, s recomputed over those bytes | refuses: the recomputed point is the identity, whose canonical encoding `01 00…00` differs from R | refuses earlier: R decodes (high bit masked, canonicity unchecked) to the identity, a small-order point | `303` |
 | wrong message | refuses | refuses | `303` |
 | public key that does not decompress | refuses | refuses | `303` |
 | truncated approval (wrong length) | not reached | not reached | `302` at decode, no fee |
@@ -315,7 +315,7 @@ No code is allocated. On this binary, a transaction naming operation 8 or 9 does
 
 1. **This PR changes no decoding.** `GovernanceOperation` keeps exactly its eight variants (0 to 7). A governance transaction naming 8 or 9 fails to decode with the same error as on the base (`invalid value: integer 8, expected variant index 0 <= i < 8`), and a block holding one is rejected whole. Tests pin this for the payload, the signed transaction and the block (`governance_operations_8_and_9_do_not_decode`), for a synced `SyncResponse::Blocks`, and for `send_raw_transaction`, which leaves the mempool empty. An upgraded and a non-upgraded node therefore agree on every block.
 
-   **Adding the two wire variants belongs to the activation change.** It is a coordinated, same-window upgrade: once a binary decodes operation 8 or 9, an earlier binary rejects any block that holds one. If an operation that refuses before semantics (`300`–`302`, no fee) could be included in a block, it would also take block space for free. The decision document does not state either point (Q14).
+   **Adding the two wire variants belongs to the activation change.** It is a coordinated, same-window upgrade: once a binary decodes operation 8 or 9, an earlier binary rejects any block that holds one. If an operation that refuses before semantics (`300`–`302`, no fee) could be included in a block, it would also take block space for free. The earlier proposal text did not state either point (Q14).
 2. **Activation needs all of the following:**
    - the two `GovernanceOperation` variants and a dispatch to `execute_registry_ingress`, released as a coordinated upgrade;
    - governance-v1 activation with `ChainParams::governance`;
@@ -330,13 +330,13 @@ No code is allocated. On this binary, a transaction naming operation 8 or 9 does
 
 ## 14. Questions, consolidated
 
-There are three groups: (a) settled by the decision ledger (`DECISION-RECORD-20261016.md`, including the appendices "2026-10-22 owner decisions" and "2026-10-23 owner decisions and corrections") or by an owner instruction; (b) routine implementation choices, resolved in this PR; (c) protocol decisions still open, each with a recommendation. No resolution in (b) changes dormancy.
+There are three groups: (a) settled by an owner decision (2026-10-16 to 2026-10-23) or owner instruction; (b) routine implementation choices, resolved in this PR; (c) protocol decisions still open, each with a recommendation. No resolution in (b) changes dormancy.
 
 | Grp | Q | Resolution or recommendation | Consequence or citation |
 |---|---|---|---|
 | a | Q3 record default threshold | A tooling-only default. Removed from the parameter set and from every consensus path, which derives thresholds from authenticated state. | Owner 2026-10-22. Guarded by `no_consensus_path_reads_a_tooling_default`. |
 | a | Q4 signature rule | **Strict** (`verify_strict`) for operations 8 and 9 only; existing operations keep `verify` (§5) | Owner 2026-10-23. The earlier comparison is corrected in §5. |
-| a | Q5 consensus-config registration | Schema 2 is fixed. New committed fields need a schema-evolution proposal. The schema version is unallocated, and the ids are provisional. | Ledger G3, 2026-10-16; owner 2026-10-23 |
+| a | Q5 consensus-config registration | Schema 2 is fixed. New committed fields need a schema-evolution proposal. The schema version is unallocated, and the ids are provisional. | Owner decision, 2026-10-16; owner decision, 2026-10-23 |
 | a | Q6 parameter structure | T_min and W: no defaults, paired presence, `1..=u32::MAX`, checked arithmetic (§9). The values are undecided; no genesis or config fields yet. | Owner 2026-10-23 |
 | a | Q8 commit consumers | Decided with the first proof consumer (#128). Until then nothing in production references `v_check_commit`, `check_commit` or `execute_registry_ingress`. | Owner 2026-10-22. Guarded by `no_production_code_calls_the_commit_check_or_the_registry_entry`. |
 | a | Q18 `id` derivation | Bound to Q8: the consumer checks that its verifier material derives to the record `id` | Owner 2026-10-22 |
@@ -345,7 +345,7 @@ There are three groups: (a) settled by the decision ledger (`DECISION-RECORD-202
 | a | Q17 register threshold | The authenticated governance threshold, under the existing rule verbatim (§6) | Owner 2026-10-22 |
 | a | B2 thresholds | Disable is at the stored record's threshold, which register made ≥ the governance threshold. Later governance changes do not affect existing records (§7). | Owner 2026-10-23; consequence in §7 |
 | a | Q12 / binding | The handshake-only binding is **rejected**. The consensus-identity binding and the registry digest are the activation proposal (§16). | Owner 2026-10-23 |
-| b | Q1 missing parameter | `302`, pre-semantic | Defensive only: activation with a missing value is impossible (ledger C5 note, 2026-10-21) |
+| b | Q1 missing parameter | `302`, pre-semantic | Defensive only: activation with a missing value is impossible (owner decision, 2026-10-21) |
 | b | Q2 expiry and window | `303`, fee per Policy-B | Height-dependent, like every other authorization refusal |
 | b | Q7 genesis hash | The activation change supplies `create_genesis_block().hash()` (config field `0x0005`) | Refuses until then |
 | b | Q10 dry-run activation check | Unchanged now; the activation change aligns `registry_dryRunAdmit` to `h + T_min` | Non-consensus RPC |
@@ -359,7 +359,7 @@ There are three groups: (a) settled by the decision ledger (`DECISION-RECORD-202
 
 ### 14.1 Status of the 2026-10-22 recommendation
 
-The consolidated recommendation of 2026-10-22 (sprint record `C5-RECOMMENDATION-20261022.md`) was decided on 2026-10-23 as follows:
+The consolidated recommendation of 2026-10-22 was decided by the owner on 2026-10-23 as follows:
 - **Signatures:** its recommendation to keep governance-v1 `verify` was **not adopted**. Its claim that VS-5 makes the two rules agree for real approvers was wrong (corrected in §5). Operations 8 and 9 are strict.
 - **Parameters:** the structure was **accepted** (§9). Its handshake digest-trailer binding was **replaced** by the consensus-identity binding of §16; a handshake check may detect mismatches but cannot substitute. Its ids are PROVISIONAL, and the ConsensusConfig schema version is unallocated (assigned when the activation change is planned).
 - **Storage and digest:** STATE placement was **adopted** (§12). The registry digest was refined into §16, which corrects where the fold goes: after the account digest.
@@ -410,7 +410,7 @@ The consolidated recommendation of 2026-10-22 (sprint record `C5-RECOMMENDATION-
 
 Gate names and domains are **provisional**. ConsensusConfig schema version: unallocated; assigned when the activation change is planned. Field ids 0x0609/0x060a and constants 0x2900–0x2904 are PROVISIONAL.
 
-This section is the sprint record `C5-CONSENSUS-BINDING-PROPOSAL-20261023.md` as amended on 2026-10-23, reproduced as written apart from wording about the schema number and today's #348 behaviour. Its section numbers are local to it. The root-coverage statement in its §6 is verbatim.
+This section is the activation proposal as amended on 2026-10-23, reproduced as written apart from wording about the schema number and today's #348 behaviour. Its section numbers are local to it. The root-coverage statement in its §6 is verbatim.
 
 Read-only basis: main `e3b8ff81`; #348 `c867eedb`; #342 `13c5c755` (draft); #338 `02508800`. Nothing here is implemented, scheduled or authorized. It replaces the handshake-only binding (owner, 2026-10-23, "2026-10-23 owner decisions and corrections"). Gate names and domains below are **provisional**. ConsensusConfig schema version: unallocated; assigned when the activation change is planned. Field ids 0x0609/0x060a and constants 0x2900–0x2904 are PROVISIONAL.
 
