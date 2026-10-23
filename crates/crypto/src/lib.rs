@@ -20,7 +20,7 @@ pub use messaging::{
     encrypt_message, is_low_order_x25519_public_key, recipient_hash, x25519_ecdh,
     DecryptedMessage, LOW_ORDER_X25519_POINTS,
 };
-pub use signature::{sign, verify, verify_bytes, Signature};
+pub use signature::{sign, verify, verify_bytes, verify_bytes_strict, Signature};
 pub use validator_key::{check_validator_key, ValidatorKeyRule};
 
 use thiserror::Error;

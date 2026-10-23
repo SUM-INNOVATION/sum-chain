@@ -77,8 +77,8 @@ const EXCLUDED: &[(&str, &str)] = &[
     ),
     (
         "REGISTRY_RECORD_KEY_PREFIX",
-        "cf::META key prefix of the dormant C5 registry records (PROPOSED); \
-         storage layout, never hashed into a block; written only through \
+        "cf::STATE key prefix of the dormant C5 registry records; storage \
+         layout, folded into no root while dormant; written only through \
          execute_registry_ingress, which no transaction decode reaches",
     ),
     // ── Node-local snapshot artefacts. `snapshot.rs` states snapshots are

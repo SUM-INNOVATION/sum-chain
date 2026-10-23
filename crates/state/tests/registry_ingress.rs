@@ -690,9 +690,9 @@ fn vectors() -> String {
     line("genesis_block_hash", hex(&GENESIS));
     line("execution_height", H.to_string());
     line("valid_until", until.to_string());
-    line("fixture.validator_authority_threshold_bps", GOV_BPS.to_string());
-    line("fixture.registry_min_timelock_blocks", T_MIN.to_string());
-    line("fixture.registry_max_approval_window", WINDOW.to_string());
+    line("test_only.validator_authority_threshold_bps", GOV_BPS.to_string());
+    line("test_only.registry_min_timelock_blocks", T_MIN.to_string());
+    line("test_only.registry_max_approval_window", WINDOW.to_string());
     for i in 1..=4u8 {
         line(&format!("validator.{i}.seed"), hex(&[i; 32]));
         line(&format!("validator.{i}.pubkey"), hex(validator(i).public_key().as_bytes()));
@@ -720,6 +720,22 @@ fn vectors() -> String {
             );
         }
     }
+    // A register whose one approval is validator 1's identity-R signature over
+    // the register preimage: governance-v1 `verify` accepts that signature,
+    // `verify_strict` (operations 8 and 9) refuses it.
+    let msg = registry_register_signing_bytes(CHAIN, &GENESIS, until, &rec).unwrap();
+    let identity_r = RegistryRegisterV1 {
+        valid_until: until,
+        record: rec.clone(),
+        approvals: vec![ValidatorApproval {
+            pubkey: *validator(1).public_key().as_bytes(),
+            signature: identity_r_signature(1, &msg),
+        }],
+    };
+    line(
+        "prospective_strict_refused.identity_r.register.k1.data",
+        hex(&identity_r.try_encode().unwrap()),
+    );
     // The proposed quorum rule's required approval counts at its boundaries
     // (Q17): `required_approvals`, `validator_authority.rs:119-123`.
     for (n, bps) in QUORUM_BOUNDARIES {
@@ -795,6 +811,17 @@ fn vectors_are_reproduced_and_execute() {
     assert_eq!(field("register.k3.data").len(), 2 * (173 + 3 * 96));
     assert_eq!(field("disable.k3.data").len(), 2 * (51 + 3 * 96));
 
+    // The identity-R register executes as 303: strict verification refuses it.
+    let hexed = field("prospective_strict_refused.identity_r.register.k1.data");
+    let bytes: Vec<u8> = (0..hexed.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hexed[i..i + 2], 16).unwrap())
+        .collect();
+    let n = node();
+    let mut c = candidate(&n.db);
+    let mut s = Submitter::new(&n.db);
+    assert_eq!(s.run(&n, &mut c, REG, bytes, H, &vset(&[1])), TxStatus::Failed(303));
+
     for (signers, ids) in [(&[1u8][..], &[1u8][..]), (&[1u8, 2, 3][..], &[1u8, 2, 3, 4][..])] {
         let n = node();
         let mut c = candidate(&n.db);
@@ -815,7 +842,7 @@ fn vectors_are_reproduced_and_execute() {
 
 /// `ALL_CFS` on `e3b8ff81`, names and order. A family a binary does not name
 /// makes the volume unopenable by that binary, so C5 adds none: records live
-/// under a versioned `cf::META` key prefix instead.
+/// in the existing `cf::STATE` under `registry/v1/` (adopted 2026-10-23).
 const MAIN_ALL_CFS: &[&str] = &[
     "blocks",
     "block_height",
@@ -1013,7 +1040,7 @@ fn the_column_families_are_exactly_mains() {
 }
 
 #[test]
-fn a_record_is_one_meta_row_under_its_prefix() {
+fn a_record_is_one_state_row_under_its_prefix() {
     let n = node();
     let mut c = candidate(&n.db);
     let mut s = Submitter::new(&n.db);
@@ -1023,16 +1050,35 @@ fn a_record_is_one_meta_row_under_its_prefix() {
         TxStatus::Success
     );
     let view = c.view();
+    // `prefix_iter` seeks to the prefix; a reader stops where the prefix ends,
+    // as the account fold does (`account_root.rs` `AccountDigest::fold`).
     let rows: Vec<(Vec<u8>, Vec<u8>)> = view
-        .prefix_iter(cf::META, REGISTRY_RECORD_KEY_PREFIX)
+        .prefix_iter(cf::STATE, REGISTRY_RECORD_KEY_PREFIX)
         .unwrap()
         .map(|r| r.unwrap())
+        .take_while(|(k, _)| k.starts_with(REGISTRY_RECORD_KEY_PREFIX))
         .collect();
     assert_eq!(rows.len(), 1);
     let (key, value) = &rows[0];
     assert_eq!(key, &registry_record_key(&[1; 32]));
-    assert_eq!(key.len(), REGISTRY_RECORD_KEY_PREFIX.len() + 32);
+    assert_eq!(key.len(), 12 + 32);
     assert_eq!(value, &record(1).try_encode().unwrap());
+    // Nothing went to `meta`. The account scan (the account root, the snapshot
+    // export, the legacy revert) stops at the end of `acct`, before any
+    // registry row: `registry/` sorts after `acct`.
+    assert_eq!(view.get(cf::META, &registry_record_key(&[1; 32])).unwrap(), None);
+    let acct = sumchain_storage::schema::ACCOUNT_KEY_PREFIX;
+    let mut accounts = 0;
+    for entry in view.prefix_iter(cf::STATE, acct).unwrap() {
+        let (key, _) = entry.unwrap();
+        if !key.starts_with(acct) {
+            assert!(key.as_slice() > acct, "the scan ends after the prefix");
+            break;
+        }
+        assert!(!key.starts_with(REGISTRY_RECORD_KEY_PREFIX));
+        accounts += 1;
+    }
+    assert!(accounts >= 2, "the payer and the proposer");
 }
 
 /// Every `b"…"` literal in `src` (simple escapes only), as
@@ -1090,13 +1136,28 @@ fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
-/// The `registry/` namespace of `cf::META` is this module's alone, and the
-/// record prefix overlaps no other META key: no existing exact read or prefix
-/// scan can see a registry row, and no registry scan can see another row.
+/// Every key family of `cf::STATE`, on main and in the open PRs (checked
+/// 2026-10-23): `acct` (account rows, `storage/src/schema.rs` `ACCOUNT_KEY_PREFIX`,
+/// the only family any production code scans) and `vset/` (G5's validator-set
+/// rows, #342, not yet merged). No other open PR writes `cf::STATE`.
+const STATE_KEY_FAMILIES: [&[u8]; 2] = [sumchain_storage::schema::ACCOUNT_KEY_PREFIX, b"vset/"];
+
+/// The registry prefix is prefix-free with every other `cf::STATE` key family,
+/// in both directions, and the `registry/` namespace is this module's alone.
+/// No existing exact read or prefix scan can see a registry row, and no
+/// registry scan can see another row.
 #[test]
-fn the_record_prefix_is_disjoint_from_every_meta_key_in_the_repository() {
-    use sumchain_storage::certified_meta::{CERTIFICATE_KEY_PREFIX, FINALIZED_POINTER_KEY};
-    use sumchain_storage::schema::meta_keys;
+fn the_record_prefix_is_disjoint_from_every_state_key_family() {
+    let p = REGISTRY_RECORD_KEY_PREFIX;
+    assert_eq!(p, b"registry/v1/");
+    assert_eq!(sumchain_storage::schema::ACCOUNT_KEY_PREFIX, b"acct");
+    for family in STATE_KEY_FAMILIES {
+        assert!(
+            !family.starts_with(p) && !p.starts_with(family),
+            "{} overlaps the registry prefix",
+            String::from_utf8_lossy(family)
+        );
+    }
 
     let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut files = Vec::new();
@@ -1110,12 +1171,7 @@ fn the_record_prefix_is_disjoint_from_every_meta_key_in_the_repository() {
         }
     }
     assert!(files.len() > 100, "the scan found too few files to mean anything");
-    // This module, its tests, and the certified-commit list that names it.
-    let own = [
-        "state/src/registry_ingress.rs",
-        "state/tests/registry_ingress.rs",
-        "storage/tests/certified_meta_v1.rs",
-    ];
+    let own = ["state/src/registry_ingress.rs", "state/tests/registry_ingress.rs"];
     let mut literals = std::collections::BTreeSet::new();
     for f in &files {
         if own.iter().any(|o| f.ends_with(o)) {
@@ -1123,8 +1179,6 @@ fn the_record_prefix_is_disjoint_from_every_meta_key_in_the_repository() {
         }
         literals.extend(byte_literals(&std::fs::read_to_string(f).unwrap()));
     }
-
-    let p = REGISTRY_RECORD_KEY_PREFIX;
     let reserved: Vec<String> = literals
         .iter()
         .filter(|l| l.starts_with(b"registry/"))
@@ -1133,33 +1187,16 @@ fn the_record_prefix_is_disjoint_from_every_meta_key_in_the_repository() {
     assert!(reserved.is_empty(), "other literals in registry/: {reserved:?}");
     let prefixes: Vec<String> = literals
         .iter()
-        .filter(|l| l.ends_with(b"/") && p.starts_with(l))
+        .filter(|l| !l.is_empty() && l.ends_with(b"/") && p.starts_with(l))
         .map(|l| String::from_utf8_lossy(l).into_owned())
         .collect();
     assert!(prefixes.is_empty(), "literals that prefix {p:?}: {prefixes:?}");
-    for key in [
-        meta_keys::LATEST_BLOCK_HASH,
-        meta_keys::LATEST_BLOCK_HEIGHT,
-        meta_keys::GENESIS_HASH,
-        meta_keys::CHAIN_ID,
-        meta_keys::FINALIZED_HEIGHT,
-        meta_keys::FINALIZED_HASH,
-        CERTIFICATE_KEY_PREFIX,
-        FINALIZED_POINTER_KEY,
-        &b"messaging/registry_seed_v1"[..],
-    ] {
-        assert!(
-            !key.starts_with(p) && !p.starts_with(key),
-            "{} overlaps the registry prefix",
-            String::from_utf8_lossy(key)
-        );
-    }
 }
 
 // ── Q17: the quorum rule at its boundaries ───────────────────────────────────
 
 /// The rule register uses, verbatim (`validator_authority.rs:119-123`,
-/// `validator_quorum.rs:59-90`): `required = (n·bps + 9999) div 10000` in
+/// `validator_quorum.rs:99-130`): `required = (n·bps + 9999) div 10000` in
 /// `u64`, accepted iff `1 ≤ bps ≤ 10000`, n ≥ 1, every approval valid, and
 /// `k ≥ required`.
 #[test]
@@ -1502,4 +1539,392 @@ fn no_production_code_calls_the_commit_check_or_the_registry_entry() {
             assert_eq!(references(&code, name), want, "{file}: {name}");
         }
     }
+}
+
+// ── Signatures: strict for operations 8 and 9 (owner, 2026-10-23) ─────────────
+
+use curve25519_dalek::{EdwardsPoint, Scalar};
+use ed25519_dalek::hazmat::ExpandedSecretKey;
+use sha2::{Digest, Sha512};
+
+/// The compressed identity point: y = 1, sign bit 0.
+const IDENTITY: [u8; 32] = {
+    let mut b = [0u8; 32];
+    b[0] = 1;
+    b
+};
+
+/// k = SHA-512(R ‖ A ‖ M) mod ℓ, as RFC 8032 and ed25519-dalek compute it.
+fn challenge(r: &[u8; 32], a: &[u8; 32], msg: &[u8]) -> Scalar {
+    let mut h = Sha512::new();
+    h.update(r);
+    h.update(a);
+    h.update(msg);
+    Scalar::from_bytes_mod_order_wide(&h.finalize().into())
+}
+
+/// Validator `i`'s signature on `msg` with R = identity and s = k·a mod ℓ.
+/// Then [s]B − [k]A = [k·a]B − [k·a]B = identity = R, so `verify` accepts it.
+/// Any key holder can produce one; `verify_strict` refuses it because R is a
+/// small-order point. VS-5 checks keys, not R, so this holds for an honest,
+/// canonical, prime-order key.
+fn identity_r_signature(i: u8, msg: &[u8]) -> [u8; 64] {
+    let a = *validator(i).public_key().as_bytes();
+    let secret = ExpandedSecretKey::from(&[i; 32]);
+    let s = challenge(&IDENTITY, &a, msg) * secret.scalar;
+    let mut sig = [0u8; 64];
+    sig[..32].copy_from_slice(&IDENTITY);
+    sig[32..].copy_from_slice(s.as_bytes());
+    sig
+}
+
+/// A small-order public key (the identity point, which VS-5 would refuse at
+/// genesis) and a signature `verify` accepts under it for ANY message:
+/// [k]A = identity, so R = [s]B for an arbitrary s.
+fn small_order_key_and_signature() -> ([u8; 32], [u8; 64]) {
+    let s = Scalar::from_bytes_mod_order([7; 32]);
+    let r = EdwardsPoint::mul_base(&s).compress().to_bytes();
+    let mut sig = [0u8; 64];
+    sig[..32].copy_from_slice(&r);
+    sig[32..].copy_from_slice(s.as_bytes());
+    (IDENTITY, sig)
+}
+
+/// ℓ = 2^252 + 27742317777372353535851937790883648493, little-endian.
+const ELL: [u8; 32] = [
+    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+];
+
+/// `sig` with S replaced by S + ℓ: the same scalar, non-canonically encoded.
+fn with_s_plus_ell(mut sig: [u8; 64]) -> [u8; 64] {
+    let mut carry = 0u16;
+    for i in 0..32 {
+        let v = sig[32 + i] as u16 + ELL[i] as u16 + carry;
+        sig[32 + i] = v as u8;
+        carry = v >> 8;
+    }
+    assert_eq!(carry, 0);
+    sig
+}
+
+/// What each rule accepts. `verify_bytes` is governance-v1's `verify`;
+/// `verify_bytes_strict` is `verify_strict`, used by operations 8 and 9 only.
+#[test]
+fn the_two_rules_on_each_distinguishing_signature() {
+    use sumchain_crypto::{verify_bytes, verify_bytes_strict};
+    let msg = b"c5 strict verification";
+    let a = *validator(1).public_key().as_bytes();
+    let honest = sign(msg, validator(1).private_key()).to_bytes();
+    let identity_r = identity_r_signature(1, msg);
+    let (weak_key, weak_sig) = small_order_key_and_signature();
+    // Non-canonical R: y = p + 1 (bytes EE FF … FF 7F) encodes the identity
+    // point, but is not its canonical encoding.
+    let mut noncanon_r = identity_r;
+    noncanon_r[..32].copy_from_slice(&[0xFF; 32]);
+    noncanon_r[0] = 0xEE;
+    noncanon_r[31] = 0x7F;
+
+    // A small-order R other than the identity: the point of order 2,
+    // y = p - 1 (bytes EC FF ... FF 7F). With a prime-order A, [s]B - [k]A is
+    // in the prime-order subgroup, so it is never this point.
+    let mut order_two_r = honest;
+    order_two_r[..32].copy_from_slice(&[0xFF; 32]);
+    order_two_r[0] = 0xEC;
+    order_two_r[31] = 0x7F;
+    // A public key that does not decompress to a curve point.
+    let undecodable = (2u8..)
+        .map(|y| {
+            let mut k = [0u8; 32];
+            k[0] = y;
+            k
+        })
+        .find(|k| ed25519_dalek::VerifyingKey::from_bytes(k).is_err())
+        .unwrap();
+
+    // (what, message, signature, key, `verify` accepts, `verify_strict` accepts)
+    type Case<'a> = (&'a str, &'a [u8], [u8; 64], [u8; 32], bool, bool);
+    let cases: [Case; 8] = [
+        ("ordinary signature", msg, honest, a, true, true),
+        ("identity R, real key", msg, identity_r, a, true, false),
+        ("small-order R other than identity", msg, order_two_r, a, false, false),
+        ("small-order public key", b"any message at all", weak_sig, weak_key, true, false),
+        ("non-canonical S (S + l)", msg, with_s_plus_ell(honest), a, false, false),
+        ("non-canonical R (y = p + 1)", msg, noncanon_r, a, false, false),
+        ("wrong message", b"another message", honest, a, false, false),
+        ("undecodable public key", msg, honest, undecodable, false, false),
+    ];
+    for (what, m, sig, key, v1, strict) in cases {
+        assert_eq!(verify_bytes(m, &sig, &key).is_ok(), v1, "verify: {what}");
+        assert_eq!(verify_bytes_strict(m, &sig, &key).is_ok(), strict, "verify_strict: {what}");
+    }
+}
+
+/// Through the dormant registry entry: an approval that only the
+/// governance-v1 rule accepts is refused with `303`. The fee is charged when
+/// the balance covers it (checked by `Submitter::run`); otherwise it is `303`
+/// with fee 0, the nonce unchanged and no state change.
+#[test]
+fn operations_8_and_9_refuse_approvals_only_the_old_rule_accepts() {
+    let n = node();
+    let mut c = candidate(&n.db);
+    let mut s = Submitter::new(&n.db);
+    let one = vset(&[1]);
+    let until = H + 50;
+    let rec = record(1);
+    let msg = registry_register_signing_bytes(CHAIN, &GENESIS, until, &rec).unwrap();
+    let with_sig = |pubkey: [u8; 32], signature: [u8; 64]| {
+        RegistryRegisterV1 {
+            valid_until: until,
+            record: rec.clone(),
+            approvals: vec![ValidatorApproval { pubkey, signature }],
+        }
+        .try_encode()
+        .unwrap()
+    };
+    let a = *validator(1).public_key().as_bytes();
+    let honest = sign(&msg, validator(1).private_key()).to_bytes();
+    // The identity-R signature from the real, honest key.
+    assert_eq!(
+        s.run(&n, &mut c, REG, with_sig(a, identity_r_signature(1, &msg)), H, &one),
+        TxStatus::Failed(303)
+    );
+    // A small-order key, outside VS-5, in a test-built active set.
+    let (weak_key, weak_sig) = small_order_key_and_signature();
+    assert_eq!(
+        s.run(&n, &mut c, REG, with_sig(weak_key, weak_sig), H, &[weak_key]),
+        TxStatus::Failed(303)
+    );
+    // Non-canonical S, and a signature over another message.
+    assert_eq!(
+        s.run(&n, &mut c, REG, with_sig(a, with_s_plus_ell(honest)), H, &one),
+        TxStatus::Failed(303)
+    );
+    let other = sign(b"not the preimage", validator(1).private_key()).to_bytes();
+    assert_eq!(s.run(&n, &mut c, REG, with_sig(a, other), H, &one), TxStatus::Failed(303));
+    assert_eq!(stored(&mut c, 1), None);
+    // A malformed approval encoding (one byte short) never reaches a
+    // signature: `302`, no fee, no nonce (checked by `Submitter::run`).
+    let mut short = with_sig(a, honest);
+    short.pop();
+    assert_eq!(s.run(&n, &mut c, REG, short, H, &one), TxStatus::Failed(302));
+    // The honest signature is accepted.
+    assert_eq!(s.run(&n, &mut c, REG, with_sig(a, honest), H, &one), TxStatus::Success);
+
+    // Disable is under the same rule.
+    let dmsg = registry_disable_signing_bytes(CHAIN, &GENESIS, until, &rec.id);
+    let disable_with = |signature: [u8; 64]| {
+        RegistryDisableV1 {
+            valid_until: until,
+            id: rec.id,
+            approvals: vec![ValidatorApproval { pubkey: a, signature }],
+        }
+        .try_encode()
+        .unwrap()
+    };
+    assert_eq!(
+        s.run(&n, &mut c, DIS, disable_with(identity_r_signature(1, &dmsg)), H, &one),
+        TxStatus::Failed(303)
+    );
+    assert_eq!(stored(&mut c, 1).unwrap().status, RegistryStatus::Enabled);
+
+    // Underfunded: the same refusal is `303` with fee 0.
+    let poor = KeyPair::from_bytes([0x5C; 32]);
+    fund(&n.db, &poor, FEE - 1);
+    let proposer = Address::new([0x98; 20]);
+    let r = execute_registry_ingress(
+        &mut c.view(),
+        CHAIN,
+        &n.params,
+        REG,
+        &with_sig(a, identity_r_signature(1, &msg)),
+        &poor.address(),
+        FEE,
+        &proposer,
+        H,
+        Hash::ZERO,
+        &one,
+        RegistryIngressContext {
+            params: &n.registry,
+            genesis_block_hash: n.genesis.as_ref(),
+        },
+    )
+    .unwrap();
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Failed(303), 0));
+    assert_eq!(StateManager::v_get_nonce(&c.view(), &poor.address()).unwrap(), 0);
+    assert_eq!(StateManager::v_get_balance(&c.view(), &poor.address()).unwrap(), FEE - 1);
+    assert_eq!(StateManager::v_get_balance(&c.view(), &proposer).unwrap(), 0);
+}
+
+/// Existing governance operations keep governance-v1 `verify`: `RegisterAsset`
+/// still accepts the identity-R approval that the registry operations refuse.
+#[test]
+fn existing_governance_operations_keep_the_governance_v1_rule() {
+    use sumchain_primitives::governance::{
+        GovernanceOperation, GovernanceTxData, RegisterAssetRequest,
+    };
+    use sumchain_primitives::validator_authority::register_asset_signing_bytes;
+    use sumchain_storage::schema::Src20TokenData;
+    use sumchain_storage::TokenStore;
+
+    let n = node();
+    let token = [0x7A; 32];
+    TokenStore::new(&n.db)
+        .put_token(
+            &token,
+            &Src20TokenData {
+                name: "Gov".into(),
+                symbol: "GOV".into(),
+                decimals: 0,
+                owner: Address::new([0xC0; 20]),
+                total_supply: 1_000,
+                max_supply: 1_000,
+                mintable: false,
+                burnable: false,
+                pausable: false,
+                paused: false,
+                minters: vec![],
+                created_at: 0,
+                created_at_block: 0,
+            },
+        )
+        .unwrap();
+    let mut c = candidate(&n.db);
+    let s = Submitter::new(&n.db);
+    let msg = register_asset_signing_bytes(CHAIN, &token, 1, 0);
+    let a = *validator(1).public_key().as_bytes();
+    let signature = identity_r_signature(1, &msg);
+    assert!(sumchain_crypto::verify_bytes(&msg, &signature, &a).is_ok());
+    assert!(sumchain_crypto::verify_bytes_strict(&msg, &signature, &a).is_err());
+    let request = RegisterAssetRequest {
+        token_id: token,
+        create_threshold: 1,
+        effective_height: 0,
+        approvals: vec![ValidatorApproval { pubkey: a, signature }],
+    };
+    let r = sumchain_state::governance_executor::execute(
+        &mut c.view(),
+        CHAIN,
+        &n.params,
+        &GovernanceTxData {
+            operation: GovernanceOperation::RegisterAsset,
+            data: bincode::serialize(&request).unwrap(),
+        },
+        &s.kp.address(),
+        0,
+        FEE,
+        &Address::new([0x99; 20]),
+        H,
+        1_000,
+        Hash::ZERO,
+        &vset(&[1]),
+    )
+    .unwrap();
+    assert_eq!(r.status, TxStatus::Success, "governance-v1 verify, unchanged");
+}
+
+// ── Parameters: paired presence, range, overflow (owner, 2026-10-23) ─────────
+
+/// A partial or out-of-range parameter set is unready: `302`, no fee, exactly
+/// like an unset one.
+#[test]
+fn invalid_parameter_sets_refuse_free() {
+    let top = u32::MAX as u64;
+    for params in [
+        RegistryIngressParams { registry_min_timelock_blocks: Some(0), ..fixture_params() },
+        RegistryIngressParams { registry_max_approval_window: Some(0), ..fixture_params() },
+        RegistryIngressParams { registry_min_timelock_blocks: Some(top + 1), ..fixture_params() },
+        RegistryIngressParams { registry_max_approval_window: Some(top + 1), ..fixture_params() },
+    ] {
+        let n = node_with(chain_params(GOV_BPS), Some(params));
+        let mut c = candidate(&n.db);
+        let mut s = Submitter::new(&n.db);
+        assert_eq!(
+            s.run(&n, &mut c, REG, register(H + 50, &record(1), &[1]), H, &vset(&[1])),
+            TxStatus::Failed(302),
+            "{params:?}"
+        );
+    }
+}
+
+/// With T_min at its maximum, `h + T_min` passes `u64::MAX` near the end of
+/// the height range. No activation height can satisfy the timelock, so the
+/// register is refused: `303`, fee charged, no state change.
+#[test]
+fn a_timelock_past_u64_max_refuses_with_303() {
+    let top = u32::MAX as u64;
+    let params = RegistryIngressParams {
+        registry_min_timelock_blocks: Some(top),
+        registry_max_approval_window: Some(top),
+    };
+    let n = node_with(chain_params(GOV_BPS), Some(params));
+    let mut c = candidate(&n.db);
+    let mut s = Submitter::new(&n.db);
+    let h = u64::MAX - 10;
+    let mut rec = record(1);
+    rec.activation_height = u64::MAX;
+    assert_eq!(
+        s.run(&n, &mut c, REG, register(u64::MAX, &rec, &[1]), h, &vset(&[1])),
+        TxStatus::Failed(303)
+    );
+    assert_eq!(stored(&mut c, 1), None);
+    // The largest timelock that still fits is accepted at its boundary.
+    let h = u64::MAX - top;
+    assert_eq!(
+        s.run(&n, &mut c, REG, register(u64::MAX, &rec, &[1]), h, &vset(&[1])),
+        TxStatus::Success
+    );
+}
+
+// ── B2: a record keeps the threshold accepted at its registration ────────────
+
+/// Disable requires the stored record's threshold, which register made ≥ the
+/// governance threshold of its time. A later change to the governance
+/// threshold does not touch existing records: after an increase, an older
+/// record is still disabled at its lower stored threshold. New registrations
+/// meet the new floor.
+#[test]
+fn a_governance_threshold_change_does_not_move_an_existing_record() {
+    let n = node();
+    let mut c = candidate(&n.db);
+    let s = Submitter::new(&n.db);
+    let two = vset(&[1, 2]);
+    let proposer = Address::new([0x99; 20]);
+    let ctx = RegistryIngressContext {
+        params: &n.registry,
+        genesis_block_hash: n.genesis.as_ref(),
+    };
+    let run = |c: &mut CandidateExecution<'_>, gov_bps: u16, op, data: Vec<u8>| {
+        execute_registry_ingress(
+            &mut c.view(),
+            CHAIN,
+            &chain_params(gov_bps),
+            op,
+            &data,
+            &s.kp.address(),
+            FEE,
+            &proposer,
+            H,
+            Hash::ZERO,
+            &two,
+            ctx,
+        )
+        .unwrap()
+        .status
+    };
+    // Registered while governance required 5000 bps (1 of 2).
+    let mut rec = record(1);
+    rec.approval_threshold_bps = 5_000;
+    assert_eq!(run(&mut c, 5_000, REG, register(H + 50, &rec, &[1])), TxStatus::Success);
+    // Governance rises to 10000 bps (2 of 2). A new record must meet it.
+    let mut newer = record(2);
+    newer.approval_threshold_bps = 5_000;
+    assert_eq!(
+        run(&mut c, 10_000, REG, register(H + 50, &newer, &[1, 2])),
+        TxStatus::Failed(303),
+        "the floor is the governance threshold at registration"
+    );
+    // The older record is still disabled at its stored 5000 bps: 1 of 2.
+    assert_eq!(run(&mut c, 10_000, DIS, disable(H + 50, 1, &[1])), TxStatus::Success);
+    assert_eq!(stored(&mut c, 1).unwrap().status, RegistryStatus::Disabled);
 }

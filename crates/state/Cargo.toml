@@ -45,6 +45,13 @@ sumchain-beacon-crypto = { path = "../beacon-crypto" }
 # The library's own `tracing` is not reachable from an integration test, and a
 # subscriber crate is not worth pulling in to read one string.
 tracing = { workspace = true }
+# `tests/registry_ingress.rs` builds signatures that only the non-strict rule
+# accepts (an identity R from a real key, a small-order public key), to show
+# where governance-v1 `verify` and the C5 operations' `verify_strict` differ.
+# All three are already in the lockfile.
+ed25519-dalek = { workspace = true }
+curve25519-dalek = "4.1"
+sha2 = { workspace = true }
 
 [features]
 # Test modules that were written against pre-migration primitives schemas and
