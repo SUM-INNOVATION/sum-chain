@@ -613,7 +613,7 @@ Each of these, like a read error, is an execution error that fails the block. A 
 - **B2 and later threshold changes:** existing records are unaffected. Disable uses the stored `approval_threshold_bps`, which was ≥ the governance threshold effective at registration (#348 `state/src/registry_ingress.rs:96-101`). New registrations use `effective(h)`.
 
 **Parameter changes after activation (design direction accepted 2026-10-23; specified in §17).** T_min, W and the governance threshold `validator_authority_threshold_bps` (0x0601) are frozen at A, instead of adopting the height-keyed `registry_param_changes` list above now. Any change after A then needs a new coordinated activation. Consequences:
-- From A, `validator_authority_threshold_bps`, T_min and W cannot be changed by acknowledgement. Startup refuses. *[Amended 2026-10-23]* The refusal is keyed on the freeze row, written at the first verified import at or above A, not on the head (§17 (a)).
+- From A, `validator_authority_threshold_bps`, T_min and W cannot be changed by acknowledgement. Startup refuses. *[Amended 2026-10-23]* The refusal is keyed on the freeze row, written in the batch of the first block at or above A that the node publishes, produced or imported, not on the head (§17 (a)).
 - Changing any of them requires a new coordinated activation, which introduces the height-keyed form or a gated second value set when it is needed.
 - Existing records keep their B2 thresholds.
 - Before A nothing changes: 0x0601 stays acknowledgement-changeable, as today, with its existing hazard.
@@ -722,117 +722,147 @@ Handshake digest trailer: optional detection only.
   - T_min (`registry_min_timelock_blocks`);
   - W (`registry_max_approval_window`);
   - the governance threshold `validator_authority_threshold_bps` (0x0601).
-- **What was decided:** the owner accepted the freeze as the design direction on 2026-10-23.
-- **What is PROPOSED:** the record layout, the keys and the messages below.
+- **What was decided:** the owner accepted the freeze as the design direction on 2026-10-23, then directed this revision before byte ratification.
+- **What is PROPOSED:** the binding rule, the recovery path, the record layouts, the keys, the command and the messages below.
 - **What is not selected:** any parameter value or activation height.
-- **Implementation:** none in this PR. The freeze is part of the activation change, which must test it.
+- **Implementation:** none in this PR. The freeze is part of the activation change, which must test it. This PR's dormant behaviour is unchanged: operations 8 and 9 do not decode.
 
 **Scope.**
 - The freeze covers those three values and A itself. Other `GovernanceParams` fields are not frozen.
 - Existing records keep their B2 thresholds.
 - Before A nothing changes. 0x0601 stays changeable by the stopped-node acknowledgement, as today, with today's hazard that it is not height-keyed.
 
-### (a) How startup enforces the freeze
+### (a) When a node commits, and how startup enforces it (PROPOSED)
 
-**Load rules first.** The §16 §1.4 load-time rules run at genesis validation, before this check. T_min and W are present, `governance` is `Some`, and A is above 496,720, so every frozen field has a value.
+**Load rules first.** The §16 §1.4 load-time rules run at genesis validation, before any check here. T_min and W are present, `governance` is `Some`, and A is above 496,720, so every frozen field has a value.
 
-**The record.** One `cf::META` row, key `registry/freeze/v1` (provisional), 41 bytes. Integers are little-endian, like the ConsensusConfig record:
+**The freeze record.** One `cf::META` row, key `registry/freeze/v1` (provisional), 41 bytes. Integers are little-endian, like the ConsensusConfig record:
 
 ```text
 magic "RFRZv1\0" (7) ‖ gate_a:u64 ‖ threshold_bps:u16 ‖ t_min:u64 ‖ w:u64 ‖ first_height:u64
 ```
 
 - `gate_a`: A as configured;
-- `threshold_bps`, `t_min`, `w`: this node's configured values, which the verified block at `first_height` executed with;
-- `first_height`: the height of the verified import that wrote the row (≥ A).
+- `threshold_bps`, `t_min`, `w`: this node's configured values, which the block at `first_height` executed with;
+- `first_height`: the height of the block whose publication wrote the row (≥ A; normally A).
 
-**When it is written: the first verified import at or above A.**
-- **Write:** in the atomic publish batch of the first block that meets all three conditions, if the row is absent:
-  - the block has height ≥ A;
-  - this node **imported** it from a peer, through either import path, a reorg replay included;
-  - its computed root **matched** the header root (`Acceptance::ExactRoot`, `storage/src/candidate.rs`). A > 496,720 (§16 §1.4), so no import at or above A is adopted under the legacy window.
-- **Why that block.** Its root folds P(h). A matching root therefore shows that this node computed the same registry values as the block's producer. The row records values that at least one other validator executed with, not values this node merely configured.
-- **Never written by:**
-  - a block this node produced (`Acceptance::Produced`): `accept_produced` publishes before any peer checks the block;
-  - a snapshot restore: a restore defers to the first verified import after it.
-- **Durability.** Publication already stamps a `cf::META` row in the same batch (the application-journal format high-water, `storage/src/candidate.rs`), so the row and the block become durable together.
-- **After that** the row is not rewritten by any publish, and it is not an application-journal row:
-  - the reorg unwind never removes it;
-  - a plain operator rollback never removes it;
-  - only the recovery rollback below removes it.
+**When the node commits: the first publish at or above A, produced or imported.**
+- **Write:** in the atomic publish batch of the first block with height ≥ A that this node publishes, if the row is absent.
+  - It does not matter whether the node produced the block or imported it through either import path, a reorg replay included.
+- **Outside the journal:**
+  - Publication stages its `cf::META` rows after the generic application journal is derived (`storage/src/candidate.rs`), and this row is one of them.
+  - So the row and the block become durable together.
+  - Neither an automatic reorg unwind nor an ordinary rollback touches the row.
+  - No later publish rewrites it.
+- **Why a publish, and not only a verified peer import:**
+  - The proposer of block A has imported nothing at or above A when it publishes A.
+  - Neither have a single validator and a node running without a peer.
+  - Waiting for a peer block would leave them unbound. Making production wait for a peer block would deadlock every chain at A.
+  - A publish needs no peer, so every node commits at its first block at or above A.
+- **What each kind of node does:**
+  - **First proposer at A:** commits at its own publish of A.
+  - **First importer:** commits at the import that publishes its first block at or above A, normally A.
+  - **Single validator, or a node without peers:** commits at its own block A.
+  - **Snapshot restore at or above A:** does not commit. The snapshot format carries no `cf::META` row; today it carries the account family only. The first publish after the restore commits.
+  - **File-level backup restore:** carries the row as it was, with nothing written by the restore.
 
-**Keyed on the first verified height, not on the head.**
-- The row's presence is the database's own record that a peer-produced block at or above A verified against this node's values.
-- The startup check does not consult the current head when the row exists.
-- A plain rollback below A therefore does not reopen the freeze: the row stays, and so does the refusal.
+**No silent switch.** While the row exists, the node cannot run under values other than those it signed or accepted blocks under:
+- **Startup refuses** any configured value that differs from the row. Each field must equal, as an integer, the configuration this node starts with:
+  - `gate_a` = `registry_enabled_from_height`;
+  - `threshold_bps` = `governance.validator_authority_threshold_bps`;
+  - `t_min` = `registry_min_timelock_blocks`;
+  - `w` = `registry_max_approval_window`.
 
-**The comparison at startup.** It runs beside `check_at_startup` (ConsensusConfig) and the activation-height check, before consensus, RPC or the network exist:
-1. **Read the row.** A row of the wrong length or magic is **unreadable, not absent**, and start is refused, as for the recorded activation heights. The recovery rollback below removes an unreadable row too.
-2. **Row absent:** start continues at any head, and nothing is frozen yet.
-   - **Head below A:** as today.
-   - **Head at or above A, before the first verified import:**
-     - **The window.** It covers block A's own proposer before it has imported anything, a node started from a snapshot at or above A, and a node whose values disagree with every peer's (so it can never verify an import).
-     - **The node may produce blocks in this window, and must be allowed to.** Block A's proposer has imported nothing at or above A. Refusing production until a verified import would stall every chain at A.
-     - **What that implies:** its blocks carry its own P(h).
-       - With the network's values, peers import them, and the node's first verified import (normally the next peer block) writes the row.
-       - With wrong values, every honest node refuses its blocks (root mismatch), and it refuses theirs. Under PoA round-robin, which has no skip, the chain cannot pass that validator's slot until it is corrected; this has not been tested over time.
-       - Because it never verifies an import, it never writes a row. Correcting `genesis.json` (with the acknowledgement, below) and restarting recovers it, and no wipe is needed.
-3. **Row present:** each field must equal, as an integer, the value in the configuration this node starts with:
-   - `gate_a` = `registry_enabled_from_height`;
-   - `threshold_bps` = `governance.validator_authority_threshold_bps`;
-   - `t_min` = `registry_min_timelock_blocks`;
-   - `w` = `registry_max_approval_window`.
+  The message names each differing field, with its frozen and its configured value, and `first_height`. It states that the values are frozen at activation and that no acknowledgement can permit the change, and it names the recovery rollback below. The check runs beside `check_at_startup` (ConsensusConfig) and the activation-height check, before consensus, RPC or the network exist. A row of the wrong length or magic is **unreadable, not absent**, and start is refused.
+- **The acknowledgement refuses** too. `acknowledge-consensus-config --old --new` refuses any change to 0x0601, T_min (0x0609, provisional), W (0x060a, provisional) or A, as it already refuses chain-identity and rule-code changes. A `GateReschedule` of A is refused the same way.
+- **Only the recovery rollback below removes the row.**
 
-   If all four are equal, start continues. Any difference **refuses start**. The message:
-   - names each differing field, with its frozen and its configured value, and `first_height`;
-   - states that the values are frozen at activation and that no acknowledgement can permit the change;
-   - says to restore the previous `genesis.json`, or to use the recovery rollback below. A real change for the network is a later coordinated change, (c).
+**Before the first publish at or above A** (no row): start continues at any head, nothing is frozen yet, and the acknowledgement treats these values as today. This window covers a node that has just restored a snapshot above A, and a node whose values make every import fail its root check. The passed-gate rule still refuses moving A once the head is ≥ A.
 
-**The acknowledgement path.**
-- **While the freeze row exists:**
-  - `acknowledge-consensus-config --old --new` refuses any change to 0x0601, T_min (0x0609, provisional), W (0x060a, provisional) or the gate A. It refuses with the same message, as it already refuses chain-identity and rule-code changes.
-  - A `GateReschedule` of A is refused the same way. The existing passed-gate rule covers a head ≥ A; the row also covers a database rolled back below A.
-- **While the row is absent, at any head,** the acknowledgement treats these values as today. Above A this is the correction path for a node in the window. The passed-gate rule still refuses moving A once the head is ≥ A.
+**Wrong local values get no lock-in.**
+- **An importer with wrong values** never publishes a block at or above A: the root check refuses block A before publication. So it never commits. To recover, correct `genesis.json` (acknowledging if the ConsensusConfig baseline differs) and restart.
+- **A proposer with wrong values that published a block at or above A** has committed to those values, and its peers refuse that block (root mismatch). Under PoA round-robin, which has no skip, the chain waits at its slot. Recovery is explicit.
 
-**Recovery: the stopped-node recovery rollback** (provisional flag name). It is for a row that holds the wrong values, for example after the node verified an import from a peer that was itself misconfigured, or for an unreadable row:
-1. Stop the node.
-2. Note `first_height` from the startup refusal, which names it.
-3. Run `sumchain rollback --to T --release-registry-freeze` with T < `first_height`. In practice T ≤ A − 1 is always below it, because `first_height` ≥ A.
-   - In one atomic batch, the command performs the ordinary rollback to T and deletes the freeze row. It logs the deleted row's bytes.
-   - It refuses, changing nothing, if T ≥ `first_height`, if the row is absent, or if the target is not a valid rollback target.
-   - For an unreadable row, it requires T ≤ A − 1.
-4. Set the network's values in `genesis.json`, and acknowledge the change if the ConsensusConfig baseline differs. Compare against the rollout evidence (§16 §5 item 5).
-5. Start. The node re-imports from T. Its first verified import at or above A writes a new row.
-   - If its values are still wrong, it cannot import the network's block at A (root mismatch), and writes no row. Repeat step 4.
+**The recovery rollback** (provisional): `sumchain rollback --to T --release-registry-freeze`, on a stopped node.
+1. **Stop the node.**
+2. **Run the command** with T < `first_height`. The startup refusal names `first_height`. T ≤ A − 1 always qualifies, because `first_height` ≥ A.
+   - **One atomic batch:**
+     - the ordinary rollback to T (state restored from the generic journal, blocks above T removed and de-indexed, head reset, finality pulled back);
+     - the deletion of the freeze row;
+     - the gate pin below.
+   - **Logged:** the deleted row's bytes, and the hashes of the removed blocks this node signed.
+   - **Refused, changing nothing:**
+     - no freeze row (use the ordinary rollback);
+     - T ≥ `first_height`;
+     - an unreadable row with T ≥ the configured A;
+     - any target the ordinary rollback refuses, for example one below the journal floor.
+3. **Correct the values** in `genesis.json`, and acknowledge the change if the ConsensusConfig baseline differs. The acknowledgement now permits it, because the row is gone.
+4. **Start and re-sync from peers.** The first publish at or above A commits again, to the corrected values.
 
-A rollback without the flag never removes the row.
+**Re-signing a height.**
+- **Only after this explicit step.** In the wrong-proposer case the chain waits at A − 1 for that proposer's slot, so after the recovery it must produce A again. That signs a height it signed before. No other part of this design makes a node do that: the producer always builds head + 1, and the freeze adds no other rollback.
+- **The consequence:** the removed header and the new one are two signatures by one validator at one height. That is the material of `DoubleSignEvidence`, the staking evidence type, which is slashable where staking slashing applies. The command states this before it runs and requires the flag.
+- **Checked against the existing protections:**
+  - **PoA block signing on `e3b8ff81` has no persisted re-sign guard.** An ordinary operator rollback can already lead a validator to produce again at a height it produced before. This design does not change that.
+  - **The durable signer proposed in #340** (dormant, not wired to any node) guards finality votes, not PoA headers. Its record lives outside the chain database, and the recovery rollback never touches it. It keeps refusing any vote at or below its last signed position; only its own recovery procedure moves that floor.
 
-**Single validator (n = 1): out of scope for the local freeze.**
-- A one-validator chain's only validator never imports a peer-produced block, so it never writes the row, and its values are not frozen locally.
-- P(h) still binds them in every root from A: a non-validator that follows that chain imports its blocks and writes its own row as usual.
-- The activation proposal targets the multi-validator PoA set. A one-validator deployment that needs the local freeze needs its own rule, which is not specified here.
+**The gate pin.** A is pinned after the recovery rollback.
+- **The pin row:** in the same batch, the recovery rollback writes `registry/freeze/gate/v1` (provisional): magic `"RFGTv1\0"` (7) ‖ `gate_a:u64`, 15 bytes. Startup refuses a configured A that differs from it, at any head, and nothing removes the pin.
+- **Why:** without the pin, a database below A would treat A as a future gate under the existing rules. The startup check would then auto-record a `GateReschedule`, and the activation-height check would permit it.
+- **The resulting rule:** the recovery rollback permits a change to the three frozen values only. Every other configuration rule is unchanged.
+
+**Rollback below A.**
+- **Ordinary operator rollback, or automatic reorg unwind, below A:**
+  - the row stays;
+  - startup still requires the frozen values;
+  - the re-import from below A runs under them and does not rewrite the row.
+- **This is the recommended rule; an ordinary rollback below A should not refuse.**
+  - It is the tool for repairing state below A, and with the row kept it cannot change a frozen value.
+  - Refusing it would remove that tool without adding protection.
+  - Changing a value needs the explicit flag.
+- **Recovery rollback below `first_height`:** removes the row and pins A, as above.
+
+**Restart.**
+- With the same values: the node runs.
+- With any changed value: start is refused, and so is the acknowledgement.
+
+**Single validator (n = 1): in scope for the deadlock analysis.**
+- It commits at its own block A, with no peer needed, so there is no bootstrap deadlock. It produces on, restarts under the same values, and refuses changed values.
+- Its recovery is the same rollback. It then produces again from T itself, re-signing every height the rollback removed. No other node produced those heights. The signed headers it already sent out are still `DoubleSignEvidence` material.
+- A rule that committed only at a verified peer import would never commit here. One that also held back production until such an import would deadlock every chain at A.
+
+**What the check does not do.**
+- The check is local. It proves that this node keeps running the values it committed to at `first_height`.
+- It does not prove that other nodes run the same values. That is P(h), in every root from A (§16 §0).
+- Rollout compares the ConsensusConfig commitments and the effective values (§16 §5 item 5).
 
 **Cases checked.**
 
-| Case | Row written | Outcome |
+| Case | Commits | Outcome |
 |---|---|---|
-| Fresh sync from genesis through A | at the first imported block ≥ A whose root matched, normally A | values proven equal to that producer's from `first_height` |
-| First start at or above A (own block A, upgrade, restart in the window) | not until the first verified import | starts; may produce; correctable without a wipe until then |
-| Proposer of A with wrong values | never: its own block does not count, and it cannot verify a peer block | refused by peers; fixed by correcting values and restarting |
-| Snapshot restore at or above A | not by the restore; at the first verified import after it | restore with wrong values: no lock-in, as for the proposer above |
-| File-level backup restore | as in the backup; nothing written by the restore | startup compares the backup's row with this node's configuration as usual |
-| Plain rollback below A, or a reorg unwind | row stays | values stay frozen; the re-import re-verifies |
-| Recovery rollback below `first_height` | row deleted, then rewritten at the next verified import ≥ A | the documented way out of a wrong row without a wipe |
-| Single validator (n = 1) | never | out of scope (above) |
+| First proposer at A | at its own publish of A | bound to its values from A |
+| First importer | at its first imported block ≥ A | bound to its values from that height |
+| Single validator, or no peer | at its own block A | no deadlock; produces on |
+| Restart, same values | unchanged | runs |
+| Restart or acknowledgement, a changed value | unchanged | refused |
+| Proposer with wrong values | at its own block A | peers refuse its block; recovery rollback, correct the values, re-sync; A re-signed only after that step |
+| Importer with wrong values | never (root check first) | correct the values and restart |
+| Snapshot restore at or above A | at the first publish after it | as for a first importer or proposer |
+| File-level backup restore | as in the backup | compared at start as usual |
+| Ordinary rollback or reorg unwind below A | row stays | frozen values still required |
+| Recovery rollback below `first_height` | row deleted, A pinned | commits again at the next publish ≥ A |
 
-**Prototype note (unpublished local activation prototype).**
-- **Exercised:** the 41-byte record and the startup comparison (each of the three values changed is refused, unchanged values start, no row starts at any head, an unreadable row is refused), and that a plain operator rollback below A leaves the row.
-- **Not exercised:** the verified-import write, the startup wiring, the acknowledgement refusal and the recovery rollback.
-
-**What the check does not do.**
-- The check is local. It proves that this node runs the values of a block it verified at `first_height`.
-- It does not prove that every node runs the same values. That is P(h), in every root from A (§16 §0).
-- Rollout compares the ConsensusConfig commitments and the effective values (§16 §5 item 5).
+**Prototype note (unpublished local activation prototype; the activation change must run its tests again).**
+- **Exercised:**
+  - the first proposer committing at its own publish of A;
+  - the first importer committing at its import;
+  - restart under the same values, and refusal of each changed value at start and by the acknowledgement;
+  - a proposer with wrong values committing, its peer refusing its block, a restart under corrected values refused, the recovery rollback removing block A and the row in one batch, then A produced again, accepted by the peer, and the two nodes continuing;
+  - an importer with wrong values never committing and recovering after a configuration fix and a restart;
+  - an ordinary rollback below A keeping the row, and the recovery's refusals;
+  - the recovery writing the gate pin in the same batch: a moved A is refused, and a changed frozen value is accepted;
+  - a single validator producing from A through A + 3, restarting, and refusing changed values.
+- **Not exercised:** the node-startup wiring itself (the check ran at engine construction), the CLI command, logs, and behaviour over time.
 
 ### (b) How earlier blocks replay
 
@@ -843,17 +873,17 @@ A rollback without the flag never removes the row.
   - The freeze neither introduces nor removes the existing hazard: an acknowledged threshold change still re-executes earlier blocks with the new value.
 - **From A, the frozen values.**
   - Every execution path uses them: import, production, reorg re-execution, resync and rollback re-import.
-  - They are the configured values. Once the row exists, startup has proven them equal to it; before that, the first verified import checks them.
+  - They are the configured values. Once the row exists, startup has proven them equal to it.
   - `effective(h)` is constant for h ≥ A, and so P(h) = P(A).
 - **Reorg across A.**
   - The unwind restores the registry rows from the generic journal: register undo deletes the row, and disable undo restores Enabled (§16 §6).
   - The freeze row stays.
   - The new branch executes below A under today's rules, and from A with the frozen values.
-- **Plain rollback below A.**
+- **Ordinary rollback below A.**
   - The row stays, and the configuration cannot change the frozen values ((a)).
   - Re-imported blocks below A run under today's rules, and from A with the frozen values again.
   - The node therefore reproduces the roots it computed before.
-- **Recovery rollback below `first_height`** ((a)): it removes the row. The node then re-imports with its corrected values, and the next verified import at or above A writes the row again.
+- **Recovery rollback below `first_height`** ((a)): it removes the row and pins A. The node then re-syncs with its corrected values, and its next publish at or above A writes the row again.
 - **A node that has not reached A** can still change these values by acknowledgement. If its values differ from the network's, its root at A differs, and the root check refuses its blocks and the network's alike (§16 §3). The freeze does not move that detection earlier.
 
 ### (c) How a later coordinated change is introduced
@@ -866,7 +896,7 @@ A change to any frozen value after A is a new coordinated activation. No single 
   - P(h) folds `effective(h)`, and from that change every reader of 0x0601 routes through `effective(h)`.
 - **Freeze rows.**
   - The A row stays as it is: its values remain effective below B, and replay below B uses them.
-  - The entry gets its own row of the same kind (provisional key `registry/freeze/v2`), written by the first verified import ≥ B, under the same rules as (a).
+  - The entry gets its own row of the same kind (provisional key `registry/freeze/v2`), written in the batch of the first publish ≥ B, under the same rules as (a).
   - From then on, startup compares both rows, and the acknowledgement refuses changes to either.
 - **Height choice.**
   - B lies above every validator's head, plus the lead time (§16 §5 item 3).
