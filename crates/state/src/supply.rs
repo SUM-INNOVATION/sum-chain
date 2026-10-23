@@ -404,25 +404,34 @@ impl SupplyStore {
     /// Award `amount` from `kind`'s pool to `addr` as a new/extended grant.
     /// Splits 10% liquid (returned for immediate account credit) / 90% locked.
     /// Checked against the pool: a grant can never exceed the remaining pool.
+    ///
+    /// `Ok(Err(385))` for a semantic refusal (reserve not initialized, grant
+    /// exceeds the remaining pool) and, as before, for a failed write. A read
+    /// of stored state that fails, or a stored row that does not decode, is
+    /// `Err`: an execution error, never a receipt.
     fn award_grant(
         view: &mut ExecutionView<'_, '_>,
         addr: &Address,
         kind: ServiceKind,
         amount: u128,
         height: u64,
-    ) -> Result<u128> {
+    ) -> Result<std::result::Result<u128, u32>> {
         // Decrement the pool (checked — fail if insufficient).
-        let mut reserve = Self::v_get_reserve(view)?
-            .ok_or_else(|| StateError::InvalidOperation("protocol reserve not initialized".into()))?;
+        let Some(mut reserve) = Self::v_get_reserve(view)? else {
+            return Ok(Err(385)); // protocol reserve not initialized
+        };
         let pool = match kind {
             ServiceKind::Validator => &mut reserve.validator_pool_remaining,
             ServiceKind::Archive => &mut reserve.archive_pool_remaining,
             ServiceKind::Compute => &mut reserve.compute_pool_remaining,
         };
-        *pool = pool
-            .checked_sub(amount)
-            .ok_or_else(|| StateError::InvalidOperation("grant exceeds remaining pool".into()))?;
-        Self::v_put_reserve(view, &reserve)?;
+        let Some(remaining) = pool.checked_sub(amount) else {
+            return Ok(Err(385)); // grant exceeds remaining pool
+        };
+        *pool = remaining;
+        if Self::v_put_reserve(view, &reserve).is_err() {
+            return Ok(Err(385));
+        }
 
         let (liquid, locked) = split_grant(amount);
         let mut grant = Self::v_get_grant(view, addr, kind)?.unwrap_or(ServiceGrant {
@@ -438,15 +447,19 @@ impl SupplyStore {
         grant.total_grant = grant.total_grant.saturating_add(amount);
         grant.liquid_claimed = grant.liquid_claimed.saturating_add(liquid);
         grant.locked_remaining = grant.locked_remaining.saturating_add(locked);
-        Self::v_put_grant(view, &grant)?;
+        if Self::v_put_grant(view, &grant).is_err() {
+            return Ok(Err(385));
+        }
 
         // Aggregate: pool → (liquid leaves reserve+grants entirely: it is
         // credited to the account by the caller; locked stays outstanding).
         let mut agg = Self::v_get_aggregate(view)?;
         agg.total_granted = agg.total_granted.saturating_add(amount);
         agg.outstanding_grant_unclaimed = agg.outstanding_grant_unclaimed.saturating_add(locked);
-        Self::v_put_aggregate(view, &agg)?;
-        Ok(liquid)
+        if Self::v_put_aggregate(view, &agg).is_err() {
+            return Ok(Err(385));
+        }
+        Ok(Ok(liquid))
     }
 
     /// Claim the validator bootstrap grant for `addr`. Enforces: registry-based
@@ -457,14 +470,18 @@ impl SupplyStore {
     /// per identity, declining cohorts, pool bound. The lookup iterates the
     /// staking validator set, which is bounded by consensus size — not a
     /// files×anything scan. Returns the liquid amount to credit.
+    ///
+    /// `Ok(Err(code))` is a refusal receipt; `Err` is a storage failure (a
+    /// failed read or an undecodable stored row), an execution error and never
+    /// a receipt.
     pub fn claim_validator_grant(
         view: &mut ExecutionView<'_, '_>,
         addr: &Address,
         height: u64,
-    ) -> std::result::Result<u128, u32> {
+    ) -> Result<std::result::Result<u128, u32>> {
         // Excluded genesis identities (accounts + pubkey-derived) → 382.
         if genesis_validator_excluded_addresses().iter().any(|a| a == addr) {
-            return Err(382);
+            return Ok(Err(382));
         }
         // Eligibility: an Active staking validator whose pubkey derives to the
         // claimer address (one grant per validator identity — the pubkey and
@@ -474,53 +491,63 @@ impl SupplyStore {
         // jailed a transaction ago, decides eligibility for a grant in the same
         // block, and the parent's validator set is the wrong answer to that
         // question in both directions.
-        let validators = crate::staking_executor::StakingExecutor::v_get_all_validators(view)
-            .map_err(|_| 381u32)?;
+        let validators = crate::staking_executor::StakingExecutor::v_get_all_validators(view)?;
         let is_active_validator = validators.iter().any(|v| {
             v.status == sumchain_primitives::ValidatorStatus::Active
                 && Address::from_public_key(&v.pubkey) == *addr
         });
         if !is_active_validator {
-            return Err(381);
+            return Ok(Err(381));
         }
-        // One grant per identity → 383.
-        if matches!(Self::v_get_grant(view, addr, ServiceKind::Validator), Ok(Some(_))) {
-            return Err(383);
+        // One grant per identity → 383. A read error is an execution error,
+        // never "no grant": it must not let a second grant proceed.
+        if Self::v_get_grant(view, addr, ServiceKind::Validator)?.is_some() {
+            return Ok(Err(383));
         }
         // Declining cohort schedule; beyond the schedule → 385.
-        let index = Self::v_validator_cohort_count(view).map_err(|_| 385u32)?;
-        let amount = validator_cohort_grant(index).ok_or(385u32)?;
-        let liquid = Self::award_grant(view, addr, ServiceKind::Validator, amount, height).map_err(|_| 385u32)?;
-        let bytes = bincode::serialize(&(index + 1)).map_err(|_| 385u32)?;
-        view.put(cf::SUPPLY, COHORT_KEY, &bytes).map_err(|_| 385u32)?;
-        Ok(liquid)
+        let index = Self::v_validator_cohort_count(view)?;
+        let Some(amount) = validator_cohort_grant(index) else {
+            return Ok(Err(385));
+        };
+        let liquid = match Self::award_grant(view, addr, ServiceKind::Validator, amount, height)? {
+            Ok(liquid) => liquid,
+            Err(code) => return Ok(Err(code)),
+        };
+        let bytes = bincode::serialize(&(index + 1))
+            .map_err(|e| StateError::SerializationError(e.to_string()))?;
+        if view.put(cf::SUPPLY, COHORT_KEY, &bytes).is_err() {
+            return Ok(Err(385));
+        }
+        Ok(Ok(liquid))
     }
 
     /// Claim newly-reached archive/compute milestone grants for `addr`.
     /// Milestones pay exactly once (tracked via `awarded`); a suspended or
     /// forfeited grant cannot claim; compute claims are blocked by any denied
     /// dispute. Returns the liquid amount to credit (0 ⇒ nothing new → 383).
+    ///
+    /// `Ok(Err(code))` is a refusal receipt; `Err` is a storage failure, an
+    /// execution error and never a receipt.
     pub fn claim_milestone_grants(
         view: &mut ExecutionView<'_, '_>,
         addr: &Address,
         kind: ServiceKind,
         height: u64,
-    ) -> std::result::Result<u128, u32> {
+    ) -> Result<std::result::Result<u128, u32>> {
         if kind == ServiceKind::Validator {
-            return Err(381); // validator uses the bootstrap cohort path
+            return Ok(Err(381)); // validator uses the bootstrap cohort path
         }
-        // Grant must not be suspended/forfeited.
-        if let Ok(Some(g)) = Self::v_get_grant(view, addr, kind) {
+        // Grant must not be suspended/forfeited. A read error is an execution
+        // error: it must not skip this check.
+        if let Some(g) = Self::v_get_grant(view, addr, kind)? {
             if g.status != GrantStatus::Active {
-                return Err(386);
+                return Ok(Err(386));
             }
         }
-        let m = Self::v_get_milestones(view, addr, kind).map_err(|_| 381u32)?;
+        let m = Self::v_get_milestones(view, addr, kind)?;
         // From the candidate: an archive slashed earlier in this same block is
         // no longer Active, and must not collect a milestone grant for it.
-        let node = crate::node_registry::NodeRegistryExecutor::v_get_node(view, addr)
-            .ok()
-            .flatten();
+        let node = crate::node_registry::NodeRegistryExecutor::v_get_node(view, addr)?;
 
         let mut reached: u128 = 0;
         match kind {
@@ -528,11 +555,11 @@ impl SupplyStore {
                 // Must be a currently-active archive node.
                 let rec = match &node {
                     Some(r) if r.role == NodeRole::ArchiveNode && r.status == NodeStatus::Active => r,
-                    _ => return Err(381),
+                    _ => return Ok(Err(381)),
                 };
                 // Active-duration milestone counts from the LATER of registration
                 // and the correction height — nothing retroactive is fabricated.
-                let ledger = Self::v_get_ledger(view).map_err(|_| 381u32)?;
+                let ledger = Self::v_get_ledger(view)?;
                 let active_since = rec.registered_at.max(ledger.migration_activation_height);
                 if height.saturating_sub(active_since) >= ARCHIVE_ACTIVE_BLOCKS_MILESTONE {
                     reached = reached.saturating_add(ARCHIVE_ACTIVE_GRANT);
@@ -547,7 +574,7 @@ impl SupplyStore {
             ServiceKind::Compute => {
                 // Denied disputes block further compute milestone claims.
                 if m.denied_disputes > 0 {
-                    return Err(386);
+                    return Ok(Err(386));
                 }
                 if m.settlement_claims >= COMPUTE_CLAIMS_MILESTONE_1 {
                     reached = reached.saturating_add(COMPUTE_CLAIMS_GRANT_1);
@@ -560,34 +587,42 @@ impl SupplyStore {
         }
         let newly = reached.saturating_sub(m.awarded);
         if newly == 0 {
-            return Err(383);
+            return Ok(Err(383));
         }
-        let liquid = Self::award_grant(view, addr, kind, newly, height).map_err(|_| 385u32)?;
+        let liquid = match Self::award_grant(view, addr, kind, newly, height)? {
+            Ok(liquid) => liquid,
+            Err(code) => return Ok(Err(code)),
+        };
         let mut m2 = m;
         m2.awarded = reached;
-        Self::v_put_milestones(view, addr, kind, &m2).map_err(|_| 385u32)?;
-        Ok(liquid)
+        if Self::v_put_milestones(view, addr, kind, &m2).is_err() {
+            return Ok(Err(385));
+        }
+        Ok(Ok(liquid))
     }
 
     /// Unlock locked grant stake 1:1 against protocol-earned credit. Returns
     /// the unlocked amount to credit (Err(384) when nothing is unlockable).
+    ///
+    /// `Ok(Err(code))` is a refusal receipt; `Err` is a storage failure, an
+    /// execution error and never a receipt.
     pub fn unlock_grant(
         view: &mut ExecutionView<'_, '_>,
         addr: &Address,
         kind: ServiceKind,
-    ) -> std::result::Result<u128, u32> {
-        let mut grant = match Self::v_get_grant(view, addr, kind) {
-            Ok(Some(g)) => g,
-            _ => return Err(383),
+    ) -> Result<std::result::Result<u128, u32>> {
+        // A read error is an execution error, never "no grant".
+        let Some(mut grant) = Self::v_get_grant(view, addr, kind)? else {
+            return Ok(Err(383));
         };
         if grant.status != GrantStatus::Active {
-            return Err(386);
+            return Ok(Err(386));
         }
-        let earned = Self::v_get_earned_credit(view, addr, kind).map_err(|_| 384u32)?;
+        let earned = Self::v_get_earned_credit(view, addr, kind)?;
         let available_credit = earned.saturating_sub(grant.earned_credit_used_for_unlock);
         let unlockable = grant.locked_remaining.min(available_credit);
         if unlockable == 0 {
-            return Err(384);
+            return Ok(Err(384));
         }
         grant.locked_remaining -= unlockable;
         grant.earned_credit_used_for_unlock =
@@ -595,11 +630,17 @@ impl SupplyStore {
         if grant.locked_remaining == 0 {
             grant.status = GrantStatus::Completed;
         }
-        Self::v_put_grant(view, &grant).map_err(|_| 384u32)?;
-        let mut agg = Self::v_get_aggregate(view).map_err(|_| 384u32)?;
+        if Self::v_put_grant(view, &grant).is_err() {
+            return Ok(Err(384));
+        }
+        // A failed read after the staged grant write fails the whole block, so
+        // the staged write never lands.
+        let mut agg = Self::v_get_aggregate(view)?;
         agg.outstanding_grant_unclaimed = agg.outstanding_grant_unclaimed.saturating_sub(unlockable);
-        Self::v_put_aggregate(view, &agg).map_err(|_| 384u32)?;
-        Ok(unlockable)
+        if Self::v_put_aggregate(view, &agg).is_err() {
+            return Ok(Err(384));
+        }
+        Ok(Ok(unlockable))
     }
 
     /// Forfeit an address's remaining locked grant back to its service pool

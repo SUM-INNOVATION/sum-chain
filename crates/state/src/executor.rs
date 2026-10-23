@@ -2044,7 +2044,7 @@ impl BlockExecutor {
                             SupplyOperation::UnlockServiceGrant { service_kind } => {
                                 SupplyStore::unlock_grant(view, &v2_tx.from, *service_kind)
                             }
-                        };
+                        }?; // a storage failure fails execution; never a receipt
                         match outcome {
                             Ok(amount) => {
                                 // Liquid/unlocked portion enters the account NOW
