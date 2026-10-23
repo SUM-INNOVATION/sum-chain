@@ -221,6 +221,7 @@ Accepted only if **all** of these hold:
 5. **Timelock floor:** `activation_height ≥ h + T_min`, in exact arithmetic (§8).
 6. **Threshold (Q17, decided 2026-10-22):** `t = GovernanceParams.validator_authority_threshold_bps`, the authenticated governance threshold from chain parameters. It is never taken from the operation or from a tooling default. **Floor (B2, adopted 2026-10-23):** `record.approval_threshold_bps ≥ t`.
 7. **New id:** no record with `record.id` exists, Enabled or Disabled.
+7a. **Size bound (owner, 2026-10-23):** fewer than `MAX_REGISTRY_RECORDS` records are stored, Enabled and Disabled together (§12.1).
 8. **Quorum:** §6 over the §4.1 preimage at threshold `t`.
 
 On acceptance, the record is stored exactly as carried.
@@ -313,6 +314,42 @@ No code is allocated. On this binary, a transaction naming operation 8 or 9 does
 - **Writes and rollback.** Rows are written only through `ExecutionView`, so they land in the block's one atomic batch, and the generic application journal unwinds them on a rollback. Disable rewrites the row in place, changing only the status byte.
 - **Digest:** while dormant, nothing folds these rows into a root. The registry digest R(h), and what the root does and does not cover, is the activation proposal (§16).
 
+### 12.1 Registry size bound (owner, 2026-10-23; value PROPOSED)
+
+**The bound.** A deterministic consensus bound on the per-block registry scan, in place of a warning threshold.
+- `MAX_REGISTRY_RECORDS = 4096` records, Enabled and Disabled together (`state/src/registry_ingress.rs`).
+- The most the proposed fold R(h) hashes per block is `MAX_REGISTRY_FOLDED_BYTES` = 4,096 × (32 + 154) + 27 + 8 = **761,891 bytes**:
+  - 32 bytes of id and 154 bytes of record per row;
+  - the 27-byte fold domain, provisional with §16;
+  - the `u64` count.
+
+**Refusal point.** A register that would store record 4,097 is refused with `303` (rule 7a):
+- the fee is charged when the balance covers it, otherwise fee 0;
+- the nonce follows the same rule as every other `303`;
+- nothing is stored.
+
+**Behaviour at the limit:**
+- **Every stored record counts.** That includes disabled records, because R(h) folds them all, so a disabled record never frees capacity.
+- **Disable adds no record** and stays allowed at the limit.
+- **A disabled id stays present,** so re-registering it is refused with `303` at any count (rule 7).
+- **Raising the bound** is a coordinated upgrade.
+
+**Counting.** A bounded prefix scan over `registry/v1/` through the block's `ExecutionView` (`v_count_records_up_to`). It stops after `MAX_REGISTRY_RECORDS` rows, so a register reads at most 4,096 keys. It sees the block's own earlier registers, and a read error is an error, never a short count.
+- **Why a scan, not a count row:** the scan reads exactly the rows R(h) would fold, so the two cannot drift. It adds no key and no collision surface. The candidate overlay, the one atomic batch and the generic journal already cover the rows it counts, so a rollback below a register restores the count with nothing else to undo.
+
+**The value.** 4,096 is PROPOSED, with this rationale:
+- One proof system is admitted today.
+- Records name verifier keys, program images, tokenizers and models, and each needs a validator quorum and a fee. The expected count is tens to low hundreds over years, so 4,096 leaves at least 16× headroom.
+- At the limit the fold costs about 0.6 ms of BLAKE3 on one core (761,891 bytes, measured on an arm64 workstation). The 4,096-row scan costs about 0.7 ms at the account root's reference of 40 ms per 250,000 rows. Together that is under 0.1% of the 1,506 ms block interval.
+
+**The dry run.** `registry_dryRunAdmit` checks the record alone. It reads no registry state, neither id uniqueness nor the count. At the limit it therefore reports an otherwise valid record as admissible, while execution refuses the register with `303`. A test pins that difference.
+
+**Activation.** While dormant the bound is in neither `consensus_limits` nor the protocol digest, because no transaction reaches it. The activation change:
+- adds `MAX_REGISTRY_RECORDS` to `protocol_digest::consensus_limits`, so every node declares it in the protocol digest at the handshake;
+- gives it the ConsensusConfig field id that each consensus limit has (`0x2000–0x20ff`), in the new schema version.
+
+The fold's byte bound follows from it and is not a separate parameter.
+
 ## 13. Consequences and activation prerequisites
 
 1. **This PR changes no decoding.** `GovernanceOperation` keeps exactly its eight variants (0 to 7). A governance transaction naming 8 or 9 fails to decode with the same error as on the base (`invalid value: integer 8, expected variant index 0 <= i < 8`), and a block holding one is rejected whole. Tests pin this for the payload, the signed transaction and the block (`governance_operations_8_and_9_do_not_decode`), for a synced `SyncResponse::Blocks`, and for `send_raw_transaction`, which leaves the mempool empty. An upgraded and a non-upgraded node therefore agree on every block.
@@ -373,7 +410,7 @@ The consolidated recommendation of 2026-10-22 was decided by the owner on 2026-1
 - both preimages;
 - each payload, and its prospective `GovernanceTxData` and `TxPayload` envelopes (§2).
 
-`vectors_are_reproduced_and_execute` regenerates the file and requires byte equality (comment lines excluded). It runs every payload through `execute_registry_ingress`: k = 1 against the active set {1}, and k = 3 against {1, 2, 3, 4}. Both must reach `Success`. It also requires every prospective envelope to fail decode on this binary.
+`vectors_are_reproduced_and_execute` regenerates the file and requires byte equality (comment lines excluded). It runs every payload through `execute_registry_ingress`: k = 1 against the active set {1}, and k = 3 against {1, 2, 3, 4}. Both must reach `Success`. It also requires every prospective envelope to fail decode on this binary. The `prospective_registry_bound.*` lines record the size bound (§12.1). The k = 1 register executes as `Success` with `MAX − 1` records stored and as `303` with `MAX` stored.
 
 **Tests.** The wire unit tests are in `crates/sumchain-wire/src/registry_ingress.rs`. The executor tests are in `crates/state/tests/registry_ingress.rs`. Each required case, with the test that checks it:
 
@@ -405,6 +442,10 @@ The consolidated recommendation of 2026-10-22 was decided by the owner on 2026-1
 | Strict for ops 8 and 9: each distinguishing signature under both rules; receipts (`303` with and without fee, `302` at decode); existing operations unchanged | `the_two_rules_on_each_distinguishing_signature`, `operations_8_and_9_refuse_approvals_only_the_old_rule_accepts`, `existing_governance_operations_keep_the_governance_v1_rule` |
 | Parameters: paired presence, `1..=u32::MAX`, overflow → `303` | `named_parameters_*` (wire), `invalid_parameter_sets_refuse_free`, `a_timelock_past_u64_max_refuses_with_303` |
 | B2: a governance-threshold change does not move an existing record | `a_governance_threshold_change_does_not_move_an_existing_record` |
+| Size bound: `MAX − 1` stored → register accepted; at `MAX` → `303` (fee charged; fee 0 when underfunded), nothing stored; disable allowed at the limit; a disabled id not re-registrable; staged registers counted | `the_size_bound_refuses_the_register_that_would_exceed_it` |
+| Size bound: rolling back a published register (generic journal) restores the count | `rolling_back_a_register_restores_the_count` |
+| Size bound: the dry run reports the record alone at the limit, while execution refuses `303` | `crates/rpc/tests/registry_dry_run_agrees.rs` (`at_the_size_bound_the_dry_run_reports_the_record_alone`) |
+| Size bound: constants and folded bytes; the boundary vectors execute | `the_size_bound_constants`, `vectors_are_reproduced_and_execute` |
 
 ## 16. Activation proposal: consensus binding and registry digest (PROPOSED)
 
@@ -495,15 +536,21 @@ R(h) is computed over the block's candidate view (as `v_account_state_digest`, `
 - **Single threshold per height:** from A, every governance reader of 0x0601 must use `effective(h)`. Today there are four (`state/src/governance_executor.rs:451/497/552/1101`). With no change entries this is identical to today; without it, replaying an existing operation across a threshold change would diverge.
 - **B2 and later threshold changes:** existing records are unaffected. Disable uses the stored `approval_threshold_bps`, which was ≥ the governance threshold effective at registration (#348 `state/src/registry_ingress.rs:96-101`). New registrations use `effective(h)`.
 
+**Parameter changes after activation (PROPOSED recommendation).** The recommendation is to freeze T_min, W and the governance threshold `validator_authority_threshold_bps` (0x0601) at A, instead of adopting the height-keyed `registry_param_changes` list above now; any change after A then needs a new coordinated activation. This is a recommendation, not a decision. Consequences:
+- From A, `validator_authority_threshold_bps`, T_min and W cannot be changed by acknowledgement. Startup refuses, keyed on the highest recorded height.
+- Changing any of them requires a new coordinated activation, which introduces the height-keyed form or a gated second value set when it is needed.
+- Existing records keep their B2 thresholds.
+- Before A nothing changes: 0x0601 stays acknowledgement-changeable, as today, with its existing hazard.
+- Other GovernanceParams fields are not frozen.
+
 ### 3. Missing or mismatched parameters
 
 - **Absent:** ops 8/9 refuse with 302, no fee, while values or the genesis hash are missing (#348 `governance_executor.rs:301-303`). 300 (gate) and 301 (governance unconfigured) come first. Below A the fold commits nothing, because it is not computed. From A, absence is impossible by the load rule; if reached anyway, P commits tag 0 explicitly and every node refuses with 302 alike.
-- **Mismatch** (node X has different effective values at some h ≥ A, or at the first `effective_from` it disagrees on):
-  - X's P(h) differs, so X's root differs for every block from that height, with or without registry operations.
-  - X's import of an honest block fails with "state root mismatch … discarding the candidate" (`candidate.rs:459-485`). X **stalls**; it does not adopt the block.
-  - Honest nodes reject X's blocks the same way.
-  - PoA proposers are strictly round-robin `validators[h mod n]` with no skip (`sumchain-wire/src/proposer.rs:61-70`; `poa.rs:2073-2080`). X therefore cannot build a growing fork (the next slot is another validator's block, which X rejects). If X holds a slot, the honest chain also halts at that slot until X is fixed.
-  - **Result:** a visible halt (safety kept, liveness lost), never silent divergence.
+- **Mismatch** (node X holds different effective values at some h ≥ A, or a binary without the registry fold meets one with it). What is established today, by code reading and by tests of the same mechanism for other gates:
+  - From A, X's P(h) or missing P‖R makes its computed root differ from the header root of every honest block. Above `LEGACY_ROOT_COMPATIBILITY_HEIGHT` (496,720) an imported root mismatch is refused and the candidate discarded (`candidate.rs:459-485`; tested for another gate by `activation_multinode.rs::above_the_legacy_window_the_same_disagreement_is_refused`). At or below it the header root is adopted, which is why A must be above it.
+  - Binaries that lack the registry gate name (the deployed release, main, this PR) declare a different protocol digest from the activation binary and are refused in both phases at the handshake. A node with the activation binary and different values declares the SAME digest (the digest covers no GovernanceParams value), so the handshake does not exclude it; only the root check from A does.
+  - Binaries without operations 8 and 9 refuse any block holding one at decode (tested in this PR).
+- **Not yet established**, and to be tested with the activation code before any ratification: below-A refusal of operations 8 and 9 on both import paths, through reorg replay, rollback re-import and sync; that every mismatch case produces the root refusal at the first block ≥ A; what a refusing node then does (retry, peer reporting, stall); whether honest nodes stall at a mismatched proposer's slot; whether a mismatched minority can extend a fork; reorg and rollback across A. This section makes no claim that every mismatch can only cause a visible halt.
 
 ### 4. Older binaries and undeclared nodes
 
