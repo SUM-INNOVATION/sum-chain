@@ -112,10 +112,42 @@ pub fn verify_bytes(
     verify(message, &sig, &pubkey)
 }
 
+/// Strict Ed25519 verification over raw bytes: `ed25519_dalek`'s
+/// `VerifyingKey::verify_strict`, the same call the ratified E1 path makes
+/// (`finality_foundations::vote::verify_e1`) and the strict inner-signature
+/// checks use (`sumchain_primitives::messaging_sponsored`,
+/// `sumchain_primitives::inference_attestation`). It is a thin wrapper, not new
+/// cryptography: the state crate does not depend on `finality-foundations`, and
+/// this keeps that dependency direction.
+///
+/// Beyond [`verify_bytes`], it refuses a signature whose `R`, or whose public
+/// key, is a small-order point. Both refuse a non-canonical `S`, and an `R`
+/// that is not the canonical encoding of the recomputed point.
+pub fn verify_bytes_strict(
+    message: &[u8],
+    signature: &[u8; 64],
+    public_key: &[u8; 32],
+) -> Result<()> {
+    let verifying_key = PublicKey::from_slice(public_key)?.verifying_key()?;
+    verifying_key
+        .verify_strict(message, &DalekSignature::from_bytes(signature))
+        .map_err(|_| CryptoError::VerificationFailed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::KeyPair;
+
+    #[test]
+    fn strict_bytes_accepts_an_ordinary_signature_and_refuses_another_message() {
+        let kp = KeyPair::generate();
+        let sig = sign(b"m", kp.private_key()).to_bytes();
+        let pk = *kp.public_key().as_bytes();
+        assert!(verify_bytes_strict(b"m", &sig, &pk).is_ok());
+        assert!(verify_bytes(b"m", &sig, &pk).is_ok());
+        assert!(verify_bytes_strict(b"n", &sig, &pk).is_err());
+    }
 
     #[test]
     fn test_sign_and_verify() {

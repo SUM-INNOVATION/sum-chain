@@ -54,16 +54,20 @@ pub fn admitted_proof_systems() -> [u16; 1] {
 
 // ── Named parameters (PROPOSED, unvalued) ───────────────────────────────────
 
-/// The C5 named parameters. `None` is "not ratified".
+/// The C5 named parameters. `None` is "not ratified". The structure (two
+/// optional values, no defaults, paired presence, `1..=u32::MAX`, checked
+/// arithmetic) was accepted by the owner on 2026-10-23; the values are not
+/// decided.
 ///
 /// No field has a value in this binary, and none is invented here. Operations
 /// 8 and 9 refuse unless every field is `Some` ([`Self::complete`]).
 ///
 /// Decided by the owner on 2026-10-22, and therefore not parameters:
 /// - **Q17:** register is authorized at the authenticated governance threshold,
-///   `GovernanceParams.validator_authority_threshold_bps`. Disable is authorized
-///   at the stored record's `approval_threshold_bps` (B2, PROPOSED with the
-///   layouts).
+///   `GovernanceParams.validator_authority_threshold_bps`.
+/// - **B2 (2026-10-23):** disable is authorized at the stored record's
+///   `approval_threshold_bps`, which register made at least the governance
+///   threshold of its time; later governance changes do not move it.
 /// - **Q3:** a record `approval_threshold_bps` default is a tooling-only
 ///   convenience. No consensus path has or reads one: the applicable threshold
 ///   always comes from authenticated state.
@@ -74,6 +78,16 @@ pub struct RegistryIngressParams {
     pub registry_min_timelock_blocks: Option<u64>,
     /// The approval window: the largest `valid_until − h` accepted.
     pub registry_max_approval_window: Option<u64>,
+}
+
+/// Why a set of named parameters cannot be used (owner, 2026-10-23: paired
+/// presence, each value in `1..=u32::MAX`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryParamsError {
+    /// One value is set and the other is not; they come as a pair.
+    Partial,
+    /// A value is outside `1..=u32::MAX`.
+    OutOfRange { name: &'static str, value: u64 },
 }
 
 /// Every named parameter, present. Obtainable only through
@@ -91,9 +105,34 @@ impl RegistryIngressParams {
         registry_max_approval_window: None,
     };
 
-    /// Both values, or `None` if either is missing. A missing value can
-    /// therefore never be defaulted on the way to execution.
+    /// Paired presence, and each value in `1..=u32::MAX`. Both unset is valid:
+    /// it is the dormant state, in which the operations refuse.
+    pub fn validate(&self) -> Result<(), RegistryParamsError> {
+        match (
+            self.registry_min_timelock_blocks,
+            self.registry_max_approval_window,
+        ) {
+            (None, None) => Ok(()),
+            (Some(t_min), Some(window)) => {
+                for (name, value) in [
+                    ("registry_min_timelock_blocks", t_min),
+                    ("registry_max_approval_window", window),
+                ] {
+                    if !(1..=u32::MAX as u64).contains(&value) {
+                        return Err(RegistryParamsError::OutOfRange { name, value });
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(RegistryParamsError::Partial),
+        }
+    }
+
+    /// Both values, only when both are set and [`Self::validate`] accepts
+    /// them; otherwise `None`. A missing or invalid value can therefore never
+    /// be defaulted on the way to execution.
     pub fn complete(&self) -> Option<RegistryIngressValues> {
+        self.validate().ok()?;
         Some(RegistryIngressValues {
             min_timelock_blocks: self.registry_min_timelock_blocks?,
             max_approval_window: self.registry_max_approval_window?,
@@ -681,6 +720,33 @@ mod tests {
         ];
         for p in missing {
             assert_eq!(p.complete(), None, "{p:?}");
+            assert_eq!(p.validate(), Err(RegistryParamsError::Partial), "{p:?}");
+        }
+        assert_eq!(RegistryIngressParams::UNSET.validate(), Ok(()));
+    }
+
+    #[test]
+    fn named_parameters_are_each_in_one_to_u32_max() {
+        let with = |t: u64, w: u64| RegistryIngressParams {
+            registry_min_timelock_blocks: Some(t),
+            registry_max_approval_window: Some(w),
+        };
+        let top = u32::MAX as u64;
+        for (t, w) in [(1, 1), (top, top), (1, top), (top, 1)] {
+            assert_eq!(with(t, w).validate(), Ok(()));
+            assert!(with(t, w).complete().is_some());
+        }
+        for (t, w, name, value) in [
+            (0, 1, "registry_min_timelock_blocks", 0),
+            (1, 0, "registry_max_approval_window", 0),
+            (top + 1, 1, "registry_min_timelock_blocks", top + 1),
+            (1, u64::MAX, "registry_max_approval_window", u64::MAX),
+        ] {
+            assert_eq!(
+                with(t, w).validate(),
+                Err(RegistryParamsError::OutOfRange { name, value })
+            );
+            assert_eq!(with(t, w).complete(), None);
         }
     }
 
