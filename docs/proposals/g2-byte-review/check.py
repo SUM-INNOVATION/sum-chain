@@ -169,8 +169,9 @@ RATIFIED_HOME = {
     "M_CERT": "crates/finality-foundations/src/certificate.rs",
     # VS-1, settled by the owner, 2026-10-21 (decision ledger).
     "D_VALSET": "crates/finality-foundations/src/vote.rs",
-    # Group A2, the signer-state format of #340: integral to the 413-byte
-    # record adopted by the owner 2026-10-22 (inferred; dormant).
+    # Group A2: integral to the 413-byte SignerStateV1 adopted by the owner on
+    # 2026-10-22 (magic, checksum domain, sign-bytes digest domain; inferred
+    # as integral, see the ratification packet's mapping). Dormant.
     "D_SIGNER": "crates/finality-foundations/src/signer_file.rs",
     "D_SIGNBYTES": "crates/finality-foundations/src/signer_file.rs",
     "M_SIGNER": "crates/finality-foundations/src/signer_file.rs",

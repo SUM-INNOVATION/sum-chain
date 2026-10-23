@@ -9,11 +9,12 @@
 //! * [`SignerStore`]: loads and atomically persists one [`SignerRecord`].
 //!   `persist` may return `Ok` only once the record is durable (data and
 //!   directory entry fsynced). The core defines no on-disk encoding;
-//!   `signer_file` implements one (format ratified by the owner, 2026-10-22 (decision ledger); dormant, no node wiring; production durability and activation separate).
+//!   `signer_file` implements one (the elements enumerated in the decision
+//!   ledger, adopted by the owner, 2026-10-22 (decision ledger, as enumerated there); dormant, no node wiring; the rest PROPOSED).
 //! * [`ExclusiveOwnership`]: one owner per key. The guard is held for the
 //!   signer's whole life.
 //! * [`SigningKey`] and [`PolkaVerifier`]: the key, and the check of a
-//!   quorum-of-prevotes justification: a `PolkaProofV1` (format ratified by the owner, 2026-10-22 (decision ledger); dormant, no node wiring; production durability and activation separate),
+//!   quorum-of-prevotes justification: a `PolkaProofV1` (adopted by the owner, 2026-10-22 (decision ledger, as enumerated there); dormant, no node wiring),
 //!   checked by `proofs::ConsensusProofs`, which no node path calls.
 //!
 //! # Signing order
@@ -59,7 +60,7 @@
 //!   position and value to match the payload. The vote format is now ratified
 //!   ([`crate::vote`]); decoding the payload as exactly `D_VOTE ‖ body` and
 //!   binding it to the requested position and value is a follow-up (the
-//!   signer-state layout, A2, was ratified by the owner on 2026-10-22).
+//!   413-byte signer-state layout was adopted by the owner on 2026-10-22).
 //! * Restoring an old copy of the state is detected only against external
 //!   evidence: [`DurableSigner::open`] takes the highest position at which this
 //!   key's signature is known to exist (for example in certificates on the
@@ -722,6 +723,10 @@ where
     ///   as a finality proof for the conflict height naming a block other
     ///   than the certified one; otherwise the store's retained copy, which
     ///   must be present and intact.
+    ///
+    /// Adopted 2026-10-22: R > H (R ≥ W), floor R + 1, and a verified resume
+    /// certificate against the node's chain. PROPOSED (not adopted): the
+    /// conflict-archive layout, the receipt, and writing the archive first.
     ///
     /// Order: verify everything (nothing is written on a refusal); archive the
     /// halted record, the evidence and the resume certificate durably, the

@@ -3,13 +3,25 @@
 //!
 //! **Semantics RATIFIED (2026-10-20):** proof-gated height advancement, the
 //! persisted conflict halt, and `PolkaProofV1` verification of lock changes.
-//! **Format ratified by the owner, 2026-10-22 (decision ledger); dormant, no node wiring; production durability and activation separate:** the format described in #340: every layout,
-//! digest, side file, archive name and the recovery rules below (group A2,
-//! revision 5 of the draft, with the owner's choice of a separate halt
-//! flag). Verified only within the bounds and limits of the ratification
-//! packet (§6–§7, summarised in #340).
+//! **Elements adopted by the owner, 2026-10-22 (decision ledger; only the
+//! items enumerated there, ledger 2026-10-23: no inference from a broad
+//! headline); dormant, no node wiring:** the 413-byte `SignerStateV1` with
+//! the halt flag; the full-state mirror and the context-bound proof digest;
+//! trimmed, re-verified side-file objects with the size bound; R0/R1 as the
+//! only repairs; `PolkaProofV1`; recovery with R > H, floor R + 1 and a
+//! verified resume certificate against the node's chain; permanent
+//! preservation of completed archives. Constants integral to an adopted
+//! element (the record's magic, schema and domains, the proof-digest domain
+//! and the kind 1 and 2 contexts) are marked *inferred*.
 //!
-//! # `SignerStateV1` layout: 413 bytes
+//! **PROPOSED (not adopted 2026-10-22):** the persistence protocol
+//! (G/P0/P1/P2, file names), the side-file names, the conflict-archive
+//! layout, naming and write order, the [`RecoveryReceipt`] and its domain,
+//! the kind 3 (resume certificate) digest context, and the open-time
+//! degraded mode and orphan cleanup. Verified only within the bounds and
+//! limits of the ratification packet (§6–§7, summarised in #340).
+//!
+//! # `SignerStateV1` layout: 413 bytes (adopted by the owner, 2026-10-22 (decision ledger, as enumerated there); dormant, no node wiring)
 //!
 //! | Offset | Width | Field |
 //! |---|---|---|
@@ -44,6 +56,9 @@
 //!
 //! # Side file: the retained proof
 //!
+//! The objects, their trimming and the size bound are adopted (2026-10-22);
+//! the file name `proof-<64 hex digest>.v1` is PROPOSED: not adopted 2026-10-22.
+//!
 //! `proof-<64 hex digest>.v1` holds the bytes `proof_digest` names: the
 //! `PolkaProofV1` that justified the current lock, or, in a halted state, the
 //! conflicting finality proof (evidence). The verifier trims either to
@@ -55,6 +70,9 @@
 //!
 //! # Conflict archive: written before a recovery
 //!
+//! Permanent preservation of completed archives is adopted (2026-10-22). The
+//! archive's layout, names and write order and the receipt are PROPOSED: not adopted 2026-10-22.
+//!
 //! `conflict-<H>.state` (the halted record), `.evidence` (the conflicting
 //! proof), `.resume` (the verified resume certificate), and last
 //! `.receipt` ([`RecoveryReceipt`]), each written with temp, fsync, rename
@@ -62,7 +80,10 @@
 //! repaired into the mirror) only when this archive matches it. The archive
 //! is kept: initialization refuses while any `conflict-*` file exists.
 //!
-//! # Persistence protocol
+//! # Persistence protocol (PROPOSED: not adopted 2026-10-22)
+//!
+//! Persistence before release is the G2-b semantics ratified 2026-10-16; this
+//! sequence is how this store meets it.
 //!
 //! 0. **G:** remove the proof file the previous persist left unreferenced.
 //! 1. **P0** (only when new proof bytes are retained): write `proof.tmp`,
@@ -76,19 +97,31 @@
 //!
 //! # Recovery at open
 //!
+//! R0 and R1 as the only repairs are adopted (2026-10-22). R1's archive check
+//! over a halted mirror, the degraded open and the orphan cleanup are
+//! PROPOSED: not adopted 2026-10-22.
+//!
 //! See [`FileSignerStore::load`]: leftover temp files are removed; the state
 //! file and the mirror are classified (two repairs only, each after making
 //! the state file durable); then the referenced proof is checked
 //! ([`ProofStatus`]: a missing or corrupt proof opens **degraded**, the lock
 //! still enforced from the state) and unreferenced proof files are removed.
 //!
+//! # Safety assumptions and operating requirements
+//!
+//! These are safety assumptions, not hardware-durability qualifications.
+//!
+//! * **No rollback of signer state.** A whole data-directory rollback (state,
+//!   mirror, side files and conflict archive restored together) is
+//!   undetectable here; only external evidence catches it. Restoring a
+//!   pre-halt snapshot also forgets the halt.
+//! * **One signer per key.** Two signers holding cloned keys are undetectable
+//!   here; recovering one copy says nothing about the other.
+//! * **Archive preservation.** Never delete a conflict archive. This is also
+//!   adopted signer-side behaviour: the signer never deletes one.
+//!
 //! # Limits
 //!
-//! * A whole data-directory rollback (state, mirror, side files and conflict
-//!   archive restored together) is undetectable here; only external evidence
-//!   catches it. Restoring a pre-halt snapshot also forgets the halt.
-//! * Two signers holding cloned keys are undetectable here; recovering one
-//!   copy says nothing about the other.
 //! * The crash model tested is process crashes plus a simulated loss of
 //!   unsynced writes; real power-loss durability is untested.
 
@@ -103,15 +136,15 @@ use crate::signer::{
 };
 use crate::Digest;
 
-/// Checksum domain.
+/// Checksum domain (adopted, inferred: integral to the 413-byte record's checksum field).
 pub const D_SIGNER: &[u8; 28] = b"SUMCHAIN/FINALITY/SIGNER/v1\0";
-/// Sign-bytes digest domain.
+/// Sign-bytes digest domain (adopted, inferred: integral to the record's `last_sign_bytes_digest` field).
 pub const D_SIGNBYTES: &[u8; 31] = b"SUMCHAIN/FINALITY/SIGNBYTES/v1\0";
-/// Retained-proof digest domain.
+/// Retained-proof digest domain (adopted, inferred: integral to the context-bound proof digest).
 pub const D_PROOF: &[u8; 34] = b"SUMCHAIN/FINALITY/SIGNER-PROOF/v1\0";
-/// Magic.
+/// Magic (adopted, inferred: bytes 0..7 of the 413-byte record).
 pub const MAGIC: &[u8; 7] = b"FSGNv1\0";
-/// Schema.
+/// Schema (adopted, inferred: bytes 7..9 of the 413-byte record).
 pub const SCHEMA: u16 = 1;
 
 /// Field offsets of the 413-byte layout.
@@ -150,21 +183,21 @@ pub const HALT_SET: u8 = 1;
 pub const STATE_LEN: usize = 413;
 /// Bytes covered by the checksum.
 pub const CHECKSUMMED_LEN: usize = offset::CHECKSUM;
-/// The state file.
+/// The state file (name PROPOSED: not adopted 2026-10-22).
 pub const STATE_FILE: &str = "signer.v1";
-/// The temporary file renamed over [`STATE_FILE`].
+/// The temporary file renamed over [`STATE_FILE`] (PROPOSED: not adopted 2026-10-22).
 pub const TEMP_FILE: &str = "signer.v1.tmp";
-/// The temporary file renamed to a proof's digest name.
+/// The temporary file renamed to a proof's digest name (PROPOSED: not adopted 2026-10-22).
 pub const PROOF_TEMP: &str = "proof.tmp";
-/// Recovery-receipt checksum domain.
+/// Recovery-receipt checksum domain (PROPOSED: not adopted 2026-10-22).
 pub const D_RECEIPT: &[u8; 37] = b"SUMCHAIN/FINALITY/SIGNER-RECOVERY/v1\0";
-/// Recovery-receipt magic.
+/// Recovery-receipt magic (PROPOSED: not adopted 2026-10-22).
 pub const RECEIPT_MAGIC: &[u8; 7] = b"FRCVv1\0";
-/// Length of a [`RecoveryReceipt`].
+/// Length of a [`RecoveryReceipt`] (PROPOSED: not adopted 2026-10-22).
 pub const RECEIPT_LEN: usize = 185;
 
 /// The conflict archive's file for `height` with `suffix`
-/// (`state`, `evidence`, `resume`, `receipt`).
+/// (`state`, `evidence`, `resume`, `receipt`). Naming PROPOSED: not adopted 2026-10-22.
 pub fn conflict_file_name(height: u64, suffix: &str) -> String {
     format!("conflict-{height}.{suffix}")
 }
@@ -326,17 +359,18 @@ fn lock_position(lock: &Lock) -> SignPosition {
 /// part of the object's digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProofPurpose {
-    /// Kind 1: the `PolkaProofV1` that justified the lock at
-    /// (`height`, `round`) on `value`.
+    /// Kind 1 (adopted, inferred: the locked record's proof digest): the
+    /// `PolkaProofV1` that justified the lock at (`height`, `round`) on `value`.
     LockJustification {
         height: u64,
         round: u32,
         value: Digest,
     },
-    /// Kind 2: a finality proof for the conflict height `height` naming a
-    /// block other than `certified`.
+    /// Kind 2 (adopted, inferred: the halted record's proof digest): a finality
+    /// proof for the conflict height `height` naming a block other than `certified`.
     ConflictEvidence { height: u64, certified: Digest },
-    /// Kind 3: the resume certificate of a recovery, for `height` and `block`.
+    /// Kind 3 (PROPOSED: not adopted 2026-10-22; used only by the receipt): the resume
+    /// certificate of a recovery, for `height` and `block`.
     ResumeCertificate { height: u64, block: Digest },
 }
 
@@ -957,7 +991,7 @@ pub fn sign_bytes_digest<H: StateHasher>(hasher: &H, sign_bytes: &[u8]) -> Diges
     hasher.hash(&pre)
 }
 
-/// The receipt that closes a conflict archive, 185 bytes.
+/// The receipt that closes a conflict archive, 185 bytes (PROPOSED: not adopted 2026-10-22).
 ///
 /// | Offset | Width | Field |
 /// |---|---|---|
@@ -1051,7 +1085,8 @@ pub trait SignerDir {
     fn list(&mut self) -> Result<Vec<String>, IoError>;
 }
 
-/// The mirror record in the node database (`finality/signer-mirror/v1`).
+/// The mirror record in the node database. The full-state mirror is adopted
+/// (2026-10-22); the key name `finality/signer-mirror/v1` is PROPOSED: not adopted 2026-10-22.
 pub trait MirrorStore {
     fn read(&mut self) -> Result<Option<Vec<u8>>, IoError>;
     /// Returns `Ok` only once the bytes are durable (synced WAL write).

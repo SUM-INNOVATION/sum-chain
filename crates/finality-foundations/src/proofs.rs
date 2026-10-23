@@ -1,4 +1,6 @@
-//! The consensus proofs the signer verifies itself (format ratified by the owner, 2026-10-22 (decision ledger); dormant, no node wiring; production durability and activation separate).
+//! The consensus proofs the signer verifies itself. `PolkaProofV1`, and the
+//! trimming of retained objects to q(n) entries with re-verification, are
+//! adopted by the owner, 2026-10-22 (decision ledger, as enumerated there); dormant, no node wiring.
 //!
 //! * [`PolkaProofV1`]: a prevote quorum for (height, round, block), the
 //!   justification V left opaque. It is the ratified `FinalityCertificateV1`

@@ -2,7 +2,9 @@
 //! 2026-10-16 (group G2; #270 certified finality, #268 upgrade authorization),
 //! the encoding conventions of byte group A1 ratified on 2026-10-17, the
 //! finality vote format (group V) ratified on 2026-10-17, and the signer-state
-//! format (group A2, the format described in #340), ratified by the owner, 2026-10-22 (decision ledger); dormant, no node wiring; production durability and activation separate.
+//! elements of group A2 (#340) that the owner adopted on 2026-10-22, as
+//! enumerated in the decision ledger; dormant, no node wiring. The rest of
+//! #340's format remains PROPOSED.
 //!
 //! # This is NOT certified finality
 //!
@@ -23,7 +25,7 @@
 //! | Rule | Ratified semantics (2026-10-16) | Implemented here |
 //! |------|----------------------------------|------------------|
 //! | G2-a | A block is published as canonical only together with a verified certificate, its post-state and the finalized pointer, in one durable atomic batch. | Not here: the storage half is the dormant `sumchain-storage` certified-commit seam (#292). |
-//! | G2-b | Signer state is durable before any signature is released; exclusive ownership; explicit initialization; fail-closed recovery. | [`signer`]; the file-backed store and recovery rules in [`signer_file`], proof-gated height advancement, and the prevote-quorum proof in [`proofs`] (format ratified by the owner, 2026-10-22 (decision ledger); dormant, no node wiring; production durability and activation separate) |
+//! | G2-b | Signer state is durable before any signature is released; exclusive ownership; explicit initialization; fail-closed recovery. | [`signer`]; the file-backed store and recovery rules in [`signer_file`], proof-gated height advancement, and the prevote-quorum proof in [`proofs`] (the elements enumerated on 2026-10-22 are adopted; the rest PROPOSED: see [`signer_file`]) |
 //! | G2-c | Quorum-signed, sequence-chained bootstrap authorization shipped with the release. Genesis membership authenticates the first bootstrap only; handshake announcements never authorize or halt; conflicting fully verified authorizations halt safely without reverting accepted history; late arrival does not invalidate authentic applied history. | [`bootstrap`] |
 //! | G2-d | No dynamic membership before certified finality. | [`containment`], enforced when an authorization is recorded as applied |
 //!
@@ -41,9 +43,9 @@
 //! |--------|----------------------------------------|------------------|
 //! | `FinalityCertificateV1` | `FCRTv1\0`, schema 1, the field order of [`certificate`], `119 + 66·k` bytes; strictly ascending indices; the validator-set commitment resolved to the authenticated set; `q(n) ≤ k ≤ n`; non-nil `block_id`; every entry a reconstructed PRECOMMIT verified under E1; any invalid entry refuses the whole certificate. Storage is not decided. | [`certificate::FinalityCertificateV1`], [`certificate::verify_certificate`] |
 //!
-//! | Object | Format ratified by the owner, 2026-10-22 (decision ledger); dormant, no node wiring; production durability and activation separate | Implemented here |
+//! | Object | Elements adopted by the owner, 2026-10-22 (decision ledger, as enumerated there); dormant, no node wiring | Implemented here |
 //! |--------|------|------------------|
-//! | Signer state (group A2) | the 413-byte `SignerStateV1` with a separate halt flag and its full-state mirror; context-bound proof digests; quorum-trimmed, re-verified side-file objects within the stated bound; R0/R1-only repairs; `PolkaProofV1`; recovery requiring `R > H`, persisting floor `R + 1`, with a verified resume certificate checked against the node's chain; completed conflict archives preserved permanently. Verified only within the bounds and limits of the ratification packet (§6–§7, summarised in #340). | [`signer_file`], [`proofs`], [`signer`] |
+//! | Signer state (group A2) | the 413-byte `SignerStateV1` with the halt flag; the full-state mirror and context-bound proof digest; trimmed, re-verified side-file objects with the size bound; R0/R1 only; `PolkaProofV1`; recovery with `R > H`, floor `R + 1` and a verified resume certificate against the node's chain; permanent preservation of completed archives. **PROPOSED (not adopted):** the persistence protocol G/P0/P1/P2 and file names, the conflict-archive layout and naming, the `RecoveryReceipt` and `SIGNER-RECOVERY/v1`. Verified only within the bounds and limits of the ratification packet (§6–§7, summarised in #340). | [`signer_file`], [`proofs`], [`signer`] |
 //!
 //! # Still unratified (deliberately absent)
 //!

@@ -1,4 +1,4 @@
-//! Signer persistence (the 413-byte record; format ratified by the owner, 2026-10-22 (decision ledger); dormant, no node wiring; production durability and activation separate): a bounded,
+//! Signer persistence (the 413-byte record adopted by the owner, 2026-10-22 (decision ledger, as enumerated there); dormant, no node wiring; other elements PROPOSED): a bounded,
 //! explicit-state model check of the recovery protocol, of proof-gated
 //! height advancement, of the persisted conflict halt (its own flag in the
 //! record) and of the operator's recovery from it.

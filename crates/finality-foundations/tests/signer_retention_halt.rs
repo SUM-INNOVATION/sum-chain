@@ -1,6 +1,7 @@
 //! The retained lock proof and the persisted conflict halt (semantics
-//! RATIFIED 2026-10-20; the 413-byte layout, the side files and the conflict
-//! archive ratified by the owner, 2026-10-22 (decision ledger); dormant, no node wiring; production durability and activation separate),
+//! RATIFIED 2026-10-20; the 413-byte layout and the side-file objects
+//! adopted by the owner, 2026-10-22 (decision ledger, as enumerated there); dormant, no node wiring; the side-file names and the conflict-archive layout,
+//! naming and receipt PROPOSED),
 //! over the file-backed store and the disk model in `common`.
 //!
 //! * KAT vectors for the 413-byte `SignerStateV1` (separate halt flag).
