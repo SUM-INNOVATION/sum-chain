@@ -12,6 +12,10 @@
 //! and the genesis hash, is the separately authorized activation change.
 //! Specification: `docs/proposals/c5-registry-ingress/README.md`.
 //!
+//! Approvals are checked strictly (`verify_validator_quorum_strict`,
+//! ed25519-dalek `verify_strict`; owner, 2026-10-23). Every other governance
+//! operation keeps governance-v1 `verify`.
+//!
 //! Once ready, every refusal below is semantic: `303`, with the Policy-B fee
 //! and nonce. The checks are independent, so their order changes no receipt;
 //! signatures are verified last because they cost the most.
@@ -28,7 +32,7 @@ use sumchain_wire::registry_ingress::{
 };
 use sumchain_wire::registry_wire::{RegistryRecordV1, RegistryStatus};
 
-use crate::validator_quorum::{check_threshold_bps, verify_validator_quorum};
+use crate::validator_quorum::{check_threshold_bps, verify_validator_quorum_strict};
 use crate::{Result, StateError};
 
 /// The named parameters of this binary: every one unset, so the operations
@@ -96,7 +100,8 @@ pub(crate) fn validate_register(
     // Q17 (owner, 2026-10-22): the authenticated governance threshold, from
     // chain parameters, never from the operation or a tooling default.
     let threshold = gp.validator_authority_threshold_bps;
-    // The floor is B2 (PROPOSED, not owner-decided): Q17 decides only `t`.
+    // B2 (adopted 2026-10-23): the record's own threshold is at least the
+    // governance threshold effective at its registration.
     if record.approval_threshold_bps < threshold {
         return Err(303);
     }
@@ -108,7 +113,7 @@ pub(crate) fn validate_register(
     let signing =
         registry_register_signing_bytes(chain_id, &ready.genesis_block_hash, req.valid_until, record)
             .map_err(|_| 303u32)?;
-    verify_validator_quorum(&req.approvals, &signing, active_validator_pubkeys, threshold)
+    verify_validator_quorum_strict(&req.approvals, &signing, active_validator_pubkeys, threshold)
         .map_err(|_| 303u32)?;
     Ok(record.clone())
 }
@@ -132,12 +137,13 @@ pub(crate) fn validate_disable(
     if stored.status != RegistryStatus::Enabled {
         return Err(303);
     }
-    // B2 (PROPOSED): the stored record's own threshold, authenticated when the
-    // record was registered.
+    // B2 (adopted 2026-10-23): the stored record's own threshold, accepted at
+    // its registration. A later change to the governance threshold does not
+    // touch it, so a disable never gets harder over time.
     let threshold = stored.approval_threshold_bps;
     let signing =
         registry_disable_signing_bytes(chain_id, &ready.genesis_block_hash, req.valid_until, &req.id);
-    verify_validator_quorum(&req.approvals, &signing, active_validator_pubkeys, threshold)
+    verify_validator_quorum_strict(&req.approvals, &signing, active_validator_pubkeys, threshold)
         .map_err(|_| 303u32)?;
     Ok(RegistryRecordV1 {
         status: RegistryStatus::Disabled,
@@ -147,17 +153,20 @@ pub(crate) fn validate_disable(
 
 // ── State ───────────────────────────────────────────────────────────────────
 //
-// Versioned keys in the EXISTING `meta` column family, exactly as the
-// certified-commit seam stores certificates (`sumchain_storage::certified_meta`):
-// a binary that does not name a column family cannot open a volume on which a
-// newer binary created one, so this module adds none. Keys in an existing
-// family carry no such hazard: an older binary opens the volume and never
-// reads them. `meta` is not folded into any committed digest.
+// Storage ADOPTED by the owner (2026-10-23): the existing `state` column
+// family under `registry/v1/` ‖ id. No column family is added. Rows are
+// written only through `ExecutionView`, so they land in the block's single
+// atomic batch and the generic application journal unwinds them on a rollback.
+// The prefix is disjoint from the account rows (`acct`, the only family scan
+// of `state` on main: the account root, snapshot export and legacy revert) and
+// from G5's proposed `vset/` (#342); tests pin both. While dormant nothing folds
+// these rows into a root; the registry digest belongs to the activation
+// proposal.
 
-/// Prefix of every registry record key in `cf::META`.
-pub const REGISTRY_RECORD_KEY_PREFIX: &[u8] = b"registry/record/v1/";
+/// Prefix of every registry record key in `cf::STATE`.
+pub const REGISTRY_RECORD_KEY_PREFIX: &[u8] = b"registry/v1/";
 
-/// The key of the record with `id`: prefix ‖ id (32), 51 bytes.
+/// The key of the record with `id`: prefix ‖ id (32), 44 bytes.
 pub fn registry_record_key(id: &[u8; 32]) -> Vec<u8> {
     [REGISTRY_RECORD_KEY_PREFIX, id].concat()
 }
@@ -169,7 +178,7 @@ pub fn v_get_record(
     id: &[u8; 32],
 ) -> Result<Option<RegistryRecordV1>> {
     let Some(bytes) = view
-        .get(cf::META, &registry_record_key(id))
+        .get(cf::STATE, &registry_record_key(id))
         .map_err(StateError::Storage)?
     else {
         return Ok(None);
@@ -189,7 +198,7 @@ pub fn v_put_record(view: &mut ExecutionView<'_, '_>, record: &RegistryRecordV1)
     let bytes = record
         .try_encode()
         .map_err(|e| StateError::Storage(StorageError::InvalidData(format!("registry record: {e}"))))?;
-    view.put(cf::META, &registry_record_key(&record.id), &bytes)
+    view.put(cf::STATE, &registry_record_key(&record.id), &bytes)
         .map_err(StateError::Storage)
 }
 
