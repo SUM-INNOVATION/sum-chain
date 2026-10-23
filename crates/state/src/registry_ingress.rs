@@ -40,6 +40,43 @@ use crate::{Result, StateError};
 /// reviewed change here, part of the activation change.
 pub const REGISTRY_INGRESS_PARAMS: RegistryIngressParams = RegistryIngressParams::UNSET;
 
+/// The most records the registry may store, Enabled and Disabled together
+/// (owner, 2026-10-23: a deterministic consensus bound on the per-block
+/// registry scan). PROPOSED value; dormant.
+///
+/// A register that would store record `MAX_REGISTRY_RECORDS + 1` is refused
+/// with `303`. Every stored record counts, including disabled ones, because
+/// the proposed registry-state fold covers them all; a disabled record never
+/// frees capacity. Disable adds no record and stays allowed at the limit.
+///
+/// Rationale for 4,096:
+/// - one proof system is admitted today ([`admitted_proof_systems`]);
+/// - records name verifier keys, program images, tokenizers and models, and
+///   each one needs a validator quorum and a fee, so the expected count is in
+///   the tens to low hundreds over years, which leaves at least 16× headroom;
+/// - at the limit the fold hashes [`MAX_REGISTRY_FOLDED_BYTES`] (761,891 bytes)
+///   per block. That is about 0.6 ms of BLAKE3 on one core (measured on an
+///   arm64 workstation), plus a 4,096-row scan, which costs about 0.7 ms at the
+///   account root's reference of 40 ms per 250,000 rows (`account_root.rs`).
+///   Together that is under 0.1% of the 1,506 ms block interval.
+///
+/// Not in `protocol_digest::consensus_limits` while dormant, because no
+/// transaction reaches the check. The activation change adds it there, and so
+/// to the protocol digest every node declares at the handshake. It also gives
+/// it the ConsensusConfig field id that every consensus limit has
+/// (`0x2000–0x20ff`) in the new schema. Changing it after activation is a
+/// coordinated upgrade.
+pub const MAX_REGISTRY_RECORDS: u64 = 4_096;
+
+/// The most bytes the proposed registry-state fold hashes per block at
+/// [`MAX_REGISTRY_RECORDS`]: per record, its id (32 bytes) and its frozen
+/// `RegistryRecordV1` (154 bytes); plus the proposed fold domain
+/// `SUMCHAIN/REGISTRY/STATE/v1\0` (27 bytes, provisional with the activation
+/// proposal) and the `u64` record count (8 bytes). 4,096 × 186 + 35 =
+/// 761,891 bytes. Derived; not a separate parameter.
+pub const MAX_REGISTRY_FOLDED_BYTES: u64 =
+    MAX_REGISTRY_RECORDS * (32 + RegistryRecordV1::LEN as u64) + 27 + 8;
+
 /// Which proposed operation an internal call runs. Deliberately not a
 /// `GovernanceOperation` variant: no transaction decodes to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +145,13 @@ pub(crate) fn validate_register(
     // Disabled is terminal: a disabled id is still present, so it can never
     // be registered again.
     if v_get_record(view, &record.id).map_err(|_| 303u32)?.is_some() {
+        return Err(303);
+    }
+    // The size bound: this register would store one more record, so it is
+    // refused once MAX_REGISTRY_RECORDS records, Enabled or Disabled, exist.
+    if v_count_records_up_to(view, MAX_REGISTRY_RECORDS).map_err(|_| 303u32)?
+        >= MAX_REGISTRY_RECORDS
+    {
         return Err(303);
     }
     let signing =
@@ -191,6 +235,41 @@ pub fn v_get_record(
         )));
     }
     Ok(Some(record))
+}
+
+/// How many records are stored, Enabled and Disabled, as this block's
+/// candidate sees them, counting at most `limit`.
+///
+/// It is a bounded prefix scan over `registry/v1/` in `cf::STATE`, not a count
+/// row:
+/// - it reads the rows the registry fold would hash, so it cannot drift from
+///   them;
+/// - it adds no key, and so no collision surface;
+/// - it needs no second write to keep in step, and the candidate overlay,
+///   atomic publication and generic journal already cover the rows it counts.
+///
+/// It sees this block's own staged registers, and stops after `limit` rows, so
+/// one register reads at most `MAX_REGISTRY_RECORDS` keys. A read error is an
+/// error, never a short count.
+pub fn v_count_records_up_to(view: &ExecutionView<'_, '_>, limit: u64) -> Result<u64> {
+    let mut count = 0u64;
+    if limit == 0 {
+        return Ok(count);
+    }
+    for entry in view
+        .prefix_iter(cf::STATE, REGISTRY_RECORD_KEY_PREFIX)
+        .map_err(StateError::Storage)?
+    {
+        let (key, _) = entry.map_err(StateError::Storage)?;
+        if !key.starts_with(REGISTRY_RECORD_KEY_PREFIX) {
+            break;
+        }
+        count += 1;
+        if count == limit {
+            break;
+        }
+    }
+    Ok(count)
 }
 
 /// Stage `record` under its id.

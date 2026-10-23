@@ -21,7 +21,8 @@ use sumchain_primitives::validator_authority::{required_approvals, ValidatorAppr
 use sumchain_primitives::{Address, Hash, TxPayload, TxStatus};
 use sumchain_state::governance_executor::execute_registry_ingress;
 use sumchain_state::registry_ingress::{
-    registry_record_key, v_check_commit, v_get_record, RegistryIngressContext, RegistryIngressOp,
+    registry_record_key, v_check_commit, v_count_records_up_to, v_get_record,
+    RegistryIngressContext, RegistryIngressOp, MAX_REGISTRY_FOLDED_BYTES, MAX_REGISTRY_RECORDS,
     REGISTRY_INGRESS_PARAMS, REGISTRY_RECORD_KEY_PREFIX,
 };
 use sumchain_storage::cf;
@@ -747,6 +748,12 @@ fn vectors() -> String {
         "prospective_both_refuse.noncanonical_r.register.k1.data",
         hex(&noncanonical_r.try_encode().unwrap()),
     );
+    // The registry size bound (owner, 2026-10-23; value PROPOSED), README §12.1.
+    line("prospective_registry_bound.max_records", MAX_REGISTRY_RECORDS.to_string());
+    line(
+        "prospective_registry_bound.max_folded_bytes",
+        MAX_REGISTRY_FOLDED_BYTES.to_string(),
+    );
     // The proposed quorum rule's required approval counts at its boundaries
     // (Q17): `required_approvals`, `validator_authority.rs:119-123`.
     for (n, bps) in QUORUM_BOUNDARIES {
@@ -838,6 +845,32 @@ fn vectors_are_reproduced_and_execute() {
         assert_eq!(s.run(&n, &mut c, REG, bytes, H, &vset(&[1])), TxStatus::Failed(303), "{key}");
     }
 
+    // The size bound: the k = 1 register is accepted with MAX - 1 records
+    // stored and refused (303) with MAX stored.
+    assert_eq!(
+        field("prospective_registry_bound.max_records"),
+        MAX_REGISTRY_RECORDS.to_string()
+    );
+    assert_eq!(
+        field("prospective_registry_bound.max_folded_bytes"),
+        MAX_REGISTRY_FOLDED_BYTES.to_string()
+    );
+    for (stored_records, want) in [
+        (MAX_REGISTRY_RECORDS - 1, TxStatus::Success),
+        (MAX_REGISTRY_RECORDS, TxStatus::Failed(303)),
+    ] {
+        let n = node();
+        fill_registry(&n.db, stored_records);
+        let mut c = candidate(&n.db);
+        let mut s = Submitter::new(&n.db);
+        let hexed = field("register.k1.data");
+        let bytes: Vec<u8> = (0..hexed.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hexed[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(s.run(&n, &mut c, REG, bytes, H, &vset(&[1])), want, "{stored_records} stored");
+    }
+
     for (signers, ids) in [(&[1u8][..], &[1u8][..]), (&[1u8, 2, 3][..], &[1u8, 2, 3, 4][..])] {
         let n = node();
         let mut c = candidate(&n.db);
@@ -852,6 +885,179 @@ fn vectors_are_reproduced_and_execute() {
             TxStatus::Success
         );
     }
+}
+
+// ── Registry size bound (owner, 2026-10-23; value PROPOSED) ─────────────────
+
+/// Store `n` filler records directly in committed state, every other one
+/// Disabled, under ids no other test record uses: `F0 ‖ i (u32 BE) ‖ 0…`.
+fn fill_registry(db: &Database, n: u64) {
+    for i in 0..n {
+        let mut rec = record(0);
+        rec.id = [0; 32];
+        rec.id[0] = 0xF0;
+        rec.id[1..5].copy_from_slice(&u32::try_from(i).unwrap().to_be_bytes());
+        if i % 2 == 1 {
+            rec.status = RegistryStatus::Disabled;
+        }
+        db.put(cf::STATE, &registry_record_key(&rec.id), &rec.try_encode().unwrap())
+            .unwrap();
+    }
+}
+
+/// Every stored record, as the candidate sees it.
+fn count(c: &mut CandidateExecution<'_>) -> u64 {
+    v_count_records_up_to(&c.view(), u64::MAX).unwrap()
+}
+
+/// The bound and the folded bytes it implies.
+#[test]
+fn the_size_bound_constants() {
+    assert_eq!(MAX_REGISTRY_RECORDS, 4_096);
+    // id (32) and the frozen record (154) per row, the proposed fold domain
+    // (27 bytes) and the u64 count.
+    assert_eq!(RegistryRecordV1::LEN, 154);
+    assert_eq!("SUMCHAIN/REGISTRY/STATE/v1\u{0}".len(), 27);
+    assert_eq!(MAX_REGISTRY_FOLDED_BYTES, 4_096 * 186 + 35);
+    assert_eq!(MAX_REGISTRY_FOLDED_BYTES, 761_891);
+}
+
+/// MAX − 1 stored: a register is accepted and the count reaches MAX. At MAX
+/// the next register is refused with 303 (fee charged, nothing stored; fee 0
+/// when underfunded). Disabled records count, and disable stays allowed. A
+/// disabled id is still present, so it cannot be registered again. A register
+/// staged earlier in the same block counts.
+#[test]
+fn the_size_bound_refuses_the_register_that_would_exceed_it() {
+    let n = node();
+    fill_registry(&n.db, MAX_REGISTRY_RECORDS - 1);
+    let mut c = candidate(&n.db);
+    let mut s = Submitter::new(&n.db);
+    let one = vset(&[1]);
+    assert_eq!(count(&mut c), MAX_REGISTRY_RECORDS - 1);
+    // Bounded: the scan never reads past its limit.
+    assert_eq!(v_count_records_up_to(&c.view(), 10).unwrap(), 10);
+    assert_eq!(v_count_records_up_to(&c.view(), 0).unwrap(), 0);
+
+    assert_eq!(
+        s.run(&n, &mut c, REG, register(H + 50, &record(1), &[1]), H, &one),
+        TxStatus::Success
+    );
+    assert_eq!(count(&mut c), MAX_REGISTRY_RECORDS, "the staged register counts");
+
+    // At the limit (MAX stored, half of the fillers Disabled): refused.
+    assert_eq!(
+        s.run(&n, &mut c, REG, register(H + 50, &record(2), &[1]), H, &one),
+        TxStatus::Failed(303)
+    );
+    assert_eq!(stored(&mut c, 2), None);
+    assert_eq!(count(&mut c), MAX_REGISTRY_RECORDS);
+
+    // Underfunded at the limit: 303 with fee 0, the nonce unchanged.
+    let poor = KeyPair::from_bytes([0x5C; 32]);
+    fund(&n.db, &poor, FEE - 1);
+    let r = execute_registry_ingress(
+        &mut c.view(),
+        CHAIN,
+        &n.params,
+        REG,
+        &register(H + 50, &record(3), &[1]),
+        &poor.address(),
+        FEE,
+        &Address::new([0x98; 20]),
+        H,
+        Hash::ZERO,
+        &one,
+        RegistryIngressContext {
+            params: &n.registry,
+            genesis_block_hash: n.genesis.as_ref(),
+        },
+    )
+    .unwrap();
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Failed(303), 0));
+    assert_eq!(StateManager::v_get_nonce(&c.view(), &poor.address()).unwrap(), 0);
+    assert_eq!(stored(&mut c, 3), None);
+
+    // Disable adds no record: allowed at the limit, and the count is unchanged.
+    assert_eq!(
+        s.run(&n, &mut c, DIS, disable(H + 50, 1, &[1]), H, &one),
+        TxStatus::Success
+    );
+    assert_eq!(stored(&mut c, 1).unwrap().status, RegistryStatus::Disabled);
+    assert_eq!(count(&mut c), MAX_REGISTRY_RECORDS);
+    // A disabled id is still present: re-registering it is refused (rule 7).
+    assert_eq!(
+        s.run(&n, &mut c, REG, register(H + 50, &record(1), &[1]), H, &one),
+        TxStatus::Failed(303)
+    );
+}
+
+/// A published register is undone through the generic application journal,
+/// and the count returns to MAX − 1, so a register is accepted again.
+#[test]
+fn rolling_back_a_register_restores_the_count() {
+    use sumchain_primitives::{Block, BlockHeader};
+    use sumchain_storage::candidate::{BlockJournals, ExecutionSubject, JournalRecord};
+    use sumchain_storage::journal::ApplicationJournal;
+    use sumchain_storage::schema::journal_key;
+
+    let n = node();
+    fill_registry(&n.db, MAX_REGISTRY_RECORDS - 1);
+    let one = vset(&[1]);
+    // One payer, funded once, so nothing is written outside a block between
+    // the publication and the undo.
+    let mut s = Submitter::new(&n.db);
+    let block = Block::new(
+        BlockHeader::new(Hash::ZERO, H, 1_000, Hash::hash(b"txs"), Hash::hash(b"root"), [0; 32]),
+        Vec::new(),
+    );
+    {
+        let mut c = candidate(&n.db);
+        assert_eq!(
+            s.run(&n, &mut c, REG, register(H + 50, &record(1), &[1]), H, &one),
+            TxStatus::Success
+        );
+        c.finish_execution(
+            ExecutionSubject::of(&block).unwrap(),
+            block.header.state_root,
+            Vec::new(),
+            BlockJournals {
+                account: JournalRecord::NothingToUndo,
+                contract: JournalRecord::NothingToUndo,
+                compute_pool: JournalRecord::NothingToUndo,
+                beacon: JournalRecord::NothingToUndo,
+            },
+        )
+        .accept_imported(&block)
+        .unwrap()
+        .publish()
+        .unwrap();
+    }
+    {
+        // Not published: the refused register's fee stays in this candidate.
+        let mut c = candidate(&n.db);
+        assert_eq!(count(&mut c), MAX_REGISTRY_RECORDS);
+        assert_eq!(
+            s.run(&n, &mut c, REG, register(H + 50, &record(2), &[1]), H, &one),
+            TxStatus::Failed(303),
+            "committed state is at the limit"
+        );
+    }
+    let bytes = n
+        .db
+        .get(cf::APPLICATION_JOURNAL, &journal_key(H, &block.hash()))
+        .unwrap()
+        .expect("a published block leaves a journal");
+    let journal = ApplicationJournal::decode_for(&bytes, H, &block.hash()).unwrap();
+    journal.undo_batch(&n.db).unwrap().commit().unwrap();
+
+    let mut c = candidate(&n.db);
+    assert_eq!(count(&mut c), MAX_REGISTRY_RECORDS - 1);
+    assert_eq!(stored(&mut c, 1), None);
+    assert_eq!(
+        s.run(&n, &mut c, REG, register(H + 50, &record(2), &[1]), H, &one),
+        TxStatus::Success
+    );
 }
 
 // ── Storage: no new column family ───────────────────────────────────────────
