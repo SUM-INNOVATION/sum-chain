@@ -1060,6 +1060,69 @@ fn rolling_back_a_register_restores_the_count() {
     );
 }
 
+/// A read the registry cannot trust is an execution error, never a receipt:
+/// a node-local failure must not become a consensus-visible outcome. Three
+/// failing reads, each through the dormant entry:
+/// - a row that does not decode;
+/// - a row whose record names another id;
+/// - a key under `registry/v1/` of the wrong length.
+///
+/// Each returns `Err` and charges nothing; no receipt is produced.
+#[test]
+fn a_failing_registry_read_is_an_execution_error_not_a_receipt() {
+    let run = |n: &Node, op, data: Vec<u8>| {
+        let mut c = candidate(&n.db);
+        let s = Submitter::new(&n.db);
+        let r = execute_registry_ingress(
+            &mut c.view(),
+            CHAIN,
+            &n.params,
+            op,
+            &data,
+            &s.kp.address(),
+            FEE,
+            &Address::new([0x99; 20]),
+            H,
+            Hash::ZERO,
+            &vset(&[1]),
+            RegistryIngressContext {
+                params: &n.registry,
+                genesis_block_hash: n.genesis.as_ref(),
+            },
+        );
+        (r.map(|r| r.status), StateManager::v_get_nonce(&c.view(), &s.kp.address()).unwrap())
+    };
+    let corrupt = |n: &Node, key: &[u8], value: &[u8]| n.db.put(cf::STATE, key, value).unwrap();
+
+    // An undecodable row under the register's own id, and under the disabled id.
+    let n = node();
+    corrupt(&n, &registry_record_key(&[1; 32]), b"not a record");
+    let (r, nonce) = run(&n, REG, register(H + 50, &record(1), &[1]));
+    assert!(r.is_err(), "register over an undecodable row: {r:?}");
+    assert_eq!(nonce, 0, "no fee, no nonce: there is no receipt");
+    let (r, _) = run(&n, DIS, disable(H + 50, 1, &[1]));
+    assert!(r.is_err(), "disable of an undecodable row: {r:?}");
+
+    // A row whose record names another id.
+    let n = node();
+    corrupt(&n, &registry_record_key(&[1; 32]), &record(2).try_encode().unwrap());
+    let (r, _) = run(&n, DIS, disable(H + 50, 1, &[1]));
+    assert!(r.is_err(), "a record stored under another id: {r:?}");
+
+    // A key of the wrong shape under the prefix, met by the size-bound scan
+    // of an otherwise valid register for another id.
+    let n = node();
+    let mut short = REGISTRY_RECORD_KEY_PREFIX.to_vec();
+    short.extend_from_slice(&[0; 31]);
+    corrupt(&n, &short, &record(9).try_encode().unwrap());
+    let (r, nonce) = run(&n, REG, register(H + 50, &record(1), &[1]));
+    assert!(r.is_err(), "a malformed registry key is an error, not counted: {r:?}");
+    assert_eq!(nonce, 0);
+    // The same row through the counting function itself.
+    let mut c = candidate(&n.db);
+    assert!(v_count_records_up_to(&c.view(), MAX_REGISTRY_RECORDS).is_err());
+}
+
 // ── Storage: no new column family ───────────────────────────────────────────
 
 /// `ALL_CFS` on `e3b8ff81`, names and order. A family a binary does not name

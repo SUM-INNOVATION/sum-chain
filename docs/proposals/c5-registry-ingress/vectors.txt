@@ -39,8 +39,8 @@
 # refuses earlier: R decodes (high bit masked, canonicity unchecked) to the
 # identity, a small-order point. Executes as 303.
 #
-# prospective_registry_bound.* is the registry size bound (owner, 2026-10-23;
-# value PROPOSED; README section 12.1): at most max_records stored records,
+# prospective_registry_bound.* is the registry size bound (required by the
+# owner 2026-10-23; rule and value PROPOSED; README section 12.1): at most max_records stored records,
 # Enabled and Disabled together, and at most max_folded_bytes hashed by the
 # proposed registry-state fold per block. register.k1.data executes as Success
 # with max_records - 1 records stored and as 303 with max_records stored.

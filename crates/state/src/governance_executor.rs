@@ -312,7 +312,7 @@ pub fn execute_registry_ingress(
                 block_height,
                 active_validator_pubkeys,
                 &req,
-            ),
+            )?,
         },
         RegistryIngressOp::Disable => match RegistryDisableV1::decode_exact(data) {
             Err(_) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
@@ -323,7 +323,7 @@ pub fn execute_registry_ingress(
                 block_height,
                 active_validator_pubkeys,
                 &req,
-            ),
+            )?,
         },
     };
     settle(
