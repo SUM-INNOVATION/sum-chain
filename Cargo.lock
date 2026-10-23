@@ -4481,6 +4481,7 @@ dependencies = [
 name = "sumchain-finality-foundations"
 version = "0.4.0"
 dependencies = [
+ "blake3",
  "ed25519-dalek",
  "hex",
  "serde_json",

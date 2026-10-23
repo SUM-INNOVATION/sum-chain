@@ -166,6 +166,12 @@ RATIFIED_HOME = {
     "D_VOTE": "crates/finality-foundations/src/vote.rs",
     "M_VOTE": "crates/finality-foundations/src/vote.rs",
     "M_CERT": "crates/finality-foundations/src/certificate.rs",
+    # Group A2: integral to the 413-byte SignerStateV1 adopted by the owner on
+    # 2026-10-22 (magic, checksum domain, sign-bytes digest domain; inferred
+    # as integral, see the ratification packet's mapping). Dormant.
+    "D_SIGNER": "crates/finality-foundations/src/signer_file.rs",
+    "D_SIGNBYTES": "crates/finality-foundations/src/signer_file.rs",
+    "M_SIGNER": "crates/finality-foundations/src/signer_file.rs",
 }
 
 

@@ -9,9 +9,9 @@ use std::rc::Rc;
 
 use ed25519_dalek::{Signer as _, Verifier as _};
 use sumchain_finality_foundations::signer::{
-    initialize, DurableSigner, ExclusiveOwnership, Justification, Lock, OwnershipError,
-    PolkaVerifier, SignPosition, SignRequest, SignerError, SignerRecord, SignerStore, SigningKey,
-    Step, StoreError, VoteValue,
+    initialize, Certified, DurableSigner, ExclusiveOwnership, Justification, Lock, OwnershipError,
+    PolkaVerifier, SignBytes, SignPosition, SignRequest, SignerError, SignerRecord, SignerStore,
+    SigningKey, Step, StoreError, VoteValue,
 };
 use sumchain_finality_foundations::Digest;
 
@@ -166,6 +166,23 @@ impl PolkaVerifier for TestPolka {
             Err("not a quorum of prevotes".into())
         }
     }
+    fn verify_finality(&self, proof: &[u8]) -> Result<Certified, String> {
+        // Accepts `final ‖ height LE ‖ block`, nothing else.
+        match proof.strip_prefix(b"final".as_slice()) {
+            Some(rest) if rest.len() == 40 => Ok(Certified {
+                height: u64::from_le_bytes(rest[..8].try_into().unwrap()),
+                block_id: rest[8..].try_into().unwrap(),
+            }),
+            _ => Err("not a finality proof".into()),
+        }
+    }
+}
+
+fn finality(height: u64, block: &Digest) -> Vec<u8> {
+    let mut p = b"final".to_vec();
+    p.extend_from_slice(&height.to_le_bytes());
+    p.extend_from_slice(block);
+    p
 }
 
 type TestSigner = DurableSigner<MemStore, EdKey, TestPolka, MemGuard>;
@@ -336,6 +353,9 @@ fn g2b_corrupt_or_inconsistent_state_fails_closed() {
             round: 0,
             value: A,
         }),
+        certified: None,
+        lock_proof: None,
+        halt: None,
     }));
     assert!(matches!(rig.open(None), Err(SignerError::Corrupt(_))));
 }
@@ -361,7 +381,7 @@ fn g2b_signature_is_durable_before_it_is_released() {
     assert_eq!(*rig.events.borrow(), vec!["sign", "persist", "release"]);
     let durable = rig.disk.record().unwrap().last.unwrap();
     assert_eq!(durable.signature, sig);
-    assert_eq!(durable.payload, r.payload);
+    assert_eq!(durable.payload, SignBytes::Full(r.payload.clone()));
 
     let vk = ed25519_dalek::SigningKey::from_bytes(&rig.seed).verifying_key();
     let sig = ed25519_dalek::Signature::from_slice(&sig).unwrap();
@@ -645,7 +665,7 @@ fn g2b_locked_value_and_nil_votes_need_no_justification() {
 }
 
 #[test]
-fn g2b_lock_does_not_outlive_its_height() {
+fn g2b_lock_is_discarded_only_by_a_verified_finality_proof() {
     let rig = Rig::new();
     rig.init();
     let mut s = rig.open(None).unwrap();
@@ -655,7 +675,30 @@ fn g2b_lock_does_not_outlive_its_height() {
         &A,
     ))
     .unwrap();
+    // Asking for a higher height does not move the signer.
+    assert_eq!(
+        s.sign(&req(3, 0, Step::Prevote, VoteValue::Block(B), "y")),
+        Err(SignerError::HeightNotCertified {
+            requested: 3,
+            working: 2
+        })
+    );
+    assert!(matches!(
+        s.advance(b"no proof"),
+        Err(SignerError::InvalidFinalityProof(_))
+    ));
+    assert_eq!(
+        rig.disk.record().unwrap().lock.map(|l| l.value),
+        Some(A),
+        "the lock survives every refused request"
+    );
+    // A verified proof for height 2 moves the signer to height 3.
+    s.advance(&finality(2, &A)).unwrap();
+    assert_eq!(rig.disk.record().unwrap().lock, None);
     s.sign(&req(3, 0, Step::Prevote, VoteValue::Block(B), "y"))
         .unwrap();
-    assert_eq!(rig.disk.record().unwrap().lock, None);
+    assert!(matches!(
+        s.sign(&req(2, 5, Step::Prevote, VoteValue::Nil, "late")),
+        Err(SignerError::Regression { .. })
+    ));
 }
