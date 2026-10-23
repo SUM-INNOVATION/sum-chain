@@ -14,12 +14,19 @@
 //! element (the record's magic, schema and domains, the proof-digest domain
 //! and the kind 1 and 2 contexts) are marked *inferred*.
 //!
-//! **PROPOSED (not adopted 2026-10-22):** the persistence protocol
-//! (G/P0/P1/P2, file names), the side-file names, the conflict-archive
-//! layout, naming and write order, the [`RecoveryReceipt`] and its domain,
-//! the kind 3 (resume certificate) digest context, and the open-time
-//! degraded mode and orphan cleanup. Verified only within the bounds and
-//! limits of the ratification packet (§6–§7, summarised in #340).
+//! **The conflict archive, RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant,** as one unit:
+//! the files `conflict-H.{state,evidence,resume,receipt}` (completed files are
+//! never overwritten or deleted); the 185-byte [`RecoveryReceipt`] and
+//! `SUMCHAIN/FINALITY/SIGNER-RECOVERY/v1\0`; the resume-certificate evidence
+//! context (kind 3); the archive durable before the recovered record; and R1
+//! accepting a recovered record over a halted mirror only when the matching
+//! archive verifies.
+//!
+//! **PROPOSED (not adopted):** the persistence protocol (G/P0/P1/P2, how each
+//! file is made durable, file names), the side-file names, the trimming of the
+//! resume certificate, the open-time degraded mode and orphan cleanup.
+//! Verified only within the bounds and limits of the ratification packet
+//! (§6–§7, summarised in #340).
 //!
 //! # `SignerStateV1` layout: 413 bytes (adopted by the owner, 2026-10-22 (decision ledger, as enumerated there); dormant, no node wiring)
 //!
@@ -71,7 +78,11 @@
 //! # Conflict archive: written before a recovery
 //!
 //! Permanent preservation of completed archives is adopted (2026-10-22). The
-//! archive's layout, names and write order and the receipt are PROPOSED: not adopted 2026-10-22.
+//! files `conflict-H.{state,evidence,resume,receipt}` (never overwritten or
+//! deleted once completed), the receipt, and the archive being durable before
+//! the recovered record are RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant. How each file is made durable
+//! (temp, fsync, rename, directory fsync) is PROPOSED with the persistence
+//! protocol.
 //!
 //! `conflict-<H>.state` (the halted record), `.evidence` (the conflicting
 //! proof), `.resume` (the verified resume certificate), and last
@@ -97,9 +108,10 @@
 //!
 //! # Recovery at open
 //!
-//! R0 and R1 as the only repairs are adopted (2026-10-22). R1's archive check
-//! over a halted mirror, the degraded open and the orphan cleanup are
-//! PROPOSED: not adopted 2026-10-22.
+//! R0 and R1 as the only repairs are adopted (2026-10-22). R1 accepting a
+//! recovered record over a halted mirror only when the matching archive
+//! verifies is RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant. The degraded open and the orphan cleanup are
+//! PROPOSED: not adopted.
 //!
 //! See [`FileSignerStore::load`]: leftover temp files are removed; the state
 //! file and the mirror are classified (two repairs only, each after making
@@ -189,15 +201,16 @@ pub const STATE_FILE: &str = "signer.v1";
 pub const TEMP_FILE: &str = "signer.v1.tmp";
 /// The temporary file renamed to a proof's digest name (PROPOSED: not adopted 2026-10-22).
 pub const PROOF_TEMP: &str = "proof.tmp";
-/// Recovery-receipt checksum domain (PROPOSED: not adopted 2026-10-22).
+/// Recovery-receipt checksum domain (RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant).
 pub const D_RECEIPT: &[u8; 37] = b"SUMCHAIN/FINALITY/SIGNER-RECOVERY/v1\0";
-/// Recovery-receipt magic (PROPOSED: not adopted 2026-10-22).
+/// Recovery-receipt magic (RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant).
 pub const RECEIPT_MAGIC: &[u8; 7] = b"FRCVv1\0";
-/// Length of a [`RecoveryReceipt`] (PROPOSED: not adopted 2026-10-22).
+/// Length of a [`RecoveryReceipt`] (RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant).
 pub const RECEIPT_LEN: usize = 185;
 
 /// The conflict archive's file for `height` with `suffix`
-/// (`state`, `evidence`, `resume`, `receipt`). Naming PROPOSED: not adopted 2026-10-22.
+/// (`state`, `evidence`, `resume`, `receipt`). Naming RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant; completed files
+/// are never overwritten or deleted.
 pub fn conflict_file_name(height: u64, suffix: &str) -> String {
     format!("conflict-{height}.{suffix}")
 }
@@ -369,7 +382,7 @@ pub enum ProofPurpose {
     /// Kind 2 (adopted, inferred: the halted record's proof digest): a finality
     /// proof for the conflict height `height` naming a block other than `certified`.
     ConflictEvidence { height: u64, certified: Digest },
-    /// Kind 3 (PROPOSED: not adopted 2026-10-22; used only by the receipt): the resume
+    /// Kind 3 (RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant; the resume-certificate evidence context): the resume
     /// certificate of a recovery, for `height` and `block`.
     ResumeCertificate { height: u64, block: Digest },
 }
@@ -991,7 +1004,7 @@ pub fn sign_bytes_digest<H: StateHasher>(hasher: &H, sign_bytes: &[u8]) -> Diges
     hasher.hash(&pre)
 }
 
-/// The receipt that closes a conflict archive, 185 bytes (PROPOSED: not adopted 2026-10-22).
+/// The receipt that closes a conflict archive, 185 bytes (RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant).
 ///
 /// | Offset | Width | Field |
 /// |---|---|---|
@@ -1287,7 +1300,7 @@ impl<D: SignerDir, M: MirrorStore, H: StateHasher> FileSignerStore<D, M, H> {
     }
 
     /// A recovered record is accepted only when the conflict archive for its
-    /// halted predecessor exists and matches: the receipt names the halted
+    /// halted predecessor exists and matches (RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant): the receipt names the halted
     /// record's checksum and the recovered height and block, and the archived
     /// state, evidence and resume certificate match the receipt.
     fn recovery_archive_ok(

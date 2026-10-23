@@ -725,8 +725,10 @@ where
     ///   must be present and intact.
     ///
     /// Adopted 2026-10-22: R > H (R ≥ W), floor R + 1, and a verified resume
-    /// certificate against the node's chain. PROPOSED (not adopted): the
-    /// conflict-archive layout, the receipt, and writing the archive first.
+    /// certificate against the node's chain. RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant: the
+    /// conflict archive, its receipt, and the archive durable before the
+    /// recovered record. PROPOSED (not adopted): conflict-evidence
+    /// verification rules and the trimming of the resume certificate.
     ///
     /// Order: verify everything (nothing is written on a refusal); archive the
     /// halted record, the evidence and the resume certificate durably, the
