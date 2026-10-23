@@ -293,10 +293,6 @@ const KNOWN_META_KEYS: &[(&[u8], &str)] = &[
     ),
     (b"node/disk_budget_bytes", "storage/src/pruner.rs"),
     (
-        b"registry/record/v1/",
-        "state/src/registry_ingress.rs (prefix)",
-    ),
-    (
         b"por_scheduler_index_backfilled",
         "state/src/storage_metadata.rs",
     ),
