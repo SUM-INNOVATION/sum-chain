@@ -153,14 +153,16 @@ It is a thin wrapper in `crypto`, not new cryptography, because `state` does not
 | ordinary signature | accepts | accepts | `Success` |
 | R = identity, s = k·a (real key holder, canonical prime-order key) | **accepts** | refuses | `303` |
 | any other small-order R, prime-order A | refuses (cannot satisfy the equation) | refuses | `303` |
-| small-order A (outside VS-5), R = [s]B, any message | **accepts** | refuses | `303` |
+| A = identity (small-order, outside VS-5), R = [s]B, any message | **accepts** | refuses | `303` |
 | non-canonical S (S + ℓ) | refuses | refuses | `303` |
 | non-canonical R: y = p + 1 for the identity, s recomputed over those bytes | refuses: the recomputed point is the identity, whose canonical encoding `01 00…00` differs from R | refuses earlier: R decodes (high bit masked, canonicity unchecked) to the identity, a small-order point | `303` |
 | wrong message | refuses | refuses | `303` |
 | public key that does not decompress | refuses | refuses | `303` |
 | truncated approval (wrong length) | not reached | not reached | `302` at decode, no fee |
 
-Every row is tested: `the_two_rules_on_each_distinguishing_signature` (both rules) and `operations_8_and_9_refuse_approvals_only_the_old_rule_accepts` (receipts). `existing_governance_operations_keep_the_governance_v1_rule` pins that `RegisterAsset` still accepts the identity-R approval. The vector `prospective_strict_refused.identity_r.register.k1.data` executes as `303`.
+For a small-order A of order 2, 4 or 8, `verify` accepts R = [s]B only when that order divides k (so that `[k]A` is the identity). `verify_strict` refuses every small-order A.
+
+Every row is tested: `the_two_rules_on_each_distinguishing_signature` (both rules) and `operations_8_and_9_refuse_approvals_only_the_old_rule_accepts` (receipts). `existing_governance_operations_keep_the_governance_v1_rule` pins that `RegisterAsset` still accepts the identity-R approval. The vectors `prospective_strict_refused.identity_r.register.k1.data` and `prospective_both_refuse.noncanonical_r.register.k1.data` execute as `303`.
 
 **Receipts:** a refused signature is `303`. The fee is charged and the nonce advanced when the balance covers the fee; otherwise it is `303` with fee 0, the nonce unchanged and no state change. Codes `300` (gate closed) and `301` (governance unconfigured) come first, and a malformed encoding is `302` with no fee (§10). Nothing is partially counted.
 
@@ -412,7 +414,7 @@ Gate names and domains are **provisional**. ConsensusConfig schema version: unal
 
 This section is the activation proposal as amended on 2026-10-23, reproduced as written apart from wording about the schema number and today's #348 behaviour. Its section numbers are local to it. The root-coverage statement in its §6 is verbatim.
 
-Read-only basis: main `e3b8ff81`; #348 `c867eedb`; #342 `13c5c755` (draft); #338 `02508800`. Nothing here is implemented, scheduled or authorized. It replaces the handshake-only binding (owner, 2026-10-23, "2026-10-23 owner decisions and corrections"). Gate names and domains below are **provisional**. ConsensusConfig schema version: unallocated; assigned when the activation change is planned. Field ids 0x0609/0x060a and constants 0x2900–0x2904 are PROVISIONAL.
+Read-only basis: main `e3b8ff81`; #348 `c867eedb`; #342 `13c5c755` (draft); #338 `02508800`. Nothing here is implemented, scheduled or authorized. It replaces the handshake-only binding (owner decision, 2026-10-23). Gate names and domains below are **provisional**. ConsensusConfig schema version: unallocated; assigned when the activation change is planned. Field ids 0x0609/0x060a and constants 0x2900–0x2904 are PROVISIONAL.
 
 ### 0. Summary
 
