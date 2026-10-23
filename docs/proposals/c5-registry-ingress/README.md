@@ -6,6 +6,8 @@
 - STATE storage;
 - B2.
 
+Later on 2026-10-23 the owner accepted freezing T_min, W and the governance threshold at activation as the design direction (§17; the bytes stay PROPOSED, and no values or heights are selected). Both registry limits stay PROPOSED until the activation change implements and tests them (§12.1).
+
 The byte layouts stay PROPOSED until every C5 decision is settled. It specifies the dormant implementation in this pull request completely enough to be checked against the code and the vectors. Every value marked *fixture* or *synthetic* is a test value, not a proposed parameter.
 
 - **Mechanism:** B of the C5 proposal (#242). Governance-v1 operations 8 (register) and 9 (disable) inside `TxType::Governance = 23`. There is no new transaction type, no `RegistryWireOp` namespace, no new gate and no new receipt code (`Failed(418)` stays unallocated).
@@ -314,7 +316,13 @@ No code is allocated. On this binary, a transaction naming operation 8 or 9 does
 - **Writes and rollback.** Rows are written only through `ExecutionView`, so they land in the block's one atomic batch, and the generic application journal unwinds them on a rollback. Disable rewrites the row in place, changing only the status byte.
 - **Digest:** while dormant, nothing folds these rows into a root. The registry digest R(h), and what the root does and does not cover, is the activation proposal (§16).
 
-### 12.1 Registry size bound (required by the owner 2026-10-23; rule and value PROPOSED)
+### 12.1 Registry limits (required by the owner 2026-10-23; rules and values PROPOSED)
+
+There are two limits. Both stay **PROPOSED** until the activation change implements and tests them:
+- **(a)** `MAX_REGISTRY_RECORDS = 4096` records: a transaction-level `303`. It is implemented dormant in this PR and tested through the internal entry.
+- **(b)** `MAX_REGISTRY_OPS_PER_BLOCK = 8` registry operations per block: a block-validity rule of the activation change. It is specified here and not implemented in this PR.
+
+#### (a) Size bound: 4,096 records (rule and value PROPOSED)
 
 **The bound.** A deterministic consensus bound on the per-block registry scan, in place of a warning threshold.
 - `MAX_REGISTRY_RECORDS = 4096` records, Enabled and Disabled together (`state/src/registry_ingress.rs`).
@@ -345,18 +353,47 @@ No code is allocated. On this binary, a transaction naming operation 8 or 9 does
 - At the limit the fold costs about 0.6 ms of BLAKE3 on one core (761,891 bytes, measured on an arm64 workstation), once per block.
 - One 4,096-row scan costs about 0.7 ms at the account root's reference of 40 ms per 250,000 rows.
 
-**Worst-case cost per block.**
-- **Who pays for a scan.** Only a register that has passed every other check, including a strict validator-quorum signature over that exact record and window, reaches the scan. Unsigned or wrongly signed registers stop before it.
-- **The bound still needs a cap.** A validator quorum could put many validly signed registers in one block, and each would scan, so the quorum alone is not a bound. With about 1,000 transactions per block, the scans alone could cost about 0.7 s.
-- **The bound this proposal relies on** is a per-block cap of `MAX_REGISTRY_OPS_PER_BLOCK = 8` transactions carrying operation 8 or 9 (value PROPOSED). It is a block-validity rule of the activation change, enforced at the same points as `R<A>` (§16 §1.4).
-- **With the cap,** a block costs at most 8 scans plus one fold: about 8 × 0.7 + 0.6 ≈ 6 ms, about 0.4% of the 1,506 ms block interval. Each approval's strict signature check comes on top; it is bounded by the approvals' bytes within the block size.
-- **This PR does not implement the cap,** because the internal entry runs per transaction and has no block context. Operations 8 and 9 do not decode, so no block can carry one.
-
 **The dry run.** `registry_dryRunAdmit` checks the record alone. It reads no registry state, neither id uniqueness nor the count. At the limit it therefore reports an otherwise valid record as admissible, while execution refuses the register with `303`. A test pins that difference.
+
+#### (b) Per-block cap: 8 registry operations (rule and value PROPOSED; activation change, not this PR)
+
+**Why the bound needs a cap.**
+- Only a register that has passed every other check reaches the scan. That includes a strict validator-quorum signature over that exact record and window, so unsigned or wrongly signed registers stop before it.
+- A validator quorum could still put many validly signed registers in one block, and each would scan, so the quorum alone is not a bound. With about 1,000 transactions per block, the scans alone could cost about 0.7 s.
+
+**What counts.** A transaction counts if its `TxType::Governance` payload names operation 8 or operation 9:
+- registers and disables count together;
+- the outcome does not matter: a transaction that would end in `Success`, `302` or `303` counts the same, because the rule is decided from the block's bytes before execution.
+
+**Refusal: block validity (authoritative).**
+- `validate_block` checks the cap immediately after `R<A>` (§16 §1.4).
+- A block at h ≥ A carrying more than 8 counted transactions is **invalid as a whole**, like any invalid block: no receipts, no fees, no nonces and no state change.
+- `validate_block` runs before execution on both import paths and on reorg re-execution, so all three refuse it the same way.
+
+**Boundary at A.**
+- **h < A:** no registry operation is allowed at all, because `R<A>` already makes a block with any operation 8 or 9 invalid. The cap is not reached.
+- **h ≥ A:** at most 8 per block, from h = A inclusive. Block A itself may carry 8.
+
+**Executor backstop (fail-closed).** Block execution counts again before it executes the first transaction. A block above the cap is an execution error: no transaction runs and no receipt exists, so a missed validation cannot yield a valid block.
+
+**Producer.** `create_block` includes at most 8 counted transactions, in its selection order.
+- A further registry operation is skipped for that block, and so is every later transaction of the same sender (nonce order), as with the `R<A>` skip.
+- Skipped transactions stay in the mempool for later blocks.
+
+**Mempool.** Admission does not apply the cap.
+- It refuses no transaction because of the count. Extras stay pending until a later block includes them.
+- They remain subject to every other admission rule, including `R<A>`.
+
+**Cost with the cap.** A block costs at most 8 scans plus one fold: about 8 × 0.7 + 0.6 ≈ 6 ms, about 0.4% of the 1,506 ms block interval. Each approval's strict signature check comes on top, bounded by the approvals' bytes within the block size.
+
+**Not in this PR.** The internal entry runs per transaction and has no block context. Operations 8 and 9 do not decode, so no block can carry one.
+
+#### Activation of both limits
 
 **Activation.** While dormant the bound is in neither `consensus_limits` nor the protocol digest, because no transaction reaches it. The activation change:
 - adds `MAX_REGISTRY_RECORDS` to `protocol_digest::consensus_limits`, so every node declares it in the protocol digest at the handshake;
-- adds the per-block cap `MAX_REGISTRY_OPS_PER_BLOCK` as a block-validity rule.
+- adds the per-block cap `MAX_REGISTRY_OPS_PER_BLOCK` as a block-validity rule, with its producer cap and executor backstop ((b) above), and to `consensus_limits` beside the bound;
+- runs the tests of both limits again against the activation binary.
 
 ConsensusConfig id: unallocated.
 
@@ -396,6 +433,8 @@ There are three groups: (a) settled by an owner decision (2026-10-16 to 2026-10-
 | a | Q17 register threshold | The authenticated governance threshold, under the existing rule verbatim (§6) | Owner 2026-10-22 |
 | a | B2 thresholds | Disable is at the stored record's threshold, which register made ≥ the governance threshold. Later governance changes do not affect existing records (§7). | Owner 2026-10-23; consequence in §7 |
 | a | Q12 / binding | The handshake-only binding is **rejected**. The consensus-identity binding and the registry digest are the activation proposal (§16). | Owner 2026-10-23 |
+| a | Freeze | T_min, W and the governance threshold are frozen at activation. This is the accepted design direction; the bytes are PROPOSED (§17), and no values or heights are selected. | Owner 2026-10-23 |
+| a | Registry limits | 4,096 records and 8 registry operations per block stay PROPOSED until the activation change implements and tests them. Their exact refusal behaviour is in §12.1. | Owner 2026-10-23 |
 | b | Q1 missing parameter | `302`, pre-semantic | Defensive only: activation with a missing value is impossible (owner decision, 2026-10-21) |
 | b | Q2 expiry and window | `303`, fee per Policy-B | Height-dependent, like every other authorization refusal |
 | b | Q7 genesis hash | The activation change supplies `create_genesis_block().hash()` (config field `0x0005`) | Refuses until then |
@@ -406,7 +445,7 @@ There are three groups: (a) settled by an owner decision (2026-10-16 to 2026-10-
 | b | Q16 approval order | Decode refusal (`302`) | The order is part of the §3 layout |
 | c | Parameter values | T_min and W are undecided. **Recommend:** decide them with the activation heights. | The vectors use TEST_ONLY values |
 | c | Schema and field-id allocation | ConsensusConfig schema version: unallocated; assigned when the activation change is planned. Field ids 0x0609/0x060a and constants 0x2900–0x2904 are PROVISIONAL. | Decided with the activation change |
-| c | Activation proposal items | **Recommend** §16: the P/R byte tables, gate A, `registry_param_changes` and the declaration height | Every existing root stays byte-identical below A |
+| c | Activation proposal items | **Recommend** §16: the P/R byte tables, gate A, the freeze bytes (§17) and the declaration height | Every existing root stays byte-identical below A |
 
 ### 14.1 Status of the 2026-10-22 recommendation
 
@@ -456,6 +495,7 @@ The consolidated recommendation of 2026-10-22 was decided by the owner on 2026-1
 | B2: a governance-threshold change does not move an existing record | `a_governance_threshold_change_does_not_move_an_existing_record` |
 | Size bound: `MAX − 1` stored → register accepted; at `MAX` → `303` (fee charged; fee 0 when underfunded), nothing stored; disable allowed at the limit; a disabled id not re-registrable; staged registers counted | `the_size_bound_refuses_the_register_that_would_exceed_it` |
 | A failing registry read (undecodable row, record under another id, malformed key met by the count) is an execution error, never a receipt | `a_failing_registry_read_is_an_execution_error_not_a_receipt` |
+| A real storage read failure: RocksDB refuses a damaged table block, on the point read (register, disable) and on the size-bound scan. Each is an execution error with no receipt, fee, nonce or write | `a_real_registry_read_failure_is_an_execution_error_with_no_fee_nonce_or_write` |
 | Size bound: rolling back a published register (generic journal) restores the count | `rolling_back_a_register_restores_the_count` |
 | Size bound: the dry run reports the record alone at the limit, while execution refuses `303` | `crates/rpc/tests/registry_dry_run_agrees.rs` (`at_the_size_bound_the_dry_run_reports_the_record_alone`) |
 | Size bound: constants and folded bytes; the boundary vectors execute | `the_size_bound_constants`, `vectors_are_reproduced_and_execute` |
@@ -466,7 +506,7 @@ The consolidated recommendation of 2026-10-22 was decided by the owner on 2026-1
 
 Gate names and domains are **provisional**. ConsensusConfig schema version: unallocated; assigned when the activation change is planned. Field ids 0x0609/0x060a and constants 0x2900–0x2904 are PROVISIONAL.
 
-This section is the activation proposal as amended on 2026-10-23, reproduced as written apart from wording about the schema number and today's #348 behaviour. Its section numbers are local to it. The root-coverage statement in its §6 is verbatim.
+This section is the activation proposal as amended on 2026-10-23, reproduced as written apart from wording about the schema number and today's #348 behaviour. Later amendments of 2026-10-23 are marked *[Amended 2026-10-23]*: the freeze direction (§17), both registry limits (§12.1) and the R(h) row rule. Its section numbers are local to it. The root-coverage statement in its §6 is verbatim.
 
 Read-only basis: main `e3b8ff81`; #348 `c867eedb`; #342 `13c5c755` (draft); #338 `02508800`. Nothing here is implemented, scheduled or authorized. It replaces the handshake-only binding (owner decision, 2026-10-23). Gate names and domains below are **provisional**. ConsensusConfig schema version: unallocated; assigned when the activation change is planned. Field ids 0x0609/0x060a and constants 0x2900–0x2904 are PROVISIONAL.
 
@@ -512,7 +552,19 @@ root(h ≥ A) = BLAKE3( …unchanged components through the account fold (execut
                      ‖ parent_accumulator )                  // executor.rs:4416
 ```
 
-R(h) is computed over the block's candidate view (as `v_account_state_digest`, `account_root.rs:449-461`), so it reflects block h's own writes. Correction to the 2026-10-22 recommendation: the fold goes after the **account** digest, which follows the beacon digest at `e3b8ff81`, not directly after the beacon digest.
+R(h) is computed over the block's candidate view (as `v_account_state_digest`, `account_root.rs:449-461`), so it reflects block h's own writes.
+
+*[Amended 2026-10-23]* Every row R(h) folds must pass `checked_registry_row` (`state/src/registry_ingress.rs`), the one row rule the size-bound count also uses (§12.1 (a)):
+- the key is exactly `registry/v1/` ‖ 32 bytes;
+- the value decodes as `RegistryRecordV1`;
+- the record's id equals the key's.
+
+A row under the prefix that breaks the rule is an error:
+- a key of any other length is `registry row key of N bytes`;
+- an undecodable value is `registry record: …`;
+- an id mismatch is `registry record stored under another id`.
+
+Each of these, like a read error, is an execution error that fails the block. A row is never skipped or folded around. Correction to the 2026-10-22 recommendation: the fold goes after the **account** digest, which follows the beacon digest at `e3b8ff81`, not directly after the beacon digest.
 
 #### 1.4 Boundary rule (new gate, provisional name `registry_enabled_from_height` = A)
 
@@ -521,6 +573,8 @@ R(h) is computed over the block's candidate view (as `v_account_state_digest`, `
   2. **Executor backstop (fail-closed):** the op-8/9 dispatch arm returns an execution **error**, never a receipt, if reached at h < A, so a missed validation cannot yield a valid block. The 300/301/302 receipts apply only from A. A ≥ the governance gate (load rule below), so 300 cannot occur from A.
   3. **Admission:** `Mempool::add` (`state/src/mempool.rs:250`) refuses op 8/9 while `current_height + 1 < A`. It mirrors `EducationAdmission`, which holds `params` and the live height (`:123-133`, check at `:402`), and covers RPC `send_raw_transaction` (`rpc/src/server.rs:1509-1521`) and gossip. Admission is a filter; block validity is authoritative.
   4. **Producer:** `create_block` skips such a transaction for a block at h < A, like its existing contract-gas skip (`poa.rs:767-800`).
+
+  *[Amended 2026-10-23]* The per-block cap of §12.1 (b) is checked at the same block-validity point, immediately after `R<A>`, with its own executor backstop and producer cap. Admission does not apply it.
 
   **Interaction with today's decode refusal:** old binaries keep refusing op 8/9 at decode at every height (#348 README §13), so below A old and new binaries reject the same blocks. In the activation binary, decoding succeeds and `R<A>` is the guard. From A, the normal receipt semantics apply: 302 pre-semantic with no fee, 303 semantic with the Policy-B fee.
 - **h = A:** ops 8/9 execute. `root(A)` appends P(A) and R(A). With no register in block A, R(A) = R_empty = `BLAKE3(DOMAIN ‖ 0u64)`.
@@ -534,6 +588,8 @@ R(h) is computed over the block's candidate view (as `v_account_state_digest`, `
   - `governance` is `Some`.
 
 ### 2. Historical execution and replay
+
+*[Amended 2026-10-23]* The owner accepted the freeze (§17) as the design direction. The activation change therefore does not include the change list `registry_param_changes` or its immutability rule, both described below. For every h ≥ A, `effective(h)` is the frozen value, until a later coordinated change introduces a height-keyed entry (§17 (c)).
 
 - **Effective value:** `effective(params, h)` is a pure function of the configuration and h, never of META history.
   - The base values are the accepted `GovernanceParams` fields (T_min, W) and the existing 0x0601. They are effective from A.
@@ -549,7 +605,7 @@ R(h) is computed over the block's candidate view (as `v_account_state_digest`, `
 - **Single threshold per height:** from A, every governance reader of 0x0601 must use `effective(h)`. Today there are four (`state/src/governance_executor.rs:451/497/552/1101`). With no change entries this is identical to today; without it, replaying an existing operation across a threshold change would diverge.
 - **B2 and later threshold changes:** existing records are unaffected. Disable uses the stored `approval_threshold_bps`, which was ≥ the governance threshold effective at registration (#348 `state/src/registry_ingress.rs:96-101`). New registrations use `effective(h)`.
 
-**Parameter changes after activation (PROPOSED recommendation).** The recommendation is to freeze T_min, W and the governance threshold `validator_authority_threshold_bps` (0x0601) at A, instead of adopting the height-keyed `registry_param_changes` list above now; any change after A then needs a new coordinated activation. This is a recommendation, not a decision. Consequences:
+**Parameter changes after activation (design direction accepted 2026-10-23; specified in §17).** T_min, W and the governance threshold `validator_authority_threshold_bps` (0x0601) are frozen at A, instead of adopting the height-keyed `registry_param_changes` list above now. Any change after A then needs a new coordinated activation. Consequences:
 - From A, `validator_authority_threshold_bps`, T_min and W cannot be changed by acknowledgement. Startup refuses, keyed on the highest recorded height.
 - Changing any of them requires a new coordinated activation, which introduces the height-keyed form or a gated second value set when it is needed.
 - Existing records keep their B2 thresholds.
@@ -590,7 +646,8 @@ R(h) is computed over the block's candidate view (as `v_account_state_digest`, `
    - P/R folds, `effective(h)`, and STATE placement;
    - `"state:registry"` in `REQUIRED_FAST_SYNC_FAMILIES`;
    - dry-run alignment to h + T_min;
-   - the next ConsensusConfig schema version as `writes`.
+   - the next ConsensusConfig schema version as `writes`;
+   - *[Amended 2026-10-23]* the per-block cap (§12.1 (b)), and the freeze record with its startup and acknowledgement checks (§17).
 3. **Heights:**
    - Set `peer_protocol_declaration_required_from_height` **strictly below** A, with ≥ 48 h observation (`docs/lane-a/ACTIVATION-PROPOSAL.json:54`).
    - If that height is already set, it stays a single height ≤ A.
@@ -621,7 +678,7 @@ R(h) is computed over the block's candidate view (as `v_account_state_digest`, `
   - Disabled records stay in R.
 - **Rollback:** the generic journal holds pre-images for every family written through `ExecutionView` (`storage/src/journal.rs:21-30`): register undo deletes the row, disable undo restores Enabled. The commit is one atomic batch (`candidate.rs:110`). The load rule requires the journal gate ≤ A.
 - **Initialization:** no migration. No production code writes registry rows before A (#348 guard), so R(A) is computed over block A's candidate, and equals R_empty if block A holds no register.
-- **Cost:** one ascending scan of n rows, 186 bytes hashed per row, per block from A. That is O(n), against the account-digest reference of about 40 ms per 250,000 rows (`account_root.rs:463-470`). n grows only by quorum-approved, fee-paying registers. No consensus cap is proposed; a warning threshold like the account root's is optional.
+- **Cost:** one ascending scan of n rows, 186 bytes hashed per row, per block from A. That is O(n), against the account-digest reference of about 40 ms per 250,000 rows (`account_root.rs:463-470`). n grows only by quorum-approved, fee-paying registers. *[Amended 2026-10-23]* The size bound and the per-block cap of §12.1, both PROPOSED, bound it. (As written, this item proposed no cap.)
 - **What `root(h)` commits to for h ≥ A** (`executor.rs:4331-4418`):
   - height, parent hash, timestamp and tx_root;
   - per receipt: tx hash, a success bit and fee_paid. **Not** the failure code: 302 and 303 differ only by fee;
@@ -637,8 +694,126 @@ R(h) is computed over the block's candidate view (as `v_account_state_digest`, `
 
 - the P/R byte tables (domains, tags, order);
 - gate and field-id allocation. ConsensusConfig schema version: unallocated; assigned when the activation change is planned. Field ids 0x0609/0x060a and constants 0x2900–0x2904 are PROVISIONAL.
-- whether to adopt `registry_param_changes` now or to freeze values until a later activation;
+- the freeze bytes and checks (§17). *[Amended 2026-10-23]* Freezing was accepted as the design direction, replacing the question whether to adopt `registry_param_changes` now;
 - T_min and W values;
 - A and the declaration height.
 
 Handshake digest trailer: optional detection only.
+
+## 17. Freeze at activation (design direction accepted 2026-10-23; bytes PROPOSED)
+
+**Status.**
+- **What is frozen:** at the registry gate A, three values:
+  - T_min (`registry_min_timelock_blocks`);
+  - W (`registry_max_approval_window`);
+  - the governance threshold `validator_authority_threshold_bps` (0x0601).
+- **What was decided:** the owner accepted the freeze as the design direction on 2026-10-23.
+- **What is PROPOSED:** the record layout, the keys and the messages below.
+- **What is not selected:** any parameter value or activation height.
+- **Implementation:** none in this PR. The freeze is part of the activation change, which must test it.
+
+**Scope.**
+- The freeze covers those three values and A itself. Other `GovernanceParams` fields are not frozen.
+- Existing records keep their B2 thresholds.
+- Before A nothing changes. 0x0601 stays changeable by the stopped-node acknowledgement, as today, with today's hazard that it is not height-keyed.
+
+### (a) How startup enforces the freeze
+
+**Load rules first.** The §16 §1.4 load-time rules run at genesis validation, before this check. T_min and W are present, `governance` is `Some`, and A is above 496,720, so every frozen field has a value.
+
+**The record.** One `cf::META` row, key `registry/freeze/v1` (provisional), 41 bytes. Integers are little-endian, like the ConsensusConfig record:
+
+```text
+magic "RFRZv1\0" (7) ‖ gate_a:u64 ‖ threshold_bps:u16 ‖ t_min:u64 ‖ w:u64 ‖ first_height:u64
+```
+
+- `gate_a`: A as configured;
+- `threshold_bps`, `t_min`, `w`: the values the block at `first_height` executed with;
+- `first_height`: the height of the block whose publication wrote the row, normally A.
+
+**When it is written.**
+- **Write:** in the atomic publish batch of the first block with height ≥ A that this database publishes, produced or imported, if the row is absent.
+  - Publication already stamps a `cf::META` row in that same batch (the application-journal format high-water, `storage/src/candidate.rs`).
+  - So the row and the block become durable together.
+- **After that, never rewritten or deleted:**
+  - It is not an application-journal row, so neither the reorg unwind nor the operator rollback (`plan_rollback` + `execute_rollback`) removes or rewrites it.
+  - A later publish at any height leaves it as it is.
+- **A snapshot restore** at a height ≥ A writes the row in its restore batch, from the restoring node's own configuration, with `first_height` = the snapshot height.
+  - The roots of the blocks it then imports fold P(h), so they check those values against the chain.
+
+**Keyed on the highest recorded height.**
+- The row's presence is the database's own record that it has published a block at height ≥ A.
+- The check does not consult the current head.
+- A rollback below A therefore does not reopen the freeze: the row stays, and so does the refusal.
+
+**The comparison at startup.** It runs beside `check_at_startup` (ConsensusConfig) and the activation-height check, before consensus, RPC or the network exist:
+1. **Read the row.** A row of the wrong length or magic is **unreadable, not absent**, and start is refused, as for the recorded activation heights.
+2. **Row absent:**
+   - head below A: nothing is frozen, and start continues;
+   - head ≥ A: start is refused. A database past A without its freeze row is damaged, or was produced by another binary.
+3. **Row present:** each field must equal, as an integer, the value in the configuration this node starts with:
+   - `gate_a` = `registry_enabled_from_height`;
+   - `threshold_bps` = `governance.validator_authority_threshold_bps`;
+   - `t_min` = `registry_min_timelock_blocks`;
+   - `w` = `registry_max_approval_window`.
+
+   If all four are equal, start continues. Any difference **refuses start**. The message:
+   - names each differing field, with its frozen and its configured value, and `first_height`;
+   - states that the values are frozen at activation and that no acknowledgement can permit the change;
+   - says to restore the previous `genesis.json`. A real change is a later coordinated change, (c).
+
+**The acknowledgement path.**
+- **While the freeze row exists,** that is, once the highest height this database has recorded is ≥ A:
+  - `acknowledge-consensus-config --old --new` refuses any change to 0x0601, T_min (0x0609, provisional), W (0x060a, provisional) or the gate A. It refuses with the same message, as it already refuses chain-identity and rule-code changes.
+  - A `GateReschedule` of A is refused the same way. The existing passed-gate rule covers a head ≥ A; the row also covers a database rolled back below A.
+- **While the row is absent,** the acknowledgement treats these values as today.
+
+**What the check does not do.**
+- The check is local. It proves that this node runs the values it ran at A.
+- It does not prove that another node runs the same values. That is P(h), in every root from A (§16 §0).
+- Rollout compares the ConsensusConfig commitments and the effective values (§16 §5 item 5).
+
+### (b) How earlier blocks replay
+
+- **Below A, unchanged.**
+  - Roots are byte-identical to `e3b8ff81`; P and R are not computed.
+  - `R<A>` makes any block with operation 8 or 9 invalid.
+  - Existing governance operations read 0x0601 from the configuration, as today.
+  - The freeze neither introduces nor removes the existing hazard: an acknowledged threshold change still re-executes earlier blocks with the new value.
+- **From A, the frozen values.**
+  - Every execution path uses them: import, production, reorg re-execution, resync and rollback re-import.
+  - They are the configured values, which startup has proven equal to the row.
+  - `effective(h)` is constant for h ≥ A, and so P(h) = P(A).
+- **Reorg across A.**
+  - The unwind restores the registry rows from the generic journal: register undo deletes the row, and disable undo restores Enabled (§16 §6).
+  - The freeze row stays.
+  - The new branch executes below A under today's rules, and from A with the frozen values.
+- **Rollback below A.**
+  - The row stays, and the configuration cannot change the frozen values ((a)).
+  - Re-imported blocks below A run under today's rules, and from A with the frozen values again.
+  - The node therefore reproduces the roots it computed before.
+- **A node that has not reached A** can still change these values by acknowledgement. If its values differ from the network's, its root at A differs, and the root check refuses its blocks and the network's alike (§16 §3). The freeze does not move that detection earlier.
+
+### (c) How a later coordinated change is introduced
+
+A change to any frozen value after A is a new coordinated activation. No single node's acknowledgement can make it.
+- **New gate B** (provisional name), with B > A, introduced by a new binary.
+- **A height-keyed entry under a new ConsensusConfig schema version** (unallocated):
+  - the entry is `{effective_from: B, threshold_bps, T_min, W}`, with provisional ids;
+  - `effective(h)` is the frozen value for A ≤ h < B, and the entry for h ≥ B;
+  - P(h) folds `effective(h)`, and from that change every reader of 0x0601 routes through `effective(h)`.
+- **Freeze rows.**
+  - The A row stays as it is: its values remain effective below B, and replay below B uses them.
+  - The entry gets its own row of the same kind (provisional key `registry/freeze/v2`), written by the first publish ≥ B.
+  - From then on, startup compares both rows, and the acknowledgement refuses changes to either.
+- **Height choice.**
+  - B lies above every validator's highest recorded height, plus the lead time (§16 §5 item 3).
+  - An entry at or below a node's highest recorded height is refused at that node's start.
+- **The same-window upgrade rules** (§16 §5) apply unchanged:
+  - ratify the entry and B;
+  - set the declaration height strictly below B;
+  - hold one stop-all / start-all window, with `acknowledge_schema_transition` to the new schema version, and `acknowledge-consensus-config` for the entry and gate B;
+  - require equal evidence on every validator, including the effective values below B and from B;
+  - keep the same stop conditions.
+
+  The gate name B enters `activation_heights()`. Binaries with and without it therefore declare different protocol digests, and are refused at the handshake before B.

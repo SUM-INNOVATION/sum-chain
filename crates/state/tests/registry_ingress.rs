@@ -1132,6 +1132,140 @@ fn a_failing_registry_read_is_an_execution_error_not_a_receipt() {
     assert!(v_count_records_up_to(&c.view(), MAX_REGISTRY_RECORDS).is_err());
 }
 
+/// A database whose only table file holds the registry row of `[3; 32]`,
+/// damaged on disk, then reopened. The row is written and flushed before any
+/// candidate exists, and every byte of every table file's first 16 is
+/// inverted. RocksDB verifies block checksums on read, so a read of that data
+/// block fails in RocksDB itself: a real read failure, not a malformed row.
+/// Every row written after the reopen is served from the memtable and never
+/// meets the damaged file.
+fn node_with_a_damaged_registry_table() -> Node {
+    let dir = TempDir::new().unwrap();
+    {
+        let db = Database::open_default(dir.path()).unwrap();
+        seed_state_row(&db, &registry_record_key(&[3; 32]), &record(3).try_encode().unwrap());
+        // Flushes the memtable and writes the table file.
+        db.compact().unwrap();
+    }
+    let tables: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "sst"))
+        .collect();
+    assert!(!tables.is_empty(), "the registry row reached a table file");
+    for t in &tables {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new().read(true).write(true).open(t).unwrap();
+        let mut head = [0u8; 16];
+        f.read_exact(&mut head).unwrap();
+        for b in &mut head {
+            *b = !*b;
+        }
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.write_all(&head).unwrap();
+        f.sync_all().unwrap();
+    }
+    let db = Arc::new(Database::open_default(dir.path()).unwrap());
+    Node {
+        db,
+        _dir: dir,
+        params: chain_params(GOV_BPS),
+        registry: fixture_params(),
+        genesis: Some(GENESIS),
+    }
+}
+
+/// What one operation through the dormant entry did, in a fresh candidate
+/// that is never published: the entry's result, whether the candidate holds
+/// any write, and the payer's and proposer's accounts after it.
+struct EntryOutcome {
+    result: sumchain_state::Result<TxStatus>,
+    wrote: bool,
+    nonce: u64,
+    balance: u128,
+    proposer_balance: u128,
+}
+
+fn entry_outcome(n: &Node, payer: &KeyPair, op: RegistryIngressOp, data: Vec<u8>) -> EntryOutcome {
+    let proposer = Address::new([0x99; 20]);
+    let mut c = candidate(&n.db);
+    let result = execute_registry_ingress(
+        &mut c.view(),
+        CHAIN,
+        &n.params,
+        op,
+        &data,
+        &payer.address(),
+        FEE,
+        &proposer,
+        H,
+        Hash::ZERO,
+        &vset(&[1]),
+        RegistryIngressContext {
+            params: &n.registry,
+            genesis_block_hash: n.genesis.as_ref(),
+        },
+    )
+    .map(|r| r.status);
+    let view = c.view();
+    EntryOutcome {
+        result,
+        wrote: !view.is_empty(),
+        nonce: StateManager::v_get_nonce(&view, &payer.address()).unwrap(),
+        balance: StateManager::v_get_balance(&view, &payer.address()).unwrap(),
+        proposer_balance: StateManager::v_get_balance(&view, &proposer).unwrap(),
+    }
+}
+
+fn is_rocksdb_read_error<T: std::fmt::Debug>(r: &sumchain_state::Result<T>) -> bool {
+    matches!(
+        r,
+        Err(sumchain_state::StateError::Storage(sumchain_storage::StorageError::RocksDb(_)))
+    )
+}
+
+/// A real storage read failure on the registry's point read and on its count
+/// scan is an execution error. There is no receipt, no fee, no nonce and no
+/// write. The failure is RocksDB's own (`StorageError::RocksDb`), from a
+/// damaged table file, not a row the registry decodes and rejects.
+/// - Point read: register and disable of `[3; 32]`, whose row is in the
+///   damaged block.
+/// - Count scan: a register of `[5; 32]`, absent and outside the damaged
+///   file's key range, so its point read succeeds and the size-bound scan,
+///   which runs last, meets the damaged block.
+#[test]
+fn a_real_registry_read_failure_is_an_execution_error_with_no_fee_nonce_or_write() {
+    let n = node_with_a_damaged_registry_table();
+    let payer = KeyPair::from_bytes([0x5A; 32]);
+    fund(&n.db, &payer, 1_000_000);
+    // The damage is real: RocksDB itself refuses the read.
+    let raw = n.db.get(cf::STATE, &registry_record_key(&[3; 32]));
+    assert!(
+        matches!(raw, Err(sumchain_storage::StorageError::RocksDb(_))),
+        "the damaged block is refused by RocksDB: {raw:?}"
+    );
+
+    for (what, op, data) in [
+        ("register over the damaged row", REG, register(H + 50, &record(3), &[1])),
+        ("disable of the damaged row", DIS, disable(H + 50, 3, &[1])),
+        ("register met by the count scan", REG, register(H + 50, &record(5), &[1])),
+    ] {
+        let out = entry_outcome(&n, &payer, op, data);
+        assert!(is_rocksdb_read_error(&out.result), "{what}: {:?}", out.result);
+        assert!(!out.wrote, "{what}: no write");
+        assert_eq!(out.nonce, 0, "{what}: no nonce");
+        assert_eq!(out.balance, 1_000_000, "{what}: no fee");
+        assert_eq!(out.proposer_balance, 0, "{what}: nothing credited");
+    }
+
+    // The same failures through the two read functions themselves.
+    let mut c = candidate(&n.db);
+    let view = c.view();
+    assert!(is_rocksdb_read_error(&v_get_record(&view, &[3; 32])));
+    assert!(matches!(v_get_record(&view, &[5; 32]), Ok(None)), "outside the damaged file");
+    assert!(is_rocksdb_read_error(&v_count_records_up_to(&view, MAX_REGISTRY_RECORDS)));
+}
+
 // ── Storage: no new column family ───────────────────────────────────────────
 
 /// `ALL_CFS` on `e3b8ff81`, names and order. A family a binary does not name
