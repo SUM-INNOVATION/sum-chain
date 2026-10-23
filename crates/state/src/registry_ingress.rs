@@ -17,8 +17,14 @@
 //! operation keeps governance-v1 `verify`.
 //!
 //! Once ready, every refusal below is semantic: `303`, with the Policy-B fee
-//! and nonce. The checks are independent, so their order changes no receipt;
-//! signatures are verified last because they cost the most.
+//! and nonce. The checks are independent, so their order changes no receipt.
+//! The quorum is verified next to last, and the size-bound scan runs last, so
+//! only a register that is otherwise valid, quorum included, pays for the scan.
+//!
+//! A storage failure (an unreadable row, a row of the wrong shape, a read
+//! error) is never a receipt: it is returned as an execution error, as the
+//! executor treats every other storage failure, because a node-local failure
+//! must not become a consensus-visible outcome.
 
 use sumchain_primitives::governance::GovernanceParams;
 use sumchain_primitives::ChainId;
@@ -40,9 +46,9 @@ use crate::{Result, StateError};
 /// reviewed change here, part of the activation change.
 pub const REGISTRY_INGRESS_PARAMS: RegistryIngressParams = RegistryIngressParams::UNSET;
 
-/// The most records the registry may store, Enabled and Disabled together
-/// (owner, 2026-10-23: a deterministic consensus bound on the per-block
-/// registry scan). PROPOSED value; dormant.
+/// The most records the registry may store, Enabled and Disabled together.
+/// A deterministic consensus bound on the per-block registry scan, required by
+/// the owner 2026-10-23; rule and value PROPOSED; dormant.
 ///
 /// A register that would store record `MAX_REGISTRY_RECORDS + 1` is refused
 /// with `303`. Every stored record counts, including disabled ones, because
@@ -55,17 +61,22 @@ pub const REGISTRY_INGRESS_PARAMS: RegistryIngressParams = RegistryIngressParams
 ///   each one needs a validator quorum and a fee, so the expected count is in
 ///   the tens to low hundreds over years, which leaves at least 16× headroom;
 /// - at the limit the fold hashes [`MAX_REGISTRY_FOLDED_BYTES`] (761,891 bytes)
-///   per block. That is about 0.6 ms of BLAKE3 on one core (measured on an
-///   arm64 workstation), plus a 4,096-row scan, which costs about 0.7 ms at the
-///   account root's reference of 40 ms per 250,000 rows (`account_root.rs`).
-///   Together that is under 0.1% of the 1,506 ms block interval.
+///   once per block, about 0.6 ms of BLAKE3 on one core (measured on an arm64
+///   workstation). One 4,096-row scan costs about 0.7 ms at the account
+///   root's reference of 40 ms per 250,000 rows (`account_root.rs`). Only an
+///   otherwise valid register, quorum included, scans. With the proposed
+///   per-block cap of 8 registry operations, a block costs at most about 6 ms,
+///   about 0.4% of the 1,506 ms block interval.
+///
+/// The cost bound relies on a per-block cap on registry operations, a
+/// block-validity rule of the activation change (README §12.1). Without one, a
+/// validator quorum could put many validly signed registers in one block, and
+/// each would scan.
 ///
 /// Not in `protocol_digest::consensus_limits` while dormant, because no
 /// transaction reaches the check. The activation change adds it there, and so
-/// to the protocol digest every node declares at the handshake. It also gives
-/// it the ConsensusConfig field id that every consensus limit has
-/// (`0x2000–0x20ff`) in the new schema. Changing it after activation is a
-/// coordinated upgrade.
+/// to the protocol digest every node declares at the handshake. ConsensusConfig
+/// id: unallocated. Changing it after activation is a coordinated upgrade.
 pub const MAX_REGISTRY_RECORDS: u64 = 4_096;
 
 /// The most bytes the proposed registry-state fold hashes per block at
@@ -111,7 +122,11 @@ pub(crate) fn ready(ctx: &RegistryIngressContext<'_>) -> Option<Ready> {
     })
 }
 
-/// Register, executed at `height`. Returns the record to store.
+/// Register, executed at `height`.
+///
+/// `Ok(Ok(record))` is the record to store, and `Ok(Err(code))` a semantic
+/// refusal, a receipt. `Err(_)` is a storage failure: an execution error,
+/// never a receipt.
 pub(crate) fn validate_register(
     view: &ExecutionView<'_, '_>,
     gp: &GovernanceParams,
@@ -120,11 +135,11 @@ pub(crate) fn validate_register(
     height: u64,
     active_validator_pubkeys: &[[u8; 32]],
     req: &RegistryRegisterV1,
-) -> std::result::Result<RegistryRecordV1, u32> {
+) -> Result<std::result::Result<RegistryRecordV1, u32>> {
     let v = &ready.values;
     let record = &req.record;
     if !approval_window_open(height, req.valid_until, v.max_approval_window) {
-        return Err(303);
+        return Ok(Err(303));
     }
     if record.status != RegistryStatus::Enabled
         || check_threshold_bps(record.approval_threshold_bps).is_err()
@@ -132,7 +147,7 @@ pub(crate) fn validate_register(
         || !unset_commitments(record).is_empty()
         || !timelock_satisfied(record.activation_height, height, v.min_timelock_blocks)
     {
-        return Err(303);
+        return Ok(Err(303));
     }
     // Q17 (owner, 2026-10-22): the authenticated governance threshold, from
     // chain parameters, never from the operation or a tooling default.
@@ -140,29 +155,37 @@ pub(crate) fn validate_register(
     // B2 (adopted 2026-10-23): the record's own threshold is at least the
     // governance threshold effective at its registration.
     if record.approval_threshold_bps < threshold {
-        return Err(303);
+        return Ok(Err(303));
     }
     // Disabled is terminal: a disabled id is still present, so it can never
     // be registered again.
-    if v_get_record(view, &record.id).map_err(|_| 303u32)?.is_some() {
-        return Err(303);
+    if v_get_record(view, &record.id)?.is_some() {
+        return Ok(Err(303));
     }
-    // The size bound: this register would store one more record, so it is
-    // refused once MAX_REGISTRY_RECORDS records, Enabled or Disabled, exist.
-    if v_count_records_up_to(view, MAX_REGISTRY_RECORDS).map_err(|_| 303u32)?
-        >= MAX_REGISTRY_RECORDS
-    {
-        return Err(303);
-    }
-    let signing =
+    // The record encodes by construction (it decoded); a failure here is the
+    // operation's own bytes, deterministic on every node.
+    let Ok(signing) =
         registry_register_signing_bytes(chain_id, &ready.genesis_block_hash, req.valid_until, record)
-            .map_err(|_| 303u32)?;
-    verify_validator_quorum_strict(&req.approvals, &signing, active_validator_pubkeys, threshold)
-        .map_err(|_| 303u32)?;
-    Ok(record.clone())
+    else {
+        return Ok(Err(303));
+    };
+    if verify_validator_quorum_strict(&req.approvals, &signing, active_validator_pubkeys, threshold)
+        .is_err()
+    {
+        return Ok(Err(303));
+    }
+    // The size bound, last: only an otherwise valid register, quorum included,
+    // pays for the scan. This register would store one more record, so it is
+    // refused once MAX_REGISTRY_RECORDS records, Enabled or Disabled, exist.
+    if v_count_records_up_to(view, MAX_REGISTRY_RECORDS)? >= MAX_REGISTRY_RECORDS {
+        return Ok(Err(303));
+    }
+    Ok(Ok(record.clone()))
 }
 
-/// Disable, executed at `height`. Returns the stored record, now Disabled.
+/// Disable, executed at `height`: `Ok(Ok(record))` is the stored record, now
+/// Disabled; `Ok(Err(code))` a receipt; `Err(_)` a storage failure, never a
+/// receipt.
 pub(crate) fn validate_disable(
     view: &ExecutionView<'_, '_>,
     ready: &Ready,
@@ -170,16 +193,16 @@ pub(crate) fn validate_disable(
     height: u64,
     active_validator_pubkeys: &[[u8; 32]],
     req: &RegistryDisableV1,
-) -> std::result::Result<RegistryRecordV1, u32> {
+) -> Result<std::result::Result<RegistryRecordV1, u32>> {
     let v = &ready.values;
     if !approval_window_open(height, req.valid_until, v.max_approval_window) {
-        return Err(303);
+        return Ok(Err(303));
     }
-    let stored = v_get_record(view, &req.id)
-        .map_err(|_| 303u32)?
-        .ok_or(303u32)?;
+    let Some(stored) = v_get_record(view, &req.id)? else {
+        return Ok(Err(303));
+    };
     if stored.status != RegistryStatus::Enabled {
-        return Err(303);
+        return Ok(Err(303));
     }
     // B2 (adopted 2026-10-23): the stored record's own threshold, accepted at
     // its registration. A later change to the governance threshold does not
@@ -187,12 +210,15 @@ pub(crate) fn validate_disable(
     let threshold = stored.approval_threshold_bps;
     let signing =
         registry_disable_signing_bytes(chain_id, &ready.genesis_block_hash, req.valid_until, &req.id);
-    verify_validator_quorum_strict(&req.approvals, &signing, active_validator_pubkeys, threshold)
-        .map_err(|_| 303u32)?;
-    Ok(RegistryRecordV1 {
+    if verify_validator_quorum_strict(&req.approvals, &signing, active_validator_pubkeys, threshold)
+        .is_err()
+    {
+        return Ok(Err(303));
+    }
+    Ok(Ok(RegistryRecordV1 {
         status: RegistryStatus::Disabled,
         ..stored
-    })
+    }))
 }
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -215,26 +241,35 @@ pub fn registry_record_key(id: &[u8; 32]) -> Vec<u8> {
     [REGISTRY_RECORD_KEY_PREFIX, id].concat()
 }
 
+/// One stored registry row, under the rule the count and the proposed
+/// registry-state fold share: the key is exactly `registry/v1/` ‖ id (12 + 32
+/// bytes), the value decodes as a `RegistryRecordV1`, and the record's id is
+/// the key's. Anything else is an error, never skipped, counted or "no record".
+pub fn checked_registry_row(key: &[u8], value: &[u8]) -> Result<RegistryRecordV1> {
+    let invalid = |why: String| StateError::Storage(StorageError::InvalidData(why));
+    let key_id = key
+        .strip_prefix(REGISTRY_RECORD_KEY_PREFIX)
+        .filter(|id| id.len() == 32)
+        .ok_or_else(|| invalid(format!("registry row key of {} bytes", key.len())))?;
+    let record = RegistryRecordV1::decode_exact(value)
+        .map_err(|e| invalid(format!("registry record: {e}")))?;
+    if record.id[..] != *key_id {
+        return Err(invalid("registry record stored under another id".to_string()));
+    }
+    Ok(record)
+}
+
 /// The record stored under `id`, as this block's candidate sees it. A row that
-/// does not decode, or names another id, is an error, never "no record".
+/// breaks [`checked_registry_row`] is an error, never "no record".
 pub fn v_get_record(
     view: &ExecutionView<'_, '_>,
     id: &[u8; 32],
 ) -> Result<Option<RegistryRecordV1>> {
-    let Some(bytes) = view
-        .get(cf::STATE, &registry_record_key(id))
-        .map_err(StateError::Storage)?
-    else {
+    let key = registry_record_key(id);
+    let Some(bytes) = view.get(cf::STATE, &key).map_err(StateError::Storage)? else {
         return Ok(None);
     };
-    let record = RegistryRecordV1::decode_exact(&bytes)
-        .map_err(|e| StateError::Storage(StorageError::InvalidData(format!("registry record: {e}"))))?;
-    if record.id != *id {
-        return Err(StateError::Storage(StorageError::InvalidData(
-            "registry record stored under another id".to_string(),
-        )));
-    }
-    Ok(Some(record))
+    checked_registry_row(&key, &bytes).map(Some)
 }
 
 /// How many records are stored, Enabled and Disabled, as this block's
@@ -249,8 +284,9 @@ pub fn v_get_record(
 ///   atomic publication and generic journal already cover the rows it counts.
 ///
 /// It sees this block's own staged registers, and stops after `limit` rows, so
-/// one register reads at most `MAX_REGISTRY_RECORDS` keys. A read error is an
-/// error, never a short count.
+/// one register reads at most `MAX_REGISTRY_RECORDS` rows. Every row it
+/// counts must pass [`checked_registry_row`]. A row that does not, or a read
+/// error, is an error, never a short count.
 pub fn v_count_records_up_to(view: &ExecutionView<'_, '_>, limit: u64) -> Result<u64> {
     let mut count = 0u64;
     if limit == 0 {
@@ -260,10 +296,11 @@ pub fn v_count_records_up_to(view: &ExecutionView<'_, '_>, limit: u64) -> Result
         .prefix_iter(cf::STATE, REGISTRY_RECORD_KEY_PREFIX)
         .map_err(StateError::Storage)?
     {
-        let (key, _) = entry.map_err(StateError::Storage)?;
+        let (key, value) = entry.map_err(StateError::Storage)?;
         if !key.starts_with(REGISTRY_RECORD_KEY_PREFIX) {
             break;
         }
+        checked_registry_row(&key, &value)?;
         count += 1;
         if count == limit {
             break;

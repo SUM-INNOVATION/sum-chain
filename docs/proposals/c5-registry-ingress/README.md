@@ -221,7 +221,7 @@ Accepted only if **all** of these hold:
 5. **Timelock floor:** `activation_height ≥ h + T_min`, in exact arithmetic (§8).
 6. **Threshold (Q17, decided 2026-10-22):** `t = GovernanceParams.validator_authority_threshold_bps`, the authenticated governance threshold from chain parameters. It is never taken from the operation or from a tooling default. **Floor (B2, adopted 2026-10-23):** `record.approval_threshold_bps ≥ t`.
 7. **New id:** no record with `record.id` exists, Enabled or Disabled.
-7a. **Size bound (owner, 2026-10-23):** fewer than `MAX_REGISTRY_RECORDS` records are stored, Enabled and Disabled together (§12.1).
+7a. **Size bound (required by the owner 2026-10-23; rule and value PROPOSED):** fewer than `MAX_REGISTRY_RECORDS` records are stored, Enabled and Disabled together (§12.1). It is checked **last**, after the quorum (rule 8), so only an otherwise valid register pays for the scan.
 8. **Quorum:** §6 over the §4.1 preimage at threshold `t`.
 
 On acceptance, the record is stored exactly as carried.
@@ -314,7 +314,7 @@ No code is allocated. On this binary, a transaction naming operation 8 or 9 does
 - **Writes and rollback.** Rows are written only through `ExecutionView`, so they land in the block's one atomic batch, and the generic application journal unwinds them on a rollback. Disable rewrites the row in place, changing only the status byte.
 - **Digest:** while dormant, nothing folds these rows into a root. The registry digest R(h), and what the root does and does not cover, is the activation proposal (§16).
 
-### 12.1 Registry size bound (owner, 2026-10-23; value PROPOSED)
+### 12.1 Registry size bound (required by the owner 2026-10-23; rule and value PROPOSED)
 
 **The bound.** A deterministic consensus bound on the per-block registry scan, in place of a warning threshold.
 - `MAX_REGISTRY_RECORDS = 4096` records, Enabled and Disabled together (`state/src/registry_ingress.rs`).
@@ -323,30 +323,42 @@ No code is allocated. On this binary, a transaction naming operation 8 or 9 does
   - the 27-byte fold domain, provisional with §16;
   - the `u64` count.
 
-**Refusal point.** A register that would store record 4,097 is refused with `303` (rule 7a):
+**Refusal point (rule PROPOSED).** A register that would store record 4,097 is refused with `303` (rule 7a), as the last check after the quorum:
 - the fee is charged when the balance covers it, otherwise fee 0;
 - the nonce follows the same rule as every other `303`;
 - nothing is stored.
 
 **Behaviour at the limit:**
-- **Every stored record counts.** That includes disabled records, because R(h) folds them all, so a disabled record never frees capacity.
+- **Every stored record counts (rule PROPOSED).** That includes disabled records, because R(h) folds them all, so a disabled record never frees capacity.
 - **Disable adds no record** and stays allowed at the limit.
 - **A disabled id stays present,** so re-registering it is refused with `303` at any count (rule 7).
 - **Raising the bound** is a coordinated upgrade.
 
-**Counting.** A bounded prefix scan over `registry/v1/` through the block's `ExecutionView` (`v_count_records_up_to`). It stops after `MAX_REGISTRY_RECORDS` rows, so a register reads at most 4,096 keys. It sees the block's own earlier registers, and a read error is an error, never a short count.
+**Counting.** A bounded prefix scan over `registry/v1/` through the block's `ExecutionView` (`v_count_records_up_to`). It stops after `MAX_REGISTRY_RECORDS` rows, so a register reads at most 4,096 rows, and it sees the block's own earlier registers.
+- Every counted row must pass `checked_registry_row`, the one row rule the proposed R(h) also uses: a key of exactly 12 + 32 bytes, a value that decodes, and a record id equal to the key's.
+- A row that breaks the rule, or a read error, is an **execution error**, never a short count and never a receipt.
 - **Why a scan, not a count row:** the scan reads exactly the rows R(h) would fold, so the two cannot drift. It adds no key and no collision surface. The candidate overlay, the one atomic batch and the generic journal already cover the rows it counts, so a rollback below a register restores the count with nothing else to undo.
 
 **The value.** 4,096 is PROPOSED, with this rationale:
 - One proof system is admitted today.
 - Records name verifier keys, program images, tokenizers and models, and each needs a validator quorum and a fee. The expected count is tens to low hundreds over years, so 4,096 leaves at least 16× headroom.
-- At the limit the fold costs about 0.6 ms of BLAKE3 on one core (761,891 bytes, measured on an arm64 workstation). The 4,096-row scan costs about 0.7 ms at the account root's reference of 40 ms per 250,000 rows. Together that is under 0.1% of the 1,506 ms block interval.
+- At the limit the fold costs about 0.6 ms of BLAKE3 on one core (761,891 bytes, measured on an arm64 workstation), once per block.
+- One 4,096-row scan costs about 0.7 ms at the account root's reference of 40 ms per 250,000 rows.
+
+**Worst-case cost per block.**
+- **Who pays for a scan.** Only a register that has passed every other check, including a strict validator-quorum signature over that exact record and window, reaches the scan. Unsigned or wrongly signed registers stop before it.
+- **The bound still needs a cap.** A validator quorum could put many validly signed registers in one block, and each would scan, so the quorum alone is not a bound. With about 1,000 transactions per block, the scans alone could cost about 0.7 s.
+- **The bound this proposal relies on** is a per-block cap of `MAX_REGISTRY_OPS_PER_BLOCK = 8` transactions carrying operation 8 or 9 (value PROPOSED). It is a block-validity rule of the activation change, enforced at the same points as `R<A>` (§16 §1.4).
+- **With the cap,** a block costs at most 8 scans plus one fold: about 8 × 0.7 + 0.6 ≈ 6 ms, about 0.4% of the 1,506 ms block interval. Each approval's strict signature check comes on top; it is bounded by the approvals' bytes within the block size.
+- **This PR does not implement the cap,** because the internal entry runs per transaction and has no block context. Operations 8 and 9 do not decode, so no block can carry one.
 
 **The dry run.** `registry_dryRunAdmit` checks the record alone. It reads no registry state, neither id uniqueness nor the count. At the limit it therefore reports an otherwise valid record as admissible, while execution refuses the register with `303`. A test pins that difference.
 
 **Activation.** While dormant the bound is in neither `consensus_limits` nor the protocol digest, because no transaction reaches it. The activation change:
 - adds `MAX_REGISTRY_RECORDS` to `protocol_digest::consensus_limits`, so every node declares it in the protocol digest at the handshake;
-- gives it the ConsensusConfig field id that each consensus limit has (`0x2000–0x20ff`), in the new schema version.
+- adds the per-block cap `MAX_REGISTRY_OPS_PER_BLOCK` as a block-validity rule.
+
+ConsensusConfig id: unallocated.
 
 The fold's byte bound follows from it and is not a separate parameter.
 
@@ -443,6 +455,7 @@ The consolidated recommendation of 2026-10-22 was decided by the owner on 2026-1
 | Parameters: paired presence, `1..=u32::MAX`, overflow → `303` | `named_parameters_*` (wire), `invalid_parameter_sets_refuse_free`, `a_timelock_past_u64_max_refuses_with_303` |
 | B2: a governance-threshold change does not move an existing record | `a_governance_threshold_change_does_not_move_an_existing_record` |
 | Size bound: `MAX − 1` stored → register accepted; at `MAX` → `303` (fee charged; fee 0 when underfunded), nothing stored; disable allowed at the limit; a disabled id not re-registrable; staged registers counted | `the_size_bound_refuses_the_register_that_would_exceed_it` |
+| A failing registry read (undecodable row, record under another id, malformed key met by the count) is an execution error, never a receipt | `a_failing_registry_read_is_an_execution_error_not_a_receipt` |
 | Size bound: rolling back a published register (generic journal) restores the count | `rolling_back_a_register_restores_the_count` |
 | Size bound: the dry run reports the record alone at the limit, while execution refuses `303` | `crates/rpc/tests/registry_dry_run_agrees.rs` (`at_the_size_bound_the_dry_run_reports_the_record_alone`) |
 | Size bound: constants and folded bytes; the boundary vectors execute | `the_size_bound_constants`, `vectors_are_reproduced_and_execute` |
