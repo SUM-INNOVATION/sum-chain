@@ -1,4 +1,4 @@
-//! The proofs the signer verifies itself (format ratified by the owner, 2026-10-22 (decision ledger); dormant, no node wiring; production durability and activation separate), with real
+//! The proofs the signer verifies itself (`PolkaProofV1` adopted by the owner, 2026-10-22 (decision ledger, as enumerated there); dormant, no node wiring), with real
 //! Ed25519 signatures from synthetic keys (seeds `[0x01; 32]`..).
 //!
 //! * `PolkaProofV1` (the prevote quorum): KAT vectors in
