@@ -81,6 +81,91 @@ fn governance_txdata_bincode_round_trip() {
     assert_eq!(GovernanceOperation::from_u8(2), Some(GovernanceOperation::CastVote));
 }
 
+/// C5 registry ingress (#242, PROPOSED) is dormant and UNWIRED: operations 8
+/// and 9 are not `GovernanceOperation` variants. A governance transaction
+/// naming either is refused at decode with the same error an unknown operation
+/// always produced (an enum of exactly eight variants), and a block holding
+/// one is rejected whole, exactly as on the base this proposal started from.
+/// Adding the variants is the separately authorized activation change.
+#[test]
+fn governance_operations_8_and_9_do_not_decode() {
+    use sumchain_primitives::block::Block;
+    use sumchain_primitives::{Hash, SignedTransaction, TransactionV2};
+
+    assert_eq!(GovernanceOperation::from_u8(7), Some(GovernanceOperation::CastEquityVote));
+    for n in [8u8, 9, 10, 255] {
+        assert_eq!(GovernanceOperation::from_u8(n), None);
+    }
+
+    // A real governance transaction (operation 7) in a real block, then the
+    // same bytes with only the operation index changed.
+    let data = vec![0xC5u8; 5];
+    let payload = TxPayload::Governance(GovernanceTxData {
+        operation: GovernanceOperation::CastEquityVote,
+        data: data.clone(),
+    });
+    let payload_bytes = bincode::serialize(&payload).unwrap();
+    let tx = SignedTransaction::new_v2(
+        TransactionV2 {
+            chain_id: 4242,
+            from: Address::ZERO,
+            fee: 1,
+            nonce: 0,
+            payload,
+        },
+        [0x11; 64],
+        [0x22; 32],
+    );
+    let mut block = Block::genesis(Hash::ZERO, [0x33; 32], 1);
+    block.transactions.push(tx.clone());
+    let tx_bytes = tx.to_bytes();
+    let block_bytes = block.to_bytes();
+    assert!(SignedTransaction::from_bytes(&tx_bytes).is_ok());
+    assert!(Block::from_bytes(&block_bytes).is_ok());
+
+    // `TxPayload::Governance` tag ‖ operation index ‖ data length ‖ data.
+    let marker: Vec<u8> = [
+        &23u32.to_le_bytes()[..],
+        &7u32.to_le_bytes(),
+        &(data.len() as u64).to_le_bytes(),
+        &data,
+    ]
+    .concat();
+    let with_op = |bytes: &[u8], op: u32| -> Vec<u8> {
+        let at = bytes
+            .windows(marker.len())
+            .position(|w| w == marker.as_slice())
+            .expect("the governance payload is in the encoding");
+        assert_eq!(
+            bytes.windows(marker.len()).filter(|w| *w == marker.as_slice()).count(),
+            1
+        );
+        let mut out = bytes.to_vec();
+        out[at + 4..at + 8].copy_from_slice(&op.to_le_bytes());
+        out
+    };
+
+    for op in [8u32, 9] {
+        let expected =
+            format!("invalid value: integer `{op}`, expected variant index 0 <= i < 8");
+        // The bare payload, the signed transaction and the block all refuse,
+        // each with the unknown-variant error.
+        let payload_err = bincode::deserialize::<TxPayload>(&with_op(&payload_bytes, op)).unwrap_err();
+        assert_eq!(payload_err.to_string(), expected, "payload, op {op}");
+        let tx_err = SignedTransaction::from_bytes(&with_op(&tx_bytes, op)).unwrap_err();
+        assert_eq!(tx_err.to_string(), expected, "transaction, op {op}");
+        let block_err = Block::from_bytes(&with_op(&block_bytes, op)).unwrap_err();
+        assert_eq!(block_err.to_string(), expected, "block, op {op}");
+        // The same class as an index that was never assigned.
+        assert_eq!(
+            SignedTransaction::from_bytes(&with_op(&tx_bytes, 10)).unwrap_err().to_string(),
+            "invalid value: integer `10`, expected variant index 0 <= i < 8"
+        );
+        assert!(matches!(*tx_err, bincode::ErrorKind::Custom(_)));
+        assert!(matches!(*block_err, bincode::ErrorKind::Custom(_)));
+    }
+}
+
 // ───────────────────── v1 data-model round-trips (P2) ────────────────────────
 
 use sumchain_primitives::governance::{

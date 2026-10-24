@@ -75,6 +75,26 @@ const EXCLUDED: &[(&str, &str)] = &[
         "cf::META key prefix of the dormant v1 certified storage layout; \
          node-local, never hashed into a block",
     ),
+    // ── Dormant C5 registry size bound. Read only by the unwired register
+    //    validation, which no transaction decode reaches; the activation change
+    //    moves MAX_REGISTRY_RECORDS into consensus_limits, and so into this
+    //    digest.
+    (
+        "MAX_REGISTRY_RECORDS",
+        "dormant C5 registry size bound (PROPOSED value); unreachable while \
+         operations 8 and 9 do not decode; activation adds it to consensus_limits",
+    ),
+    (
+        "MAX_REGISTRY_FOLDED_BYTES",
+        "derived from MAX_REGISTRY_RECORDS; documents the proposed fold's byte \
+         bound and is read by no code path",
+    ),
+    (
+        "REGISTRY_RECORD_KEY_PREFIX",
+        "cf::STATE key prefix of the dormant C5 registry records; storage \
+         layout, folded into no root while dormant; written only through \
+         execute_registry_ingress, which no transaction decode reaches",
+    ),
     // ── Node-local snapshot artefacts. `snapshot.rs` states snapshots are
     //    "node-local artefacts — never hashed into a block".
     ("SNAPSHOT_VERSION", "node-local snapshot artefact"),

@@ -56,11 +56,55 @@ pub fn check_threshold_bps(threshold_bps: u16) -> Result<(), QuorumError> {
 /// - distinct valid approvals must be `>= ceil(active_count * threshold_bps / 10000)`.
 ///
 /// `tx.from` is irrelevant here — authority comes solely from the approvals.
+///
+/// Signatures are checked with `sumchain_crypto::verify_bytes` (ed25519-dalek
+/// `verify`), the governance-v1 rule every existing governance and settlement
+/// quorum action uses. [`verify_validator_quorum_strict`] is the same rule with
+/// strict verification.
 pub fn verify_validator_quorum(
     approvals: &[ValidatorApproval],
     signing_bytes: &[u8],
     active_validator_pubkeys: &[[u8; 32]],
     threshold_bps: u16,
+) -> Result<(), QuorumError> {
+    quorum_with(
+        approvals,
+        signing_bytes,
+        active_validator_pubkeys,
+        threshold_bps,
+        sumchain_crypto::verify_bytes,
+    )
+}
+
+/// [`verify_validator_quorum`] with every signature checked by
+/// `sumchain_crypto::verify_bytes_strict` (ed25519-dalek `verify_strict`). Only
+/// the C5 registry operations use it (owner, 2026-10-23); no existing
+/// operation changes rule.
+pub fn verify_validator_quorum_strict(
+    approvals: &[ValidatorApproval],
+    signing_bytes: &[u8],
+    active_validator_pubkeys: &[[u8; 32]],
+    threshold_bps: u16,
+) -> Result<(), QuorumError> {
+    quorum_with(
+        approvals,
+        signing_bytes,
+        active_validator_pubkeys,
+        threshold_bps,
+        sumchain_crypto::verify_bytes_strict,
+    )
+}
+
+/// A signature check over raw bytes, as `sumchain_crypto` provides them.
+type SignatureCheck = fn(&[u8], &[u8; 64], &[u8; 32]) -> sumchain_crypto::Result<()>;
+
+/// The quorum rule, with the signature check supplied.
+fn quorum_with(
+    approvals: &[ValidatorApproval],
+    signing_bytes: &[u8],
+    active_validator_pubkeys: &[[u8; 32]],
+    threshold_bps: u16,
+    verify: SignatureCheck,
 ) -> Result<(), QuorumError> {
     check_threshold_bps(threshold_bps)?;
     let active_count = active_validator_pubkeys.len() as u32;
@@ -79,8 +123,7 @@ pub fn verify_validator_quorum(
         if !seen.insert(ap.pubkey) {
             return Err(QuorumError::DuplicateApproval);
         }
-        sumchain_crypto::verify_bytes(signing_bytes, &ap.signature, &ap.pubkey)
-            .map_err(|_| QuorumError::InvalidSignature)?;
+        verify(signing_bytes, &ap.signature, &ap.pubkey).map_err(|_| QuorumError::InvalidSignature)?;
         valid += 1;
     }
     if valid < required {

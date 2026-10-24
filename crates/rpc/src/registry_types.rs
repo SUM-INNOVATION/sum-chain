@@ -22,7 +22,6 @@
 
 use serde::{Deserialize, Serialize};
 use sumchain_wire::b0::codec::DecodeError;
-use sumchain_wire::b0::enums::Candidate;
 use sumchain_wire::registry_wire::{RegistryRecordV1, RegistryStatus};
 
 /// Why a candidate profile would be refused admission.
@@ -172,17 +171,13 @@ pub fn dry_run_admit(bytes: &[u8], ctx: DryRunContext<'_>) -> DryRunResult {
         });
     }
 
-    // Fixed source order, so the sequence is stable.
-    for (which, commitment) in [
-        ("audit_commitment", &record.audit_commitment),
-        ("source_commitment", &record.source_commitment),
-        ("ceremony_commitment", &record.ceremony_commitment),
-    ] {
-        if commitment.iter().all(|&b| b == 0) {
-            refusals.push(RefusalReason::CommitmentUnset {
-                which: which.to_string(),
-            });
-        }
+    // Fixed source order, so the sequence is stable. The same function the
+    // (dormant, PROPOSED) register operation refuses with, so the dry run and
+    // execution cannot disagree about which commitments are unset.
+    for which in sumchain_wire::registry_ingress::unset_commitments(&record) {
+        refusals.push(RefusalReason::CommitmentUnset {
+            which: which.to_string(),
+        });
     }
 
     if record.status != RegistryStatus::Enabled {
@@ -212,9 +207,11 @@ pub fn dry_run_admit(bytes: &[u8], ctx: DryRunContext<'_>) -> DryRunResult {
 /// constant `proof_system_id = Risc0` (discriminant 2), the unique qualifier under
 /// the frozen gates, and `crates/b0-final-closure-audit` machine-checks that
 /// record. SP1 (discriminant 1) is recorded there as disqualified. A test below
-/// reads the committed record, so this cannot drift from it silently.
+/// reads the committed record, so this cannot drift from it silently. The list
+/// is `sumchain_wire::registry_ingress::admitted_proof_systems`, the one the
+/// (dormant, PROPOSED) register operation reads, so the two cannot disagree.
 pub fn admitted_proof_systems() -> [u16; 1] {
-    [Candidate::Risc0.to_repr()]
+    sumchain_wire::registry_ingress::admitted_proof_systems()
 }
 
 /// `registry_dryRunAdmit` request.
@@ -320,6 +317,7 @@ pub fn parse_record_hex(s: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sumchain_wire::b0::enums::Candidate;
 
     const ALLOWED: &[u16] = &[1, 2];
 
