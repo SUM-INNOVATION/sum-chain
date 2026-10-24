@@ -513,8 +513,16 @@ pub struct AssignmentCoverageV2 {
     pub assignment_epochs: Vec<u64>,
     /// The latest assignment epoch height (== `assignment_epochs.last()`).
     pub latest_assignment_epoch: u64,
-    /// True iff an archive assigned under the latest epoch has left the active
-    /// set — i.e. an owner `ReassignChunksV2` would be accepted (issue #62).
+    /// The chain's coverage-gap predicate (issue #62): true iff an archive in
+    /// the file's LATEST assignment epoch's snapshot is no longer currently
+    /// active (it exited, was slashed or is unbonding). This is the same
+    /// predicate `ReassignChunksV2` checks, and it is necessary but not
+    /// sufficient for one to be accepted: the transaction is also refused
+    /// below the reassignment activation gate (330), for an unknown file
+    /// (331), from a sender other than the file owner (332), for an
+    /// `Abandoned` file (333), and when the file was already reassigned at
+    /// the same height (334). After a reassignment the latest snapshot is
+    /// all-active, so this returns `false` until another archive leaves.
     pub reassignment_needed: bool,
     /// Per-epoch coverage detail (issue #62). Each entry's `per_archive` and
     /// `covered_count` are self-consistent for that epoch — no mixing of

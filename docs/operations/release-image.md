@@ -70,7 +70,8 @@ release is the GitHub Release `release-<40-hex commit>`:
   Neither is configured by this change.
 
 Dispatch, only after the change is merged and publication is authorized
-naming the commit (the dispatcher must not be Mike-Mans):
+naming the commit. Self-review is prevented, so the dispatcher must not be
+suminnovationadmin, the required reviewer:
 
 ```bash
 gh workflow run release-native.yml -R SUM-INNOVATION/sum-chain --ref main -f commit="$(git rev-parse origin/main)"
@@ -149,11 +150,13 @@ tags:
 ### Environment protection (configured 2026-09-25, read back through the API)
 
 Environment `release`:
-- Mike-Mans is the required reviewer;
-- self-review is prevented;
+- suminnovationadmin is the required reviewer;
+- self-review is prevented, so whoever dispatches a run cannot approve it;
 - deployment branches are limited to `main`;
 - admin bypass is disabled;
 - it holds no secrets.
+
+The required reviewer changed to suminnovationadmin on 2026-10-21. Runs before that date were approved under the previous reviewer, and their records are unchanged.
 
 It protects both `release-native.yml`'s `publish` job and this workflow's.
 
@@ -226,8 +229,8 @@ attesting it, and `verify-image.sh` passes the digest, never the tag.
 
 ### 2b. Threat model: two controls, two different attackers
 
-* **The `release` environment** (required reviewer Mike-Mans, self-review
-  prevented, admin bypass off, deployments from `main` only) controls **the
+* **The `release` environment** (required reviewer suminnovationadmin,
+  self-review prevented, admin bypass off, deployments from `main` only) controls **the
   approved workflow**. `release-image.yml`'s publish job cannot run without
   that approval, and cannot run from another branch.
 * **It does not control other workflows.** Anyone with write access can push

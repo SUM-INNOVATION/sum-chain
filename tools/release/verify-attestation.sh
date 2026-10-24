@@ -70,13 +70,49 @@ fi
 readonly POLICY_WORKFLOW
 readonly POLICY_IDENTITY="https://github.com/${POLICY_REPO}/${POLICY_WORKFLOW}@${POLICY_SOURCE_REF}"
 
-out=$(gh attestation verify "$SUBJECT" \
-        --repo "$POLICY_REPO" \
-        --cert-identity "$POLICY_IDENTITY" \
-        --source-ref "$POLICY_SOURCE_REF" \
-        --deny-self-hosted-runners \
-        --format json) \
-  || fail "gh attestation verify rejected $SUBJECT under the release policy"
+# Asking gh can fail for two very different reasons, and they are kept apart:
+#   * gh REJECTED the attestation (no attestation, wrong signer, wrong subject,
+#     bad signature...): never retried, never softened -> ATTESTATION FAIL, exit 1;
+#   * the attestation SERVICE could not answer (HTTP 5xx or 429, a timeout, a
+#     reset or refused connection, DNS): retried with backoff, and if it still
+#     cannot answer -> ATTESTATION UNAVAILABLE, exit 3. That is a failure too:
+#     this subject stays unverified, and is never accepted without an answer.
+#     The result concerns this one subject; a caller verifying several reports
+#     which passed and which remain unverified.
+# The 2026-10-08 release-native run published a correct release and then failed
+# its read-back on one "HTTP 503: trust-metadata-api service unavailable"; the
+# same assets verified when re-checked. The retry delays (seconds, one per
+# retry) are not policy, so tests may set them; the policy above is fixed.
+read -r -a RETRY_DELAYS <<<"${VERIFY_ATTESTATION_RETRY_DELAYS:-5 15 45}"
+for d in "${RETRY_DELAYS[@]}"; do [[ $d =~ ^[0-9]+$ ]] || usage; done
+readonly MAX_ATTEMPTS=$(( ${#RETRY_DELAYS[@]} + 1 ))
+transient() {  # the service did not answer; anything else is a rejection
+  grep -Eiq 'HTTP (5[0-9][0-9]|429)([^0-9]|$)|service unavailable|bad gateway|gateway time-?out|too many requests|timed out|timeout|connection (reset|refused)|temporary failure in name resolution|no such host|unexpected EOF|TLS handshake' <<<"$1"
+}
+attempt=1
+while :; do
+  errf=$(mktemp)
+  if out=$(gh attestation verify "$SUBJECT" \
+             --repo "$POLICY_REPO" \
+             --cert-identity "$POLICY_IDENTITY" \
+             --source-ref "$POLICY_SOURCE_REF" \
+             --deny-self-hosted-runners \
+             --format json 2>"$errf"); then
+    rm -f "$errf"; break
+  fi
+  err=$(head -c 2000 "$errf"); rm -f "$errf"
+  if ! transient "$err"; then
+    fail "gh attestation verify rejected $SUBJECT under the release policy${err:+: $(tr '\n' ' ' <<<"$err")}"
+  fi
+  if (( attempt >= MAX_ATTEMPTS )); then
+    echo "ATTESTATION UNAVAILABLE: $SUBJECT is NOT verified: the attestation service did not answer after $attempt attempts (last error: $(tr '\n' ' ' <<<"$err"))" >&2
+    exit 3
+  fi
+  delay=${RETRY_DELAYS[attempt-1]}
+  echo "attestation service unavailable for $SUBJECT (attempt $attempt of $MAX_ATTEMPTS): $(tr '\n' ' ' <<<"$err"); retrying in ${delay}s" >&2
+  sleep "$delay"
+  attempt=$((attempt + 1))
+done
 
 jq -e --arg id "$POLICY_IDENTITY" --arg ref "$POLICY_SOURCE_REF" --arg uri "$POLICY_SOURCE_URI" \
       --arg hex "${DIGEST#sha256:}" '

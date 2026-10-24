@@ -169,6 +169,72 @@ check "file: a symlink is refused" 1 "is not a regular file" $rc "$o"
 ARGS=(--file "$ART"); o=$(run "$FGOOD"); rc=$?
 check "file: the commit is required" 2 "usage" $rc "$o"
 
+echo "transient service failures: retried; rejections: never"
+# A second stub that answers from a script of outcomes, one per call:
+#   503|429|timeout  the service did not answer (stderr as gh prints it, exit 1)
+#   reject           gh rejected the attestation (exit 1)
+#   ok               the fixture result (exit 0)
+cat >"$T/bin/gh-seq" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$STUB_ARGV"
+n=$(( $(cat "$STUB_COUNT" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$STUB_COUNT"
+read -r -a seq <<<"$STUB_SEQ"; step=${seq[n-1]:-${seq[${#seq[@]}-1]}}
+case $step in
+  503) echo "HTTP 503: trust-metadata-api service unavailable (https://api.github.com/...)" >&2; exit 1 ;;
+  429) echo "HTTP 429: too many requests" >&2; exit 1 ;;
+  timeout) echo 'Get "https://api.github.com/...": dial tcp 140.82.112.6:443: i/o timeout' >&2; exit 1 ;;
+  reject) echo "Error: verifying with issuer \"sigstore.dev\": failed to verify signature" >&2; exit 1 ;;
+  ok) cat "$STUB_OUT" ;;
+esac
+EOF
+chmod +x "$T/bin/gh-seq"
+mkdir -p "$T/seqbin"; ln -sf "$T/bin/gh-seq" "$T/seqbin/gh"
+# seqrun <out-json> <sequence> [env...]: runs the script with the sequence stub; no real waiting.
+seqrun() {
+  local out=$1 seq=$2; shift 2
+  printf '%s' "$out" >"$T/out.json"; : >"$T/argv"; rm -f "$T/count"
+  env PATH="$T/seqbin:$PATH" STUB_OUT="$T/out.json" STUB_ARGV="$T/argv" STUB_COUNT="$T/count" \
+      STUB_SEQ="$seq" VERIFY_ATTESTATION_RETRY_DELAYS="${DELAYS-0 0 0}" "$@" bash "$SCRIPT" "${ARGS[@]}" 2>&1
+}
+calls() { cat "$T/count" 2>/dev/null || echo 0; }
+ARGS=(--file "$ART" "$COMMIT")
+o=$(seqrun "$FGOOD" "503 ok"); rc=$?
+check "503 once, then an answer: verified on the retry" 0 "ATTESTATION OK" $rc "$o"
+n=$((n+1)); [[ $(calls) -eq 2 ]] && printf '  ok    %-62s\n' "  ...gh was asked exactly twice" \
+  || { printf '  FAIL  %-62s calls=%s\n' "  ...gh was asked exactly twice" "$(calls)"; fail=$((fail+1)); }
+argv_case "  ...the retry asks gh for the same policy (identity)" --cert-identity "$NID"
+argv_case "  ...the retry asks gh for the same policy (source ref)" --source-ref refs/heads/main
+o=$(seqrun "$FGOOD" "503 503 503 503"); rc=$?
+check "503 on every attempt: unavailable, not accepted" 3 "ATTESTATION UNAVAILABLE" $rc "$o"
+check "  ...the message names the unverified subject" 3 "x86_64-unknown-linux-gnu.tar.gz is NOT verified" $rc "$o"
+check "  ...and says how many attempts were made" 3 "did not answer after 4 attempts" $rc "$o"
+n=$((n+1)); grep -q "nothing was verified" <<<"$o" && { printf '  FAIL  %-62s\n' "  ...without claiming anything about other subjects"; fail=$((fail+1)); } \
+  || printf '  ok    %-62s\n' "  ...without claiming anything about other subjects"
+n=$((n+1)); [[ $(calls) -eq 4 ]] && printf '  ok    %-62s\n' "  ...gh was asked four times (1 + 3 retries)" \
+  || { printf '  FAIL  %-62s calls=%s\n' "  ...gh was asked four times (1 + 3 retries)" "$(calls)"; fail=$((fail+1)); }
+n=$((n+1)); grep -q "ATTESTATION OK" <<<"$o" && { printf '  FAIL  %-62s\n' "  ...and never reports OK"; fail=$((fail+1)); } \
+  || printf '  ok    %-62s\n' "  ...and never reports OK"
+o=$(seqrun "$FGOOD" "reject ok"); rc=$?
+check "a rejection fails at once" 1 "rejected" $rc "$o"
+n=$((n+1)); [[ $(calls) -eq 1 ]] && printf '  ok    %-62s\n' "  ...and is never retried" \
+  || { printf '  FAIL  %-62s calls=%s\n' "  ...and is never retried" "$(calls)"; fail=$((fail+1)); }
+n=$((n+1)); grep -q "UNAVAILABLE" <<<"$o" && { printf '  FAIL  %-62s\n' "  ...nor reported as unavailable"; fail=$((fail+1)); } \
+  || printf '  ok    %-62s\n' "  ...nor reported as unavailable"
+o=$(seqrun "$FGOOD" "503 reject ok"); rc=$?
+check "a rejection after a 503 is still a rejection" 1 "rejected" $rc "$o"
+n=$((n+1)); [[ $(calls) -eq 2 ]] && printf '  ok    %-62s\n' "  ...with no further retry" \
+  || { printf '  FAIL  %-62s calls=%s\n' "  ...with no further retry" "$(calls)"; fail=$((fail+1)); }
+o=$(seqrun "$FGOOD" "429 ok"); rc=$?
+check "429 rate limit, then an answer: verified" 0 "ATTESTATION OK" $rc "$o"
+o=$(seqrun "$FGOOD" "timeout ok"); rc=$?
+check "network timeout, then an answer: verified" 0 "ATTESTATION OK" $rc "$o"
+o=$(seqrun "$(fresult "$OID" "$OID" refs/heads/main "$U" "$AHEX" "$U" .github/workflows/release-image.yml refs/heads/main "$COMMIT")" "503 ok"); rc=$?
+check "a retried answer is re-checked like any other (foreign signer)" 1 "does not match the release policy" $rc "$o"
+o=$(DELAYS="0" seqrun "$FGOOD" "503 503 ok"); rc=$?
+check "one retry configured: two 503s are unavailable" 3 "after 2 attempts" $rc "$o"
+o=$(DELAYS="5 x" seqrun "$FGOOD" "ok"); rc=$?
+check "a malformed retry delay is a usage error" 2 "usage" $rc "$o"
+
 echo "wiring: the release workflow and verify-image.sh use this policy"
 WF="$HERE/../../.github/workflows/release-image.yml"
 VI="$HERE/verify-image.sh"

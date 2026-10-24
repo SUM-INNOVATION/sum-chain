@@ -7,6 +7,8 @@ name: rollout-tooling
 #   * wave1-monitor.sh (fixture battery)
 #   * release attestation policy (verify-attestation.sh, fixture battery)
 #   * native release archives, installer and workflow structure
+#   * native release publish steps, run against a stubbed gh (draft, tag,
+#     verify-before-publication and every recovery state)
 #   * native systemd preflight (checker, and recorder on Linux)
 #   * scrape configuration points at the port /metrics is served on
 #   * no activation height baked into tracked genesis
@@ -52,6 +54,9 @@ jobs:
 
       - name: Native release workflow structure
         run: python3 tools/release/release-native-workflow-test.py
+
+      - name: Native release publish steps (their own scripts, against a stubbed gh)
+        run: python3 tools/release/release-native-publish-test.py
 
       - name: Native systemd preflight (checker and recorder)
         run: python3 tools/lane-b/native-preflight-test.py
