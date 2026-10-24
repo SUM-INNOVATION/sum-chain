@@ -992,6 +992,28 @@ fn the_size_bound_refuses_the_register_that_would_exceed_it() {
     );
 }
 
+/// The size-bound scan is the last check. A register refused earlier, here at
+/// its quorum (an approval from outside the active set), is a `303` receipt
+/// even though the scan would fail; with a valid quorum the same register
+/// reaches the scan, which meets a malformed key and fails execution. Only an
+/// otherwise valid register pays for the scan. The row is seeded before any
+/// candidate exists.
+#[test]
+fn the_size_bound_scan_runs_only_after_the_quorum() {
+    let n = node();
+    let mut short = REGISTRY_RECORD_KEY_PREFIX.to_vec();
+    short.extend_from_slice(&[0; 31]);
+    seed_state_row(&n.db, &short, &record(9).try_encode().unwrap());
+
+    let (r, nonce) = run_entry(&n, REG, register(H + 50, &record(1), &[2]));
+    assert_eq!(r.unwrap(), TxStatus::Failed(303), "refused at the quorum, before the scan");
+    assert_eq!(nonce, 1, "a receipt: Policy-B fee and nonce");
+
+    let (r, nonce) = run_entry(&n, REG, register(H + 50, &record(1), &[1]));
+    assert!(r.is_err(), "a valid quorum reaches the scan: {r:?}");
+    assert_eq!(nonce, 0, "no receipt");
+}
+
 /// A published register is undone through the generic application journal,
 /// and the count returns to MAX − 1, so a register is accepted again.
 #[test]
@@ -1268,7 +1290,7 @@ fn a_real_registry_read_failure_is_an_execution_error_with_no_fee_nonce_or_write
 
 // ── Storage: no new column family ───────────────────────────────────────────
 
-/// `ALL_CFS` on `e3b8ff81`, names and order. A family a binary does not name
+/// `ALL_CFS` on main (`e3b8ff81`, unchanged at `df502b53`), names and order. A family a binary does not name
 /// makes the volume unopenable by that binary, so C5 adds none: records live
 /// in the existing `cf::STATE` under `registry/v1/` (adopted 2026-10-23).
 const MAIN_ALL_CFS: &[&str] = &[

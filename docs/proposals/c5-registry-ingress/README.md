@@ -14,7 +14,7 @@ The byte layouts stay PROPOSED until every C5 decision is settled. It specifies 
 - **Not on the wire:** this PR does **not** add the two `GovernanceOperation` variants. A governance transaction naming 8 or 9 is refused at decode exactly as on the base, and a block holding one is rejected (§13). The codecs and the executor logic are reached only through `governance_executor::execute_registry_ingress`, which nothing but the tests calls. Adding the wire variants is part of the separately authorized activation change.
 - **Authorization:** a quorum of the active PoA validator set at the execution height, verified **strictly** by `validator_quorum::verify_validator_quorum_strict` (§5). Register uses the authenticated governance threshold (Q17). Disable uses the stored record's threshold (B2, adopted 2026-10-23). `tx.from` only pays the fee.
 - **State:** dormant and unwired. Even by direct call, both operations refuse with `302` before reading their payload: both named parameters are unset (§9), and nothing supplies a genesis block hash. Records live in `cf::STATE` under `registry/v1/` (§12).
-- **Refs:** #242, #128. Base: `main` `e3b8ff81`.
+- **Refs:** #242, #128. Base: `main` `df502b53`.
 
 | File | Contents |
 |---|---|
@@ -304,7 +304,7 @@ No code is allocated. On this binary, a transaction naming operation 8 or 9 does
 
 ## 12. State (STATE adopted 2026-10-23)
 
-- **Placement:** the existing `cf::STATE` family. No column family is added: `ALL_CFS` is byte-identical to `e3b8ff81`, and a test checks this. A family a binary does not name makes the volume unopenable by that binary, and the 0.2.0-era binary would auto-repair it to empty.
+- **Placement:** the existing `cf::STATE` family. No column family is added: `ALL_CFS` is byte-identical to `main` (`df502b53`; unchanged since `e3b8ff81`), and a test checks this. A family a binary does not name makes the volume unopenable by that binary, and the 0.2.0-era binary would auto-repair it to empty.
   - Key: `REGISTRY_RECORD_KEY_PREFIX` `"registry/v1/"` (12 bytes) ‖ `id` (32), 44 bytes.
   - Value: the 154-byte `RegistryRecordV1` encoding.
   - A stored row that does not decode, or names another `id`, is an error, never "no record".
@@ -341,6 +341,13 @@ There are two limits. Both stay **PROPOSED** until the activation change impleme
 - **Disable adds no record** and stays allowed at the limit.
 - **A disabled id stays present,** so re-registering it is refused with `303` at any count (rule 7).
 - **Raising the bound** is a coordinated upgrade.
+
+**Tested in this PR (dormant, through the internal entry):**
+- **The limit:** with 4,095 records stored, a register is accepted; with 4,096 it is `303` (fee charged, and fee 0 when underfunded), and nothing is stored. Disable stays allowed at the limit, a disabled id cannot be registered again, and staged registers are counted (`the_size_bound_refuses_the_register_that_would_exceed_it`, `rolling_back_a_register_restores_the_count`).
+- **The order:** a register refused at its quorum is a `303` receipt even when the scan would fail, and the same register with a valid quorum reaches the scan (`the_size_bound_scan_runs_only_after_the_quorum`).
+- **Storage errors:** a malformed row or key, and a real RocksDB read failure on the point read and on the scan, are execution errors with no receipt, fee, nonce or write (`a_failing_registry_read_is_an_execution_error_not_a_receipt`, `a_real_registry_read_failure_is_an_execution_error_with_no_fee_nonce_or_write`).
+  - They propagate exactly as the governance-v1 operations' storage errors do since #349. In `execute`, a read failure is `Stop::Storage` and returns the error before settlement. In `execute_registry_ingress`, the validators return the error, and the entry propagates it before `settle`.
+  - Both reach the executor's block-transaction failure path, and neither becomes a receipt.
 
 **Counting.** A bounded prefix scan over `registry/v1/` through the block's `ExecutionView` (`v_count_records_up_to`). It stops after `MAX_REGISTRY_RECORDS` rows, so a register reads at most 4,096 rows, and it sees the block's own earlier registers.
 - Every counted row must pass `checked_registry_row`, the one row rule the proposed R(h) also uses: a key of exactly 12 + 32 bytes, a value that decodes, and a record id equal to the key's.
@@ -388,12 +395,11 @@ There are two limits. Both stay **PROPOSED** until the activation change impleme
 
 **Not in this PR.** The internal entry runs per transaction and has no block context. Operations 8 and 9 do not decode, so no block can carry one.
 
-**Prototype note (unpublished local activation prototype; not evidence for ratification).** It exercised the rule as specified here, at a test-only A:
-- 8 registry operations at A were accepted;
-- 9 were refused whole on the PoA import, with no state change, and on a reorg ("reorg refused before unwinding"), while a branch with 8 was replayed across A and adopted;
-- the producer included 8 of 10 admitted operations, the mempool held the other 2 pending, and the next block included them.
-
-The activation change must run these tests again.
+**LOCAL PROTOTYPE evidence (not the activation change's tests).** An unpublished local activation prototype, at a test-only A, exercised the rule as specified here. These are not tests of this PR or of the activation change, which must run its own:
+- `the_per_block_cap_accepts_8_and_refuses_9_on_poa_import`: 8 registry operations at A accepted; 9 refused whole on the PoA import, with no state change.
+- `reorg_import_and_replay_refuse_9_registry_ops_at_a_and_adopt_8`: 9 at A refused on a reorg ("reorg refused before unwinding"); a branch with 8 replayed across A and adopted.
+- `the_producer_includes_8_and_the_mempool_keeps_the_rest_pending`: the producer included 8 of 10 admitted operations, the mempool held the other 2 pending, and the next block included them.
+- `the_producer_selection_keeps_8_and_skips_the_rest_with_the_sender_tail`: the selection skips the 9th with its sender's later transaction.
 
 #### Activation of both limits
 
@@ -503,6 +509,7 @@ The consolidated recommendation of 2026-10-22 was decided by the owner on 2026-1
 | Size bound: `MAX − 1` stored → register accepted; at `MAX` → `303` (fee charged; fee 0 when underfunded), nothing stored; disable allowed at the limit; a disabled id not re-registrable; staged registers counted | `the_size_bound_refuses_the_register_that_would_exceed_it` |
 | A failing registry read (undecodable row, record under another id, malformed key met by the count) is an execution error, never a receipt | `a_failing_registry_read_is_an_execution_error_not_a_receipt` |
 | A real storage read failure: RocksDB refuses a damaged table block, on the point read (register, disable) and on the size-bound scan. Each is an execution error with no receipt, fee, nonce or write | `a_real_registry_read_failure_is_an_execution_error_with_no_fee_nonce_or_write` |
+| Size bound: the scan runs only after the quorum (a quorum refusal is a `303` receipt even when the scan would fail) | `the_size_bound_scan_runs_only_after_the_quorum` |
 | Size bound: rolling back a published register (generic journal) restores the count | `rolling_back_a_register_restores_the_count` |
 | Size bound: the dry run reports the record alone at the limit, while execution refuses `303` | `crates/rpc/tests/registry_dry_run_agrees.rs` (`at_the_size_bound_the_dry_run_reports_the_record_alone`) |
 | Size bound: constants and folded bytes; the boundary vectors execute | `the_size_bound_constants`, `vectors_are_reproduced_and_execute` |
@@ -575,7 +582,7 @@ Each of these, like a read error, is an execution error that fails the block. A 
 
 #### 1.4 Boundary rule (new gate, provisional name `registry_enabled_from_height` = A)
 
-- **h ≤ A−1:** the root is byte-identical to `e3b8ff81`; P and R are not computed. A block holding governance op 8 or 9 must be **invalid**. In #348 today, operations 8 and 9 are not wire variants, so such a block is refused at decode (§13 of this README); that decode refusal is today's only protection. #348's internal entry `execute_registry_ingress` returns `Failed(300/301/302)` receipts keyed on the governance gate. Once the activation binary decodes variants 8/9, that alone would let a block below A be valid to new binaries and undecodable to old ones. The activation binary therefore needs an **explicit height rule**, `R<A>`: a transaction carrying `GovernanceOperation` 8 or 9 is invalid at any height h < A. It is enforced at four points:
+- **h ≤ A−1:** the root is byte-identical to the base (`df502b53`); P and R are not computed. A block holding governance op 8 or 9 must be **invalid**. In #348 today, operations 8 and 9 are not wire variants, so such a block is refused at decode (§13 of this README); that decode refusal is today's only protection. #348's internal entry `execute_registry_ingress` returns `Failed(300/301/302)` receipts keyed on the governance gate. Once the activation binary decodes variants 8/9, that alone would let a block below A be valid to new binaries and undecodable to old ones. The activation binary therefore needs an **explicit height rule**, `R<A>`: a transaction carrying `GovernanceOperation` 8 or 9 is invalid at any height h < A. It is enforced at four points:
   1. **Block validity (authoritative):** in `BlockExecutor::validate_block` (`state/src/executor.rs:4703-4746`), immediately after `check_block_contract_gas` (`:4741`), which is the existing height-gated per-transaction block check. A new `registry_ingress::check_block_registry_ops(&params, block.header.height, &block.transactions)` returns `StateError::BlockValidation` if `height < A` and any `TxType::Governance` transaction names op 8 or 9. `validate_block` runs before execution on both import paths (`consensus/src/poa.rs:1497-1500`, `consensus/src/reorg.rs:476`). So the block is refused whole: no receipt, no fee, no state, as with any invalid block.
   2. **Executor backstop (fail-closed):** the op-8/9 dispatch arm returns an execution **error**, never a receipt, if reached at h < A, so a missed validation cannot yield a valid block. The 300/301/302 receipts apply only from A. A ≥ the governance gate (load rule below), so 300 cannot occur from A.
   3. **Admission:** `Mempool::add` (`state/src/mempool.rs:250`) refuses op 8/9 while `current_height + 1 < A`. It mirrors `EducationAdmission`, which holds `params` and the live height (`:123-133`, check at `:402`), and covers RPC `send_raw_transaction` (`rpc/src/server.rs:1509-1521`) and gossip. Admission is a filter; block validity is authoritative.
@@ -626,12 +633,12 @@ Each of these, like a read error, is an execution error that fails the block. A 
   - From A, X's P(h) or missing P‖R makes its computed root differ from the header root of every honest block. Above `LEGACY_ROOT_COMPATIBILITY_HEIGHT` (496,720) an imported root mismatch is refused and the candidate discarded (`candidate.rs:459-485`; tested for another gate by `activation_multinode.rs::above_the_legacy_window_the_same_disagreement_is_refused`). At or below it the header root is adopted, which is why A must be above it.
   - Binaries that lack the registry gate name (the deployed release, main, this PR) declare a different protocol digest from the activation binary and are refused in both phases at the handshake. A node with the activation binary and different values declares the SAME digest (the digest covers no GovernanceParams value), so the handshake does not exclude it; only the root check from A does.
   - Binaries without operations 8 and 9 refuse any block holding one at decode (tested in this PR).
-- *[Amended 2026-10-23]* **Since exercised in an unpublished local activation prototype** (test-only values; the activation change must run its tests again):
-  - below-A refusal on both import paths, through reorg replay, rollback re-import and sync;
-  - for each of T_min, W and the threshold, the root refusal at A in both directions, and identical blocks and roots below A;
-  - equal protocol digests for those mismatched values;
-  - a refusing node keeps its head, refuses again identically, and does not halt;
-  - at a mismatched proposer's slot, honest nodes refuse its block and stay below A.
+- *[Amended 2026-10-23]* **Since exercised, as LOCAL PROTOTYPE evidence (not the activation change's tests)** (an unpublished local activation prototype, test-only values):
+  - below-A refusal on both import paths, through reorg replay, rollback re-import and sync (`poa_import_refuses_operation_8_below_a_and_accepts_it_at_a`, `reorg_import_refuses_operation_8_below_a_and_adopts_it_at_a`, `reorg_replay_across_a_reproduces_every_root_and_refuses_op_8_below_a`, `rollback_below_a_then_reimport_reproduces_every_root_and_refuses_op_8_below_a`, `a_synced_block_below_a_with_operation_8_is_refused_like_poa_import`);
+  - for each of T_min, W and the threshold, the root refusal at A in both directions, and identical blocks and roots below A (`mismatched_{t_min,window,threshold}_from_a_refuses_both_ways_at_a_and_agrees_below_a`);
+  - equal protocol digests for those mismatched values (`x_with_mismatched_values_declares_the_honest_protocol_digest_and_is_verified`);
+  - a refusing node keeps its head, refuses again identically, and does not halt (the same `mismatched_…` tests);
+  - at a mismatched proposer's slot, honest nodes refuse its block and stay below A (`rotation_with_x_holding_the_slot_at_a`).
 
   Behaviour over time, logs, sync loops and peer reporting were not exercised.
 - **Not yet established**, and to be tested with the activation code before any ratification: below-A refusal of operations 8 and 9 on both import paths, through reorg replay, rollback re-import and sync; that every mismatch case produces the root refusal at the first block ≥ A; what a refusing node then does (retry, peer reporting, stall); whether honest nodes stall at a mismatched proposer's slot; whether a mismatched minority can extend a fork; reorg and rollback across A. This section makes no claim that every mismatch can only cause a visible halt.
@@ -803,7 +810,7 @@ magic "RFRZv1\0" (7) ‖ gate_a:u64 ‖ threshold_bps:u16 ‖ t_min:u64 ‖ w:u6
 - **Only after this explicit step.** In the wrong-proposer case the chain waits at A − 1 for that proposer's slot, so after the recovery it must produce A again. That signs a height it signed before. No other part of this design makes a node do that: the producer always builds head + 1, and the freeze adds no other rollback.
 - **The consequence:** the removed header and the new one are two signatures by one validator at one height. That is the material of `DoubleSignEvidence`, the staking evidence type, which is slashable where staking slashing applies. The command states this before it runs and requires the flag.
 - **Checked against the existing protections:**
-  - **PoA block signing on `e3b8ff81` has no persisted re-sign guard.** An ordinary operator rollback can already lead a validator to produce again at a height it produced before. This design does not change that.
+  - **PoA block signing on `df502b53` has no persisted re-sign guard.** An ordinary operator rollback can already lead a validator to produce again at a height it produced before. This design does not change that.
   - **The durable signer proposed in #340** (dormant, not wired to any node) guards finality votes, not PoA headers. Its record lives outside the chain database, and the recovery rollback never touches it. It keeps refusing any vote at or below its last signed position; only its own recovery procedure moves that floor.
 
 **The gate pin.** A is pinned after the recovery rollback.
@@ -838,36 +845,29 @@ magic "RFRZv1\0" (7) ‖ gate_a:u64 ‖ threshold_bps:u16 ‖ t_min:u64 ‖ w:u6
 
 **Cases checked.**
 
-| Case | Commits | Outcome |
-|---|---|---|
-| First proposer at A | at its own publish of A | bound to its values from A |
-| First importer | at its first imported block ≥ A | bound to its values from that height |
-| Single validator, or no peer | at its own block A | no deadlock; produces on |
-| Restart, same values | unchanged | runs |
-| Restart or acknowledgement, a changed value | unchanged | refused |
-| Proposer with wrong values | at its own block A | peers refuse its block; recovery rollback, correct the values, re-sync; A re-signed only after that step |
-| Importer with wrong values | never (root check first) | correct the values and restart |
-| Snapshot restore at or above A | at the first publish after it | as for a first importer or proposer |
-| File-level backup restore | as in the backup | compared at start as usual |
-| Ordinary rollback or reorg unwind below A | row stays | frozen values still required |
-| Recovery rollback below `first_height` | row deleted, A pinned | commits again at the next publish ≥ A |
+Every test named in the last column is **LOCAL PROTOTYPE evidence (not the activation change's tests)**: an unpublished local activation prototype, run at a test-only A, with its startup check at engine construction. None of them is a test of this PR or of the activation change, which must run its own.
 
-**Prototype note (unpublished local activation prototype; the activation change must run its tests again).**
-- **Exercised:**
-  - the first proposer committing at its own publish of A;
-  - the first importer committing at its import;
-  - restart under the same values, and refusal of each changed value at start and by the acknowledgement;
-  - a proposer with wrong values committing, its peer refusing its block, a restart under corrected values refused, the recovery rollback removing block A and the row in one batch, then A produced again, accepted by the peer, and the two nodes continuing;
-  - an importer with wrong values never committing and recovering after a configuration fix and a restart;
-  - an ordinary rollback below A keeping the row, and the recovery's refusals;
-  - the recovery writing the gate pin in the same batch: a moved A is refused, and a changed frozen value is accepted;
-  - a single validator producing from A through A + 3, restarting, and refusing changed values.
-- **Not exercised:** the node-startup wiring itself (the check ran at engine construction), the CLI command, logs, and behaviour over time.
+| Case | Commits | Outcome | LOCAL PROTOTYPE evidence (not the activation change's tests) |
+|---|---|---|---|
+| First proposer at A | at its own publish of A | bound to its values from A | `the_first_proposer_at_a_binds_at_its_own_publish` |
+| First importer | at its first imported block ≥ A | bound to its values from that height | `the_first_importer_binds_at_its_import` |
+| Single validator, or no peer | at its own block A | no deadlock; produces on | `a_single_validator_produces_through_a_plus_3_restarts_and_refuses_changed_values` |
+| Restart, same values | unchanged | runs | `a_bound_node_restarts_with_the_same_values_and_refuses_changed_ones` |
+| Restart or acknowledgement, a changed value | unchanged | refused | the same, and the single-validator test |
+| Proposer with wrong values | at its own block A | peers refuse its block; recovery rollback, correct the values, re-sync; A re-signed only after that step | `a_mismatched_proposer_binds_is_rejected_and_recovers_through_the_explicit_rollback` |
+| Importer with wrong values | never (root check first) | correct the values and restart | `a_mismatched_importer_never_binds_and_a_config_fix_plus_restart_recovers_it` |
+| Snapshot restore at or above A | at the first publish after it | as for a first importer or proposer | not exercised |
+| File-level backup restore | as in the backup | compared at start as usual | not exercised |
+| Ordinary rollback below A | row stays | frozen values still required | `an_ordinary_rollback_below_a_keeps_the_record_and_the_recovery_rollback_removes_it` |
+| Reorg unwind below A | row stays | frozen values still required | not exercised for the row |
+| Recovery rollback below `first_height` | row deleted, A pinned | commits again at the next publish ≥ A; a moved A refused | `an_ordinary_rollback_below_a_keeps_the_record_and_the_recovery_rollback_removes_it` |
+
+**Not exercised by the local prototype:** the node-startup wiring itself (the check ran at engine construction), the CLI command, a snapshot or backup restore, the row across a reorg unwind, logs, and behaviour over time.
 
 ### (b) How earlier blocks replay
 
 - **Below A, unchanged.**
-  - Roots are byte-identical to `e3b8ff81`; P and R are not computed.
+  - Roots are byte-identical to the base (`df502b53`); P and R are not computed.
   - `R<A>` makes any block with operation 8 or 9 invalid.
   - Existing governance operations read 0x0601 from the configuration, as today.
   - The freeze neither introduces nor removes the existing hazard: an acknowledged threshold change still re-executes earlier blocks with the new value.
