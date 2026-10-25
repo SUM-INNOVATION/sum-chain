@@ -139,7 +139,6 @@ wasmer-types = "=5.0.6"
 # because 6.0.0 relicensed Singlepass to BUSL-1.1 (#203/#222), so the MSRV cannot
 # advance while that pin stands.
 ethabi = "18"
-k256 = "0.13"
 
 # #306 (RUSTSEC-2026-0344): wasmer-compiler 5.0.6 enables object 0.32.2's default
 # features, and its "compression" feature pulls ruzstd 0.5.0. Cargo features are

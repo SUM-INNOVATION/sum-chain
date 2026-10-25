@@ -14,7 +14,6 @@ sumchain-storage = { path = "../storage" }
 # Ethereum interaction
 reqwest = { version = "0.12", features = ["json"] }
 ethabi = { workspace = true }
-k256 = { workspace = true }
 
 # Async
 tokio = { workspace = true }
