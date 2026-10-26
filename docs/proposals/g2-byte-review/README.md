@@ -24,7 +24,20 @@
 
   Dormant code is in `crates/finality-foundations` (`vote`); its tests and E1 edge-case vectors are `tests/vote_v1.rs` and `tests/vectors/finality_vote_v1.json`. Nothing calls it and nothing is active. Historical signature verification is unchanged. Ratifying the vote froze no other object layout: not the certificate, not the validator-set commitment preimage (§2), and no database key.
 - **Settled since drafting (owner, 2026-10-21, decision ledger): VS-1, the validator-set commitment of §2.** It is `BLAKE3-256(D_VALSET ‖ n u16 LE ‖ 32·n keys)`. Dormant code is in `crates/finality-foundations` (`vote`); nothing calls it. The header's "bytes not ratified" covers every other object in this draft, not §2.
-- **Still unresolved:** D3, D5, D6, M1–M5, H1 and S1 (groups A2–A5), and every object layout and key composition in this draft other than the vote and the §2 validator-set commitment.
+- **Adopted since drafting (owner, 2026-10-22, decision ledger "2026-10-22 owner decisions"), group A2: the signer-state format of #340.** Exactly these items:
+  - the 413-byte `SignerStateV1` with a separate halt flag;
+  - the full-state mirror and the context-bound proof digest;
+  - quorum-trimmed, re-verified side-file objects and their stated size bound;
+  - R0/R1-only repairs;
+  - `PolkaProofV1`;
+  - recovery requiring R > H, persisting floor R + 1, with a verified resume certificate checked against the node's chain;
+  - permanent preservation of completed conflict archives.
+
+  Ratified 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"): the conflict archive as one unit: `conflict-H.{state,evidence,resume,receipt}` (completed files never overwritten or deleted), the 185-byte `RecoveryReceipt` and `SUMCHAIN/FINALITY/SIGNER-RECOVERY/v1\0`, the resume-certificate evidence context, the archive durable before the recovered record, and R1 over a halted mirror only with a verified matching archive.
+
+  Dormant code is in `crates/finality-foundations` (`signer_file`, `proofs`, `signer`). Every other signer detail stays PROPOSED. Production durability and activation are separate requirements. It supersedes §8's draft 1. Of the §9 choices it settles **S1** (see §9); **D3** and **D6** stay open.
+- **Still unresolved:** D3, D5, D6, M1–M5 and H1 (groups A2–A5), and every object layout and key composition in this draft other than the vote, the §2 validator-set commitment and the adopted group A2 signer-state items above.
+  - **Why D6 stays open:** the adopted format keeps the lock in the one signer-state record (no `FLCKv1`; valid_round and valid_value are not persisted). But its durable safety data also includes the full-state mirror, retained-proof side files and conflict archives, so "one file" does not map 1:1.
 
 These semantics alone are **not** complete certified finality. See §10 for what is still missing.
 
@@ -72,7 +85,7 @@ These semantics alone are **not** complete certified finality. See §10 for what
 | Decoding | Exact length. Every enum and flag byte is checked. An absent group must be all zero. Trailing bytes are refused. `schema` u16 = 1, and anything else is refused (no forward-compatible parsing, no defaults). |
 | Round | u32, with the validity rule `round ≤ 2^20` (D4) on every round field |
 
-**Domains and magics proposed here.** `check.py` confirms they are distinct, prefix-free, and clash with no retired draft and no byte-string literal under `crates/`. The exceptions are settled constants in their implementation file: `D_VOTE`, `FVOTv1\0` and `D_VALSET` are spelled exactly, and only, in `crates/finality-foundations/src/vote.rs`.
+**Domains and magics proposed here.** `check.py` confirms they are distinct, prefix-free, and clash with no retired draft and no byte-string literal under `crates/`. The exceptions are settled constants in their implementation file: `D_VOTE`, `FVOTv1\0` and `D_VALSET` are spelled exactly, and only, in `crates/finality-foundations/src/vote.rs`; `FCRTv1\0` (group C) in `crates/finality-foundations/src/certificate.rs`; and `D_SIGNER`, `D_SIGNBYTES` and `FSGNv1\0` (group A2: integral to the 413-byte record adopted by the owner, 2026-10-22; inferred) in `crates/finality-foundations/src/signer_file.rs`.
 
 | Constant | Bytes | Length | Use |
 |---|---|---|---|
@@ -81,8 +94,8 @@ These semantics alone are **not** complete certified finality. See §10 for what
 | `D_MDIGEST` | `SUMCHAIN/CONSENSUS-UPGRADE-MANIFEST/v1\0` | 39 | manifest digest |
 | `D_MSIGN` | `SUMCHAIN/CONSENSUS-UPGRADE-MANIFEST/SIGN/v1\0` | 44 | manifest signature message |
 | `D_HANDLER` | `SUMCHAIN/CONSENSUS-UPGRADE-HANDLER/v1\0` | 38 | handler identity |
-| `D_SIGNER` | `SUMCHAIN/FINALITY/SIGNER/v1\0` | 28 | signer-state checksum |
-| `D_SIGNBYTES` | `SUMCHAIN/FINALITY/SIGNBYTES/v1\0` | 31 | digest of released sign bytes |
+| `D_SIGNER` | `SUMCHAIN/FINALITY/SIGNER/v1\0` | 28 | signer-state checksum. Group A2: integral to the 413-byte record adopted 2026-10-22 (inferred) |
+| `D_SIGNBYTES` | `SUMCHAIN/FINALITY/SIGNBYTES/v1\0` | 31 | digest of released sign bytes. Group A2: integral to the 413-byte record adopted 2026-10-22 (inferred) |
 | magics | `FVOTv1\0` `FCRTv1\0` `FEVDv1\0` (BL, unchanged) · `CUPMv1\0` manifest · `UHNTv1\0` hint · `FSGNv1\0` signer state · `UCEVv1\0` upgrade-conflict evidence | 7 each | |
 
 **Cross-object signature separation.** Validator keys sign votes (`D_VOTE` ‖ 113 bytes) and manifests (`D_MSIGN` ‖ 276 bytes). Distinct NUL-terminated prefixes separate the two. Today's v1 block-header signatures sign a 32-byte hash, which can never equal either message. **The review must confirm that no other signing path for validator keys** (for example transactions) can produce a message beginning with a `SUMCHAIN/…\0` consensus domain.
@@ -377,17 +390,17 @@ Only full manifest bytes can produce this record; a hint never does.
 |---|---|---|---|
 | **D0** | Integer byte order | **LE** in objects and records; **BE** only in RocksDB keys. The frozen `protocol_digest` stays BE and never shares an encoder with these objects. | All BE; or per object (invites encoder mistakes) |
 | **D2** | Explicit n in the certificate | **Omit.** n is implied by the valset commitment the verifier must resolve anyway. | Add `n u16` at offset 117 (+2 bytes, plus a new mismatch refusal) |
-| **D3** | Creating signer state | **An explicit operator initialization** that writes counter 0 with the floor, and refuses if the file or mirror exists | Automatic creation on first start, which cannot tell a fresh signer from a lost one (the double-sign case) |
+| **D3** | Creating signer state | **An explicit operator initialization** that writes counter 0 with the floor, and refuses if the file or mirror exists. **Still open after the 2026-10-22 adoption:** the counter-0 record with the floor is adopted, but the initialization refusals are not. | Automatic creation on first start, which cannot tell a fresh signer from a lost one (the double-sign case) |
 | **D4** | Round range | **u32 with the validity rule `round ≤ 2^20`** on every round field | Unbounded u32; u16 |
 | **D5** | Evidence retention | **First valid record per slot**: (h, r, type, index) for votes, and sequence for upgrade conflicts | Keep all (unbounded under spam); keep latest (overwritable) |
-| **D6** | Durable safety files | **One file, the signer state.** No `FLCKv1` record; valid_round and valid_value are not persisted. | A separate lock record, with a cross-file consistency failure mode |
+| **D6** | Durable safety files | **One file, the signer state.** No `FLCKv1` record; valid_round and valid_value are not persisted. **Still open after #340:** the adopted format keeps the lock in the one record, but adds a full-state mirror, side files and conflict archives, so "one file" does not map 1:1. | A separate lock record, with a cross-file consistency failure mode |
 | **M1** | Manifest signature message | **`D_MSIGN ‖ body`**, the full 276-byte body with its magic | `D_MSIGN ‖ digest` (32 bytes); or B-1's `domain ‖ body[7..]` |
 | **M2** | Handler identity | **One digest over (name, version)**. The new commitment and the release bind the rules themselves. | B-1's separate `handler_version` plus a digest including an undefined "migration digest" |
 | **M3** | Cancellation | **Not in v1.** Cancellation semantics need their own ratification and would take a new schema value. | An `action u8` byte now (1 = activate, 2 = cancel) |
 | **M4** | Scope of genesis authentication | **Sequence 1 only**, the literal G2-c reading. Consequence: a pre-H cancellation or replacement through sequence 2 cannot be authenticated by genesis membership, so stopping a bad sequence-1 manifest relies on not installing it, or on signing a conflicting sequence-1 manifest (which halts). | Any manifest while static membership governs, i.e. before certified finality is active |
 | **M5** | `quorum_version` (in B-1) | **Drop it.** It has no meaning separate from `quorum_rule`. | Keep it as a reserved byte = 1 |
 | **H1** | Next sequence in the hint | **Implied** (applied + 1); the applied digest is the last applied manifest digest | Explicit field (a redundant mismatch case); a separate accumulator |
-| **S1** | Signer-state binding and content | **Bind chain identity and the signer's public key**, not commitment, valset or index, which can change across upgrades. **Store the digest of the sign bytes**, which supports variable-length proposals. | BL §6's binding to commitment, valset and index; storing the full sign bytes |
+| **S1** | Signer-state binding and content | **Bind chain identity and the signer's public key**, not commitment, valset or index, which can change across upgrades. **Store the digest of the sign bytes**, which supports variable-length proposals. **Settled (owner, 2026-10-22, decision ledger "2026-10-22 owner decisions") by the #340 format:** the record binds `chain_id` (offset 17), `genesis_block_hash` (25) and `signer_pubkey` (57), with no commitment, valset or index field, and stores `last_sign_bytes_digest` (175) = BLAKE3(`D_SIGNBYTES` ‖ sign bytes), not the sign bytes. | BL §6's binding to commitment, valset and index; storing the full sign bytes |
 | **E1** | Ed25519 verification criterion, which must be identical on every node | **APPROVED DESIGN DIRECTION (owner, 2026-10-16), for NEW finality and upgrade signatures only: strict.** Canonical S < L and canonical R and A encodings; reject small-order A and R; the cofactorless equation (ed25519-dalek `verify_strict` semantics). Historical signature verification (every existing path, including `sumchain-crypto` `verify`) is unchanged. The vote's bytes are ratified (group V, 2026-10-17); its E1 edge-case vectors are in `crates/finality-foundations/tests/vectors/finality_vote_v1.json`. Other objects' bytes are unratified. | ZIP-215 (cofactored, permissive, batch-friendly); or today's `sumchain-crypto` `verify` (cofactorless, accepts small-order keys) |
 
 ## 10. What this artifact does not provide (do not read it as complete certified finality)
@@ -473,7 +486,7 @@ Run `python3 check.py` (standard library only; under a minute). It exits nonzero
 - Ed25519 against RFC 8032 TEST 1, plus a negative case;
 - byte-for-byte reproduction of the dalek-produced 2026-09-29 vectors: 4 public keys, the valset bytes and both commitments, the stand-in commitment, the vote preimage, signature and wire, the nil prevote, the n = 4 certificate, the evidence, and the storage key and pointer;
 - every length in these tables;
-- that each settled constant (`D_VOTE`, `FVOTv1\0`, `D_VALSET`) is spelled only in its implementation file, and every other domain and magic nowhere under `crates/`;
+- that each settled constant (`D_VOTE`, `FVOTv1\0`, `D_VALSET`, `FCRTv1\0`, `D_SIGNER`, `D_SIGNBYTES`, `FSGNv1\0`) is spelled only in its implementation file, and every other domain and magic nowhere under `crates/`;
 - that every vector passes its strict decoder or verifier;
 - that **every single-byte flip**, truncation and trailing byte is refused, for:
   - the vote, both certificates, the equivocation evidence, both manifests, the upgrade-conflict evidence and both signer states;

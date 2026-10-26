@@ -26,6 +26,3 @@ blake3 = { workspace = true }
 # Test vectors in tests/vectors/finality_vote_v1.json.
 hex = { workspace = true }
 serde_json = { workspace = true }
-# The hash the proposed signer-state layout names (BLAKE3-256); the library
-# itself takes it as an injected `StateHasher`.
-blake3 = { workspace = true }
