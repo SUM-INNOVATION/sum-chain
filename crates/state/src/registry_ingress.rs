@@ -34,8 +34,8 @@ use sumchain_storage::StorageError;
 use sumchain_wire::registry_ingress::{
     admitted_proof_systems, approval_window_open, check_commit, registry_disable_signing_bytes,
     registry_register_signing_bytes, timelock_satisfied, unset_commitments, RegistryCommitRefusal,
-    RegistryDisableV1, RegistryIngressParams, RegistryIngressValues, RegistryLimits,
-    RegistryRegisterV1,
+    RegistryDisableV1, RegistryIngressParams, RegistryIngressValues, RegistryRegisterV1,
+    REGISTRY_STATE_DIGEST_DOMAIN,
 };
 use sumchain_wire::registry_wire::{RegistryRecordV1, RegistryStatus};
 
@@ -47,19 +47,13 @@ use crate::{Result, StateError};
 /// reviewed change here, part of the activation change.
 pub const REGISTRY_INGRESS_PARAMS: RegistryIngressParams = RegistryIngressParams::UNSET;
 
-/// The binary's registry limits: the **single source** of both consensus
-/// limits (owner 2026-10-26: both are committed in `P(h)`; rule and values
-/// PROPOSED; dormant).
-///
-/// Execution reads them only through [`RegistryIngressContext::limits`] (the
-/// size bound in register), the activation change's block-validity cap reads
-/// the same context value, and [`registry_params_digest_for`] commits that
-/// same value in `P(h)`. [`MAX_REGISTRY_RECORDS`] and
-/// [`MAX_REGISTRY_OPS_PER_BLOCK`] are derived from it, so the census rows and
-/// the protocol-digest entries the activation change adds cannot name another
-/// number.
-pub const REGISTRY_LIMITS: RegistryLimits =
-    RegistryLimits { max_records: 4_096, max_ops_per_block: 8 };
+/// The binary's registry limits, the one definition of both consensus limits
+/// (`sumchain_wire::registry_ingress::REGISTRY_LIMITS`, re-exported). Every
+/// consensus reader in this crate reads this constant directly: the size bound
+/// in register, [`registry_params_digest_for`] (`P(h)`), and the derived
+/// [`MAX_REGISTRY_RECORDS`] and [`MAX_REGISTRY_OPS_PER_BLOCK`]. No caller
+/// supplies limits: [`RegistryIngressContext`] carries none.
+pub use sumchain_wire::registry_ingress::REGISTRY_LIMITS;
 
 /// The most records the registry may store, Enabled and Disabled together.
 /// A deterministic consensus bound on the per-block registry scan, required by
@@ -91,17 +85,27 @@ pub const REGISTRY_LIMITS: RegistryLimits =
 /// Not in `protocol_digest::consensus_limits` while dormant, because no
 /// transaction reaches the check. The activation change adds it there, and so
 /// to the protocol digest every node declares at the handshake. ConsensusConfig
-/// id: unallocated. Changing it after activation is a coordinated upgrade.
+/// id: unallocated.
+///
+/// Frozen at A with [`REGISTRY_LIMITS`]: changing it later is a new
+/// coordinated activation that height-keys the old and new values, and every
+/// binary keeps applying the old value below the change height on replay,
+/// reorg and resync (README §12.1 (c), §17 (c)).
 pub const MAX_REGISTRY_RECORDS: u64 = REGISTRY_LIMITS.max_records as u64;
 
 /// The most bytes the proposed registry-state fold hashes per block at
 /// [`MAX_REGISTRY_RECORDS`]: per record, its id (32 bytes) and its frozen
 /// `RegistryRecordV1` (154 bytes); plus the proposed fold domain
 /// `SUMCHAIN/REGISTRY/STATE/v1\0` (27 bytes, provisional with the activation
-/// proposal) and the `u64` record count (8 bytes). 4,096 × 186 + 35 =
-/// 761,891 bytes. Derived; not a separate parameter.
-pub const MAX_REGISTRY_FOLDED_BYTES: u64 =
-    MAX_REGISTRY_RECORDS * (32 + RegistryRecordV1::LEN as u64) + 27 + 8;
+/// proposal) and the `u64` record count (8 bytes): 761,891 bytes at the
+/// proposed limit. Derived; not a separate parameter.
+pub const MAX_REGISTRY_FOLDED_BYTES: u64 = MAX_REGISTRY_RECORDS
+    * (REGISTRY_ROW_ID_LEN + RegistryRecordV1::LEN as u64)
+    + REGISTRY_STATE_DIGEST_DOMAIN.len() as u64
+    + core::mem::size_of::<u64>() as u64;
+
+/// Bytes of a record id in a folded row.
+const REGISTRY_ROW_ID_LEN: u64 = 32;
 
 /// The most governance transactions naming operation 8 or 9 one block may
 /// carry, registers and disables together, whatever their outcome. Required by
@@ -111,7 +115,8 @@ pub const MAX_REGISTRY_FOLDED_BYTES: u64 =
 /// block at or above A carrying more is invalid as a whole. It is defined here,
 /// unwired, so that its value has one home, a census row and a pin before the
 /// activation change, which adds it to `protocol_digest::consensus_limits`.
-/// ConsensusConfig id: unallocated.
+/// ConsensusConfig id: unallocated. Frozen at A with [`REGISTRY_LIMITS`], under
+/// the same height-keyed change rule as [`MAX_REGISTRY_RECORDS`].
 pub const MAX_REGISTRY_OPS_PER_BLOCK: u64 = REGISTRY_LIMITS.max_ops_per_block as u64;
 
 /// `cf::META` key of the node-local freeze record (README §17 (a), PROPOSED;
@@ -136,10 +141,6 @@ pub enum RegistryIngressOp {
 #[derive(Debug, Clone, Copy)]
 pub struct RegistryIngressContext<'a> {
     pub params: &'a RegistryIngressParams,
-    /// The consensus limits this node enforces and commits in `P(h)`. Always
-    /// [`REGISTRY_LIMITS`] in a production binary; a value that fails
-    /// [`RegistryLimits::validate`] refuses both operations (`302`).
-    pub limits: RegistryLimits,
     /// The chain's genesis block hash (`Genesis::create_genesis_block().hash()`,
     /// consensus-configuration field `0x0005`). `None` refuses both operations.
     pub genesis_block_hash: Option<&'a [u8; 32]>,
@@ -150,16 +151,13 @@ pub struct RegistryIngressContext<'a> {
 pub(crate) struct Ready {
     values: RegistryIngressValues,
     genesis_block_hash: [u8; 32],
-    limits: RegistryLimits,
 }
 
 /// `Some` only when every named parameter and the genesis hash are present.
 pub(crate) fn ready(ctx: &RegistryIngressContext<'_>) -> Option<Ready> {
-    ctx.limits.validate().ok()?;
     Some(Ready {
         values: ctx.params.complete()?,
         genesis_block_hash: *ctx.genesis_block_hash?,
-        limits: ctx.limits,
     })
 }
 
@@ -218,8 +216,8 @@ pub(crate) fn validate_register(
     // The size bound, last: only an otherwise valid register, quorum included,
     // pays for the scan. This register would store one more record, so it is
     // refused once `max_records` records, Enabled or Disabled, exist. The
-    // limit is the context's, the value `P(h)` commits.
-    let max_records = u64::from(ready.limits.max_records);
+    // limit is REGISTRY_LIMITS, the one value `P(h)` commits.
+    let max_records = u64::from(REGISTRY_LIMITS.max_records);
     if v_count_records_up_to(view, max_records)? >= max_records {
         return Ok(Err(303));
     }
@@ -372,25 +370,33 @@ pub fn v_check_commit(
     Ok(check_commit(v_get_record(view, id)?.as_ref(), height))
 }
 
-/// `P(h)` for the values this context gives execution (README §16 §1.3,
-/// PROPOSED): the context's limits, which the size bound and the per-block cap
-/// read, the governance threshold the caller reads from `ChainParams`, and the
-/// named parameters when complete. Passing the same context to execution and to
-/// this function is what makes the committed and the enforced values one
-/// value; nothing here accepts a limit from anywhere else.
+/// `P(h)` for block execution (README §16 §1.3, PROPOSED). Every input is the
+/// value execution itself reads, from the same place:
+/// - both limits: [`REGISTRY_LIMITS`], the constant the size bound reads (and
+///   the activation change's per-block cap); there is no limits argument;
+/// - the governance threshold: `params.governance`'s
+///   `validator_authority_threshold_bps`, the field `validate_register` reads
+///   through `execute_registry_ingress`; absent governance (execution refuses
+///   `301`) commits `gov_tag = 0`;
+/// - T_min and W: committed exactly when execution can use them, that is when
+///   [`ready`] holds (both named parameters complete and the genesis hash
+///   present). Otherwise execution refuses `302` and `P(h)` commits
+///   `reg_tag = 0`, so the committed values never claim parameters that
+///   execution does not apply.
 pub fn registry_params_digest_for(
+    params: &sumchain_genesis::ChainParams,
     ctx: &RegistryIngressContext<'_>,
-    governance_threshold_bps: Option<u16>,
 ) -> sumchain_primitives::Hash {
-    let values = ctx
-        .params
-        .complete()
-        .map(|v| (v.min_timelock_blocks, v.max_approval_window));
-    sumchain_wire::registry_ingress::registry_params_digest(
-        &ctx.limits,
-        governance_threshold_bps,
-        values,
-    )
+    let threshold = params
+        .governance
+        .as_ref()
+        .map(|g| g.validator_authority_threshold_bps);
+    let values = ready(ctx).map(|r| (r.values.min_timelock_blocks, r.values.max_approval_window));
+    match sumchain_wire::registry_ingress::registry_params_digest(&REGISTRY_LIMITS, threshold, values) {
+        Ok(h) => h,
+        // REGISTRY_LIMITS is valid: asserted when sumchain-wire compiles.
+        Err(e) => unreachable!("REGISTRY_LIMITS is const-asserted valid: {e:?}"),
+    }
 }
 
 /// The proposed registry-state digest `R(h)` over this block's candidate view
@@ -441,10 +447,10 @@ mod tests {
     fn ready_needs_every_parameter_and_the_genesis_hash() {
         let hash = [7u8; 32];
         let params = full();
-        assert!(ready(&RegistryIngressContext { params: &params, limits: REGISTRY_LIMITS, genesis_block_hash: Some(&hash) }).is_some());
-        assert!(ready(&RegistryIngressContext { params: &params, limits: REGISTRY_LIMITS, genesis_block_hash: None }).is_none());
+        assert!(ready(&RegistryIngressContext { params: &params, genesis_block_hash: Some(&hash) }).is_some());
+        assert!(ready(&RegistryIngressContext { params: &params, genesis_block_hash: None }).is_none());
         let unset = REGISTRY_INGRESS_PARAMS;
         assert_eq!(unset, RegistryIngressParams::UNSET);
-        assert!(ready(&RegistryIngressContext { params: &unset, limits: REGISTRY_LIMITS, genesis_block_hash: Some(&hash) }).is_none());
+        assert!(ready(&RegistryIngressContext { params: &unset, genesis_block_hash: Some(&hash) }).is_none());
     }
 }

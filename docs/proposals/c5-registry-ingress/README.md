@@ -340,7 +340,7 @@ There are two limits. Both stay **PROPOSED** until the activation change impleme
 - **Every stored record counts (rule PROPOSED).** That includes disabled records, because R(h) folds them all, so a disabled record never frees capacity.
 - **Disable adds no record** and stays allowed at the limit.
 - **A disabled id stays present,** so re-registering it is refused with `303` at any count (rule 7).
-- **Raising the bound** is a coordinated upgrade.
+- **Raising the bound** after A is a new coordinated activation that height-keys the old and new values (§17 (c)). Every binary keeps the old value and applies it below the change height on replay, reorg and resync, so historical roots and outcomes still reproduce.
 
 **Tested in this PR (dormant, through the internal entry):**
 - **The limit:** with 4,095 records stored, a register is accepted; with 4,096 it is `303` (fee charged, and fee 0 when underfunded), and nothing is stored. Disable stays allowed at the limit, a disabled id cannot be registered again, and staged registers are counted (`the_size_bound_refuses_the_register_that_would_exceed_it`, `rolling_back_a_register_restores_the_count`).
@@ -403,7 +403,7 @@ There are two limits. Both stay **PROPOSED** until the activation change impleme
 
 #### (c) How both limits are authenticated (PROPOSED)
 
-`MAX_REGISTRY_RECORDS = 4096` and `MAX_REGISTRY_OPS_PER_BLOCK = 8` are compiled constants, derived from the one value `REGISTRY_LIMITS` (`state/src/registry_ingress.rs`). No configuration file carries them, so no acknowledgement can change them. Two binaries agree on them only if they were built from the same values. *[Amended 2026-10-26]* The authoritative binding is now the state root: both limits are committed in P(h) from A (§16 §1.3), so a node with a different value of either limit computes a different root at every block from A, even with an empty registry and no registry operation. Four mechanisms bind nodes to the same values once the activation change wires them. While dormant only the pins of (iv) and the P(h) encoding exist.
+`MAX_REGISTRY_RECORDS = 4096` and `MAX_REGISTRY_OPS_PER_BLOCK = 8` are compiled constants, derived from the one definition `REGISTRY_LIMITS` (`sumchain-wire/src/registry_ingress.rs`, re-exported by `state/src/registry_ingress.rs`). No configuration file carries them, so no acknowledgement can change them. Two binaries agree on them only if they were built from the same values. *[Amended 2026-10-26]* The authoritative binding is now the state root: both limits are committed in P(h) from A (§16 §1.3), so a node with a different value of either limit computes a different root at every block from A, even with an empty registry and no registry operation. Three mechanisms bind nodes to the same values once the activation change wires them (items 1-3), and item 4 is the rule their readers follow. While dormant only the pins of item 5 and the P(h) encoding exist.
 
 1. **The handshake (detection and exclusion of declaring peers).**
    - The activation change adds both names to `protocol_digest::consensus_limits` (`state/src/protocol_digest.rs:141`).
@@ -413,7 +413,7 @@ There are two limits. Both stay **PROPOSED** until the activation change impleme
    - This excludes a declaring peer that was built with another value. It checks no block.
    - Tested dormant: `once_folded_a_different_compiled_registry_limit_changes_the_protocol_digest` shows that a value one step away, in either limit, changes the digest.
 2. **Both limits, through P(h) in the state root (authoritative; amended 2026-10-26).**
-   - P(h) commits `max_records` and `max_ops_per_block` from the same `RegistryIngressContext::limits` that execution and block validity read (§16 §1.3), so the committed and enforced values are one value.
+   - P(h) commits `max_records` and `max_ops_per_block` from `REGISTRY_LIMITS`, the constant the size bound reads (§16 §1.3); the cap readers must read it too (item 4). The committed and enforced values are then one constant.
    - Two nodes differing only in one limit compute different roots at A and at every later block, whatever the block carries. Import refuses on the root mismatch (`storage/src/candidate.rs:481`). Tested in the local activation prototype: `nodes_with_different_registry_limits_refuse_each_others_block_at_a` (not the activation change's test).
    - Below A, P(h) is not folded, and the roots are equal.
    - **Also, through R(h):** a register at the boundary is accepted under one value and refused under another, so the two nodes store different rows.
@@ -425,7 +425,8 @@ There are two limits. Both stay **PROPOSED** until the activation change impleme
    - A node built with a smaller cap refuses honest blocks that carry more than its own cap.
    - Either way the disagreement is a refused block, never a silently different state.
    - Which chain advances then depends on proposer order. The local prototype observed a stall at the mismatched proposer's slot for value mismatches; that is not established for long runs, or for this specific mismatch.
-4. **Pins in this PR (dormant).**
+4. **Readers of the cap (activation change).** `validate_block`, the executor backstop and the producer cap **must** read `REGISTRY_LIMITS` (through its derived `MAX_REGISTRY_OPS_PER_BLOCK` or directly), never a literal or another value, so that the cap enforced and the value P(h) commits are the same constant. The activation change adds a test showing that the root fold and the cap read the same value.
+5. **Pins in this PR (dormant).**
    - `the_compiled_registry_limits_are_pinned_with_their_census_rows` asserts both values. It also asserts their `EXCLUDE unwired` census rows (`consensus/tests/data/consensus_constants_census.tsv`), their classification in `state/tests/protocol_digest_census.rs`, and that neither is in `consensus_limits()` yet.
    - Changing a value, or wiring one without classifying it, fails a test first.
 
@@ -434,7 +435,8 @@ There are two limits. Both stay **PROPOSED** until the activation change impleme
 #### Activation of both limits
 
 **Activation.** While dormant the bound is in neither `consensus_limits` nor the protocol digest, because no transaction reaches it. The activation change:
-- folds P(h), committing both limits from `REGISTRY_LIMITS` through the block's `RegistryIngressContext` (§16 §1.3);
+- folds P(h) through `registry_params_digest_for`, committing both limits from `REGISTRY_LIMITS` (§16 §1.3);
+- makes every cap reader (`validate_block`, the executor backstop, the producer cap) read `REGISTRY_LIMITS`, with a test that the root fold and the cap read the same value;
 - adds `MAX_REGISTRY_RECORDS` to `protocol_digest::consensus_limits`, so every node declares it in the protocol digest at the handshake;
 - adds the per-block cap `MAX_REGISTRY_OPS_PER_BLOCK` (defined, unwired, in this PR) as a block-validity rule, with its producer cap and executor backstop ((b) above), and to `consensus_limits` beside the bound;
 - moves both names out of `EXCLUDED` in `state/tests/protocol_digest_census.rs`, changes their census rows (`consensus_constants_census.tsv`) from `EXCLUDE unwired`, and updates `the_compiled_registry_limits_are_pinned_with_their_census_rows`, which fails until it does;
@@ -558,7 +560,8 @@ The test also checks:
 | Size bound: constants and folded bytes; the boundary vectors execute | `the_size_bound_constants`, `vectors_are_reproduced_and_execute` |
 | P(h): preimage layout; a different limit, threshold, T_min, W, order or presence gives a different digest | wire `params_digest_preimage_layout_and_every_field_matters`; `the_registry_params_digest_separates_every_mismatch` |
 | P(h) commits both limits at fixed offsets; either limit one step away changes P(h) with an empty registry and no registry operations; zero limits refused | `either_limit_changes_p_h_with_an_empty_registry_and_no_registry_operations`; wire `registry_limits_refuse_zero` |
-| One source: the size bound execution enforces is the context's limit, the value P(h) commits; invalid limits refuse both operations (`302`) | `the_size_bound_and_p_h_read_the_same_limits` |
+| One source: the size bound and P(h) read the one compiled `REGISTRY_LIMITS`; neither value is spelled as a registry-limit literal anywhere else; the wire builders refuse invalid limits and the constant is asserted valid at compile time | `the_size_bound_and_p_h_read_the_one_compiled_source`; `registry_limit_values_are_defined_once`; wire `registry_limits_refuse_zero` |
+| P(h) commits the threshold and values execution applies: `gov_tag = 0` without governance (`301`), `reg_tag = 0` whenever execution refuses `302` | `p_h_commits_the_threshold_and_values_execution_applies` |
 | R(h): preimage layout; ascending key order; disabled records folded; any byte change moves it | wire `state_digest_preimage_layout`; `the_registry_state_digest_is_ordered_and_covers_every_record` |
 | R(h) never folds around a bad row (short key, undecodable value, record under another id) | `the_registry_state_digest_refuses_every_malformed_row` |
 | Freeze record and gate pin: exact LE layout, round trip, refusal of short, long and cross-magic bytes; the META keys disjoint and prefix-free | wire `freeze_record_and_gate_pin_encode_decode_and_refuse`; `the_freeze_record_and_gate_pin_refuse_malformed_bytes`; `the_record_prefix_is_disjoint_from_every_state_key_family` (the `registry/` namespace, META keys included, is this module's alone) |
@@ -578,7 +581,7 @@ Read-only basis: main `e3b8ff81`; #348 `c867eedb`; #342 `13c5c755` (draft); #338
 
 ### 0. Summary
 
-- **Mechanism:** from a new registry activation gate A, `compute_block_state_root` appends two components: **P(h)**, a registry-parameters sub-commitment of the consensus-configuration values *effective at h* (T_min, W, 0x0601), and **R(h)**, the registry-state digest. Both go after the account-state fold and before the parent accumulator.
+- **Mechanism:** from a new registry activation gate A, `compute_block_state_root` appends two components: **P(h)**, a registry-parameters sub-commitment of both consensus limits (`REGISTRY_LIMITS`, amended 2026-10-26) and the consensus-configuration values *effective at h* (T_min, W, 0x0601), and **R(h)**, the registry-state digest. Both go after the account-state fold and before the parent accumulator.
 - **Why this binds:** every importer recomputes the root and refuses a mismatch (`storage/src/candidate.rs:459-485`). A node with different effective values computes a different root from block A, whether or not a registry operation occurs. It cannot import honest blocks, and its own blocks are refused.
 - **Handshake** (protocol digest) stays as early detection only.
 
@@ -634,23 +637,31 @@ R(h) is computed over the block's candidate view (as `v_account_state_digest`, `
 | next | 1 | `reg_tag` | 0 or 1 |
 | next | 8 + 8 | `T_min` u64 BE ‖ `W` u64 BE | only when `reg_tag = 1` |
 
-- **Lengths:** 36 bytes (no values), 38 (governance only), 52 (both).
+- **Lengths:** 36 bytes (no values), 38 (governance only), 54 (both).
 - **Why the limits come first, unconditionally:** they are compiled consensus constants that execution and block validity always apply from A. Fixed offsets keep them independent of the optional fields.
 - **Widths:**
   - `max_records` is u32, because the registry count is not bounded by any block field, and 32 bits cover every plausible registry while the fold cost stays computable (`max_records × 186` bytes).
   - `max_ops_per_block` is u16, because a cap above a block's transaction count would be meaningless, and u16 exceeds every configured `max_txs_per_block`.
-- **One source, so the committed and enforced values cannot diverge:**
-  - Both limits live in one value, `REGISTRY_LIMITS: RegistryLimits` (`state/src/registry_ingress.rs`).
-  - Execution reads it only through `RegistryIngressContext::limits`: the size bound in `validate_register`. The activation change's block-validity cap reads the same context field.
-  - `registry_params_digest_for(ctx, threshold)` builds P(h) from that same context, and nothing accepts a limit from anywhere else.
-  - `MAX_REGISTRY_RECORDS` and `MAX_REGISTRY_OPS_PER_BLOCK` are derived from `REGISTRY_LIMITS`. A context whose limits fail `RegistryLimits::validate` refuses both operations (`302`).
+- **One source, structurally, for the readers in this PR:**
+  - Both limits have one definition, `REGISTRY_LIMITS: RegistryLimits` (`sumchain_wire::registry_ingress`, re-exported by `sumchain_state::registry_ingress`). A compile-time assertion checks that it is valid.
+  - The size bound in `validate_register` reads the constant directly. `RegistryIngressContext` carries no limits, so no caller can supply one.
+  - `registry_params_digest_for(params, ctx)` builds P(h) from the same constant and accepts no limits argument. The wire `registry_params_digest(limits, …)` keeps its parameter for vectors and the local prototype only, and refuses invalid limits, so a zero limit is never committed.
+  - `MAX_REGISTRY_RECORDS` and `MAX_REGISTRY_OPS_PER_BLOCK` are derived from it.
+  - `registry_limit_values_are_defined_once` fails if either value is spelled as a registry-limit literal anywhere else in the workspace's Rust sources; only the definition and its pins are allowed.
+  - **Not yet established:** the per-block cap has no reader in this PR. Its three future readers (`validate_block`, the executor backstop, the producer cap) **must** read `REGISTRY_LIMITS` (§12.1 (c), activation list).
+- **The other P(h) inputs come from the values execution reads:**
+  - the threshold is `params.governance`'s `validator_authority_threshold_bps`, the field `validate_register` reads; absent governance (`301`) commits `gov_tag = 0`;
+  - T_min and W are committed exactly when execution can apply them (`ready`: both parameters complete and the genesis hash present). Otherwise execution refuses `302`, and P(h) commits `reg_tag = 0`.
 - **Tests:**
   - `either_limit_changes_p_h_with_an_empty_registry_and_no_registry_operations`;
-  - `the_size_bound_and_p_h_read_the_same_limits`;
+  - `the_size_bound_and_p_h_read_the_one_compiled_source`;
+  - `p_h_commits_the_threshold_and_values_execution_applies`;
+  - `registry_limit_values_are_defined_once`;
   - `the_registry_params_digest_separates_every_mismatch`;
   - the wire `params_digest_preimage_layout_and_every_field_matters` and `registry_limits_refuse_zero`;
   - the vectors `prospective_registry_params.*`, including the four `*_plus_1` cases.
-- **The freeze record (§17) does not carry the limits:** they are compiled, not configured, so no acknowledgement can change them. A different value means a different binary, and the root of every block from A shows it.
+- **The freeze record (§17) does not carry the limits:** they are compiled constants, not configuration, so no acknowledgement can change them. P(h) and the root bind them: a different value means a different binary, and the root of every block from A shows it.
+- **Frozen at A.** Like T_min, W and the threshold, both limits are fixed from A. A later change is a new coordinated activation with a height-keyed entry (§17 (c)): every binary keeps the old value and applies it below the change height on replay, reorg and resync.
 
 *[Amended 2026-10-26]* These preimages have one dormant implementation in this PR. Nothing calls it, and no root folds it:
 - `registry_params_digest_preimage` / `registry_params_digest` and `registry_state_digest_preimage` (`sumchain_wire::registry_ingress`);
@@ -1004,9 +1015,10 @@ Every test named in the last column is **LOCAL PROTOTYPE evidence (not the activ
 A change to any frozen value after A is a new coordinated activation. No single node's acknowledgement can make it.
 - **New gate B** (provisional name), with B > A, introduced by a new binary.
 - **A height-keyed entry under a new ConsensusConfig schema version** (unallocated):
-  - the entry is `{effective_from: B, threshold_bps, T_min, W}`, with provisional ids;
+  - the entry is `{effective_from: B, threshold_bps, T_min, W, max_records, max_ops_per_block}`, with provisional ids (amended 2026-10-26: both limits are frozen at A too and change only this way);
   - `effective(h)` is the frozen value for A ≤ h < B, and the entry for h ≥ B;
-  - P(h) folds `effective(h)`, and from that change every reader of 0x0601 routes through `effective(h)`.
+  - P(h) folds `effective(h)`, and from that change every reader of 0x0601 routes through `effective(h)`;
+  - **the limits:** a binary carrying a limit change keeps the old compiled `REGISTRY_LIMITS` and applies it for A ≤ h < B (the size bound, the per-block cap and P(h)), and the new value only from B, on replay, reorg and resync. A binary that applied the new value below B would reproduce neither the historical roots nor the historical outcomes. The freeze rows do not carry the limits (compiled, not configured).
 - **Freeze rows.**
   - The A row stays as it is: its values remain effective below B, and replay below B uses them.
   - The entry gets its own row of the same kind (provisional key `registry/freeze/v2`), written in the batch of the first publish ≥ B, under the same rules as (a).
