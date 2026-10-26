@@ -22,16 +22,19 @@ use sumchain_primitives::{Address, Hash, TxPayload, TxStatus};
 use sumchain_state::governance_executor::execute_registry_ingress;
 use sumchain_state::registry_ingress::{
     registry_record_key, v_check_commit, v_count_records_up_to, v_get_record,
-    RegistryIngressContext, RegistryIngressOp, MAX_REGISTRY_FOLDED_BYTES, MAX_REGISTRY_RECORDS,
-    REGISTRY_INGRESS_PARAMS, REGISTRY_RECORD_KEY_PREFIX,
+    v_registry_state_digest, RegistryIngressContext, RegistryIngressOp, MAX_REGISTRY_FOLDED_BYTES,
+    MAX_REGISTRY_OPS_PER_BLOCK, MAX_REGISTRY_RECORDS, REGISTRY_FREEZE_META_KEY,
+    REGISTRY_GATE_PIN_META_KEY, REGISTRY_INGRESS_PARAMS, REGISTRY_RECORD_KEY_PREFIX,
 };
 use sumchain_storage::cf;
 use sumchain_state::state::StateManager;
 use sumchain_storage::candidate::CandidateExecution;
 use sumchain_storage::Database;
 use sumchain_wire::registry_ingress::{
-    registry_disable_signing_bytes, registry_register_signing_bytes, unset_commitments,
-    RegistryCommitRefusal, RegistryDisableV1, RegistryIngressParams, RegistryRegisterV1,
+    registry_disable_signing_bytes, registry_params_digest, registry_params_digest_preimage,
+    registry_register_signing_bytes, registry_state_digest_preimage, unset_commitments,
+    RegistryCommitRefusal, RegistryDisableV1, RegistryFreezeRecordV1, RegistryGatePinV1,
+    RegistryIngressParams, RegistryRegisterV1,
 };
 use sumchain_wire::registry_wire::{RegistryRecordV1, RegistryStatus};
 use tempfile::TempDir;
@@ -762,7 +765,61 @@ fn vectors() -> String {
             required_approvals(n, bps).to_string(),
         );
     }
+    // The per-block cap (owner, 2026-10-23; rule and value PROPOSED), §12.1 (b).
+    line(
+        "prospective_registry_limit.max_ops_per_block",
+        MAX_REGISTRY_OPS_PER_BLOCK.to_string(),
+    );
+    // The proposed state-root folds (README §16 §1.3; big-endian integers).
+    for (name, gov, reg) in [
+        ("none", None, None),
+        ("governance_only", Some(GOV_BPS), None),
+        ("both", Some(GOV_BPS), Some((T_MIN, WINDOW))),
+    ] {
+        line(
+            &format!("prospective_registry_params.{name}.preimage"),
+            hex(&registry_params_digest_preimage(gov, reg)),
+        );
+        line(
+            &format!("prospective_registry_params.{name}.digest"),
+            hex(registry_params_digest(gov, reg).as_bytes()),
+        );
+    }
+    let rec_bytes: [u8; RegistryRecordV1::LEN] = rec.try_encode().unwrap()[..].try_into().unwrap();
+    for (name, rows) in [
+        ("empty", vec![]),
+        ("one_record", vec![(&rec.id, &rec_bytes)]),
+    ] {
+        let preimage = registry_state_digest_preimage(rows);
+        line(&format!("prospective_registry_state.{name}.preimage"), hex(&preimage));
+        line(
+            &format!("prospective_registry_state.{name}.digest"),
+            hex(Hash::hash(&preimage).as_bytes()),
+        );
+    }
+    // The node-local freeze record and gate pin (README §17 (a); little-endian).
+    line("test_only.registry_gate_a", FREEZE_A.to_string());
+    line("prospective_registry_freeze.record", hex(&freeze_fixture().encode()));
+    line(
+        "prospective_registry_freeze.gate_pin",
+        hex(&RegistryGatePinV1 { gate_a: FREEZE_A }.encode()),
+    );
     out
+}
+
+/// TEST_ONLY activation height A of the freeze vectors (above the 496,720
+/// legacy-root window the §16 load rules require).
+const FREEZE_A: u64 = 500_000;
+
+/// The freeze record of the fixture's values, written at A.
+fn freeze_fixture() -> RegistryFreezeRecordV1 {
+    RegistryFreezeRecordV1 {
+        gate_a: FREEZE_A,
+        threshold_bps: GOV_BPS,
+        t_min: T_MIN,
+        w: WINDOW,
+        first_height: FREEZE_A,
+    }
 }
 
 /// (n, bps) boundaries of the quorum rule: n = 1, the effective validator cap
@@ -870,6 +927,37 @@ fn vectors_are_reproduced_and_execute() {
             .collect();
         assert_eq!(s.run(&n, &mut c, REG, bytes, H, &vset(&[1])), want, "{stored_records} stored");
     }
+
+    // The fold vectors are what the dormant digest computes over real state:
+    // R_empty over an empty registry, the one-record R after one stored record.
+    let n = node();
+    let mut c = candidate(&n.db);
+    assert_eq!(
+        hex(v_registry_state_digest(&c.view()).unwrap().as_bytes()),
+        field("prospective_registry_state.empty.digest")
+    );
+    let rec = record(0x11);
+    sumchain_state::registry_ingress::v_put_record(&mut c.view(), &rec).unwrap();
+    assert_eq!(
+        hex(v_registry_state_digest(&c.view()).unwrap().as_bytes()),
+        field("prospective_registry_state.one_record.digest")
+    );
+    // The freeze record and the gate pin decode back to their fields.
+    let unhex = |k: &str| -> Vec<u8> {
+        let h = field(k);
+        (0..h.len()).step_by(2).map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap()).collect()
+    };
+    assert_eq!(
+        RegistryFreezeRecordV1::decode_exact(&unhex("prospective_registry_freeze.record")),
+        Ok(freeze_fixture())
+    );
+    assert_eq!(
+        RegistryGatePinV1::decode_exact(&unhex("prospective_registry_freeze.gate_pin")),
+        Ok(RegistryGatePinV1 { gate_a: FREEZE_A })
+    );
+    assert_eq!(unhex("prospective_registry_freeze.record").len(), 41);
+    assert_eq!(unhex("prospective_registry_freeze.gate_pin").len(), 15);
+    assert_eq!(field("prospective_registry_limit.max_ops_per_block"), "8");
 
     for (signers, ids) in [(&[1u8][..], &[1u8][..]), (&[1u8, 2, 3][..], &[1u8, 2, 3, 4][..])] {
         let n = node();
@@ -2421,4 +2509,174 @@ fn a_governance_threshold_change_does_not_move_an_existing_record() {
     // The older record is still disabled at its stored 5000 bps: 1 of 2.
     assert_eq!(run(&mut c, 10_000, DIS, disable(H + 50, 1, &[1])), TxStatus::Success);
     assert_eq!(stored(&mut c, 1).unwrap().status, RegistryStatus::Disabled);
+}
+
+// ── Activation-change encodings: mismatch and refusal tests (dormant) ──────
+
+/// `R(h)` never folds around a bad row: a short key, an undecodable value and
+/// a record stored under another id each make the digest an error, exactly as
+/// the size-bound count refuses them. Rows are seeded before any candidate.
+#[test]
+fn the_registry_state_digest_refuses_every_malformed_row() {
+    let short_key = [REGISTRY_RECORD_KEY_PREFIX, &[0x11; 31]].concat();
+    let cases: [(&str, Vec<u8>, Vec<u8>); 3] = [
+        ("short key", short_key, record(0x11).try_encode().unwrap()),
+        ("undecodable", registry_record_key(&[0x11; 32]), b"not a record".to_vec()),
+        (
+            "another id",
+            registry_record_key(&[0x11; 32]),
+            record(0x12).try_encode().unwrap(),
+        ),
+    ];
+    for (why, key, value) in cases {
+        let n = node();
+        seed_state_row(&n.db, &key, &value);
+        let mut c = candidate(&n.db);
+        assert!(v_registry_state_digest(&c.view()).is_err(), "{why} must be an error");
+    }
+}
+
+/// `R(h)` covers every stored record in ascending key order, disabled ones
+/// included, and moves when any record's bytes move.
+#[test]
+fn the_registry_state_digest_is_ordered_and_covers_every_record() {
+    let (a, b) = (record(0x11), record(0x22));
+    let bytes = |r: &RegistryRecordV1| -> [u8; RegistryRecordV1::LEN] {
+        r.try_encode().unwrap()[..].try_into().unwrap()
+    };
+    let n = node();
+    // Inserted in descending order; folded in ascending key order.
+    seed_state_row(&n.db, &registry_record_key(&b.id), &b.try_encode().unwrap());
+    seed_state_row(&n.db, &registry_record_key(&a.id), &a.try_encode().unwrap());
+    let mut c = candidate(&n.db);
+    let (ab, bb) = (bytes(&a), bytes(&b));
+    let want = Hash::hash(&registry_state_digest_preimage([(&a.id, &ab), (&b.id, &bb)]));
+    assert_eq!(v_registry_state_digest(&c.view()).unwrap(), want);
+    let swapped = Hash::hash(&registry_state_digest_preimage([(&b.id, &bb), (&a.id, &ab)]));
+    assert_ne!(want, swapped, "order is part of the digest");
+
+    // Disabling a record changes its status byte, and so the digest; the
+    // disabled record is still folded (the count stays 2).
+    let mut a_disabled = a.clone();
+    a_disabled.status = RegistryStatus::Disabled;
+    let n2 = node();
+    seed_state_row(&n2.db, &registry_record_key(&b.id), &b.try_encode().unwrap());
+    seed_state_row(&n2.db, &registry_record_key(&a.id), &a_disabled.try_encode().unwrap());
+    let mut c2 = candidate(&n2.db);
+    let got = v_registry_state_digest(&c2.view()).unwrap();
+    assert_ne!(got, want);
+    let ad = bytes(&a_disabled);
+    assert_eq!(got, Hash::hash(&registry_state_digest_preimage([(&a.id, &ad), (&b.id, &bb)])));
+}
+
+/// Two nodes whose frozen values differ in any field compute a different
+/// `P(h)`, and so a different root from A: the mismatch the binding relies on.
+#[test]
+fn the_registry_params_digest_separates_every_mismatch() {
+    let base = registry_params_digest(Some(GOV_BPS), Some((T_MIN, WINDOW)));
+    for (why, other) in [
+        ("threshold", registry_params_digest(Some(GOV_BPS + 1), Some((T_MIN, WINDOW)))),
+        ("timelock", registry_params_digest(Some(GOV_BPS), Some((T_MIN + 1, WINDOW)))),
+        ("window", registry_params_digest(Some(GOV_BPS), Some((T_MIN, WINDOW + 1)))),
+        ("timelock and window swapped", registry_params_digest(Some(GOV_BPS), Some((WINDOW, T_MIN)))),
+        ("governance absent", registry_params_digest(None, Some((T_MIN, WINDOW)))),
+        ("registry values absent", registry_params_digest(Some(GOV_BPS), None)),
+    ] {
+        assert_ne!(base, other, "{why}");
+    }
+}
+
+/// The freeze record and the gate pin are refused, never misread, when their
+/// bytes are short, long or carry the other's magic; a refusal refuses start.
+#[test]
+fn the_freeze_record_and_gate_pin_refuse_malformed_bytes() {
+    let rec = freeze_fixture().encode();
+    let pin = RegistryGatePinV1 { gate_a: FREEZE_A }.encode();
+    assert!(RegistryFreezeRecordV1::decode_exact(&rec[..40]).is_err());
+    assert!(RegistryFreezeRecordV1::decode_exact(&[&rec[..], &[0]].concat()).is_err());
+    assert!(RegistryFreezeRecordV1::decode_exact(&pin).is_err());
+    assert!(RegistryGatePinV1::decode_exact(&pin[..14]).is_err());
+    assert!(RegistryGatePinV1::decode_exact(&rec).is_err());
+    // A gate pin whose A differs from the record's is a different pin: the
+    // startup comparison (§17 (a)) refuses a configured A that is not the pin's.
+    assert_ne!(pin, RegistryGatePinV1 { gate_a: FREEZE_A + 1 }.encode());
+    // The META keys are disjoint, and neither is a prefix of the other or of
+    // the registry's STATE prefix.
+    for (x, y) in [
+        (REGISTRY_FREEZE_META_KEY, REGISTRY_GATE_PIN_META_KEY),
+        (REGISTRY_GATE_PIN_META_KEY, REGISTRY_FREEZE_META_KEY),
+        (REGISTRY_FREEZE_META_KEY, REGISTRY_RECORD_KEY_PREFIX),
+        (REGISTRY_GATE_PIN_META_KEY, REGISTRY_RECORD_KEY_PREFIX),
+        (REGISTRY_RECORD_KEY_PREFIX, REGISTRY_FREEZE_META_KEY),
+        (REGISTRY_RECORD_KEY_PREFIX, REGISTRY_GATE_PIN_META_KEY),
+    ] {
+        assert!(!x.starts_with(y), "{:?} starts with {:?}", String::from_utf8_lossy(x), String::from_utf8_lossy(y));
+    }
+}
+
+/// Both proposed consensus limits are pinned: their values, their census rows
+/// and their protocol-digest classification. Changing either value, or
+/// wiring it without moving it into `consensus_limits`, fails here first.
+#[test]
+fn the_compiled_registry_limits_are_pinned_with_their_census_rows() {
+    assert_eq!(MAX_REGISTRY_RECORDS, 4_096);
+    assert_eq!(MAX_REGISTRY_OPS_PER_BLOCK, 8);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let census = std::fs::read_to_string(root.join("consensus/tests/data/consensus_constants_census.tsv")).unwrap();
+    for name in ["MAX_REGISTRY_RECORDS", "MAX_REGISTRY_OPS_PER_BLOCK"] {
+        let row = census
+            .lines()
+            .find(|l| l.starts_with(&format!("crates/state/src/registry_ingress.rs\t{name}\t")))
+            .unwrap_or_else(|| panic!("no census row for {name}"));
+        assert!(row.contains("\tEXCLUDE\tunwired\t"), "{name}: {row}");
+        assert!(row.contains("PROPOSED value"), "{name}: {row}");
+    }
+    // Not in consensus_limits while dormant; the activation change moves both.
+    let names: Vec<&str> = sumchain_state::protocol_digest::consensus_limits()
+        .iter()
+        .map(|(n, _)| *n)
+        .collect();
+    assert!(!names.contains(&"MAX_REGISTRY_RECORDS"));
+    assert!(!names.contains(&"MAX_REGISTRY_OPS_PER_BLOCK"));
+    let digest_census = std::fs::read_to_string(root.join("state/tests/protocol_digest_census.rs")).unwrap();
+    for name in ["\"MAX_REGISTRY_RECORDS\"", "\"MAX_REGISTRY_OPS_PER_BLOCK\""] {
+        assert!(digest_census.contains(name), "{name} is not classified in protocol_digest_census.rs");
+    }
+}
+
+/// The handshake half of the limits' binding, modelled before activation: once
+/// the activation change folds both limits into `consensus_limits`, a binary
+/// compiled with a different value of either declares a different protocol
+/// digest. `protocol_digest_with_limits` computes the digest the OTHER binary
+/// would declare; production `consensus_limits()` is not changed here.
+#[test]
+fn once_folded_a_different_compiled_registry_limit_changes_the_protocol_digest() {
+    use sumchain_state::protocol_digest::{consensus_limits, protocol_digest_with_limits, LimitValue};
+    let g = sumchain_genesis::Genesis::new(
+        1,
+        1_734_624_000_000,
+        vec![
+            "GW1pJKzqDmmHczMGz5g7CV51RgDuR6kKw76yZ1cVbEv8".to_string(),
+            "7jUZxm5rJ5PazGYkrtJ4sUJj7ztib2VHEoM2Yc4Liydy".to_string(),
+        ],
+        [("8zZ1pfbpUcAmoByWKYgJgiFZWpmhWQKJ4".to_string(), 500u128)].into_iter().collect(),
+        ChainParams::default(),
+    );
+    let with = |records: u64, ops: u64| {
+        let mut limits = consensus_limits();
+        limits.push(("MAX_REGISTRY_RECORDS", LimitValue::Num(records as u128)));
+        limits.push(("MAX_REGISTRY_OPS_PER_BLOCK", LimitValue::Num(ops as u128)));
+        protocol_digest_with_limits(&g, &limits).unwrap()
+    };
+    let honest = with(MAX_REGISTRY_RECORDS, MAX_REGISTRY_OPS_PER_BLOCK);
+    let today = protocol_digest_with_limits(&g, &consensus_limits()).unwrap();
+    for (why, other) in [
+        ("record limit + 1", with(MAX_REGISTRY_RECORDS + 1, MAX_REGISTRY_OPS_PER_BLOCK)),
+        ("record limit - 1", with(MAX_REGISTRY_RECORDS - 1, MAX_REGISTRY_OPS_PER_BLOCK)),
+        ("per-block cap + 1", with(MAX_REGISTRY_RECORDS, MAX_REGISTRY_OPS_PER_BLOCK + 1)),
+        ("per-block cap - 1", with(MAX_REGISTRY_RECORDS, MAX_REGISTRY_OPS_PER_BLOCK - 1)),
+        ("neither folded (today's binaries)", today),
+    ] {
+        assert_ne!(honest, other, "{why}");
+    }
 }

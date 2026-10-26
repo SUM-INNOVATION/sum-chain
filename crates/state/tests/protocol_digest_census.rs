@@ -85,6 +85,12 @@ const EXCLUDED: &[(&str, &str)] = &[
          operations 8 and 9 do not decode; activation adds it to consensus_limits",
     ),
     (
+        "MAX_REGISTRY_OPS_PER_BLOCK",
+        "dormant C5 per-block cap on registry operations (PROPOSED value); read by \
+         no code; a block-validity rule of the activation change, which adds it \
+         to consensus_limits",
+    ),
+    (
         "MAX_REGISTRY_FOLDED_BYTES",
         "derived from MAX_REGISTRY_RECORDS; documents the proposed fold's byte \
          bound and is read by no code path",

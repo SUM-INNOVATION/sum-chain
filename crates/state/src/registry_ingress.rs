@@ -88,6 +88,25 @@ pub const MAX_REGISTRY_RECORDS: u64 = 4_096;
 pub const MAX_REGISTRY_FOLDED_BYTES: u64 =
     MAX_REGISTRY_RECORDS * (32 + RegistryRecordV1::LEN as u64) + 27 + 8;
 
+/// The most governance transactions naming operation 8 or 9 one block may
+/// carry, registers and disables together, whatever their outcome. Required by
+/// the owner 2026-10-23; rule and value PROPOSED; dormant and read by no code.
+///
+/// It is a block-validity rule of the activation change (README §12.1 (b)): a
+/// block at or above A carrying more is invalid as a whole. It is defined here,
+/// unwired, so that its value has one home, a census row and a pin before the
+/// activation change, which adds it to `protocol_digest::consensus_limits`.
+/// ConsensusConfig id: unallocated.
+pub const MAX_REGISTRY_OPS_PER_BLOCK: u64 = 8;
+
+/// `cf::META` key of the node-local freeze record (README §17 (a), PROPOSED;
+/// key name provisional). No code writes it while dormant.
+pub const REGISTRY_FREEZE_META_KEY: &[u8] = b"registry/freeze/v1";
+
+/// `cf::META` key of the node-local gate pin (README §17 (a), PROPOSED; key
+/// name provisional). No code writes it while dormant.
+pub const REGISTRY_GATE_PIN_META_KEY: &[u8] = b"registry/freeze/gate/v1";
+
 /// Which proposed operation an internal call runs. Deliberately not a
 /// `GovernanceOperation` variant: no transaction decodes to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,6 +346,39 @@ pub fn v_check_commit(
     height: u64,
 ) -> Result<std::result::Result<(), RegistryCommitRefusal>> {
     Ok(check_commit(v_get_record(view, id)?.as_ref(), height))
+}
+
+/// The proposed registry-state digest `R(h)` over this block's candidate view
+/// (README §16 §1.3, PROPOSED). Dormant: no root folds it.
+///
+/// It reads every row under `registry/v1/` in ascending key order, the rows the
+/// size-bound count reads. Each must pass [`checked_registry_row`]: a row that
+/// does not, or a read error, is an error that fails the block, never skipped
+/// or folded around. The preimage is
+/// [`sumchain_wire::registry_ingress::registry_state_digest_preimage`].
+pub fn v_registry_state_digest(view: &ExecutionView<'_, '_>) -> Result<sumchain_primitives::Hash> {
+    let mut rows: Vec<([u8; 32], [u8; RegistryRecordV1::LEN])> = Vec::new();
+    for entry in view
+        .prefix_iter(cf::STATE, REGISTRY_RECORD_KEY_PREFIX)
+        .map_err(StateError::Storage)?
+    {
+        let (key, value) = entry.map_err(StateError::Storage)?;
+        if !key.starts_with(REGISTRY_RECORD_KEY_PREFIX) {
+            break;
+        }
+        let record = checked_registry_row(&key, &value)?;
+        let bytes: [u8; RegistryRecordV1::LEN] = value[..].try_into().map_err(|_| {
+            StateError::Storage(StorageError::InvalidData(format!(
+                "registry record of {} bytes",
+                value.len()
+            )))
+        })?;
+        rows.push((record.id, bytes));
+    }
+    let preimage = sumchain_wire::registry_ingress::registry_state_digest_preimage(
+        rows.iter().map(|(id, bytes)| (id, bytes)),
+    );
+    Ok(sumchain_primitives::Hash::hash(&preimage))
 }
 
 #[cfg(test)]

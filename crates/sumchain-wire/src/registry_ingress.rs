@@ -406,6 +406,186 @@ pub fn check_commit(record: Option<&RegistryRecordV1>, height: u64) -> Result<()
     Ok(())
 }
 
+// ── Activation-change encodings (PROPOSED, dormant, unwired) ────────────────
+//
+// The byte forms the activation proposal (README §16, §17) relies on, defined
+// here so that they have one implementation, vectors and refusal tests before
+// the activation change exists. Nothing calls them: no root folds `P(h)` or
+// `R(h)`, and no node writes the freeze record or the gate pin.
+
+/// Domain of the registry-parameters digest `P(h)` (PROPOSED).
+pub const REGISTRY_PARAMS_DIGEST_DOMAIN: &[u8] = b"SUMCHAIN/REGISTRY/PARAMS/v1\0";
+/// Domain of the registry-state digest `R(h)` (PROPOSED).
+pub const REGISTRY_STATE_DIGEST_DOMAIN: &[u8] = b"SUMCHAIN/REGISTRY/STATE/v1\0";
+
+/// The preimage of `P(h)`. Integers are **big-endian**, like the state root's
+/// own integers:
+///
+/// `REGISTRY_PARAMS_DIGEST_DOMAIN[28] ‖ gov_tag u8 [‖ threshold_bps u16] ‖
+/// reg_tag u8 [‖ T_min u64 ‖ W u64]`
+///
+/// A tag is 0 when its values are absent and 1 when present. `T_min` and `W`
+/// are present or absent together (paired presence).
+pub fn registry_params_digest_preimage(
+    governance_threshold_bps: Option<u16>,
+    timelock_and_window: Option<(u64, u64)>,
+) -> Vec<u8> {
+    let mut m = Vec::with_capacity(REGISTRY_PARAMS_DIGEST_DOMAIN.len() + 1 + 2 + 1 + 16);
+    m.extend_from_slice(REGISTRY_PARAMS_DIGEST_DOMAIN);
+    match governance_threshold_bps {
+        Some(bps) => {
+            m.push(1);
+            m.extend_from_slice(&bps.to_be_bytes());
+        }
+        None => m.push(0),
+    }
+    match timelock_and_window {
+        Some((t_min, w)) => {
+            m.push(1);
+            m.extend_from_slice(&t_min.to_be_bytes());
+            m.extend_from_slice(&w.to_be_bytes());
+        }
+        None => m.push(0),
+    }
+    m
+}
+
+/// `P(h)` = BLAKE3 of [`registry_params_digest_preimage`].
+pub fn registry_params_digest(
+    governance_threshold_bps: Option<u16>,
+    timelock_and_window: Option<(u64, u64)>,
+) -> crate::hash::Hash {
+    crate::hash::Hash::hash(&registry_params_digest_preimage(
+        governance_threshold_bps,
+        timelock_and_window,
+    ))
+}
+
+/// The preimage of `R(h)` over `rows`, which the caller supplies in ascending
+/// key order, each an id and that record's frozen bytes. The count is a
+/// **big-endian** u64 after the rows:
+///
+/// `REGISTRY_STATE_DIGEST_DOMAIN[27] ‖ (id[32] ‖ record[154])* ‖ count u64`
+///
+/// The row rule (the key is `registry/v1/` ‖ id, the record decodes and its id
+/// is the key's) is checked where the rows are read, by
+/// `sumchain_state::registry_ingress::checked_registry_row`.
+pub fn registry_state_digest_preimage<'a>(
+    rows: impl IntoIterator<Item = (&'a [u8; 32], &'a [u8; RegistryRecordV1::LEN])>,
+) -> Vec<u8> {
+    let mut m = REGISTRY_STATE_DIGEST_DOMAIN.to_vec();
+    let mut count: u64 = 0;
+    for (id, record) in rows {
+        m.extend_from_slice(id);
+        m.extend_from_slice(record);
+        count += 1;
+    }
+    m.extend_from_slice(&count.to_be_bytes());
+    m
+}
+
+/// MAGIC of the node-local freeze record (PROPOSED).
+pub const REGISTRY_FREEZE_MAGIC: [u8; 7] = *b"RFRZv1\0";
+/// Length of [`RegistryFreezeRecordV1`]: 7 + 8 + 2 + 8 + 8 + 8.
+pub const REGISTRY_FREEZE_RECORD_LEN: usize = 41;
+
+/// The node-local freeze record (README §17 (a), PROPOSED). Not consensus
+/// state: it lives in `cf::META`, outside the generic journal, and says which
+/// values this node committed to at its first publish at or above A. Integers
+/// are **little-endian**, like the ConsensusConfig record:
+///
+/// `REGISTRY_FREEZE_MAGIC[7] ‖ gate_a u64 ‖ threshold_bps u16 ‖ t_min u64 ‖
+/// w u64 ‖ first_height u64`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegistryFreezeRecordV1 {
+    /// The registry activation height A, as configured.
+    pub gate_a: u64,
+    /// The governance threshold the block at `first_height` executed with.
+    pub threshold_bps: u16,
+    /// T_min the block at `first_height` executed with.
+    pub t_min: u64,
+    /// W the block at `first_height` executed with.
+    pub w: u64,
+    /// The height of the block whose publication wrote the record (≥ A).
+    pub first_height: u64,
+}
+
+impl RegistryFreezeRecordV1 {
+    /// The 41-byte encoding.
+    pub fn encode(&self) -> [u8; REGISTRY_FREEZE_RECORD_LEN] {
+        let mut out = [0u8; REGISTRY_FREEZE_RECORD_LEN];
+        out[..7].copy_from_slice(&REGISTRY_FREEZE_MAGIC);
+        out[7..15].copy_from_slice(&self.gate_a.to_le_bytes());
+        out[15..17].copy_from_slice(&self.threshold_bps.to_le_bytes());
+        out[17..25].copy_from_slice(&self.t_min.to_le_bytes());
+        out[25..33].copy_from_slice(&self.w.to_le_bytes());
+        out[33..41].copy_from_slice(&self.first_height.to_le_bytes());
+        out
+    }
+
+    /// Decode exactly 41 bytes. Any other length, or another magic, is
+    /// refused: an unreadable record refuses start, never "no record".
+    pub fn decode_exact(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let ctx: &'static str = "RegistryFreezeRecordV1";
+        let mut r = Reader::new(bytes);
+        if r.read_array::<7>(ctx)? != REGISTRY_FREEZE_MAGIC {
+            return Err(DecodeError::BadTag { ctx });
+        }
+        let gate_a = r.read_u64(ctx)?;
+        let threshold_bps = r.read_u16(ctx)?;
+        let t_min = r.read_u64(ctx)?;
+        let w = r.read_u64(ctx)?;
+        let first_height = r.read_u64(ctx)?;
+        r.finish(ctx)?;
+        Ok(Self {
+            gate_a,
+            threshold_bps,
+            t_min,
+            w,
+            first_height,
+        })
+    }
+}
+
+/// MAGIC of the node-local gate pin (PROPOSED).
+pub const REGISTRY_GATE_PIN_MAGIC: [u8; 7] = *b"RFGTv1\0";
+/// Length of [`RegistryGatePinV1`]: 7 + 8.
+pub const REGISTRY_GATE_PIN_LEN: usize = 15;
+
+/// The node-local gate pin (README §17 (a), PROPOSED), written by the explicit
+/// recovery rollback in the batch that deletes the freeze record. The integer
+/// is **little-endian**:
+///
+/// `REGISTRY_GATE_PIN_MAGIC[7] ‖ gate_a u64`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegistryGatePinV1 {
+    /// The registry activation height A that the deleted freeze record held.
+    pub gate_a: u64,
+}
+
+impl RegistryGatePinV1 {
+    /// The 15-byte encoding.
+    pub fn encode(&self) -> [u8; REGISTRY_GATE_PIN_LEN] {
+        let mut out = [0u8; REGISTRY_GATE_PIN_LEN];
+        out[..7].copy_from_slice(&REGISTRY_GATE_PIN_MAGIC);
+        out[7..15].copy_from_slice(&self.gate_a.to_le_bytes());
+        out
+    }
+
+    /// Decode exactly 15 bytes. Any other length, or another magic, is
+    /// refused: an unreadable pin refuses start.
+    pub fn decode_exact(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let ctx: &'static str = "RegistryGatePinV1";
+        let mut r = Reader::new(bytes);
+        if r.read_array::<7>(ctx)? != REGISTRY_GATE_PIN_MAGIC {
+            return Err(DecodeError::BadTag { ctx });
+        }
+        let gate_a = r.read_u64(ctx)?;
+        r.finish(ctx)?;
+        Ok(Self { gate_a })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,9 +736,11 @@ mod tests {
 
     #[test]
     fn domains_are_prefix_free_against_every_registry_and_validator_domain() {
-        let all: [&[u8]; 9] = [
+        let all: [&[u8]; 11] = [
             REGISTRY_REGISTER_DOMAIN,
             REGISTRY_DISABLE_DOMAIN,
+            REGISTRY_PARAMS_DIGEST_DOMAIN,
+            REGISTRY_STATE_DIGEST_DOMAIN,
             VK_ID_TAG,
             TOKENIZER_ID_TAG,
             GRAPH_DEFINITION_TAG,
@@ -574,10 +756,102 @@ mod tests {
                 }
             }
         }
-        for d in [REGISTRY_REGISTER_DOMAIN, REGISTRY_DISABLE_DOMAIN] {
+        for d in [
+            REGISTRY_REGISTER_DOMAIN,
+            REGISTRY_DISABLE_DOMAIN,
+            REGISTRY_PARAMS_DIGEST_DOMAIN,
+            REGISTRY_STATE_DIGEST_DOMAIN,
+        ] {
             assert_eq!(d.iter().filter(|&&b| b == 0).count(), 1);
             assert_eq!(*d.last().unwrap(), 0);
         }
+        assert_eq!(REGISTRY_PARAMS_DIGEST_DOMAIN.len(), 28);
+        assert_eq!(REGISTRY_STATE_DIGEST_DOMAIN.len(), 27);
+    }
+
+    #[test]
+    fn params_digest_preimage_layout_and_every_field_matters() {
+        let d = REGISTRY_PARAMS_DIGEST_DOMAIN;
+        // Both tags absent: domain ‖ 0 ‖ 0.
+        assert_eq!(registry_params_digest_preimage(None, None), [d, &[0, 0]].concat());
+        // Both present, big-endian.
+        let both = registry_params_digest_preimage(Some(6667), Some((10, 100)));
+        let mut want = d.to_vec();
+        want.push(1);
+        want.extend_from_slice(&6667u16.to_be_bytes());
+        want.push(1);
+        want.extend_from_slice(&10u64.to_be_bytes());
+        want.extend_from_slice(&100u64.to_be_bytes());
+        assert_eq!(both, want);
+        assert_eq!(both.len(), 28 + 1 + 2 + 1 + 16);
+        // Any differing field, presence or order gives a different digest.
+        let cases = [
+            registry_params_digest(Some(6667), Some((10, 100))),
+            registry_params_digest(Some(6668), Some((10, 100))),
+            registry_params_digest(Some(6667), Some((11, 100))),
+            registry_params_digest(Some(6667), Some((10, 101))),
+            registry_params_digest(Some(6667), Some((100, 10))),
+            registry_params_digest(None, Some((10, 100))),
+            registry_params_digest(Some(6667), None),
+            registry_params_digest(None, None),
+        ];
+        for (i, a) in cases.iter().enumerate() {
+            for (j, b) in cases.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "cases {i} and {j} collide");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn state_digest_preimage_layout() {
+        let d = REGISTRY_STATE_DIGEST_DOMAIN;
+        assert_eq!(registry_state_digest_preimage([]), [d, &0u64.to_be_bytes()].concat());
+        let id = [0x11u8; 32];
+        let rec = [0x22u8; RegistryRecordV1::LEN];
+        let one = registry_state_digest_preimage([(&id, &rec)]);
+        assert_eq!(one, [d, &id[..], &rec[..], &1u64.to_be_bytes()].concat());
+        assert_eq!(one.len(), 27 + 32 + 154 + 8);
+    }
+
+    #[test]
+    fn freeze_record_and_gate_pin_encode_decode_and_refuse() {
+        let rec = RegistryFreezeRecordV1 {
+            gate_a: 500_000,
+            threshold_bps: 6667,
+            t_min: 10,
+            w: 100,
+            first_height: 500_001,
+        };
+        let b = rec.encode();
+        assert_eq!(&b[..7], b"RFRZv1\0");
+        assert_eq!(b[7..15], 500_000u64.to_le_bytes());
+        assert_eq!(b[15..17], 6667u16.to_le_bytes());
+        assert_eq!(b[17..25], 10u64.to_le_bytes());
+        assert_eq!(b[25..33], 100u64.to_le_bytes());
+        assert_eq!(b[33..41], 500_001u64.to_le_bytes());
+        assert_eq!(RegistryFreezeRecordV1::decode_exact(&b), Ok(rec));
+        assert!(RegistryFreezeRecordV1::decode_exact(&b[..40]).is_err());
+        assert!(RegistryFreezeRecordV1::decode_exact(&[&b[..], &[0]].concat()).is_err());
+        let mut bad = b;
+        bad[0] ^= 1;
+        assert!(matches!(RegistryFreezeRecordV1::decode_exact(&bad), Err(DecodeError::BadTag { .. })));
+
+        let pin = RegistryGatePinV1 { gate_a: 500_000 };
+        let p = pin.encode();
+        assert_eq!(p.len(), 15);
+        assert_eq!(&p[..7], b"RFGTv1\0");
+        assert_eq!(p[7..15], 500_000u64.to_le_bytes());
+        assert_eq!(RegistryGatePinV1::decode_exact(&p), Ok(pin));
+        assert!(RegistryGatePinV1::decode_exact(&p[..14]).is_err());
+        assert!(RegistryGatePinV1::decode_exact(&[&p[..], &[0]].concat()).is_err());
+        // A freeze record is never read as a pin, nor a pin as a record.
+        assert!(RegistryGatePinV1::decode_exact(&b).is_err());
+        assert!(RegistryFreezeRecordV1::decode_exact(&p).is_err());
+        let mut badp = p;
+        badp[6] = 1;
+        assert!(matches!(RegistryGatePinV1::decode_exact(&badp), Err(DecodeError::BadTag { .. })));
     }
 
     #[test]
