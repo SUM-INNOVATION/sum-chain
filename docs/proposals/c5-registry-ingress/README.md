@@ -403,7 +403,7 @@ There are two limits. Both stay **PROPOSED** until the activation change impleme
 
 #### (c) How both limits are authenticated (PROPOSED)
 
-`MAX_REGISTRY_RECORDS = 4096` and `MAX_REGISTRY_OPS_PER_BLOCK = 8` are compiled constants (`state/src/registry_ingress.rs`). No configuration file carries them, so no acknowledgement can change them. Two binaries agree on them only if they were built from the same values. Three mechanisms bind nodes to the same values once the activation change wires them. While dormant only the pins of (iv) exist.
+`MAX_REGISTRY_RECORDS = 4096` and `MAX_REGISTRY_OPS_PER_BLOCK = 8` are compiled constants, derived from the one value `REGISTRY_LIMITS` (`state/src/registry_ingress.rs`). No configuration file carries them, so no acknowledgement can change them. Two binaries agree on them only if they were built from the same values. *[Amended 2026-10-26]* The authoritative binding is now the state root: both limits are committed in P(h) from A (§16 §1.3), so a node with a different value of either limit computes a different root at every block from A, even with an empty registry and no registry operation. Four mechanisms bind nodes to the same values once the activation change wires them. While dormant only the pins of (iv) and the P(h) encoding exist.
 
 1. **The handshake (detection and exclusion of declaring peers).**
    - The activation change adds both names to `protocol_digest::consensus_limits` (`state/src/protocol_digest.rs:141`).
@@ -412,11 +412,14 @@ There are two limits. Both stay **PROPOSED** until the activation change impleme
    - A peer that declares nothing is refused only from `peer_protocol_declaration_required_from_height`, which the §16 §1.4 load rules put at or below A.
    - This excludes a declaring peer that was built with another value. It checks no block.
    - Tested dormant: `once_folded_a_different_compiled_registry_limit_changes_the_protocol_digest` shows that a value one step away, in either limit, changes the digest.
-2. **The record limit, through the state root.**
-   - A register at the boundary is accepted under one value and refused under another, so the two nodes store different rows.
+2. **Both limits, through P(h) in the state root (authoritative; amended 2026-10-26).**
+   - P(h) commits `max_records` and `max_ops_per_block` from the same `RegistryIngressContext::limits` that execution and block validity read (§16 §1.3), so the committed and enforced values are one value.
+   - Two nodes differing only in one limit compute different roots at A and at every later block, whatever the block carries. Import refuses on the root mismatch (`storage/src/candidate.rs:481`). Tested in the local activation prototype: `nodes_with_different_registry_limits_refuse_each_others_block_at_a` (not the activation change's test).
+   - Below A, P(h) is not folded, and the roots are equal.
+   - **Also, through R(h):** a register at the boundary is accepted under one value and refused under another, so the two nodes store different rows.
    - R(h) folds every row and the count (§16 §1.3), so from that block their roots differ.
    - Import refuses a block whose computed root differs from its header ("state root mismatch", `storage/src/candidate.rs:481`); only an exact root is accepted (`:468`). A > 496,720 keeps this out of the legacy window.
-   - Until a register reaches the boundary, nothing diverges, and the root cannot reveal the difference. The handshake of (i) is what reveals it earlier.
+   - Without P(h), nothing would diverge until a register reached the boundary. With P(h), the root differs from A.
 3. **The per-block cap, through block validity.**
    - A node built with a larger cap accepts, and may produce, a block with more than 8 registry operations. A node with the proposed 8 refuses that block whole in `BlockExecutor::validate_block` (`state/src/executor.rs:4704`, beside the contract-gas check at `:4741`), on both import paths and on reorg.
    - A node built with a smaller cap refuses honest blocks that carry more than its own cap.
@@ -431,6 +434,7 @@ There are two limits. Both stay **PROPOSED** until the activation change impleme
 #### Activation of both limits
 
 **Activation.** While dormant the bound is in neither `consensus_limits` nor the protocol digest, because no transaction reaches it. The activation change:
+- folds P(h), committing both limits from `REGISTRY_LIMITS` through the block's `RegistryIngressContext` (§16 §1.3);
 - adds `MAX_REGISTRY_RECORDS` to `protocol_digest::consensus_limits`, so every node declares it in the protocol digest at the handshake;
 - adds the per-block cap `MAX_REGISTRY_OPS_PER_BLOCK` (defined, unwired, in this PR) as a block-validity rule, with its producer cap and executor backstop ((b) above), and to `consensus_limits` beside the bound;
 - moves both names out of `EXCLUDED` in `state/tests/protocol_digest_census.rs`, changes their census rows (`consensus_constants_census.tsv`) from `EXCLUDE unwired`, and updates `the_compiled_registry_limits_are_pinned_with_their_census_rows`, which fails until it does;
@@ -552,7 +556,9 @@ The test also checks:
 | Size bound: rolling back a published register (generic journal) restores the count | `rolling_back_a_register_restores_the_count` |
 | Size bound: the dry run reports the record alone at the limit, while execution refuses `303` | `crates/rpc/tests/registry_dry_run_agrees.rs` (`at_the_size_bound_the_dry_run_reports_the_record_alone`) |
 | Size bound: constants and folded bytes; the boundary vectors execute | `the_size_bound_constants`, `vectors_are_reproduced_and_execute` |
-| P(h): preimage layout; a different threshold, T_min, W, order or presence gives a different digest | wire `params_digest_preimage_layout_and_every_field_matters`; `the_registry_params_digest_separates_every_mismatch` |
+| P(h): preimage layout; a different limit, threshold, T_min, W, order or presence gives a different digest | wire `params_digest_preimage_layout_and_every_field_matters`; `the_registry_params_digest_separates_every_mismatch` |
+| P(h) commits both limits at fixed offsets; either limit one step away changes P(h) with an empty registry and no registry operations; zero limits refused | `either_limit_changes_p_h_with_an_empty_registry_and_no_registry_operations`; wire `registry_limits_refuse_zero` |
+| One source: the size bound execution enforces is the context's limit, the value P(h) commits; invalid limits refuse both operations (`302`) | `the_size_bound_and_p_h_read_the_same_limits` |
 | R(h): preimage layout; ascending key order; disabled records folded; any byte change moves it | wire `state_digest_preimage_layout`; `the_registry_state_digest_is_ordered_and_covers_every_record` |
 | R(h) never folds around a bad row (short key, undecodable value, record under another id) | `the_registry_state_digest_refuses_every_malformed_row` |
 | Freeze record and gate pin: exact LE layout, round trip, refusal of short, long and cross-magic bytes; the META keys disjoint and prefix-free | wire `freeze_record_and_gate_pin_encode_decode_and_refuse`; `the_freeze_record_and_gate_pin_refuse_malformed_bytes`; `the_record_prefix_is_disjoint_from_every_state_key_family` (the `registry/` namespace, META keys included, is this module's alone) |
@@ -600,9 +606,11 @@ Read-only basis: main `e3b8ff81`; #348 `c867eedb`; #342 `13c5c755` (draft); #338
 #### 1.3 Preimages (all integers big-endian, like the root's own integers and the account digest, `executor.rs:4333/4342`, `state/src/account_root.rs:25-28`)
 
 ```text
-P(h) = BLAKE3( "SUMCHAIN/REGISTRY/PARAMS/v1\0"
-             ‖ gov_tag:u8   ‖ [ threshold_bps:u16 ]          // 0x0601 effective at h; tag 0 = governance unconfigured, 1 = present
-             ‖ reg_tag:u8   ‖ [ T_min:u64 ‖ W:u64 ] )         // paired presence; tag 0 = both absent, 1 = both present
+P(h) = BLAKE3( "SUMCHAIN/REGISTRY/PARAMS/v1\0"           // offset 0, 28 bytes
+             ‖ max_records:u32                         // offset 28: REGISTRY_LIMITS.max_records (proposed 4,096), always present
+             ‖ max_ops_per_block:u16                   // offset 32: REGISTRY_LIMITS.max_ops_per_block (proposed 8), always present
+             ‖ gov_tag:u8   ‖ [ threshold_bps:u16 ]    // offset 34; 0x0601 effective at h; tag 0 = governance unconfigured, 1 = present
+             ‖ reg_tag:u8   ‖ [ T_min:u64 ‖ W:u64 ] )  // paired presence; tag 0 = both absent, 1 = both present
 R(h) = BLAKE3( "SUMCHAIN/REGISTRY/STATE/v1\0"
              ‖ for each STATE row with key prefix "registry/v1/", ascending key bytes:
                    id[32] ‖ record[154]                      // RegistryRecordV1 frozen bytes, verbatim; id must equal record.id
@@ -613,6 +621,36 @@ root(h ≥ A) = BLAKE3( …unchanged components through the account fold (execut
 ```
 
 R(h) is computed over the block's candidate view (as `v_account_state_digest`, `account_root.rs:449-461`), so it reflects block h's own writes.
+
+*[Amended 2026-10-26: both limits in P(h); owner, design direction approved; bytes and values PROPOSED]* P(h) commits the exact limits execution and block validity enforce.
+
+| Offset | Size | Field | Rule |
+|---|---|---|---|
+| 0 | 28 | `SUMCHAIN/REGISTRY/PARAMS/v1\0` | unchanged; no version bump, because no v1 layout was ever ratified or used |
+| 28 | 4 | `max_records` u32 BE | `1..=u32::MAX`; must be the value the size bound enforces |
+| 32 | 2 | `max_ops_per_block` u16 BE | `1..=u16::MAX`; must be the value the block-validity cap enforces |
+| 34 | 1 | `gov_tag` | 0 or 1 |
+| 35 | 2 | `threshold_bps` u16 BE | only when `gov_tag = 1` |
+| next | 1 | `reg_tag` | 0 or 1 |
+| next | 8 + 8 | `T_min` u64 BE ‖ `W` u64 BE | only when `reg_tag = 1` |
+
+- **Lengths:** 36 bytes (no values), 38 (governance only), 52 (both).
+- **Why the limits come first, unconditionally:** they are compiled consensus constants that execution and block validity always apply from A. Fixed offsets keep them independent of the optional fields.
+- **Widths:**
+  - `max_records` is u32, because the registry count is not bounded by any block field, and 32 bits cover every plausible registry while the fold cost stays computable (`max_records × 186` bytes).
+  - `max_ops_per_block` is u16, because a cap above a block's transaction count would be meaningless, and u16 exceeds every configured `max_txs_per_block`.
+- **One source, so the committed and enforced values cannot diverge:**
+  - Both limits live in one value, `REGISTRY_LIMITS: RegistryLimits` (`state/src/registry_ingress.rs`).
+  - Execution reads it only through `RegistryIngressContext::limits`: the size bound in `validate_register`. The activation change's block-validity cap reads the same context field.
+  - `registry_params_digest_for(ctx, threshold)` builds P(h) from that same context, and nothing accepts a limit from anywhere else.
+  - `MAX_REGISTRY_RECORDS` and `MAX_REGISTRY_OPS_PER_BLOCK` are derived from `REGISTRY_LIMITS`. A context whose limits fail `RegistryLimits::validate` refuses both operations (`302`).
+- **Tests:**
+  - `either_limit_changes_p_h_with_an_empty_registry_and_no_registry_operations`;
+  - `the_size_bound_and_p_h_read_the_same_limits`;
+  - `the_registry_params_digest_separates_every_mismatch`;
+  - the wire `params_digest_preimage_layout_and_every_field_matters` and `registry_limits_refuse_zero`;
+  - the vectors `prospective_registry_params.*`, including the four `*_plus_1` cases.
+- **The freeze record (§17) does not carry the limits:** they are compiled, not configured, so no acknowledgement can change them. A different value means a different binary, and the root of every block from A shows it.
 
 *[Amended 2026-10-26]* These preimages have one dormant implementation in this PR. Nothing calls it, and no root folds it:
 - `registry_params_digest_preimage` / `registry_params_digest` and `registry_state_digest_preimage` (`sumchain_wire::registry_ingress`);

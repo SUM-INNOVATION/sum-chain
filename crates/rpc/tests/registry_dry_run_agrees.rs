@@ -15,6 +15,7 @@ use sumchain_rpc::registry_types::{dry_run_admit, DryRunContext, RefusalReason};
 use sumchain_state::governance_executor::execute_registry_ingress;
 use sumchain_state::registry_ingress::{
     registry_record_key, RegistryIngressContext, RegistryIngressOp, MAX_REGISTRY_RECORDS,
+    REGISTRY_LIMITS,
 };
 use sumchain_storage::candidate::CandidateExecution;
 use sumchain_storage::schema::AccountState;
@@ -113,6 +114,7 @@ fn register_with_stored(rec: &RegistryRecordV1, stored: u64) -> TxStatus {
         &[*v.public_key().as_bytes()],
         RegistryIngressContext {
             params: &registry,
+            limits: REGISTRY_LIMITS,
             genesis_block_hash: Some(&GENESIS),
         },
     )

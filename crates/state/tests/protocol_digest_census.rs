@@ -91,6 +91,12 @@ const EXCLUDED: &[(&str, &str)] = &[
          to consensus_limits",
     ),
     (
+        "REGISTRY_LIMITS",
+        "dormant C5 consensus limits (PROPOSED values), the single source the \
+         size bound reads and P(h) commits; unreachable while operations 8 and 9 \
+         do not decode; activation adds both limits to consensus_limits",
+    ),
+    (
         "MAX_REGISTRY_FOLDED_BYTES",
         "derived from MAX_REGISTRY_RECORDS; documents the proposed fold's byte \
          bound and is read by no code path",

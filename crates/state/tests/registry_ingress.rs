@@ -22,9 +22,10 @@ use sumchain_primitives::{Address, Hash, TxPayload, TxStatus};
 use sumchain_state::governance_executor::execute_registry_ingress;
 use sumchain_state::registry_ingress::{
     registry_record_key, v_check_commit, v_count_records_up_to, v_get_record,
-    v_registry_state_digest, RegistryIngressContext, RegistryIngressOp, MAX_REGISTRY_FOLDED_BYTES,
+    registry_params_digest_for, v_registry_state_digest, RegistryIngressContext, RegistryIngressOp,
+    MAX_REGISTRY_FOLDED_BYTES,
     MAX_REGISTRY_OPS_PER_BLOCK, MAX_REGISTRY_RECORDS, REGISTRY_FREEZE_META_KEY,
-    REGISTRY_GATE_PIN_META_KEY, REGISTRY_INGRESS_PARAMS, REGISTRY_RECORD_KEY_PREFIX,
+    REGISTRY_GATE_PIN_META_KEY, REGISTRY_INGRESS_PARAMS, REGISTRY_LIMITS, REGISTRY_RECORD_KEY_PREFIX,
 };
 use sumchain_storage::cf;
 use sumchain_state::state::StateManager;
@@ -34,7 +35,7 @@ use sumchain_wire::registry_ingress::{
     registry_disable_signing_bytes, registry_params_digest, registry_params_digest_preimage,
     registry_register_signing_bytes, registry_state_digest_preimage, unset_commitments,
     RegistryCommitRefusal, RegistryDisableV1, RegistryFreezeRecordV1, RegistryGatePinV1,
-    RegistryIngressParams, RegistryRegisterV1,
+    RegistryIngressParams, RegistryLimits, RegistryRegisterV1,
 };
 use sumchain_wire::registry_wire::{RegistryRecordV1, RegistryStatus};
 use tempfile::TempDir;
@@ -78,6 +79,9 @@ struct Node {
     _dir: TempDir,
     params: ChainParams,
     registry: RegistryIngressParams,
+    /// The consensus limits this node enforces and commits in `P(h)`:
+    /// `REGISTRY_LIMITS` unless a test overrides it.
+    limits: RegistryLimits,
     genesis: Option<[u8; 32]>,
 }
 
@@ -95,6 +99,7 @@ fn node_with(params: ChainParams, registry: Option<RegistryIngressParams>) -> No
         _dir: dir,
         params,
         registry,
+        limits: REGISTRY_LIMITS,
         genesis,
     }
 }
@@ -217,6 +222,7 @@ impl Submitter {
             active,
             RegistryIngressContext {
                 params: &n.registry,
+                limits: n.limits,
                 genesis_block_hash: n.genesis.as_ref(),
             },
         )
@@ -771,18 +777,26 @@ fn vectors() -> String {
         MAX_REGISTRY_OPS_PER_BLOCK.to_string(),
     );
     // The proposed state-root folds (README §16 §1.3; big-endian integers).
-    for (name, gov, reg) in [
-        ("none", None, None),
-        ("governance_only", Some(GOV_BPS), None),
-        ("both", Some(GOV_BPS), Some((T_MIN, WINDOW))),
+    // P(h) commits both limits first (owner 2026-10-26: design direction).
+    let more_records = RegistryLimits { max_records: REGISTRY_LIMITS.max_records + 1, ..REGISTRY_LIMITS };
+    let more_ops =
+        RegistryLimits { max_ops_per_block: REGISTRY_LIMITS.max_ops_per_block + 1, ..REGISTRY_LIMITS };
+    for (name, limits, gov, reg) in [
+        ("none", REGISTRY_LIMITS, None, None),
+        ("governance_only", REGISTRY_LIMITS, Some(GOV_BPS), None),
+        ("both", REGISTRY_LIMITS, Some(GOV_BPS), Some((T_MIN, WINDOW))),
+        ("both.max_records_plus_1", more_records, Some(GOV_BPS), Some((T_MIN, WINDOW))),
+        ("both.max_ops_per_block_plus_1", more_ops, Some(GOV_BPS), Some((T_MIN, WINDOW))),
+        ("none.max_records_plus_1", more_records, None, None),
+        ("none.max_ops_per_block_plus_1", more_ops, None, None),
     ] {
         line(
             &format!("prospective_registry_params.{name}.preimage"),
-            hex(&registry_params_digest_preimage(gov, reg)),
+            hex(&registry_params_digest_preimage(&limits, gov, reg)),
         );
         line(
             &format!("prospective_registry_params.{name}.digest"),
-            hex(registry_params_digest(gov, reg).as_bytes()),
+            hex(registry_params_digest(&limits, gov, reg).as_bytes()),
         );
     }
     let rec_bytes: [u8; RegistryRecordV1::LEN] = rec.try_encode().unwrap()[..].try_into().unwrap();
@@ -1058,6 +1072,7 @@ fn the_size_bound_refuses_the_register_that_would_exceed_it() {
         &one,
         RegistryIngressContext {
             params: &n.registry,
+            limits: n.limits,
             genesis_block_hash: n.genesis.as_ref(),
         },
     )
@@ -1195,6 +1210,7 @@ fn run_entry(n: &Node, op: RegistryIngressOp, data: Vec<u8>) -> (sumchain_state:
         &vset(&[1]),
         RegistryIngressContext {
             params: &n.registry,
+            limits: n.limits,
             genesis_block_hash: n.genesis.as_ref(),
         },
     );
@@ -1281,6 +1297,7 @@ fn node_with_a_damaged_registry_table() -> Node {
         _dir: dir,
         params: chain_params(GOV_BPS),
         registry: fixture_params(),
+        limits: REGISTRY_LIMITS,
         genesis: Some(GENESIS),
     }
 }
@@ -1313,6 +1330,7 @@ fn entry_outcome(n: &Node, payer: &KeyPair, op: RegistryIngressOp, data: Vec<u8>
         &vset(&[1]),
         RegistryIngressContext {
             params: &n.registry,
+            limits: n.limits,
             genesis_block_hash: n.genesis.as_ref(),
         },
     )
@@ -1899,6 +1917,7 @@ fn an_underfunded_zero_commitment_register_is_303_with_no_fee() {
         &vset(&[1, 2, 3, 4]),
         RegistryIngressContext {
             params: &n.registry,
+            limits: n.limits,
             genesis_block_hash: n.genesis.as_ref(),
         },
     )
@@ -2328,6 +2347,7 @@ fn operations_8_and_9_refuse_approvals_only_the_old_rule_accepts() {
         &one,
         RegistryIngressContext {
             params: &n.registry,
+            limits: n.limits,
             genesis_block_hash: n.genesis.as_ref(),
         },
     )
@@ -2474,6 +2494,7 @@ fn a_governance_threshold_change_does_not_move_an_existing_record() {
     let proposer = Address::new([0x99; 20]);
     let ctx = RegistryIngressContext {
         params: &n.registry,
+        limits: n.limits,
         genesis_block_hash: n.genesis.as_ref(),
     };
     let run = |c: &mut CandidateExecution<'_>, gov_bps: u16, op, data: Vec<u8>| {
@@ -2573,17 +2594,103 @@ fn the_registry_state_digest_is_ordered_and_covers_every_record() {
 /// `P(h)`, and so a different root from A: the mismatch the binding relies on.
 #[test]
 fn the_registry_params_digest_separates_every_mismatch() {
-    let base = registry_params_digest(Some(GOV_BPS), Some((T_MIN, WINDOW)));
+    let l = REGISTRY_LIMITS;
+    let more_records = RegistryLimits { max_records: l.max_records + 1, ..l };
+    let more_ops = RegistryLimits { max_ops_per_block: l.max_ops_per_block + 1, ..l };
+    let base = registry_params_digest(&l, Some(GOV_BPS), Some((T_MIN, WINDOW)));
     for (why, other) in [
-        ("threshold", registry_params_digest(Some(GOV_BPS + 1), Some((T_MIN, WINDOW)))),
-        ("timelock", registry_params_digest(Some(GOV_BPS), Some((T_MIN + 1, WINDOW)))),
-        ("window", registry_params_digest(Some(GOV_BPS), Some((T_MIN, WINDOW + 1)))),
-        ("timelock and window swapped", registry_params_digest(Some(GOV_BPS), Some((WINDOW, T_MIN)))),
-        ("governance absent", registry_params_digest(None, Some((T_MIN, WINDOW)))),
-        ("registry values absent", registry_params_digest(Some(GOV_BPS), None)),
+        ("threshold", registry_params_digest(&l, Some(GOV_BPS + 1), Some((T_MIN, WINDOW)))),
+        ("timelock", registry_params_digest(&l, Some(GOV_BPS), Some((T_MIN + 1, WINDOW)))),
+        ("window", registry_params_digest(&l, Some(GOV_BPS), Some((T_MIN, WINDOW + 1)))),
+        ("timelock and window swapped", registry_params_digest(&l, Some(GOV_BPS), Some((WINDOW, T_MIN)))),
+        ("governance absent", registry_params_digest(&l, None, Some((T_MIN, WINDOW)))),
+        ("registry values absent", registry_params_digest(&l, Some(GOV_BPS), None)),
+        ("max_records + 1", registry_params_digest(&more_records, Some(GOV_BPS), Some((T_MIN, WINDOW)))),
+        ("max_ops_per_block + 1", registry_params_digest(&more_ops, Some(GOV_BPS), Some((T_MIN, WINDOW)))),
     ] {
         assert_ne!(base, other, "{why}");
     }
+}
+
+/// Owner 2026-10-26: changing either limit changes `P(h)` even with an empty
+/// registry and no registry operation in the block, so a node built with a
+/// different limit computes a different root from A whatever it executes.
+#[test]
+fn either_limit_changes_p_h_with_an_empty_registry_and_no_registry_operations() {
+    let n = node();
+    let mut c = candidate(&n.db);
+    // Empty registry: R(h) is R_empty on every node, whatever its limits.
+    let r = v_registry_state_digest(&c.view()).unwrap();
+    assert_eq!(r, Hash::hash(&registry_state_digest_preimage([])));
+    let ctx = |limits| RegistryIngressContext {
+        params: &n.registry,
+        limits,
+        genesis_block_hash: n.genesis.as_ref(),
+    };
+    let l = REGISTRY_LIMITS;
+    let base = registry_params_digest_for(&ctx(l), Some(GOV_BPS));
+    let more_records = registry_params_digest_for(&ctx(RegistryLimits { max_records: l.max_records + 1, ..l }), Some(GOV_BPS));
+    let fewer_records = registry_params_digest_for(&ctx(RegistryLimits { max_records: l.max_records - 1, ..l }), Some(GOV_BPS));
+    let more_ops = registry_params_digest_for(&ctx(RegistryLimits { max_ops_per_block: l.max_ops_per_block + 1, ..l }), Some(GOV_BPS));
+    let fewer_ops = registry_params_digest_for(&ctx(RegistryLimits { max_ops_per_block: l.max_ops_per_block - 1, ..l }), Some(GOV_BPS));
+    let all = [base, more_records, fewer_records, more_ops, fewer_ops];
+    for (i, a) in all.iter().enumerate() {
+        for (j, b) in all.iter().enumerate() {
+            if i != j {
+                assert_ne!(a, b, "limit cases {i} and {j} collide");
+            }
+        }
+    }
+    // The same holds with no registry values set (both tags 0): the limits are
+    // committed unconditionally from A.
+    let unset = RegistryIngressParams::UNSET;
+    let bare = |limits| RegistryIngressContext { params: &unset, limits, genesis_block_hash: None };
+    assert_ne!(
+        registry_params_digest_for(&bare(l), None),
+        registry_params_digest_for(&bare(RegistryLimits { max_records: l.max_records + 1, ..l }), None)
+    );
+    assert_ne!(
+        registry_params_digest_for(&bare(l), None),
+        registry_params_digest_for(&bare(RegistryLimits { max_ops_per_block: l.max_ops_per_block + 1, ..l }), None)
+    );
+    // And `registry_params_digest_for` is exactly the wire preimage over the
+    // context's own limits and complete values.
+    assert_eq!(
+        base,
+        registry_params_digest(&l, Some(GOV_BPS), Some((T_MIN, WINDOW)))
+    );
+}
+
+/// The single source: the size bound execution enforces is the context's
+/// `limits.max_records`, the value `P(h)` commits from the same context. A
+/// node whose context carries 2 refuses the third register, and its `P(h)`
+/// differs from a node carrying `REGISTRY_LIMITS`.
+#[test]
+fn the_size_bound_and_p_h_read_the_same_limits() {
+    let mut n = node();
+    n.limits = RegistryLimits { max_records: 2, ..REGISTRY_LIMITS };
+    fill_registry(&n.db, 1);
+    let mut c = candidate(&n.db);
+    let mut s = Submitter::new(&n.db);
+    let one = vset(&[1]);
+    // One stored: a register under a limit of 2 is accepted.
+    assert_eq!(s.run(&n, &mut c, REG, register(H + 50, &record(0xE1), &[1]), H, &one), TxStatus::Success);
+    // Two stored: the next is refused (303), under the context's limit, far
+    // below REGISTRY_LIMITS.
+    assert_eq!(s.run(&n, &mut c, REG, register(H + 50, &record(0xE2), &[1]), H, &one), TxStatus::Failed(303));
+    assert_eq!(stored(&mut c, 0xE2), None);
+    let ctx = RegistryIngressContext { params: &n.registry, limits: n.limits, genesis_block_hash: n.genesis.as_ref() };
+    let prod = RegistryIngressContext {
+        params: &n.registry,
+        limits: REGISTRY_LIMITS,
+        genesis_block_hash: n.genesis.as_ref(),
+    };
+    assert_ne!(registry_params_digest_for(&ctx, Some(GOV_BPS)), registry_params_digest_for(&prod, Some(GOV_BPS)));
+    // A context whose limits fail validation refuses both operations (302).
+    n.limits = RegistryLimits { max_records: 0, ..REGISTRY_LIMITS };
+    assert_eq!(s.run(&n, &mut c, REG, register(H + 50, &record(0xE3), &[1]), H, &one), TxStatus::Failed(302));
+    n.limits = RegistryLimits { max_ops_per_block: 0, ..REGISTRY_LIMITS };
+    assert_eq!(s.run(&n, &mut c, REG, register(H + 50, &record(0xE4), &[1]), H, &one), TxStatus::Failed(302));
 }
 
 /// The freeze record and the gate pin are refused, never misread, when their

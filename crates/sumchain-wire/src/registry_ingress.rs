@@ -418,20 +418,77 @@ pub const REGISTRY_PARAMS_DIGEST_DOMAIN: &[u8] = b"SUMCHAIN/REGISTRY/PARAMS/v1\0
 /// Domain of the registry-state digest `R(h)` (PROPOSED).
 pub const REGISTRY_STATE_DIGEST_DOMAIN: &[u8] = b"SUMCHAIN/REGISTRY/STATE/v1\0";
 
+/// The two consensus limits of registry ingress (PROPOSED; README §12.1).
+///
+/// One value of this type is the **single source** of both limits: execution
+/// reads `max_records` for the size bound, block validity reads
+/// `max_ops_per_block` for the per-block cap, and `P(h)` commits both from the
+/// same value. The binary's value is
+/// `sumchain_state::registry_ingress::REGISTRY_LIMITS`.
+///
+/// - `max_records`, `u32`: the most records stored, Enabled and Disabled
+///   together. `u32` because the count is unbounded by any block field and
+///   only a 32-bit width leaves headroom for every plausible registry while
+///   keeping the fold cost computable (`max_records × 186` bytes).
+/// - `max_ops_per_block`, `u16`: the most governance transactions naming
+///   operation 8 or 9 in one block. A cap above a block's transaction count
+///   would be meaningless, and `u16` exceeds every configured
+///   `max_txs_per_block`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegistryLimits {
+    pub max_records: u32,
+    pub max_ops_per_block: u16,
+}
+
+/// Why a [`RegistryLimits`] value is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryLimitsError {
+    /// `max_records` is 0: no register could ever succeed.
+    ZeroRecords,
+    /// `max_ops_per_block` is 0: no registry operation could ever be included.
+    ZeroOpsPerBlock,
+}
+
+impl RegistryLimits {
+    /// Each limit must be at least 1; the type bounds the maximum
+    /// (`1..=u32::MAX` and `1..=u16::MAX`).
+    pub const fn validate(&self) -> Result<(), RegistryLimitsError> {
+        if self.max_records == 0 {
+            return Err(RegistryLimitsError::ZeroRecords);
+        }
+        if self.max_ops_per_block == 0 {
+            return Err(RegistryLimitsError::ZeroOpsPerBlock);
+        }
+        Ok(())
+    }
+}
+
 /// The preimage of `P(h)`. Integers are **big-endian**, like the state root's
-/// own integers:
+/// own integers. The two limits come first, at fixed offsets, and are present
+/// unconditionally from A because they are compiled consensus constants that
+/// execution and block validity always apply:
 ///
-/// `REGISTRY_PARAMS_DIGEST_DOMAIN[28] ‖ gov_tag u8 [‖ threshold_bps u16] ‖
-/// reg_tag u8 [‖ T_min u64 ‖ W u64]`
+/// | Offset | Size | Field |
+/// |---|---|---|
+/// | 0 | 28 | `REGISTRY_PARAMS_DIGEST_DOMAIN` |
+/// | 28 | 4 | `max_records` u32 |
+/// | 32 | 2 | `max_ops_per_block` u16 |
+/// | 34 | 1 | `gov_tag` u8 (0 absent, 1 present) |
+/// | 35 | 2 | `threshold_bps` u16, only when `gov_tag = 1` |
+/// | next | 1 | `reg_tag` u8 (0 absent, 1 present) |
+/// | next | 8 + 8 | `T_min` u64 ‖ `W` u64, only when `reg_tag = 1` |
 ///
-/// A tag is 0 when its values are absent and 1 when present. `T_min` and `W`
-/// are present or absent together (paired presence).
+/// `T_min` and `W` are present or absent together (paired presence). Lengths:
+/// 36 (no values), 38 (governance only), 52 (both).
 pub fn registry_params_digest_preimage(
+    limits: &RegistryLimits,
     governance_threshold_bps: Option<u16>,
     timelock_and_window: Option<(u64, u64)>,
 ) -> Vec<u8> {
-    let mut m = Vec::with_capacity(REGISTRY_PARAMS_DIGEST_DOMAIN.len() + 1 + 2 + 1 + 16);
+    let mut m = Vec::with_capacity(REGISTRY_PARAMS_DIGEST_DOMAIN.len() + 4 + 2 + 1 + 2 + 1 + 16);
     m.extend_from_slice(REGISTRY_PARAMS_DIGEST_DOMAIN);
+    m.extend_from_slice(&limits.max_records.to_be_bytes());
+    m.extend_from_slice(&limits.max_ops_per_block.to_be_bytes());
     match governance_threshold_bps {
         Some(bps) => {
             m.push(1);
@@ -452,10 +509,12 @@ pub fn registry_params_digest_preimage(
 
 /// `P(h)` = BLAKE3 of [`registry_params_digest_preimage`].
 pub fn registry_params_digest(
+    limits: &RegistryLimits,
     governance_threshold_bps: Option<u16>,
     timelock_and_window: Option<(u64, u64)>,
 ) -> crate::hash::Hash {
     crate::hash::Hash::hash(&registry_params_digest_preimage(
+        limits,
         governance_threshold_bps,
         timelock_and_window,
     ))
@@ -769,31 +828,51 @@ mod tests {
         assert_eq!(REGISTRY_STATE_DIGEST_DOMAIN.len(), 27);
     }
 
+    const L: RegistryLimits = RegistryLimits { max_records: 4_096, max_ops_per_block: 8 };
+
     #[test]
     fn params_digest_preimage_layout_and_every_field_matters() {
         let d = REGISTRY_PARAMS_DIGEST_DOMAIN;
-        // Both tags absent: domain ‖ 0 ‖ 0.
-        assert_eq!(registry_params_digest_preimage(None, None), [d, &[0, 0]].concat());
-        // Both present, big-endian.
-        let both = registry_params_digest_preimage(Some(6667), Some((10, 100)));
-        let mut want = d.to_vec();
+        let limits = [&4_096u32.to_be_bytes()[..], &8u16.to_be_bytes()[..]].concat();
+        // No values: domain ‖ limits ‖ 0 ‖ 0, 36 bytes.
+        let none = registry_params_digest_preimage(&L, None, None);
+        assert_eq!(none, [d, &limits, &[0, 0]].concat());
+        assert_eq!(none.len(), 36);
+        // Governance only: 38 bytes.
+        let gov = registry_params_digest_preimage(&L, Some(6667), None);
+        assert_eq!(gov, [d, &limits, &[1], &6667u16.to_be_bytes(), &[0]].concat());
+        assert_eq!(gov.len(), 38);
+        // Both present, big-endian, 52 bytes.
+        let both = registry_params_digest_preimage(&L, Some(6667), Some((10, 100)));
+        let mut want = [d, &limits].concat();
         want.push(1);
         want.extend_from_slice(&6667u16.to_be_bytes());
         want.push(1);
         want.extend_from_slice(&10u64.to_be_bytes());
         want.extend_from_slice(&100u64.to_be_bytes());
         assert_eq!(both, want);
-        assert_eq!(both.len(), 28 + 1 + 2 + 1 + 16);
+        assert_eq!(both.len(), 28 + 4 + 2 + 1 + 2 + 1 + 16);
+        // The limits sit at fixed offsets whatever the tags.
+        for p in [&none, &gov, &both] {
+            assert_eq!(&p[28..32], &4_096u32.to_be_bytes());
+            assert_eq!(&p[32..34], &8u16.to_be_bytes());
+        }
         // Any differing field, presence or order gives a different digest.
+        let more_records = RegistryLimits { max_records: 4_097, ..L };
+        let more_ops = RegistryLimits { max_ops_per_block: 9, ..L };
         let cases = [
-            registry_params_digest(Some(6667), Some((10, 100))),
-            registry_params_digest(Some(6668), Some((10, 100))),
-            registry_params_digest(Some(6667), Some((11, 100))),
-            registry_params_digest(Some(6667), Some((10, 101))),
-            registry_params_digest(Some(6667), Some((100, 10))),
-            registry_params_digest(None, Some((10, 100))),
-            registry_params_digest(Some(6667), None),
-            registry_params_digest(None, None),
+            registry_params_digest(&L, Some(6667), Some((10, 100))),
+            registry_params_digest(&L, Some(6668), Some((10, 100))),
+            registry_params_digest(&L, Some(6667), Some((11, 100))),
+            registry_params_digest(&L, Some(6667), Some((10, 101))),
+            registry_params_digest(&L, Some(6667), Some((100, 10))),
+            registry_params_digest(&L, None, Some((10, 100))),
+            registry_params_digest(&L, Some(6667), None),
+            registry_params_digest(&L, None, None),
+            registry_params_digest(&more_records, Some(6667), Some((10, 100))),
+            registry_params_digest(&more_ops, Some(6667), Some((10, 100))),
+            registry_params_digest(&more_records, None, None),
+            registry_params_digest(&more_ops, None, None),
         ];
         for (i, a) in cases.iter().enumerate() {
             for (j, b) in cases.iter().enumerate() {
@@ -802,6 +881,21 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn registry_limits_refuse_zero() {
+        assert_eq!(L.validate(), Ok(()));
+        assert_eq!(
+            RegistryLimits { max_records: 0, ..L }.validate(),
+            Err(RegistryLimitsError::ZeroRecords)
+        );
+        assert_eq!(
+            RegistryLimits { max_ops_per_block: 0, ..L }.validate(),
+            Err(RegistryLimitsError::ZeroOpsPerBlock)
+        );
+        let max = RegistryLimits { max_records: u32::MAX, max_ops_per_block: u16::MAX };
+        assert_eq!(max.validate(), Ok(()));
     }
 
     #[test]
