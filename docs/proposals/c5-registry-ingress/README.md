@@ -142,7 +142,7 @@ Operations 8 and 9 verify every approval with **`verify_strict`**. Every existin
 - the ratified E1 path: `finality_foundations::vote::verify_e1`, `finality-foundations/src/vote.rs:277-280`;
 - the strict inner-signature checks: `primitives/src/messaging_sponsored.rs:61` and `primitives/src/inference_attestation.rs:45`.
 
-It is a thin wrapper in `crypto`, not new cryptography, because `state` does not depend on `finality-foundations` and should not. The existing `verify_validator_quorum` keeps `verify_bytes`, and both share one private rule (`quorum_with`).
+It is a thin wrapper in `crypto`, not new cryptography, because `state` does not depend on `finality-foundations` and should not. The existing `verify_validator_quorum` keeps `verify_bytes`, and both share one internal rule (`quorum_with`).
 
 **What the two rules compute** (ed25519-dalek 2.2.0 source):
 - `verify` (`verifying.rs:201-217`) decodes `S` canonically (`signature.rs:91-96`) and recomputes `R' = [k](−A) + [s]B`. It accepts iff `compress(R')` equals the signature's `R` bytes.
@@ -401,12 +401,40 @@ There are two limits. Both stay **PROPOSED** until the activation change impleme
 - `the_producer_includes_8_and_the_mempool_keeps_the_rest_pending`: the producer included 8 of 10 admitted operations, the mempool held the other 2 pending, and the next block included them.
 - `the_producer_selection_keeps_8_and_skips_the_rest_with_the_sender_tail`: the selection skips the 9th with its sender's later transaction.
 
+#### (c) How both limits are authenticated (PROPOSED)
+
+`MAX_REGISTRY_RECORDS = 4096` and `MAX_REGISTRY_OPS_PER_BLOCK = 8` are compiled constants (`state/src/registry_ingress.rs`). No configuration file carries them, so no acknowledgement can change them. Two binaries agree on them only if they were built from the same values. Three mechanisms bind nodes to the same values once the activation change wires them. While dormant only the pins of (iv) exist.
+
+1. **The handshake (detection and exclusion of declaring peers).**
+   - The activation change adds both names to `protocol_digest::consensus_limits` (`state/src/protocol_digest.rs:141`).
+   - `protocol_digest_with_limits` (`:372`) folds every limit's name, type tag and value into the protocol digest each node declares through `GetProtocolId` (`p2p/src/sync.rs:44`).
+   - A peer that declares a different digest is `PeerCompat::Incompatible` in both phases. It may not propose, vote or move fork choice (`p2p/src/peer_compat.rs:231-236`, checked at `node/src/node.rs:1128`).
+   - A peer that declares nothing is refused only from `peer_protocol_declaration_required_from_height`, which the §16 §1.4 load rules put at or below A.
+   - This excludes a declaring peer that was built with another value. It checks no block.
+   - Tested dormant: `once_folded_a_different_compiled_registry_limit_changes_the_protocol_digest` shows that a value one step away, in either limit, changes the digest.
+2. **The record limit, through the state root.**
+   - A register at the boundary is accepted under one value and refused under another, so the two nodes store different rows.
+   - R(h) folds every row and the count (§16 §1.3), so from that block their roots differ.
+   - Import refuses a block whose computed root differs from its header ("state root mismatch", `storage/src/candidate.rs:481`); only an exact root is accepted (`:468`). A > 496,720 keeps this out of the legacy window.
+   - Until a register reaches the boundary, nothing diverges, and the root cannot reveal the difference. The handshake of (i) is what reveals it earlier.
+3. **The per-block cap, through block validity.**
+   - A node built with a larger cap accepts, and may produce, a block with more than 8 registry operations. A node with the proposed 8 refuses that block whole in `BlockExecutor::validate_block` (`state/src/executor.rs:4704`, beside the contract-gas check at `:4741`), on both import paths and on reorg.
+   - A node built with a smaller cap refuses honest blocks that carry more than its own cap.
+   - Either way the disagreement is a refused block, never a silently different state.
+   - Which chain advances then depends on proposer order. The local prototype observed a stall at the mismatched proposer's slot for value mismatches; that is not established for long runs, or for this specific mismatch.
+4. **Pins in this PR (dormant).**
+   - `the_compiled_registry_limits_are_pinned_with_their_census_rows` asserts both values. It also asserts their `EXCLUDE unwired` census rows (`consensus/tests/data/consensus_constants_census.tsv`), their classification in `state/tests/protocol_digest_census.rs`, and that neither is in `consensus_limits()` yet.
+   - Changing a value, or wiring one without classifying it, fails a test first.
+
+**What is not established.** No test runs two binaries with different compiled limits. (i) is modelled through `protocol_digest_with_limits`, and (ii) and (iii) follow from the root and the validity rule, which the activation change must test with the real code.
+
 #### Activation of both limits
 
 **Activation.** While dormant the bound is in neither `consensus_limits` nor the protocol digest, because no transaction reaches it. The activation change:
 - adds `MAX_REGISTRY_RECORDS` to `protocol_digest::consensus_limits`, so every node declares it in the protocol digest at the handshake;
-- adds the per-block cap `MAX_REGISTRY_OPS_PER_BLOCK` as a block-validity rule, with its producer cap and executor backstop ((b) above), and to `consensus_limits` beside the bound;
-- runs the tests of both limits again against the activation binary.
+- adds the per-block cap `MAX_REGISTRY_OPS_PER_BLOCK` (defined, unwired, in this PR) as a block-validity rule, with its producer cap and executor backstop ((b) above), and to `consensus_limits` beside the bound;
+- moves both names out of `EXCLUDED` in `state/tests/protocol_digest_census.rs`, changes their census rows (`consensus_constants_census.tsv`) from `EXCLUDE unwired`, and updates `the_compiled_registry_limits_are_pinned_with_their_census_rows`, which fails until it does;
+- runs the tests of both limits again against the activation binary, including the handshake, root and validity mismatches of (c).
 
 ConsensusConfig id: unallocated.
 
@@ -476,6 +504,17 @@ The consolidated recommendation of 2026-10-22 was decided by the owner on 2026-1
 
 `vectors_are_reproduced_and_execute` regenerates the file and requires byte equality (comment lines excluded). It runs every payload through `execute_registry_ingress`: k = 1 against the active set {1}, and k = 3 against {1, 2, 3, 4}. Both must reach `Success`. It also requires every prospective envelope to fail decode on this binary. The `prospective_registry_bound.*` lines record the size bound (§12.1). The k = 1 register executes as `Success` with `MAX − 1` records stored and as `303` with `MAX` stored.
 
+**Activation-change encodings (PROPOSED; dormant codecs, no caller).** The file also holds, at a TEST_ONLY A = 500,000:
+- `prospective_registry_limit.max_ops_per_block`: the per-block cap, 8.
+- `prospective_registry_params.{none,governance_only,both}.{preimage,digest}`: P(h) with both tags absent, with only the governance threshold, and with the threshold, T_min and W (§16 §1.3, big-endian).
+- `prospective_registry_state.{empty,one_record}.{preimage,digest}`: R_empty, and R over the fixture record (§16 §1.3, big-endian).
+- `prospective_registry_freeze.record`: the 41-byte freeze record of the fixture values with `first_height = A` (§17, little-endian).
+- `prospective_registry_freeze.gate_pin`: the 15-byte gate pin of A (§17, little-endian).
+
+The test also checks:
+- that `v_registry_state_digest` over an empty registry, and over one stored fixture record, reproduces the R vectors;
+- that the freeze record and the pin decode back to their fields.
+
 **Tests.** The wire unit tests are in `crates/sumchain-wire/src/registry_ingress.rs`. The executor tests are in `crates/state/tests/registry_ingress.rs`. Each required case, with the test that checks it:
 
 | Case | Test |
@@ -513,6 +552,13 @@ The consolidated recommendation of 2026-10-22 was decided by the owner on 2026-1
 | Size bound: rolling back a published register (generic journal) restores the count | `rolling_back_a_register_restores_the_count` |
 | Size bound: the dry run reports the record alone at the limit, while execution refuses `303` | `crates/rpc/tests/registry_dry_run_agrees.rs` (`at_the_size_bound_the_dry_run_reports_the_record_alone`) |
 | Size bound: constants and folded bytes; the boundary vectors execute | `the_size_bound_constants`, `vectors_are_reproduced_and_execute` |
+| P(h): preimage layout; a different threshold, T_min, W, order or presence gives a different digest | wire `params_digest_preimage_layout_and_every_field_matters`; `the_registry_params_digest_separates_every_mismatch` |
+| R(h): preimage layout; ascending key order; disabled records folded; any byte change moves it | wire `state_digest_preimage_layout`; `the_registry_state_digest_is_ordered_and_covers_every_record` |
+| R(h) never folds around a bad row (short key, undecodable value, record under another id) | `the_registry_state_digest_refuses_every_malformed_row` |
+| Freeze record and gate pin: exact LE layout, round trip, refusal of short, long and cross-magic bytes; the META keys disjoint and prefix-free | wire `freeze_record_and_gate_pin_encode_decode_and_refuse`; `the_freeze_record_and_gate_pin_refuse_malformed_bytes`; `the_record_prefix_is_disjoint_from_every_state_key_family` (the `registry/` namespace, META keys included, is this module's alone) |
+| The P and R domains are prefix-free with every registry and validator domain, one NUL each | wire `domains_are_prefix_free_against_every_registry_and_validator_domain` |
+| Both compiled limits pinned: values, census rows, protocol-digest classification, not yet in `consensus_limits` | `the_compiled_registry_limits_are_pinned_with_their_census_rows` |
+| Once folded, a different compiled value of either limit changes the protocol digest (§12.1 (c)) | `once_folded_a_different_compiled_registry_limit_changes_the_protocol_digest` |
 
 ## 16. Activation proposal: consensus binding and registry digest (PROPOSED)
 
@@ -567,6 +613,12 @@ root(h ≥ A) = BLAKE3( …unchanged components through the account fold (execut
 ```
 
 R(h) is computed over the block's candidate view (as `v_account_state_digest`, `account_root.rs:449-461`), so it reflects block h's own writes.
+
+*[Amended 2026-10-26]* These preimages have one dormant implementation in this PR. Nothing calls it, and no root folds it:
+- `registry_params_digest_preimage` / `registry_params_digest` and `registry_state_digest_preimage` (`sumchain_wire::registry_ingress`);
+- `v_registry_state_digest` over a candidate view (`sumchain_state::registry_ingress`).
+
+Each has vectors in §15.
 
 *[Amended 2026-10-23]* Every row R(h) folds must pass `checked_registry_row` (`state/src/registry_ingress.rs`), the one row rule the size-bound count also uses (§12.1 (a)):
 - the key is exactly `registry/v1/` ‖ 32 bytes;
@@ -732,7 +784,9 @@ Handshake digest trailer: optional detection only.
 - **What was decided:** the owner accepted the freeze as the design direction on 2026-10-23, then directed this revision before byte ratification.
 - **What is PROPOSED:** the binding rule, the recovery path, the record layouts, the keys, the command and the messages below.
 - **What is not selected:** any parameter value or activation height.
-- **Implementation:** none in this PR. The freeze is part of the activation change, which must test it. This PR's dormant behaviour is unchanged: operations 8 and 9 do not decode.
+- **Implementation:** the behaviour is not in this PR. The freeze is part of the activation change, which must test it.
+  - This PR carries only the two **codecs** (`RegistryFreezeRecordV1`, `RegistryGatePinV1`), their META key names, vectors and refusal tests. Nothing writes or reads either row.
+  - This PR's dormant behaviour is unchanged: operations 8 and 9 do not decode.
 
 **Scope.**
 - The freeze covers those three values and A itself. Other `GovernanceParams` fields are not frozen.
@@ -813,10 +867,31 @@ magic "RFRZv1\0" (7) ‖ gate_a:u64 ‖ threshold_bps:u16 ‖ t_min:u64 ‖ w:u6
   - **PoA block signing on `df502b53` has no persisted re-sign guard.** An ordinary operator rollback can already lead a validator to produce again at a height it produced before. This design does not change that.
   - **The durable signer proposed in #340** (dormant, not wired to any node) guards finality votes, not PoA headers. Its record lives outside the chain database, and the recovery rollback never touches it. It keeps refusing any vote at or below its last signed position; only its own recovery procedure moves that floor.
 
-**The gate pin.** A is pinned after the recovery rollback.
-- **The pin row:** in the same batch, the recovery rollback writes `registry/freeze/gate/v1` (provisional): magic `"RFGTv1\0"` (7) ‖ `gate_a:u64`, 15 bytes. Startup refuses a configured A that differs from it, at any head, and nothing removes the pin.
+**The gate pin (PROPOSED).** A is pinned after the recovery rollback.
+
+*Layout: 15 bytes, the integer little-endian like the freeze record and the ConsensusConfig record* (`RegistryGatePinV1`, `sumchain_wire::registry_ingress`; codec and vector in this PR, written by nothing):
+
+| Offset | Size | Field | Value |
+|---|---|---|---|
+| 0 | 7 | magic | `"RFGTv1\0"` = `52 46 47 54 76 31 00` (`REGISTRY_GATE_PIN_MAGIC`) |
+| 7 | 8 | `gate_a`, u64 LE | A: the deleted freeze record's `gate_a`, or the configured A if that record was unreadable |
+
+- **Key:** one `cf::META` row, `registry/freeze/gate/v1` (`REGISTRY_GATE_PIN_META_KEY`, provisional), outside the generic journal like the freeze record, and never hashed into a block. It is under the `registry/` namespace, which no other source file spells (`the_record_prefix_is_disjoint_from_every_state_key_family`), so it cannot meet another META key. It is disjoint from the freeze record's key, and neither key prefixes the other.
+- **Written:** only by the explicit recovery rollback, in the **same atomic batch** that rolls back to T and deletes the freeze record.
+  - `gate_a` is copied from the deleted record's bytes 7..15 when the record decodes, which is the A the node committed to.
+  - For an unreadable record (allowed only with T below the configured A, see the refusals above), it is the configured A.
+  - A second recovery rollback (a row written again at A, then removed again) rewrites the pin with the same A, because startup has already refused any other configured A.
+- **Read at startup:** after the freeze-record comparison and before the node opens for blocks.
+  - **Absent:** no constraint.
+  - **Present:** `RegistryGatePinV1::decode_exact` must succeed: exactly 15 bytes and this magic. An unreadable pin **refuses start**, as an unreadable freeze record does; it is never treated as absent. Then the configured `registry_enabled_from_height` must equal `gate_a`.
+  - **Refused:** a configured A that differs, or is unset, at any head. The message names the pinned A and the configured value, and says that only T_min, W and the governance threshold may change after a recovery rollback.
+- **Removed by:** nothing. No command deletes it and no rollback touches it. It outlives the freeze record it replaced.
+- **Interaction with the freeze record:**
+  - while both exist (the node re-committed at its next publish at or above A), both hold the same A, because both are compared with the configured A;
+  - the record holds the three values and `first_height`; the pin holds only A.
 - **Why:** without the pin, a database below A would treat A as a future gate under the existing rules. The startup check would then auto-record a `GateReschedule`, and the activation-height check would permit it.
 - **The resulting rule:** the recovery rollback permits a change to the three frozen values only. Every other configuration rule is unchanged.
+- **LOCAL PROTOTYPE evidence (not the activation change's tests):** the unpublished prototype writes exactly these 15 bytes in the recovery batch, and its `an_ordinary_rollback_below_a_keeps_the_record_and_the_recovery_rollback_removes_it` checks the pin row in that batch and that a restart with a moved A is refused.
 
 **Rollback below A.**
 - **Ordinary operator rollback, or automatic reorg unwind, below A:**
