@@ -2664,8 +2664,10 @@ fn the_size_bound_and_p_h_read_the_one_compiled_source() {
 
 /// L3: the production builder takes the threshold from the same
 /// `ChainParams::governance` value execution reads, and commits T_min and W
-/// exactly when execution can apply them (`ready`): with the parameters but
-/// no genesis hash, execution refuses 302 and P(h) commits `reg_tag = 0`.
+/// whenever `ready` holds: with the parameters but no genesis hash, execution
+/// refuses 302 and P(h) commits `reg_tag = 0`. With governance absent, P(h)
+/// still commits T_min and W while execution refuses 301; the load rules
+/// (README §16 §1.4) make that unreachable from the activation height.
 #[test]
 fn p_h_commits_the_threshold_and_values_execution_applies() {
     let n = node();
@@ -2704,10 +2706,13 @@ fn p_h_commits_the_threshold_and_values_execution_applies() {
     );
 }
 
-/// M1 guard: neither limit value appears as a registry-limit literal anywhere
-/// in the workspace's Rust sources except its one definition
-/// (`sumchain_wire::registry_ingress::REGISTRY_LIMITS`) and the allow-listed
-/// pins that assert it. Every other reader must name the constant.
+/// M1 guard, a line heuristic (not a proof; README §16 §1.3): outside the one
+/// definition (`sumchain_wire::registry_ingress::REGISTRY_LIMITS`) and the
+/// allow-listed pins, no line naming the registry or `max_records` spells the
+/// records value (`4096`, `4_096` or `0x1000`), and no line naming
+/// `ops_per_block` or registry operations spells `8`. A value on a line that
+/// names neither, or a computed value, escapes it; the cap's future readers
+/// must name the constant and are reviewed for it.
 #[test]
 fn registry_limit_values_are_defined_once() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -2746,10 +2751,19 @@ fn registry_limit_values_are_defined_once() {
                 && !matches!(after, Some(c) if c.is_ascii_alphanumeric() || c == '_' || c == '.')
         })
     }
+    // A line naming registry operations (or the per-block cap) that spells 8.
+    fn registry_ops_line(t: &str) -> bool {
+        let lower = t.to_ascii_lowercase();
+        let names_ops = lower.contains("ops_per_block")
+            || (lower.contains("reg") && (lower.contains("_ops") || lower.contains("operations")));
+        names_ops && spells(t, "8")
+    }
     // The matcher itself: a spelled value is caught, a longer number is not.
     assert!(spells("RegistryLimits { max_records: 4_096, max_ops_per_block: 8u16 }", "8")); // limit-guard-self
     assert!(spells("let cap = 4096u32; // registry", "4096")); // limit-guard-self
     assert!(!spells("registry 14_096 0x8 1.8 v8", "8") && !spells("40960", "4096")); // limit-guard-self
+    assert!(spells("let bound = 0x1000; // registry records", "0x1000")); // limit-guard-self
+    assert!(registry_ops_line("if registry_ops > 8 {") && registry_ops_line("const MAX_REG_OPS_PER_BLOCK: usize = 8;")); // limit-guard-self
     let mut hits = Vec::new();
     for f in &files {
         let rel = f.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
@@ -2761,8 +2775,8 @@ fn registry_limit_values_are_defined_once() {
             }
             let lower = t.to_ascii_lowercase();
             let registry_line = lower.contains("regist") || lower.contains("max_records");
-            let spells_records = registry_line && (spells(t, "4_096") || spells(t, "4096")); // limit-guard-self
-            let spells_ops = lower.contains("ops_per_block") && spells(t, "8"); // limit-guard-self
+            let spells_records = registry_line && (spells(t, "4_096") || spells(t, "4096") || spells(t, "0x1000")); // limit-guard-self
+            let spells_ops = registry_ops_line(t); // limit-guard-self
             if (spells_records || spells_ops)
                 && !allowed.iter().any(|(file, l)| rel.ends_with(file) && t.starts_with(l))
             {

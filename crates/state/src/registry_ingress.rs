@@ -378,11 +378,15 @@ pub fn v_check_commit(
 ///   `validator_authority_threshold_bps`, the field `validate_register` reads
 ///   through `execute_registry_ingress`; absent governance (execution refuses
 ///   `301`) commits `gov_tag = 0`;
-/// - T_min and W: committed exactly when execution can use them, that is when
-///   [`ready`] holds (both named parameters complete and the genesis hash
-///   present). Otherwise execution refuses `302` and `P(h)` commits
-///   `reg_tag = 0`, so the committed values never claim parameters that
-///   execution does not apply.
+/// - T_min and W: committed (`reg_tag = 1`) whenever [`ready`] holds (both
+///   named parameters complete and the genesis hash present); otherwise
+///   execution refuses `302` and `P(h)` commits `reg_tag = 0`. `ready` does not
+///   look at governance: with governance absent, `P(h)` still commits T_min
+///   and W while execution refuses `301` first. The load rules (README §16
+///   §1.4) require governance at or before the activation height, so from
+///   activation `P(h)` commits exactly the values execution applies.
+///
+/// Consensus code must build `P(h)` only through this function.
 pub fn registry_params_digest_for(
     params: &sumchain_genesis::ChainParams,
     ctx: &RegistryIngressContext<'_>,

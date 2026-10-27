@@ -473,11 +473,13 @@ impl RegistryLimits {
 /// - `P(h)`, through `sumchain_state::registry_ingress::registry_params_digest_for`,
 ///   which accepts no limits argument.
 ///
-/// A guard test refuses either value as a literal anywhere else.
+/// A guard test (a line heuristic, not a proof) flags either value spelled on
+/// a registry-limit line elsewhere; readers must name this constant.
 ///
 /// **Frozen at A.** Like T_min, W and the governance threshold, these values
 /// are fixed once the registry gate A opens. Changing either later is a new
-/// coordinated activation that height-keys the old and new values: every
+/// coordinated activation carrying a compiled, height-keyed schedule in a new
+/// binary (never a ConsensusConfig entry): every
 /// binary must keep the old value and apply it below the change height on
 /// replay, reorg and resync, or historical roots (P(h)) and outcomes would no
 /// longer reproduce (README §12.1 (c), §17 (c)). They are not in the
@@ -510,7 +512,9 @@ const _: () = assert!(REGISTRY_LIMITS.validate().is_ok());
 /// parameter exists for vectors and the local activation prototype only:
 /// consensus code builds `P(h)` through
 /// `sumchain_state::registry_ingress::registry_params_digest_for`, which reads
-/// [`REGISTRY_LIMITS`] itself and accepts no limits.
+/// [`REGISTRY_LIMITS`] itself and accepts no limits. Hidden from the crate
+/// documentation for that reason.
+#[doc(hidden)]
 pub fn registry_params_digest_preimage(
     limits: &RegistryLimits,
     governance_threshold_bps: Option<u16>,
@@ -540,7 +544,10 @@ pub fn registry_params_digest_preimage(
 }
 
 /// `P(h)` = BLAKE3 of [`registry_params_digest_preimage`]; invalid limits are
-/// refused. Same `limits` caveat as the preimage.
+/// refused. Same `limits` caveat as the preimage: vectors and the local
+/// prototype only; consensus code uses
+/// `sumchain_state::registry_ingress::registry_params_digest_for`.
+#[doc(hidden)]
 pub fn registry_params_digest(
     limits: &RegistryLimits,
     governance_threshold_bps: Option<u16>,
