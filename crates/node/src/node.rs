@@ -643,14 +643,20 @@ impl Node {
                 // changing consensus-relevant configuration on a running node.
                 warn!("Activation parameter changed (permitted): {}", change);
             }
+            // Only retroactive openings are ever restored. Their Display text
+            // describes a gate that really was opened late, so name the gate
+            // and height directly: on this path the gate was in force.
             for change in &restored {
-                warn!(
-                    "Activation record restored: {} — the gate's name was missing from \
-                     the recorded activation heights (a binary that does not know it \
-                     rewrites the record without it) and this database's verified \
-                     consensus configuration record holds the same height",
-                    change
-                );
+                if let sumchain_genesis::ActivationChange::RetroactivelyOpened { gate, to } = change
+                {
+                    warn!(
+                        "Activation record restored: {gate} at height {to} — the gate's \
+                         name was missing from the recorded activation heights (a binary \
+                         that does not know it rewrites the record without it) and this \
+                         database's verified consensus configuration record holds the \
+                         same height; no rule changes"
+                    );
+                }
             }
             if !refused.is_empty() {
                 let detail = refused
