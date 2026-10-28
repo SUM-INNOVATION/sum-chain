@@ -356,3 +356,205 @@ fn the_node_registry_gate_through_the_boot_sequence() {
     assert_eq!(r.config.schema().number, 3);
     assert_eq!(r.config.get(GATE), Some(&ccfg::Value::U64(1_000)));
 }
+
+// ── an older binary's activation record after the move ──────────────────────
+
+const H_NAME: &str = "node_registry_update_status_unsupported_enabled_from_height";
+const P_NAME: &str = "peer_protocol_declaration_required_from_height";
+
+/// Activation names a binary released before them does not declare. Such a
+/// binary, started by mistake on a moved node, is refused by the schema-3
+/// configuration record, but its activation-height check runs first and
+/// rewrites the activation record with only the names it knows.
+const NAMES_AN_OLDER_BINARY_LACKS: &[&str] = &[
+    H_NAME,
+    "messaging_timestamp_units_enabled_from_height",
+    "contract_metering_enabled_from_height",
+];
+
+/// [`genesis`] with the peer-declaration deadline at `peer` and, when given,
+/// the node-registry gate at `gate`.
+fn gated(peer: u64, gate: Option<u64>) -> Genesis {
+    let mut g = genesis();
+    g.params.peer_protocol_declaration_required_from_height = Some(peer);
+    g.params
+        .node_registry_update_status_unsupported_enabled_from_height = gate;
+    g
+}
+
+fn write_activation_heights(dir: &Path, heights: &[(String, Option<u64>)]) {
+    let db = Database::open_default(dir).unwrap();
+    db.put(
+        cf::META,
+        b"activation/heights",
+        &bincode::serialize(heights).unwrap(),
+    )
+    .unwrap();
+}
+
+/// What a start of the older binary leaves in the activation record: the
+/// recorded heights of the names it knows, none of the names it does not.
+fn as_an_older_binary_records(dir: &Path) {
+    let mut heights = activation_heights(dir);
+    heights.retain(|(n, _)| !NAMES_AN_OLDER_BINARY_LACKS.contains(&n.as_str()));
+    write_activation_heights(dir, &heights);
+}
+
+/// Empty blocks on `dir`, published as [`genesis`]'s one validator, up to
+/// `height`.
+async fn extend_to(dir: &Path, g: &Genesis, height: u64) {
+    use sumchain_consensus::ConsensusEngine;
+    use sumchain_storage::schema::BlockStore;
+    let db = std::sync::Arc::new(Database::open_default(dir).unwrap());
+    let state = std::sync::Arc::new(sumchain_state::StateManager::new(db.clone(), g.chain_id));
+    let mempool = std::sync::Arc::new(sumchain_state::Mempool::new(
+        sumchain_state::MempoolConfig::default(),
+    ));
+    let engine = sumchain_consensus::PoAEngine::new(
+        db.clone(),
+        state.clone(),
+        mempool.clone(),
+        g,
+        Some(validator()),
+    )
+    .unwrap();
+    if BlockStore::new(&db).get_latest_height().unwrap().is_none() {
+        engine.init_genesis(g).unwrap();
+    }
+    while BlockStore::new(&db)
+        .get_latest_height()
+        .unwrap()
+        .unwrap_or(0)
+        < height
+    {
+        engine.propose_block(vec![]).await.unwrap();
+    }
+    drop(engine);
+    drop(mempool);
+    drop(state);
+    drop(db);
+}
+
+/// A directory the schema-1 release recorded, booted by this binary, moved to
+/// schema 3, booted under `scheduled` at height 0, then extended to `height`.
+async fn moved_and_extended(scheduled: &Genesis, height: u64) -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().unwrap();
+    {
+        let db = Database::open_default(dir.path()).unwrap();
+        ccfg::record::check_at_startup_with(&db, &genesis(), 0, &PREVIOUS).unwrap();
+    }
+    boot(dir.path(), &genesis()).unwrap();
+    {
+        let db = Database::open_default(dir.path()).unwrap();
+        let p = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+        ccfg::acknowledge_schema_transition(&db, 0, p.old, p.new).unwrap();
+    }
+    boot(dir.path(), scheduled).unwrap();
+    extend_to(dir.path(), scheduled, height).await;
+    dir
+}
+
+fn refused_as_already_passed(err: &str) {
+    assert!(err.contains("already passed"), "{err}");
+    assert!(err.contains(H_NAME), "{err}");
+}
+
+/// (a) A moved node whose gate has passed, after an older binary dropped the
+/// gate's name from the activation record: the verified schema-3
+/// configuration record holds the same height, so this binary starts and
+/// restores the full activation record.
+#[tokio::test]
+async fn a_dropped_gate_name_is_restored_from_the_verified_configuration() {
+    let g = gated(2, Some(3));
+    let dir = moved_and_extended(&g, 5).await;
+    as_an_older_binary_records(dir.path());
+    assert_eq!(height_of(&activation_heights(dir.path()), H_NAME), None);
+    assert!(!activation_heights(dir.path())
+        .iter()
+        .any(|(n, _)| n == H_NAME));
+
+    boot(dir.path(), &g).unwrap();
+    assert_eq!(
+        activation_heights(dir.path()),
+        g.params.recorded_activation_heights(),
+        "the full activation record is back"
+    );
+    assert_eq!(height_of(&activation_heights(dir.path()), H_NAME), Some(3));
+    let r = record(dir.path()).unwrap();
+    assert_eq!(r.config.get(0x1043), Some(&ccfg::Value::U64(3)));
+    boot(dir.path(), &g).unwrap();
+}
+
+/// (b) The name is missing, but the configuration record holds a different
+/// height, or none: refused exactly as before, nothing rewritten.
+#[tokio::test]
+async fn a_dropped_gate_name_is_not_restored_against_a_different_or_absent_height() {
+    for scheduled in [gated(2, Some(4)), gated(2, None)] {
+        let dir = moved_and_extended(&scheduled, 5).await;
+        as_an_older_binary_records(dir.path());
+        let before = activation_heights(dir.path());
+        let err = boot(dir.path(), &gated(2, Some(3))).unwrap_err();
+        refused_as_already_passed(&err);
+        assert_eq!(activation_heights(dir.path()), before, "nothing rewritten");
+    }
+}
+
+/// (c) The name is present with no height: not an older binary's omission, and
+/// refused exactly as before even though the configuration holds the height.
+#[tokio::test]
+async fn a_gate_recorded_as_unset_is_not_restored() {
+    let g = gated(2, Some(3));
+    let dir = moved_and_extended(&g, 5).await;
+    let mut heights = activation_heights(dir.path());
+    for (n, h) in heights.iter_mut() {
+        if n == H_NAME {
+            *h = None;
+        }
+    }
+    write_activation_heights(dir.path(), &heights);
+    let err = boot(dir.path(), &g).unwrap_err();
+    refused_as_already_passed(&err);
+    assert_eq!(activation_heights(dir.path()), heights, "nothing rewritten");
+}
+
+/// (d) A node never moved: its schema-1 record cannot hold the gate, so a
+/// missing name with a passed height is refused exactly as before.
+#[tokio::test]
+async fn without_a_schema_3_record_a_dropped_gate_name_is_not_restored() {
+    let dir = tempfile::TempDir::new().unwrap();
+    {
+        let db = Database::open_default(dir.path()).unwrap();
+        ccfg::record::check_at_startup_with(&db, &genesis(), 0, &PREVIOUS).unwrap();
+    }
+    let peer_only = gated(2, None);
+    boot(dir.path(), &peer_only).unwrap();
+    assert_eq!(record(dir.path()).unwrap().config.schema().number, 1);
+    extend_to(dir.path(), &peer_only, 5).await;
+    as_an_older_binary_records(dir.path());
+    assert_eq!(height_of(&activation_heights(dir.path()), P_NAME), Some(2));
+    let before = activation_heights(dir.path());
+    let err = boot(dir.path(), &gated(2, Some(3))).unwrap_err();
+    refused_as_already_passed(&err);
+    assert_eq!(activation_heights(dir.path()), before, "nothing rewritten");
+    assert_eq!(record(dir.path()).unwrap().config.schema().number, 1);
+}
+
+/// (e) The name is missing and the configuration record would hold the height,
+/// but the record does not verify: nothing is restored from it, and the start
+/// is refused exactly as before.
+#[tokio::test]
+async fn a_dropped_gate_name_is_not_restored_from_an_unverifiable_record() {
+    let g = gated(2, Some(3));
+    let dir = moved_and_extended(&g, 5).await;
+    as_an_older_binary_records(dir.path());
+    {
+        let db = Database::open_default(dir.path()).unwrap();
+        let mut raw = db.get(cf::META, RECORD_KEY).unwrap().unwrap();
+        *raw.last_mut().unwrap() ^= 1;
+        db.put(cf::META, RECORD_KEY, &raw).unwrap();
+    }
+    let before = activation_heights(dir.path());
+    let err = boot(dir.path(), &g).unwrap_err();
+    refused_as_already_passed(&err);
+    assert_eq!(activation_heights(dir.path()), before, "nothing rewritten");
+}

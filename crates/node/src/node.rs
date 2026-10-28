@@ -636,11 +636,21 @@ impl Node {
             let changes = genesis.params.activation_changes(recorded, current_height);
             let (permitted, refused): (Vec<_>, Vec<_>) =
                 changes.into_iter().partition(|c| c.is_permitted());
+            let (refused, restored) = Self::restorable_gate_names(db, recorded, refused);
 
             for change in &permitted {
                 // Loud, because a legitimate reschedule is still an operator
                 // changing consensus-relevant configuration on a running node.
                 warn!("Activation parameter changed (permitted): {}", change);
+            }
+            for change in &restored {
+                warn!(
+                    "Activation record restored: {} — the gate's name was missing from \
+                     the recorded activation heights (a binary that does not know it \
+                     rewrites the record without it) and this database's verified \
+                     consensus configuration record holds the same height",
+                    change
+                );
             }
             if !refused.is_empty() {
                 let detail = refused
@@ -682,6 +692,61 @@ impl Node {
             info!("Activation heights recorded for the first time on this database");
         }
         Ok(())
+    }
+
+    /// Split refused activation changes into those still refused and those a
+    /// gate-name omission explains.
+    ///
+    /// A binary started on this database runs the activation check before the
+    /// consensus-configuration check, and rewrites the activation record with
+    /// only the gates IT declares. An older binary started by mistake on a node
+    /// whose configuration record it cannot read is refused at that second
+    /// check, but has already dropped every newer gate's name from the
+    /// activation record. Once such a gate has passed, the next start of the
+    /// right binary would read the missing name as "never set" and refuse the
+    /// gate as retroactively opened, with no way to acknowledge it.
+    ///
+    /// Restored, and nothing else: a gate retroactively opened whose NAME is
+    /// absent from the recorded list (not present with no height), when this
+    /// database's consensus-configuration record decodes and verifies with its
+    /// whole history and holds that gate's field at exactly the height the
+    /// genesis gives. That record is written only by a binary that declares the
+    /// gate, so it is this node's own earlier acceptance of the height. Any
+    /// other refusal, an unreadable or unverifiable record, or a different or
+    /// absent value, stays refused exactly as before.
+    fn restorable_gate_names(
+        db: &Database,
+        recorded: &[(String, Option<u64>)],
+        refused: Vec<sumchain_genesis::ActivationChange>,
+    ) -> (
+        Vec<sumchain_genesis::ActivationChange>,
+        Vec<sumchain_genesis::ActivationChange>,
+    ) {
+        use sumchain_consensus::consensus_config as ccfg;
+        use sumchain_genesis::ActivationChange;
+
+        let name_missing = |gate: &str| !recorded.iter().any(|(name, _)| name == gate);
+        if !refused.iter().any(|c| {
+            matches!(c, ActivationChange::RetroactivelyOpened { gate, .. } if name_missing(gate))
+        }) {
+            return (refused, Vec::new());
+        }
+        let config = match ccfg::read_record(db) {
+            Ok(Some(record)) => record.config,
+            // No record, or one that does not decode and verify: nothing to
+            // restore from.
+            Ok(None) | Err(_) => return (refused, Vec::new()),
+        };
+        let (restored, still_refused): (Vec<_>, Vec<_>) =
+            refused.into_iter().partition(|c| match c {
+                ActivationChange::RetroactivelyOpened { gate, to } => {
+                    name_missing(gate)
+                        && ccfg::fields::gate_id(gate)
+                            .is_some_and(|id| config.get(id) == Some(&ccfg::Value::U64(*to)))
+                }
+                _ => false,
+            });
+        (still_refused, restored)
     }
 
     /// Record, or compare against, this database's consensus-configuration
