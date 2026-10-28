@@ -2,6 +2,9 @@
 
 > **Status:** code enablement only (#268). No release, database migration or
 > gate activation is part of the change that adds this document.
+>
+> A later binary writes schema 3 and moves a schema-1 or schema-2 record to it
+> in one step: see `consensus-config-schema-3.md`.
 
 Schema 2 of the local consensus configuration (`crates/consensus/src/consensus_config`)
 is schema 1 plus ten optional fields, each meaning "the behaviour that existed
