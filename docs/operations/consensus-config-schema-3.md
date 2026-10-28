@@ -97,6 +97,10 @@ Scheduling the gate means writing two heights into the genesis of every node:
 - **Identical everywhere, in one window.** Every validator must carry the same
   P and H. The heights are folded into the activation and protocol digests, so
   nodes with different values do not interoperate.
+- **Before the chain reaches H, on every node.** Every node must be moved and
+  have P and H written before the chain reaches H. A node that misses it cannot
+  schedule a gate the chain has already passed: its start is refused, and it
+  must be re-synced from genesis under the scheduled configuration.
 
 The order on each node is therefore: stop, take a copy of the data directory,
 install, `--show`, move, write P and H into the genesis, start.
@@ -118,11 +122,19 @@ unchanged. Statuses set by `UpdateStatus` before H stay as they are.
 
 - **Before the move:** the record is unchanged, so a binary that reads its
   schema can still run the database, provided no gate height has been written.
-- **After the move:** a binary that does not read schema 3 refuses the record
-  ("written by a newer binary") and rewrites nothing. Returning to it needs the
-  copy of the data directory taken before the move. Restoring that copy
-  discards every block the node accepted after it was taken, so it is a
-  recovery decision, not a routine rollback.
+- **After the move:** a binary that does not read schema 3 refuses the
+  consensus-configuration record ("written by a newer binary") and rewrites
+  nothing there. Its activation-height check runs first, though, and rewrites
+  the node's activation record with only the gates that binary declares, which
+  drops the name of this gate. A later start of this binary restores the
+  dropped name when the database's consensus-configuration record verifies and
+  holds the same height as the genesis; it logs "Activation record restored".
+  If the record does not verify, or holds another height or none, the start is
+  refused once the gate has passed, and the node must be re-synced. Do not
+  start an older binary on a moved node. Returning to one needs the copy of the
+  data directory taken before the move. Restoring that copy discards every
+  block the node accepted after it was taken, so it is a recovery decision,
+  not a routine rollback.
 - **After P and H are written:** a binary without this field does not enforce
   the gate, and one that does not refuse unknown genesis fields would ignore it
   silently and diverge at the first `UpdateStatus` at or above H. Do not return
