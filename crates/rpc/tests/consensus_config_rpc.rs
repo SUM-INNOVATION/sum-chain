@@ -41,6 +41,17 @@ fn genesis() -> Genesis {
 fn serve(genesis: &Genesis) -> Served {
     let dir = tempfile::TempDir::new().unwrap();
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
+    let server = server_over(&db, genesis);
+    Served { dir, db, server }
+}
+
+/// Another server over `s`'s database, running `genesis`.
+fn serve_on(s: &Served, genesis: &Genesis) -> RpcServer {
+    server_over(&s.db, genesis)
+}
+
+fn server_over(db: &Arc<Database>, genesis: &Genesis) -> RpcServer {
+    let db = db.clone();
     let state = Arc::new(StateManager::new(db.clone(), genesis.chain_id));
     let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
     let engine: Arc<dyn ConsensusQuery> = Arc::new(
@@ -54,7 +65,7 @@ fn serve(genesis: &Genesis) -> Served {
         .unwrap(),
     );
     let (tx_sender, _rx) = mpsc::channel(8);
-    let server = RpcServer::with_full_config(
+    RpcServer::with_full_config(
         db.clone(),
         state,
         mempool,
@@ -68,8 +79,7 @@ fn serve(genesis: &Genesis) -> Served {
         Arc::new(Metrics::new()),
     )
     .with_chain_params(genesis.params.clone())
-    .with_genesis(genesis);
-    Served { dir, db, server }
+    .with_genesis(genesis)
 }
 
 type Row = (Box<[u8]>, Box<[u8]>);
@@ -142,25 +152,53 @@ async fn the_rpc_reports_the_recorded_baseline_and_its_history() {
     assert_eq!(info.matches_baseline, Some(false));
 }
 
-/// A baseline the previous release recorded (schema 1) is reported in the schema
-/// it holds until its operator moves it.
+/// A baseline an older release recorded (schema 1 or 2) is reported in the
+/// schema it holds until its operator moves it, and matches the running rules
+/// as the startup check sees them — compared in the record's schema — although
+/// its commitment differs from the schema-3 running commitment. A real
+/// difference in rules still does not match.
 #[tokio::test]
-async fn the_rpc_reports_a_schema_1_baseline_as_recorded() {
-    // Knows schema 3 only because this binary's genesis carries the schema-3
-    // gate; unset, it adds nothing to the schema-1 record written.
-    static PREVIOUS: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
+async fn the_rpc_reports_an_older_schema_baseline_as_recorded() {
+    // Know schema 3 only because this binary's genesis carries the schema-3
+    // gate; unset, it adds nothing to the record written.
+    static SCHEMA_1_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
         reads: &[&ccfg::SCHEMA_1],
         writes: &ccfg::SCHEMA_1,
         knows: &ccfg::SCHEMA_3,
     };
-    let g = genesis();
-    let s = serve(&g);
-    ccfg::record::check_at_startup_with(&s.db, &g, 42, &PREVIOUS).unwrap();
-    let info = s.server.chain_get_consensus_config().await.unwrap();
-    assert_eq!(info.schema, ccfg::SCHEMA_V1);
-    assert_eq!(info.fields.len(), ccfg::SCHEMA_V1_FIELDS.len());
-    let recorded = ccfg::read_record(&s.db).unwrap().unwrap().commitment;
-    assert_eq!(info.commitment, Some(recorded.to_string()));
+    static SCHEMA_2_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
+        reads: &[&ccfg::SCHEMA_1, &ccfg::SCHEMA_2],
+        writes: &ccfg::SCHEMA_2,
+        knows: &ccfg::SCHEMA_3,
+    };
+    for (policy, schema, fields) in [
+        (
+            &SCHEMA_1_RELEASE,
+            ccfg::SCHEMA_V1,
+            ccfg::SCHEMA_V1_FIELDS.len(),
+        ),
+        (&SCHEMA_2_RELEASE, 2, ccfg::SCHEMA_2.specs().len()),
+    ] {
+        let g = genesis();
+        let s = serve(&g);
+        ccfg::record::check_at_startup_with(&s.db, &g, 42, policy).unwrap();
+        let info = s.server.chain_get_consensus_config().await.unwrap();
+        assert_eq!(info.schema, schema);
+        assert_eq!(info.fields.len(), fields);
+        let recorded = ccfg::read_record(&s.db).unwrap().unwrap().commitment;
+        assert_eq!(info.commitment, Some(recorded.to_string()));
+        let running = ccfg::build(&g).unwrap().commitment().to_string();
+        assert_eq!(info.running_commitment.as_deref(), Some(running.as_str()));
+        assert_ne!(info.commitment.as_deref(), Some(running.as_str()));
+        assert_eq!(info.matches_baseline, Some(true), "schema {schema}");
+
+        // A server running a genesis with a different rule does not match.
+        let mut changed = g.clone();
+        changed.params.max_contract_gas += 1;
+        let other = serve_on(&s, &changed);
+        let info = other.chain_get_consensus_config().await.unwrap();
+        assert_eq!(info.matches_baseline, Some(false), "schema {schema}");
+    }
 }
 
 #[tokio::test]

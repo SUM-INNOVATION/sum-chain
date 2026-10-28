@@ -2091,8 +2091,16 @@ impl SumChainApiServer for RpcServer {
             baseline_height: record.as_ref().map(|r| r.baseline_height),
             initial_commitment: record.as_ref().map(|r| r.initial_commitment.to_string()),
             running_commitment: running.map(|c| c.commitment().to_string()),
+            // Compared as the startup check compares: in the schema the record
+            // holds. A record of an older schema matches when it carries the
+            // running rules with every newer field absent.
             matches_baseline: match (record.as_ref(), running) {
-                (Some(r), Some(c)) => Some(r.commitment == c.commitment()),
+                (Some(r), Some(c)) => Some(
+                    r.commitment == c.commitment()
+                        || r.config
+                            .extend_to(c.schema())
+                            .is_ok_and(|moved| moved == *c),
+                ),
                 _ => None,
             },
             rules: {

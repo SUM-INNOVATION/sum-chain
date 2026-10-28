@@ -887,9 +887,13 @@ pub struct ConsensusConfigInfo {
     pub baseline_height: Option<BlockHeight>,
     /// The commitment first recorded.
     pub initial_commitment: Option<String>,
-    /// What THIS process computes from the genesis it was started with.
+    /// What THIS process computes from the genesis it was started with, in
+    /// the schema this binary writes.
     pub running_commitment: Option<String>,
-    /// Whether the running configuration equals the recorded baseline.
+    /// Whether the running configuration equals the recorded baseline,
+    /// compared in the schema the record holds, as the startup check compares.
+    /// A record of an older schema that carries the running rules matches,
+    /// although its commitment differs from `running_commitment`.
     pub matches_baseline: Option<bool>,
     /// The rules the running engine implements, as named rule codes.
     pub rules: ConsensusRulesInfo,
