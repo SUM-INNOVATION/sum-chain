@@ -387,8 +387,8 @@ enum Commands {
     /// The recorded rules are re-encoded, not changed: every field the newer
     /// schema adds is recorded absent, which is the behaviour the node already
     /// runs. The previous encoding stays in the append-only history. The
-    /// operator names BOTH commitments; the node prints them at start when a
-    /// transition is available.
+    /// operator names BOTH commitments: `--show` prints them without writing,
+    /// and the node prints them at start when a transition is available.
     ///
     /// Local only. It authorizes nothing on the network and activates nothing.
     /// A binary that records the schema the database already holds refuses.
@@ -398,16 +398,22 @@ enum Commands {
         data_dir: PathBuf,
 
         /// The commitment recorded in this database, exactly
-        #[arg(long)]
-        old: String,
+        #[arg(long, required_unless_present = "show")]
+        old: Option<String>,
 
         /// The commitment of the recorded configuration in the newer schema, exactly
-        #[arg(long)]
-        new: String,
+        #[arg(long, required_unless_present = "show")]
+        new: Option<String>,
 
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
+
+        /// Print the move this binary would make, with both commitments exactly
+        /// as `--old` and `--new` take them, and exit. Opens the database
+        /// read-only and writes nothing; meant for a stopped node.
+        #[arg(long, conflicts_with_all = ["old", "new", "yes"])]
+        show: bool,
     },
 
     /// Inspect SNIP V2 metadata rows in the database (read-only). Used as a
@@ -1468,11 +1474,49 @@ async fn main() -> Result<()> {
             old,
             new,
             yes,
+            show,
         } => {
             use sumchain_consensus::consensus_config as ccfg;
             use sumchain_storage::schema::BlockStore;
 
             init_logging("info", false)?;
+
+            if show {
+                // Read-only: no lock, no write. The record is read and its
+                // whole history verified, exactly as a start would.
+                let db = Database::open_read_only(&data_dir)
+                    .with_context(|| format!("cannot open {data_dir:?} read-only"))?;
+                let record = ccfg::read_record(&db).map_err(|e| anyhow::anyhow!("{e}"))?;
+                match (
+                    record.as_ref(),
+                    ccfg::pending_schema_transition_for(record.as_ref(), &ccfg::PRODUCTION),
+                ) {
+                    (_, Some(p)) => {
+                        println!(
+                            "Recorded in schema {}; this binary records schema {}.",
+                            p.from_schema, p.to_schema
+                        );
+                        println!("  --old {}", p.old);
+                        println!("  --new {}", p.new);
+                    }
+                    (Some(r), None) => println!(
+                        "Recorded in schema {} (commitment {}); this binary records schema \
+                         {}. There is no schema transition to make.",
+                        r.config.schema().number,
+                        r.commitment,
+                        ccfg::PRODUCTION.writes.number
+                    ),
+                    (None, None) => println!(
+                        "No consensus configuration baseline is recorded; the next start \
+                         records one in schema {}.",
+                        ccfg::PRODUCTION.writes.number
+                    ),
+                }
+                return Ok(());
+            }
+            let (Some(old), Some(new)) = (old, new) else {
+                anyhow::bail!("--old and --new are both required");
+            };
 
             let old = sumchain_primitives::Hash::from_hex(&old)
                 .map_err(|e| anyhow::anyhow!("--old is not a commitment: {e}"))?;

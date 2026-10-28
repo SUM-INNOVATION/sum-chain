@@ -192,6 +192,27 @@ fn schema_2_fixture() -> (tempfile::TempDir, std::path::PathBuf, String, String)
     (dir, data, r.commitment.to_string(), pending.new.to_string())
 }
 
+fn show_schema(data_dir: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_sumchain"))
+        .args([
+            "acknowledge-consensus-config-schema",
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "--show",
+        ])
+        .output()
+        .expect("running the node binary")
+}
+
+/// The value printed after `flag` by `--show`.
+fn shown(out: &Output, flag: &str) -> Option<String> {
+    String::from_utf8_lossy(&out.stdout).lines().find_map(|l| {
+        l.trim()
+            .strip_prefix(&format!("{flag} "))
+            .map(str::to_string)
+    })
+}
+
 fn meta(data: &Path) -> Vec<(Vec<u8>, Vec<u8>)> {
     let db = Database::open_default(data).unwrap();
     db.prefix_iter_checked(sumchain_storage::cf::META, b"consensus_config/")
@@ -248,6 +269,62 @@ fn the_schema_transition_moves_a_schema_2_database() {
     let r = ccfg::read_record(&db).unwrap().unwrap();
     assert_eq!(r.config.schema().number, 3);
     assert_eq!(r.commitment.to_string(), new);
+}
+
+/// `--show` prints both commitments exactly as the move takes them and writes
+/// nothing; the operator's sequence — show, then move with what it printed —
+/// lands on schema 3. On a database already in schema 3 it says there is
+/// nothing to move.
+#[test]
+fn show_prints_the_exact_move_and_writes_nothing() {
+    let (_dir, data, old, new) = schema_1_fixture();
+    let before = meta(&data);
+    let out = show_schema(&data);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("schema 1"), "{}", text(&out));
+    assert_eq!(
+        shown(&out, "--old").as_deref(),
+        Some(old.as_str()),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(
+        shown(&out, "--new").as_deref(),
+        Some(new.as_str()),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(meta(&data), before, "nothing written");
+
+    let moved = ack_schema(
+        &data,
+        &shown(&out, "--old").unwrap(),
+        &shown(&out, "--new").unwrap(),
+    );
+    assert!(moved.status.success(), "{}", text(&moved));
+
+    let after = show_schema(&data);
+    assert!(after.status.success(), "{}", text(&after));
+    assert!(
+        text(&after).contains("no schema transition to make"),
+        "{}",
+        text(&after)
+    );
+    assert_eq!(shown(&after, "--new"), None);
+
+    // `--show` takes no commitments.
+    let both = Command::new(env!("CARGO_BIN_EXE_sumchain"))
+        .args([
+            "acknowledge-consensus-config-schema",
+            "--data-dir",
+            data.to_str().unwrap(),
+            "--show",
+            "--old",
+            &old,
+        ])
+        .output()
+        .unwrap();
+    assert!(!both.status.success(), "{}", text(&both));
 }
 
 /// Anything but both exact commitments refuses and writes nothing.
