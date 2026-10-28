@@ -25,14 +25,20 @@
 //! refuses to start if any of its added fields is non-absent — a draft field
 //! can be registered, never activated.
 //!
-//! Schema 2 is frozen: [`PRODUCTION`] writes it. Its registry,
-//! [`SCHEMA_2_ADDED`], never changes again, and the encoding is pinned by
+//! Schema 2 is frozen: a release wrote it. Its registry, [`SCHEMA_2_ADDED`],
+//! never changes again, and the encoding is pinned by
 //! `crates/consensus/tests/consensus_config_schema2.rs`.
 //!
-//! # Registering a field after schema 2
+//! Schema 3 is frozen: [`PRODUCTION`] writes it. It is schema 2 plus one
+//! remediation gate, [`SCHEMA_3_ADDED`], which never changes again; its
+//! encoding is pinned by `schema_3_golden_vectors` in
+//! `crates/consensus/tests/consensus_config.rs`, and the move to it by
+//! `crates/consensus/tests/consensus_config_schema3.rs`.
 //!
-//! A field registered from now on belongs to a new schema 3: a `SCHEMA_3`
-//! extending [`SCHEMA_2`] with its own append-only list, known by
+//! # Registering a field after schema 3
+//!
+//! A field registered from now on belongs to a new schema 4: a `SCHEMA_4`
+//! extending [`SCHEMA_3`] with its own append-only list, known by
 //! [`PRODUCTION`] as a draft until a later reviewed change writes it. Use the
 //! next unused id in the field's range (an activation gate: the `0x1000–0x1fff`
 //! range, `source: Source::Gate`, `ty: U64`, named exactly as
@@ -257,9 +263,9 @@ pub static SCHEMA_1: Schema = Schema {
     added: &[],
 };
 
-/// Fields schema 2 adds to schema 1. FROZEN: this binary writes schema 2
-/// ([`PRODUCTION`]), so this list never changes again; a later field belongs
-/// to schema 3. Ids are never reused or reordered. The list's order is history
+/// Fields schema 2 adds to schema 1. FROZEN: a release wrote schema 2, so this
+/// list never changes again; a later field belongs to a later schema. Ids are
+/// never reused or reordered. The list's order is history
 /// only: configurations encode in ascending id order ([`Schema::specs`]), so
 /// where an entry sits here never changes bytes or commitments.
 pub const SCHEMA_2_ADDED: &[AddedField] = &[
@@ -653,10 +659,9 @@ pub static SCHEMA_2: Schema = Schema {
     added: SCHEMA_2_ADDED,
 };
 
-/// Fields schema 3 adds to schema 2. DRAFT: [`PRODUCTION`] knows these fields
-/// but neither writes nor reads schema-3 records, and refuses to start if any
-/// of them is non-absent, so a gate registered here can be declared but never
-/// activated by this binary. Append-only, like every later schema.
+/// Fields schema 3 adds to schema 2. FROZEN: this binary writes schema 3
+/// ([`PRODUCTION`]), so this list never changes again; a later field belongs
+/// to schema 4. Ids are never reused or reordered.
 pub const SCHEMA_3_ADDED: &[AddedField] = &[
     // A transaction-borne node-registry `UpdateStatus` is refused.
     AddedField {
@@ -672,7 +677,7 @@ pub const SCHEMA_3_ADDED: &[AddedField] = &[
     },
 ];
 
-/// Schema 3: schema 2 plus [`SCHEMA_3_ADDED`]. DRAFT.
+/// Schema 3: schema 2 plus [`SCHEMA_3_ADDED`]. FROZEN.
 pub static SCHEMA_3: Schema = Schema {
     number: 3,
     previous: Some(&SCHEMA_2),
@@ -681,16 +686,17 @@ pub static SCHEMA_3: Schema = Schema {
 
 /// What this binary does.
 ///
-/// It writes schema 2: a fresh database records schema 2 directly. It reads
-/// schema 1 and schema 2, and keeps reading schema 1 for good (see the module
-/// documentation of [`super`]). An existing schema-1 record is run as it
-/// stands, compared in schema 1 and never re-encoded at start; moving it to
-/// schema 2 is the stopped-node `acknowledge-consensus-config-schema`, which
-/// changes no rule. Until a node has moved, a schema-2 field set in its
-/// genesis refuses start and names that command. It knows the draft schema 3,
-/// whose fields must all be absent. Nothing here sets any gate.
+/// It writes schema 3: a fresh database records schema 3 directly. It reads
+/// schemas 1, 2 and 3, and keeps reading schemas 1 and 2 for good (see the
+/// module documentation of [`super`]). An existing schema-1 or schema-2 record
+/// is run as it stands, compared in its own schema and never re-encoded at
+/// start; moving it to schema 3 is the stopped-node
+/// `acknowledge-consensus-config-schema`, one step from either, which changes
+/// no rule. Until a node has moved, a schema-2 or schema-3 field set in its
+/// genesis that its record's schema cannot express refuses start and names that
+/// command. No field is a draft. Nothing here sets any gate.
 pub static PRODUCTION: SchemaPolicy = SchemaPolicy {
-    reads: &[&SCHEMA_1, &SCHEMA_2],
-    writes: &SCHEMA_2,
+    reads: &[&SCHEMA_1, &SCHEMA_2, &SCHEMA_3],
+    writes: &SCHEMA_3,
     knows: &SCHEMA_3,
 };

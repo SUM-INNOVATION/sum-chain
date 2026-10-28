@@ -7,7 +7,10 @@
 //! gate reschedule and an operator acknowledgement), loaded into a fresh
 //! database byte for byte.
 //!
-//! This binary writes schema 2 ([`PRODUCTION`]). The release before it read and
+//! The release that wrote schema 2 read schemas 1 and 2 and wrote 2:
+//! [`SCHEMA_2_RELEASE`] models it, and is this file's subject. This binary
+//! writes schema 3 ([`PRODUCTION`], `consensus_config_schema3.rs`) and still
+//! runs a schema-2 record as it stands. The release before schema 2 read and
 //! wrote schema 1 and knew schema 2 only as a draft: [`PREVIOUS`] models it, for
 //! what an older binary does with a schema-2 database. [`TEST_SCHEMA_2`] adds
 //! one test-only example field to exercise the mechanism. Nothing here
@@ -127,11 +130,19 @@ static DRAFT: SchemaPolicy = SchemaPolicy {
     knows: &TEST_SCHEMA_3,
 };
 
-/// The release before this binary: it read and wrote schema 1 and knew the
-/// real schema 2 only as a draft.
+/// The release before schema 2: it read and wrote schema 1 and knew the real
+/// schema 2 only as a draft.
 static PREVIOUS: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1],
     writes: &SCHEMA_1,
+    knows: &ccfg::SCHEMA_3,
+};
+
+/// The release that wrote schema 2: it read schemas 1 and 2, wrote 2, and knew
+/// schema 3 only as a draft.
+static SCHEMA_2_RELEASE: SchemaPolicy = SchemaPolicy {
+    reads: &[&SCHEMA_1, &SCHEMA_2],
+    writes: &SCHEMA_2,
     knows: &ccfg::SCHEMA_3,
 };
 
@@ -261,21 +272,21 @@ fn the_fixture_is_what_the_schema_1_path_still_writes() {
     );
 }
 
-/// This binary runs a released schema-1 database exactly as it stands — compared
-/// in schema 1, never re-encoded, however often it starts — and offers the
-/// explicit move to schema 2. The previous release offered none.
+/// The schema-2 release ran a released schema-1 database exactly as it stood —
+/// compared in schema 1, never re-encoded, however often it started — and
+/// offered the explicit move to schema 2. The previous release offered none.
 #[test]
-fn this_binary_runs_a_schema_1_database_as_it_is_and_offers_the_transition() {
+fn the_schema_2_release_runs_a_schema_1_database_as_it_is_and_offers_the_transition() {
     let (_d, db) = schema_1_database();
     for _ in 0..3 {
         assert_eq!(
-            ccfg::check_at_startup(&db, &g2(), HEIGHT).unwrap(),
+            check_at_startup_with(&db, &g2(), HEIGHT, &SCHEMA_2_RELEASE).unwrap(),
             StartupOutcome::Unchanged { commitment: h(C2) }
         );
     }
-    let r = ccfg::read_record(&db).unwrap().unwrap();
+    let r = read_record_with(&db, &SCHEMA_2_RELEASE).unwrap().unwrap();
     assert_eq!(r.config.schema().number, 1);
-    let pending = ccfg::pending_schema_transition(&db)
+    let pending = pending_schema_transition_with(&db, &SCHEMA_2_RELEASE)
         .unwrap()
         .expect("schema 2 is offered");
     assert_eq!((pending.from_schema, pending.to_schema), (1, 2));
@@ -299,7 +310,7 @@ fn this_binary_runs_a_schema_1_database_as_it_is_and_offers_the_transition() {
 }
 
 #[test]
-fn the_production_schema_2_is_frozen_and_written() {
+fn schema_2_is_frozen_and_was_written() {
     // Registered in append order: #277's, #279's and #278's gates, #215's
     // compute-pool parameter group (outside the gate range), #279's
     // metering gate, block budget, engine identity, cost schedule and deploy
@@ -352,20 +363,23 @@ fn the_production_schema_2_is_frozen_and_written() {
     assert_eq!(ms.spec.ty, Ty::U128);
     assert!(ms.spec.optional);
     assert_eq!(SCHEMA_2.number, 2);
-    assert!(std::ptr::eq(PRODUCTION.writes, &SCHEMA_2));
+    // The release that wrote it read schemas 1 and 2.
+    assert!(std::ptr::eq(SCHEMA_2_RELEASE.writes, &SCHEMA_2));
     assert_eq!(
-        PRODUCTION
+        SCHEMA_2_RELEASE
             .reads
             .iter()
             .map(|s| s.number)
             .collect::<Vec<_>>(),
         [1, 2]
     );
-    // It knows the draft schema 3, which extends schema 2 and is never
-    // written; schema 2 itself is unchanged.
-    assert!(std::ptr::eq(PRODUCTION.knows, &ccfg::SCHEMA_3));
+    // This binary keeps reading it for good and writes schema 3, which extends
+    // it; schema 2 itself is unchanged.
+    assert!(PRODUCTION.reads.iter().any(|s| std::ptr::eq(*s, &SCHEMA_2)));
+    assert!(std::ptr::eq(PRODUCTION.writes, &ccfg::SCHEMA_3));
     assert!(ccfg::SCHEMA_3.extends(&SCHEMA_2));
     PRODUCTION.check().unwrap();
+    SCHEMA_2_RELEASE.check().unwrap();
     PREVIOUS.check().unwrap();
     ENABLED.check().unwrap();
     DRAFT.check().unwrap();
@@ -566,23 +580,27 @@ fn a_fresh_database_records_schema_2_directly() {
     assert_eq!(pending_schema_transition_with(&db, &ENABLED).unwrap(), None);
 }
 
-/// The real schema 2: the transition re-encodes, adding only its registered
-/// fields, all absent.
+/// The real schema 2: the schema-2 release's transition re-encodes, adding
+/// only its registered fields, all absent. This binary runs the result as it
+/// stands.
 #[test]
 fn the_real_schema_2_transition_adds_only_its_registered_fields_absent() {
     let (_d, db) = schema_1_database();
-    let new = moved_commitment(&db, &PRODUCTION);
-    let done = acknowledge_schema_transition_with(&db, HEIGHT, h(C2), new, &PRODUCTION).unwrap();
+    let new = moved_commitment(&db, &SCHEMA_2_RELEASE);
+    let done =
+        acknowledge_schema_transition_with(&db, HEIGHT, h(C2), new, &SCHEMA_2_RELEASE).unwrap();
     assert_eq!(done.added, real_added_ids());
-    let r = read_record_with(&db, &PRODUCTION).unwrap().unwrap();
+    let r = read_record_with(&db, &SCHEMA_2_RELEASE).unwrap().unwrap();
     for id in real_added_ids() {
         assert_eq!(r.config.get(id), Some(&Value::Absent), "{id:#06x}");
     }
     assert!(done.added.contains(&0x0720), "{:?}", done.added);
-    assert_eq!(
-        check_at_startup_with(&db, &g2(), HEIGHT, &PRODUCTION).unwrap(),
-        StartupOutcome::Unchanged { commitment: new }
-    );
+    for policy in [&SCHEMA_2_RELEASE, &PRODUCTION] {
+        assert_eq!(
+            check_at_startup_with(&db, &g2(), HEIGHT, policy).unwrap(),
+            StartupOutcome::Unchanged { commitment: new }
+        );
+    }
     // The previous release refuses it.
     assert!(matches!(
         read_record_with(&db, &PREVIOUS),
@@ -593,16 +611,16 @@ fn the_real_schema_2_transition_adds_only_its_registered_fields_absent() {
 // ── older binaries ──────────────────────────────────────────────────────────
 
 /// The previous release — it reads only schema 1 — refuses a schema-2 record,
-/// whether a database moved to schema 2 or a fresh one this binary created,
-/// and rewrites nothing.
+/// whether a database moved to schema 2 or a fresh one the schema-2 release
+/// created, and rewrites nothing. This binary runs either as it stands.
 #[test]
 fn a_schema_1_binary_refuses_a_schema_2_record() {
     let (_d, moved) = schema_1_database();
-    let new = moved_commitment(&moved, &PRODUCTION);
-    ccfg::acknowledge_schema_transition(&moved, HEIGHT, h(C2), new).unwrap();
+    let new = moved_commitment(&moved, &SCHEMA_2_RELEASE);
+    acknowledge_schema_transition_with(&moved, HEIGHT, h(C2), new, &SCHEMA_2_RELEASE).unwrap();
     let fresh_dir = TempDir::new().unwrap();
     let fresh = Database::open_default(fresh_dir.path()).unwrap();
-    ccfg::check_at_startup(&fresh, &g2(), 0).unwrap();
+    check_at_startup_with(&fresh, &g2(), 0, &SCHEMA_2_RELEASE).unwrap();
 
     for db in [&moved, &fresh] {
         let before = entries(db);
@@ -1314,7 +1332,7 @@ fn schema_2_encodes_in_id_order_whatever_the_registration_order() {
     // The metering gate cannot be set while its values are provisional, and
     // the budget is never committed without it (`consensus_config_metering.rs`).
     for genesis in [g2(), all_set] {
-        let a = ccfg::build_with(&genesis, &ccfg::PRODUCTION).unwrap();
+        let a = ccfg::build_with(&genesis, &SCHEMA_2_RELEASE).unwrap();
         let b = ccfg::build_with(&genesis, policy).unwrap();
         assert_eq!(a.encode(), b.encode());
         assert_eq!(a.commitment(), b.commitment());

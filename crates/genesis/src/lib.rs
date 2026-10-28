@@ -2933,6 +2933,13 @@ pub struct ChainParams {
     /// every validator must run the identical reviewed binary and observe the
     /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
     /// in this branch.
+    ///
+    /// It is consensus-configuration field `0x1043`, which only schema 3 can
+    /// express. A node whose recorded configuration is schema 1 or 2 refuses
+    /// to start with it set, naming the stopped-node
+    /// `acknowledge-consensus-config-schema` that moves the record to schema 3;
+    /// genesis validation also requires
+    /// `peer_protocol_declaration_required_from_height` at or below it.
     #[serde(default)]
     pub node_registry_update_status_unsupported_enabled_from_height: Option<u64>,
 

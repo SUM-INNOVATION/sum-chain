@@ -144,14 +144,21 @@ fn ack_schema(data_dir: &Path, old: &str, new: &str) -> Output {
         .expect("running the node binary")
 }
 
-/// The release before this binary: it read and wrote schema 1 and knew schema 2
-/// only as a draft. Used to create the schema-1 database it would have left.
-/// It knows schema 3 only because this binary's genesis carries the draft
+/// The release that recorded schema 1: it read and wrote schema 1 and knew
+/// schema 2 only as a draft. Used to create the schema-1 database it would have
+/// left. It knows schema 3 only because this binary's genesis carries the
 /// schema-3 gate, which a policy must be able to name to build at all; unset,
 /// that gate adds nothing to the schema-1 record this writes.
 static PREVIOUS: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
     reads: &[&ccfg::SCHEMA_1],
     writes: &ccfg::SCHEMA_1,
+    knows: &ccfg::SCHEMA_3,
+};
+
+/// The release that wrote schema 2: it read schemas 1 and 2 and wrote 2.
+static SCHEMA_2_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
+    reads: &[&ccfg::SCHEMA_1, &ccfg::SCHEMA_2],
+    writes: &ccfg::SCHEMA_2,
     knows: &ccfg::SCHEMA_3,
 };
 
@@ -166,7 +173,22 @@ fn schema_1_fixture() -> (tempfile::TempDir, std::path::PathBuf, String, String)
     assert_eq!(r.config.schema().number, 1);
     let pending = ccfg::pending_schema_transition(&db)
         .unwrap()
-        .expect("this binary offers schema 2");
+        .expect("this binary offers schema 3");
+    (dir, data, r.commitment.to_string(), pending.new.to_string())
+}
+
+/// A database the schema-2 release created (schema 2), and the commitment this
+/// binary moves it to.
+fn schema_2_fixture() -> (tempfile::TempDir, std::path::PathBuf, String, String) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let data = dir.path().join("data");
+    let db = Database::open_default(&data).unwrap();
+    ccfg::record::check_at_startup_with(&db, &genesis(), 0, &SCHEMA_2_RELEASE).unwrap();
+    let r = ccfg::read_record(&db).unwrap().unwrap();
+    assert_eq!(r.config.schema().number, 2);
+    let pending = ccfg::pending_schema_transition(&db)
+        .unwrap()
+        .expect("this binary offers schema 3");
     (dir, data, r.commitment.to_string(), pending.new.to_string())
 }
 
@@ -180,19 +202,19 @@ fn meta(data: &Path) -> Vec<(Vec<u8>, Vec<u8>)> {
         .collect()
 }
 
-/// The command moves a schema-1 database to schema 2 when told both
-/// commitments exactly, keeps the old encoding in the history, and has nothing
-/// left to do afterwards.
+/// The command moves a schema-1 database to schema 3 in one step when told
+/// both commitments exactly, keeps the old encoding in the history, and has
+/// nothing left to do afterwards.
 #[test]
 fn the_schema_transition_moves_a_schema_1_database() {
     let (_dir, data, old, new) = schema_1_fixture();
     let out = ack_schema(&data, &old, &new);
     assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("schema 1 -> 2"), "{}", text(&out));
+    assert!(text(&out).contains("schema 1 -> 3"), "{}", text(&out));
 
     let db = Database::open_default(&data).unwrap();
     let r = ccfg::read_record(&db).unwrap().unwrap();
-    assert_eq!(r.config.schema().number, 2);
+    assert_eq!(r.config.schema().number, 3);
     assert_eq!(r.commitment.to_string(), new);
     let history = ccfg::read_transitions(&db).unwrap();
     assert_eq!(history.len(), 1);
@@ -202,12 +224,30 @@ fn the_schema_transition_moves_a_schema_1_database() {
     let again = ack_schema(&data, &new, &new);
     assert!(!again.status.success(), "{}", text(&again));
     assert!(
-        text(&again).contains("already recorded in schema 2"),
+        text(&again).contains("already recorded in schema 3"),
         "{}",
         text(&again)
     );
     let db = Database::open_default(&data).unwrap();
     assert_eq!(ccfg::read_transitions(&db).unwrap().len(), 1);
+}
+
+/// A schema-2 database moves to schema 3 the same way.
+#[test]
+fn the_schema_transition_moves_a_schema_2_database() {
+    let (_dir, data, old, new) = schema_2_fixture();
+    let out = ack_schema(&data, &old, &new);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("schema 2 -> 3"), "{}", text(&out));
+    assert!(
+        text(&out).contains("1 field(s) added absent"),
+        "{}",
+        text(&out)
+    );
+    let db = Database::open_default(&data).unwrap();
+    let r = ccfg::read_record(&db).unwrap().unwrap();
+    assert_eq!(r.config.schema().number, 3);
+    assert_eq!(r.commitment.to_string(), new);
 }
 
 /// Anything but both exact commitments refuses and writes nothing.
@@ -223,15 +263,15 @@ fn the_schema_transition_refuses_wrong_commitments() {
     assert_eq!(meta(&data), before, "nothing written");
 }
 
-/// A database this binary created records schema 2 already: nothing to move.
+/// A database this binary created records schema 3 already: nothing to move.
 #[test]
-fn the_schema_transition_refuses_a_database_already_in_schema_2() {
+fn the_schema_transition_refuses_a_database_already_in_schema_3() {
     let f = fixture();
     let before = meta(&f.data);
     let out = ack_schema(&f.data, &f.old, &f.old);
     assert!(!out.status.success(), "{}", text(&out));
     assert!(
-        text(&out).contains("already recorded in schema 2"),
+        text(&out).contains("already recorded in schema 3"),
         "{}",
         text(&out)
     );

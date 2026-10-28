@@ -140,11 +140,11 @@ fn the_baseline_runs_after_the_gate_check_and_before_consensus_exists() {
     );
 }
 
-/// The release before this binary: it read and wrote schema 1 and knew schema 2
-/// only as a draft. Used to create the database it would have left.
-/// It knows schema 3 only because this binary's genesis carries the draft
-/// schema-3 gate, which a policy must be able to name to build at all; unset,
-/// that gate adds nothing to the schema-1 record this writes.
+/// The release that recorded schema 1: it read and wrote schema 1 and knew
+/// schema 2 only as a draft. Used to create the database it would have left.
+/// It knows schema 3 only because this binary's genesis carries the schema-3
+/// gate, which a policy must be able to name to build at all; unset, that gate
+/// adds nothing to the schema-1 record this writes.
 static PREVIOUS: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
     reads: &[&ccfg::SCHEMA_1],
     writes: &ccfg::SCHEMA_1,
@@ -153,7 +153,7 @@ static PREVIOUS: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
 
 /// #277's gate (schema-2 field 0x103f) through the real boot sequence:
 ///
-/// * unset (every committed genesis), a fresh node records schema 2;
+/// * unset (every committed genesis), a fresh node records schema 3;
 /// * set on a fresh directory, the node boots and commits the height;
 /// * set as a future height on a directory this binary records, the boot is an
 ///   ordinary gate reschedule;
@@ -179,11 +179,11 @@ fn the_credential_schema_gate_through_the_boot_sequence() {
         None
     );
 
-    // Unset, fresh: schema 2, the gate absent.
+    // Unset, fresh: schema 3, the gate absent.
     let dir = tempfile::TempDir::new().unwrap();
     boot(dir.path(), &g).unwrap();
     let r = record(dir.path()).expect("recorded at first boot");
-    assert_eq!(r.config.schema().number, 2);
+    assert_eq!(r.config.schema().number, 3);
     assert_eq!(r.config.get(GATE), Some(&ccfg::Value::Absent));
     assert_eq!(r.commitment, ccfg::build(&g).unwrap().commitment());
 
@@ -232,6 +232,127 @@ fn the_credential_schema_gate_through_the_boot_sequence() {
     }
     boot(old.path(), &set(1_000)).unwrap();
     let r = record(old.path()).unwrap();
-    assert_eq!(r.config.schema().number, 2);
+    assert_eq!(r.config.schema().number, 3);
+    assert_eq!(r.config.get(GATE), Some(&ccfg::Value::U64(1_000)));
+}
+
+/// The activation heights this directory recorded at its last start.
+fn activation_heights(dir: &Path) -> Vec<(String, Option<u64>)> {
+    let db = Database::open_default(dir).unwrap();
+    bincode::deserialize(&db.get(cf::META, b"activation/heights").unwrap().unwrap()).unwrap()
+}
+
+fn height_of(heights: &[(String, Option<u64>)], gate: &str) -> Option<u64> {
+    heights
+        .iter()
+        .find(|(n, _)| n == gate)
+        .and_then(|(_, h)| *h)
+}
+
+/// The node-registry `UpdateStatus` gate (schema-3 field 0x1043) through the
+/// real boot sequence, on a directory the schema-1 release recorded:
+///
+/// * unset, this binary boots it unchanged, still schema 1;
+/// * scheduled (with its peer-declaration deadline) before the move, the boot
+///   is refused, naming the stopped-node command with both commitments, and
+///   the configuration record is not rewritten. The activation-height check,
+///   which runs first, has already recorded the new future heights; with the
+///   genesis restored, the next boot accepts that as a future reschedule;
+/// * after the move, the scheduled genesis boots as a future-gate reschedule
+///   of exactly the gate and its deadline, and a fresh directory commits the
+///   gate from its first boot.
+#[test]
+fn the_node_registry_gate_through_the_boot_sequence() {
+    const GATE: u16 = 0x1043;
+    const NAME: &str = "node_registry_update_status_unsupported_enabled_from_height";
+    const PEER_NAME: &str = "peer_protocol_declaration_required_from_height";
+    let peer_gate = ccfg::fields::gate_id(PEER_NAME).unwrap();
+    let scheduled = |peer: u64, gate: u64| {
+        let mut g = genesis();
+        g.params.peer_protocol_declaration_required_from_height = Some(peer);
+        g.params
+            .node_registry_update_status_unsupported_enabled_from_height = Some(gate);
+        g
+    };
+    let g = genesis();
+    assert_eq!(
+        g.params
+            .node_registry_update_status_unsupported_enabled_from_height,
+        None
+    );
+
+    let old = tempfile::TempDir::new().unwrap();
+    {
+        let db = Database::open_default(old.path()).unwrap();
+        ccfg::record::check_at_startup_with(&db, &g, 0, &PREVIOUS).unwrap();
+    }
+    let before = record(old.path()).unwrap();
+    assert_eq!(before.config.schema().number, 1);
+
+    // Installing this binary changes nothing.
+    boot(old.path(), &g).unwrap();
+    assert_eq!(record(old.path()).unwrap(), before, "runs as it stands");
+
+    // Scheduled before the move: refused, naming the exact command.
+    let pending = {
+        let db = Database::open_default(old.path()).unwrap();
+        ccfg::pending_schema_transition(&db).unwrap().unwrap()
+    };
+    assert_eq!((pending.from_schema, pending.to_schema), (1, 3));
+    let err = boot(old.path(), &scheduled(900, 1_000)).unwrap_err();
+    assert!(err.contains(NAME), "{err}");
+    assert!(
+        err.contains(&format!(
+            "acknowledge-consensus-config-schema --old {} --new {}",
+            pending.old, pending.new
+        )),
+        "{err}"
+    );
+    assert_eq!(record(old.path()).unwrap(), before, "record not rewritten");
+    let heights = activation_heights(old.path());
+    assert_eq!(
+        height_of(&heights, NAME),
+        Some(1_000),
+        "recorded by the earlier check"
+    );
+    assert_eq!(height_of(&heights, PEER_NAME), Some(900));
+
+    // Genesis restored: a permitted future reschedule back to unset.
+    boot(old.path(), &g).unwrap();
+    assert_eq!(record(old.path()).unwrap(), before);
+    assert_eq!(height_of(&activation_heights(old.path()), NAME), None);
+
+    // The stopped-node move, then the scheduled genesis.
+    {
+        let db = Database::open_default(old.path()).unwrap();
+        ccfg::acknowledge_schema_transition(&db, 0, pending.old, pending.new).unwrap();
+    }
+    boot(old.path(), &g).unwrap();
+    assert_eq!(
+        record(old.path()).unwrap().commitment,
+        pending.new,
+        "moved, unchanged"
+    );
+    boot(old.path(), &scheduled(900, 1_000)).unwrap();
+    let r = record(old.path()).unwrap();
+    assert_eq!(r.config.schema().number, 3);
+    assert_eq!(r.config.get(GATE), Some(&ccfg::Value::U64(1_000)));
+    {
+        let db = Database::open_default(old.path()).unwrap();
+        let history = ccfg::read_transitions(&db).unwrap();
+        let last = history.last().unwrap();
+        assert_eq!(last.kind, TransitionKind::GateReschedule);
+        let mut ids = last.changed_ids.clone();
+        ids.sort();
+        let mut expected = vec![GATE, peer_gate];
+        expected.sort();
+        assert_eq!(ids, expected);
+    }
+
+    // Fresh: committed from the first boot.
+    let fresh = tempfile::TempDir::new().unwrap();
+    boot(fresh.path(), &scheduled(900, 1_000)).unwrap();
+    let r = record(fresh.path()).unwrap();
+    assert_eq!(r.config.schema().number, 3);
     assert_eq!(r.config.get(GATE), Some(&ccfg::Value::U64(1_000)));
 }

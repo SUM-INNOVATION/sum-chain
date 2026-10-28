@@ -1801,7 +1801,7 @@ pub(crate) fn compute(genesis: &Genesis, policy: &SchemaPolicy) -> Result<Vec<Fi
         contract_error_rollback_enabled_from_height: _,
         // Schema 2 (draft), 0x1040: `schema::SCHEMA_2_ADDED`.
         messaging_timestamp_units_enabled_from_height: _,
-        // Schema 3 (draft), 0x1043: `schema::SCHEMA_3_ADDED`.
+        // Schema 3, 0x1043: `schema::SCHEMA_3_ADDED`.
         node_registry_update_status_unsupported_enabled_from_height: _,
         // Schema 2 (draft), 0x1041 (gate) and 0x0115 (param): `schema::SCHEMA_2_ADDED`,
         // the gate via `activation_heights()`, the budget as a `Source::Param`.

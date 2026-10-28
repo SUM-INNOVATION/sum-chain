@@ -12,7 +12,7 @@ use sumchain_consensus::consensus_config::{
     record::{RECORD_KEY, TRANSITION_PREFIX},
     schema::{METERED_COST_SCHEDULE_ID, METERED_ENGINE_IDENTITY_ID, SCHEMA_2_ADDED},
     AddedField, BaselineStatus, ConfigError, ConsensusConfig, Schema, SchemaPolicy, Source,
-    StartupOutcome, TransitionKind, Value, SCHEMA_1, SCHEMA_2, SCHEMA_V1_FIELDS,
+    StartupOutcome, TransitionKind, Value, SCHEMA_1, SCHEMA_2, SCHEMA_3, SCHEMA_V1_FIELDS,
 };
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::{BeaconParamsConfig, ChainParams, DocClassParams, Genesis, MessagingParams};
@@ -148,6 +148,15 @@ fn open(dir: &TempDir) -> Database {
 static SCHEMA_2_DRAFT: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1],
     writes: &SCHEMA_1,
+    knows: &ccfg::SCHEMA_3,
+};
+
+/// The release that wrote schema 2: it read schemas 1 and 2, wrote schema 2 and
+/// knew schema 3 only as a draft. It is how the frozen schema-2 encoding is
+/// pinned now that this binary writes schema 3.
+static SCHEMA_2_RELEASE: SchemaPolicy = SchemaPolicy {
+    reads: &[&SCHEMA_1, &SCHEMA_2],
+    writes: &SCHEMA_2,
     knows: &ccfg::SCHEMA_3,
 };
 
@@ -465,14 +474,17 @@ fn decoding_round_trips_exactly() {
     assert_eq!(&bytes[..7], MAGIC);
     assert_eq!(
         u16::from_le_bytes([bytes[7], bytes[8]]),
-        2,
-        "this binary writes schema 2"
+        3,
+        "this binary writes schema 3"
     );
 
-    // Every schema-2 field set, and the frozen schema-1 encoding.
+    // Every schema-2 field set, and the frozen schema-1 and schema-2 encodings.
     for bytes in [
         full_schema_2_config().encode(),
         ccfg::build_with(&full_genesis(), &SCHEMA_2_DRAFT)
+            .unwrap()
+            .encode(),
+        ccfg::build_with(&full_genesis(), &SCHEMA_2_RELEASE)
             .unwrap()
             .encode(),
     ] {
@@ -490,16 +502,18 @@ fn decoding_refuses_anything_the_encoder_would_not_produce() {
     assert!(malformed(&b), "wrong magic");
 
     let mut b = bytes.clone();
-    b[7] = 3;
+    b[7] = 4;
     assert_eq!(
         ConsensusConfig::decode(&b),
-        Err(ConfigError::UnknownSchema(3))
+        Err(ConfigError::UnknownSchema(4))
     );
 
-    // Schema 1's number on schema 2's fields.
-    let mut b = bytes.clone();
-    b[7] = 1;
-    assert!(malformed(&b), "schema-2 fields under schema 1");
+    // An older schema's number on schema 3's fields.
+    for older in [1u8, 2] {
+        let mut b = bytes.clone();
+        b[7] = older;
+        assert!(malformed(&b), "schema-3 fields under schema {older}");
+    }
 
     let mut b = bytes.clone();
     b.push(0);
@@ -584,7 +598,7 @@ fn every_field_value_is_bound_by_the_commitment() {
         pos += 7 + len;
         seen += 1;
     }
-    assert_eq!(seen, SCHEMA_2.specs().len());
+    assert_eq!(seen, SCHEMA_3.specs().len());
 }
 
 /// [`every_field_value_is_bound_by_the_commitment`] over the fields schema 2
@@ -649,7 +663,7 @@ fn schema_2_golden_vectors() {
             c.commitment().to_string(),
         )
     };
-    let dormant = vector(ccfg::build(&full_genesis()).unwrap());
+    let dormant = vector(ccfg::build_with(&full_genesis(), &SCHEMA_2_RELEASE).unwrap());
     let set = vector(full_schema_2_config());
     assert_eq!(
         (dormant.0, dormant.1.as_str(), dormant.2.as_str()),
@@ -682,7 +696,7 @@ const GOLDEN_2_SET_COMMITMENT: &str =
 #[test]
 fn the_schema_2_encoding_is_the_schema_1_encoding_plus_absent_fields() {
     let one = ccfg::build_with(&full_genesis(), &SCHEMA_2_DRAFT).unwrap();
-    let two = ccfg::build(&full_genesis()).unwrap();
+    let two = ccfg::build_with(&full_genesis(), &SCHEMA_2_RELEASE).unwrap();
     assert_eq!(one.schema().number, 1);
     assert_eq!(two.schema().number, 2);
     assert_eq!(
@@ -786,7 +800,7 @@ fn a_damaged_baseline_is_refused_and_never_recreated() {
         ("unknown status", Box::new(|r| r[2] = 9)),
         ("claims a transition", Box::new(|r| r[43] = 1)),
         // Record header is 87 bytes; the encoding's schema follows its magic.
-        ("schema from a newer binary", Box::new(|r| r[87 + 7] = 3)),
+        ("schema from a newer binary", Box::new(|r| r[87 + 7] = 4)),
     ];
     for (what, damage) in cases {
         let dir = TempDir::new().unwrap();
@@ -1171,15 +1185,18 @@ fn the_messaging_timestamp_units_gate_is_a_schema_2_field_with_its_constant() {
     );
 }
 
-/// The node-registry `UpdateStatus` refusal gate is registered in the draft
-/// schema 3 (0x1043). Dormant, it leaves the written schema-2 configuration
-/// byte-identical; set, build refuses, because this binary writes schema 2 and
-/// a draft field can be declared but never activated.
+/// The node-registry `UpdateStatus` refusal gate is schema 3's one field
+/// (0x1043). Dormant, the release that wrote schema 2 still writes its frozen
+/// schema-2 configuration byte for byte, and this binary's schema-3
+/// configuration is that one plus 0x1043 absent. Set, this binary commits the
+/// height; the schema-2 release, and a binary recording schema 1, refuse it,
+/// because neither schema can express it.
 #[test]
-fn the_draft_schema_3_gate_is_held_dormant_and_refused_when_set() {
+fn the_node_registry_gate_is_the_schema_3_field() {
     let name = "node_registry_update_status_unsupported_enabled_from_height";
     assert_eq!(ccfg::fields::gate_id(name), Some(0x1043));
-    assert!(ccfg::SCHEMA_3
+    assert_eq!(SCHEMA_3.added.len(), 1);
+    assert!(SCHEMA_3
         .added
         .iter()
         .any(|a| a.spec.id == 0x1043 && a.spec.name == name));
@@ -1191,26 +1208,91 @@ fn the_draft_schema_3_gate_is_held_dormant_and_refused_when_set() {
             .node_registry_update_status_unsupported_enabled_from_height,
         None
     );
-    let c = ccfg::build(&base).unwrap();
-    let bytes = c.encode();
+    let two = ccfg::build_with(&base, &SCHEMA_2_RELEASE).unwrap();
+    let bytes = two.encode();
     assert_eq!(
         (
             bytes.len(),
             Hash::hash(&bytes).to_string(),
-            c.commitment().to_string()
+            two.commitment().to_string()
         ),
         (
             GOLDEN_2_LEN,
             GOLDEN_2_ENCODING_DIGEST.to_string(),
             GOLDEN_2_COMMITMENT.to_string()
         ),
-        "dormant, the draft gate changes nothing the binary writes"
+        "schema 2 stays frozen"
     );
+    let three = ccfg::build(&base).unwrap();
+    assert_eq!(three.schema().number, 3);
+    assert_eq!(three.get(0x1043), Some(&Value::Absent));
+    assert_eq!(two.extend_to(&SCHEMA_3).unwrap(), three);
 
     let mut set = full_genesis();
     set.params
         .node_registry_update_status_unsupported_enabled_from_height = Some(10);
-    let err = ccfg::build(&set).expect_err("a draft field is never activated");
-    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
-    assert!(err.to_string().contains(name), "{err}");
+    let c = ccfg::build(&set).expect("schema 3 commits the gate");
+    assert_eq!(c.get(0x1043), Some(&Value::U64(10)));
+    assert_eq!(
+        three
+            .diff(&c)
+            .unwrap()
+            .iter()
+            .map(|ch| ch.id)
+            .collect::<Vec<_>>(),
+        vec![0x1043],
+        "only the gate moved"
+    );
+    for (policy, schema) in [(&SCHEMA_2_RELEASE, 2), (&SCHEMA_2_DRAFT, 1)] {
+        let err =
+            ccfg::build_with(&set, policy).expect_err("an older schema cannot commit to this gate");
+        assert!(
+            matches!(err, ConfigError::Refused(_)),
+            "schema {schema}: {err}"
+        );
+        assert!(err.to_string().contains(name), "schema {schema}: {err}");
+    }
 }
+
+/// The schema-3 vectors: the golden fixture with 0x1043 absent, and set.
+/// Computed identically on every architecture CI runs; a change here is a
+/// change to schema 3, which is frozen.
+#[test]
+fn schema_3_golden_vectors() {
+    let vector = |c: ConsensusConfig| {
+        let bytes = c.encode();
+        (
+            bytes.len(),
+            Hash::hash(&bytes).to_string(),
+            c.commitment().to_string(),
+        )
+    };
+    let dormant = vector(ccfg::build(&full_genesis()).unwrap());
+    let mut g = full_genesis();
+    g.params
+        .node_registry_update_status_unsupported_enabled_from_height = Some(10);
+    let set = vector(ccfg::build(&g).unwrap());
+    assert_eq!(
+        (dormant.0, dormant.1.as_str(), dormant.2.as_str()),
+        (GOLDEN_3_LEN, GOLDEN_3_ENCODING_DIGEST, GOLDEN_3_COMMITMENT),
+    );
+    assert_eq!(
+        (set.0, set.1.as_str(), set.2.as_str()),
+        (
+            GOLDEN_3_SET_LEN,
+            GOLDEN_3_SET_ENCODING_DIGEST,
+            GOLDEN_3_SET_COMMITMENT
+        ),
+    );
+}
+
+const GOLDEN_3_LEN: usize = 7960;
+const GOLDEN_3_ENCODING_DIGEST: &str =
+    "0xbc0a9fae33d78b2260f24309589a6c30a3d7f68c8e917f5c94f3765bb21072dc";
+const GOLDEN_3_COMMITMENT: &str =
+    "0x3246651f47e049d16647391e62ce7d50d256604eb273584a2b69f6d838e085ed";
+const GOLDEN_3_SET_LEN: usize = 7968;
+const GOLDEN_3_SET_ENCODING_DIGEST: &str =
+    "0x78b7f5ff7267ed02a1a54d94b398d41937599ffc24fa3b932b954607f7d3a70b";
+const GOLDEN_3_SET_COMMITMENT: &str =
+    "0x2553f741bbc7fdeeecd01e1099d5abc8a6c8196702d9c90057de1a3c08331e98";
