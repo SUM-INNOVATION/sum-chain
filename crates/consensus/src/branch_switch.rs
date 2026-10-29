@@ -27,6 +27,16 @@
 //! A failure in 1–3 leaves the database byte-for-byte unchanged and the
 //! in-memory head, accumulator and mempool untouched.
 //!
+//! # Under the dormant G5 configuration (#351)
+//!
+//! Protocol v1 validates the whole branch against one set, the static genesis
+//! list. With a configuration, each block's set is resolved in stage 3 from
+//! its own parent state, the branch layer, and its header is validated there,
+//! just before it executes. A transition block of the branch stages its own
+//! validator-set row on its overlay, and stage 4 commits it with the rest of
+//! the branch, in the same batch as the unwind that removes the abandoned
+//! blocks' rows.
+//!
 //! # Two kinds of failure, never confused
 //!
 //! [`SwitchError::Rejected`] is a verdict on the branch: a block of it is
@@ -46,8 +56,10 @@ use sumchain_storage::branch::BranchState;
 use sumchain_storage::candidate::{build_adoption_batch, AdoptionReport, SpeculativeBlock};
 use sumchain_storage::db::{cf, Database, WriteBatch};
 use sumchain_storage::journal::{ApplicationJournal, JournalActivation};
+use sumchain_storage::validator_set_g5::G5Error;
 use sumchain_storage::StorageError;
 
+use crate::membership::G5Membership;
 use crate::reorg::{accumulator_of, ReorgPlan};
 
 /// Local resource bounds on one chain switch.
@@ -172,12 +184,18 @@ fn journal_rows(block: &Block) -> Vec<(String, Vec<u8>)> {
 
 /// Stages 1–3: check, reconstruct and execute the replacement branch in full,
 /// writing nothing.
+///
+/// `membership` is the engine's dormant G5 configuration (#351): `None` in
+/// production, and then every block is validated and executed against
+/// `validators`, exactly as before. With one, `validators` is not read: each
+/// block's set comes from its own parent state (module docs).
 pub fn validate_replacement(
     db: &Database,
     executor: &BlockExecutor,
     plan: &ReorgPlan,
     activation: &JournalActivation,
     validators: &[[u8; 32]],
+    membership: Option<&G5Membership>,
     limits: &BranchLimits,
 ) -> Result<ValidatedBranch, SwitchError> {
     // ── 1. structural bounds, before anything is allocated for the branch ──
@@ -216,8 +234,10 @@ pub fn validate_replacement(
             limits.max_transactions
         )));
     }
-    crate::reorg::validate_branch(db, executor, plan, validators)
-        .map_err(|e| SwitchError::Rejected(e.to_string()))?;
+    if membership.is_none() {
+        crate::reorg::validate_branch(db, executor, plan, validators)
+            .map_err(|e| SwitchError::Rejected(e.to_string()))?;
+    }
 
     // ── 2. the fork parent, reconstructed exactly or not at all ────────────
     let block_store = sumchain_storage::schema::BlockStore::new(db);
@@ -259,6 +279,7 @@ pub fn validate_replacement(
     let mut layer = Arc::new(layer);
     let mut accumulator = accumulator_of(&ancestor);
     let mut adopted: Vec<SpeculativeBlock> = Vec::with_capacity(plan.new_branch.len());
+    let mut parent = &ancestor;
     for (index, block) in plan.new_branch.iter().enumerate() {
         #[cfg(feature = "failpoints")]
         if failpoints::hit(failpoints::Failpoint::SpeculativeExecution(index)) {
@@ -268,9 +289,17 @@ pub fn validate_replacement(
         }
         #[cfg(not(feature = "failpoints"))]
         let _ = index;
+        let resolved;
+        let block_validators = match membership {
+            None => validators,
+            Some(m) => {
+                resolved = branch_block_set(db, executor, &layer, m, plan, block, parent)?;
+                &resolved[..]
+            }
+        };
         let spec = {
             let execution = executor
-                .execute_block_on_branch(block, accumulator, validators, layer.clone())
+                .execute_block_on_branch(block, accumulator, block_validators, layer.clone())
                 .map_err(|e| {
                     SwitchError::Rejected(format!(
                         "replacement block {} at height {} failed execution: {e}",
@@ -307,6 +336,7 @@ pub fn validate_replacement(
             .map_err(|e| local_or_rejected("absorbing a replacement block", e))?;
         accumulator = spec.accumulator();
         adopted.push(spec);
+        parent = block;
     }
 
     let layer = Arc::try_unwrap(layer).map_err(|_| {
@@ -318,6 +348,53 @@ pub fn validate_replacement(
         adopted,
         abandoned_journal_rows,
     })
+}
+
+/// Under the dormant G5 configuration (#351): the set for `block`, resolved
+/// from the branch layer (its parent's state), and its header and body
+/// validated against it, as `crate::reorg::validate_branch` does for protocol
+/// v1.
+///
+/// A set that does not govern (its transition block is not certified on the
+/// branch's ancestry) and an invalid block are verdicts on the branch. A row
+/// this node cannot read is a statement about this node.
+fn branch_block_set(
+    db: &Database,
+    executor: &BlockExecutor,
+    layer: &BranchState,
+    membership: &G5Membership,
+    plan: &ReorgPlan,
+    block: &Block,
+    parent: &Block,
+) -> Result<Vec<[u8; 32]>, SwitchError> {
+    let set = crate::membership::set_on_branch(
+        db,
+        layer,
+        membership,
+        block.height(),
+        plan.ancestor_height,
+    )
+    .map_err(|e| {
+        let why = format!(
+            "replacement block {} at height {}: validator-set membership: {e}",
+            block.hash(),
+            block.height()
+        );
+        match e {
+            G5Error::TransitionNotCertified { .. } => SwitchError::Rejected(why),
+            _ => SwitchError::Local(why),
+        }
+    })?;
+    executor
+        .validate_block(block, Some(parent), &set)
+        .map_err(|e| {
+            SwitchError::Rejected(format!(
+                "reorg refused before unwinding: block {} at height {}: {e}",
+                block.hash(),
+                block.height()
+            ))
+        })?;
+    Ok(set)
 }
 
 /// Stage 4: the one batch that adopts a validated branch. Not committed.

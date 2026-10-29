@@ -496,8 +496,8 @@ impl BlockExecutor {
     /// candidate, so a boundary block's validator-set row is written by that
     /// block's publication batch and by nothing else.
     ///
-    /// No production source calls it; tests do. No production path constructs
-    /// a [`G5Membership`] (`crates/storage/tests/validator_set_g5.rs`).
+    /// Called only by `PoAEngine::new_with_dormant_membership` and by tests.
+    /// No production path constructs a [`G5Membership`].
     pub fn with_dormant_membership(mut self, membership: Arc<G5Membership>) -> Self {
         self.membership = Some(membership);
         self

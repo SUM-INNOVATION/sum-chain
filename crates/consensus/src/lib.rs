@@ -62,6 +62,7 @@ pub mod bft;
 pub mod branch_switch;
 pub mod consensus_config;
 pub mod engine;
+pub mod membership;
 pub mod poa;
 
 pub use bft::BftEngine;
@@ -120,6 +121,12 @@ pub enum ConsensusError {
     /// the head. Nothing was applied; not a verdict on the branch.
     #[error("chain switch not applied, canonical head moved: {0}")]
     StaleSwitch(String),
+
+    /// Under the dormant G5 validator-set wiring (#351) only: the set that
+    /// governs a height cannot be resolved, or does not govern yet (its
+    /// transition block is not certified). Not a verdict on any block.
+    #[error("validator-set membership: {0}")]
+    Membership(String),
 }
 
 pub type Result<T> = std::result::Result<T, ConsensusError>;
