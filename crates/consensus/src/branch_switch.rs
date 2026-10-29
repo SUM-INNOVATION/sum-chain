@@ -371,6 +371,9 @@ pub mod failpoints {
         AfterValidation,
         /// Part-way through post-commit mempool reconciliation.
         MidReconcile,
+        /// The local-depth finality record's write fails (`PoAEngine`'s
+        /// finality check, after a block is committed).
+        FinalityWriteFails,
     }
 
     impl Failpoint {
@@ -386,6 +389,7 @@ pub mod failpoints {
                 Failpoint::EventEmission => "event-emission".into(),
                 Failpoint::AfterValidation => "after-validation".into(),
                 Failpoint::MidReconcile => "mid-reconcile".into(),
+                Failpoint::FinalityWriteFails => "finality-write-fails".into(),
             }
         }
     }

@@ -110,6 +110,16 @@ stalls that validator's block slots until it rejoins. Restart in a known window,
 one validator at a time, and confirm it reconnects and produces before touching
 the next.
 
+A start reads the node's local finality record (`finalized_height` and
+`finalized_hash`: the height at or below which the node refuses to
+reorganize, and the block there). The start is refused if the record cannot
+be read, holds one key without the other, is above the head, or does not name
+the canonical block at its height. The record is never reset to zero, and a
+refused start changes nothing. A database with no record starts with nothing
+finalized, as before. The record is written as one batch after each block that
+finalizes another; if that write fails, the node stops (`node fail-stopped`)
+rather than running on with finality it has not recorded.
+
 ## Further Reading
 
 - [operations/production-checklist.md](./operations/production-checklist.md) — full operations checklist.

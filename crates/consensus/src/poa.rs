@@ -485,16 +485,43 @@ impl PoAEngine {
                 // Restore state root cache from the latest block
                 self.state.set_state_root(block.header.state_root);
 
-                // Restore finality state from storage
-                if let Ok(Some(finalized_height)) = block_store.get_finalized_height() {
-                    *self.last_finalized_height.write() = finalized_height;
-                    if let Ok(Some(finalized_hash)) = block_store.get_finalized_hash() {
+                // Restore local-depth finality from its record. A record that
+                // cannot be read, is half present, is above the head, or does
+                // not name the canonical block at its height refuses start. It
+                // is the height at or below which this node refuses to
+                // reorganize, and reading it as zero would let a restart accept
+                // a switch below blocks the node already treated as final.
+                match block_store.checked_finality_record() {
+                    Ok(Some((finalized_height, finalized_hash))) => {
+                        *self.last_finalized_height.write() = finalized_height;
                         *self.last_finalized_hash.write() = finalized_hash;
+                        info!(
+                            "Restored finality state: height {} finalized",
+                            finalized_height
+                        );
                     }
-                    info!(
-                        "Restored finality state: height {} finalized",
-                        finalized_height
-                    );
+                    // Neither key: nothing finalized has been recorded, as on a
+                    // chain below its finality depth. Unchanged: finality is
+                    // derived again from the head at the next block.
+                    Ok(None) => {
+                        if block.height() > self.params.finality_depth {
+                            warn!(
+                                "No local finality record although the head {} is above the \
+                                 finality depth {}; nothing is treated as finalized until the \
+                                 next block re-derives it",
+                                block.height(),
+                                self.params.finality_depth
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        return Err(ConsensusError::Storage(
+                            sumchain_storage::StorageError::InvalidData(format!(
+                                "refusing to start: {e}. The local finality record is not \
+                                 reset to zero, and nothing was changed"
+                            )),
+                        ));
+                    }
                 }
 
                 Ok(Some(block))
@@ -511,16 +538,25 @@ impl PoAEngine {
             .as_millis() as Timestamp
     }
 
-    /// Check and update finality based on current chain state
-    /// A block becomes finalized when finality_depth blocks have been built on top
-    fn check_finality(&self) {
+    /// Advance local-depth finality: a block becomes finalized once
+    /// `finality_depth` blocks have been built on top of it.
+    ///
+    /// The record is persisted FIRST, as one batch holding the new height and
+    /// its block's hash together ([`BlockStore::set_finalized`]); memory and the
+    /// `BlockFinalized` events follow only once it is written. A write that
+    /// fails fail-stops the engine ([`ConsensusError::LocalFailStop`]): the
+    /// in-memory finalized height never runs ahead of what the database holds,
+    /// and the node does not go on producing or importing as if it had recorded
+    /// what it did not. The block that triggered the check is already
+    /// committed; restart reloads it with the last record that was written.
+    fn check_finality(&self) -> Result<()> {
         let current_height = self.current_height();
         let finality_depth = self.params.finality_depth;
         let last_finalized = *self.last_finalized_height.read();
 
         // Can't finalize blocks at or below current finalized height
         if current_height <= finality_depth {
-            return;
+            return Ok(());
         }
 
         // The highest block that can be finalized
@@ -528,29 +564,47 @@ impl PoAEngine {
 
         // Only process if we have new blocks to finalize
         if can_finalize_up_to <= last_finalized {
-            return;
+            return Ok(());
         }
 
-        // Finalize blocks from last_finalized+1 to can_finalize_up_to
+        // The blocks newly final are those from last_finalized+1 to
+        // can_finalize_up_to that have a block on the canonical index; a height
+        // without one is skipped, as before. The record names the highest of
+        // them, found scanning down so that nothing is held in memory: with no
+        // record yet, the range can be the whole chain.
         let block_store = BlockStore::new(&self.db);
-        for height in (last_finalized + 1)..=can_finalize_up_to {
-            if let Ok(Some(block)) = block_store.get_by_height(height) {
-                let hash = block.hash();
-                *self.last_finalized_height.write() = height;
-                *self.last_finalized_hash.write() = hash;
+        let newly_final = (last_finalized + 1)..=can_finalize_up_to;
+        let mut highest = None;
+        for h in newly_final.clone().rev() {
+            if let Ok(Some(block)) = block_store.get_by_height(h) {
+                highest = Some((h, block.hash()));
+                break;
+            }
+        }
+        let Some((height, hash)) = highest else {
+            return Ok(());
+        };
 
-                // Persist finality state to storage
-                if let Err(e) = block_store.set_finalized_height(height) {
-                    warn!("Failed to persist finalized height: {}", e);
-                }
-                if let Err(e) = block_store.set_finalized_hash(&hash) {
-                    warn!("Failed to persist finalized hash: {}", e);
-                }
+        // Persist finality state to storage, before anything reports it.
+        if let Err(e) = self.persist_finality(&block_store, height, &hash) {
+            return Err(self.fail_stop(format!(
+                "could not persist local finality at height {height} ({e}); the finalized \
+                 height stays at {last_finalized}, which is what the database holds"
+            )));
+        }
+        *self.last_finalized_height.write() = height;
+        *self.last_finalized_hash.write() = hash;
 
+        // One event per newly final height, in order, streamed: each block is
+        // read again here, the same way, rather than kept from the scan above.
+        for h in *newly_final.start()..=height {
+            if let Ok(Some(block)) = block_store.get_by_height(h) {
+                let block_hash = block.hash();
                 // Emit finalization event
-                let _ = self.event_tx.send(ConsensusEvent::BlockFinalized(hash, height));
-
-                debug!("Block {} finalized at height {}", hash, height);
+                let _ = self
+                    .event_tx
+                    .send(ConsensusEvent::BlockFinalized(block_hash, h));
+                debug!("Block {} finalized at height {}", block_hash, h);
             }
         }
 
@@ -558,6 +612,25 @@ impl PoAEngine {
             "Finality checkpoint: height {} (current: {}, depth: {})",
             can_finalize_up_to, current_height, finality_depth
         );
+        Ok(())
+    }
+
+    /// Write the finality record, height and hash in one batch.
+    fn persist_finality(
+        &self,
+        block_store: &BlockStore<'_>,
+        height: BlockHeight,
+        hash: &Hash,
+    ) -> sumchain_storage::Result<()> {
+        #[cfg(feature = "failpoints")]
+        if crate::branch_switch::failpoints::hit(
+            crate::branch_switch::failpoints::Failpoint::FinalityWriteFails,
+        ) {
+            return Err(sumchain_storage::StorageError::InvalidData(
+                "injected failure of the finality write".to_string(),
+            ));
+        }
+        block_store.set_finalized(height, hash)
     }
 
     /// Get the last finalized block height
@@ -1459,8 +1532,9 @@ impl PoAEngine {
             block.tx_count()
         );
 
-        // Check if any blocks can be finalized
-        self.check_finality();
+        // Check if any blocks can be finalized. A failed finality write
+        // fail-stops the engine; the block above is committed either way.
+        self.check_finality()?;
 
         // Check if we need to update the validator set (epoch boundary)
         self.maybe_update_validator_set(height, &block.hash());
@@ -1580,8 +1654,9 @@ impl PoAEngine {
 
         info!("Imported block {} at height {}", hash, height);
 
-        // Check if any blocks can be finalized
-        self.check_finality();
+        // Check if any blocks can be finalized. A failed finality write
+        // fail-stops the engine; the block above is committed either way.
+        self.check_finality()?;
 
         // Check if we need to update the validator set (epoch boundary)
         self.maybe_update_validator_set(height, &hash);
