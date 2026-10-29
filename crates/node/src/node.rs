@@ -2166,6 +2166,14 @@ mod protocol_v1_boot_tests;
 #[path = "../tests/unit/crash_recovery_tests.rs"]
 mod crash_recovery_tests;
 
+/// The local-depth finality record (#350) through the real start: a whole
+/// record is restored, and a damaged one refuses the start rather than being
+/// read as finalized height 0. A unit-test module for the same reason as the
+/// ones above.
+#[cfg(test)]
+#[path = "../tests/unit/finality_record_boot_tests.rs"]
+mod finality_record_boot_tests;
+
 /// #276 through the real boot: a genesis allocating one account twice is
 /// refused before a data directory exists. A unit-test module for the same
 /// reason as the ones above.

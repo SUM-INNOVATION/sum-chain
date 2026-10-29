@@ -448,8 +448,7 @@ fn a_certified_commit_writes_only_v1_keys_and_leaves_the_legacy_pointer_alone() 
     let g = genesis(&db);
     // Legacy local-depth records, set to sentinels.
     let blocks = BlockStore::new(&db);
-    blocks.set_finalized_height(0).unwrap();
-    blocks.set_finalized_hash(&g.hash()).unwrap();
+    blocks.set_finalized(0, &g.hash()).unwrap();
     let before = meta_keys_now(&db);
 
     let b1 = child(&g, 0);
