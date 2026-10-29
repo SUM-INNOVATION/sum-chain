@@ -758,9 +758,9 @@ pub fn execute_rollback(
 //
 // Under G2-a a block is final once its certificate is committed with it, and
 // neither a chain switch nor an operator rollback may cross it. The rule is
-// `sumchain_storage::certified_guard`, read at the moment of the decision. It
-// trusts the stored pointer as `certified_meta::recover_v1` leaves it; no
-// start-up path runs that audit yet, and no production path writes the records.
+// `sumchain_storage::certified_guard`, read at the moment of the decision; it
+// relies on the start-up audit (`certified_guard::audit_at_start`), which the
+// node and the rollback command run before anything here can be reached.
 //
 // Certified finality is not active: nothing writes a certificate or the
 // pointer, so on every database this binary runs on there is no certified

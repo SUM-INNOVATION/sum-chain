@@ -70,13 +70,14 @@ const EXCLUDED: &[(&str, &str)] = &[
     // ── Certified storage layout. `certified_meta.rs` keeps finality
     //    certificates under cf::META keys, which no committed digest reads.
     //    Consensus reads them only through the crossing guard (a chain switch
-    //    or rollback across a certified block is refused); block execution
-    //    never reads them and no production path writes them.
+    //    or rollback across a certified block is refused) and its start-up
+    //    audit; block execution never reads them and no production path
+    //    writes them.
     (
         "CERTIFICATE_KEY_PREFIX",
         "cf::META key prefix of the v1 certified storage layout; node-local, \
-         never hashed into a block; read by the crossing guard, written by no \
-         production path",
+         never hashed into a block; read by the crossing guard and its start-up \
+         audit, written by no production path",
     ),
     // ── Dormant C5 registry size bound. Read only by the unwired register
     //    validation, which no transaction decode reaches; the activation change
