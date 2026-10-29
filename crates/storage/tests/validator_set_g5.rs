@@ -1,5 +1,6 @@
 //! **G5 validator-set transitions (#266): semantics ratified 2026-10-21;
-//! dormant; no values; not activated.**
+//! wired in execution behind a dormant configuration (#351); no values; not
+//! activated.**
 //!
 //! Tests for `validator_set_g5`. They cover:
 //! * Q0, Q1, Q2, Q4 (N_min = 5, `max_validators` ≤ 29,127) and Q5;
@@ -9,7 +10,8 @@
 //! * the wiring's API (#351): the configuration, the executor's one call per
 //!   block, Q2 before any row is read, the certified height, restart and a
 //!   replacement branch's rows;
-//! * dormancy: nothing outside this crate names the module yet.
+//! * dormancy: only the executor names the module, and no production path
+//!   gives it a configuration.
 //!
 //! Nothing here activates dynamic membership or selects an epoch length,
 //! activation height, stake minimum or `max_validators`. Every schedule below
@@ -1374,7 +1376,7 @@ fn wiring_unwinding_a_transition_block_removes_its_row_with_the_rest() {
     assert_eq!(stored_epochs(&d), Vec::<u64>::new());
 }
 
-// ── dormancy ────────────────────────────────────────────────────────────────
+// ── dormancy: wired only behind a configuration production never builds ───
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
@@ -1387,18 +1389,19 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Nothing outside `sumchain-storage`, and nothing else inside it, names the
-/// G5 module. Its semantics are ratified, but wiring (activating) it is a
-/// separate, authorized change that deletes or rewrites this test.
-#[test]
-fn the_g5_module_is_dormant() {
-    let storage = Path::new(env!("CARGO_MANIFEST_DIR"));
+/// Every source file of the workspace (`src`, `tests`, `benches` and
+/// `examples` of every crate, and the one workspace member outside
+/// `crates/`), as (path relative to the repository root, code lines). Comment
+/// lines are dropped: prose may name what code may not.
+fn workspace_sources() -> Vec<(String, Vec<String>)> {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut roots: Vec<PathBuf> = std::fs::read_dir(repo.join("crates"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    roots.push(repo.join("scripts"));
     let mut files = Vec::new();
-    for entry in std::fs::read_dir(storage.join("..")).unwrap() {
-        let dir = entry.unwrap().path();
-        if dir.file_name().is_some_and(|n| n == "storage") {
-            continue;
-        }
+    for dir in roots {
         for sub in ["src", "tests", "benches", "examples"] {
             let d = dir.join(sub);
             if d.is_dir() {
@@ -1406,34 +1409,109 @@ fn the_g5_module_is_dormant() {
             }
         }
     }
-    let mut own = Vec::new();
-    rust_files(&storage.join("src"), &mut own);
-    files.extend(
-        own.into_iter()
-            .filter(|f| !f.ends_with("validator_set_g5.rs") && !f.ends_with("lib.rs")),
-    );
     assert!(files.len() > 100, "the scan found too few sources");
-    let hits: Vec<String> = files
-        .iter()
-        .filter(|f| {
-            std::fs::read_to_string(f)
+    files
+        .into_iter()
+        .map(|f| {
+            let rel = f
+                .strip_prefix(&repo)
                 .unwrap()
-                .contains("validator_set_g5")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let code = std::fs::read_to_string(&f)
+                .unwrap()
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .map(str::to_string)
+                .collect();
+            (rel, code)
         })
-        .map(|f| f.display().to_string())
+        .collect()
+}
+
+/// Production sources: anything under a crate's `src/`.
+fn production(sources: &[(String, Vec<String>)]) -> Vec<&(String, Vec<String>)> {
+    sources
+        .iter()
+        .filter(|(f, _)| f.contains("/src/"))
+        .collect()
+}
+
+/// The production files whose code contains `needle`.
+fn naming(sources: &[(String, Vec<String>)], needle: &str) -> Vec<String> {
+    let mut out: Vec<String> = production(sources)
+        .into_iter()
+        .filter(|(_, code)| code.iter().any(|l| l.contains(needle)))
+        .map(|(f, _)| f.clone())
         .collect();
-    assert!(
-        hits.is_empty(),
-        "the dormant G5 module is referenced: {hits:?}"
+    out.sort();
+    out
+}
+
+/// Every production line containing `needle`, as (file, trimmed line).
+fn lines_with(sources: &[(String, Vec<String>)], needle: &str) -> Vec<(String, String)> {
+    production(sources)
+        .into_iter()
+        .flat_map(|(f, code)| {
+            code.iter()
+                .filter(|l| l.contains(needle))
+                .map(move |l| (f.clone(), l.trim().to_string()))
+        })
+        .collect()
+}
+
+/// The G5 module is named, in production code, by exactly the executor's
+/// publication-batch write (#351); `lib.rs` only declares it. The consensus
+/// engine and the node name nothing of the wiring yet.
+#[test]
+fn the_g5_module_is_named_only_by_the_dormant_wiring() {
+    let sources = workspace_sources();
+    assert_eq!(
+        naming(&sources, "validator_set_g5"),
+        ["crates/state/src/executor.rs", "crates/storage/src/lib.rs"],
+        "a new production consumer of the G5 module"
     );
-    let lib = std::fs::read_to_string(storage.join("src/lib.rs")).unwrap();
-    let uses: Vec<&str> = lib
-        .lines()
-        .filter(|l| l.contains("validator_set_g5"))
+    let lib: Vec<String> = lines_with(&sources, "validator_set_g5")
+        .into_iter()
+        .filter(|(f, _)| f == "crates/storage/src/lib.rs")
+        .map(|(_, l)| l)
         .collect();
     assert_eq!(
-        uses,
+        lib,
         ["pub mod validator_set_g5;"],
         "lib.rs only declares it"
+    );
+    for (file, code) in &sources {
+        if !(file.starts_with("crates/node/") || file.starts_with("crates/consensus/")) {
+            continue;
+        }
+        for needle in [
+            "validator_set_g5",
+            "G5Membership",
+            "with_dormant_membership",
+        ] {
+            assert!(
+                !code.iter().any(|l| l.contains(needle)),
+                "{file} names {needle}: the engine is not wired yet"
+            );
+        }
+    }
+}
+
+/// No production path gives the executor a configuration (#351): its dormant
+/// setter is defined and called by no production source, and no production
+/// source constructs a `G5Membership`.
+#[test]
+fn no_production_path_constructs_the_dormant_configuration() {
+    let sources = workspace_sources();
+    assert_eq!(
+        lines_with(&sources, ".with_dormant_membership("),
+        Vec::<(String, String)>::new(),
+        "nothing gives the executor a configuration"
+    );
+    assert_eq!(
+        naming(&sources, "G5Membership::new("),
+        Vec::<String>::new(),
+        "nothing constructs a configuration"
     );
 }
