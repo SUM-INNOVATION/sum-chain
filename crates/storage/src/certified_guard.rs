@@ -1,4 +1,4 @@
-//! DORMANT (#270): fork choice and rollback never cross certified finality.
+//! Fork choice and rollback never cross certified finality (#270, #341).
 //!
 //! #270 requires that "fork choice and the rollback command cannot cross
 //! finality". Under G2-a (ratified 2026-10-16) a block is final once its
@@ -27,8 +27,9 @@
 //! the moment of the decision: it decodes the pointer and refuses the one
 //! absence that cannot mean "never certified" (certificate rows with no
 //! pointer). It does not re-verify certificates or the canonical chain; it
-//! relies on `recover_v1` having passed at start-up, which wiring must
-//! guarantee.
+//! relies on `recover_v1` having passed at start-up. [`audit_at_start`] runs
+//! it, and node start-up and the `rollback` command run that before anything
+//! consults this check.
 //!
 //! The check relies on one invariant the seam already guarantees and
 //! [`crate::certified_meta::recover_v1`] re-verifies at start-up: the certified
@@ -36,20 +37,36 @@
 //! certified height, on the certified block itself when at it, contains the
 //! certified block.
 //!
-//! It is DORMANT: nothing calls it. The reorg planner and the operator
-//! rollback command still use the legacy local-depth `finalized_height`
-//! (`crates/consensus/src/reorg.rs`), and certified finality is inactive.
-//! Wiring this check into them is a separate, authorized change, which must
-//! also decide how the legacy rollback pull-back of `finalized_height` is
-//! retired. It defines no key, family, encoding or value: the pointer key and
-//! its encoding are [`crate::certified_meta`]'s.
+//! # Where it is consulted
+//!
+//! * The engine's chain switch (`PoAEngine::import_reorg`, through
+//!   `sumchain_consensus::reorg::refuse_certified_crossing`), after the switch
+//!   is planned and before the replacement branch is executed.
+//! * The operator rollback (`sumchain_consensus::reorg::execute_rollback`,
+//!   which the `rollback` command also calls before it asks for confirmation).
+//! * Node start-up and the `rollback` command run [`audit_at_start`] before
+//!   either of those can be reached.
+//!
+//! Certified finality itself is still inactive. No production path writes a
+//! certificate or the pointer, and this binary has no certificate verifier, so
+//! [`audit_at_start`] passes only on a database that holds no certified-finality
+//! record: on every database this binary runs on, [`certified_block`] is `None`
+//! and every switch and rollback is decided exactly as before, by the legacy
+//! local-depth rules (`crates/consensus/src/reorg.rs`). The BFT engine is still
+//! refused at start-up and RPC still reports `finality_mechanism:
+//! "local-depth"`. The rollback command's pull-back of the legacy local-depth
+//! `finalized_height` is unchanged; retiring it is a separate decision. This
+//! module defines no key, family, encoding or value: the pointer key and its
+//! encoding are [`crate::certified_meta`]'s.
 
 use std::fmt;
 
 use sumchain_primitives::{BlockHeight, Hash};
 
+use crate::certified::{CertificateRefusal, CertificateVerifier, Recovery};
 use crate::certified_meta::{
-    decode_pointer, parse_certificate_key, CERTIFICATE_KEY_PREFIX, FINALIZED_POINTER_KEY,
+    decode_pointer, parse_certificate_key, recover_v1, RecoverV1Error, CERTIFICATE_KEY_PREFIX,
+    FINALIZED_POINTER_KEY,
 };
 use crate::db::{cf, Database};
 
@@ -241,4 +258,65 @@ pub fn refuse_rollback_crossing(
         });
     }
     Ok(())
+}
+
+/// The certificate verifier this binary has: none. Certified finality is not
+/// active, so a stored certificate cannot be re-verified, and is refused rather
+/// than trusted.
+struct NoCertificateVerifier;
+
+impl CertificateVerifier for NoCertificateVerifier {
+    fn verify(
+        &self,
+        height: BlockHeight,
+        block_hash: &Hash,
+        _certificate: &[u8],
+    ) -> Result<(), CertificateRefusal> {
+        Err(CertificateRefusal(format!(
+            "this binary has no finality-certificate verifier (certified finality is not \
+             active), so the certificate stored for block {block_hash} at height {height} \
+             cannot be re-verified"
+        )))
+    }
+}
+
+/// Why [`audit_at_start`] refused.
+#[derive(Debug)]
+pub struct StartAuditRefusal(pub RecoverV1Error);
+
+impl fmt::Display for StartAuditRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the certified-finality records in this database (the `finality/` keys of the \
+             meta column family) did not pass the start-up audit: {}. Fork choice and the \
+             rollback command trust those records only after this audit passes, so this \
+             database is refused; nothing was changed",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for StartAuditRefusal {}
+
+/// The start-up audit the crossing checks rely on: [`recover_v1`] over this
+/// database, run before anything consults [`certified_block`]. Read-only.
+///
+/// This binary verifies no certificate, so the audit runs with a verifier that
+/// refuses every one. It therefore passes, returning `None`, exactly when the
+/// database holds no certified-finality record: no pointer and no row under
+/// the certificate prefix. No production path writes either, so that is every
+/// database this binary produces, and on it no certificate is read and the
+/// verifier is never called. Anything else is
+/// refused: a pointer that does not decode or does not name the canonical
+/// head, certificate rows without a pointer or above it, a malformed key under
+/// the prefix, and any stored certificate, which cannot be re-verified here.
+pub fn audit_at_start(db: &Database) -> Result<Option<CertifiedBlock>, StartAuditRefusal> {
+    match recover_v1(db, &NoCertificateVerifier).map_err(StartAuditRefusal)? {
+        Recovery::NeverCertified => Ok(None),
+        Recovery::Finalized(p) => Ok(Some(CertifiedBlock {
+            height: p.height,
+            hash: p.hash,
+        })),
+    }
 }

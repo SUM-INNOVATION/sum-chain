@@ -1,11 +1,14 @@
 //! Certified commit: a DORMANT, library-independent storage seam for #270.
 //!
-//! Nothing in the node, consensus or RPC crates calls this module, and
+//! Nothing in the node, consensus or RPC crates names this module, and
 //! `tests/certified_commit_dormant.rs` fails if anything outside this crate
-//! starts to. Production publication is unchanged: it still goes through
-//! [`AcceptedCandidate::publish`], and the legacy local-depth pointer
-//! (`meta_keys::FINALIZED_HEIGHT` / `FINALIZED_HASH`) is neither read nor
-//! written here.
+//! starts to. Its one production caller is read-only: the start-up audit
+//! (`crate::certified_guard::audit_at_start`) runs [`CertifiedStore::recover`]
+//! through `crate::certified_meta::recover_v1`, with no certificate verifier.
+//! Nothing calls [`CertifiedStore::commit`], so production publication is
+//! unchanged: it still goes through [`AcceptedCandidate::publish`], and the
+//! legacy local-depth pointer (`meta_keys::FINALIZED_HEIGHT` /
+//! `FINALIZED_HASH`) is neither read nor written here.
 //!
 //! # What is deliberately NOT decided here
 //!

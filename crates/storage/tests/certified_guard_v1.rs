@@ -1,4 +1,4 @@
-//! The dormant certified-finality crossing guard (`certified_guard`, #270):
+//! The certified-finality crossing guard (`certified_guard`, #270, #341):
 //! fork choice and rollback never cross the certified block recorded under
 //! `finality/finalized/v1`.
 //!
@@ -10,17 +10,22 @@
 //!   exhaustively over a small grid against an independent oracle);
 //! * a rollback is refused exactly when its target is below the certified
 //!   height, or at it on another block;
-//! * it is dormant: no crate outside `sumchain-storage` refers to it.
+//! * the start-up audit the checks rely on passes exactly when no certified
+//!   record exists, refuses anything else, and writes nothing;
+//! * it is consulted by exactly the production code its docs name: the
+//!   consensus reorg module (chain switch and rollback) and the node's boot and
+//!   rollback command (start-up audit).
 //!
 //! All data is synthetic.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use sumchain_primitives::{BlockHeight, Hash};
 use sumchain_storage::certified::FinalizedPointer;
 use sumchain_storage::certified_guard::{
-    certified_block, refuse_reorg_crossing, refuse_rollback_crossing, CertifiedBlock,
-    CrossingRefusal,
+    audit_at_start, certified_block, refuse_reorg_crossing, refuse_rollback_crossing,
+    CertifiedBlock, CrossingRefusal,
 };
 use sumchain_storage::certified_meta::{
     certificate_key, encode_pointer, CERTIFICATE_KEY_PREFIX, FINALIZED_POINTER_KEY,
@@ -329,7 +334,90 @@ fn refusals_say_what_was_protected() {
     assert!(msg.contains("forks at block 3"), "{msg}");
 }
 
-// ── dormancy ────────────────────────────────────────────────────────────────
+// ── the start-up audit ──────────────────────────────────────────────────────
+
+fn all_rows(db: &Database) -> BTreeMap<(String, Vec<u8>), Vec<u8>> {
+    let mut out = BTreeMap::new();
+    for cf_name in sumchain_storage::db::ALL_CFS {
+        for entry in db.iter_checked_from(cf_name, None).unwrap() {
+            let (k, v) = entry.unwrap();
+            out.insert((cf_name.to_string(), k.into_vec()), v.into_vec());
+        }
+    }
+    out
+}
+
+/// Refused, with `needle` in the message, and nothing written.
+fn audit_refuses(db: &Database, needle: &str) {
+    let before = all_rows(db);
+    let err = audit_at_start(db).expect_err("the audit must refuse");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("did not pass the start-up audit") && msg.contains(needle),
+        "{msg}"
+    );
+    assert_eq!(all_rows(db), before, "the audit wrote: {msg}");
+}
+
+#[test]
+fn the_start_up_audit_passes_a_database_with_no_certified_record() {
+    let (_d, db) = db();
+    assert_eq!(audit_at_start(&db).unwrap(), None);
+
+    // The legacy local-depth records, and neighbours of the certificate prefix
+    // that are not under it, are not certified records.
+    use sumchain_storage::schema::meta_keys;
+    db.put(cf::META, meta_keys::FINALIZED_HEIGHT, &9u64.to_be_bytes())
+        .unwrap();
+    db.put(cf::META, meta_keys::FINALIZED_HASH, canonical(9).as_bytes())
+        .unwrap();
+    let mut v2 = CERTIFICATE_KEY_PREFIX.to_vec();
+    let n = v2.len();
+    v2[n - 2] = b'2';
+    db.put(cf::META, &v2, b"x").unwrap();
+    let before = all_rows(&db);
+    assert_eq!(audit_at_start(&db).unwrap(), None);
+    assert_eq!(all_rows(&db), before, "the audit is read-only");
+}
+
+#[test]
+fn the_start_up_audit_refuses_certificate_rows_without_a_pointer() {
+    let (_d, db) = db();
+    db.put(cf::META, &certificate_key(7, &canonical(7)), b"cert")
+        .unwrap();
+    audit_refuses(&db, "CertificateWithoutPointer");
+}
+
+#[test]
+fn the_start_up_audit_refuses_a_malformed_key_under_the_prefix() {
+    let (_d, db) = db();
+    let malformed = [CERTIFICATE_KEY_PREFIX, b"xyz"].concat();
+    db.put(cf::META, &malformed, b"cert").unwrap();
+    audit_refuses(&db, "MalformedCertificateKey");
+}
+
+#[test]
+fn the_start_up_audit_refuses_an_undecodable_pointer() {
+    let (_d, db) = db();
+    db.put(cf::META, FINALIZED_POINTER_KEY, &[0xFF; 8]).unwrap();
+    audit_refuses(&db, "finalized pointer");
+}
+
+#[test]
+fn the_start_up_audit_refuses_a_pointer_without_a_canonical_head() {
+    let (_d, db) = db();
+    let p = FinalizedPointer {
+        height: 7,
+        hash: canonical(7),
+    };
+    db.put(cf::META, FINALIZED_POINTER_KEY, &encode_pointer(&p))
+        .unwrap();
+    db.put(cf::META, &certificate_key(7, &canonical(7)), b"cert")
+        .unwrap();
+    audit_refuses(&db, "no canonical head");
+}
+
+// ── where it is consulted ───────────────────────────────────────────────────
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
@@ -342,38 +430,58 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Nothing calls the guard: no crate outside `sumchain-storage`, and no
-/// module inside it other than its own declaration in `lib.rs`. The reorg
-/// planner and the rollback command still use the legacy local-depth
-/// `finalized_height`; wiring this in is a separate, authorized change that
-/// must delete this test.
+/// Lines of `text` that are code, not comments.
+fn code_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().filter(|l| !l.trim_start().starts_with("//"))
+}
+
+/// The guard is consulted by exactly the production code its module docs
+/// name, and by nothing else:
+///
+/// * `crates/consensus/src/reorg.rs`: the chain-switch check the engine's
+///   `import_reorg` calls, and the rollback check `execute_rollback` calls;
+/// * `crates/node/src/node.rs`: the start-up audit, before the engine exists;
+/// * `crates/node/src/main.rs`: the `rollback` command's start-up audit and its
+///   early rollback check.
+///
+/// Inside this crate, no other module calls it. A new caller fails this test
+/// until it is added here, with its reason. Production sources only: tests
+/// name it freely.
 #[test]
-fn the_guard_is_dormant() {
+fn the_guard_is_consulted_by_fork_choice_rollback_and_start_up_only() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let mut files = Vec::new();
+    let mut scanned = 0usize;
+    let mut callers = BTreeSet::new();
     for entry in std::fs::read_dir(&crates).unwrap() {
         let dir = entry.unwrap().path();
-        if dir.file_name().is_some_and(|n| n == "storage") {
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        if name == "storage" || !dir.join("src").is_dir() {
             continue;
         }
-        for sub in ["src", "tests", "benches", "examples"] {
-            let d = dir.join(sub);
-            if d.is_dir() {
-                rust_files(&d, &mut files);
+        let mut files = Vec::new();
+        rust_files(&dir.join("src"), &mut files);
+        for f in files {
+            scanned += 1;
+            let text = std::fs::read_to_string(&f).unwrap();
+            if code_lines(&text).any(|l| l.contains("certified_guard")) {
+                let rel = f.strip_prefix(&dir).unwrap().display().to_string();
+                callers.insert(format!("crates/{name}/{rel}"));
             }
         }
     }
-    assert!(files.len() > 100, "the scan found too few sources");
-    let hits: Vec<String> = files
-        .iter()
-        .filter(|f| {
-            std::fs::read_to_string(f)
-                .unwrap()
-                .contains("certified_guard")
-        })
-        .map(|f| f.display().to_string())
-        .collect();
-    assert!(hits.is_empty(), "the dormant guard is referenced: {hits:?}");
+    assert!(scanned > 100, "the scan found too few sources");
+    let expected: BTreeSet<String> = [
+        "crates/consensus/src/reorg.rs",
+        "crates/node/src/main.rs",
+        "crates/node/src/node.rs",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    assert_eq!(
+        callers, expected,
+        "the production callers of the certified-crossing guard changed"
+    );
 
     let storage_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut own = Vec::new();
@@ -384,7 +492,7 @@ fn the_guard_is_dormant() {
             continue;
         }
         let text = std::fs::read_to_string(&f).unwrap();
-        for line in text.lines().filter(|l| l.contains("certified_guard")) {
+        for line in code_lines(&text).filter(|l| l.contains("certified_guard")) {
             let declaration = f.ends_with("lib.rs") && line.trim() == "pub mod certified_guard;";
             if !declaration {
                 inside.push(format!("{}: {}", f.display(), line.trim()));

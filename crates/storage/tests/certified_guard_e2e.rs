@@ -9,12 +9,15 @@
 //!   refused; extending the certified head, or rolling back to it, is not;
 //! * losing the pointer while certificate rows remain is refused by the guard,
 //!   as `recover_v1` refuses it;
-//! * a database that never certified anything is "nothing certified".
+//! * a database that never certified anything is "nothing certified";
+//! * the start-up audit this binary runs (`audit_at_start`, which has no
+//!   certificate verifier) refuses a certified database it cannot re-verify,
+//!   and passes one that never certified anything.
 //!
 //! The certificate verifier is the same structural stand-in
 //! `tests/certified_meta_v1.rs` uses (magic, length, height and block id; no
-//! signatures), because storage must not depend on the finality crate. Nothing
-//! here is wired into consensus. All data is synthetic.
+//! signatures), because storage must not depend on the finality crate. All data
+//! is synthetic.
 
 use std::path::Path;
 
@@ -26,8 +29,8 @@ use sumchain_storage::certified::{
     CertificateRefusal, CertificateVerifier, CertifiedStore, FinalizedPointer, Recovery,
 };
 use sumchain_storage::certified_guard::{
-    certified_block, refuse_reorg_crossing, refuse_rollback_crossing, CertifiedBlock,
-    CrossingRefusal,
+    audit_at_start, certified_block, refuse_reorg_crossing, refuse_rollback_crossing,
+    CertifiedBlock, CrossingRefusal,
 };
 use sumchain_storage::certified_meta::{recover_v1, MetaLayoutV1, FINALIZED_POINTER_KEY};
 use sumchain_storage::db::{cf, Database};
@@ -264,4 +267,28 @@ fn a_database_that_never_certified_anything_has_nothing_to_protect() {
     assert_eq!(recover_v1(&db, &V1Shape).unwrap(), Recovery::NeverCertified);
     assert_eq!(certified_block(&db).unwrap(), None);
     assert!(refuse_rollback_crossing(None, 0, &g.hash()).is_ok());
+    assert_eq!(
+        audit_at_start(&db).unwrap(),
+        None,
+        "this binary's start-up audit passes it"
+    );
+}
+
+/// The committed certified state that `recover_v1` accepts with a verifier is
+/// refused by the start-up audit this binary runs, which has none: it does not
+/// trust a certificate it cannot re-verify. Nothing is written.
+#[test]
+fn the_start_up_audit_refuses_a_certified_database_it_cannot_verify() {
+    let dir = TempDir::new().unwrap();
+    let db = open(dir.path());
+    certified_chain(&db, 3);
+    assert!(recover_v1(&db, &V1Shape).is_ok(), "the records are sound");
+    let pointer = db.get(cf::META, FINALIZED_POINTER_KEY).unwrap();
+
+    let err = audit_at_start(&db).unwrap_err().to_string();
+    assert!(
+        err.contains("no finality-certificate verifier") && err.contains("height 3"),
+        "{err}"
+    );
+    assert_eq!(db.get(cf::META, FINALIZED_POINTER_KEY).unwrap(), pointer);
 }

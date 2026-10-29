@@ -67,13 +67,17 @@ const EXCLUDED: &[(&str, &str)] = &[
         "node-local undo journal; gates whether a node can revert, not what a \
          block computes. A mismatch stalls one node, it does not fork the chain",
     ),
-    // ── Dormant certified storage layout. `certified_meta.rs` keeps finality
-    //    certificates under cf::META keys, which no committed digest reads, and
-    //    nothing in block execution or consensus calls it.
+    // ── Certified storage layout. `certified_meta.rs` keeps finality
+    //    certificates under cf::META keys, which no committed digest reads.
+    //    Consensus reads them only through the crossing guard (a chain switch
+    //    or rollback across a certified block is refused) and its start-up
+    //    audit; block execution never reads them and no production path
+    //    writes them.
     (
         "CERTIFICATE_KEY_PREFIX",
-        "cf::META key prefix of the dormant v1 certified storage layout; \
-         node-local, never hashed into a block",
+        "cf::META key prefix of the v1 certified storage layout; node-local, \
+         never hashed into a block; read by the crossing guard and its start-up \
+         audit, written by no production path",
     ),
     // ── Dormant C5 registry size bound. Read only by the unwired register
     //    validation, which no transaction decode reaches; the activation change
