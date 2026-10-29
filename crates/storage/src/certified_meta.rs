@@ -8,6 +8,8 @@
 //! rollback, and its start-up audit runs [`recover_v1`]. Nothing writes these
 //! keys outside tests, so on the databases this binary produces those reads
 //! find nothing and change nothing.
+//! The dormant G5 wiring's certified-height read (#351) is one more reader;
+//! it runs only under a configuration no production path constructs.
 //!
 //! # Keys and values (all in `cf::META`; no new column family)
 //!

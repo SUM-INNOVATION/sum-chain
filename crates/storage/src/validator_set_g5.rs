@@ -10,12 +10,17 @@
 //! The ratification selects no activation height, stake minimum, epoch length
 //! or `max_validators` value, and nothing here does either.
 //!
-//! **Nothing calls this module.**
-//! * No crate outside `sumchain-storage` names it.
-//! * No module of this crate refers to it, other than the two dormant
-//!   validator-set seams it builds on.
+//! **Nothing calls this module yet.** The wiring's API (#351) is here:
+//! [`G5Membership`], the configuration every wired use goes through, and the
+//! functions that take it. Until the executor and the engine are wired:
+//! * no crate outside `sumchain-storage` names this module;
+//! * no module of this crate refers to it, other than the two dormant
+//!   validator-set seams it builds on;
 //! * `tests/validator_set_record_dormant.rs` and `tests/validator_set_g5.rs`
 //!   fail if that changes.
+//!
+//! What the wiring does with a configuration is listed under *The wiring
+//! (#351)* below.
 //!
 //! Membership is still the static genesis list (protocol v1, #272). The
 //! consensus engine refuses `staking.epoch_length != 0` and stake-weighted
@@ -71,10 +76,16 @@
 //! before activation, because the engine refuses `staking.epoch_length != 0`
 //! and stake-weighted selection.
 //!
-//! This module does not authenticate the list. The `genesis` argument of
-//! [`resolve_set`] and the anchor `previous` of [`select_members`] must be
-//! exactly that list. If static membership could ever change before G5
-//! activates, this assumption would have to be revisited.
+//! This module does not decode the ConsensusConfig, so it cannot authenticate
+//! the list itself. The `genesis` argument of [`resolve_set`], the anchor
+//! `previous` of [`select_members`] and the anchor of [`G5Membership::new`]
+//! must be exactly that list. The wiring takes it from there:
+//! `PoAEngine::new_with_dormant_membership` reads field 0x0003 of the node's
+//! verified ConsensusConfig record and refuses a record that is missing or
+//! that differs from the genesis list the engine runs.
+//!
+//! **Assumption.** Static membership does not change before activation. If it
+//! ever could, this anchor would have to be revisited.
 //!
 //! ## Derived properties
 //!
@@ -105,7 +116,48 @@
 //!   * the only writer of `validator_sets` is the engine's epoch update, which
 //!     returns before writing when L = 0;
 //!   * protocol v1 refuses L ≠ 0 at construction;
-//!   * nothing writes `vset/` rows while this module is dormant.
+//!   * nothing writes `vset/` rows without a configuration, and no production
+//!     path constructs one.
+//!
+//! # The wiring (#351)
+//!
+//! What a [`G5Membership`] is for: what the executor and the engine do with
+//! one once they are wired. None of it runs without one.
+//!
+//! * **Publication batch (Q1, Q4).** The executor calls [`stage_boundary_row`]
+//!   once for each block it executes, after every transaction and every
+//!   post-transaction phase, through that block's own [`ExecutionView`]:
+//!   * a block that is not a transition block stages nothing;
+//!   * a transition block computes Q4 over its own post-state
+//!     ([`read_candidates_in`]), with the set that governs it as `previous`,
+//!     and stages the row into its own candidate.
+//!
+//!   The row is therefore committed by that block's publication batch (or by
+//!   a chain switch's adoption batch) and by nothing else. It is staged after
+//!   the block's state root is computed and is not folded into it: there is
+//!   no Q3-commit.
+//! * **Header validation and the proposer (Q0, Q2).** The set for block H is
+//!   [`governing_set`]: Q2 first, then [`resolve_set`] over the rows of H's
+//!   parent's ancestry, never a "latest" row. Its `certified` argument is the
+//!   highest certified height on that ancestry: [`certified_height`], capped
+//!   at the height where the ancestry leaves the canonical chain. With that
+//!   cap, a set whose transition block lies above the fork point never
+//!   governs, so every row that governs is on the canonical chain the
+//!   certified block is on.
+//! * **Restart.** [`check_restart`] runs [`check_stored_rows`], then resolves
+//!   the set for the height after the canonical head from committed state. A
+//!   missing or corrupt row refuses the start. The engine keeps no membership
+//!   in memory under a configuration: every use resolves from committed rows,
+//!   or from a replacement branch's layer.
+//! * **Reorg and rollback.** Rows are journalled application state (#313):
+//!   * unwinding a block that wrote a row removes the row in the same batch
+//!     as the rest of the unwind;
+//!   * a replacement block stages its own row on its branch, its set is read
+//!     through [`BranchRows`], and the adoption batch commits its row with the
+//!     rest of the branch.
+//! * **Stored rows (Q5).** [`check_stored_rows`] runs when the engine is
+//!   constructed with a configuration, before the rules govern the database in
+//!   that process, and again whenever the engine loads its chain.
 //!
 //! # Not in this module
 //!
@@ -114,24 +166,36 @@
 //!   [`EFFECTIVE_VALIDATOR_CAP`] is a ratified upper bound, not a value for
 //!   `max_validators`.
 //!   N_min is a parameter too. The ratified value, 5, is
-//!   `pool_topology::PRODUCT_MINIMUM` in `sumchain-consensus`, which this crate
-//!   cannot name, so the wiring passes it.
-//! * **Activation, heights and gates.** None.
+//!   `pool_topology::PRODUCT_MINIMUM` in `sumchain-genesis`, which this crate
+//!   cannot name. The wiring passes it.
+//! * **Activation, heights and gates.** None. Protocol v1 still refuses
+//!   `staking.epoch_length != 0`; a configuration carries its own epoch
+//!   length. Lifting that refusal behind an activation gate needs #352's
+//!   allocation and values.
 //! * **Q3-commit.** Rows stay uncommitted application state (#313, D2). Folding
 //!   a set digest into the state root is a separate, gated decision.
-//! * **Execution reads.** [`read_candidates`] reads committed state through a
-//!   [`Database`]. A wired transition must read the block's own
-//!   [`crate::exec_view::ExecutionView`] instead; that is part of wiring.
-//! * **The engine's legacy-row refusal.** It is unchanged.
-//!   [`check_stored_rows`] is its G5 counterpart, applied when this is wired.
+//! * **Committed reads.** [`read_candidates`] reads committed state through a
+//!   [`Database`]. The wiring uses [`read_candidates_in`], which reads the
+//!   block's own [`ExecutionView`].
+//! * **Certificates.** [`certified_height`] reads the finalized pointer of the
+//!   certified-commit layout (`crate::certified_meta`) and fails closed. It
+//!   does not re-verify certificates; that is the certified-commit store's
+//!   start-up recovery, which is not wired here.
+//! * **The engine's legacy-row refusal.** It is unchanged and runs with or
+//!   without a configuration. [`check_stored_rows`] is its G5 counterpart and
+//!   runs only with one.
 
 use std::cmp::Ordering;
 
 use sumchain_primitives::{Balance, BlockHeight};
 
+use crate::branch::BranchState;
+use crate::certified_meta::{decode_pointer, CERTIFICATE_KEY_PREFIX, FINALIZED_POINTER_KEY};
 use crate::db::{cf, Database};
 use crate::exec_view::ExecutionView;
-use crate::schema::{DelegationStore, StakingStore};
+use crate::schema::{
+    decode_delegation, decode_delegator_list, decode_validator, DelegationStore, StakingStore,
+};
 use crate::validator_set_record::{ValidatorSetRecord, ValidatorSetRecordError};
 use crate::validator_set_state::{
     read, stage_insert, Presence, RowSource, StateError, ValidatorSetLayout,
@@ -226,6 +290,13 @@ pub enum G5Error {
     EmptyPrevious,
     #[error("max_validators {configured} is above the effective validator cap {cap}")]
     MaxValidatorsAboveCap { configured: usize, cap: usize },
+    #[error("the anchor membership is refused: {0}")]
+    Anchor(ValidatorSetRecordError),
+    #[error(
+        "the certified finalized pointer cannot be read ({0}); refusing rather than guessing \
+         which transitions are certified"
+    )]
+    CertifiedPointer(String),
 }
 
 /// Why an epoch has no row: the named exceptions to Q1's missing-row rule. Any
@@ -545,4 +616,253 @@ pub fn check_stored_rows(db: &Database, schedule: &EpochSchedule) -> Result<(), 
         }
     }
     Ok(())
+}
+
+// ── The wiring (#351) ────────────────────────────────────────────────────────
+
+/// The configuration the dormant wiring (#351) runs these rules under: the
+/// schedule, the Q4 parameters and the anchor membership.
+///
+/// No production path constructs one (module docs). Every value is the
+/// caller's. The ratification chose none of them except N_min = 5, which the
+/// engine's dormant constructor passes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct G5Membership {
+    schedule: EpochSchedule,
+    n_min: usize,
+    max_validators: usize,
+    min_stake: Balance,
+    anchor: Vec<[u8; 32]>,
+}
+
+impl G5Membership {
+    /// Refuses `max_validators` above [`EFFECTIVE_VALIDATOR_CAP`], and an
+    /// anchor protocol v1 could not run (empty, or naming a validator twice:
+    /// the row codec's own set rule). `anchor` must be the authenticated
+    /// static membership (module docs).
+    pub fn new(
+        schedule: EpochSchedule,
+        n_min: usize,
+        max_validators: usize,
+        min_stake: Balance,
+        anchor: Vec<[u8; 32]>,
+    ) -> Result<Self, G5Error> {
+        if max_validators > EFFECTIVE_VALIDATOR_CAP {
+            return Err(G5Error::MaxValidatorsAboveCap {
+                configured: max_validators,
+                cap: EFFECTIVE_VALIDATOR_CAP,
+            });
+        }
+        ValidatorSetRecord::new(0, anchor.clone()).map_err(G5Error::Anchor)?;
+        Ok(Self {
+            schedule,
+            n_min,
+            max_validators,
+            min_stake,
+            anchor,
+        })
+    }
+
+    pub fn schedule(&self) -> &EpochSchedule {
+        &self.schedule
+    }
+
+    pub fn n_min(&self) -> usize {
+        self.n_min
+    }
+
+    pub fn max_validators(&self) -> usize {
+        self.max_validators
+    }
+
+    pub fn min_stake(&self) -> Balance {
+        self.min_stake
+    }
+
+    /// The membership that governs every rowless epoch.
+    pub fn anchor(&self) -> &[[u8; 32]] {
+        &self.anchor
+    }
+}
+
+/// What a transition block staged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedTransition {
+    /// The epoch whose row was staged.
+    pub epoch: u64,
+    /// The Q4 outcome the row holds.
+    pub selection: Selection,
+}
+
+/// Q4 inputs from the block's own view: the post-state of every write the
+/// block has staged so far, over its parent's state (committed state, or a
+/// replacement branch's layer).
+///
+/// The same rows and the same arithmetic as [`read_candidates`]: every entry
+/// of the validators family, and each validator's delegations through the
+/// delegation index. Any read or decode failure is an error, and so is a
+/// delegation total that overflows: no total defaults to zero or saturates.
+pub fn read_candidates_in(view: &ExecutionView<'_, '_>) -> Result<Vec<Candidate>, G5Error> {
+    let mut validators = Vec::new();
+    for item in view
+        .prefix_iter(cf::VALIDATORS, &[])
+        .map_err(G5Error::StakingRead)?
+    {
+        let (_, value) = item.map_err(G5Error::StakingRead)?;
+        validators.push(decode_validator(&value).map_err(G5Error::StakingRead)?);
+    }
+    let mut out = Vec::with_capacity(validators.len());
+    for v in validators {
+        let delegators = match view
+            .get(cf::DELEGATION_VALIDATOR_INDEX, &v.pubkey)
+            .map_err(G5Error::StakingRead)?
+        {
+            Some(bytes) => decode_delegator_list(&bytes).map_err(G5Error::StakingRead)?,
+            None => Vec::new(),
+        };
+        let mut delegated: Balance = 0;
+        for delegator in delegators {
+            let key = DelegationStore::delegation_key(&delegator, &v.pubkey);
+            let Some(bytes) = view
+                .get(cf::DELEGATIONS, &key)
+                .map_err(G5Error::StakingRead)?
+            else {
+                continue;
+            };
+            let amount = decode_delegation(&bytes)
+                .map_err(G5Error::StakingRead)?
+                .amount;
+            delegated = delegated.checked_add(amount).ok_or_else(|| {
+                G5Error::StakingRead(StorageError::InvalidData(format!(
+                    "the delegations to validator {:02x?} overflow a balance",
+                    v.pubkey
+                )))
+            })?;
+        }
+        out.push(Candidate {
+            pubkey: v.pubkey,
+            active: v.status == sumchain_primitives::ValidatorStatus::Active,
+            jailed: v.is_jailed(),
+            self_stake: v.stake,
+            delegated,
+        });
+    }
+    Ok(out)
+}
+
+/// Q1 + Q4 for one executed block, through its own view: the executor's one
+/// call, made after every transaction and post-transaction phase.
+///
+/// A block that is not a transition block reads and stages nothing. A
+/// transition block T resolves the set that governs it (`previous`: the
+/// anchor at the first transition after activation), computes Q4 over its own
+/// post-state and stages the row it writes. Every failure fails the block.
+pub fn stage_boundary_row(
+    view: &mut ExecutionView<'_, '_>,
+    height: BlockHeight,
+    membership: &G5Membership,
+) -> Result<Option<StagedTransition>, G5Error> {
+    if membership.schedule.transition_epoch(height)?.is_none() {
+        return Ok(None);
+    }
+    let previous = resolve_set(&*view, &membership.anchor, height, &membership.schedule)?;
+    let candidates = read_candidates_in(view)?;
+    let selection = select_members(
+        &candidates,
+        membership.min_stake,
+        membership.max_validators,
+        membership.n_min,
+        &previous,
+    )?;
+    let epoch = stage_transition_row(
+        view,
+        height,
+        &membership.schedule,
+        selection.members().to_vec(),
+    )?;
+    Ok(Some(StagedTransition { epoch, selection }))
+}
+
+/// Q0 + Q2: the set that validates block `height`, read from `rows`, the rows
+/// of the block's parent's ancestry.
+///
+/// Q2 is checked first: a set whose transition block is not at or below
+/// `certified` does not govern, and the block cannot be validated or proposed
+/// yet. `certified` is the highest certified height on the parent's ancestry
+/// (module docs: [`certified_height`] capped at the fork point).
+pub fn governing_set<S>(
+    rows: &S,
+    height: BlockHeight,
+    membership: &G5Membership,
+    certified: Option<BlockHeight>,
+) -> Result<Vec<[u8; 32]>, G5Error>
+where
+    S: RowSource + ?Sized,
+{
+    require_transition_certified(height, &membership.schedule, certified)?;
+    resolve_set(rows, &membership.anchor, height, &membership.schedule)
+}
+
+/// The certified height the certified-commit layout records: the height of
+/// its finalized pointer (`crate::certified_meta`).
+///
+/// Fail-closed. `Ok(None)` only when the pointer is absent and no certificate
+/// row exists. An unreadable or undecodable pointer, or certificate rows with
+/// no pointer, is an error, never "nothing certified". Certificates are not
+/// re-verified here (module docs).
+pub fn certified_height(db: &Database) -> Result<Option<BlockHeight>, G5Error> {
+    let pointer = db
+        .get(cf::META, FINALIZED_POINTER_KEY)
+        .map_err(|e| G5Error::CertifiedPointer(e.to_string()))?;
+    if let Some(bytes) = pointer {
+        let pointer = decode_pointer(&bytes).map_err(G5Error::CertifiedPointer)?;
+        return Ok(Some(pointer.height));
+    }
+    let mut rows = db
+        .prefix_iter_checked(cf::META, CERTIFICATE_KEY_PREFIX)
+        .map_err(|e| G5Error::CertifiedPointer(e.to_string()))?;
+    if let Some(entry) = rows.next() {
+        let (key, _) = entry.map_err(|e| G5Error::CertifiedPointer(e.to_string()))?;
+        if key.starts_with(CERTIFICATE_KEY_PREFIX) {
+            return Err(G5Error::CertifiedPointer(
+                "certificate rows exist but the finalized pointer is absent".to_string(),
+            ));
+        }
+    }
+    Ok(None)
+}
+
+/// Q5 and the restart rule: [`check_stored_rows`], then the set that governs
+/// the height after the canonical head `head_height`, resolved from committed
+/// state. A missing or corrupt required row is an error, never a fallback.
+pub fn check_restart(
+    db: &Database,
+    membership: &G5Membership,
+    head_height: BlockHeight,
+) -> Result<Vec<[u8; 32]>, G5Error> {
+    check_stored_rows(db, &membership.schedule)?;
+    let next = head_height.checked_add(1).ok_or(G5Error::HeightOverflow {
+        height: head_height,
+    })?;
+    resolve_set(db, &membership.anchor, next, &membership.schedule)
+}
+
+/// Rows as a block of a replacement branch sees them: the branch layer (the
+/// reconstructed fork parent plus the branch's earlier blocks) over committed
+/// state.
+pub struct BranchRows<'a> {
+    layer: &'a BranchState,
+    db: &'a Database,
+}
+
+impl<'a> BranchRows<'a> {
+    pub fn new(layer: &'a BranchState, db: &'a Database) -> Self {
+        Self { layer, db }
+    }
+}
+
+impl RowSource for BranchRows<'_> {
+    fn get_row(&self, cf: &str, key: &[u8]) -> crate::Result<Option<Vec<u8>>> {
+        self.layer.get(self.db, cf, key)
+    }
 }
