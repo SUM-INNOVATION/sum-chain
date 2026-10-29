@@ -39,10 +39,14 @@ use sumchain_state::reorg_undo::{
 };
 use sumchain_state::state::StateManager;
 use sumchain_storage::candidate::{stage_deindex, Acceptance};
+use sumchain_storage::certified_guard::{
+    certified_block, refuse_reorg_crossing, refuse_rollback_crossing,
+};
 use sumchain_storage::journal::{JournalActivation, JournalRequirement};
 use sumchain_storage::schema::BlockStore;
 use sumchain_storage::Database;
 
+use crate::branch_switch::SwitchError;
 use crate::{ConsensusError, Result};
 
 /// A resolved, validated description of a chain switch. Read-only: producing one
@@ -702,6 +706,10 @@ pub fn plan_rollback(
 /// rolled-back blocks retrievable by hash would leave the tool's effect
 /// ambiguous. This differs from a reorg, which keeps them so the branch can be
 /// re-adopted.
+///
+/// Before anything is staged, the target is checked against certified
+/// finality ([`refuse_rollback_across_certified`]), so a plan built elsewhere
+/// cannot roll back below the certified block either.
 pub fn execute_rollback(
     db: &Database,
     state: &StateManager,
@@ -709,6 +717,7 @@ pub fn execute_rollback(
     journal: &dyn BranchJournal,
     missing: MissingJournalPolicy,
 ) -> Result<UnwindReport> {
+    refuse_rollback_across_certified(db, plan)?;
     let block_store = BlockStore::new(db);
     let mut batch = db.batch();
     let report = stage_branch_unwind(db, &mut batch, &plan.abandoned, journal, missing)
@@ -742,6 +751,72 @@ pub fn execute_rollback(
     // Only after the commit, for the same reason `execute_reorg` waits.
     state.set_state_root(accumulator_of(&plan.target));
     Ok(report)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Certified finality (#270, #341)
+//
+// Under G2-a a block is final once its certificate is committed with it, and
+// neither a chain switch nor an operator rollback may cross it. The rule is
+// `sumchain_storage::certified_guard`, read at the moment of the decision. It
+// trusts the stored pointer as `certified_meta::recover_v1` leaves it; no
+// start-up path runs that audit yet, and no production path writes the records.
+//
+// Certified finality is not active: nothing writes a certificate or the
+// pointer, so on every database this binary runs on there is no certified
+// block and these checks refuse nothing. They come in addition to the legacy
+// local-depth `finalized_height` the planner enforces, which is unchanged.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Refuse a planned switch that crosses the certified finalized block.
+///
+/// [`SwitchError::Rejected`] when the switch forks below the certified block,
+/// forks at its height on another block, or would unwind it or anything below
+/// it: the branch conflicts with certified history. [`SwitchError::Local`] when
+/// this node cannot say what is certified (the pointer cannot be read or
+/// decoded, or certificate rows exist without one): a statement about this
+/// database, not about the branch. Read-only.
+pub fn refuse_certified_crossing(
+    db: &Database,
+    plan: &ReorgPlan,
+) -> std::result::Result<(), SwitchError> {
+    let certified = certified_block(db).map_err(|refusal| {
+        SwitchError::Local(format!(
+            "cannot tell whether this switch crosses certified finality: {refusal}"
+        ))
+    })?;
+    refuse_reorg_crossing(
+        certified.as_ref(),
+        plan.ancestor_height,
+        &plan.ancestor_hash,
+        plan.old_branch.iter().map(|b| (b.height(), b.hash())),
+    )
+    .map_err(|refusal| {
+        SwitchError::Rejected(format!("the switch crosses certified finality: {refusal}"))
+    })
+}
+
+/// Refuse a rollback whose target is below the certified finalized block, or
+/// at its height on another block, and a rollback on a database whose
+/// certified pointer cannot be read. Read-only.
+///
+/// [`execute_rollback`] calls it before staging anything; the `rollback`
+/// command calls it as well, before asking for confirmation, so the operator
+/// hears the refusal first.
+pub fn refuse_rollback_across_certified(db: &Database, plan: &RollbackPlan) -> Result<()> {
+    let refused = |refusal: sumchain_storage::certified_guard::CrossingRefusal| {
+        ConsensusError::InvalidBlock(format!(
+            "refusing to roll back to height {}: {refusal}",
+            plan.target.height()
+        ))
+    };
+    let certified = certified_block(db).map_err(refused)?;
+    refuse_rollback_crossing(
+        certified.as_ref(),
+        plan.target.height(),
+        &plan.target.hash(),
+    )
+    .map_err(refused)
 }
 
 #[cfg(test)]

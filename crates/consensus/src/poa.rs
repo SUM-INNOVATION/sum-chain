@@ -1676,7 +1676,11 @@ impl PoAEngine {
     ///    ancestor walk can see it.
     /// 2. [`plan_reorg_within_undo_history`] resolves the fork by hash and
     ///    refuses a gap, a switch below finality, a walk past the engine's
-    ///    bound, or a depth this node holds no undo history for.
+    ///    bound, or a depth this node holds no undo history for. Then
+    ///    [`crate::reorg::refuse_certified_crossing`] refuses a switch that
+    ///    crosses the certified finalized block (#341), and fail-stops when the
+    ///    certified pointer cannot be read. No production path certifies a
+    ///    block, so on the databases this binary runs on it refuses nothing.
     /// 3. [`validate_replacement`]: local bounds; every block's header, proposer
     ///    and signature; the fork parent reconstructed exactly from validated
     ///    journals; every block executed on its parent and accepted.
@@ -1739,6 +1743,14 @@ impl PoAEngine {
             MAX_REORG_WALK,
             &activation,
         )?;
+        // Certified finality, before anything is executed: a switch that
+        // crosses the certified block is a verdict on the branch; a pointer this
+        // node cannot read is a statement about this node.
+        match crate::reorg::refuse_certified_crossing(&self.db, &plan) {
+            Ok(()) => {}
+            Err(SwitchError::Rejected(r)) => return Err(ConsensusError::InvalidBlock(r)),
+            Err(SwitchError::Local(r)) => return Err(self.fail_stop(r)),
+        }
         let limits = *self.branch_limits.read();
 
         // ── validate the whole branch, writing nothing ──────────────────────

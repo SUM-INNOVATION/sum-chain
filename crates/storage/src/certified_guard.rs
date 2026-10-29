@@ -1,4 +1,4 @@
-//! DORMANT (#270): fork choice and rollback never cross certified finality.
+//! Fork choice and rollback never cross certified finality (#270, #341).
 //!
 //! #270 requires that "fork choice and the rollback command cannot cross
 //! finality". Under G2-a (ratified 2026-10-16) a block is final once its
@@ -28,7 +28,8 @@
 //! absence that cannot mean "never certified" (certificate rows with no
 //! pointer). It does not re-verify certificates or the canonical chain; it
 //! relies on `recover_v1` having passed at start-up, which wiring must
-//! guarantee.
+//! guarantee. No start-up path runs it yet; until one does, the guard is sound
+//! only because no production path writes a certified record.
 //!
 //! The check relies on one invariant the seam already guarantees and
 //! [`crate::certified_meta::recover_v1`] re-verifies at start-up: the certified
@@ -36,13 +37,24 @@
 //! certified height, on the certified block itself when at it, contains the
 //! certified block.
 //!
-//! It is DORMANT: nothing calls it. The reorg planner and the operator
-//! rollback command still use the legacy local-depth `finalized_height`
-//! (`crates/consensus/src/reorg.rs`), and certified finality is inactive.
-//! Wiring this check into them is a separate, authorized change, which must
-//! also decide how the legacy rollback pull-back of `finalized_height` is
-//! retired. It defines no key, family, encoding or value: the pointer key and
-//! its encoding are [`crate::certified_meta`]'s.
+//! # Where it is consulted
+//!
+//! * The engine's chain switch (`PoAEngine::import_reorg`, through
+//!   `sumchain_consensus::reorg::refuse_certified_crossing`), after the switch
+//!   is planned and before the replacement branch is executed.
+//! * The operator rollback (`sumchain_consensus::reorg::execute_rollback`,
+//!   which the `rollback` command also calls before it asks for confirmation).
+//!
+//! Certified finality itself is still inactive. No production path writes a
+//! certificate or the pointer, so on the databases this binary produces
+//! [`certified_block`] is `None` and every switch and rollback is decided
+//! exactly as before, by the legacy local-depth rules
+//! (`crates/consensus/src/reorg.rs`). The BFT engine is still refused at
+//! start-up and RPC still reports `finality_mechanism: "local-depth"`. The
+//! rollback command's pull-back of the legacy local-depth `finalized_height` is
+//! unchanged; retiring it is a separate decision. This module defines no key,
+//! family, encoding or value: the pointer key and its encoding are
+//! [`crate::certified_meta`]'s.
 
 use std::fmt;
 

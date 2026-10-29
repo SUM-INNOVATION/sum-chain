@@ -1,4 +1,4 @@
-//! The dormant certified-finality crossing guard (`certified_guard`, #270):
+//! The certified-finality crossing guard (`certified_guard`, #270, #341):
 //! fork choice and rollback never cross the certified block recorded under
 //! `finality/finalized/v1`.
 //!
@@ -10,10 +10,12 @@
 //!   exhaustively over a small grid against an independent oracle);
 //! * a rollback is refused exactly when its target is below the certified
 //!   height, or at it on another block;
-//! * it is dormant: no crate outside `sumchain-storage` refers to it.
+//! * it is consulted by exactly the production code its docs name: the
+//!   consensus reorg module (chain switch and rollback).
 //!
 //! All data is synthetic.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use sumchain_primitives::{BlockHeight, Hash};
@@ -329,7 +331,7 @@ fn refusals_say_what_was_protected() {
     assert!(msg.contains("forks at block 3"), "{msg}");
 }
 
-// ── dormancy ────────────────────────────────────────────────────────────────
+// ── where it is consulted ───────────────────────────────────────────────────
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
@@ -342,38 +344,52 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Nothing calls the guard: no crate outside `sumchain-storage`, and no
-/// module inside it other than its own declaration in `lib.rs`. The reorg
-/// planner and the rollback command still use the legacy local-depth
-/// `finalized_height`; wiring this in is a separate, authorized change that
-/// must delete this test.
+/// Lines of `text` that are code, not comments.
+fn code_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().filter(|l| !l.trim_start().starts_with("//"))
+}
+
+/// The guard is consulted by exactly the production code its module docs
+/// name, and by nothing else:
+///
+/// * `crates/consensus/src/reorg.rs`: the chain-switch check the engine's
+///   `import_reorg` calls, and the rollback check `execute_rollback` and the
+///   `rollback` command call.
+///
+/// Inside this crate, no other module calls it. A new caller fails this test
+/// until it is added here, with its reason. Production sources only: tests
+/// name it freely.
 #[test]
-fn the_guard_is_dormant() {
+fn the_guard_is_consulted_by_fork_choice_and_rollback_only() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let mut files = Vec::new();
+    let mut scanned = 0usize;
+    let mut callers = BTreeSet::new();
     for entry in std::fs::read_dir(&crates).unwrap() {
         let dir = entry.unwrap().path();
-        if dir.file_name().is_some_and(|n| n == "storage") {
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        if name == "storage" || !dir.join("src").is_dir() {
             continue;
         }
-        for sub in ["src", "tests", "benches", "examples"] {
-            let d = dir.join(sub);
-            if d.is_dir() {
-                rust_files(&d, &mut files);
+        let mut files = Vec::new();
+        rust_files(&dir.join("src"), &mut files);
+        for f in files {
+            scanned += 1;
+            let text = std::fs::read_to_string(&f).unwrap();
+            if code_lines(&text).any(|l| l.contains("certified_guard")) {
+                let rel = f.strip_prefix(&dir).unwrap().display().to_string();
+                callers.insert(format!("crates/{name}/{rel}"));
             }
         }
     }
-    assert!(files.len() > 100, "the scan found too few sources");
-    let hits: Vec<String> = files
-        .iter()
-        .filter(|f| {
-            std::fs::read_to_string(f)
-                .unwrap()
-                .contains("certified_guard")
-        })
-        .map(|f| f.display().to_string())
+    assert!(scanned > 100, "the scan found too few sources");
+    let expected: BTreeSet<String> = ["crates/consensus/src/reorg.rs"]
+        .into_iter()
+        .map(String::from)
         .collect();
-    assert!(hits.is_empty(), "the dormant guard is referenced: {hits:?}");
+    assert_eq!(
+        callers, expected,
+        "the production callers of the certified-crossing guard changed"
+    );
 
     let storage_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut own = Vec::new();
@@ -384,7 +400,7 @@ fn the_guard_is_dormant() {
             continue;
         }
         let text = std::fs::read_to_string(&f).unwrap();
-        for line in text.lines().filter(|l| l.contains("certified_guard")) {
+        for line in code_lines(&text).filter(|l| l.contains("certified_guard")) {
             let declaration = f.ends_with("lib.rs") && line.trim() == "pub mod certified_guard;";
             if !declaration {
                 inside.push(format!("{}: {}", f.display(), line.trim()));
