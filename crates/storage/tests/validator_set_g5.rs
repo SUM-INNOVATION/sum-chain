@@ -5,7 +5,11 @@
 //! * Q0, Q1, Q2, Q4 (N_min = 5, `max_validators` ≤ 29,127) and Q5;
 //! * the named exceptions to the missing-row rule, S1(a) and S2(a);
 //! * the derived properties (overflow, who certifies a transition block,
-//!   stored rows).
+//!   stored rows);
+//! * the wiring's API (#351): the configuration, the executor's one call per
+//!   block, Q2 before any row is read, the certified height, restart and a
+//!   replacement branch's rows;
+//! * dormancy: nothing outside this crate names the module yet.
 //!
 //! Nothing here activates dynamic membership or selects an epoch length,
 //! activation height, stake minimum or `max_validators`. Every schedule below
@@ -13,16 +17,28 @@
 
 use std::path::{Path, PathBuf};
 
-use sumchain_primitives::{Block, BlockHeader, Hash, ValidatorSet, ValidatorSetEntry};
+use sumchain_primitives::{
+    Block, BlockHeader, DelegationInfo, Hash, ValidatorInfo, ValidatorSet, ValidatorSetEntry,
+    ValidatorStatus,
+};
+use sumchain_storage::branch::BranchState;
 use sumchain_storage::candidate::{
     BlockJournals, CandidateExecution, ExecutionSubject, JournalRecord,
 };
+use sumchain_storage::certified::FinalizedPointer;
+use sumchain_storage::certified_meta::{certificate_key, encode_pointer, FINALIZED_POINTER_KEY};
 use sumchain_storage::db::{cf, Database};
-use sumchain_storage::schema::{ValidatorSetStore, ACCOUNT_KEY_PREFIX};
+use sumchain_storage::exec_view::ExecutionView;
+use sumchain_storage::journal::ApplicationJournal;
+use sumchain_storage::schema::{
+    encode_delegation, encode_delegator_list, encode_validator, DelegationStore, StakingStore,
+    ValidatorSetStore, ACCOUNT_KEY_PREFIX,
+};
 use sumchain_storage::validator_set_g5::{
-    check_stored_rows, require_transition_certified, resolve_set, select_members,
-    stage_transition_row, Candidate, EpochSchedule, G5Error, RowlessEpoch, Selection, VsetLayout,
-    EFFECTIVE_VALIDATOR_CAP,
+    certified_height, check_restart, check_stored_rows, governing_set, read_candidates,
+    read_candidates_in, require_transition_certified, resolve_set, select_members,
+    stage_boundary_row, stage_transition_row, BranchRows, Candidate, EpochSchedule, G5Error,
+    G5Membership, RowlessEpoch, Selection, StagedTransition, VsetLayout, EFFECTIVE_VALIDATOR_CAP,
 };
 use sumchain_storage::validator_set_record::ValidatorSetRecord;
 use sumchain_storage::validator_set_state::StateError;
@@ -864,6 +880,498 @@ fn certifier_a_transition_block_is_certified_by_the_set_before_the_one_it_writes
     // And row[e] governs only after the preceding set certified e·L − 1.
     assert!(require_transition_certified(8, &s, Some(6)).is_err());
     require_transition_certified(8, &s, Some(7)).unwrap();
+}
+
+// ── #351 wiring: the configuration ──────────────────────────────────────────
+
+/// A synthetic configuration: L, A and `max_validators` as given, minimum
+/// stake 1, N_min = 5, the synthetic genesis list as anchor.
+fn membership(l: u64, a: u64, max_validators: usize) -> G5Membership {
+    G5Membership::new(
+        EpochSchedule::new(l, a).unwrap(),
+        RATIFIED_N_MIN,
+        max_validators,
+        1,
+        genesis(),
+    )
+    .unwrap()
+}
+
+/// Committed staking validators `keys`, each with self-stake 100.
+fn seed_validators(d: &Database, keys: impl IntoIterator<Item = u8>) {
+    let store = StakingStore::new(d);
+    for b in keys {
+        store
+            .put_validator(&ValidatorInfo::new(key(b), 100, 0, 0))
+            .unwrap();
+    }
+}
+
+/// Execute block `height` the way the executor does, `before` standing in for
+/// its transactions: then the one `stage_boundary_row` call, through the same
+/// view. Publishes the block and returns what it staged.
+fn publish_executed(
+    d: &Database,
+    parent: Hash,
+    height: u64,
+    m: &G5Membership,
+    before: impl FnOnce(&mut ExecutionView<'_, '_>),
+) -> (Block, Option<StagedTransition>) {
+    let b = block(parent, height, height);
+    let mut cand = CandidateExecution::new(d, LIMIT);
+    let staged = {
+        let mut view = cand.view();
+        before(&mut view);
+        stage_boundary_row(&mut view, height, m).unwrap()
+    };
+    cand.finish_execution(
+        ExecutionSubject::of(&b).unwrap(),
+        b.header.state_root,
+        Vec::new(),
+        journals(),
+    )
+    .accept_imported(&b)
+    .unwrap()
+    .publish()
+    .unwrap();
+    (b, staged)
+}
+
+/// The epochs of every stored `vset/` row, in order.
+fn stored_epochs(d: &Database) -> Vec<u64> {
+    let prefix = VsetLayout::prefix();
+    d.iter_checked_from(cf::STATE, Some(prefix))
+        .unwrap()
+        .map(|e| e.unwrap().0.into_vec())
+        .take_while(|k| k.starts_with(prefix))
+        .map(|k| u64::from_be_bytes(k[prefix.len()..].try_into().unwrap()))
+        .collect()
+}
+
+/// The five synthetic validators with the smallest keys among `keys`, in key
+/// order: Q4's choice among equal totals.
+fn smallest_five(keys: impl IntoIterator<Item = u8>) -> Vec<[u8; 32]> {
+    let mut all: Vec<[u8; 32]> = keys.into_iter().map(key).collect();
+    all.sort();
+    all.truncate(5);
+    all
+}
+
+#[test]
+fn wiring_the_configuration_refuses_a_cap_above_29127_and_an_anchor_v1_cannot_run() {
+    let s = from_genesis(4);
+    assert!(matches!(
+        G5Membership::new(s, RATIFIED_N_MIN, EFFECTIVE_VALIDATOR_CAP + 1, 1, genesis()),
+        Err(G5Error::MaxValidatorsAboveCap {
+            configured,
+            cap: 29_127
+        }) if configured == EFFECTIVE_VALIDATOR_CAP + 1
+    ));
+    for anchor in [Vec::new(), vec![key(1), key(2), key(1)]] {
+        assert!(matches!(
+            G5Membership::new(s, RATIFIED_N_MIN, 10, 1, anchor),
+            Err(G5Error::Anchor(_))
+        ));
+    }
+    let m = G5Membership::new(s, RATIFIED_N_MIN, EFFECTIVE_VALIDATOR_CAP, 7, genesis()).unwrap();
+    assert_eq!(*m.schedule(), s);
+    assert_eq!(
+        (m.n_min(), m.max_validators(), m.min_stake()),
+        (RATIFIED_N_MIN, EFFECTIVE_VALIDATOR_CAP, 7)
+    );
+    assert_eq!(m.anchor(), genesis().as_slice());
+}
+
+// ── #351 wiring: the publication batch (Q1, Q4) ─────────────────────────────
+
+#[test]
+fn wiring_only_transition_blocks_stage_a_row_and_only_their_publication_commits_it() {
+    let (d, _t) = db();
+    seed_validators(&d, 31..=36);
+    let m = membership(4, 0, 5);
+    let mut parent = block(Hash::ZERO, 0, 0).hash();
+    for h in 1..=8u64 {
+        if h == 3 || h == 7 {
+            // Executed and dropped, never published: nothing reaches the
+            // database.
+            let mut cand = CandidateExecution::new(&d, LIMIT);
+            let staged = stage_boundary_row(&mut cand.view(), h, &m).unwrap();
+            assert!(staged.is_some(), "h={h}");
+            drop(cand);
+            assert_eq!(stored_epochs(&d), if h == 3 { vec![] } else { vec![1] });
+        }
+        let (b, staged) = publish_executed(&d, parent, h, &m, |_| {});
+        parent = b.hash();
+        match h {
+            3 | 7 => {
+                let staged = staged.unwrap();
+                assert_eq!(staged.epoch, (h + 1) / 4);
+                assert!(matches!(staged.selection, Selection::Selected(_)));
+            }
+            _ => assert!(staged.is_none(), "h={h}"),
+        }
+        let want: Vec<u64> = match h {
+            1..=2 => vec![],
+            3..=6 => vec![1],
+            _ => vec![1, 2],
+        };
+        assert_eq!(stored_epochs(&d), want, "after block {h}");
+    }
+    // Q4 over equal totals: the smallest keys, in key order.
+    assert_eq!(
+        governing_set(&d, 4, &m, Some(3)).unwrap(),
+        smallest_five(31..=36)
+    );
+    check_stored_rows(&d, m.schedule()).unwrap();
+}
+
+#[test]
+fn wiring_q4_reads_the_blocks_own_post_state_not_committed_state() {
+    let (d, _t) = db();
+    seed_validators(&d, 31..=36);
+    let m = membership(4, 0, 5);
+    let parent = publish_plain_range(&d, block(Hash::ZERO, 0, 0).hash(), 1, 3);
+    // From committed state alone, key(36) would be left out.
+    let committed = select_members(
+        &read_candidates(&d).unwrap(),
+        1,
+        5,
+        RATIFIED_N_MIN,
+        &genesis(),
+    )
+    .unwrap();
+    assert!(!committed.members().contains(&key(36)));
+    // The block's own writes: a delegation of 1,000 to key(36), and key(31)
+    // jailed.
+    let (_b, staged) = publish_executed(&d, parent, 3, &m, |view| {
+        let delegator = key(90);
+        let delegation = DelegationInfo::new(delegator, key(36), 1_000, 3);
+        view.put(
+            cf::DELEGATIONS,
+            &DelegationStore::delegation_key(&delegator, &key(36)),
+            &encode_delegation(&delegation).unwrap(),
+        )
+        .unwrap();
+        view.put(
+            cf::DELEGATION_VALIDATOR_INDEX,
+            &key(36),
+            &encode_delegator_list(&vec![delegator]).unwrap(),
+        )
+        .unwrap();
+        let mut jailed = ValidatorInfo::new(key(31), 100, 0, 0);
+        jailed.status = ValidatorStatus::Jailed;
+        view.put(
+            cf::VALIDATORS,
+            &key(31),
+            &encode_validator(&jailed).unwrap(),
+        )
+        .unwrap();
+        // The view sees both; committed state sees neither.
+        let in_view = read_candidates_in(view).unwrap();
+        assert!(in_view
+            .iter()
+            .any(|c| c.pubkey == key(36) && c.delegated == 1_000));
+        assert!(in_view.iter().any(|c| c.pubkey == key(31) && c.jailed));
+    });
+    let want = vec![key(36), key(32), key(33), key(34), key(35)];
+    assert_eq!(staged.unwrap().selection, Selection::Selected(want.clone()));
+    assert_eq!(governing_set(&d, 4, &m, Some(3)).unwrap(), want);
+}
+
+#[test]
+fn wiring_below_n_min_the_previous_set_carries_forward_the_anchor_only_at_the_first() {
+    let (d, _t) = db();
+    seed_validators(&d, 31..=34);
+    let m = membership(4, 0, 10);
+    let parent = publish_plain_range(&d, block(Hash::ZERO, 0, 0).hash(), 1, 3);
+    // The first transition: four eligible, so the anchor carries forward.
+    let (_, staged) = publish_executed(&d, parent, 3, &m, |_| {});
+    assert_eq!(
+        staged.unwrap().selection,
+        Selection::CarriedForward {
+            members: genesis(),
+            eligible: 4
+        }
+    );
+    assert_eq!(governing_set(&d, 4, &m, Some(3)).unwrap(), genesis());
+
+    // A selected set, then too few again: that set carries forward, never the
+    // anchor.
+    let (d, _t) = db();
+    seed_validators(&d, 31..=36);
+    let parent = publish_plain_range(&d, block(Hash::ZERO, 0, 0).hash(), 1, 3);
+    let (b3, _) = publish_executed(&d, parent, 3, &m, |_| {});
+    let row1 = governing_set(&d, 4, &m, Some(3)).unwrap();
+    assert_ne!(row1, genesis());
+    let parent = publish_plain_range(&d, b3.hash(), 4, 7);
+    let (_, staged) = publish_executed(&d, parent, 7, &m, |view| {
+        for b in [33u8, 34] {
+            let mut v = ValidatorInfo::new(key(b), 100, 0, 0);
+            v.status = ValidatorStatus::Inactive;
+            view.put(cf::VALIDATORS, &key(b), &encode_validator(&v).unwrap())
+                .unwrap();
+        }
+    });
+    assert_eq!(
+        staged.unwrap().selection,
+        Selection::CarriedForward {
+            members: row1.clone(),
+            eligible: 4
+        }
+    );
+    assert_eq!(governing_set(&d, 8, &m, Some(7)).unwrap(), row1);
+}
+
+#[test]
+fn wiring_a_missing_required_row_fails_the_transition_never_falls_back() {
+    let (d, _t) = db();
+    seed_validators(&d, 31..=36);
+    let m = membership(4, 0, 10);
+    // Blocks 1..=6 published with no row: block 3 wrote nothing.
+    publish_plain_range(&d, block(Hash::ZERO, 0, 0).hash(), 1, 7);
+    let mut cand = CandidateExecution::new(&d, LIMIT);
+    let err = stage_boundary_row(&mut cand.view(), 7, &m).unwrap_err();
+    assert!(
+        matches!(err, G5Error::Row(StateError::Missing { key: 1 })),
+        "{err}"
+    );
+    assert!(
+        cand.view().is_empty(),
+        "a refused transition stages nothing"
+    );
+}
+
+#[test]
+fn wiring_a_staking_read_error_fails_a_transition_block_and_no_other() {
+    let (d, _t) = db();
+    seed_validators(&d, 31..=36);
+    d.put(cf::VALIDATORS, &key(40), b"not a validator").unwrap();
+    let m = membership(4, 0, 10);
+    let mut cand = CandidateExecution::new(&d, LIMIT);
+    for h in [1u64, 2, 4] {
+        assert!(stage_boundary_row(&mut cand.view(), h, &m)
+            .unwrap()
+            .is_none());
+    }
+    assert!(matches!(
+        stage_boundary_row(&mut cand.view(), 3, &m),
+        Err(G5Error::StakingRead(_))
+    ));
+    assert!(cand.view().is_empty());
+}
+
+#[test]
+fn wiring_activation_immediately_before_exactly_on_and_after_a_boundary() {
+    // (L, A, the blocks that write a row, and the epoch each writes), by hand,
+    // for the first two transitions. L = 1 is S1(a).
+    type Case = (u64, u64, [(u64, u64); 2]);
+    #[rustfmt::skip]
+    let cases: [Case; 8] = [
+        (1, 0, [(1, 2), (2, 3)]),
+        (1, 4, [(4, 5), (5, 6)]),
+        (1, 5, [(5, 6), (6, 7)]),
+        (1, 6, [(6, 7), (7, 8)]),
+        (10, 0, [(9, 1), (19, 2)]),
+        (10, 29, [(29, 3), (39, 4)]),
+        (10, 30, [(39, 4), (49, 5)]),
+        (10, 31, [(39, 4), (49, 5)]),
+    ];
+    for (l, a, writes) in cases {
+        let what = format!("L={l} A={a}");
+        let (d, _t) = db();
+        seed_validators(&d, 31..=36);
+        let m = membership(l, a, 5);
+        let mut parent = block(Hash::ZERO, 0, 0).hash();
+        let last = writes[1].0;
+        for h in 1..=last {
+            let (b, staged) = publish_executed(&d, parent, h, &m, |_| {});
+            parent = b.hash();
+            let want = writes.iter().find(|(t, _)| *t == h).map(|(_, e)| *e);
+            assert_eq!(staged.map(|s| s.epoch), want, "{what} block {h}");
+        }
+        assert_eq!(stored_epochs(&d), vec![writes[0].1, writes[1].1], "{what}");
+        check_stored_rows(&d, m.schedule()).unwrap();
+        // Through the first transition block the anchor governs with no
+        // certificate; the next height needs its row and that block certified.
+        let first = writes[0].0;
+        for h in 0..=first {
+            assert_eq!(
+                governing_set(&d, h, &m, None).unwrap(),
+                genesis(),
+                "{what} h={h}"
+            );
+        }
+        assert!(matches!(
+            governing_set(&d, first + 1, &m, Some(first - 1)),
+            Err(G5Error::TransitionNotCertified { .. })
+        ));
+        assert_eq!(
+            governing_set(&d, first + 1, &m, Some(first)).unwrap(),
+            smallest_five(31..=36),
+            "{what}"
+        );
+    }
+}
+
+// ── #351 wiring: header validation and the proposer (Q0, Q2) ────────────────
+
+#[test]
+fn wiring_governing_set_checks_q2_before_it_reads_a_row() {
+    let (d, _t) = db();
+    seed_validators(&d, 31..=36);
+    let m = membership(4, 0, 5);
+    for h in 0..4 {
+        assert_eq!(governing_set(&d, h, &m, None).unwrap(), genesis());
+    }
+    // Row[1] missing and block 3 uncertified: Q2 refuses first.
+    for certified in [None, Some(2)] {
+        assert!(matches!(
+            governing_set(&d, 4, &m, certified),
+            Err(G5Error::TransitionNotCertified {
+                height: 4,
+                epoch: 1,
+                transition: 3,
+                ..
+            })
+        ));
+    }
+    // Certified and missing: the missing-row error, never the anchor.
+    assert!(matches!(
+        governing_set(&d, 4, &m, Some(3)),
+        Err(G5Error::Row(StateError::Missing { key: 1 }))
+    ));
+    let parent = publish_plain_range(&d, block(Hash::ZERO, 0, 0).hash(), 1, 3);
+    publish_executed(&d, parent, 3, &m, |_| {});
+    assert!(governing_set(&d, 4, &m, Some(2)).is_err());
+    assert_eq!(
+        governing_set(&d, 7, &m, Some(3)).unwrap(),
+        smallest_five(31..=36)
+    );
+}
+
+#[test]
+fn wiring_certified_height_reads_the_pointer_and_fails_closed() {
+    let (d, _t) = db();
+    assert_eq!(certified_height(&d).unwrap(), None);
+    // A certificate row without a pointer: the pointer was lost.
+    d.put(cf::META, &certificate_key(4, &Hash::hash(b"b4")), b"cert")
+        .unwrap();
+    assert!(matches!(
+        certified_height(&d),
+        Err(G5Error::CertifiedPointer(_))
+    ));
+    let pointer = FinalizedPointer {
+        height: 9,
+        hash: Hash::hash(b"b9"),
+    };
+    d.put(cf::META, FINALIZED_POINTER_KEY, &encode_pointer(&pointer))
+        .unwrap();
+    assert_eq!(certified_height(&d).unwrap(), Some(9));
+    d.put(cf::META, FINALIZED_POINTER_KEY, b"short").unwrap();
+    assert!(matches!(
+        certified_height(&d),
+        Err(G5Error::CertifiedPointer(_))
+    ));
+}
+
+// ── #351 wiring: restart and reorg ──────────────────────────────────────────
+
+#[test]
+fn wiring_restart_checks_the_rows_and_resolves_the_set_after_the_head() {
+    let (d, _t) = db();
+    seed_validators(&d, 31..=36);
+    let m = membership(4, 0, 5);
+    let parent = publish_plain_range(&d, block(Hash::ZERO, 0, 0).hash(), 1, 3);
+    assert_eq!(check_restart(&d, &m, 2).unwrap(), genesis());
+    publish_executed(&d, parent, 3, &m, |_| {});
+    assert_eq!(check_restart(&d, &m, 3).unwrap(), smallest_five(31..=36));
+    // A missing required row refuses the start, at the head that needs it.
+    d.delete(cf::STATE, &VsetLayout::row_key(1)).unwrap();
+    assert_eq!(check_restart(&d, &m, 2).unwrap(), genesis());
+    assert!(matches!(
+        check_restart(&d, &m, 3),
+        Err(G5Error::Row(StateError::Missing { key: 1 }))
+    ));
+    // Q5 runs first: a legacy row, or a row for a rowless epoch, refuses.
+    let (d, _t) = db();
+    d.put(cf::VALIDATOR_SETS, &1u64.to_be_bytes(), b"x")
+        .unwrap();
+    assert!(matches!(
+        check_restart(&d, &m, 0),
+        Err(G5Error::LegacyEpochSet { .. })
+    ));
+    let (d, _t) = db();
+    let row = ValidatorSetRecord::new(0, genesis()).unwrap().encode();
+    d.put(cf::STATE, &VsetLayout::row_key(0), &row).unwrap();
+    assert!(matches!(
+        check_restart(&d, &m, 0),
+        Err(G5Error::RowForRowlessEpoch { epoch: 0, .. })
+    ));
+}
+
+#[test]
+fn wiring_branch_rows_read_the_branch_layer_over_committed_state() {
+    let (d, _t) = db();
+    seed_validators(&d, 31..=36);
+    let m = membership(4, 0, 5);
+    let parent = publish_plain_range(&d, block(Hash::ZERO, 0, 0).hash(), 1, 3);
+    publish_executed(&d, parent, 3, &m, |_| {});
+    let canonical = smallest_five(31..=36);
+    let other: Vec<[u8; 32]> = (51..=55).map(key).collect();
+    let row_key = VsetLayout::row_key(1);
+    let other_row = ValidatorSetRecord::new(1, other.clone()).unwrap().encode();
+
+    // No override: committed state.
+    let layer = BranchState::new(1 << 20);
+    assert_eq!(
+        governing_set(&BranchRows::new(&layer, &d), 4, &m, Some(3)).unwrap(),
+        canonical
+    );
+    // A tombstone (the row's block unwound): the row is missing on the branch.
+    let mut layer = BranchState::new(1 << 20);
+    layer
+        .absorb_net_writes([(cf::STATE, row_key.as_slice(), None)])
+        .unwrap();
+    assert!(matches!(
+        governing_set(&BranchRows::new(&layer, &d), 4, &m, Some(3)),
+        Err(G5Error::Row(StateError::Missing { key: 1 }))
+    ));
+    // The branch's own row.
+    let mut layer = BranchState::new(1 << 20);
+    layer
+        .absorb_net_writes([(cf::STATE, row_key.as_slice(), Some(other_row.as_slice()))])
+        .unwrap();
+    assert_eq!(
+        governing_set(&BranchRows::new(&layer, &d), 4, &m, Some(3)).unwrap(),
+        other
+    );
+}
+
+#[test]
+fn wiring_unwinding_a_transition_block_removes_its_row_with_the_rest() {
+    // A row is journalled application state: the published generic journal
+    // records it as absent before the block, so an unwind deletes it.
+    let (d, _t) = db();
+    seed_validators(&d, 31..=36);
+    let m = membership(4, 0, 10);
+    let parent = publish_plain_range(&d, block(Hash::ZERO, 0, 0).hash(), 1, 3);
+    let (b3, _) = publish_executed(&d, parent, 3, &m, |_| {});
+    assert_eq!(stored_epochs(&d), vec![1]);
+    let record = d
+        .get(
+            cf::APPLICATION_JOURNAL,
+            &sumchain_storage::schema::journal_key(3, &b3.hash()),
+        )
+        .unwrap()
+        .expect("the block's generic journal is published with it");
+    let journal = ApplicationJournal::decode_for(&record, 3, &b3.hash()).unwrap();
+    assert!(journal
+        .entries()
+        .iter()
+        .any(|e| e.cf() == cf::STATE && e.key() == VsetLayout::row_key(1).as_slice()));
+    journal.check_current_matches_after(&d).unwrap();
+    journal.undo_batch(&d).unwrap().commit().unwrap();
+    assert_eq!(stored_epochs(&d), Vec::<u64>::new());
 }
 
 // ── dormancy ────────────────────────────────────────────────────────────────
