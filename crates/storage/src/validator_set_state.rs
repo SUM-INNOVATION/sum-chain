@@ -1,7 +1,9 @@
 //! Validator-set state rows: a DORMANT seam for #266 that keeps membership as
 //! ordinary application state, over [`crate::validator_set_record`].
 //!
-//! Nothing reads or writes membership through this module. No crate outside
+//! In production nothing reads or writes membership through this module. Its
+//! one consumer is `validator_set_g5`, which is wired only behind a
+//! configuration no production path constructs (#351). No crate outside
 //! storage and no other module of this crate names it, and
 //! `tests/validator_set_record_dormant.rs` fails if that changes. Membership is
 //! still the static genesis list (protocol v1, #272); the legacy

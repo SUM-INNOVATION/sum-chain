@@ -1,5 +1,6 @@
 //! **G5 validator-set transitions (#266): semantics ratified 2026-10-21;
-//! dormant; no values; not activated.**
+//! wired in execution behind a dormant configuration (#351); no values; not
+//! activated.**
 //!
 //! This module implements the G5 semantics the owner ratified on 2026-10-21:
 //! * Q0, Q1, Q2 and Q4 with N_min = 5;
@@ -10,14 +11,20 @@
 //! The ratification selects no activation height, stake minimum, epoch length
 //! or `max_validators` value, and nothing here does either.
 //!
-//! **Nothing calls this module yet.** The wiring's API (#351) is here:
-//! [`G5Membership`], the configuration every wired use goes through, and the
-//! functions that take it. Until the executor and the engine are wired:
-//! * no crate outside `sumchain-storage` names this module;
-//! * no module of this crate refers to it, other than the two dormant
-//!   validator-set seams it builds on;
-//! * `tests/validator_set_record_dormant.rs` and `tests/validator_set_g5.rs`
-//!   fail if that changes.
+//! **Wired in execution, and dormant (#351).** Every use of these rules
+//! outside this module goes through one configuration, [`G5Membership`], and
+//! no production path constructs one:
+//! * `sumchain-state`'s `BlockExecutor` holds an optional [`G5Membership`],
+//!   `None` unless `BlockExecutor::with_dormant_membership` is called, which
+//!   no production source does.
+//! * The consensus engine does not use this module yet: header validation,
+//!   the proposer, restart and reorg run protocol v1's static membership.
+//! * With `None`, execution is what it was before the wiring: no `vset/` row
+//!   is written or read.
+//! * `tests/validator_set_g5.rs` fails if another production file names this
+//!   module or a production source calls the executor's dormant setter, and
+//!   `tests/validator_set_record_dormant.rs` fails if anything else names the
+//!   row codec or the state seam.
 //!
 //! What the wiring does with a configuration is listed under *The wiring
 //! (#351)* below.
@@ -121,8 +128,8 @@
 //!
 //! # The wiring (#351)
 //!
-//! What a [`G5Membership`] is for: what the executor and the engine do with
-//! one once they are wired. None of it runs without one.
+//! What a [`G5Membership`] makes the executor do, and what the engine does
+//! with one once it is wired. None of it runs without one.
 //!
 //! * **Publication batch (Q1, Q4).** The executor calls [`stage_boundary_row`]
 //!   once for each block it executes, after every transaction and every
