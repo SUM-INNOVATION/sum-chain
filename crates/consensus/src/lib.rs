@@ -34,9 +34,13 @@
 //!   it: rolling back below the finalized height lowers the stored finalized
 //!   height to the rollback target (`reorg::execute_rollback`).
 //! - The `finalized_height()` and `is_finalized()` methods track finality state.
-//! - Finality state is persisted to storage for crash recovery, as two metadata
-//!   writes outside the block's own batch; a node that cannot read it back
-//!   restarts from finalized height 0 (#270).
+//! - Finality state is persisted for crash recovery as one record, height and
+//!   hash written together in one batch after the block's own batch. A write
+//!   that fails fail-stops the engine, so the in-memory finalized height never
+//!   runs ahead of the record. A record that cannot be read, is half present,
+//!   is above the head or does not name the canonical block at its height
+//!   refuses start rather than restarting from finalized height 0; a database
+//!   with no record at all starts with nothing finalized, as before (#270).
 //!
 //! ## Experimental: Byzantine Fault Tolerant (BFT)
 //!

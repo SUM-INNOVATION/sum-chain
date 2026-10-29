@@ -721,20 +721,11 @@ pub fn execute_rollback(
 
     // Finality cannot outlive the tip. Staged into the SAME batch, not applied
     // after it: a crash between the two would leave a node claiming finality for
-    // a block it no longer has.
+    // a block it no longer has. Height and hash together, through the record's
+    // one writer.
     if let Some(finalized) = block_store.get_finalized_height()? {
         if finalized > plan.target.height() {
-            use sumchain_storage::schema::meta_keys;
-            batch.put(
-                sumchain_storage::cf::META,
-                meta_keys::FINALIZED_HEIGHT,
-                &plan.target.height().to_be_bytes(),
-            )?;
-            batch.put(
-                sumchain_storage::cf::META,
-                meta_keys::FINALIZED_HASH,
-                plan.target.hash().as_bytes(),
-            )?;
+            BlockStore::stage_finalized(&mut batch, plan.target.height(), &plan.target.hash())?;
         }
     }
 

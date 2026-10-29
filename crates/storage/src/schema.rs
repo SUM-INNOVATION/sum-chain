@@ -9,7 +9,7 @@ use sumchain_primitives::{
     ValidatorStatus,
 };
 
-use crate::db::{cf, Database};
+use crate::db::{cf, Database, WriteBatch};
 use crate::nft_store::{
     collection_index_key, collection_key, decode_collection, decode_collection_tokens,
     decode_issuer, decode_owner_tokens, decode_token, encode_collection, encode_collection_tokens,
@@ -26,6 +26,47 @@ pub mod meta_keys {
     pub const CHAIN_ID: &[u8] = b"chain_id";
     pub const FINALIZED_HEIGHT: &[u8] = b"finalized_height";
     pub const FINALIZED_HASH: &[u8] = b"finalized_hash";
+}
+
+/// Why a stored local-depth finality record cannot be trusted
+/// ([`BlockStore::checked_finality_record`]).
+///
+/// The record is the height at or below which this node refuses to
+/// reorganize, so a damaged one is refused rather than read as "nothing
+/// finalized".
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FinalityRecordError {
+    /// A key is present but does not decode, or cannot be read.
+    #[error("the finality record cannot be read: {0}")]
+    Unreadable(String),
+    /// `finalized_height` is present and `finalized_hash` is not.
+    #[error(
+        "the finality record is half present: finalized_height is {height} but \
+         finalized_hash is absent"
+    )]
+    HeightWithoutHash { height: BlockHeight },
+    /// `finalized_hash` is present and `finalized_height` is not.
+    #[error(
+        "the finality record is half present: finalized_hash is {hash} but \
+         finalized_height is absent"
+    )]
+    HashWithoutHeight { hash: Hash },
+    /// The record names a height above the recorded head (or there is no head).
+    #[error("the finality record names height {height}, above the recorded head {head:?}")]
+    AboveHead {
+        height: BlockHeight,
+        head: Option<BlockHeight>,
+    },
+    /// The record's hash is not the canonical block at its height.
+    #[error(
+        "the finality record names block {recorded} at height {height}, but the canonical \
+         block at that height is {canonical:?}"
+    )]
+    NotCanonical {
+        height: BlockHeight,
+        recorded: Hash,
+        canonical: Option<Hash>,
+    },
 }
 
 /// Key for a per-block undo journal: height big-endian, then the block hash.
@@ -193,11 +234,6 @@ impl<'a> BlockStore<'a> {
         }
     }
 
-    /// Set the finalized block height
-    pub fn set_finalized_height(&self, height: BlockHeight) -> Result<()> {
-        self.db.put(cf::META, meta_keys::FINALIZED_HEIGHT, &height.to_be_bytes())
-    }
-
     /// Get the finalized block hash
     pub fn get_finalized_hash(&self) -> Result<Option<Hash>> {
         match self.db.get(cf::META, meta_keys::FINALIZED_HASH)? {
@@ -210,9 +246,64 @@ impl<'a> BlockStore<'a> {
         }
     }
 
-    /// Set the finalized block hash
-    pub fn set_finalized_hash(&self, hash: &Hash) -> Result<()> {
-        self.db.put(cf::META, meta_keys::FINALIZED_HASH, hash.as_bytes())
+    /// Stage the local-depth finality record into `batch`: the height and the
+    /// hash of the block it names, together.
+    ///
+    /// The one writer of [`meta_keys::FINALIZED_HEIGHT`] and
+    /// [`meta_keys::FINALIZED_HASH`]. The two keys are one record and are never
+    /// written apart, so no crash and no failed write can leave a height
+    /// without its hash or a hash of another height.
+    pub fn stage_finalized(
+        batch: &mut WriteBatch<'_>,
+        height: BlockHeight,
+        hash: &Hash,
+    ) -> Result<()> {
+        batch.put(cf::META, meta_keys::FINALIZED_HEIGHT, &height.to_be_bytes())?;
+        batch.put(cf::META, meta_keys::FINALIZED_HASH, hash.as_bytes())
+    }
+
+    /// Record `height` / `hash` as this node's local-depth finality, both keys
+    /// in one atomic batch.
+    pub fn set_finalized(&self, height: BlockHeight, hash: &Hash) -> Result<()> {
+        let mut batch = self.db.batch();
+        Self::stage_finalized(&mut batch, height, hash)?;
+        batch.commit()
+    }
+
+    /// The local-depth finality record, checked against the chain this
+    /// database holds.
+    ///
+    /// `Ok(None)` when neither key is present: nothing has been finalized on
+    /// this node yet. Otherwise both keys must decode, the height must not be
+    /// above the recorded head, and the hash must be the block the canonical
+    /// height index names at that height. Anything else is a
+    /// [`FinalityRecordError`]; the record is never read as "nothing
+    /// finalized". Read-only.
+    pub fn checked_finality_record(
+        &self,
+    ) -> std::result::Result<Option<(BlockHeight, Hash)>, FinalityRecordError> {
+        let unreadable = |e: StorageError| FinalityRecordError::Unreadable(e.to_string());
+        let height = self.get_finalized_height().map_err(unreadable)?;
+        let hash = self.get_finalized_hash().map_err(unreadable)?;
+        let (height, hash) = match (height, hash) {
+            (None, None) => return Ok(None),
+            (Some(height), None) => return Err(FinalityRecordError::HeightWithoutHash { height }),
+            (None, Some(hash)) => return Err(FinalityRecordError::HashWithoutHeight { hash }),
+            (Some(height), Some(hash)) => (height, hash),
+        };
+        let head = self.get_latest_height().map_err(unreadable)?;
+        if head.is_none_or(|head| height > head) {
+            return Err(FinalityRecordError::AboveHead { height, head });
+        }
+        let canonical = self.get_hash_by_height(height).map_err(unreadable)?;
+        if canonical != Some(hash) {
+            return Err(FinalityRecordError::NotCanonical {
+                height,
+                recorded: hash,
+                canonical,
+            });
+        }
+        Ok(Some((height, hash)))
     }
 
     /// Get the finalized block
