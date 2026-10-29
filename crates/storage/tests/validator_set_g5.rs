@@ -1,6 +1,5 @@
 //! **G5 validator-set transitions (#266): semantics ratified 2026-10-21;
-//! wired in execution behind a dormant configuration (#351); no values; not
-//! activated.**
+//! wired behind a dormant configuration (#351); no values; not activated.**
 //!
 //! Tests for `validator_set_g5`. They cover:
 //! * Q0, Q1, Q2, Q4 (N_min = 5, `max_validators` ≤ 29,127) and Q5;
@@ -10,8 +9,8 @@
 //! * the wiring's API (#351): the configuration, the executor's one call per
 //!   block, Q2 before any row is read, the certified height, restart and a
 //!   replacement branch's rows;
-//! * dormancy: only the executor names the module, and no production path
-//!   gives it a configuration.
+//! * dormancy: only the wiring names the module, and no production path
+//!   constructs its configuration.
 //!
 //! Nothing here activates dynamic membership or selects an epoch length,
 //! activation height, stake minimum or `max_validators`. Every schedule below
@@ -1460,15 +1459,21 @@ fn lines_with(sources: &[(String, Vec<String>)], needle: &str) -> Vec<(String, S
         .collect()
 }
 
-/// The G5 module is named, in production code, by exactly the executor's
-/// publication-batch write (#351); `lib.rs` only declares it. The consensus
-/// engine and the node name nothing of the wiring yet.
+/// The G5 module is named, in production code, by exactly the wiring (#351):
+/// the executor's publication-batch write, the engine's membership module and
+/// the chain switch. `lib.rs` only declares it, and the node crate names
+/// nothing of the wiring at all.
 #[test]
 fn the_g5_module_is_named_only_by_the_dormant_wiring() {
     let sources = workspace_sources();
     assert_eq!(
         naming(&sources, "validator_set_g5"),
-        ["crates/state/src/executor.rs", "crates/storage/src/lib.rs"],
+        [
+            "crates/consensus/src/branch_switch.rs",
+            "crates/consensus/src/membership.rs",
+            "crates/state/src/executor.rs",
+            "crates/storage/src/lib.rs",
+        ],
         "a new production consumer of the G5 module"
     );
     let lib: Vec<String> = lines_with(&sources, "validator_set_g5")
@@ -1482,36 +1487,82 @@ fn the_g5_module_is_named_only_by_the_dormant_wiring() {
         "lib.rs only declares it"
     );
     for (file, code) in &sources {
-        if !(file.starts_with("crates/node/") || file.starts_with("crates/consensus/")) {
+        if !file.starts_with("crates/node/") {
             continue;
         }
         for needle in [
             "validator_set_g5",
             "G5Membership",
+            "DormantMembershipRules",
             "with_dormant_membership",
         ] {
             assert!(
                 !code.iter().any(|l| l.contains(needle)),
-                "{file} names {needle}: the engine is not wired yet"
+                "{file} names {needle}: the node must not build the dormant configuration"
             );
         }
     }
 }
 
-/// No production path gives the executor a configuration (#351): its dormant
-/// setter is defined and called by no production source, and no production
-/// source constructs a `G5Membership`.
+/// No production path constructs the configuration (#351).
+///
+/// * `PoAEngine::new_with_dormant_membership` is defined and never called.
+/// * It is the only caller of the engine's `membership::build`, the only
+///   production `G5Membership::new`, and of the executor's
+///   `with_dormant_membership`; `PoAEngine::new` passes `None`.
 #[test]
 fn no_production_path_constructs_the_dormant_configuration() {
     let sources = workspace_sources();
+    let at = |needle: &str| -> Vec<(String, String)> { lines_with(&sources, needle) };
     assert_eq!(
-        lines_with(&sources, ".with_dormant_membership("),
-        Vec::<(String, String)>::new(),
-        "nothing gives the executor a configuration"
+        at("new_with_dormant_membership"),
+        [(
+            "crates/consensus/src/poa.rs".to_string(),
+            "pub fn new_with_dormant_membership(".to_string()
+        )],
+        "the engine's dormant constructor is defined and never named again"
+    );
+    assert_eq!(
+        at("membership::build("),
+        [(
+            "crates/consensus/src/poa.rs".to_string(),
+            "let membership = crate::membership::build(&db, &genesis_validators, rules)?;"
+                .to_string()
+        )],
+        "the configuration is built only inside the dormant constructor"
     );
     assert_eq!(
         naming(&sources, "G5Membership::new("),
-        Vec::<String>::new(),
-        "nothing constructs a configuration"
+        ["crates/consensus/src/membership.rs"],
+        "the configuration is constructed only by the engine's build"
+    );
+    let mut setter: Vec<(String, String)> = at("with_dormant_membership")
+        .into_iter()
+        .filter(|(_, l)| !l.contains("new_with_dormant_membership"))
+        .collect();
+    setter.sort();
+    assert_eq!(
+        setter,
+        [
+            (
+                "crates/consensus/src/poa.rs".to_string(),
+                "Some(m) => executor.with_dormant_membership(m.clone()),".to_string()
+            ),
+            (
+                "crates/state/src/executor.rs".to_string(),
+                "pub fn with_dormant_membership(mut self, membership: Arc<G5Membership>) -> Self {"
+                    .to_string()
+            ),
+        ],
+        "the executor receives a configuration only from the engine"
+    );
+    let construct: Vec<String> = at("Self::construct(").into_iter().map(|(_, l)| l).collect();
+    assert_eq!(
+        construct,
+        [
+            "Self::construct(db, state, mempool, genesis, validator_key, None)",
+            "Self::construct(db, state, mempool, genesis, validator_key, Some(membership))",
+        ],
+        "PoAEngine::new passes no configuration"
     );
 }

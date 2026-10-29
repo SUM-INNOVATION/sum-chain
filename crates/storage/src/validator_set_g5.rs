@@ -1,6 +1,5 @@
 //! **G5 validator-set transitions (#266): semantics ratified 2026-10-21;
-//! wired in execution behind a dormant configuration (#351); no values; not
-//! activated.**
+//! wired behind a dormant configuration (#351); no values; not activated.**
 //!
 //! This module implements the G5 semantics the owner ratified on 2026-10-21:
 //! * Q0, Q1, Q2 and Q4 with N_min = 5;
@@ -11,18 +10,19 @@
 //! The ratification selects no activation height, stake minimum, epoch length
 //! or `max_validators` value, and nothing here does either.
 //!
-//! **Wired in execution, and dormant (#351).** Every use of these rules
-//! outside this module goes through one configuration, [`G5Membership`], and
-//! no production path constructs one:
+//! **Wired, and dormant (#351).** Every use of these rules outside this module
+//! goes through one configuration, [`G5Membership`], and no production path
+//! constructs one:
 //! * `sumchain-state`'s `BlockExecutor` holds an optional [`G5Membership`],
-//!   `None` unless `BlockExecutor::with_dormant_membership` is called, which
-//!   no production source does.
-//! * The consensus engine does not use this module yet: header validation,
-//!   the proposer, restart and reorg run protocol v1's static membership.
-//! * With `None`, execution is what it was before the wiring: no `vset/` row
-//!   is written or read.
+//!   `None` unless `BlockExecutor::with_dormant_membership` is called.
+//! * `sumchain-consensus`'s `PoAEngine::new_with_dormant_membership` is the
+//!   only constructor that calls it. `PoAEngine::new`, the constructor every
+//!   production path uses, passes `None`.
+//! * With `None`, execution, header validation, the proposer, restart, reorg
+//!   and rollback are what they were before the wiring: no `vset/` row is
+//!   written or read, and [`check_stored_rows`] does not run.
 //! * `tests/validator_set_g5.rs` fails if another production file names this
-//!   module or a production source calls the executor's dormant setter, and
+//!   module or a production source calls either dormant constructor, and
 //!   `tests/validator_set_record_dormant.rs` fails if anything else names the
 //!   row codec or the state seam.
 //!
@@ -128,8 +128,8 @@
 //!
 //! # The wiring (#351)
 //!
-//! What a [`G5Membership`] makes the executor do, and what the engine does
-//! with one once it is wired. None of it runs without one.
+//! What a [`G5Membership`] makes the executor and the engine do. None of it
+//! runs without one.
 //!
 //! * **Publication batch (Q1, Q4).** The executor calls [`stage_boundary_row`]
 //!   once for each block it executes, after every transaction and every
@@ -174,7 +174,7 @@
 //!   `max_validators`.
 //!   N_min is a parameter too. The ratified value, 5, is
 //!   `pool_topology::PRODUCT_MINIMUM` in `sumchain-genesis`, which this crate
-//!   cannot name. The wiring passes it.
+//!   cannot name. The engine's dormant constructor passes it.
 //! * **Activation, heights and gates.** None. Protocol v1 still refuses
 //!   `staking.epoch_length != 0`; a configuration carries its own epoch
 //!   length. Lifting that refusal behind an activation gate needs #352's
