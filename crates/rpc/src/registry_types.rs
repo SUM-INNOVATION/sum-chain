@@ -19,10 +19,20 @@
 //!   governance floor.
 //! * It writes nothing and allocates no record. `dry_run_admit` is a pure
 //!   function of its inputs.
+//!
+//! The record reads (#128), [`read_record`] and [`read_records`], are here too.
+//! They report the records committed state holds under `registry/v1/`, through
+//! the state module's own row rule, and write nothing.
 
 use serde::{Deserialize, Serialize};
+use sumchain_state::registry_ingress::{
+    checked_registry_row, registry_record_key, REGISTRY_RECORD_KEY_PREFIX,
+};
+use sumchain_storage::{cf, Database};
 use sumchain_wire::b0::codec::DecodeError;
 use sumchain_wire::registry_wire::{RegistryRecordV1, RegistryStatus};
+
+use crate::RpcError;
 
 /// Why a candidate profile would be refused admission.
 ///
@@ -228,6 +238,10 @@ pub struct RegistryDryRunRequest {
 
 /// The candidate as decoded, echoed back so an observer can see exactly what
 /// was evaluated. Present only when the bytes decode; nothing here is stored.
+///
+/// The record reads return stored records in this same shape
+/// ([`RegistryRecordView`]), so a candidate and a stored record compare field
+/// for field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegistryCandidateView {
     /// `0x`-prefixed hex of the 32-byte id.
@@ -283,21 +297,7 @@ pub fn dry_run_response(record: &[u8], chain_height: u64) -> RegistryDryRunRespo
     );
     let candidate = RegistryRecordV1::decode_exact(record)
         .ok()
-        .map(|r| RegistryCandidateView {
-            id: hex0x(&r.id),
-            proof_system_id: r.proof_system_id,
-            audit_commitment: hex0x(&r.audit_commitment),
-            source_commitment: hex0x(&r.source_commitment),
-            ceremony_commitment: hex0x(&r.ceremony_commitment),
-            verifier_binary_version: r.verifier_binary_version,
-            activation_height: r.activation_height,
-            status: match r.status {
-                RegistryStatus::Enabled => "enabled",
-                RegistryStatus::Disabled => "disabled",
-            }
-            .to_string(),
-            approval_threshold_bps: r.approval_threshold_bps,
-        });
+        .map(|r| record_view(&r));
     RegistryDryRunResponse {
         admissible: result.admissible,
         refusals: result.refusals,
@@ -312,6 +312,113 @@ pub fn dry_run_response(record: &[u8], chain_height: u64) -> RegistryDryRunRespo
 pub fn parse_record_hex(s: &str) -> Result<Vec<u8>, String> {
     let body = s.strip_prefix("0x").unwrap_or(s);
     hex::decode(body).map_err(|e| format!("record is not valid hex: {e}"))
+}
+
+// ── Record reads (#128) ─────────────────────────────────────────────────────
+//
+// Read-only and outside consensus: no transaction's validity depends on them
+// and no root folds them. The registry is dormant: operations 8 and 9 do not
+// decode, so no block can write a record, and on a real chain `read_record` is
+// `None` and `read_records` is empty.
+
+/// A stored `RegistryRecordV1`, field for field: the same shape as the dry
+/// run's `candidate`, so the two cannot drift apart. `status` is the stored
+/// status byte and `activation_height` the stored height, as stored; neither
+/// is evaluated against the head.
+pub type RegistryRecordView = RegistryCandidateView;
+
+/// Every field of `r`, rendered for JSON. Byte fields are `0x`-prefixed hex.
+pub fn record_view(r: &RegistryRecordV1) -> RegistryRecordView {
+    RegistryCandidateView {
+        id: hex0x(&r.id),
+        proof_system_id: r.proof_system_id,
+        audit_commitment: hex0x(&r.audit_commitment),
+        source_commitment: hex0x(&r.source_commitment),
+        ceremony_commitment: hex0x(&r.ceremony_commitment),
+        verifier_binary_version: r.verifier_binary_version,
+        activation_height: r.activation_height,
+        status: match r.status {
+            RegistryStatus::Enabled => "enabled",
+            RegistryStatus::Disabled => "disabled",
+        }
+        .to_string(),
+        approval_threshold_bps: r.approval_threshold_bps,
+    }
+}
+
+/// A registry row that committed state holds but that cannot be reported as a
+/// record: an internal error, never "absent".
+fn registry_inconsistent(e: impl std::fmt::Display) -> RpcError {
+    RpcError::Internal(format!("registry state is inconsistent: {e}"))
+}
+
+fn registry_read_failed(e: impl std::fmt::Display) -> RpcError {
+    RpcError::Internal(format!("registry state could not be read: {e}"))
+}
+
+/// The record committed state holds under `id`, or `None` when no row is
+/// stored under its key.
+///
+/// A stored row is checked by the state module's own row rule
+/// ([`checked_registry_row`]): a value that does not decode, or a record that
+/// names another id than its key, is an error, never `None`. So is a read
+/// error.
+pub fn read_record(db: &Database, id: &[u8; 32]) -> Result<Option<RegistryRecordV1>, RpcError> {
+    let key = registry_record_key(id);
+    let Some(bytes) = db.get(cf::STATE, &key).map_err(registry_read_failed)? else {
+        return Ok(None);
+    };
+    checked_registry_row(&key, &bytes)
+        .map(Some)
+        .map_err(registry_inconsistent)
+}
+
+/// Up to `limit` records in ascending id order: the first ones after
+/// `start_after` (exclusive; it need not be a stored id), or from the first
+/// record when `None`.
+///
+/// One forward scan of `cf::STATE` from the registry prefix, through the
+/// error-propagating iterator, so a read error ends the page with an error
+/// rather than a short page. Every row the page reads is checked by
+/// [`checked_registry_row`]; a row that breaks it (a key of the wrong length, a
+/// value that does not decode, a record under another id) is an error, never
+/// skipped. The scan stops at the first key outside the prefix or after
+/// `limit` records, so it reads at most `limit` registry rows. `limit` is the
+/// caller's page bound (`registry_getRecords` takes it from
+/// `pagination::page_of`), not a registry limit.
+pub fn read_records(
+    db: &Database,
+    start_after: Option<&[u8; 32]>,
+    limit: usize,
+) -> Result<Vec<RegistryRecordV1>, RpcError> {
+    let mut out = Vec::new();
+    if limit == 0 {
+        return Ok(out);
+    }
+    let start = match start_after {
+        // `key ‖ 0x00` is the least key above `key`, so the scan starts
+        // strictly after `start_after`.
+        Some(id) => {
+            let mut k = registry_record_key(id);
+            k.push(0);
+            k
+        }
+        None => REGISTRY_RECORD_KEY_PREFIX.to_vec(),
+    };
+    for entry in db
+        .iter_checked_from(cf::STATE, Some(&start))
+        .map_err(registry_read_failed)?
+    {
+        let (key, value) = entry.map_err(registry_read_failed)?;
+        if !key.starts_with(REGISTRY_RECORD_KEY_PREFIX) {
+            break;
+        }
+        out.push(checked_registry_row(&key, &value).map_err(registry_inconsistent)?);
+        if out.len() == limit {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
