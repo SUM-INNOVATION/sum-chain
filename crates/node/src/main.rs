@@ -1027,6 +1027,12 @@ async fn main() -> Result<()> {
             let format = sumchain_storage::journal::validate_startup(&db)
                 .context("application journal format check failed")?;
 
+            // The same certified-finality audit the node runs at start (#341):
+            // the rollback below is checked against the certified block, and
+            // that check trusts the stored pointer only once this has passed.
+            sumchain_storage::certified_guard::audit_at_start(&db)
+                .map_err(|e| anyhow::anyhow!("refusing to roll back: {e}"))?;
+
             let (source, gates) = match configured {
                 Some(configured) => configured,
                 None => {

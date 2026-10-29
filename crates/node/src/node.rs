@@ -371,6 +371,19 @@ impl Node {
         // runs, not that any other node agrees.
         Self::check_consensus_config(&db, &genesis, initial_height)?;
 
+        // ── the certified-finality records, before anything relies on them ──
+        //
+        // Fork choice consults the certified-crossing guard (#341) on every
+        // chain switch, and the guard trusts the pointer it reads only because
+        // this audit (`certified_meta::recover_v1`) has passed: the pointer,
+        // its block and every stored certificate. This binary verifies no
+        // certificate, so the audit passes exactly when the database holds no
+        // certified-finality record, which no production path writes, and
+        // refuses anything else rather than trusting what it cannot check.
+        // Read-only, and before the consensus engine exists.
+        sumchain_storage::certified_guard::audit_at_start(&db)
+            .map_err(|e| anyhow::anyhow!("refusing to start: {e}"))?;
+
         // What this node may claim about its own history, said at start.
         Self::report_sync_capability(&db, initial_height)?;
 
@@ -2179,3 +2192,11 @@ mod genesis_alloc_boot_tests;
 #[cfg(test)]
 #[path = "../tests/unit/consensus_config_boot_tests.rs"]
 mod consensus_config_boot_tests;
+
+/// The certified-finality start-up audit (#341) through the real boot: a
+/// database with no certified record boots as before, and any certified record
+/// this binary cannot verify is refused without being changed. A unit-test
+/// module for the same reason as the ones above.
+#[cfg(test)]
+#[path = "../tests/unit/certified_audit_boot_tests.rs"]
+mod certified_audit_boot_tests;
