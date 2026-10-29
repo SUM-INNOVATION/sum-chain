@@ -1,7 +1,10 @@
-//! The validator-set row codec and state seam (#266) are DORMANT: nothing may
-//! read or write membership through them until the membership-effective-height
-//! and finality rules are decided and an activation is authorized. Wiring
-//! either in must be a deliberate change that deletes or rewrites this test.
+//! The validator-set row codec and state seam (#266) are reached only through
+//! `validator_set_g5`, the ratified G5 rules. That module is wired (#351)
+//! behind a configuration no production path constructs, which
+//! `tests/validator_set_g5.rs` enforces. No crate outside storage names the
+//! codec or the seam, and no other storage module uses them, so every read and
+//! write of a row goes through the G5 rules. Changing that must be a
+//! deliberate change that rewrites this test.
 
 use std::path::{Path, PathBuf};
 
@@ -12,9 +15,9 @@ const NEEDLES: &[&str] = &[
     "ValidatorSetLayout",
 ];
 
-/// The two dormant modules, which may name each other, and the G5 transition
-/// module built on them (semantics ratified 2026-10-21; not activated), which
-/// is itself dormant: `tests/validator_set_g5.rs` fails if anything names it.
+/// The two modules, which may name each other, and the G5 transition module
+/// built on them (semantics ratified 2026-10-21; not activated), whose
+/// consumers `tests/validator_set_g5.rs` enumerates.
 const MODULES: &[&str] = &[
     "validator_set_record.rs",
     "validator_set_state.rs",

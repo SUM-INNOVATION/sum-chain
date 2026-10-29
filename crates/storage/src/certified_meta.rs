@@ -3,7 +3,9 @@
 //!
 //! Nothing outside `sumchain-storage` uses this module (the seam's dormancy
 //! test still holds), and nothing in this crate calls it from a production
-//! path. It changes no running node.
+//! path. Its one reader outside the seam is the dormant G5 wiring's
+//! certified-height read (#351), which runs only under a configuration no
+//! production path constructs. It changes no running node.
 //!
 //! # Keys and values (all in `cf::META`; no new column family)
 //!

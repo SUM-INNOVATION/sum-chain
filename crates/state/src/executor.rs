@@ -53,6 +53,7 @@ fn encode_contract_journal(diff: &ContractStateDiff) -> Result<JournalRecord> {
 }
 use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::schema::{ContractStateDiff, StateDiff};
+use sumchain_storage::validator_set_g5::{stage_boundary_row, G5Membership};
 use sumchain_storage::Database;
 use tracing::{debug, info, warn};
 
@@ -398,6 +399,11 @@ pub struct BlockExecutor {
     /// after. `None` while dormant (production default) — then the beacon dispatch is
     /// byte/state-identical to the fail-closed seam.
     beacon_block: parking_lot::Mutex<Option<crate::beacon_manager::BeaconBlockState>>,
+    /// The dormant G5 validator-set wiring (#351). `None` unless
+    /// [`Self::with_dormant_membership`] is called, which no production path
+    /// does: [`Self::new`] leaves it `None`, and then execution stages no
+    /// validator-set row and reads none.
+    membership: Option<Arc<G5Membership>>,
 }
 
 /// Everything one block's execution produced, INCLUDING the unpublished
@@ -481,7 +487,20 @@ impl BlockExecutor {
             contract_executor,
             inference_settlement_executor,
             beacon_block: parking_lot::Mutex::new(None),
+            membership: None,
         }
+    }
+
+    /// The dormant G5 wiring (#351): every block this executor executes then
+    /// calls `validator_set_g5::stage_boundary_row` once, through its own
+    /// candidate, so a boundary block's validator-set row is written by that
+    /// block's publication batch and by nothing else.
+    ///
+    /// Called only by `PoAEngine::new_with_dormant_membership` and by tests.
+    /// No production path constructs a [`G5Membership`].
+    pub fn with_dormant_membership(mut self, membership: Arc<G5Membership>) -> Self {
+        self.membership = Some(membership);
+        self
     }
 
     /// Validate a transaction without executing it
@@ -3988,6 +4007,23 @@ impl BlockExecutor {
                 parent_accumulator,
             )?
         };
+
+        // ── Dormant G5 validator-set row (#351), AFTER the state root ──
+        // `None` in production (`BlockExecutor::new`): nothing is read or
+        // staged. With a configuration, a transition block computes Q4 over
+        // its own post-state and stages its row into THIS BLOCK'S CANDIDATE,
+        // so its publication batch (or a chain switch's adoption batch)
+        // commits it and nothing else does. Staged after the root: the row is
+        // uncommitted application state, never folded into it.
+        if let Some(membership) = &self.membership {
+            let mut view = candidate.view();
+            stage_boundary_row(&mut view, block.height(), membership).map_err(|e| {
+                StateError::BlockValidation(format!(
+                    "block {}: validator-set transition: {e}",
+                    block.height()
+                ))
+            })?;
+        }
 
         // The in-memory accumulator is NOT advanced here.
         //

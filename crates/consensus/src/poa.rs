@@ -37,6 +37,7 @@ use crate::engine::{
     ConsensusEngine, ConsensusEvent, ConsensusQuery, FinalityMechanism, ForkChoice,
     LongestChainForkChoice,
 };
+use crate::membership::{DormantMembershipRules, G5Membership};
 use crate::reorg::plan_reorg_within_undo_history;
 use crate::{ConsensusError, Result};
 
@@ -131,6 +132,11 @@ pub struct PoAEngine {
     halted: RwLock<Option<String>>,
     /// Local bounds on one chain switch (#269). Consensus-neutral.
     branch_limits: RwLock<BranchLimits>,
+    /// The dormant G5 validator-set wiring (#351). `None` from [`Self::new`],
+    /// the constructor every production path uses; `Some` only from
+    /// [`Self::new_with_dormant_membership`], which no production path calls.
+    /// With `None` membership is the static genesis list, exactly as before.
+    membership: Option<Arc<G5Membership>>,
 }
 
 /// Refuse a genesis protocol v1 cannot run: stake-weighted proposer selection,
@@ -167,6 +173,42 @@ impl PoAEngine {
         genesis: &Genesis,
         validator_key: Option<KeyPair>,
     ) -> Result<Self> {
+        Self::construct(db, state, mempool, genesis, validator_key, None)
+    }
+
+    /// An engine under the dormant G5 validator-set wiring (#351).
+    ///
+    /// Test-only in effect: no production path calls it, and
+    /// `crates/storage/tests/validator_set_g5.rs` fails if one does. Protocol
+    /// v1's refusals still apply first (`staking.epoch_length != 0` among
+    /// them); `rules` carries its own epoch length. Then, before the engine
+    /// exists, the anchor membership is taken from this database's
+    /// ConsensusConfig record (field 0x0003) and the stored validator-set rows
+    /// are checked. See [`crate::membership`].
+    pub fn new_with_dormant_membership(
+        db: Arc<Database>,
+        state: Arc<StateManager>,
+        mempool: Arc<Mempool>,
+        genesis: &Genesis,
+        validator_key: Option<KeyPair>,
+        rules: DormantMembershipRules,
+    ) -> Result<Self> {
+        let genesis_validators = genesis
+            .validator_pubkeys()
+            .map_err(|e| ConsensusError::Genesis(e.to_string()))?;
+        check_protocol_v1(genesis)?;
+        let membership = crate::membership::build(&db, &genesis_validators, rules)?;
+        Self::construct(db, state, mempool, genesis, validator_key, Some(membership))
+    }
+
+    fn construct(
+        db: Arc<Database>,
+        state: Arc<StateManager>,
+        mempool: Arc<Mempool>,
+        genesis: &Genesis,
+        validator_key: Option<KeyPair>,
+        membership: Option<Arc<G5Membership>>,
+    ) -> Result<Self> {
         let genesis_validators = genesis
             .validator_pubkeys()
             .map_err(|e| ConsensusError::Genesis(e.to_string()))?;
@@ -175,7 +217,11 @@ impl PoAEngine {
         // `Genesis::new` builds a genesis without validating it.
         check_protocol_v1(genesis)?;
 
-        let executor = Arc::new(BlockExecutor::new(state.clone(), db.clone(), genesis.params.clone()));
+        let executor = BlockExecutor::new(state.clone(), db.clone(), genesis.params.clone());
+        let executor = Arc::new(match &membership {
+            None => executor,
+            Some(m) => executor.with_dormant_membership(m.clone()),
+        });
         let (event_tx, _) = broadcast::channel(100);
         let capacity = sumchain_storage::pruner::CapacityGuard::from_db(&db).unwrap_or_else(|e| {
             warn!("unreadable disk budget row ({e}); treating this node as unbudgeted");
@@ -202,6 +248,7 @@ impl PoAEngine {
             exec_lock: parking_lot::Mutex::new(()),
             halted: RwLock::new(None),
             branch_limits: RwLock::new(BranchLimits::PRODUCTION),
+            membership,
         })
     }
 
@@ -273,6 +320,21 @@ impl PoAEngine {
 
         // Fall back to genesis validators
         self.genesis_validators.clone()
+    }
+
+    /// The set that validates block `height` built on the canonical chain:
+    /// the proposer's, the screening pass's and the query surface's.
+    ///
+    /// Without the dormant G5 configuration this is
+    /// [`Self::get_active_validator_set`], unchanged. With it, the set is
+    /// resolved from committed state for a parent at `height - 1`, or at the
+    /// head if that is lower (#351).
+    fn validator_set_at(&self, height: BlockHeight) -> Result<Vec<[u8; 32]>> {
+        let Some(membership) = &self.membership else {
+            return Ok(self.get_active_validator_set());
+        };
+        let parent = height.saturating_sub(1).min(self.current_height());
+        crate::membership::set_on_canonical_ancestry(&self.db, membership, height, parent)
     }
 
     /// Compute the validator set for a new epoch based on staking state
@@ -396,14 +458,19 @@ impl PoAEngine {
     /// unreachable; if it were reached, no key matches the zero key, so the node
     /// proposes nothing rather than guessing.
     fn compute_proposer(&self, height: BlockHeight) -> [u8; 32] {
-        sumchain_primitives::proposer::round_robin_proposer(
-            height,
-            &self.get_active_validator_set(),
+        let validators = match self.validator_set_at(height) {
+            Ok(validators) => validators,
+            Err(e) => {
+                warn!("no validator set for height {height}: {e}");
+                return [0u8; 32];
+            }
+        };
+        sumchain_primitives::proposer::round_robin_proposer(height, &validators).unwrap_or_else(
+            |e| {
+                warn!("no proposer for height {height}: {e}");
+                [0u8; 32]
+            },
         )
-        .unwrap_or_else(|e| {
-            warn!("no proposer for height {height}: {e}");
-            [0u8; 32]
-        })
     }
 
     /// Check the stored validator-set history at startup.
@@ -473,6 +540,13 @@ impl PoAEngine {
                 // database this binary cannot run under protocol v1 is refused
                 // outright, and a row it cannot read is not taken to mean
                 // "static".
+                //
+                // Under the dormant G5 configuration (#351) the stored rows are
+                // checked and the set after this head is resolved from committed
+                // state first; without one, nothing here is new.
+                if let Some(membership) = &self.membership {
+                    crate::membership::check_restart(&self.db, membership, block.height())?;
+                }
                 self.load_active_validator_set()?;
 
                 info!(
@@ -1051,7 +1125,13 @@ impl PoAEngine {
                 return transactions;
             }
         };
-        let active_validators = self.get_active_validator_set();
+        let active_validators = match self.validator_set_at(height) {
+            Ok(validators) => validators,
+            Err(e) => {
+                debug!("no screening pass for this proposal: {e}");
+                return transactions;
+            }
+        };
         self.proposal_executions
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let screening = match self.executor.screen_proposal(
@@ -1371,7 +1451,7 @@ impl PoAEngine {
 
         // Execute block to get state root. Authorize validator-quorum actions
         // against the same active set used to select this height's proposer.
-        let active_validators = self.get_active_validator_set();
+        let active_validators = self.validator_set_at(height)?;
         self.proposal_executions
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let execution = self
@@ -1494,8 +1574,18 @@ impl PoAEngine {
                 .into()
         };
 
-        // Validate block
-        let active_validators = self.get_active_validator_set();
+        // Validate block. Under the dormant G5 configuration (#351) the set is
+        // resolved from the canonical ancestry of this block's parent.
+        let active_validators = match &self.membership {
+            None => self.get_active_validator_set(),
+            Some(membership) => crate::membership::set_for_arriving_block(
+                &self.db,
+                membership,
+                &block,
+                parent.as_ref(),
+                MAX_REORG_WALK,
+            )?,
+        };
         self.executor
             .validate_block(&block, parent.as_ref(), &active_validators)?;
 
@@ -1748,6 +1838,7 @@ impl PoAEngine {
             &plan,
             &activation,
             active_validators,
+            self.membership.as_deref(),
             &limits,
         ) {
             Ok(v) => v,
@@ -2010,7 +2101,14 @@ impl ConsensusQuery for PoAEngine {
     }
 
     fn validators(&self) -> Vec<[u8; 32]> {
-        self.get_active_validator_set()
+        if self.membership.is_none() {
+            return self.get_active_validator_set();
+        }
+        let next = self.current_height().saturating_add(1);
+        self.validator_set_at(next).unwrap_or_else(|e| {
+            warn!("no validator set for height {next}: {e}");
+            Vec::new()
+        })
     }
 
     fn get_proposer(&self, height: BlockHeight) -> [u8; 32] {
