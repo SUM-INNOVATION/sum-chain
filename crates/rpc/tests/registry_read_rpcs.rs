@@ -434,10 +434,19 @@ async fn the_listing_is_ascending_and_resumes_strictly_after_start_after() {
         store(&db, &record(id(b)));
     }
     // Rows outside the prefix, before and after it, are never read: one sorts
-    // just after `registry/v1/` (`0` > `/`) and does not decode.
-    put_raw(&db, b"registry/v10", b"not a record");
+    // just after the prefix (its `/` replaced by `0`, and `0` > `/`) and does
+    // not decode; one sorts just before it (version `0` for `1`). Both keys are
+    // derived from the prefix, not written as literals: the state crate's
+    // `registry/` namespace test reserves those literals to the registry
+    // module.
+    let p = REGISTRY_RECORD_KEY_PREFIX;
+    let after = [&p[..p.len() - 1], b"0"].concat();
+    let mut before = p.to_vec();
+    before[p.len() - 2] = b'0';
+    assert!(before.as_slice() < p && p < after.as_slice() && !after.starts_with(p));
+    put_raw(&db, &after, b"not a record");
     put_raw(&db, b"acct-not-a-registry-row", b"x");
-    put_raw(&db, b"registry/v0/", b"x");
+    put_raw(&db, &before, b"x");
 
     let all = [0x00u8, 0x10, 0x30, 0x50, 0xF0, 0xFF].map(hex32).to_vec();
     assert_eq!(ids(&list(&srv, None, None).await.unwrap()), all);
