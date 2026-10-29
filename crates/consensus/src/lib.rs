@@ -33,6 +33,11 @@
 //!   the local finalized height. The operator `rollback` command is not bound by
 //!   it: rolling back below the finalized height lowers the stored finalized
 //!   height to the rollback target (`reorg::execute_rollback`).
+//! - Fork choice and the operator `rollback` command also consult the
+//!   certified-crossing guard (#341, `reorg::refuse_certified_crossing` and
+//!   `reorg::refuse_rollback_across_certified`). Certified finality is not
+//!   active: no production path writes a certificate, so the guard finds no
+//!   certified block and refuses nothing on the databases this binary runs on.
 //! - The `finalized_height()` and `is_finalized()` methods track finality state.
 //! - Finality state is persisted to storage for crash recovery, as two metadata
 //!   writes outside the block's own batch; a node that cannot read it back

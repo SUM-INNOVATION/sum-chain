@@ -980,7 +980,9 @@ async fn main() -> Result<()> {
             // go deeper than this node's undo history reaches. Those live in the
             // consensus crate rather than here because a correctness-critical
             // unwind only a binary can reach is one no test can reach either.
-            use sumchain_consensus::reorg::{execute_rollback, plan_rollback};
+            use sumchain_consensus::reorg::{
+                execute_rollback, plan_rollback, refuse_rollback_across_certified,
+            };
             use sumchain_state::reorg_undo::ActivatedJournal;
             use sumchain_state::StateManager;
             use sumchain_storage::journal::ActivationSource;
@@ -1073,6 +1075,10 @@ async fn main() -> Result<()> {
             // history reaches.
             let plan = plan_rollback(&block_store, to_height, max_blocks, &journals.activation())
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
+            // A target below the certified block, or replacing it, is refused
+            // here, before the confirmation prompt; `execute_rollback` checks
+            // the same again before it stages anything.
+            refuse_rollback_across_certified(&db, &plan).map_err(|e| anyhow::anyhow!("{e}"))?;
             let target_hash = plan.target.hash();
 
             println!("WARNING: Rolling back {} block(s).", plan.depth());

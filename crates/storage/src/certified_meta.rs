@@ -1,9 +1,12 @@
 //! Storage layout v1 for the DORMANT certified-commit seam ([`crate::certified`]):
 //! versioned keys in the EXISTING `meta` column family.
 //!
-//! Nothing outside `sumchain-storage` uses this module (the seam's dormancy
-//! test still holds), and nothing in this crate calls it from a production
-//! path. It changes no running node.
+//! No production code outside `sumchain-storage` names this module (the
+//! seam's dormancy test still holds). Its readers have one production caller
+//! in this crate: the crossing guard ([`crate::certified_guard`]) decodes the
+//! pointer and probes the certificate prefix on every chain switch and
+//! rollback. Nothing writes these keys outside tests, so on the databases this
+//! binary produces those reads find nothing and change nothing.
 //!
 //! # Keys and values (all in `cf::META`; no new column family)
 //!
