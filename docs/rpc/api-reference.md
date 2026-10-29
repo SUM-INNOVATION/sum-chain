@@ -1034,6 +1034,31 @@ Response:
 
 All refusals are returned together, in the fixed order above. **Stability:** `admissible`, each `reason` tag and its typed payload fields, `evaluated_at_height`, `admitted_proof_systems` and the `candidate` field names are the contract; `detail` is human-facing and may change. New tags may be added — treat an unknown tag as a refusal. A refusal is never reported as `disabled`: `candidate.status` is the record's own byte.
 
+### C5 registry records (`registry_getRecord`, `registry_getRecords`) — read-only, dormant (issue #128)
+
+Reads of the registry records committed state holds: the rows under `registry/v1/` ‖ id in `STATE`. They write nothing and never fill in an absent value from other state. **The registry is dormant and empty until C5 activates:** governance operations 8 (register) and 9 (disable) do not decode, so no block can write a record, and on a real chain `registry_getRecord` returns `null` and `registry_getRecords` returns `[]`. These methods do not activate the registry or change how it would be written.
+
+- Ids are 32-byte values as `0x`-prefixed or bare hex; anything else is `-32602`.
+- A record has the same fields as `registry_dryRunAdmit`'s `candidate`. `status` (`enabled` or `disabled`) and `activation_height` are the stored values, reported as stored; neither is evaluated against the head.
+- A stored row with a key of the wrong length, a value that does not decode as a `RegistryRecordV1`, or a record whose id is not its key's, is `-32603`, never `null` and never skipped. This is the state module's own row rule (`checked_registry_row`).
+- An answer is the node's committed state at its current head, not a finality claim: a reorg can replace it.
+
+| Method | Returns |
+|---|---|
+| `registry_getRecord(id)` | `{id, proof_system_id, audit_commitment, source_commitment, ceremony_commitment, verifier_binary_version, activation_height, status, approval_threshold_bps}`, or `null` if no record is stored under `id`. |
+| `registry_getRecords(start_after?, limit?)` | An array of records in ascending id order. `start_after` (optional id) resumes strictly after that id, which need not be stored. `limit` (optional) defaults to 100; above 1,000 is `-32004`, not a clamp; `0` is an empty page. A page shorter than `limit` means no record followed it when it was read. |
+
+```json
+{
+  "id": "0x…", "proof_system_id": 2,
+  "audit_commitment": "0x…", "source_commitment": "0x…", "ceremony_commitment": "0x…",
+  "verifier_binary_version": 1, "activation_height": 200,
+  "status": "enabled", "approval_threshold_bps": 6667
+}
+```
+
+To page through every record, pass the last `id` of each page as the next `start_after` until a page is shorter than `limit`. Each page is one scan, and it fails as a whole (`-32603`) if any row it reads breaks the row rule. Consecutive pages may be read at different heads: a record registered between two pages appears only if its id sorts after the cursor, and a status can change between pages. The page bound is this RPC's (`RPC_PAGE_MAX`), not a registry limit.
+
 ### BR1 randomness beacon (`beacon_*`, `dkg_*`) — read-only, dormant (issue #127)
 
 Reads of the beacon rows committed state holds, plus one value derived from them (`beacon_getGroupKey`). They write nothing and never fill in an absent value from other state. Genesis validation refuses `beacon_enabled_from_height` on every network, so on a real chain each of these returns `null`.

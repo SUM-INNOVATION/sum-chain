@@ -1775,6 +1775,45 @@ pub trait SumChainApi {
         request: crate::registry_types::RegistryDryRunRequest,
     ) -> Result<crate::registry_types::RegistryDryRunResponse, jsonrpsee::types::ErrorObjectOwned>;
 
+    // C5 registry records (#128) — read-only, dormant. Each method answers
+    // from the committed rows under `registry/v1/` in `cf::STATE` alone: no row
+    // is written and nothing absent is reconstructed. The registry is dormant
+    // until C5 activates: operations 8 and 9 do not decode, so no block can
+    // write a record, and on every network today `registry_getRecord` is
+    // `null` and `registry_getRecords` is empty. A stored row that breaks the
+    // state module's row rule (`checked_registry_row`: a key of the wrong
+    // length, a value that does not decode, a record under another id) is an
+    // internal error, never `null` or skipped. These are reads of the node's
+    // state at its current head, not finality claims: a reorg can replace them.
+
+    /// The registry record stored under `id`, every `RegistryRecordV1` field
+    /// in the shape of `registry_dryRunAdmit`'s `candidate`.
+    ///
+    /// `id` is a 32-byte record id, `0x`-prefixed or bare hex; anything else
+    /// is `-32602`. `Ok(None)` when no record is stored under it. `status` and
+    /// `activation_height` are the stored values; neither is evaluated
+    /// against the head.
+    #[method(name = "registry_getRecord")]
+    async fn registry_get_record(
+        &self,
+        id: String,
+    ) -> Result<Option<crate::registry_types::RegistryRecordView>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Stored registry records in ascending id order, one bounded page.
+    ///
+    /// `start_after` (optional, a 32-byte id as hex; invalid hex is `-32602`)
+    /// resumes strictly after that id, which need not be stored. `limit`
+    /// (optional) defaults to `RPC_PAGE_DEFAULT`; above `RPC_PAGE_MAX` is
+    /// `-32004`, not a clamp; `0` is an empty page. A page shorter than
+    /// `limit` means no record followed it when it was read. Each page is one
+    /// scan; consecutive pages may be read at different heads.
+    #[method(name = "registry_getRecords")]
+    async fn registry_get_records(
+        &self,
+        start_after: Option<String>,
+        limit: Option<u32>,
+    ) -> Result<Vec<crate::registry_types::RegistryRecordView>, jsonrpsee::types::ErrorObjectOwned>;
+
     /// Tally a proposal from its frozen snapshot + cast votes.
     #[method(name = "gov_getTally")]
     async fn gov_get_tally(

@@ -6355,6 +6355,39 @@ impl SumChainApiServer for RpcServer {
         Ok(crate::registry_types::dry_run_response(&record, chain_height))
     }
 
+    async fn registry_get_record(
+        &self,
+        id: String,
+    ) -> std::result::Result<
+        Option<crate::registry_types::RegistryRecordView>,
+        jsonrpsee::types::ErrorObjectOwned,
+    > {
+        let id = self.parse_hex32(&id)?;
+        let held = crate::registry_types::read_record(&self.db, &id)?;
+        Ok(held.as_ref().map(crate::registry_types::record_view))
+    }
+
+    async fn registry_get_records(
+        &self,
+        start_after: Option<String>,
+        limit: Option<u32>,
+    ) -> std::result::Result<
+        Vec<crate::registry_types::RegistryRecordView>,
+        jsonrpsee::types::ErrorObjectOwned,
+    > {
+        let start_after = start_after
+            .as_deref()
+            .map(|s| self.parse_hex32(s))
+            .transpose()?;
+        let page = page_of("registry_getRecords", limit, None)?;
+        let records =
+            crate::registry_types::read_records(&self.db, start_after.as_ref(), page.limit())?;
+        Ok(records
+            .iter()
+            .map(crate::registry_types::record_view)
+            .collect())
+    }
+
     async fn gov_get_tally(
         &self,
         proposal_id: String,
