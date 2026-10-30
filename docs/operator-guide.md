@@ -77,7 +77,11 @@ section for details.
 
 ## Full Node vs. Block-Producing Validator
 
-- Supplying a bootnode lets a node **sync** as a full node.
+- Supplying a bootnode lets a node **sync** as a full node. It compares heights
+  with each peer when they connect, and when a gossiped block arrives whose
+  parent it does not have (a block it missed while not connected to its
+  producer), it requests the missing blocks from the peer that sent it and logs
+  `Missing blocks <from>..=<to> below gossiped block …; requesting them from …`.
 - **Producing blocks** additionally requires the validator's public key to be in
   the **active validator set**. Consensus is PoA round-robin (proposer for
   height `H` is `validators[H % N]`), and the set is defined in the runtime
