@@ -33,6 +33,25 @@ use tracing::{debug, error, info, warn};
 
 use crate::consensus_wrapper::ConsensusWrapper;
 
+/// Issue #354: the blocks to request from the peer that gossiped a block at
+/// `block_height` this node could not import, when its head is at
+/// `our_height`.
+///
+/// A gossiped block more than one height above the head cannot be imported:
+/// its parent is missing. `Some((from, to))` is the missing range, from the
+/// height after the head up to the gossiped block itself, capped at
+/// [`MAX_BLOCKS_PER_REQUEST`] (the existing sync continues from there).
+/// `None` when the block is not above the next height, which a range request
+/// cannot help with (a competing block at the next height, or an old one).
+pub(crate) fn missing_ancestor_range(our_height: u64, block_height: u64) -> Option<(u64, u64)> {
+    let next = our_height.checked_add(1)?;
+    if block_height <= next {
+        return None;
+    }
+    let last = next.saturating_add(MAX_BLOCKS_PER_REQUEST - 1);
+    Some((next, last.min(block_height)))
+}
+
 /// What the consensus boundary did with a block a peer supplied.
 ///
 /// Three outcomes and not a `bool`, because the caller has to tell a REFUSAL
@@ -1083,6 +1102,34 @@ impl Node {
                                 PeerBlockOutcome::ImportFailed(e) => {
                                     warn!("Failed to import block: {}", e);
                                     metrics.blocks.record_block_error();
+                                    // Issue #354: a block above the next height
+                                    // failed because its ancestors are missing.
+                                    // The peer that sent it holds them: ask it,
+                                    // through the same sync the status path
+                                    // uses, unless a sync toward this height is
+                                    // already under way.
+                                    let our_height = consensus.current_height();
+                                    let already = matches!(
+                                        network.sync_state(),
+                                        SyncState::Syncing { target_height, .. } if target_height >= height
+                                    );
+                                    if let (false, Some((from, to))) =
+                                        (already, missing_ancestor_range(our_height, height))
+                                    {
+                                        info!(
+                                            "Missing blocks {}..={} below gossiped block {} at height {}; requesting them from {}",
+                                            from, to, hash, height, source
+                                        );
+                                        network.set_sync_state(SyncState::Syncing {
+                                            current_height: our_height,
+                                            target_height: height,
+                                        });
+                                        let _ = command_sender.send(NetworkCommand::RequestBlocks {
+                                            peer: source,
+                                            from_height: from,
+                                            to_height: to,
+                                        }).await;
+                                    }
                                 }
                             }
                         }
@@ -2179,3 +2226,40 @@ mod genesis_alloc_boot_tests;
 #[cfg(test)]
 #[path = "../tests/unit/consensus_config_boot_tests.rs"]
 mod consensus_config_boot_tests;
+
+/// Issue #354: which blocks a node asks for when a gossiped block cannot be
+/// imported.
+#[cfg(test)]
+mod missed_block_tests {
+    use super::missing_ancestor_range;
+    use sumchain_p2p::MAX_BLOCKS_PER_REQUEST;
+
+    #[test]
+    fn a_block_one_above_the_next_height_requests_the_missing_parent_and_itself() {
+        // Head 418, gossiped 420: block 419 is missing.
+        assert_eq!(missing_ancestor_range(418, 420), Some((419, 420)));
+        assert_eq!(missing_ancestor_range(0, 2), Some((1, 2)));
+    }
+
+    #[test]
+    fn a_block_at_or_below_the_next_height_requests_nothing() {
+        // The next block itself, a competing block, or an old one: a range
+        // request from the head cannot help.
+        for block in [0, 417, 418, 419] {
+            assert_eq!(missing_ancestor_range(418, block), None, "{block}");
+        }
+    }
+
+    #[test]
+    fn a_long_gap_is_capped_at_one_request() {
+        let (from, to) = missing_ancestor_range(10, 10 + 5 * MAX_BLOCKS_PER_REQUEST).unwrap();
+        assert_eq!(from, 11);
+        assert_eq!(to - from + 1, MAX_BLOCKS_PER_REQUEST);
+    }
+
+    #[test]
+    fn heights_near_the_top_of_the_range_do_not_overflow() {
+        assert_eq!(missing_ancestor_range(u64::MAX, u64::MAX), None);
+        assert_eq!(missing_ancestor_range(u64::MAX - 2, u64::MAX), Some((u64::MAX - 1, u64::MAX)));
+    }
+}
