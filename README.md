@@ -208,7 +208,9 @@ This creates:
 
 ### 2. Start Validator Nodes
 
-Open 3 terminals and start each validator:
+Open 3 terminals and start each validator. Every node binds its own JSON-RPC,
+P2P and health/readiness address; the health server defaults to
+`0.0.0.0:8546`, so on one host each node is given a distinct `--health-addr`.
 
 **Terminal 1 - Validator 1:**
 ```bash
@@ -217,7 +219,8 @@ cargo run --release --bin sumchain -- run \
   --data-dir data/validator1 \
   --validator-key keys/validator1.json \
   --p2p-addr /ip4/0.0.0.0/tcp/30301 \
-  --rpc-addr 127.0.0.1:8545
+  --rpc-addr 127.0.0.1:8545 \
+  --health-addr 127.0.0.1:9101
 ```
 
 **Terminal 2 - Validator 2:**
@@ -228,6 +231,7 @@ cargo run --release --bin sumchain -- run \
   --validator-key keys/validator2.json \
   --p2p-addr /ip4/0.0.0.0/tcp/30302 \
   --rpc-addr 127.0.0.1:8546 \
+  --health-addr 127.0.0.1:9102 \
   --bootnodes /ip4/127.0.0.1/tcp/30301
 ```
 
@@ -239,6 +243,7 @@ cargo run --release --bin sumchain -- run \
   --validator-key keys/validator3.json \
   --p2p-addr /ip4/0.0.0.0/tcp/30303 \
   --rpc-addr 127.0.0.1:8547 \
+  --health-addr 127.0.0.1:9103 \
   --bootnodes /ip4/127.0.0.1/tcp/30301
 ```
 
@@ -256,6 +261,7 @@ cargo run --release --bin sumchain -- run \
   --data-dir data/fullnode \
   --p2p-addr /ip4/0.0.0.0/tcp/30304 \
   --rpc-addr 127.0.0.1:8548 \
+  --health-addr 127.0.0.1:9104 \
   --bootnodes /ip4/127.0.0.1/tcp/30301
 ```
 

@@ -73,6 +73,12 @@ enum Commands {
         #[arg(long)]
         rpc_addr: Option<String>,
 
+        /// Health/readiness server listen address (overrides config
+        /// `[health] addr`; default 0.0.0.0:8546). Give each node on one host
+        /// its own, as it is bound whether or not anything probes it
+        #[arg(long)]
+        health_addr: Option<String>,
+
         /// P2P listen address (overrides config)
         #[arg(long)]
         p2p_addr: Option<String>,
@@ -442,6 +448,7 @@ async fn main() -> Result<()> {
             genesis,
             data_dir,
             rpc_addr,
+            health_addr,
             p2p_addr,
             bootnodes,
             validator_key,
@@ -481,6 +488,9 @@ async fn main() -> Result<()> {
             }
             if let Some(addr) = rpc_addr {
                 cfg.rpc.addr = addr;
+            }
+            if let Some(addr) = health_addr {
+                cfg.health.addr = addr;
             }
             if let Some(key) = rpc_api_key {
                 cfg.rpc.api_key = Some(key);
