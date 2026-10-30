@@ -1,12 +1,16 @@
 //! Devnet provisioner for the SUM Chain local/smoke/topology devnets.
 //!
 //! Modes (`--mode`):
-//!   * `local`     — DEFAULT, legacy behaviour, UNCHANGED. Generates three
-//!     validators + a test account and writes the tracked-name
-//!     `genesis/local_genesis.json` + `keys/` relative to the
-//!     working directory. This is what the `deploy/health-e2e-
+//!   * `local`     — DEFAULT, legacy behaviour, UNCHANGED without options.
+//!     Generates three validators + a test account and writes the
+//!     tracked-name `genesis/local_genesis.json` + `keys/` relative
+//!     to the working directory. This is what the `deploy/health-e2e-
 //!     harness.sh` (#120) harness invokes with no arguments, so it
-//!     is preserved verbatim for backward compatibility.
+//!     is preserved verbatim for backward compatibility. Issue #311:
+//!     `--output-dir <dir>` writes the same layout under `<dir>`
+//!     instead (an existing, empty directory outside the repository),
+//!     plus a per-node config file that only moves each node's
+//!     health server, so the printed commands start on one host.
 //!   * `smoke`     — issue #119. Generates EXACTLY ONE validator plus all funded
 //!     roles (three archives, one verifier, one client, one funder)
 //!     and a runnable genesis, ALL under an explicit `--output-dir`
@@ -24,6 +28,14 @@
 //!     validator-set change.
 //!   * `ecosystem` — issue #119, DEFERRED. Hard-fails with an explicit blocker
 //!     message and generates nothing.
+//!
+//! Issue #311 options, `local` and `smoke` only (refused elsewhere):
+//!   * `--enable <gate>[=<height>]` (repeatable) opens an activation gate in
+//!     the genesis, e.g. `--enable omninode` (height 0) or `--enable v2=0`.
+//!     Any `*_enabled_from_height` field of `ChainParams`; the genesis is then
+//!     validated as usual, so gates the chain refuses stay refused.
+//!   * `--fund <address>[=<amount>]` (repeatable) funds an extra account at
+//!     genesis, by default with 1e18 base units.
 
 use std::fs;
 use std::path::PathBuf;
@@ -33,7 +45,9 @@ use clap::{Parser, ValueEnum};
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::{ChainParams, Genesis};
 use sumchain_scripts::{
-    provision_smoke, provision_topology, ECOSYSTEM_DEFERRED_MSG, TOPOLOGY_DEFAULT_VALIDATORS,
+    apply_gate_overrides, fund_entries, provision_smoke_with, provision_topology,
+    validate_local_output_dir, DevnetOptions, FundEntry, GateOverride, ECOSYSTEM_DEFERRED_MSG,
+    TOPOLOGY_DEFAULT_VALIDATORS,
 };
 
 /// Provisioning mode.
@@ -69,35 +83,57 @@ struct Cli {
 
     /// Output directory for ALL generated keys + the runnable genesis.
     /// REQUIRED for `smoke` and `topology` (their keys/genesis are written only
-    /// here, never a tracked path). REJECTED for `local` (which uses ./genesis
-    /// + ./keys).
+    /// here, never a tracked path). Optional for `local` (issue #311): without
+    /// it, ./genesis + ./keys; with it, the same layout under this directory,
+    /// which must exist, be empty and lie outside the repository.
     #[arg(long)]
     output_dir: Option<PathBuf>,
+
+    /// Open an activation gate in the generated genesis: `<gate>[=<height>]`,
+    /// height 0 if omitted. `<gate>` is a `ChainParams` field with or without
+    /// its `_enabled_from_height` suffix, e.g. `omninode`, `v2`,
+    /// `archive_unbonding`. Repeatable. `local` and `smoke` only (issue #311).
+    #[arg(long = "enable", value_name = "GATE[=HEIGHT]")]
+    enable: Vec<GateOverride>,
+
+    /// Fund an extra account at genesis: `<address>[=<amount>]`, the amount in
+    /// base units (default 1e18). Repeatable. `local` and `smoke` only
+    /// (issue #311).
+    #[arg(long = "fund", value_name = "ADDRESS[=AMOUNT]")]
+    fund: Vec<FundEntry>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let opts = DevnetOptions {
+        gates: cli.enable,
+        fund: cli.fund,
+    };
 
     match cli.mode {
         Mode::Ecosystem => {
             // Hard-fail BEFORE creating anything, with the blockers named.
             bail!("{ECOSYSTEM_DEFERRED_MSG}");
         }
-        Mode::Smoke => run_smoke(cli.output_dir, cli.validator_count.unwrap_or(1)),
-        Mode::Topology => run_topology(
-            cli.output_dir,
-            cli.validator_count.unwrap_or(TOPOLOGY_DEFAULT_VALIDATORS),
-        ),
+        Mode::Smoke => run_smoke(cli.output_dir, cli.validator_count.unwrap_or(1), &opts),
+        Mode::Topology => {
+            // The topology genesis is the one the tracked template describes
+            // (`check_topology_shape`, tests/topology_template.rs): no extras.
+            if opts != DevnetOptions::default() {
+                bail!(
+                    "--enable and --fund are not supported with --mode topology (its genesis is \
+                     the consensus-only one genesis/snip-mirror-genesis.template.json describes). \
+                     Use --mode local or --mode smoke."
+                );
+            }
+            run_topology(
+                cli.output_dir,
+                cli.validator_count.unwrap_or(TOPOLOGY_DEFAULT_VALIDATORS),
+            )
+        }
         Mode::Local => {
             // Fail closed: `local` is the fixed legacy 3-validator mode. Reject
             // arguments it does not support instead of silently ignoring them.
-            if cli.output_dir.is_some() {
-                bail!(
-                    "--output-dir is not supported with --mode local (it always writes \
-                     ./genesis/local_genesis.json + ./keys). Use --mode smoke or --mode topology \
-                     with --output-dir <dir>."
-                );
-            }
             if cli.validator_count.is_some() {
                 bail!(
                     "--validator-count is not supported with --mode local (it always \
@@ -106,14 +142,18 @@ fn main() -> Result<()> {
                      --mode ecosystem (deferred five-validator pool)."
                 );
             }
-            run_local()
+            run_local(cli.output_dir, &opts)
         }
     }
 }
 
 /// Issue #119 smoke provisioning. `--output-dir` is required so the hardcoded
 /// tracked path can never be taken.
-fn run_smoke(output_dir: Option<PathBuf>, validator_count: usize) -> Result<()> {
+fn run_smoke(
+    output_dir: Option<PathBuf>,
+    validator_count: usize,
+    opts: &DevnetOptions,
+) -> Result<()> {
     let output_dir = output_dir.ok_or_else(|| {
         anyhow::anyhow!(
             "smoke mode requires --output-dir <path>: all keys and the runnable \
@@ -125,7 +165,7 @@ fn run_smoke(output_dir: Option<PathBuf>, validator_count: usize) -> Result<()> 
     println!("=== SUM Chain Smoke Devnet Setup (issue #119) ===\n");
     println!("Output directory: {}", output_dir.display());
 
-    let artifacts = provision_smoke(&output_dir, validator_count)?;
+    let artifacts = provision_smoke_with(&output_dir, validator_count, opts)?;
 
     println!(
         "\nGenerated 1 validator + {} funded roles:",
@@ -142,6 +182,7 @@ fn run_smoke(output_dir: Option<PathBuf>, validator_count: usize) -> Result<()> 
     );
     println!("  compute-pool gate: None (dormant)");
     println!("  beacon gate:       None (dormant)");
+    print_options(opts);
     println!("\n  Runnable genesis: {}", artifacts.genesis_path.display());
     println!("  Manifest:         {}", artifacts.manifest_path.display());
     println!(
@@ -212,15 +253,25 @@ fn run_topology(output_dir: Option<PathBuf>, validator_count: usize) -> Result<(
     Ok(())
 }
 
-/// Legacy three-validator local testnet — UNCHANGED behaviour. Writes
-/// `genesis/local_genesis.json` + `keys/` relative to the working directory.
-/// Always generates exactly three validators (no `--validator-count` knob).
-fn run_local() -> Result<()> {
+/// Legacy three-validator local testnet — UNCHANGED behaviour without
+/// options. Writes `genesis/local_genesis.json` + `keys/` relative to the
+/// working directory, or (issue #311) under `output_dir`. Always generates
+/// exactly three validators (no `--validator-count` knob). `opts` opens gates
+/// and funds extra accounts (issue #311).
+fn run_local(output_dir: Option<PathBuf>, opts: &DevnetOptions) -> Result<()> {
     println!("=== SUM Chain Local Testnet Setup ===\n");
 
+    // Issue #311: the same layout under an existing, empty directory outside
+    // the repository, checked before anything is written. Without it, the
+    // working directory, exactly as before.
+    if let Some(dir) = &output_dir {
+        validate_local_output_dir(dir)?;
+    }
+    let root = output_dir.clone().unwrap_or_default();
+
     // Create directories
-    fs::create_dir_all("keys")?;
-    fs::create_dir_all("genesis")?;
+    fs::create_dir_all(root.join("keys"))?;
+    fs::create_dir_all(root.join("genesis"))?;
 
     // Generate validator keys
     println!("Generating validator keys...");
@@ -235,13 +286,13 @@ fn run_local() -> Result<()> {
         let address = keypair.address().to_base58();
 
         // Save private key
-        let key_path = format!("keys/validator{}.json", i);
+        let key_path = root.join(format!("keys/validator{i}.json"));
         let key_json = serde_json::to_string_pretty(keypair.private_key().as_bytes())?;
         fs::write(&key_path, &key_json)?;
 
         println!("  Validator {}: {}", i, pubkey);
         println!("    Address: {}", address);
-        println!("    Key saved to: {}", key_path);
+        println!("    Key saved to: {}", key_path.display());
 
         validators.push(pubkey);
         alloc_entries.push((address, 1_000_000_000_000_000_000u128)); // 1e18 SUM tokens
@@ -254,17 +305,20 @@ fn run_local() -> Result<()> {
     let test_address = test_keypair.address().to_base58();
 
     let key_json = serde_json::to_string_pretty(test_keypair.private_key().as_bytes())?;
-    fs::write("keys/test_account.json", &key_json)?;
+    let test_key_path = root.join("keys/test_account.json");
+    fs::write(&test_key_path, &key_json)?;
 
     println!("  Test account: {}", test_address);
-    println!("    Key saved to: keys/test_account.json");
+    println!("    Key saved to: {}", test_key_path.display());
 
     alloc_entries.push((test_address, 1_000_000_000_000_000_000u128));
+    // Issue #311: extra accounts (archives, a gateway, an operator).
+    alloc_entries.extend(fund_entries(opts));
     let alloc = sumchain_genesis::alloc_from_entries(alloc_entries)?;
 
     // Create genesis
     println!("\nCreating genesis file...");
-    let genesis = Genesis::new(
+    let mut genesis = Genesis::new(
         1337, // Local testnet chain ID
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -398,12 +452,20 @@ fn run_local() -> Result<()> {
             messaging_sponsored_registration_enabled_from_height: None, // issue #145: sponsored registration dormant (coordinated activation only)
         },
     );
+    // Issue #311: gates the caller opened, then the usual validation.
+    apply_gate_overrides(&mut genesis.params, &opts.gates)?;
 
     genesis.validate()?;
-    genesis.to_file("genesis/local_genesis.json")?;
-    println!("  Genesis saved to: genesis/local_genesis.json");
+    let genesis_path = root.join("genesis/local_genesis.json");
+    genesis.to_file(&genesis_path)?;
+    println!("  Genesis saved to: {}", genesis_path.display());
+    print_options(opts);
 
     println!("\n=== Setup Complete ===");
+    if let Some(dir) = &output_dir {
+        return print_output_dir_recipe(dir);
+    }
+
     println!("\nTo start the testnet, run:");
     println!("  # Terminal 1 - Validator 1");
     println!("  cargo run --bin sumchain -- run \\");
@@ -439,5 +501,65 @@ fn run_local() -> Result<()> {
     println!("    --rpc-addr 127.0.0.1:8548 \\");
     println!("    --bootnodes /ip4/127.0.0.1/tcp/30301");
 
+    Ok(())
+}
+
+/// The issue #311 options in force, if any.
+fn print_options(opts: &DevnetOptions) {
+    for g in &opts.gates {
+        println!("  enabled gate:      {} = {}", g.field, g.height);
+    }
+    for f in &opts.fund {
+        println!(
+            "  funded:            {} ({} base units)",
+            f.address, f.amount
+        );
+    }
+}
+
+/// Issue #311: the start commands for a `--mode local --output-dir <dir>`
+/// testnet, with absolute paths.
+///
+/// Every node also gets `<dir>/config/<node>.toml`, a config file holding only
+/// its health/readiness address. The health server otherwise binds
+/// `0.0.0.0:8546` for every node, which validator 2's JSON-RPC address and the
+/// other nodes' health servers collide with on one host (sum-chain #353).
+fn print_output_dir_recipe(dir: &std::path::Path) -> Result<()> {
+    let dir = dir.canonicalize()?;
+    let config_dir = dir.join("config");
+    fs::create_dir(&config_dir)?;
+    let nodes = [
+        ("Validator 1", "validator1", Some("keys/validator1.json"), 1),
+        ("Validator 2", "validator2", Some("keys/validator2.json"), 2),
+        ("Validator 3", "validator3", Some("keys/validator3.json"), 3),
+        ("Full Node (non-validator)", "fullnode", None, 4),
+    ];
+    println!("\nTo start the testnet, run (from the repository):");
+    for (title, name, key, n) in nodes {
+        let config = config_dir.join(format!("{name}.toml"));
+        fs::write(&config, format!("[health]\naddr = \"127.0.0.1:910{n}\"\n"))?;
+        println!();
+        println!("  # Terminal {n} - {title}");
+        println!("  cargo run --bin sumchain -- run \\");
+        println!("    --config {} \\", config.display());
+        println!(
+            "    --genesis {} \\",
+            dir.join("genesis/local_genesis.json").display()
+        );
+        println!(
+            "    --data-dir {} \\",
+            dir.join("data").join(name).display()
+        );
+        if let Some(key) = key {
+            println!("    --validator-key {} \\", dir.join(key).display());
+        }
+        println!("    --p2p-addr /ip4/0.0.0.0/tcp/3030{n} \\");
+        if n == 1 {
+            println!("    --rpc-addr 127.0.0.1:8545");
+        } else {
+            println!("    --rpc-addr 127.0.0.1:854{} \\", 4 + n);
+            println!("    --bootnodes /ip4/127.0.0.1/tcp/30301");
+        }
+    }
     Ok(())
 }
