@@ -38,12 +38,14 @@
 //!   or topology run does NOT constitute the ecosystem.
 //!
 //! The legacy three-validator "local testnet" behaviour lives in the binary
-//! (`setup_local_testnet.rs`) and is unchanged; this library is only the
-//! #118/#119 surface.
+//! (`setup_local_testnet.rs`); this library is the #118/#119 surface, plus
+//! the #311 [`DevnetOptions`] (activation gates opened in the generated
+//! genesis, extra funded accounts) that the `local` and `smoke` modes accept.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use anyhow::{bail, Context, Result};
 use sumchain_crypto::KeyPair;
@@ -144,6 +146,192 @@ ecosystem; ecosystem completion is tracked separately. Available today:
 `--mode smoke` (one validator) and `--mode topology` (a synthetic >= 5
 validator, consensus-only devnet with both gates None, which
 deploy/snip-local-mirror.yaml runs).";
+
+// ── Issue #311: devnet options ─────────────────────────────────────────────
+
+/// The suffix every activation-gate field of [`ChainParams`] carries.
+pub const GATE_SUFFIX: &str = "_enabled_from_height";
+
+/// One activation gate a devnet genesis opens (`--enable <gate>[=<height>]`):
+/// the [`ChainParams`] field `field` (always ending in [`GATE_SUFFIX`]) is set
+/// to `Some(height)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateOverride {
+    /// The `ChainParams` field, e.g. `omninode_enabled_from_height`.
+    pub field: String,
+    /// The activation height.
+    pub height: u64,
+}
+
+impl FromStr for GateOverride {
+    type Err = anyhow::Error;
+
+    /// `<gate>[=<height>]`, where `<gate>` is a field name with or without its
+    /// `_enabled_from_height` suffix (`omninode`, `v2_enabled_from_height`)
+    /// and the height defaults to 0. Whether the field exists is checked when
+    /// it is applied ([`apply_gate_overrides`]).
+    fn from_str(s: &str) -> Result<Self> {
+        let (name, height) = match s.split_once('=') {
+            Some((name, h)) => (
+                name,
+                h.trim()
+                    .parse::<u64>()
+                    .with_context(|| format!("--enable {s}: the height must be a u64"))?,
+            ),
+            None => (s, 0),
+        };
+        let name = name.trim();
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
+            bail!("--enable {s}: expected <gate>[=<height>], e.g. `omninode` or `v2=0`");
+        }
+        let field = if name.ends_with(GATE_SUFFIX) {
+            name.to_string()
+        } else {
+            format!("{name}{GATE_SUFFIX}")
+        };
+        Ok(Self { field, height })
+    }
+}
+
+/// One extra account funded at genesis (`--fund <address>[=<amount>]`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FundEntry {
+    /// The account, in either form a genesis allocation accepts (base58 or
+    /// hex); checked, with duplicates, when the genesis is built.
+    pub address: String,
+    /// The balance in base units, > 0. Default [`ROLE_ALLOC`].
+    pub amount: u128,
+}
+
+impl FromStr for FundEntry {
+    type Err = anyhow::Error;
+
+    /// `<address>[=<amount>]`; the amount, in base units, defaults to
+    /// [`ROLE_ALLOC`] and must be positive.
+    fn from_str(s: &str) -> Result<Self> {
+        let (address, amount) = match s.split_once('=') {
+            Some((a, n)) => (
+                a.trim(),
+                n.trim().parse::<u128>().with_context(|| {
+                    format!("--fund {s}: the amount must be a u128 in base units")
+                })?,
+            ),
+            None => (s.trim(), ROLE_ALLOC),
+        };
+        if address.is_empty() {
+            bail!("--fund {s}: expected <address>[=<amount>]");
+        }
+        if amount == 0 {
+            bail!("--fund {s}: the amount must be positive");
+        }
+        Ok(Self {
+            address: address.to_string(),
+            amount,
+        })
+    }
+}
+
+/// What issue #311 lets the `local` and `smoke` modes add to their genesis.
+/// The default changes nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DevnetOptions {
+    /// Activation gates to open, each from its height.
+    pub gates: Vec<GateOverride>,
+    /// Extra accounts funded at genesis, after the generated ones.
+    pub fund: Vec<FundEntry>,
+}
+
+/// The activation-gate fields of [`ChainParams`] — every serialized field
+/// ending in [`GATE_SUFFIX`] — sorted.
+pub fn activation_gate_fields() -> Vec<String> {
+    let v = serde_json::to_value(ChainParams::default()).unwrap_or_default();
+    let mut out: Vec<String> = v
+        .as_object()
+        .map(|o| {
+            o.keys()
+                .filter(|k| k.ends_with(GATE_SUFFIX))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out
+}
+
+/// Set each gate of `gates` on `params` (issue #311).
+///
+/// Refuses a name that is not an activation-gate field of [`ChainParams`],
+/// and a gate named twice. Nothing else is checked here: the genesis built
+/// from `params` still goes through [`Genesis::validate`], which refuses
+/// combinations the chain refuses (for example the compute-pool and beacon
+/// gates, or a gate whose parameters are missing).
+pub fn apply_gate_overrides(params: &mut ChainParams, gates: &[GateOverride]) -> Result<()> {
+    if gates.is_empty() {
+        return Ok(());
+    }
+    let mut value = serde_json::to_value(&*params).context("serialize ChainParams")?;
+    let obj = value
+        .as_object_mut()
+        .context("ChainParams does not serialize to an object")?;
+    let mut seen = BTreeSet::new();
+    for gate in gates {
+        if !seen.insert(gate.field.as_str()) {
+            bail!("--enable names {} more than once", gate.field);
+        }
+        let is_gate = gate.field.ends_with(GATE_SUFFIX)
+            && matches!(
+                obj.get(&gate.field),
+                Some(serde_json::Value::Null | serde_json::Value::Number(_))
+            );
+        if !is_gate {
+            bail!(
+                "--enable: `{}` is not an activation gate of ChainParams; the gates are: {}",
+                gate.field.trim_end_matches(GATE_SUFFIX),
+                activation_gate_fields()
+                    .iter()
+                    .map(|f| f.trim_end_matches(GATE_SUFFIX))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        obj.insert(gate.field.clone(), serde_json::Value::from(gate.height));
+    }
+    *params = serde_json::from_value(value).context("rebuild ChainParams with the gates set")?;
+    Ok(())
+}
+
+/// The genesis allocation entries of `opts.fund`, for
+/// [`sumchain_genesis::alloc_from_entries`].
+pub fn fund_entries(opts: &DevnetOptions) -> impl Iterator<Item = (String, u128)> + '_ {
+    opts.fund.iter().map(|f| (f.address.clone(), f.amount))
+}
+
+/// The gates and extra accounts of `opts`, as a manifest records them.
+fn options_manifest(opts: &DevnetOptions) -> serde_json::Value {
+    serde_json::json!({
+        "enabled_gates": opts
+            .gates
+            .iter()
+            .map(|g| (g.field.clone(), serde_json::Value::from(g.height)))
+            .collect::<serde_json::Map<_, _>>(),
+        "funded": opts
+            .fund
+            .iter()
+            .map(|f| serde_json::json!({ "address": f.address, "amount": f.amount.to_string() }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Check an `--output-dir` for `--mode local` (issue #311) before anything is
+/// written, by the rules smoke mode uses: it must exist as a real directory,
+/// resolve outside the repository, and be empty.
+pub fn validate_local_output_dir(output_dir: &Path) -> Result<()> {
+    validate_output_dir(output_dir, OutputPolicy::OutsideRepository, "local")
+}
 
 /// A generated, funded role: its name, its base58 address, and the path its
 /// private key was written to (inside `output_dir/keys`).
@@ -475,11 +663,13 @@ fn build_dormant_genesis(
     validators: &[ValidatorKey],
     roles: &[RoleKey],
     mode: &str,
+    opts: &DevnetOptions,
 ) -> Result<Genesis> {
     let alloc_entries: Vec<(String, u128)> = validators
         .iter()
         .map(|v| (v.address_b58.clone(), ROLE_ALLOC))
         .chain(roles.iter().map(|r| (r.address_b58.clone(), ROLE_ALLOC)))
+        .chain(fund_entries(opts))
         .collect();
 
     // `with_v2_enabled()` activates SNIP V2 from genesis (so the funded archive
@@ -494,6 +684,11 @@ fn build_dormant_genesis(
     // every shipped genesis, including the topology template, to omit it).
     let mut params = ChainParams::with_v2_enabled();
     params.staking = None;
+    // Issue #311: gates the caller opened (smoke mode only; topology passes
+    // none). Applied before the consensus-only check below, so opening the
+    // compute-pool or beacon gate is refused here.
+    apply_gate_overrides(&mut params, &opts.gates)
+        .with_context(|| format!("{mode} genesis gates"))?;
     if params.compute_pool_enabled_from_height.is_some()
         || params.beacon_enabled_from_height.is_some()
         || params.compute_pool_params.is_some()
@@ -568,6 +763,18 @@ fn roles_manifest(roles: &[RoleKey]) -> Vec<serde_json::Value> {
 /// the repository. It never reads #118's template and never touches a tracked
 /// genesis file.
 pub fn provision_smoke(output_dir: &Path, validator_count: usize) -> Result<SmokeArtifacts> {
+    provision_smoke_with(output_dir, validator_count, &DevnetOptions::default())
+}
+
+/// [`provision_smoke`], with the issue #311 [`DevnetOptions`]: activation gates
+/// opened in the genesis, and extra accounts funded in it. Both are recorded in
+/// the manifest (`options`). The default options give exactly
+/// [`provision_smoke`]'s output.
+pub fn provision_smoke_with(
+    output_dir: &Path,
+    validator_count: usize,
+    opts: &DevnetOptions,
+) -> Result<SmokeArtifacts> {
     if validator_count != 1 {
         bail!(
             "smoke mode is single-validator by definition (got --validator-count {validator_count}). \
@@ -584,7 +791,7 @@ pub fn provision_smoke(output_dir: &Path, validator_count: usize) -> Result<Smok
     let keys_dir = create_keys_dir(output_dir)?;
     let mut validators = generate_validators(&keys_dir, &["validator".to_string()])?;
     let roles = generate_roles(&keys_dir)?;
-    let genesis = build_dormant_genesis(&validators, &roles, "smoke")?;
+    let genesis = build_dormant_genesis(&validators, &roles, "smoke", opts)?;
     let genesis_path = write_genesis(output_dir, &genesis)?;
     let validator = validators.remove(0);
 
@@ -604,6 +811,7 @@ pub fn provision_smoke(output_dir: &Path, validator_count: usize) -> Result<Smok
             "compute_pool_enabled_from_height": serde_json::Value::Null,
             "beacon_enabled_from_height": serde_json::Value::Null,
         },
+        "options": options_manifest(opts),
     });
     let manifest_json = serde_json::to_string_pretty(&manifest).context("serialize manifest")?;
     write_new_public_file(&manifest_path, &manifest_json)
@@ -666,7 +874,8 @@ pub fn provision_topology(output_dir: &Path, validator_count: usize) -> Result<T
         .collect();
     let validators = generate_validators(&keys_dir, &names)?;
     let roles = generate_roles(&keys_dir)?;
-    let genesis = build_dormant_genesis(&validators, &roles, "topology")?;
+    let genesis =
+        build_dormant_genesis(&validators, &roles, "topology", &DevnetOptions::default())?;
     check_topology_shape(&genesis).context("generated topology genesis")?;
     let genesis_path = write_genesis(output_dir, &genesis)?;
 

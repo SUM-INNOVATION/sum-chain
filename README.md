@@ -201,6 +201,20 @@ mainnet.
 cargo run --bin setup-local-testnet
 ```
 
+Options (all optional, also accepted by `--mode smoke`):
+- `--enable <gate>[=<height>]` opens an activation gate in the generated
+  genesis, from height 0 unless given; repeatable. For attestation and SNIP
+  storage on a fresh devnet, for example: `--enable omninode --enable
+  archive_unbonding --enable archive_reassignment --enable
+  por_assignment_targeting --enable assignment_aware_por_scheduler` (V2 is
+  already on). The genesis is validated as usual, so gates the chain refuses
+  (compute pool, beacon) stay refused.
+- `--fund <address>[=<amount>]` funds an extra account (an archive, a gateway,
+  an operator) at genesis, by default with 1e18 base units; repeatable.
+- `--output-dir <dir>` writes everything under an existing, empty directory
+  outside the repository instead of `./keys` and `./genesis`, and prints start
+  commands with absolute paths.
+
 This creates:
 - `keys/validator1.json`, `keys/validator2.json`, `keys/validator3.json` - Validator private keys
 - `keys/test_account.json` - Test account for sending transactions
