@@ -1,5 +1,6 @@
 //! Node orchestration - wires together all components.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -971,6 +972,26 @@ impl Node {
         tokio::pin!(shutdown);
         info!("Node running. Stop with SIGINT (Ctrl+C) or SIGTERM.");
 
+        // Peers to ask for their sync status again when they declare our digest.
+        //
+        // `PeerConnected` asks a peer for its protocol digest and for its status
+        // at once, and the answers race. At or above the enforcement height a
+        // status, a gossiped block or a synced batch that arrives before the
+        // declaration is refused, as it must be. Nothing else asks the peer
+        // again once it has declared, so without this a node restarted one
+        // block behind never synced: the block it lacked was produced while it
+        // was down, the next height was its peer's turn, and each waited for
+        // the other. So each of those three refusals records the peer, and the
+        // `ProtocolIdResponse` arm asks a recorded peer for its status once
+        // more.
+        //
+        // Only a recorded peer. When the declaration wins the race, the status
+        // that follows is taken as it always was; asking again regardless would
+        // give a node that connects while behind two answers, and so two block
+        // requests for every range. Forgotten on disconnect, since a reconnect
+        // asks afresh.
+        let mut resync_on_declaration: HashSet<PeerId> = HashSet::new();
+
         loop {
             tokio::select! {
                 // Handle consensus events
@@ -1034,6 +1055,7 @@ impl Node {
                             info!("Peer disconnected: {}", peer);
                             metrics.p2p.record_peer_disconnected();
                             metrics.p2p.set_peer_count(network.peer_count());
+                            resync_on_declaration.remove(&peer);
                         }
                         NetworkEvent::TransactionReceived(tx) => {
                             debug!("Received transaction: {}", tx.hash());
@@ -1077,6 +1099,9 @@ impl Node {
                                         self.peer_compat.enforcement_height(),
                                     );
                                     metrics.blocks.record_block_error();
+                                    // Lost, not deferred: gossip is not
+                                    // repeated. See `resync_on_declaration`.
+                                    resync_on_declaration.insert(source);
                                     continue;
                                 }
                                 PeerBlockOutcome::Imported => {}
@@ -1123,6 +1148,13 @@ impl Node {
                                     digest = %digest,
                                     "compatibility handshake accepted: peer enforces our protocol digest"
                                 );
+                                // Something it sent before this was refused;
+                                // ask again now that it may take part. See
+                                // `resync_on_declaration`.
+                                if resync_on_declaration.remove(&peer) {
+                                    debug!("Asking {} for its sync status again after its declaration", peer);
+                                    let _ = command_sender.send(NetworkCommand::RequestSyncStatus(peer)).await;
+                                }
                             } else {
                                 warn!(
                                     "REFUSING peer {}: it enforces protocol digest {} but this \
@@ -1212,6 +1244,9 @@ impl Node {
                                     our_next,
                                     self.peer_compat.enforcement_height(),
                                 );
+                                // Asked for again if the peer declares our
+                                // digest. See `resync_on_declaration`.
+                                resync_on_declaration.insert(peer);
                             } else if chain_id != self.genesis.chain_id {
                                 warn!("Peer {} has different chain_id: {} vs {}", peer, chain_id, self.genesis.chain_id);
                             } else {
@@ -1266,6 +1301,9 @@ impl Node {
                                             self.peer_compat.enforcement_height(),
                                         );
                                         metrics.blocks.record_block_error();
+                                        // This ends the sync below. See
+                                        // `resync_on_declaration`.
+                                        resync_on_declaration.insert(peer);
                                         break;
                                     }
                                     PeerBlockOutcome::Imported => {
