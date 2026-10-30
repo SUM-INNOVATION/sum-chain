@@ -1550,6 +1550,8 @@ impl Node {
             .await
             .with_context(|| format!("Failed to bind health server to {}", self.health_addr))?;
 
+        info!("Health server listening on {}", self.health_addr);
+
         Ok(handle)
     }
 

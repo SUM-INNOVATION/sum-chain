@@ -147,7 +147,8 @@ refuse_contract_transactions = false
 # Health/readiness HTTP server listen address.
 # Serves GET /health (liveness) and GET /ready (readiness). Bound separately
 # from the JSON-RPC server so container/orchestrator probes never contend with
-# RPC traffic. Defaults to 0.0.0.0:8546.
+# RPC traffic. Defaults to 0.0.0.0:8546. `sumchain run --health-addr` overrides
+# it; several nodes on one host each need their own.
 addr = "0.0.0.0:8546"
 
 [logging]

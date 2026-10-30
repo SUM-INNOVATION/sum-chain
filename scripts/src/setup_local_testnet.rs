@@ -411,7 +411,8 @@ fn run_local() -> Result<()> {
     println!("    --data-dir data/validator1 \\");
     println!("    --validator-key keys/validator1.json \\");
     println!("    --p2p-addr /ip4/0.0.0.0/tcp/30301 \\");
-    println!("    --rpc-addr 127.0.0.1:8545");
+    println!("    --rpc-addr 127.0.0.1:8545 \\");
+    println!("    --health-addr 127.0.0.1:9101");
     println!();
     println!("  # Terminal 2 - Validator 2");
     println!("  cargo run --bin sumchain -- run \\");
@@ -420,6 +421,7 @@ fn run_local() -> Result<()> {
     println!("    --validator-key keys/validator2.json \\");
     println!("    --p2p-addr /ip4/0.0.0.0/tcp/30302 \\");
     println!("    --rpc-addr 127.0.0.1:8546 \\");
+    println!("    --health-addr 127.0.0.1:9102 \\");
     println!("    --bootnodes /ip4/127.0.0.1/tcp/30301");
     println!();
     println!("  # Terminal 3 - Validator 3");
@@ -429,6 +431,7 @@ fn run_local() -> Result<()> {
     println!("    --validator-key keys/validator3.json \\");
     println!("    --p2p-addr /ip4/0.0.0.0/tcp/30303 \\");
     println!("    --rpc-addr 127.0.0.1:8547 \\");
+    println!("    --health-addr 127.0.0.1:9103 \\");
     println!("    --bootnodes /ip4/127.0.0.1/tcp/30301");
     println!();
     println!("  # Terminal 4 - Full Node (non-validator)");
@@ -437,6 +440,7 @@ fn run_local() -> Result<()> {
     println!("    --data-dir data/fullnode \\");
     println!("    --p2p-addr /ip4/0.0.0.0/tcp/30304 \\");
     println!("    --rpc-addr 127.0.0.1:8548 \\");
+    println!("    --health-addr 127.0.0.1:9104 \\");
     println!("    --bootnodes /ip4/127.0.0.1/tcp/30301");
 
     Ok(())
