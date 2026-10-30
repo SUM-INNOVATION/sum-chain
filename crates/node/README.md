@@ -11,7 +11,7 @@ and/or follows blocks.
 
 ## Entry points
 
-- `sumchain` binary — `cargo run --bin sumchain -- run --genesis <file> --data-dir <dir> [--validator-key <file>] [--rpc-addr <addr>] …`
+- `sumchain` binary — `cargo run --bin sumchain -- run --genesis <file> --data-dir <dir> [--validator-key <file>] [--rpc-addr <addr>] [--health-addr <addr>] …`
 - `main.rs` — CLI / startup.
 - `node.rs` — the assembled node; `config.rs` — node configuration;
   `consensus_wrapper.rs` — consensus integration; `tx_broadcaster.rs` — outbound tx gossip.
