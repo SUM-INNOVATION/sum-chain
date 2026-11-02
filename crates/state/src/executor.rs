@@ -503,6 +503,13 @@ impl BlockExecutor {
         self
     }
 
+    /// Whether this executor runs under the dormant G5 configuration (#351).
+    /// Always `false` in production. Callers that validate or execute a whole
+    /// branch against one validator set refuse when it is `true`.
+    pub fn membership_configured(&self) -> bool {
+        self.membership.is_some()
+    }
+
     /// Validate a transaction without executing it
     pub fn validate_tx(&self, view: &mut ExecutionView<'_, '_>, tx: &SignedTransaction) -> Result<()> {
         // 1. Verify chain ID

@@ -28,7 +28,9 @@ use std::sync::Arc;
 
 use sumchain_consensus::consensus_config::check_at_startup;
 use sumchain_consensus::membership::DormantMembershipRules;
-use sumchain_consensus::reorg::{execute_rollback, plan_rollback};
+use sumchain_consensus::reorg::{
+    apply_branch, execute_reorg, execute_rollback, plan_rollback, resume, ReorgPlan,
+};
 use sumchain_consensus::{ConsensusEngine, ConsensusError, ConsensusQuery, PoAEngine};
 use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::{ChainParams, Genesis};
@@ -1006,6 +1008,90 @@ async fn an_operator_rollback_removes_the_rows_of_the_blocks_it_unwinds() {
     assert_eq!(x.engine.validators(), anchor());
     x.import(&w.a3).await.unwrap();
     assert_eq!(x.rows_set(4, 4, 0), delegated_set());
+}
+
+/// The three reorg functions that validate and execute a whole branch against
+/// ONE set (`execute_reorg`, `apply_branch`, `resume`) refuse when the executor
+/// carries the configuration, before anything is read or written (F361-5).
+/// The control: the same switch, with an executor without one and the same
+/// single set, goes through, so the refusal is the configuration's and not
+/// the inputs'.
+#[tokio::test]
+async fn the_one_set_reorg_functions_refuse_under_a_configuration() {
+    let w = fork();
+    let x = Node::new(&w.g, Some(rules(4, 0)));
+    for blk in w.prefix.iter().chain([&w.a3]) {
+        x.import(blk).await.unwrap();
+    }
+    let journals = ActivatedJournal::resolve(
+        &x.db,
+        ActivationSource::from_configured_height(
+            w.g.params.application_journal_enabled_from_height,
+        ),
+        SubsystemGates {
+            compute_pool: None,
+            beacon: None,
+        },
+    )
+    .unwrap();
+    let plan = ReorgPlan {
+        ancestor_hash: w.prefix[1].hash(),
+        ancestor_height: 2,
+        old_branch: vec![w.a3.clone()],
+        new_branch: vec![w.b3.clone()],
+    };
+    let configured = BlockExecutor::new(x.state.clone(), x.db.clone(), w.g.params.clone())
+        .with_dormant_membership(builder_membership(4, 0));
+    let before = rows(&x.db);
+    let root = x.state.state_root();
+
+    let refused = [
+        execute_reorg(
+            &x.db,
+            &x.state,
+            &configured,
+            &plan,
+            &anchor(),
+            &journals,
+            journals.policy(),
+        ),
+        apply_branch(&x.db, &x.state, &configured, &plan.new_branch, &anchor()),
+        resume(
+            &x.db,
+            &x.state,
+            &configured,
+            &plan,
+            &anchor(),
+            &journals,
+            journals.policy(),
+        ),
+    ];
+    for r in &refused {
+        assert!(
+            matches!(r, Err(ConsensusError::Membership(_))),
+            "refused under the configuration: {r:?}"
+        );
+    }
+    assert_eq!(rows(&x.db), before, "nothing was written");
+    assert_eq!(
+        x.state.state_root(),
+        root,
+        "the accumulator was not touched"
+    );
+
+    // Control: no configuration, the same plan and set.
+    let plain = BlockExecutor::new(x.state.clone(), x.db.clone(), w.g.params.clone());
+    execute_reorg(
+        &x.db,
+        &x.state,
+        &plain,
+        &plan,
+        &anchor(),
+        &journals,
+        journals.policy(),
+    )
+    .unwrap();
+    assert_eq!(x.head().hash(), w.b3.hash());
 }
 
 // ── production: unchanged ───────────────────────────────────────────────────

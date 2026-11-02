@@ -134,7 +134,8 @@ pub enum ConsensusError {
 
     /// Under the dormant G5 validator-set wiring (#351) only: the set that
     /// governs a height cannot be resolved, or does not govern yet (its
-    /// transition block is not certified). Not a verdict on any block.
+    /// transition block is not certified), or a reorg function that takes one
+    /// set for a whole branch was called. Not a verdict on any block.
     #[error("validator-set membership: {0}")]
     Membership(String),
 }
