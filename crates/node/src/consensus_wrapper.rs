@@ -223,6 +223,16 @@ impl ConsensusWrapper {
         }
     }
 
+    /// Why the engine has fail-stopped, if it has (`PoAEngine::halted_reason`).
+    /// A read of local engine state for the readiness probe; it changes
+    /// nothing. The BFT engine is refused at startup and has no such state.
+    pub fn halted_reason(&self) -> Option<String> {
+        match self {
+            Self::Poa(engine) => engine.halted_reason(),
+            Self::Bft(_) => None,
+        }
+    }
+
     /// Clone the wrapper (clones the Arc, not the engine)
     pub fn clone(&self) -> Self {
         match self {

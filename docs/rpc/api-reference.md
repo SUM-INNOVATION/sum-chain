@@ -1107,7 +1107,7 @@ probes target — not the JSON-RPC port.
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `:8546/health` | GET | Liveness probe. Returns `200 OK` (JSON `{status, version}`) once the health server is up. |
-| `:8546/ready` | GET | Readiness probe. Returns `200` once the node is synced with peers **or** has committed its first block past genesis (single-validator devnet rule); otherwise `503`. |
+| `:8546/ready` | GET | Readiness probe. Returns `200` once the node is synced with peers **or** has committed its first block past genesis (single-validator devnet rule), and its consensus engine has not fail-stopped; otherwise `503`. A fail-stopped engine adds `checks.consensus_halted` (the reason) to the body and stays not ready until the node is restarted; `/health` is unaffected. |
 
 ### Metrics
 

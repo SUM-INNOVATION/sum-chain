@@ -127,10 +127,15 @@ finality it has not recorded. **The process does not exit.**
 - From then on it refuses every production and import with `node
   fail-stopped: …`, logged as `Failed to create block`, `Failed to import
   block` and `Failed to import synced block` warnings.
-- It keeps serving RPC. `/health` stays `ok` and `/ready` keeps reporting sync
-  state and peers, so neither probe shows the halt, and a supervisor that
-  restarts the node only when it exits does not restart it. Alert on the log
-  line `consensus engine fail-stopped`.
+- It keeps serving RPC, and the liveness probe `/health` stays 200 (`"status":
+  "ok"`): the process is alive.
+- The readiness probe `/ready` answers 503 (`"ready": false`, `"status":
+  "not_ready"`) with the reason in `checks.consensus_halted`, until the node is
+  restarted. While the engine runs, `/ready` answers exactly as before.
+- Nothing restarts the node automatically: a supervisor that restarts it only
+  when it exits does not, and a liveness probe on `/health` does not fail.
+  Alert on either signal: `/ready` returning 503 with `consensus_halted`, or the
+  log line `consensus engine fail-stopped`.
 - Restart the node to recover. The start reads the last record that was
   written, and the next block derives finality again.
 - A block this validator produced in the slot whose finality write failed is

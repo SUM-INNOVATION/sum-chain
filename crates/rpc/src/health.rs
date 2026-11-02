@@ -48,6 +48,12 @@ pub struct ReadinessChecks {
     pub block_height: u64,
     /// Number of connected peers
     pub peer_count: usize,
+    /// Why the consensus engine has fail-stopped, when it has. A fail-stopped
+    /// engine refuses every production and import until the node is
+    /// restarted, so the node is not ready. Absent while the engine runs, which
+    /// leaves the body exactly as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consensus_halted: Option<String>,
 }
 
 /// Health check provider - supplies the data needed for health endpoints
@@ -56,7 +62,11 @@ pub struct HealthCheck {
     peer_count: Arc<dyn Fn() -> usize + Send + Sync>,
     current_height: Arc<dyn Fn() -> u64 + Send + Sync>,
     min_peers_for_ready: usize,
+    consensus_halted: Option<ConsensusHaltedProvider>,
 }
+
+/// Why the consensus engine has fail-stopped, or `None` while it runs.
+pub type ConsensusHaltedProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
 impl HealthCheck {
     /// Create a new health check provider
@@ -70,7 +80,16 @@ impl HealthCheck {
             peer_count,
             current_height,
             min_peers_for_ready: 0, // Default: no minimum peers required
+            consensus_halted: None,
         }
+    }
+
+    /// Report the node NOT ready while `halted` returns a reason: the consensus
+    /// engine has fail-stopped and refuses every production and import until
+    /// the node is restarted. Liveness is unaffected: the process still runs.
+    pub fn with_consensus_halted(mut self, halted: ConsensusHaltedProvider) -> Self {
+        self.consensus_halted = Some(halted);
+        self
     }
 
     /// Set minimum peers required for readiness
@@ -99,8 +118,12 @@ impl HealthCheck {
         // Database is ok if we can get the current height (which reads from DB)
         let database_ok = true; // If height call succeeded, DB is working
 
-        // Node is ready if synced and has minimum peers
-        let ready = synced && has_peers && database_ok;
+        // A fail-stopped consensus engine refuses every production and
+        // import until restart: the node is running but not ready.
+        let consensus_halted = self.consensus_halted.as_ref().and_then(|halted| halted());
+
+        // Node is ready if synced, has minimum peers and its engine runs
+        let ready = synced && has_peers && database_ok && consensus_halted.is_none();
 
         ReadinessStatus {
             ready,
@@ -111,6 +134,7 @@ impl HealthCheck {
                 database_ok,
                 block_height,
                 peer_count,
+                consensus_halted,
             },
         }
     }
@@ -544,5 +568,96 @@ mod tests {
         let mut rebound = rebound.expect("port was not released after clean shutdown");
         assert_eq!(get_status(addr, "/health").await, 200);
         rebound.stop();
+    }
+
+    // ---- a fail-stopped consensus engine (#350) ----
+
+    const REASON: &str = "could not persist local finality at height 7 (disk full)";
+
+    /// Synced, five peers, height 100: ready on every other check, so the
+    /// engine's state alone decides.
+    fn with_engine(halted: Arc<std::sync::Mutex<Option<String>>>) -> HealthCheck {
+        HealthCheck::new(Arc::new(|| true), Arc::new(|| 5), Arc::new(|| 100))
+            .with_consensus_halted(Arc::new(move || halted.lock().unwrap().clone()))
+    }
+
+    #[test]
+    fn a_fail_stopped_engine_is_not_ready_and_says_why_while_liveness_stays_ok() {
+        let health = with_engine(Arc::new(std::sync::Mutex::new(Some(REASON.to_string()))));
+
+        let status = health.readiness();
+        assert!(!status.ready);
+        assert_eq!(status.status, "not_ready");
+        assert!(
+            status.checks.synced && status.checks.has_peers && status.checks.database_ok,
+            "only the engine makes it not ready"
+        );
+        assert_eq!(status.checks.consensus_halted.as_deref(), Some(REASON));
+        let body = serde_json::to_string(&status).unwrap();
+        assert!(
+            body.contains(&format!("\"consensus_halted\":\"{REASON}\"")),
+            "{body}"
+        );
+
+        assert_eq!(health.liveness().status, "ok");
+    }
+
+    #[test]
+    fn a_running_engine_leaves_readiness_and_its_body_exactly_as_before() {
+        let without = HealthCheck::new(Arc::new(|| true), Arc::new(|| 5), Arc::new(|| 100));
+        let running = with_engine(Arc::new(std::sync::Mutex::new(None)));
+
+        let before = serde_json::to_string(&without.readiness()).unwrap();
+        let after = serde_json::to_string(&running.readiness()).unwrap();
+        assert_eq!(after, before);
+        assert!(!after.contains("consensus_halted"), "{after}");
+        assert!(running.is_ready());
+    }
+
+    /// `GET <path>`: the status code and the body.
+    async fn get(addr: SocketAddr, path: &str) -> (u16, String) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        let code = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|c| c.parse().ok())
+            .expect("no status code");
+        let body = text
+            .split_once("\r\n\r\n")
+            .map(|(_, b)| b.to_string())
+            .unwrap_or_default();
+        (code, body)
+    }
+
+    #[tokio::test]
+    async fn test_http_ready_is_503_with_the_reason_while_halted_and_health_stays_200() {
+        let addr = free_local_addr().await;
+        let halted = Arc::new(std::sync::Mutex::new(None));
+        let mut handle = HealthServer::new(Arc::new(with_engine(halted.clone())))
+            .start(addr)
+            .await
+            .unwrap();
+
+        let (code, body) = get(addr, "/ready").await;
+        assert_eq!(code, 200, "{body}");
+
+        *halted.lock().unwrap() = Some(REASON.to_string());
+        let (code, body) = get(addr, "/ready").await;
+        assert_eq!(code, 503, "{body}");
+        assert!(body.contains("\"status\":\"not_ready\""), "{body}");
+        assert!(body.contains(REASON), "{body}");
+
+        let (code, body) = get(addr, "/health").await;
+        assert_eq!(code, 200, "{body}");
+        assert!(body.contains("\"status\":\"ok\""), "{body}");
+
+        handle.stop();
     }
 }

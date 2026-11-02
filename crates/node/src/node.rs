@@ -1562,7 +1562,9 @@ impl Node {
     /// JSON-RPC server. Wires the readiness predicate so a single-validator
     /// devnet with no peers becomes ready once it commits its first block past
     /// the height it started at (`genesis_height`); see issue #120 and
-    /// [`single_validator_synced`].
+    /// [`single_validator_synced`]. A fail-stopped consensus engine makes
+    /// `/ready` answer 503 with the reason in `checks.consensus_halted`;
+    /// `/health` stays 200 (#350).
     async fn start_health(&self) -> Result<HealthServerHandle> {
         // Readiness `is_synced`: true if the p2p sync state says synced OR the
         // chain has advanced past the startup height. The latter is what lets a
@@ -1591,9 +1593,20 @@ impl Node {
             Arc::new(move || chain_height.load(Ordering::Relaxed))
         };
 
+        // A fail-stopped engine refuses every production and import until
+        // restart, so readiness reports it, with the reason. Liveness does not:
+        // the process keeps running and serving RPC.
+        let consensus_halted = {
+            let consensus = self.consensus.clone();
+            Arc::new(move || consensus.halted_reason())
+        };
+
         // `HealthCheck::new` defaults `min_peers_for_ready` to 0, so a
         // single-validator devnet is not blocked on peers.
-        let health_check = Arc::new(HealthCheck::new(is_synced, peer_count, current_height));
+        let health_check = Arc::new(
+            HealthCheck::new(is_synced, peer_count, current_height)
+                .with_consensus_halted(consensus_halted),
+        );
         let server = health_server(health_check, self.metrics.clone());
 
         let handle = server
@@ -2226,6 +2239,13 @@ mod crash_recovery_tests;
 #[cfg(test)]
 #[path = "../tests/unit/finality_record_boot_tests.rs"]
 mod finality_record_boot_tests;
+
+/// Readiness follows the consensus engine (#350): a fail-stopped engine makes
+/// `/ready` 503 with the reason while `/health` stays 200, through the node's
+/// own servers. A unit-test module for the same reason as the ones above.
+#[cfg(test)]
+#[path = "../tests/unit/halted_readiness_tests.rs"]
+mod halted_readiness_tests;
 
 /// #276 through the real boot: a genesis allocating one account twice is
 /// refused before a data directory exists. A unit-test module for the same
