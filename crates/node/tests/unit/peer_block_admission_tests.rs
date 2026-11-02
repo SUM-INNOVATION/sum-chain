@@ -30,19 +30,33 @@
 //! The RESTART tests below are different: they drive `Node::with_rpc_config`,
 //! the real boot, twice on the same directory, so what they assert about a
 //! restarted node's compatibility state is behaviour and not text.
+//!
+//! The EVENT-LOOP tests at the end are different again: they run `Node::run`
+//! itself against a scripted peer over a real loopback connection. Nothing is
+//! handed to the loop; the peer sends real answers in an order the test
+//! chooses, because what they pin — that whatever the loop refused from a peer
+//! before its declaration is asked for again once it declares — is an ordering
+//! between two arms of the loop, with no seam below it.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use sumchain_consensus::ConsensusEngine;
 use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::{ChainParams, Genesis};
-use sumchain_p2p::{PeerCompat, PeerCompatRegistry, PeerId};
+use sumchain_p2p::{
+    NetworkCommand, NetworkConfig, NetworkEvent, NetworkService, PeerCompat, PeerCompatRegistry,
+    PeerId,
+};
 use sumchain_primitives::{Block, BlockHeight, Hash, SignedTransaction, Transaction};
 use sumchain_state::{Mempool, MempoolConfig, StateManager};
 use sumchain_storage::{BlockStore, Database};
+use tokio::sync::{broadcast, mpsc};
+use tokio::time::Instant;
 
 use crate::consensus_wrapper::ConsensusWrapper;
 
@@ -763,4 +777,552 @@ async fn the_digest_this_node_declares_covers_the_block_write_set_ceiling() {
              not a thing an operator gets to phase in"
         );
     }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 6. The event loop: what was refused before a declaration is asked for again
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// `Node::run` itself, against a SCRIPTED peer over a real loopback connection.
+// On `PeerConnected` the node asks the peer for its protocol digest and for its
+// sync status at once, and the two answers race. At or above the enforcement
+// height whatever the peer says before its declaration is refused, as it must
+// be. What these tests pin is the next step: once the declaration is accepted,
+// the node asks for the peer's status again, so whatever it refused is fetched
+// again — and it asks again ONLY then.
+//
+// The peer is a bare `NetworkService` and every answer it gives is sent by the
+// test, which is what lets the test decide which answer wins the race.
+
+/// How long the scripted peer waits for something the node must send.
+/// Generous: a real TCP + Noise handshake on a loaded machine, and a timeout
+/// here would read as the defect.
+const WAIT: Duration = Duration::from_secs(20);
+
+/// How long the scripted peer watches for something the node must NOT send.
+/// This bounds how long the absence is observed, not how long it holds; each
+/// use is paired with a positive step that shows the node was live.
+const QUIET: Duration = Duration::from_millis(1500);
+
+/// A full node built by the real boot on `dir`, dialing `bootnode`.
+///
+/// Not a validator: without a key its head moves only by importing a peer's
+/// block, so its height is a direct reading of whether it synced.
+fn full_node(dir: &Path, genesis: &Genesis, bootnode: Option<&str>) -> Node {
+    let network = NetworkConfig {
+        listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
+        bootnodes: bootnode.map(str::to_string).into_iter().collect(),
+        enable_mdns: false,
+        node_key_file: None,
+        ..Default::default()
+    };
+    Node::with_rpc_config(
+        dir.to_path_buf(),
+        genesis.clone(),
+        None,
+        network,
+        "127.0.0.1:0".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+        sumchain_rpc::RpcAuthConfig::disabled(),
+        sumchain_rpc::RateLimitConfig::disabled(),
+        crate::config::ConsensusSettings::default(),
+    )
+    .expect("the real boot must succeed")
+}
+
+/// A data directory that a previous run of the real boot left at `height`:
+/// what a node restarting behind its peer starts from.
+async fn left_at(genesis: &Genesis, blocks: &[Block], height: BlockHeight) -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let first = full_node(dir.path(), genesis, None);
+    first.init_chain().expect("init chain");
+    let seed = PeerId::random();
+    assert!(first
+        .peer_compat
+        .on_declaration(seed, first.protocol_digest));
+    for b in blocks.iter().filter(|b| b.height() <= height) {
+        let o =
+            Node::admit_peer_block(&first.peer_compat, &first.consensus, &seed, b.clone()).await;
+        assert!(
+            matches!(o, PeerBlockOutcome::Imported),
+            "seeding height {}: {o:?}",
+            b.height()
+        );
+    }
+    assert_eq!(first.consensus.current_height(), height);
+    // Released before the restart: RocksDB refuses a directory whose lock is
+    // still held.
+    drop(first);
+    dir
+}
+
+/// Run `node` — the real `Node::run`: RPC and health servers, the swarm, the
+/// event loop — until `script` finishes. The node must not stop first.
+async fn drive(node: &mut Node, script: impl std::future::Future<Output = ()>) {
+    let run = node.run();
+    tokio::pin!(run);
+    tokio::select! {
+        stopped = &mut run => {
+            panic!("the node stopped while the scripted peer was still talking to it: {stopped:?}")
+        }
+        () = script => {}
+    }
+}
+
+/// Whether `done` holds within [`WAIT`].
+async fn eventually(mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if done() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// The other end of the node's connection: a bare `NetworkService` that says
+/// nothing until the test tells it to.
+struct ScriptedPeer {
+    service: Arc<NetworkService>,
+    events: broadcast::Receiver<NetworkEvent>,
+    commands: mpsc::Sender<NetworkCommand>,
+    /// `/ip4/127.0.0.1/tcp/<port>/p2p/<id>`, for the node's bootnode list.
+    dial: String,
+    /// Every `GetStatus` the node has sent this peer, counted as the events
+    /// go past, so a test can say how many times it was asked and not only
+    /// whether.
+    status_requests: usize,
+}
+
+impl ScriptedPeer {
+    async fn start() -> Self {
+        let (service, command_rx) = NetworkService::new(NetworkConfig {
+            listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
+            bootnodes: Vec::new(),
+            enable_mdns: false,
+            node_key_file: None,
+            ..Default::default()
+        });
+        let service = Arc::new(service);
+        let events = service.subscribe();
+        let commands = service.command_sender();
+        let runner = Arc::clone(&service);
+        tokio::spawn(async move {
+            let _ = runner.run(command_rx).await;
+        });
+        let mut peer = Self {
+            service,
+            events,
+            commands,
+            dial: String::new(),
+            status_requests: 0,
+        };
+        let addr = peer
+            .next("its own listen address", |e| match e {
+                NetworkEvent::Listening(addr) => Some(addr.to_string()),
+                _ => None,
+            })
+            .await;
+        peer.dial = format!("{addr}/p2p/{}", peer.id());
+        peer
+    }
+
+    fn id(&self) -> PeerId {
+        self.service
+            .local_peer_id()
+            .expect("`run` sets the local peer id before it binds a listener")
+    }
+
+    async fn send(&self, command: NetworkCommand) {
+        self.commands
+            .send(command)
+            .await
+            .expect("the scripted peer's swarm is running");
+    }
+
+    fn count(&mut self, event: &NetworkEvent) {
+        if matches!(event, NetworkEvent::SyncStatusRequest { .. }) {
+            self.status_requests += 1;
+        }
+    }
+
+    /// The first event `pick` accepts, within [`WAIT`]. A timeout fails with
+    /// everything seen meanwhile, so it says what the node did instead.
+    async fn next<T>(&mut self, what: &str, mut pick: impl FnMut(&NetworkEvent) -> Option<T>) -> T {
+        let deadline = Instant::now() + WAIT;
+        let mut seen = Vec::new();
+        loop {
+            match tokio::time::timeout_at(deadline, self.events.recv()).await {
+                Err(_) => panic!("no {what} within {WAIT:?}; the scripted peer saw {seen:?}"),
+                Ok(Err(e)) => panic!("the scripted peer's event stream failed: {e}"),
+                Ok(Ok(event)) => {
+                    self.count(&event);
+                    if let Some(picked) = pick(&event) {
+                        return picked;
+                    }
+                    seen.push(format!("{event:?}"));
+                }
+            }
+        }
+    }
+
+    /// Watch for [`QUIET`], failing on anything `forbidden` accepts.
+    async fn quiet(&mut self, what: &str, mut forbidden: impl FnMut(&NetworkEvent) -> bool) {
+        let until = Instant::now() + QUIET;
+        loop {
+            match tokio::time::timeout_at(until, self.events.recv()).await {
+                Err(_) => return,
+                Ok(Err(e)) => panic!("the scripted peer's event stream failed: {e}"),
+                Ok(Ok(event)) => {
+                    self.count(&event);
+                    assert!(!forbidden(&event), "the node sent {what}: {event:?}");
+                }
+            }
+        }
+    }
+
+    /// The node connecting, and the two requests its `PeerConnected` arm makes
+    /// of this peer, in whichever order they arrive. Neither is answered yet.
+    /// Returns the node's id, the digest request and the status request.
+    async fn connected(&mut self) -> (PeerId, u64, u64) {
+        let node = self
+            .next("connection from the node", |e| match e {
+                NetworkEvent::PeerConnected(p) => Some(*p),
+                _ => None,
+            })
+            .await;
+        let (mut digest_req, mut status_req) = (None, None);
+        while digest_req.is_none() || status_req.is_none() {
+            match self
+                .next("digest and status requests from the node", |e| match e {
+                    NetworkEvent::ProtocolIdRequest { request_id, peer } if *peer == node => {
+                        Some((true, *request_id))
+                    }
+                    NetworkEvent::SyncStatusRequest { request_id, peer } if *peer == node => {
+                        Some((false, *request_id))
+                    }
+                    _ => None,
+                })
+                .await
+            {
+                (true, id) => digest_req = Some(id),
+                (false, id) => status_req = Some(id),
+            }
+        }
+        (node, digest_req.unwrap(), status_req.unwrap())
+    }
+
+    async fn answer_status(&self, request_id: u64, head: &Block) {
+        self.send(NetworkCommand::SendSyncStatusResponse {
+            request_id,
+            height: head.height(),
+            best_hash: head.hash(),
+            chain_id: CHAIN_ID,
+        })
+        .await;
+    }
+
+    async fn declare(&self, request_id: u64, digest: Hash) {
+        self.send(NetworkCommand::SendProtocolIdResponse { request_id, digest })
+            .await;
+    }
+
+    /// The next status request from `node`.
+    async fn status_request(&mut self, node: PeerId, what: &str) -> u64 {
+        self.next(what, |e| match e {
+            NetworkEvent::SyncStatusRequest { request_id, peer } if *peer == node => {
+                Some(*request_id)
+            }
+            _ => None,
+        })
+        .await
+    }
+
+    /// The next block request from `node`, answered out of `chain` (indexed
+    /// by height - 1). Returns the range it asked for.
+    async fn serve_blocks(&mut self, node: PeerId, chain: &[Block]) -> (BlockHeight, BlockHeight) {
+        let (request_id, from, to) = self
+            .next("a block request from the node", |e| match e {
+                NetworkEvent::SyncBlocksRequest {
+                    request_id,
+                    peer,
+                    from_height,
+                    to_height,
+                } if *peer == node => Some((*request_id, *from_height, *to_height)),
+                _ => None,
+            })
+            .await;
+        let blocks = chain[(from - 1) as usize..to as usize].to_vec();
+        self.send(NetworkCommand::SendSyncBlocksResponse { request_id, blocks })
+            .await;
+        (from, to)
+    }
+
+    /// The node's own answer to a status request from this peer: its height.
+    ///
+    /// Also a barrier. The node's loop handles events one at a time, in the
+    /// order they reach it, so once it has answered this it has handled what
+    /// this peer sent it earlier. Each use is backed by a direct check on the
+    /// node, because two requests on one connection are separate streams.
+    async fn node_height(&mut self, node: PeerId) -> BlockHeight {
+        self.send(NetworkCommand::RequestSyncStatus(node)).await;
+        self.next("the node's status", |e| match e {
+            NetworkEvent::SyncStatusResponse { peer, height, .. } if *peer == node => Some(*height),
+            _ => None,
+        })
+        .await
+    }
+}
+
+/// The reported stall, as it happened: a node restarts one block behind, at or
+/// above the enforcement height, and its peer's status beats the peer's
+/// declaration.
+///
+/// The status is ignored, correctly: the peer had not declared. The declaration
+/// is accepted a moment later. Nothing then asked for the status again, so the
+/// node never learned it was behind; in a two-validator round-robin chain the
+/// block it lacked had been the peer's turn, the next height was the peer's to
+/// wait for, and both validators waited forever. The node must ask again and
+/// sync.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_status_that_beat_the_declaration_is_asked_for_again_and_the_node_syncs() {
+    let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
+    let tip = blocks.last().expect("a chain").clone();
+    let behind = tip.height() - 1;
+    assert!(
+        behind + 1 >= ENFORCE_FROM,
+        "the block the node lacks must be one only a declared peer may supply"
+    );
+    let dir = left_at(&genesis, &blocks, behind).await;
+
+    let mut peer = ScriptedPeer::start().await;
+    let peer_id = peer.id();
+    let mut node = full_node(dir.path(), &genesis, Some(peer.dial.as_str()));
+    let (compat, consensus, digest) = (
+        node.peer_compat.clone(),
+        node.consensus.clone(),
+        node.protocol_digest,
+    );
+
+    drive(&mut node, async {
+        let (node_id, digest_req, status_req) = peer.connected().await;
+
+        // The status wins the race and is ignored.
+        peer.answer_status(status_req, &tip).await;
+        assert_eq!(peer.node_height(node_id).await, behind);
+        peer.quiet("a block request before the peer declared", |e| {
+            matches!(e, NetworkEvent::SyncBlocksRequest { .. })
+        })
+        .await;
+        assert_eq!(compat.status(&peer_id), PeerCompat::Undeclared);
+        assert_eq!(consensus.current_height(), behind);
+
+        // The declaration, a moment later.
+        peer.declare(digest_req, digest).await;
+        let again = peer
+            .status_request(node_id, "second status request after the peer declared")
+            .await;
+        assert_eq!(compat.status(&peer_id), PeerCompat::Verified);
+
+        // Answered, it shows the node behind, and the node fetches the block.
+        peer.answer_status(again, &tip).await;
+        assert_eq!(
+            peer.serve_blocks(node_id, &blocks).await,
+            (tip.height(), tip.height())
+        );
+        assert!(
+            eventually(|| consensus.current_height() == tip.height()).await,
+            "the node never imported the block it was missing; it is at {}",
+            consensus.current_height()
+        );
+        assert_eq!(
+            peer.status_requests, 2,
+            "asked once on connect and once on the declaration"
+        );
+    })
+    .await;
+
+    assert!(BlockStore::new(&node.db).contains(&tip.hash()).unwrap());
+}
+
+/// The same gap on the sync route: a batch cut at the enforcement height
+/// before the peer declared.
+///
+/// A fresh node below the boundary takes an undeclared peer's status and its
+/// blocks, as it should. The batch crosses the boundary and is cut there, the
+/// request for the rest is cut again, and the sync loop stops. The declaration
+/// that arrives afterwards must start it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_batch_cut_at_the_boundary_before_the_declaration_is_fetched_again() {
+    let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
+    let tip = blocks.last().expect("a chain").clone();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+
+    let mut peer = ScriptedPeer::start().await;
+    let peer_id = peer.id();
+    let mut node = full_node(dir.path(), &genesis, Some(peer.dial.as_str()));
+    let (compat, consensus, metrics, digest) = (
+        node.peer_compat.clone(),
+        node.consensus.clone(),
+        node.metrics.clone(),
+        node.protocol_digest,
+    );
+
+    drive(&mut node, async {
+        let (node_id, digest_req, status_req) = peer.connected().await;
+
+        // Below the boundary the undeclared peer's status is taken, and both
+        // block requests it leads to are cut at the boundary.
+        peer.answer_status(status_req, &tip).await;
+        assert_eq!(peer.serve_blocks(node_id, &blocks).await, (1, tip.height()));
+        assert_eq!(
+            peer.serve_blocks(node_id, &blocks).await,
+            (ENFORCE_FROM, tip.height())
+        );
+        assert!(
+            eventually(|| metrics.blocks.block_errors.load(Ordering::Relaxed) == 2).await,
+            "both batches must have been cut at height {ENFORCE_FROM}"
+        );
+        assert_eq!(consensus.current_height(), ENFORCE_FROM - 1);
+        peer.quiet("another request before the peer declared", |e| {
+            matches!(
+                e,
+                NetworkEvent::SyncBlocksRequest { .. } | NetworkEvent::SyncStatusRequest { .. }
+            )
+        })
+        .await;
+        assert_eq!(compat.status(&peer_id), PeerCompat::Undeclared);
+
+        // The declaration restarts the sync.
+        peer.declare(digest_req, digest).await;
+        let again = peer
+            .status_request(node_id, "second status request after the peer declared")
+            .await;
+        peer.answer_status(again, &tip).await;
+        assert_eq!(
+            peer.serve_blocks(node_id, &blocks).await,
+            (ENFORCE_FROM, tip.height())
+        );
+        assert!(
+            eventually(|| consensus.current_height() == tip.height()).await,
+            "the node never synced past the boundary; it is at {}",
+            consensus.current_height()
+        );
+        assert_eq!(peer.status_requests, 2);
+    })
+    .await;
+}
+
+/// And the third route: a gossiped block refused before the peer declared.
+///
+/// Gossip is not repeated, so the block is lost rather than deferred. Here the
+/// status the peer gave — answered before it produced the block, accepted after
+/// its declaration — shows the node level, so nothing in it says to sync; only
+/// the refused block does, and the node must ask again because of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gossiped_block_refused_before_the_declaration_is_fetched_again() {
+    let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
+    let tip = blocks.last().expect("a chain").clone();
+    let behind = tip.height() - 1;
+    let before_tip = blocks[(behind - 1) as usize].clone();
+    assert!(behind + 1 >= ENFORCE_FROM);
+    let dir = left_at(&genesis, &blocks, behind).await;
+
+    let mut peer = ScriptedPeer::start().await;
+    let peer_id = peer.id();
+    let mut node = full_node(dir.path(), &genesis, Some(peer.dial.as_str()));
+    let (compat, consensus, metrics, digest) = (
+        node.peer_compat.clone(),
+        node.consensus.clone(),
+        node.metrics.clone(),
+        node.protocol_digest,
+    );
+
+    drive(&mut node, async {
+        let (node_id, digest_req, status_req) = peer.connected().await;
+
+        // Published until the node has refused it: gossipsub drops a publish
+        // while it does not yet know the node subscribes, and refuses to repeat
+        // one it has already sent, so the node receives it once.
+        let deadline = Instant::now() + WAIT;
+        while metrics.blocks.block_errors.load(Ordering::Relaxed) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the gossiped block never reached the node"
+            );
+            peer.send(NetworkCommand::BroadcastBlock(tip.clone())).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert_eq!(consensus.current_height(), behind);
+        assert_eq!(compat.status(&peer_id), PeerCompat::Undeclared);
+
+        // The declaration, then the status the peer gave before it produced
+        // the block: taken now, and level with the node.
+        peer.declare(digest_req, digest).await;
+        assert!(eventually(|| compat.status(&peer_id) == PeerCompat::Verified).await);
+        peer.answer_status(status_req, &before_tip).await;
+
+        let again = peer
+            .status_request(node_id, "second status request after the peer declared")
+            .await;
+        peer.answer_status(again, &tip).await;
+        assert_eq!(
+            peer.serve_blocks(node_id, &blocks).await,
+            (tip.height(), tip.height())
+        );
+        assert!(
+            eventually(|| consensus.current_height() == tip.height()).await,
+            "the node never fetched the block it refused; it is at {}",
+            consensus.current_height()
+        );
+        assert_eq!(peer.status_requests, 2);
+    })
+    .await;
+}
+
+/// The control, and why the node asks again only when something was refused.
+///
+/// When the declaration wins the race nothing is refused: the status that
+/// follows is taken as it always was, and the node asks for it once per
+/// connection, exactly as before. Asking again regardless would give a node
+/// that connects while behind two answers, and so two block requests for every
+/// range it fetches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declaration_that_wins_the_race_is_asked_for_status_once() {
+    let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
+    let tip = blocks.last().expect("a chain").clone();
+    let behind = tip.height() - 1;
+    let dir = left_at(&genesis, &blocks, behind).await;
+
+    let mut peer = ScriptedPeer::start().await;
+    let peer_id = peer.id();
+    let mut node = full_node(dir.path(), &genesis, Some(peer.dial.as_str()));
+    let (compat, consensus, digest) = (
+        node.peer_compat.clone(),
+        node.consensus.clone(),
+        node.protocol_digest,
+    );
+
+    drive(&mut node, async {
+        let (node_id, digest_req, status_req) = peer.connected().await;
+
+        peer.declare(digest_req, digest).await;
+        assert!(eventually(|| compat.status(&peer_id) == PeerCompat::Verified).await);
+
+        peer.answer_status(status_req, &tip).await;
+        assert_eq!(
+            peer.serve_blocks(node_id, &blocks).await,
+            (tip.height(), tip.height())
+        );
+        assert!(eventually(|| consensus.current_height() == tip.height()).await);
+        peer.quiet("a second status request", |e| {
+            matches!(e, NetworkEvent::SyncStatusRequest { .. })
+        })
+        .await;
+        assert_eq!(peer.status_requests, 1);
+    })
+    .await;
 }
