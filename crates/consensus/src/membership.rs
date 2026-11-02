@@ -23,17 +23,22 @@
 //!   leaves the canonical chain, so only rows the ancestry shares with the
 //!   canonical chain can govern. They are read from committed state for a
 //!   block that arrives or is proposed, and from the replacement branch's
-//!   layer for a block of a chain switch.
+//!   layer for a block of a chain switch. An arriving block whose parent is on
+//!   a side branch must show its proposer and signature under that set before
+//!   its ancestry is walked ([`set_for_arriving_block`]).
 //! * **No membership in memory.** Every use resolves from rows. The legacy
 //!   in-memory set the engine keeps for protocol v1 is not read.
 
 use std::sync::Arc;
 
+use sumchain_crypto::verify_bytes;
 use sumchain_genesis::pool_topology::PRODUCT_MINIMUM;
+use sumchain_primitives::proposer::round_robin_proposer;
 use sumchain_primitives::{Balance, Block, BlockHeight};
 use sumchain_storage::branch::BranchState;
 use sumchain_storage::validator_set_g5::{
-    certified_height, check_stored_rows, governing_set, BranchRows, EpochSchedule, G5Error,
+    certified_height, check_stored_rows, governing_set, resolve_set, BranchRows, EpochSchedule,
+    G5Error,
 };
 use sumchain_storage::{BlockStore, Database};
 
@@ -183,7 +188,10 @@ pub(crate) fn set_on_canonical_ancestry(
 /// The set for an arriving block, whose parent may be on any branch.
 ///
 /// The fork point is the parent's highest canonical ancestor, found by
-/// following parent links for at most `walk_limit` blocks.
+/// following parent links for at most `walk_limit` blocks. A canonical parent
+/// needs no walk. Before walking from a side-branch parent, the block must pass
+/// [`authenticate_before_walk`], so a block no validator signed costs one row
+/// read and one signature check, never up to `walk_limit` block reads.
 pub(crate) fn set_for_arriving_block(
     db: &Database,
     membership: &G5Membership,
@@ -197,9 +205,16 @@ pub(crate) fn set_for_arriving_block(
     };
     let store = BlockStore::new(db);
     let mut cursor = parent.clone();
+    let mut authenticated = false;
     for _ in 0..=walk_limit {
         if store.get_hash_by_height(cursor.height())? == Some(cursor.hash()) {
             return set_on_canonical_ancestry(db, membership, block.height(), cursor.height());
+        }
+        if !authenticated {
+            // The parent is on a side branch: the walk below is the expensive
+            // part, so the block earns it first.
+            authenticate_before_walk(db, membership, block)?;
+            authenticated = true;
         }
         if cursor.height() == 0 {
             break;
@@ -214,6 +229,60 @@ pub(crate) fn set_for_arriving_block(
         block.hash(),
         block.height()
     )))
+}
+
+/// What an arriving block whose parent is on a side branch must show before
+/// its ancestry is walked: its proposer is the round-robin proposer of its
+/// height over the set the canonical rows give that height, and its header is
+/// signed by that key.
+///
+/// If the block can be governed at all, that is exactly the set it is
+/// validated against. Q2 caps the certified height at the fork point, so a
+/// transition that governs lies on the prefix the branch shares with the
+/// canonical chain, and [`set_on_canonical_ancestry`] reads the same committed
+/// rows this does. A block refused here is therefore refused by the full path
+/// as well, only later.
+///
+/// * A bad signature is a verdict on the block: `InvalidBlock`.
+/// * A proposer that is not the canonical rows' proposer for its height, and a
+///   height whose set those rows cannot give (its transition is above the
+///   canonical head, or the row is unreadable), are `Membership`, not a
+///   verdict: with the canonical chain as it stands nothing can govern the
+///   block, which is also what the walk would conclude, by Q2.
+fn authenticate_before_walk(db: &Database, membership: &G5Membership, block: &Block) -> Result<()> {
+    let header = &block.header;
+    let set = resolve_set(
+        db,
+        membership.anchor(),
+        header.height,
+        membership.schedule(),
+    )
+    .map_err(refused)?;
+    let expected = round_robin_proposer(header.height, &set).map_err(|e| {
+        ConsensusError::Membership(format!("no proposer for height {}: {e}", header.height))
+    })?;
+    if header.proposer_pubkey != expected {
+        return Err(ConsensusError::Membership(format!(
+            "block {} at height {}: its proposer is not that height's round-robin proposer under \
+             the set the canonical rows give it, the only set that could govern it; refused \
+             before walking its side-branch ancestry",
+            block.hash(),
+            header.height
+        )));
+    }
+    verify_bytes(
+        header.signing_hash().as_bytes(),
+        &header.proposer_sig,
+        &header.proposer_pubkey,
+    )
+    .map_err(|_| {
+        ConsensusError::InvalidBlock(format!(
+            "block {} at height {}: invalid proposer signature; refused before walking its \
+             side-branch ancestry",
+            block.hash(),
+            header.height
+        ))
+    })
 }
 
 /// A configuration for this crate's unit tests only: `anchor`, epoch length
@@ -236,4 +305,108 @@ pub(crate) fn set_on_branch(
 ) -> std::result::Result<Vec<[u8; 32]>, G5Error> {
     let certified = certified_height(db)?.map(|c| c.min(ancestor_height));
     governing_set(&BranchRows::new(layer, db), height, membership, certified)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sumchain_crypto::{sign, KeyPair};
+    use sumchain_primitives::{BlockHeader, Hash};
+    use sumchain_storage::cf;
+    use tempfile::TempDir;
+
+    const WALK: u64 = 4_096;
+
+    fn key(i: u8) -> KeyPair {
+        KeyPair::from_bytes([i; 32])
+    }
+
+    fn pk(k: &KeyPair) -> [u8; 32] {
+        *k.public_key().as_bytes()
+    }
+
+    /// Five anchor validators; with L = 1,000 every height below is in the
+    /// rowless genesis epoch, so the set is the anchor.
+    fn anchor_keys() -> Vec<KeyPair> {
+        (1..=5).map(key).collect()
+    }
+
+    fn open() -> (TempDir, Database) {
+        let dir = TempDir::new().unwrap();
+        let db = Database::open_default(dir.path()).unwrap();
+        (dir, db)
+    }
+
+    /// A block at `height` over `parent_hash`, naming `proposer` and signed by
+    /// `signer`.
+    fn block(parent_hash: Hash, height: u64, proposer: &KeyPair, signer: &KeyPair) -> Block {
+        let mut b = Block::new(
+            BlockHeader::new(
+                parent_hash,
+                height,
+                1_000 + height,
+                Hash::ZERO,
+                Hash::ZERO,
+                pk(proposer),
+            ),
+            Vec::new(),
+        );
+        let s = sign(b.header.signing_hash().as_bytes(), signer.private_key());
+        b.header.set_signature(*s.as_bytes());
+        b
+    }
+
+    /// Archived, not canonical: no height-index entry names it.
+    fn archive(db: &Database, b: &Block) {
+        db.put(cf::BLOCKS, b.hash().as_bytes(), &b.to_bytes())
+            .unwrap();
+    }
+
+    /// F361-2: a side-branch parent whose own parent is missing from the store,
+    /// so any walk fails with `ParentNotFound`. A block no validator signed over
+    /// it is refused before that walk (an outsider's proposal as membership, a
+    /// forged signature as an invalid block); an authenticated one still walks.
+    #[test]
+    fn a_block_no_validator_signed_is_refused_before_its_side_branch_ancestry_is_walked() {
+        let (_dir, db) = open();
+        let keys = anchor_keys();
+        let m = test_configuration(keys.iter().map(pk).collect(), 1_000);
+        let side_parent = block(Hash::hash(b"not stored"), 5, &keys[0], &keys[0]);
+        archive(&db, &side_parent);
+        let rightful = &keys[6 % 5];
+        let outsider = key(0x77);
+
+        // A proposer outside the set, with its own valid signature: nothing
+        // can govern it (membership, not a verdict).
+        let b = block(side_parent.hash(), 6, &outsider, &outsider);
+        let r = set_for_arriving_block(&db, &m, &b, Some(&side_parent), WALK);
+        assert!(matches!(r, Err(ConsensusError::Membership(_))), "{r:?}");
+
+        // The rightful proposer's key, signed by someone else.
+        let b = block(side_parent.hash(), 6, rightful, &outsider);
+        let r = set_for_arriving_block(&db, &m, &b, Some(&side_parent), WALK);
+        assert!(matches!(r, Err(ConsensusError::InvalidBlock(_))), "{r:?}");
+
+        // The rightful proposer, rightly signed: the walk runs and finds the
+        // missing ancestor, as before.
+        let b = block(side_parent.hash(), 6, rightful, rightful);
+        let r = set_for_arriving_block(&db, &m, &b, Some(&side_parent), WALK);
+        assert!(matches!(r, Err(ConsensusError::ParentNotFound)), "{r:?}");
+    }
+
+    /// A canonical parent needs no walk, so nothing is checked early: the set
+    /// is returned and header validation refuses a wrong proposer later, as it
+    /// always did.
+    #[test]
+    fn a_canonical_parent_is_resolved_without_the_early_check() {
+        let (_dir, db) = open();
+        let keys = anchor_keys();
+        let m = test_configuration(keys.iter().map(pk).collect(), 1_000);
+        let parent = block(Hash::hash(b"not stored"), 5, &keys[0], &keys[0]);
+        BlockStore::new(&db).put(&parent).unwrap();
+        let outsider = key(0x77);
+        let b = block(parent.hash(), 6, &outsider, &outsider);
+        let set = set_for_arriving_block(&db, &m, &b, Some(&parent), WALK).unwrap();
+        assert_eq!(set, keys.iter().map(pk).collect::<Vec<_>>());
+    }
 }

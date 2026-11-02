@@ -909,6 +909,19 @@ async fn a_block_whose_ancestry_left_the_canonical_chain_below_its_transition_is
     // Side: 3B archived, then 4B on it, proposed by B's set.
     archive(&x.db, &w.b3);
     let mut b = w.b;
+    // First, block 4 on 3B signed by the proposer the CANONICAL row names for
+    // height 4. It passes the early check an arriving side-branch block makes
+    // before its ancestry is walked (proposer and signature under the
+    // canonical rows), so it is the fork-point cap alone that refuses it: its
+    // ancestry leaves the canonical chain at 2, below the certified 3A.
+    let canonical_signer = staking_keys()
+        .into_iter()
+        .find(|k| pk(k) == delegated_set()[4])
+        .unwrap();
+    let b4_canonical_signer = b.draft_by(Vec::new(), 1, &canonical_signer);
+    let refused = x.import(&b4_canonical_signer).await;
+    assert!(is_membership(&refused), "{refused:?}");
+    assert_eq!(x.head().hash(), w.a3.hash());
     let b4 = b.produce(Vec::new());
     let refused = x.import(&b4).await;
     assert!(is_membership(&refused), "{refused:?}");
