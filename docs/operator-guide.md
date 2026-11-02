@@ -120,6 +120,24 @@ finalized, as before. The record is written as one batch after each block that
 finalizes another; if that write fails, the node stops (`node fail-stopped`)
 rather than running on with finality it has not recorded.
 
+Before installing a binary with this start check, run that binary's check on
+each validator's data directory while the node is stopped:
+
+```bash
+sumchain check-finality-record --data-dir <validator data directory>
+```
+
+It opens the database read-only and writes nothing, applies exactly the check a
+start applies, and prints the record with `Result: START_ACCEPTS`, or the reason
+the start would refuse with the remedies that apply and `Result:
+START_REFUSES`. It exits 0 when the start accepts the record, 2 when the start
+would refuse it, and 1 when there is no database to check. Install the binary
+only once every validator's directory passes. Do not use RPC `get_finality` for
+this: it reports the running node's memory, not the stored record. `sumchain
+info` prints the two stored keys but does not check them: it prints a missing
+hash as zeros, omits a height it cannot decode, and opens the database
+read-write.
+
 ## Further Reading
 
 - [operations/production-checklist.md](./operations/production-checklist.md) — full operations checklist.

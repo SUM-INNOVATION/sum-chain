@@ -433,6 +433,19 @@ enum Commands {
         #[arg(short, long, default_value = "data")]
         data_dir: PathBuf,
     },
+
+    /// Check a STOPPED node's local finality record exactly as this binary's
+    /// start does, and write nothing. Run it with the new binary on every
+    /// validator's data directory before installing it: a start refuses a
+    /// record that cannot be read, holds one key without the other, is above
+    /// the head or does not name the canonical block at its height. Opens the
+    /// database read-only; exits 2 when the start would refuse. It checks the
+    /// finality record only, not everything a start checks.
+    CheckFinalityRecord {
+        /// Data directory
+        #[arg(short, long, default_value = "data")]
+        data_dir: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -1700,9 +1713,111 @@ async fn main() -> Result<()> {
                 std::process::exit(2);
             }
         }
+
+        Commands::CheckFinalityRecord { data_dir } => {
+            init_logging("warn", false)?;
+            if !check_finality_record(&data_dir)? {
+                // Non-zero exit so a script can branch on the result, as
+                // `inspect-v2-rows` does.
+                std::process::exit(2);
+            }
+        }
     }
 
     Ok(())
+}
+
+/// `sumchain check-finality-record`: what this binary's start would make of a
+/// stopped node's local finality record.
+///
+/// `Ok(true)` when the start accepts the record, `Ok(false)` when it refuses
+/// it, and an error when there is nothing to check (no directory, no database,
+/// no head). The verdict is `BlockStore::checked_finality_record`, the check
+/// `PoAEngine::load_chain` applies at start, on a read-only handle: nothing is
+/// created, locked, repaired or written.
+fn check_finality_record(data_dir: &std::path::Path) -> Result<bool> {
+    use sumchain_storage::schema::{BlockStore, FinalityRecordError};
+
+    // `open_read_only` creates nothing either; this only says so plainly.
+    if !data_dir.is_dir() {
+        anyhow::bail!("no data directory at {data_dir:?}; nothing was checked or created");
+    }
+    let db = Database::open_read_only(data_dir)
+        .with_context(|| format!("cannot open {data_dir:?} read-only"))?;
+    let store = BlockStore::new(&db);
+
+    // A start reads the record only once the database names a head
+    // (`PoAEngine::load_chain`).
+    let head = store
+        .get_latest()
+        .context("reading the recorded head")?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{data_dir:?} records no chain head, so a start checks no finality record \
+                 there; is this the validator's data directory?"
+            )
+        })?;
+    println!("Data directory:  {} (opened read-only)", data_dir.display());
+    println!(
+        "Head:            height {} ({})",
+        head.height(),
+        head.hash()
+    );
+
+    match store.checked_finality_record() {
+        Ok(Some((height, hash))) => {
+            println!("Finality record: height {height}, block {hash}");
+            println!("  Whole, at or below the head, and the canonical block at its height.");
+            println!("Result: START_ACCEPTS");
+            Ok(true)
+        }
+        Ok(None) => {
+            println!("Finality record: absent (neither finalized_height nor finalized_hash)");
+            println!("  A start accepts this and treats nothing as finalized until the next");
+            println!("  block derives finality again; it logs a warning when the head is above");
+            println!("  finality_depth.");
+            println!("Result: START_ACCEPTS");
+            Ok(true)
+        }
+        Err(refusal) => {
+            println!("Finality record: {refusal}");
+            println!(
+                "  A start of this binary refuses this database: \"refusing to start: {refusal}\""
+            );
+            // Which remedies apply depends on what the record holds: the
+            // rollback rewrites the pair only when it can read a height above
+            // its target, and the previous binary rewrites it only once its
+            // head passes the recorded height.
+            let rollback_rewrites = matches!(store.get_finalized_height(), Ok(Some(_)));
+            let above_head = matches!(refusal, FinalityRecordError::AboveHead { .. });
+            println!("Remedies (each rewrites the record; run this check again afterwards):");
+            if rollback_rewrites {
+                println!(
+                    "  - `sumchain rollback --data-dir <dir> --to-height <h>` with <h> below the \
+                     recorded height: it writes height and hash together, in its own batch."
+                );
+            } else {
+                println!(
+                    "  - not `sumchain rollback`: it rewrites the record only when it can read \
+                     finalized_height, so it leaves this record as it is (height absent) or \
+                     stops with an error (height undecodable)."
+                );
+            }
+            if !above_head {
+                println!(
+                    "  - start the previous binary on this directory: it does not check the \
+                     record, and it writes height and hash at its next finalized block. Stop it \
+                     gracefully once a block has finalized."
+                );
+            }
+            println!(
+                "  - restore the pre-upgrade backup of this directory, or resynchronize it from \
+                 an empty one."
+            );
+            println!("Result: START_REFUSES");
+            Ok(false)
+        }
+    }
 }
 
 /// Format a Unix timestamp as a human-readable date string
