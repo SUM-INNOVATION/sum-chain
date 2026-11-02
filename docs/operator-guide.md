@@ -117,8 +117,26 @@ be read, holds one key without the other, is above the head, or does not name
 the canonical block at its height. The record is never reset to zero, and a
 refused start changes nothing. A database with no record starts with nothing
 finalized, as before. The record is written as one batch after each block that
-finalizes another; if that write fails, the node stops (`node fail-stopped`)
-rather than running on with finality it has not recorded.
+finalizes another.
+
+If that write fails, the consensus engine halts rather than run on with
+finality it has not recorded. **The process does not exit.**
+- It logs `consensus engine fail-stopped; restart to reload the committed
+  chain` once, at error level, with the reason (`could not persist local
+  finality at height …`).
+- From then on it refuses every production and import with `node
+  fail-stopped: …`, logged as `Failed to create block`, `Failed to import
+  block` and `Failed to import synced block` warnings.
+- It keeps serving RPC. `/health` stays `ok` and `/ready` keeps reporting sync
+  state and peers, so neither probe shows the halt, and a supervisor that
+  restarts the node only when it exits does not restart it. Alert on the log
+  line `consensus engine fail-stopped`.
+- Restart the node to recover. The start reads the last record that was
+  written, and the next block derives finality again.
+- A block this validator produced in the slot whose finality write failed is
+  kept but was never announced. After the restart, its peers fetch it by sync.
+  Under round robin, the chain makes no progress from the halt until that
+  restart.
 
 Before installing a binary with this start check, run that binary's check on
 each validator's data directory while the node is stopped:
@@ -137,6 +155,22 @@ this: it reports the running node's memory, not the stored record. `sumchain
 info` prints the two stored keys but does not check them: it prints a missing
 hash as zeros, omits a height it cannot decode, and opens the database
 read-write.
+
+If the check or a start refuses the record, rewrite the record before starting
+this binary. Which tool rewrites it depends on what the record holds (the
+check prints the remedies that apply):
+
+| The record holds | `sumchain rollback --to-height <h>`, h below the recorded height | The previous binary, until one block finalizes |
+|---|---|---|
+| a height without its hash; another block's hash; an undecodable hash | rewrites both keys, in its own batch | rewrites both keys |
+| a height above the head | rewrites both keys | no: it rewrites nothing until its head passes the recorded height |
+| a hash without its height | no: it decides from `finalized_height`, finds none, and leaves the record as it is | rewrites both keys |
+| an undecodable height | no: it stops with `Invalid finalized height bytes` | rewrites both keys |
+
+Restoring the pre-upgrade backup of the directory, or resynchronizing from an
+empty one, works in every case. Before an upgrade nothing has changed yet, so
+the simplest remedy is usually the previous binary: start it again, let a block
+finalize, stop it gracefully, and run the check again.
 
 ## Further Reading
 
