@@ -354,6 +354,27 @@ pub fn recorded_head(block_store: &BlockStore) -> Result<Option<Block>> {
     Ok(block_store.get_by_hash(&hash)?)
 }
 
+/// [`execute_reorg`], [`apply_branch`] and [`resume`] validate and execute a
+/// whole branch against ONE validator set. That is correct only under protocol
+/// v1's static membership. Under the dormant G5 configuration (#351) each
+/// block's set depends on its own parent state, which only the engine's chain
+/// switch ([`crate::branch_switch`]) resolves, so these three refuse rather
+/// than validate a branch that crosses a transition against the wrong set.
+/// No production path calls them (the engine switches through
+/// `branch_switch`; the operator rollback is [`execute_rollback`], which takes
+/// no set), and production never configures membership.
+fn refuse_one_set_under_membership(executor: &BlockExecutor, what: &str) -> Result<()> {
+    if executor.membership_configured() {
+        return Err(ConsensusError::Membership(format!(
+            "reorg::{what} validates and executes a whole branch against one validator set, \
+             which is wrong under the dormant G5 configuration (#351), where each block's set \
+             comes from its own parent state; the engine's chain switch (branch_switch) is the \
+             path that resolves it. Nothing was read or written"
+        )));
+    }
+    Ok(())
+}
+
 /// Unwind the abandoned branch, then apply the adopted one.
 ///
 /// **Not the engine's chain-switch path (#269).** This unwinds the old branch
@@ -387,6 +408,9 @@ pub fn recorded_head(block_store: &BlockStore) -> Result<Option<Block>> {
 /// Interrupt anywhere and the reopened database names a head whose state is
 /// fully applied: the old tip, the ancestor, or some prefix of the new branch.
 /// [`resume`] takes it from there.
+///
+/// Refused, before anything is read or written, when `executor` runs under the
+/// dormant G5 configuration (#351): see `refuse_one_set_under_membership`.
 pub fn execute_reorg(
     db: &Database,
     state: &StateManager,
@@ -396,6 +420,7 @@ pub fn execute_reorg(
     journal: &dyn BranchJournal,
     missing: MissingJournalPolicy,
 ) -> Result<ReorgOutcome> {
+    refuse_one_set_under_membership(executor, "execute_reorg")?;
     let block_store = BlockStore::new(db);
     let ancestor = block_store
         .get_by_hash(&plan.ancestor_hash)?
@@ -495,6 +520,9 @@ pub fn validate_branch(
 /// recorded head IS it — not when its rows happen to be present, which is a
 /// weaker condition that a partially-written batch could also satisfy, except
 /// that no partially-written batch can exist here.
+///
+/// Refused, before anything is read or written, when `executor` runs under the
+/// dormant G5 configuration (#351): see `refuse_one_set_under_membership`.
 pub fn apply_branch(
     db: &Database,
     state: &StateManager,
@@ -502,6 +530,7 @@ pub fn apply_branch(
     branch: &[Block],
     validators: &[[u8; 32]],
 ) -> Result<ReorgOutcome> {
+    refuse_one_set_under_membership(executor, "apply_branch")?;
     let block_store = BlockStore::new(db);
     let head = block_store.get_latest_hash()?;
 
@@ -555,6 +584,10 @@ pub fn apply_branch(
 /// carrying its own head pointer. Recovery therefore needs no crash marker and
 /// no journal of its own: the head IS the marker, and it is written by the same
 /// atomic write as the state it names.
+///
+/// Refused, before the accumulator or anything else is touched, when
+/// `executor` runs under the dormant G5 configuration (#351): see
+/// `refuse_one_set_under_membership`.
 pub fn resume(
     db: &Database,
     state: &StateManager,
@@ -564,6 +597,7 @@ pub fn resume(
     journal: &dyn BranchJournal,
     missing: MissingJournalPolicy,
 ) -> Result<ReorgOutcome> {
+    refuse_one_set_under_membership(executor, "resume")?;
     let block_store = BlockStore::new(db);
     let head = recorded_head(&block_store)?.ok_or_else(|| {
         ConsensusError::InvalidBlock(
