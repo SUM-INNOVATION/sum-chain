@@ -216,6 +216,15 @@ pub(crate) fn set_for_arriving_block(
     )))
 }
 
+/// A configuration for this crate's unit tests only: `anchor`, epoch length
+/// `epoch_length`, activation 0, N_min the ratified 5, `max_validators` 5,
+/// minimum stake 1. Every value is a test fixture.
+#[cfg(test)]
+pub(crate) fn test_configuration(anchor: Vec<[u8; 32]>, epoch_length: u64) -> Arc<G5Membership> {
+    let schedule = EpochSchedule::new(epoch_length, 0).unwrap();
+    Arc::new(G5Membership::new(schedule, PRODUCT_MINIMUM, 5, 1, anchor).unwrap())
+}
+
 /// The set for block `height` of a replacement branch that forks at
 /// `ancestor_height`, read from the branch layer: the block's own parent state.
 pub(crate) fn set_on_branch(

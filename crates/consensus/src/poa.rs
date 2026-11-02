@@ -398,7 +398,18 @@ impl PoAEngine {
     /// so the early return below is always taken. Kept for the canonical
     /// validator-set history work (#266), which has to replace its direct,
     /// unjournaled write before epochs can be enabled.
+    ///
+    /// Never under the dormant G5 configuration (#351), whatever
+    /// `staking.epoch_length` says. With a configuration, membership comes only
+    /// from `vset/` rows written in publication batches; this writer stores a
+    /// legacy `validator_sets` row out of band and swaps the in-memory set, and
+    /// `check_stored_rows` refuses any legacy row at the next start. So lifting
+    /// protocol v1's `epoch_length != 0` refusal can never re-enable it beside
+    /// the configuration.
     fn maybe_update_validator_set(&self, height: BlockHeight, block_hash: &Hash) {
+        if self.membership.is_some() {
+            return;
+        }
         let epoch_length = self.params.staking.as_ref()
             .map(|s| s.epoch_length)
             .unwrap_or(0);
@@ -2241,6 +2252,69 @@ mod tests {
         assert_eq!(genesis_block.height(), 0);
         assert!(genesis_block.header.parent_hash.is_zero());
         assert_eq!(engine.current_height(), 0);
+    }
+
+    /// F361-4 (#351): the legacy epoch writer never runs beside the dormant G5
+    /// configuration. The staking epoch length is set on the engine directly,
+    /// as if protocol v1's `epoch_length != 0` refusal had been lifted. Without
+    /// a configuration the same call writes a legacy `validator_sets` row and
+    /// swaps the in-memory set (the control); with one it writes nothing.
+    #[tokio::test]
+    async fn the_legacy_epoch_writer_never_runs_beside_the_g5_configuration() {
+        fn lifted(mut engine: PoAEngine) -> PoAEngine {
+            engine.params.staking = Some(sumchain_primitives::StakingParams {
+                epoch_length: 10,
+                ..Default::default()
+            });
+            engine
+        }
+        fn legacy_rows(db: &Database) -> usize {
+            db.iter_checked_from(sumchain_storage::cf::VALIDATOR_SETS, None)
+                .unwrap()
+                .count()
+        }
+
+        // Control: no configuration, so the legacy writer acts at a boundary.
+        let (db, state, mempool, genesis, key, _dir) = setup();
+        let engine = lifted(
+            PoAEngine::new(
+                db.clone(),
+                state,
+                mempool,
+                &genesis,
+                Some(KeyPair::from_bytes(key)),
+            )
+            .unwrap(),
+        );
+        engine.maybe_update_validator_set(10, &Hash::ZERO);
+        assert_eq!(legacy_rows(&db), 1, "the control: the legacy writer ran");
+        assert!(engine.active_validator_set.read().is_some());
+
+        // With a configuration: nothing at any boundary.
+        let (db, state, mempool, genesis, key, _dir2) = setup();
+        let mut engine = lifted(
+            PoAEngine::new(
+                db.clone(),
+                state,
+                mempool,
+                &genesis,
+                Some(KeyPair::from_bytes(key)),
+            )
+            .unwrap(),
+        );
+        engine.membership = Some(crate::membership::test_configuration(
+            genesis.validator_pubkeys().unwrap(),
+            10,
+        ));
+        for height in [10, 20, 30, 100] {
+            engine.maybe_update_validator_set(height, &Hash::ZERO);
+        }
+        assert_eq!(
+            legacy_rows(&db),
+            0,
+            "no legacy row beside the configuration"
+        );
+        assert!(engine.active_validator_set.read().is_none());
     }
 
     #[tokio::test]
