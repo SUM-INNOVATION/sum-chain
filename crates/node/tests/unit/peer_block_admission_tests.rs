@@ -1326,3 +1326,168 @@ async fn a_declaration_that_wins_the_race_is_asked_for_status_once() {
     })
     .await;
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 7. Issue #354's missed-block fetch, beside the declaration
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// A gossiped block more than one height above the head is missing its
+// ancestors, and the node asks the peer that sent it for them (#354). These pin
+// how that fetch sits beside section 6. An undeclared peer's block at or above
+// the boundary is refused before it can start a fetch; once the peer declares,
+// the missed block is fetched once, through the status asked for again. A
+// declared peer's block starts the fetch itself, and nothing is asked again.
+
+/// A node that missed a block, and a peer that gossips the next one before it
+/// declares.
+///
+/// The gossiped block is refused, so it starts no fetch: a range request to an
+/// undeclared peer at or above the boundary would only be refused block by
+/// block. Once the peer declares, the status asked for again shows the node two
+/// behind, and one request fetches both blocks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_missed_block_whose_peer_declares_late_is_fetched_once() {
+    let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
+    let tip = blocks.last().expect("a chain").clone();
+    let head = tip.height() - 2;
+    let level = blocks[(head - 1) as usize].clone();
+    let missed = blocks[head as usize].clone();
+    assert!(
+        head + 1 >= ENFORCE_FROM,
+        "the missed block must be one only a declared peer may supply"
+    );
+    let dir = left_at(&genesis, &blocks, head).await;
+
+    let mut peer = ScriptedPeer::start().await;
+    let peer_id = peer.id();
+    let mut node = full_node(dir.path(), &genesis, Some(peer.dial.as_str()));
+    let (compat, consensus, metrics, digest) = (
+        node.peer_compat.clone(),
+        node.consensus.clone(),
+        node.metrics.clone(),
+        node.protocol_digest,
+    );
+
+    drive(&mut node, async {
+        let (node_id, digest_req, status_req) = peer.connected().await;
+
+        // The tip, gossiped over the missed block while the peer is undeclared:
+        // refused, and no block request follows. Published until the node has
+        // refused it, as in section 6.
+        let deadline = Instant::now() + WAIT;
+        while metrics.blocks.block_errors.load(Ordering::Relaxed) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the gossiped block never reached the node"
+            );
+            peer.send(NetworkCommand::BroadcastBlock(tip.clone())).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert_eq!(peer.node_height(node_id).await, head);
+        peer.quiet("a block request to a peer that has not declared", |e| {
+            matches!(e, NetworkEvent::SyncBlocksRequest { .. })
+        })
+        .await;
+        assert_eq!(compat.status(&peer_id), PeerCompat::Undeclared);
+        assert_eq!(consensus.current_height(), head);
+
+        // The declaration, then the status given before the peer produced
+        // anything: taken now, and level with the node.
+        peer.declare(digest_req, digest).await;
+        assert!(eventually(|| compat.status(&peer_id) == PeerCompat::Verified).await);
+        peer.answer_status(status_req, &level).await;
+
+        // Asked again, it shows the node two behind: one request, both blocks.
+        let again = peer
+            .status_request(node_id, "second status request after the peer declared")
+            .await;
+        peer.answer_status(again, &tip).await;
+        assert_eq!(
+            peer.serve_blocks(node_id, &blocks).await,
+            (head + 1, tip.height())
+        );
+        assert!(
+            eventually(|| consensus.current_height() == tip.height()).await,
+            "the node never fetched the block it missed; it is at {}",
+            consensus.current_height()
+        );
+        peer.quiet("a second block request", |e| {
+            matches!(e, NetworkEvent::SyncBlocksRequest { .. })
+        })
+        .await;
+        assert_eq!(
+            peer.status_requests, 2,
+            "asked once on connect and once on the declaration"
+        );
+    })
+    .await;
+
+    assert!(BlockStore::new(&node.db).contains(&missed.hash()).unwrap());
+}
+
+/// The control: the same missed block from a peer that has declared.
+///
+/// Nothing is refused, so nothing is asked again. The gossiped block itself
+/// starts the fetch (#354), from the peer that sent it, in one request, and the
+/// node asks for the peer's status once, on connect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_missed_block_from_a_declared_peer_is_fetched_from_it_once() {
+    let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
+    let tip = blocks.last().expect("a chain").clone();
+    let head = tip.height() - 2;
+    let level = blocks[(head - 1) as usize].clone();
+    let missed = blocks[head as usize].clone();
+    let dir = left_at(&genesis, &blocks, head).await;
+
+    let mut peer = ScriptedPeer::start().await;
+    let peer_id = peer.id();
+    let mut node = full_node(dir.path(), &genesis, Some(peer.dial.as_str()));
+    let (compat, consensus, metrics, digest) = (
+        node.peer_compat.clone(),
+        node.consensus.clone(),
+        node.metrics.clone(),
+        node.protocol_digest,
+    );
+
+    drive(&mut node, async {
+        let (node_id, digest_req, status_req) = peer.connected().await;
+
+        // Declared first, and level with the node: nothing to fetch yet.
+        peer.declare(digest_req, digest).await;
+        assert!(eventually(|| compat.status(&peer_id) == PeerCompat::Verified).await);
+        peer.answer_status(status_req, &level).await;
+        assert_eq!(peer.node_height(node_id).await, head);
+
+        // The tip, gossiped over the missed block: it fails to import, and the
+        // node asks this peer for the missed block and the tip.
+        let deadline = Instant::now() + WAIT;
+        while metrics.blocks.block_errors.load(Ordering::Relaxed) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the gossiped block never reached the node"
+            );
+            peer.send(NetworkCommand::BroadcastBlock(tip.clone())).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert_eq!(
+            peer.serve_blocks(node_id, &blocks).await,
+            (head + 1, tip.height())
+        );
+        assert!(
+            eventually(|| consensus.current_height() == tip.height()).await,
+            "the node never fetched the block it missed; it is at {}",
+            consensus.current_height()
+        );
+        peer.quiet("a second request", |e| {
+            matches!(
+                e,
+                NetworkEvent::SyncBlocksRequest { .. } | NetworkEvent::SyncStatusRequest { .. }
+            )
+        })
+        .await;
+        assert_eq!(peer.status_requests, 1, "asked once, on connect");
+    })
+    .await;
+
+    assert!(BlockStore::new(&node.db).contains(&missed.hash()).unwrap());
+}
