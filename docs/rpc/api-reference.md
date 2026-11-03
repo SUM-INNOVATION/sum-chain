@@ -32,6 +32,26 @@ Examples:
 - `0.5 Ϙ` = `500000000` base units
 - `0.001 Ϙ` = `1000000` base units
 
+## Address format
+
+An address is 20 bytes. A parameter that takes an address accepts it as a string in these forms, which all name the same 20 bytes:
+
+| Form | Text | Accepted by |
+|---|---|---|
+| Plain | base58 of the 20 bytes followed by a 4-byte checksum (the first 4 bytes of `blake3(blake3(bytes))`) | every address parameter |
+| Agent (`r0`) | `r0` followed by the plain text, unchanged: the same bytes, key and checksum (issue #309) | every address parameter |
+| Hex | 40 hex digits, `0x` optional | every address parameter except those listed below, which take base58 only and still refuse hex |
+
+Base58-only parameters (plain or `r0`, no hex): `employment_getIssuer`, `employment_getCredentialsByEmployeeAddress`, `employment_getActiveCredentialsByEmployeeAddress`, `employment_getIncomeAttestationsByHolderAddress`, `employment_createCredential` (`employee_address`), `docclass_issueAcademicCredential` (`holder_address`), `docclass_getAcademicCredentialsByHolder`, and the member and approver addresses of `policy_buildCreateAccount` and `policy_buildSubmitProposal`.
+
+- **No fixed length.** Most plain addresses are 33 characters, about 4% are 32, and an address with leading zero bytes is shorter (`Address::ZERO` is under 32). The node decodes the text and checks its length and checksum; a client should do the same rather than count characters.
+- **`r0` is unambiguous.** `0` is not in the base58 alphabet and `r` is not a hex digit, so no plain or hex address starts with `r0`. An argument that starts with `r0` is the agent form or `-32602`; it is never retried as hex.
+- **The form changes nothing.** No method refuses either form, and the node keeps no list of which accounts are agents. A plain address and its `r0` form are the same account in every method.
+- **Output is unchanged.** No response contains the `r0` form: every address in a response is printed in the plain base58 form, as before, including an address echoed from a request that used the `r0` form or hex.
+- **Text only.** Transactions, blocks, state and digests carry the 20 bytes; the `r0` form is not part of any of them.
+
+The TypeScript SDK's `toRaddress` / `fromRaddress` convert between the plain and agent forms, and `isValidAddress` accepts all three.
+
 ## Methods
 
 ### Chain Methods
@@ -590,7 +610,7 @@ Resolve public registry labels for an address (issue #64). Read-only **point loo
 1. `address` (string) - Address to resolve (base58)
 
 **Returns:** `AddressLabelsInfo`
-- `address` (string) - the queried address, echoed
+- `address` (string) - the queried address, echoed in the plain base58 form (also for an `r0` or hex argument)
 - `primary_label` (string | null) - deterministic primary label (first `Active` institution name, else first `Active` label, else `null`)
 - `labels` (array) - `{ label, kind: "institution" | "role", source, status }`, in fixed source order
 
