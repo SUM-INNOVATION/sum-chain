@@ -27,7 +27,9 @@ pub use peer_manager::{
     BanOutcome, ConnectionDirection, ConnectionLimits, ConnectionStats, PeerInfo, PeerManager,
     PeerState,
 };
-pub use sync::{SyncRequest, SyncResponse, SyncState, MAX_BLOCKS_PER_REQUEST};
+pub use sync::{
+    SyncRequest, SyncRequestKind, SyncRequestTag, SyncResponse, SyncState, MAX_BLOCKS_PER_REQUEST,
+};
 
 use thiserror::Error;
 

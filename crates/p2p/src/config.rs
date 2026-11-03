@@ -1,6 +1,7 @@
 //! Network configuration for SUM Chain P2P.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use libp2p_core::Multiaddr;
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,15 @@ pub struct NetworkConfig {
     /// Path to node key file (for persistent peer ID)
     #[serde(default)]
     pub node_key_file: Option<PathBuf>,
+    /// How long an outbound sync request may wait for its answer before it
+    /// fails ([`crate::sync::SYNC_REQUEST_TIMEOUT`]). Not read from a config
+    /// file: only in-crate and integration tests set another value.
+    #[serde(skip, default = "default_sync_request_timeout")]
+    pub sync_request_timeout: Duration,
+}
+
+fn default_sync_request_timeout() -> Duration {
+    crate::sync::SYNC_REQUEST_TIMEOUT
 }
 
 impl Default for NetworkConfig {
@@ -38,6 +48,7 @@ impl Default for NetworkConfig {
             max_message_size: 10 * 1024 * 1024, // 10 MB
             rate_limit_per_peer: 100,
             node_key_file: None,
+            sync_request_timeout: crate::sync::SYNC_REQUEST_TIMEOUT,
         }
     }
 }

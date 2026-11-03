@@ -21,6 +21,26 @@ pub const MAX_BLOCKS_PER_REQUEST: u64 = 100;
 /// Request timeout for sync operations
 pub const SYNC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A node-chosen label for one outbound block request (`NetworkCommand::RequestBlocks`).
+/// Local to this node, never sent: the network reports it back with the
+/// request's answer (`NetworkEvent::SyncBlocksReceived`) or failure
+/// (`NetworkEvent::SyncRequestFailed`), so the caller can tell which of its
+/// requests a batch or a failure belongs to.
+pub type SyncRequestTag = u64;
+
+/// Which outbound sync request a failure belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncRequestKind {
+    /// A `GetStatus` request.
+    Status,
+    /// A `GetProtocolId` request.
+    ProtocolId,
+    /// A `GetBlocks` request, with the tag its sender gave it.
+    Blocks(SyncRequestTag),
+    /// A request this network service has no record of.
+    Unknown,
+}
+
 /// Sync request messages
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SyncRequest {
@@ -182,9 +202,15 @@ impl Codec for SyncCodec {
 
 /// Create sync behaviour
 pub fn create_sync_behaviour() -> request_response::Behaviour<SyncCodec> {
+    create_sync_behaviour_with_timeout(SYNC_REQUEST_TIMEOUT)
+}
+
+/// [`create_sync_behaviour`] with another request timeout (tests; see
+/// `NetworkConfig::sync_request_timeout`).
+pub fn create_sync_behaviour_with_timeout(timeout: Duration) -> request_response::Behaviour<SyncCodec> {
     let protocol = StreamProtocol::new(SYNC_PROTOCOL);
     let config = request_response::Config::default()
-        .with_request_timeout(SYNC_REQUEST_TIMEOUT);
+        .with_request_timeout(timeout);
 
     request_response::Behaviour::new(
         [(protocol, ProtocolSupport::Full)],

@@ -671,10 +671,13 @@ impl BlockSyncer {
         }
 
         // Send the request
+        // The syncer tracks its requests by range (`pending_requests`), not
+        // by tag.
         let cmd = NetworkCommand::RequestBlocks {
             peer,
             from_height: from,
             to_height: to,
+            tag: 0,
         };
 
         if let Err(e) = self.command_tx.send(cmd).await {

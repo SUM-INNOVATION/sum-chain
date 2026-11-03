@@ -30,7 +30,7 @@ use crate::config::NetworkConfig;
 use crate::peer_manager::{
     BanOutcome, ConnectionDirection, ConnectionLimits, ConnectionStats, PeerInfo, PeerManager,
 };
-use crate::sync::{SyncRequest, SyncResponse, SyncState};
+use crate::sync::{SyncRequest, SyncRequestKind, SyncRequestTag, SyncResponse, SyncState};
 use crate::topics;
 use crate::{P2pError, Result};
 
@@ -209,11 +209,18 @@ pub enum NetworkEvent {
     SyncBlocksReceived {
         peer: PeerId,
         blocks: Vec<Block>,
+        /// The tag of the `NetworkCommand::RequestBlocks` this answers. `None`
+        /// when the answer is to some other request (a peer answering a status
+        /// request with blocks, or one this service has no record of).
+        tag: Option<SyncRequestTag>,
     },
-    /// Sync request failed
+    /// Sync request failed: an error answer, a timeout, or the connection
+    /// closing before the answer.
     SyncRequestFailed {
         peer: PeerId,
         error: String,
+        /// Which of this node's requests failed.
+        request: SyncRequestKind,
     },
     /// A peer asked which protocol digest this binary enforces; the node
     /// answers via `NetworkCommand::SendProtocolIdResponse`.
@@ -273,6 +280,8 @@ pub enum NetworkCommand {
         peer: PeerId,
         from_height: u64,
         to_height: u64,
+        /// Reported back with the answer or the failure; see [`SyncRequestTag`].
+        tag: SyncRequestTag,
     },
     /// Send sync status response (using request_id from SyncStatusRequest event)
     SendSyncStatusResponse {
@@ -384,6 +393,11 @@ pub struct NetworkService {
     /// names no port, and with `/ip4/0.0.0.0` it names no interface. This is
     /// what a peer can actually dial. See [`NetworkEvent::Listening`].
     listen_addrs: RwLock<Vec<Multiaddr>>,
+    /// This node's outbound sync requests that have neither been answered nor
+    /// failed, by the request id the request-response behaviour gave them.
+    /// It is what lets an answer or a failure name the request it belongs to,
+    /// which the wire messages do not carry.
+    outbound_sync: RwLock<HashMap<libp2p_request_response::OutboundRequestId, SyncRequestKind>>,
 }
 
 impl NetworkService {
@@ -417,6 +431,7 @@ impl NetworkService {
             peer_manager,
             rate_limiter: PeerRateLimiter::new(rate_limit),
             listen_addrs: RwLock::new(Vec::new()),
+            outbound_sync: RwLock::new(HashMap::new()),
         };
 
         (service, command_rx)
@@ -440,6 +455,7 @@ impl NetworkService {
             peer_manager,
             rate_limiter: PeerRateLimiter::new(RateLimitConfig::default()),
             listen_addrs: RwLock::new(Vec::new()),
+            outbound_sync: RwLock::new(HashMap::new()),
         };
 
         (service, command_rx)
@@ -509,6 +525,16 @@ impl NetworkService {
     /// Set sync state
     pub fn set_sync_state(&self, state: SyncState) {
         *self.sync_state.write() = state;
+    }
+
+    /// How many of this node's block requests are outstanding: sent, and
+    /// neither answered nor failed.
+    pub fn outstanding_block_requests(&self) -> usize {
+        self.outbound_sync
+            .read()
+            .values()
+            .filter(|k| matches!(k, SyncRequestKind::Blocks(_)))
+            .count()
     }
 
     /// Get connected peer IDs
@@ -633,8 +659,9 @@ impl NetworkService {
             .multiplex(yamux::Config::default())
             .boxed();
 
-        let behaviour =
+        let mut behaviour =
             SumChainBehaviour::new().map_err(|e| P2pError::Transport(e.to_string()))?;
+        behaviour.sync = crate::sync::create_sync_behaviour_with_timeout(self.config.sync_request_timeout);
 
         let swarm_config = libp2p_swarm::Config::with_tokio_executor()
             .with_idle_connection_timeout(Duration::from_secs(60));
@@ -751,14 +778,16 @@ impl NetworkService {
                         }
                         Some(NetworkCommand::RequestSyncStatus(peer)) => {
                             debug!("Requesting sync status from {}", peer);
-                            swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetStatus);
+                            let id = swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetStatus);
+                            self.outbound_sync.write().insert(id, SyncRequestKind::Status);
                         }
-                        Some(NetworkCommand::RequestBlocks { peer, from_height, to_height }) => {
-                            debug!("Requesting blocks {}-{} from {}", from_height, to_height, peer);
-                            swarm.behaviour_mut().sync.send_request(
+                        Some(NetworkCommand::RequestBlocks { peer, from_height, to_height, tag }) => {
+                            debug!("Requesting blocks {}-{} from {} (tag {})", from_height, to_height, peer, tag);
+                            let id = swarm.behaviour_mut().sync.send_request(
                                 &peer,
                                 SyncRequest::GetBlocks { from_height, to_height },
                             );
+                            self.outbound_sync.write().insert(id, SyncRequestKind::Blocks(tag));
                         }
                         Some(NetworkCommand::SendSyncStatusResponse { request_id, height, best_hash, chain_id }) => {
                             if let Some(channel) = pending_sync_responses.remove(&request_id) {
@@ -782,7 +811,8 @@ impl NetworkService {
                         }
                         Some(NetworkCommand::RequestProtocolId(peer)) => {
                             debug!("Requesting protocol digest from {}", peer);
-                            swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetProtocolId);
+                            let id = swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetProtocolId);
+                            self.outbound_sync.write().insert(id, SyncRequestKind::ProtocolId);
                         }
                         Some(NetworkCommand::SendProtocolIdResponse { request_id, digest }) => {
                             if let Some(channel) = pending_sync_responses.remove(&request_id) {
@@ -1008,8 +1038,17 @@ impl NetworkService {
                         }
                     }
                 }
-                Message::Response { response, .. } => {
+                Message::Response { request_id, response } => {
                     debug!("Received sync response from {}: {:?}", peer, std::mem::discriminant(&response));
+                    let kind = self
+                        .outbound_sync
+                        .write()
+                        .remove(&request_id)
+                        .unwrap_or(SyncRequestKind::Unknown);
+                    let tag = match kind {
+                        SyncRequestKind::Blocks(tag) => Some(tag),
+                        _ => None,
+                    };
                     match response {
                         SyncResponse::Status {
                             height,
@@ -1028,6 +1067,7 @@ impl NetworkService {
                             let _ = self.event_tx.send(NetworkEvent::SyncBlocksReceived {
                                 peer,
                                 blocks,
+                                tag,
                             });
                         }
                         SyncResponse::Block(block_opt) => {
@@ -1035,6 +1075,7 @@ impl NetworkService {
                                 let _ = self.event_tx.send(NetworkEvent::SyncBlocksReceived {
                                     peer,
                                     blocks: vec![block],
+                                    tag,
                                 });
                             }
                         }
@@ -1048,16 +1089,23 @@ impl NetworkService {
                             let _ = self.event_tx.send(NetworkEvent::SyncRequestFailed {
                                 peer,
                                 error,
+                                request: kind,
                             });
                         }
                     }
                 }
             },
-            Event::OutboundFailure { peer, error, .. } => {
+            Event::OutboundFailure { peer, request_id, error, .. } => {
                 warn!("Outbound sync request to {} failed: {:?}", peer, error);
+                let request = self
+                    .outbound_sync
+                    .write()
+                    .remove(&request_id)
+                    .unwrap_or(SyncRequestKind::Unknown);
                 let _ = self.event_tx.send(NetworkEvent::SyncRequestFailed {
                     peer,
                     error: format!("{:?}", error),
+                    request,
                 });
             }
             Event::InboundFailure { peer, error, .. } => {
