@@ -68,6 +68,111 @@ pub(crate) fn missing_ancestor_range(our_height: u64, block_height: u64) -> Opti
 /// consensus or digest change.
 pub(crate) const SYNC_STALL_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Issue #354: the node's one block-sync stream.
+///
+/// A stream is a chain of range requests to one peer: each batch it brings
+/// asks that peer for the next range, until the shared target. Every reason to
+/// sync used to start a stream of its own: a peer's status showing it ahead
+/// (on connect, after its declaration, after a stall check) and a gossiped
+/// block whose ancestors are missing. A block this node already holds imports
+/// as a success, so parallel streams over the same ranges never died out. A
+/// node catching up while the network produced started one more stream per
+/// gossiped block, each downloading the rest of the range again.
+///
+/// Now at most one stream runs. A reason to sync while one runs only raises
+/// the shared target (see [`record_sync_target`]), and only the running
+/// stream's batches continue it. It ends when it reaches the target, when a
+/// batch brings nothing, when its request fails or its peer disconnects, and,
+/// as a backstop, when it has neither continued nor ended for longer than a
+/// request may take ([`sumchain_p2p::sync::SYNC_REQUEST_TIMEOUT`]). The next
+/// reason to sync then starts a new one at the height after the head. So at
+/// most one block request is outstanding at a time, and a block is requested
+/// again only after the stream that asked for it ended without it.
+#[derive(Debug, Default)]
+pub(crate) struct SyncStream {
+    /// The running stream's peer, and when it last started or continued.
+    running: Option<(PeerId, std::time::Instant)>,
+}
+
+impl SyncStream {
+    /// Start a stream from `peer` unless one is running. `true` when the
+    /// caller is to send the stream's first request.
+    pub(crate) fn start(&mut self, peer: PeerId, now: std::time::Instant) -> bool {
+        if self.running.is_some() {
+            return false;
+        }
+        self.running = Some((peer, now));
+        true
+    }
+
+    /// Whether one is running.
+    pub(crate) fn is_running(&self) -> bool {
+        self.running.is_some()
+    }
+
+    /// Whether a batch from `peer` belongs to the running stream, and so may
+    /// continue it. Records the progress when it does.
+    pub(crate) fn continues(&mut self, peer: &PeerId, now: std::time::Instant) -> bool {
+        match &mut self.running {
+            Some((running, at)) if running == peer => {
+                *at = now;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// End the running stream.
+    pub(crate) fn end(&mut self) {
+        self.running = None;
+    }
+
+    /// End the running stream if it is `peer`'s: its request failed, or the
+    /// peer disconnected. `true` when it did.
+    pub(crate) fn end_if_from(&mut self, peer: &PeerId) -> bool {
+        if matches!(&self.running, Some((running, _)) if running == peer) {
+            self.running = None;
+            return true;
+        }
+        false
+    }
+
+    /// The backstop: end a stream that has neither continued nor ended for
+    /// longer than `timeout`. By then its request has been answered or has
+    /// failed, so nothing it asked for is still on its way. Returns its peer.
+    pub(crate) fn end_if_lost(
+        &mut self,
+        now: std::time::Instant,
+        timeout: std::time::Duration,
+    ) -> Option<PeerId> {
+        match self.running {
+            Some((peer, at)) if now.saturating_duration_since(at) > timeout => {
+                self.running = None;
+                Some(peer)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Issue #354: record a sync toward `target` with the head at `our_height`.
+/// While a stream runs, a lower target never replaces the one it has.
+pub(crate) fn record_sync_target(
+    network: &NetworkService,
+    stream: &SyncStream,
+    our_height: u64,
+    target: u64,
+) {
+    let target = match network.sync_state() {
+        SyncState::Syncing { target_height, .. } if stream.is_running() => target_height.max(target),
+        _ => target,
+    };
+    network.set_sync_state(SyncState::Syncing {
+        current_height: our_height,
+        target_height: target,
+    });
+}
+
 /// What the consensus boundary did with a block a peer supplied.
 ///
 /// Three outcomes and not a `bool`, because the caller has to tell a REFUSAL
@@ -155,6 +260,10 @@ pub struct Node {
     /// Which deprecated custodial signing families the RPC serves. Both off
     /// unless [`Node::apply_rpc_custodial_signing`] turns one on.
     rpc_custodial_signing: sumchain_rpc::custodial::CustodialSigningMethods,
+    /// How long the head may stay at one height before this node asks its
+    /// peers for theirs (#354, second trigger). [`SYNC_STALL_CHECK`]; only
+    /// in-crate tests set another value, to keep their request counts exact.
+    sync_stall_check: std::time::Duration,
 }
 
 impl Node {
@@ -538,6 +647,7 @@ impl Node {
             peer_compat: Arc::new(PeerCompatRegistry::new(protocol_digest, enforce_from)),
             rpc_contract_exec: (sumc_runtime::LocalExecutionLimits::DEFAULT, 1),
             rpc_custodial_signing: sumchain_rpc::custodial::CustodialSigningMethods::default(),
+            sync_stall_check: SYNC_STALL_CHECK,
         })
     }
 
@@ -1042,12 +1152,16 @@ impl Node {
         // Issue #354, second trigger: notice a head that stopped moving. See
         // `SYNC_STALL_CHECK`. The first check is one interval after start, so
         // a node that is starting up asks nothing extra.
+        let stall_interval = self.sync_stall_check;
         let mut stall_check = tokio::time::interval_at(
-            tokio::time::Instant::now() + SYNC_STALL_CHECK,
-            SYNC_STALL_CHECK,
+            tokio::time::Instant::now() + stall_interval,
+            stall_interval,
         );
         stall_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut height_at_last_check = consensus.current_height();
+
+        // Issue #354: at most one block-sync stream. See `SyncStream`.
+        let mut sync_stream = SyncStream::default();
 
         loop {
             tokio::select! {
@@ -1113,6 +1227,9 @@ impl Node {
                             metrics.p2p.record_peer_disconnected();
                             metrics.p2p.set_peer_count(network.peer_count());
                             resync_on_declaration.remove(&peer);
+                            if sync_stream.end_if_from(&peer) {
+                                info!("Sync stream from {} ended: the peer disconnected", peer);
+                            }
                         }
                         NetworkEvent::TransactionReceived(tx) => {
                             debug!("Received transaction: {}", tx.hash());
@@ -1169,29 +1286,27 @@ impl Node {
                                     // failed because its ancestors are missing.
                                     // The peer that sent it holds them: ask it,
                                     // through the same sync the status path
-                                    // uses, unless a sync toward this height is
-                                    // already under way.
+                                    // uses. While a stream runs, the block only
+                                    // raises its target (`SyncStream`).
                                     let our_height = consensus.current_height();
-                                    let already = matches!(
-                                        network.sync_state(),
-                                        SyncState::Syncing { target_height, .. } if target_height >= height
-                                    );
-                                    if let (false, Some((from, to))) =
-                                        (already, missing_ancestor_range(our_height, height))
-                                    {
-                                        info!(
-                                            "Missing blocks {}..={} below gossiped block {} at height {}; requesting them from {}",
-                                            from, to, hash, height, source
-                                        );
-                                        network.set_sync_state(SyncState::Syncing {
-                                            current_height: our_height,
-                                            target_height: height,
-                                        });
-                                        let _ = command_sender.send(NetworkCommand::RequestBlocks {
-                                            peer: source,
-                                            from_height: from,
-                                            to_height: to,
-                                        }).await;
+                                    if let Some((from, to)) = missing_ancestor_range(our_height, height) {
+                                        record_sync_target(&network, &sync_stream, our_height, height);
+                                        if sync_stream.start(source, std::time::Instant::now()) {
+                                            info!(
+                                                "Missing blocks {}..={} below gossiped block {} at height {}; requesting them from {}",
+                                                from, to, hash, height, source
+                                            );
+                                            let _ = command_sender.send(NetworkCommand::RequestBlocks {
+                                                peer: source,
+                                                from_height: from,
+                                                to_height: to,
+                                            }).await;
+                                        } else {
+                                            debug!(
+                                                "Gossiped block {} at height {} is above the head; the running sync now targets it",
+                                                hash, height
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -1338,19 +1453,23 @@ impl Node {
                                 let our_height = consensus.current_height();
                                 if height > our_height {
                                     info!("Peer {} is ahead: {} vs {} (we're behind by {} blocks)", peer, height, our_height, height - our_height);
-                                    // Request blocks we're missing
-                                    let from = our_height + 1;
-                                    let to = (from + MAX_BLOCKS_PER_REQUEST - 1).min(height);
-                                    network.set_sync_state(SyncState::Syncing {
-                                        current_height: our_height,
-                                        target_height: height,
-                                    });
-                                    let _ = command_sender.send(NetworkCommand::RequestBlocks {
-                                        peer,
-                                        from_height: from,
-                                        to_height: to,
-                                    }).await;
-                                } else if height == our_height {
+                                    // Request blocks we're missing, unless a
+                                    // stream already runs (#354, `SyncStream`):
+                                    // then this only raises its target.
+                                    record_sync_target(&network, &sync_stream, our_height, height);
+                                    if sync_stream.start(peer, std::time::Instant::now()) {
+                                        let from = our_height + 1;
+                                        let to = (from + MAX_BLOCKS_PER_REQUEST - 1).min(height);
+                                        let _ = command_sender.send(NetworkCommand::RequestBlocks {
+                                            peer,
+                                            from_height: from,
+                                            to_height: to,
+                                        }).await;
+                                    }
+                                } else if height == our_height && !sync_stream.is_running() {
+                                    // Level with this peer. A running stream
+                                    // toward another peer's height is not
+                                    // ended by it.
                                     network.set_sync_state(SyncState::Synced);
                                 }
                             }
@@ -1405,8 +1524,16 @@ impl Node {
                                     }
                                 }
                             }
-                            // Check if we need more blocks
-                            if let SyncState::Syncing { target_height, .. } = network.sync_state() {
+                            // Check if we need more blocks. Only the running
+                            // stream continues (#354, `SyncStream`): a batch
+                            // from any other request is imported and that is
+                            // all.
+                            if !sync_stream.continues(&peer, std::time::Instant::now()) {
+                                debug!(
+                                    "Blocks from {} outside the running sync stream: imported, not continued",
+                                    peer
+                                );
+                            } else if let SyncState::Syncing { target_height, .. } = network.sync_state() {
                                 if last_imported_height < target_height && last_imported_height > 0 {
                                     // Request more blocks
                                     let from = last_imported_height + 1;
@@ -1423,13 +1550,21 @@ impl Node {
                                 } else {
                                     info!("Sync complete at height {}", last_imported_height);
                                     network.set_sync_state(SyncState::Synced);
+                                    sync_stream.end();
                                 }
+                            } else {
+                                // Nothing to sync toward any more.
+                                sync_stream.end();
                             }
                         }
                         // Handle sync failures
                         NetworkEvent::SyncRequestFailed { peer, error } => {
                             warn!("Sync request to {} failed: {}", peer, error);
-                            // Could try another peer here
+                            // The stream it belonged to has ended; the next
+                            // reason to sync starts a new one (#354).
+                            if sync_stream.end_if_from(&peer) {
+                                info!("Sync stream from {} ended by its failed request", peer);
+                            }
                         }
 
                         // BFT consensus messages
@@ -1520,12 +1655,22 @@ impl Node {
                 // same participation check as every other status answer.
                 _ = stall_check.tick() => {
                     let height = consensus.current_height();
+                    if let Some(peer) = sync_stream.end_if_lost(
+                        std::time::Instant::now(),
+                        sumchain_p2p::sync::SYNC_REQUEST_TIMEOUT,
+                    ) {
+                        warn!(
+                            "Sync stream from {} made no progress for over {:?}; ended",
+                            peer,
+                            sumchain_p2p::sync::SYNC_REQUEST_TIMEOUT
+                        );
+                    }
                     if height == height_at_last_check {
                         let peers = network.connected_peers();
                         if !peers.is_empty() {
                             info!(
                                 "No new block for {:?} at height {}; asking {} peer(s) for their height",
-                                SYNC_STALL_CHECK, height, peers.len()
+                                stall_interval, height, peers.len()
                             );
                         }
                         for peer in peers {
@@ -2397,5 +2542,78 @@ mod missed_block_tests {
     fn heights_near_the_top_of_the_range_do_not_overflow() {
         assert_eq!(missing_ancestor_range(u64::MAX, u64::MAX), None);
         assert_eq!(missing_ancestor_range(u64::MAX - 2, u64::MAX), Some((u64::MAX - 1, u64::MAX)));
+    }
+}
+
+/// Issue #354: at most one block-sync stream (`SyncStream`).
+#[cfg(test)]
+mod sync_stream_tests {
+    use super::SyncStream;
+    use std::time::{Duration, Instant};
+    use sumchain_p2p::PeerId;
+
+    #[test]
+    fn a_second_reason_to_sync_starts_no_second_stream() {
+        let (a, b) = (PeerId::random(), PeerId::random());
+        let now = Instant::now();
+        let mut stream = SyncStream::default();
+        assert!(stream.start(a, now), "the first reason starts a stream");
+        assert!(!stream.start(b, now), "another peer's reason only raises the target");
+        assert!(!stream.start(a, now), "and so does the same peer's");
+        assert!(stream.is_running());
+    }
+
+    #[test]
+    fn only_the_running_streams_batches_continue_it() {
+        let (a, b) = (PeerId::random(), PeerId::random());
+        let now = Instant::now();
+        let mut stream = SyncStream::default();
+        assert!(!stream.continues(&a, now), "no stream: nothing continues");
+        stream.start(a, now);
+        assert!(stream.continues(&a, now));
+        assert!(!stream.continues(&b, now), "a batch from another request is not continued");
+    }
+
+    #[test]
+    fn a_failed_request_or_a_disconnect_ends_only_its_own_stream() {
+        let (a, b) = (PeerId::random(), PeerId::random());
+        let now = Instant::now();
+        let mut stream = SyncStream::default();
+        stream.start(a, now);
+        assert!(!stream.end_if_from(&b), "another peer's failure leaves the stream running");
+        assert!(stream.is_running());
+        assert!(stream.end_if_from(&a));
+        assert!(!stream.is_running());
+        assert!(stream.start(b, now), "the next reason to sync starts a new stream");
+    }
+
+    #[test]
+    fn a_stream_ends_when_it_completes_and_a_new_one_may_start() {
+        let a = PeerId::random();
+        let now = Instant::now();
+        let mut stream = SyncStream::default();
+        stream.start(a, now);
+        stream.end();
+        assert!(!stream.is_running());
+        assert!(stream.start(a, now));
+    }
+
+    #[test]
+    fn the_backstop_ends_only_a_stream_quiet_for_longer_than_a_request_may_take() {
+        let a = PeerId::random();
+        let timeout = Duration::from_secs(30);
+        let start = Instant::now();
+        let mut stream = SyncStream::default();
+        stream.start(a, start);
+        assert_eq!(stream.end_if_lost(start + timeout, timeout), None, "not longer than the timeout");
+        stream.continues(&a, start + Duration::from_secs(20));
+        assert_eq!(
+            stream.end_if_lost(start + Duration::from_secs(45), timeout),
+            None,
+            "it progressed 25 s ago"
+        );
+        assert_eq!(stream.end_if_lost(start + Duration::from_secs(51), timeout), Some(a));
+        assert!(!stream.is_running());
+        assert_eq!(stream.end_if_lost(start + Duration::from_secs(99), timeout), None);
     }
 }
