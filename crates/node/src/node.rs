@@ -15,7 +15,7 @@ use sumchain_crypto::KeyPair;
 use sumchain_genesis::Genesis;
 use sumchain_p2p::{
     NetworkCommand, NetworkConfig, NetworkEvent, NetworkService, PeerCompat, PeerCompatRegistry,
-    PeerId, SyncState, MAX_BLOCKS_PER_REQUEST,
+    PeerId, SyncRequestKind, SyncRequestTag, SyncState, MAX_BLOCKS_PER_REQUEST,
 };
 use sumchain_primitives::Block;
 use sumchain_primitives::Hash;
@@ -79,47 +79,81 @@ pub(crate) const SYNC_STALL_CHECK: std::time::Duration = std::time::Duration::fr
 /// node catching up while the network produced started one more stream per
 /// gossiped block, each downloading the rest of the range again.
 ///
-/// Now at most one stream runs. A reason to sync while one runs only raises
-/// the shared target (see [`record_sync_target`]), and only the running
-/// stream's batches continue it. It ends when it reaches the target, when a
-/// batch brings nothing, when its request fails or its peer disconnects, and,
-/// as a backstop, when it has neither continued nor ended for longer than a
-/// request may take ([`sumchain_p2p::sync::SYNC_REQUEST_TIMEOUT`]). The next
-/// reason to sync then starts a new one at the height after the head. So at
-/// most one block request is outstanding at a time, and a block is requested
-/// again only after the stream that asked for it ended without it.
+/// Now at most one stream runs, and it knows which request it is waiting for:
+/// each request it sends carries a fresh tag (`NetworkCommand::RequestBlocks`),
+/// and the network reports that tag back with the request's batch or failure.
+/// The wire messages carry no request id; the tag never leaves this node.
+///
+/// - A reason to sync while the stream runs only raises the shared target
+///   ([`record_sync_target`]).
+/// - A batch continues the stream only if it answers the request the stream
+///   is waiting for. Any other batch, such as a late answer to an ended
+///   stream's request, is imported, and that is all.
+/// - A failure ends the stream only if it is that request's failure. A failed
+///   status or protocol-id request, or the failure of an older request, leaves
+///   it running.
+///
+/// The stream ends when it reaches the target, when its batch brings nothing,
+/// when its request fails or its peer disconnects, and, as a backstop, when it
+/// has waited longer than its request may take plus one stall check
+/// (`Node::sync_stream_backstop`). By then that request has been answered or
+/// has failed. The next reason to sync then starts a new stream at the height
+/// after the head. So at most one block request is outstanding, and a block is
+/// requested again only after the stream that asked for it ended without it.
 #[derive(Debug, Default)]
 pub(crate) struct SyncStream {
-    /// The running stream's peer, and when it last started or continued.
-    running: Option<(PeerId, std::time::Instant)>,
+    /// The running stream: its peer, the request it waits for, and when that
+    /// request was sent.
+    running: Option<AwaitedRequest>,
+    /// The last tag handed out. Tag 0 is never handed out here.
+    last_tag: SyncRequestTag,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AwaitedRequest {
+    peer: PeerId,
+    tag: SyncRequestTag,
+    sent: std::time::Instant,
 }
 
 impl SyncStream {
-    /// Start a stream from `peer` unless one is running. `true` when the
-    /// caller is to send the stream's first request.
-    pub(crate) fn start(&mut self, peer: PeerId, now: std::time::Instant) -> bool {
-        if self.running.is_some() {
-            return false;
-        }
-        self.running = Some((peer, now));
-        true
+    fn fresh_tag(&mut self) -> SyncRequestTag {
+        self.last_tag = self.last_tag.wrapping_add(1).max(1);
+        self.last_tag
     }
 
-    /// Whether one is running.
+    /// Start a stream from `peer` unless one runs. The tag for its first
+    /// request when it started; `None` when one already runs.
+    pub(crate) fn start(&mut self, peer: PeerId, now: std::time::Instant) -> Option<SyncRequestTag> {
+        if self.running.is_some() {
+            return None;
+        }
+        let tag = self.fresh_tag();
+        self.running = Some(AwaitedRequest { peer, tag, sent: now });
+        Some(tag)
+    }
+
+    /// Whether one runs.
     pub(crate) fn is_running(&self) -> bool {
         self.running.is_some()
     }
 
-    /// Whether a batch from `peer` belongs to the running stream, and so may
-    /// continue it. Records the progress when it does.
-    pub(crate) fn continues(&mut self, peer: &PeerId, now: std::time::Instant) -> bool {
-        match &mut self.running {
-            Some((running, at)) if running == peer => {
-                *at = now;
-                true
-            }
-            _ => false,
+    /// Whether a batch from `peer` that answers the request tagged `tag` is
+    /// the batch the running stream waits for.
+    pub(crate) fn is_awaited(&self, peer: &PeerId, tag: Option<SyncRequestTag>) -> bool {
+        matches!((&self.running, tag), (Some(r), Some(t)) if r.peer == *peer && r.tag == t)
+    }
+
+    /// The running stream sends its next request: the tag to send it with.
+    /// `None` when no stream runs.
+    pub(crate) fn next_request(&mut self, now: std::time::Instant) -> Option<SyncRequestTag> {
+        self.running?;
+        let tag = self.fresh_tag();
+        if let Some(r) = &mut self.running {
+            r.tag = tag;
+            r.sent = now;
         }
+        Some(tag)
     }
 
     /// End the running stream.
@@ -127,28 +161,37 @@ impl SyncStream {
         self.running = None;
     }
 
-    /// End the running stream if it is `peer`'s: its request failed, or the
-    /// peer disconnected. `true` when it did.
-    pub(crate) fn end_if_from(&mut self, peer: &PeerId) -> bool {
-        if matches!(&self.running, Some((running, _)) if running == peer) {
+    /// End the running stream if `tag` is the request it waits for, which
+    /// failed. `true` when it did.
+    pub(crate) fn end_if_awaited(&mut self, tag: SyncRequestTag) -> bool {
+        if matches!(&self.running, Some(r) if r.tag == tag) {
             self.running = None;
             return true;
         }
         false
     }
 
-    /// The backstop: end a stream that has neither continued nor ended for
-    /// longer than `timeout`. By then its request has been answered or has
-    /// failed, so nothing it asked for is still on its way. Returns its peer.
+    /// End the running stream if it is `peer`'s, which disconnected. `true`
+    /// when it did.
+    pub(crate) fn end_if_from(&mut self, peer: &PeerId) -> bool {
+        if matches!(&self.running, Some(r) if r.peer == *peer) {
+            self.running = None;
+            return true;
+        }
+        false
+    }
+
+    /// The backstop: end a stream whose awaited request was sent longer than
+    /// `after` ago. Returns its peer.
     pub(crate) fn end_if_lost(
         &mut self,
         now: std::time::Instant,
-        timeout: std::time::Duration,
+        after: std::time::Duration,
     ) -> Option<PeerId> {
         match self.running {
-            Some((peer, at)) if now.saturating_duration_since(at) > timeout => {
+            Some(r) if now.saturating_duration_since(r.sent) > after => {
                 self.running = None;
-                Some(peer)
+                Some(r.peer)
             }
             _ => None,
         }
@@ -264,6 +307,11 @@ pub struct Node {
     /// peers for theirs (#354, second trigger). [`SYNC_STALL_CHECK`]; only
     /// in-crate tests set another value, to keep their request counts exact.
     sync_stall_check: std::time::Duration,
+    /// How long a sync stream may wait for its request before the stall check
+    /// ends it (`SyncStream::end_if_lost`): the network's request timeout plus
+    /// one stall interval, so that the request has failed or been answered by
+    /// then. Only in-crate tests set another value.
+    sync_stream_backstop: std::time::Duration,
 }
 
 impl Node {
@@ -586,6 +634,7 @@ impl Node {
         };
 
         // Create network service
+        let sync_stream_backstop = network_config.sync_request_timeout + SYNC_STALL_CHECK;
         let (network, network_command_rx) = NetworkService::new(network_config);
         let network = Arc::new(network);
 
@@ -648,6 +697,7 @@ impl Node {
             rpc_contract_exec: (sumc_runtime::LocalExecutionLimits::DEFAULT, 1),
             rpc_custodial_signing: sumchain_rpc::custodial::CustodialSigningMethods::default(),
             sync_stall_check: SYNC_STALL_CHECK,
+            sync_stream_backstop,
         })
     }
 
@@ -1291,7 +1341,7 @@ impl Node {
                                     let our_height = consensus.current_height();
                                     if let Some((from, to)) = missing_ancestor_range(our_height, height) {
                                         record_sync_target(&network, &sync_stream, our_height, height);
-                                        if sync_stream.start(source, std::time::Instant::now()) {
+                                        if let Some(tag) = sync_stream.start(source, std::time::Instant::now()) {
                                             info!(
                                                 "Missing blocks {}..={} below gossiped block {} at height {}; requesting them from {}",
                                                 from, to, hash, height, source
@@ -1300,6 +1350,7 @@ impl Node {
                                                 peer: source,
                                                 from_height: from,
                                                 to_height: to,
+                                                tag,
                                             }).await;
                                         } else {
                                             debug!(
@@ -1457,13 +1508,14 @@ impl Node {
                                     // stream already runs (#354, `SyncStream`):
                                     // then this only raises its target.
                                     record_sync_target(&network, &sync_stream, our_height, height);
-                                    if sync_stream.start(peer, std::time::Instant::now()) {
+                                    if let Some(tag) = sync_stream.start(peer, std::time::Instant::now()) {
                                         let from = our_height + 1;
                                         let to = (from + MAX_BLOCKS_PER_REQUEST - 1).min(height);
                                         let _ = command_sender.send(NetworkCommand::RequestBlocks {
                                             peer,
                                             from_height: from,
                                             to_height: to,
+                                            tag,
                                         }).await;
                                     }
                                 } else if height == our_height && !sync_stream.is_running() {
@@ -1475,7 +1527,7 @@ impl Node {
                             }
                         }
                         // Handle received blocks from sync
-                        NetworkEvent::SyncBlocksReceived { peer, blocks } => {
+                        NetworkEvent::SyncBlocksReceived { peer, blocks, tag } => {
                             info!("Received {} blocks from {} via sync", blocks.len(), peer);
                             let mut last_imported_height = 0;
                             for block in blocks {
@@ -1524,14 +1576,14 @@ impl Node {
                                     }
                                 }
                             }
-                            // Check if we need more blocks. Only the running
-                            // stream continues (#354, `SyncStream`): a batch
-                            // from any other request is imported and that is
-                            // all.
-                            if !sync_stream.continues(&peer, std::time::Instant::now()) {
+                            // Check if we need more blocks. Only the batch the
+                            // running stream waits for continues it (#354,
+                            // `SyncStream`): any other batch is imported and
+                            // that is all.
+                            if !sync_stream.is_awaited(&peer, tag) {
                                 debug!(
-                                    "Blocks from {} outside the running sync stream: imported, not continued",
-                                    peer
+                                    "Blocks from {} (request tag {:?}) are not the batch the running sync waits for: imported, not continued",
+                                    peer, tag
                                 );
                             } else if let SyncState::Syncing { target_height, .. } = network.sync_state() {
                                 if last_imported_height < target_height && last_imported_height > 0 {
@@ -1542,11 +1594,14 @@ impl Node {
                                         current_height: last_imported_height,
                                         target_height,
                                     });
-                                    let _ = command_sender.send(NetworkCommand::RequestBlocks {
-                                        peer,
-                                        from_height: from,
-                                        to_height: to,
-                                    }).await;
+                                    if let Some(tag) = sync_stream.next_request(std::time::Instant::now()) {
+                                        let _ = command_sender.send(NetworkCommand::RequestBlocks {
+                                            peer,
+                                            from_height: from,
+                                            to_height: to,
+                                            tag,
+                                        }).await;
+                                    }
                                 } else {
                                     info!("Sync complete at height {}", last_imported_height);
                                     network.set_sync_state(SyncState::Synced);
@@ -1558,12 +1613,15 @@ impl Node {
                             }
                         }
                         // Handle sync failures
-                        NetworkEvent::SyncRequestFailed { peer, error } => {
-                            warn!("Sync request to {} failed: {}", peer, error);
-                            // The stream it belonged to has ended; the next
-                            // reason to sync starts a new one (#354).
-                            if sync_stream.end_if_from(&peer) {
-                                info!("Sync stream from {} ended by its failed request", peer);
+                        NetworkEvent::SyncRequestFailed { peer, error, request } => {
+                            warn!("Sync request to {} failed ({:?}): {}", peer, request, error);
+                            // Only the failure of the request the running
+                            // stream waits for ends it; the next reason to sync
+                            // then starts a new one (#354, `SyncStream`).
+                            if let SyncRequestKind::Blocks(tag) = request {
+                                if sync_stream.end_if_awaited(tag) {
+                                    info!("Sync stream from {} ended by its failed request", peer);
+                                }
                             }
                         }
 
@@ -1655,14 +1713,10 @@ impl Node {
                 // same participation check as every other status answer.
                 _ = stall_check.tick() => {
                     let height = consensus.current_height();
-                    if let Some(peer) = sync_stream.end_if_lost(
-                        std::time::Instant::now(),
-                        sumchain_p2p::sync::SYNC_REQUEST_TIMEOUT,
-                    ) {
+                    if let Some(peer) = sync_stream.end_if_lost(std::time::Instant::now(), self.sync_stream_backstop) {
                         warn!(
-                            "Sync stream from {} made no progress for over {:?}; ended",
-                            peer,
-                            sumchain_p2p::sync::SYNC_REQUEST_TIMEOUT
+                            "Sync stream from {} waited over {:?} for its request; ended",
+                            peer, self.sync_stream_backstop
                         );
                     }
                     if height == height_at_last_check {
@@ -2545,7 +2599,8 @@ mod missed_block_tests {
     }
 }
 
-/// Issue #354: at most one block-sync stream (`SyncStream`).
+/// Issue #354: at most one block-sync stream (`SyncStream`), correlated with
+/// its own requests by tag.
 #[cfg(test)]
 mod sync_stream_tests {
     use super::SyncStream;
@@ -2557,34 +2612,64 @@ mod sync_stream_tests {
         let (a, b) = (PeerId::random(), PeerId::random());
         let now = Instant::now();
         let mut stream = SyncStream::default();
-        assert!(stream.start(a, now), "the first reason starts a stream");
-        assert!(!stream.start(b, now), "another peer's reason only raises the target");
-        assert!(!stream.start(a, now), "and so does the same peer's");
+        assert!(stream.start(a, now).is_some(), "the first reason starts a stream");
+        assert_eq!(stream.start(b, now), None, "another peer's reason only raises the target");
+        assert_eq!(stream.start(a, now), None, "and so does the same peer's");
         assert!(stream.is_running());
     }
 
     #[test]
-    fn only_the_running_streams_batches_continue_it() {
+    fn only_the_awaited_batch_continues_the_stream() {
         let (a, b) = (PeerId::random(), PeerId::random());
         let now = Instant::now();
         let mut stream = SyncStream::default();
-        assert!(!stream.continues(&a, now), "no stream: nothing continues");
-        stream.start(a, now);
-        assert!(stream.continues(&a, now));
-        assert!(!stream.continues(&b, now), "a batch from another request is not continued");
+        let t1 = stream.start(a, now).unwrap();
+        assert!(stream.is_awaited(&a, Some(t1)));
+        assert!(!stream.is_awaited(&a, None), "an untagged batch (an answer to another request)");
+        assert!(!stream.is_awaited(&a, Some(t1 + 1)), "a batch for another tag");
+        assert!(!stream.is_awaited(&b, Some(t1)), "the right tag from another peer");
+        let t2 = stream.next_request(now).unwrap();
+        assert_ne!(t1, t2, "each request gets a fresh tag");
+        assert!(!stream.is_awaited(&a, Some(t1)), "the answered request's tag no longer continues it");
+        assert!(stream.is_awaited(&a, Some(t2)));
+    }
+
+    /// The race: a block request to P is out; an unrelated request to P fails;
+    /// before, that ended the stream, a replacement started to P, and the first
+    /// request's late batch was taken as the replacement's and started yet
+    /// another request.
+    #[test]
+    fn an_unrelated_failure_or_a_late_batch_from_the_same_peer_cannot_advance_a_replacement() {
+        let p = PeerId::random();
+        let now = Instant::now();
+        let mut stream = SyncStream::default();
+        let t1 = stream.start(p, now).unwrap();
+        // 2. A status or protocol-id request to P fails: no block tag, so the
+        //    caller does not end the stream; nor does an older tag's failure.
+        assert!(!stream.end_if_awaited(t1 + 1000));
+        assert!(stream.is_running());
+        assert_eq!(stream.start(p, now), None, "3. no replacement while it runs");
+        // The stream is ended anyway (the backstop), and a replacement starts.
+        assert!(stream.end_if_awaited(t1));
+        let t2 = stream.start(p, now).unwrap();
+        // 4. The first request's batch arrives late from the same peer.
+        assert!(!stream.is_awaited(&p, Some(t1)), "the late batch does not advance the replacement");
+        assert!(stream.is_awaited(&p, Some(t2)));
+        // And the late request's failure, were it to come, does not end it.
+        assert!(!stream.end_if_awaited(t1));
+        assert!(stream.is_running());
     }
 
     #[test]
-    fn a_failed_request_or_a_disconnect_ends_only_its_own_stream() {
+    fn a_disconnect_ends_only_its_own_peers_stream() {
         let (a, b) = (PeerId::random(), PeerId::random());
         let now = Instant::now();
         let mut stream = SyncStream::default();
         stream.start(a, now);
-        assert!(!stream.end_if_from(&b), "another peer's failure leaves the stream running");
+        assert!(!stream.end_if_from(&b));
         assert!(stream.is_running());
         assert!(stream.end_if_from(&a));
-        assert!(!stream.is_running());
-        assert!(stream.start(b, now), "the next reason to sync starts a new stream");
+        assert!(stream.start(b, now).is_some(), "the next reason to sync starts a new stream");
     }
 
     #[test]
@@ -2592,28 +2677,46 @@ mod sync_stream_tests {
         let a = PeerId::random();
         let now = Instant::now();
         let mut stream = SyncStream::default();
-        stream.start(a, now);
+        let t1 = stream.start(a, now).unwrap();
         stream.end();
         assert!(!stream.is_running());
-        assert!(stream.start(a, now));
+        assert_eq!(stream.next_request(now), None, "no stream, no next request");
+        let t2 = stream.start(a, now).unwrap();
+        assert_ne!(t1, t2);
     }
 
     #[test]
-    fn the_backstop_ends_only_a_stream_quiet_for_longer_than_a_request_may_take() {
+    fn the_backstop_ends_only_a_stream_whose_request_is_older_than_its_window() {
         let a = PeerId::random();
-        let timeout = Duration::from_secs(30);
+        let window = Duration::from_secs(40);
         let start = Instant::now();
         let mut stream = SyncStream::default();
         stream.start(a, start);
-        assert_eq!(stream.end_if_lost(start + timeout, timeout), None, "not longer than the timeout");
-        stream.continues(&a, start + Duration::from_secs(20));
+        assert_eq!(stream.end_if_lost(start + window, window), None, "not older than the window");
+        stream.next_request(start + Duration::from_secs(20));
         assert_eq!(
-            stream.end_if_lost(start + Duration::from_secs(45), timeout),
+            stream.end_if_lost(start + Duration::from_secs(55), window),
             None,
-            "it progressed 25 s ago"
+            "its current request was sent 35 s ago"
         );
-        assert_eq!(stream.end_if_lost(start + Duration::from_secs(51), timeout), Some(a));
+        assert_eq!(stream.end_if_lost(start + Duration::from_secs(61), window), Some(a));
         assert!(!stream.is_running());
-        assert_eq!(stream.end_if_lost(start + Duration::from_secs(99), timeout), None);
+        assert_eq!(stream.end_if_lost(start + Duration::from_secs(99), window), None);
+    }
+
+    #[test]
+    fn tags_are_never_zero_and_do_not_repeat_while_running() {
+        let a = PeerId::random();
+        let now = Instant::now();
+        let mut stream = SyncStream::default();
+        let mut seen = std::collections::HashSet::new();
+        let t = stream.start(a, now).unwrap();
+        assert_ne!(t, 0, "tag 0 belongs to BlockSyncer");
+        seen.insert(t);
+        for _ in 0..1000 {
+            let t = stream.next_request(now).unwrap();
+            assert_ne!(t, 0);
+            assert!(seen.insert(t), "tag {t} repeated");
+        }
     }
 }
