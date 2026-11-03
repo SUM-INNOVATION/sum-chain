@@ -175,9 +175,11 @@ impl AddressText {
     ///
     /// The `r0` prefix is decided first: text that starts with it is the agent
     /// form or an error, never retried as plain text. The base58 text is not of
-    /// fixed length (most addresses encode to 33 characters, some to 32, and
-    /// addresses with leading zero bytes to fewer); it is decoded and its length
-    /// and checksum checked by [`Address::from_base58`].
+    /// fixed length: it encodes 24 bytes (the address and a 4-byte checksum), so
+    /// it is 24 to 33 characters: most addresses take 33, some 32, and only an
+    /// address with two or more leading zero bytes takes fewer
+    /// ([`Address::ZERO`] takes 26). It is decoded and its length and checksum
+    /// checked by [`Address::from_base58`].
     pub fn parse(s: &str) -> Result<Self> {
         match s.strip_prefix("r0") {
             Some(plain) => Address::from_base58(plain).map(AddressText::Agent),
@@ -415,6 +417,83 @@ mod tests {
                 (Err(e1), Err(e2)) => assert_eq!(e1.to_string(), e2.to_string(), "{s:?}"),
                 (o, n) => panic!("{s:?}: old {o:?}, new {n:?}"),
             }
+        }
+    }
+
+    // ── vectors shared with the TypeScript SDK ─────────────────────────────
+    //
+    // The same strings are in sdk/typescript/src/__tests__/raddress.test.ts, so
+    // the SDK's format check and this parser are pinned to the same text. Keep
+    // the two tables equal.
+    //
+    // The plain text is base58 of 24 bytes: the 20-byte address and a 4-byte
+    // checksum. Each leading zero byte is one `1` and the rest, as a number,
+    // takes the fewest base-58 digits, so the text is 24 characters (24 zero
+    // bytes) to 33 (58^32 < 2^192 <= 58^33), and under 32 only with two or more
+    // leading zero bytes.
+
+    /// Valid addresses of each length: Address::ZERO (26 characters); the
+    /// address of the key whose first 8 bytes are 345842 little-endian and the
+    /// rest zero (two leading zero bytes, 31); two allocations in
+    /// genesis/local_genesis.json (32 and 33).
+    const SHARED_VALID: [(&str, usize); 4] = [
+        ("111111111111111111112u6Gvy", 26),
+        ("11cMv23diqJbvHNnfUXcFZZb6p53x2G", 31),
+        ("jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j", 32),
+        ("ChBEvSC2DKPKr8qFgbSv69Xnm8JNAKdiY", 33),
+    ];
+
+    /// The shape of an address (24 bytes) with a wrong checksum: the SDK's
+    /// checksum-free format check takes them; this parser refuses them on the
+    /// checksum alone. The shortest shape, 24 zero bytes (24 characters), and
+    /// the largest 24-byte value (33).
+    const SHARED_SHAPE_ONLY: [&str; 2] =
+        ["111111111111111111111111", "QLbz7JHiBTspS962RLKV8GndWFwiEaqKL"];
+
+    /// Base58 characters that do not decode to 24 bytes: refused by both, on
+    /// length. 23 and 25 zero bytes; 2^192, the smallest 25-byte value (33
+    /// characters); the largest 23-byte value with no leading zero byte (32
+    /// characters); 33 `z`s (25 bytes).
+    const SHARED_WRONG_SHAPE: [&str; 5] = [
+        "11111111111111111111111",
+        "1111111111111111111111111",
+        "QLbz7JHiBTspS962RLKV8GndWFwiEaqKM",
+        "6HgC8KRBEhXYbF4riJyJFLSHt32XBnGv",
+        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+    ];
+
+    #[test]
+    fn shared_vectors_pin_the_lengths_the_parser_accepts() {
+        assert_eq!(SHARED_VALID[0].0, Address::ZERO.to_base58());
+        let mut pubkey = [0u8; 32];
+        pubkey[..8].copy_from_slice(&345842u64.to_le_bytes());
+        assert_eq!(SHARED_VALID[1].0, Address::from_public_key(&pubkey).to_base58());
+
+        for (plain, len) in SHARED_VALID {
+            assert_eq!(plain.len(), len, "{plain}");
+            let a = Address::from_base58(plain).unwrap();
+            assert_eq!(a.to_base58(), plain);
+            assert_eq!(AddressText::parse(plain).unwrap(), AddressText::Human(a));
+            assert_eq!(AddressText::parse(&format!("r0{plain}")).unwrap(), AddressText::Agent(a));
+            assert_eq!(AddressText::parse_or_hex(&format!("r0{plain}")).unwrap(), AddressText::Agent(a));
+        }
+        for s in SHARED_SHAPE_ONLY {
+            assert_eq!(bs58::decode(s).into_vec().unwrap().len(), 24, "{s}");
+            assert!(matches!(Address::from_base58(s), Err(PrimitiveError::InvalidChecksum)), "{s}");
+            assert!(
+                matches!(AddressText::parse(&format!("r0{s}")), Err(PrimitiveError::InvalidChecksum)),
+                "{s}"
+            );
+        }
+        for s in SHARED_WRONG_SHAPE {
+            assert!(
+                matches!(
+                    Address::from_base58(s),
+                    Err(PrimitiveError::InvalidLength { expected: 24, got }) if got != 24
+                ),
+                "{s}"
+            );
+            assert!(AddressText::parse(&format!("r0{s}")).is_err(), "{s}");
         }
     }
 }
