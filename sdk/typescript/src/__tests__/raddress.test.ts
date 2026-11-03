@@ -4,13 +4,43 @@ import { fromRaddress, isRaddress, isValidAddress, RADDRESS_PREFIX, toRaddress }
 // The agent ("raddress") text form, issue #309: `r0` followed by the plain
 // base58 address. Format checks only; no network, no keys.
 
-// Allocations in genesis/local_genesis.json: plain texts of 32 and 33
-// characters (about 4% of addresses encode to 32).
-const PLAIN_32 = 'jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j';
-const PLAIN_33 = 'ChBEvSC2DKPKr8qFgbSv69Xnm8JNAKdiY';
-// Hex as a node prints it; real hex addresses almost always contain a `0`,
-// which is not base58. (40 hex digits with no `0` are base58 characters too,
-// and the format check below takes them as base58, as it always has.)
+// Vectors shared with the Rust parser (crates/sumchain-wire/src/address.rs,
+// `shared_vectors_pin_the_lengths_the_parser_accepts`): keep the two tables
+// equal, so this format check and the node accept the same text.
+//
+// The plain text is base58 of 24 bytes (the 20-byte address and a 4-byte
+// checksum): 24 to 33 characters, and under 32 only with two or more leading
+// zero bytes.
+
+// Valid addresses of each length: the zero address (26 characters); the
+// address of the key whose first 8 bytes are 345842 little-endian and the rest
+// zero (two leading zero bytes, 31); two allocations in
+// genesis/local_genesis.json (32 and 33).
+const SHARED_VALID: Array<[string, number]> = [
+  ['111111111111111111112u6Gvy', 26],
+  ['11cMv23diqJbvHNnfUXcFZZb6p53x2G', 31],
+  ['jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j', 32],
+  ['ChBEvSC2DKPKr8qFgbSv69Xnm8JNAKdiY', 33],
+];
+// The shape of an address (24 bytes) with a wrong checksum: this format check
+// takes them; the node refuses them on the checksum alone. 24 zero bytes (24
+// characters) and the largest 24-byte value (33).
+const SHARED_SHAPE_ONLY = ['111111111111111111111111', 'QLbz7JHiBTspS962RLKV8GndWFwiEaqKL'];
+// Base58 characters that do not decode to 24 bytes: refused by both. 23 and 25
+// zero bytes; 2^192, the smallest 25-byte value (33 characters); the largest
+// 23-byte value with no leading zero byte (32 characters); 33 `z`s (25 bytes).
+const SHARED_WRONG_SHAPE = [
+  '11111111111111111111111',
+  '1111111111111111111111111',
+  'QLbz7JHiBTspS962RLKV8GndWFwiEaqKM',
+  '6HgC8KRBEhXYbF4riJyJFLSHt32XBnGv',
+  'zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz',
+];
+
+const ZERO_ADDRESS = SHARED_VALID[0][0];
+const SHORT_KEY_ADDRESS = SHARED_VALID[1][0];
+const PLAIN_33 = SHARED_VALID[3][0];
+// Hex as a node prints it.
 const HEX = '0x0123456789abcdef0123456789abcdef01234567';
 
 describe('raddress text form (issue #309)', () => {
@@ -18,10 +48,9 @@ describe('raddress text form (issue #309)', () => {
     expect(RADDRESS_PREFIX).toBe('r0');
   });
 
-  it('round-trips plain addresses of 32 and 33 characters', () => {
-    expect(PLAIN_32).toHaveLength(32);
-    expect(PLAIN_33).toHaveLength(33);
-    for (const plain of [PLAIN_32, PLAIN_33]) {
+  it('round-trips valid addresses of 26, 31, 32 and 33 characters', () => {
+    for (const [plain, length] of SHARED_VALID) {
+      expect(plain).toHaveLength(length);
       const agent = toRaddress(plain);
       expect(agent).toBe('r0' + plain);
       expect(fromRaddress(agent)).toBe(plain);
@@ -31,9 +60,11 @@ describe('raddress text form (issue #309)', () => {
   });
 
   it('isValidAddress accepts the plain, agent and hex forms', () => {
-    for (const ok of [PLAIN_32, PLAIN_33, 'r0' + PLAIN_32, 'r0' + PLAIN_33, HEX]) {
-      expect(isValidAddress(ok)).toBe(true);
+    for (const [plain] of SHARED_VALID) {
+      expect(isValidAddress(plain)).toBe(true);
+      expect(isValidAddress('r0' + plain)).toBe(true);
     }
+    expect(isValidAddress(HEX)).toBe(true);
   });
 
   it('refuses r0 followed by anything but a plain base58 address', () => {
@@ -41,6 +72,7 @@ describe('raddress text form (issue #309)', () => {
       'r0',
       'r0' + HEX, // the agent form is not over hex
       'r0' + HEX.slice(2),
+      'r0' + 'ab'.repeat(20), // 40 characters cannot be 24 bytes
       'r0r0' + PLAIN_33, // one prefix only
       'R0' + PLAIN_33, // the prefix is lower-case
       'r0' + PLAIN_33.slice(0, -1) + '0', // `0` is not base58
@@ -63,13 +95,39 @@ describe('raddress text form (issue #309)', () => {
     expect(() => fromRaddress(HEX)).toThrow();
   });
 
-  it('leaves non-r0 validation as it was', () => {
-    expect(isValidAddress(PLAIN_33.slice(0, 31))).toBe(false); // under 32
-    expect(isValidAddress('1'.repeat(45))).toBe(false); // over 44
-    expect(isValidAddress(HEX.slice(0, -2))).toBe(false); // short hex
-    expect(isValidAddress(HEX.slice(2))).toBe(false); // hex without 0x
-    expect(isValidAddress('ab'.repeat(20))).toBe(true); // base58 characters only, as before
+  it('takes exactly the plain shapes the node decodes, short ones included', () => {
+    // Short valid addresses, in both forms: the 24-to-31 range the node accepts.
+    for (const plain of [ZERO_ADDRESS, SHORT_KEY_ADDRESS]) {
+      expect(plain.length).toBeLessThan(32);
+      expect(isValidAddress(plain)).toBe(true);
+      expect(isRaddress('r0' + plain)).toBe(true);
+      expect(fromRaddress(toRaddress(plain))).toBe(plain);
+    }
+    // The right shape with a wrong checksum: a format check cannot tell.
+    for (const s of SHARED_SHAPE_ONLY) {
+      expect(isValidAddress(s)).toBe(true);
+      expect(isRaddress('r0' + s)).toBe(true);
+    }
+    // Not 24 bytes, whatever the length: refused in both forms.
+    for (const s of SHARED_WRONG_SHAPE) {
+      expect(isValidAddress(s)).toBe(false);
+      expect(isRaddress('r0' + s)).toBe(false);
+      expect(() => toRaddress(s)).toThrow();
+      expect(() => fromRaddress('r0' + s)).toThrow();
+    }
+  });
+
+  it('refuses what cannot be an address: length bounds 24 and 33, hex rule unchanged', () => {
     expect(isValidAddress('')).toBe(false);
+    expect(isValidAddress(ZERO_ADDRESS.slice(1))).toBe(false); // 23 bytes
+    expect(isValidAddress('1'.repeat(23))).toBe(false); // under 24 characters
+    expect(isValidAddress('2'.repeat(34))).toBe(false); // over 33 characters
+    // A 44-character base58 public key is not an address.
+    expect(isValidAddress('2'.repeat(44))).toBe(false);
+    // Bare hex: 40 characters is never 24 bytes of base58.
+    expect(isValidAddress('ab'.repeat(20))).toBe(false);
+    expect(isValidAddress(HEX.slice(2))).toBe(false);
+    expect(isValidAddress(HEX.slice(0, -2))).toBe(false); // short hex
   });
 });
 

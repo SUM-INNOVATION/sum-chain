@@ -128,10 +128,61 @@ export function formatNumber(value: number | string): string {
  */
 export const RADDRESS_PREFIX = 'r0';
 
-/** The plain base58 form, by format (the node checks the checksum). */
+const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+/**
+ * The plain text is base58 of 24 bytes: the 20-byte address and a 4-byte
+ * checksum, as the node decodes it.
+ */
+const PLAIN_ADDRESS_BYTES = 24;
+
+/**
+ * Length bounds of the plain text, derived from those 24 bytes: each leading
+ * zero byte is one `1` and the rest, as a number, takes the fewest base-58
+ * digits. 24 zero bytes give the shortest text, 24 characters; no 24-byte
+ * value takes more than 33, since 58^32 < 2^192 <= 58^33. Most addresses take
+ * 33 or 32 characters; only one with two or more leading zero bytes takes
+ * fewer (the zero address takes 26).
+ */
+const PLAIN_ADDRESS_MIN_LENGTH = 24;
+const PLAIN_ADDRESS_MAX_LENGTH = 33;
+
+/**
+ * The number of bytes base58 text decodes to, counted as the node's decoder
+ * counts them: one zero byte per leading `1`, then the bytes of the number the
+ * rest spells. -1 for a character outside the alphabet.
+ */
+function base58DecodedLength(text: string): number {
+  let zeros = 0;
+  while (zeros < text.length && text[zeros] === '1') {
+    zeros++;
+  }
+  let value = 0n;
+  for (let i = zeros; i < text.length; i++) {
+    const digit = BASE58_ALPHABET.indexOf(text[i]);
+    if (digit < 0) {
+      return -1;
+    }
+    value = value * 58n + BigInt(digit);
+  }
+  let bytes = 0;
+  while (value > 0n) {
+    value >>= 8n;
+    bytes++;
+  }
+  return zeros + bytes;
+}
+
+/**
+ * The plain base58 form, by shape: base58 characters that decode to exactly
+ * the 24 bytes the node requires. This is what the node accepts, except that
+ * the node also checks the checksum and this does not.
+ */
 function isPlainBase58Address(address: string): boolean {
   return (
-    /^[1-9A-HJ-NP-Za-km-z]+$/.test(address) && address.length >= 32 && address.length <= 44
+    address.length >= PLAIN_ADDRESS_MIN_LENGTH &&
+    address.length <= PLAIN_ADDRESS_MAX_LENGTH &&
+    base58DecodedLength(address) === PLAIN_ADDRESS_BYTES
   );
 }
 
@@ -139,8 +190,9 @@ function isPlainBase58Address(address: string): boolean {
  * Validate address format
  *
  * Accepts the plain base58 form, the agent form (`r0` followed by the plain
- * base58 form) and `0x` hex. A format check only: the node checks the
- * checksum.
+ * base58 form) and `0x` hex. The plain form is base58 that decodes to the 24
+ * bytes the node requires, 24 to 33 characters. A format check only: the node
+ * checks the checksum.
  *
  * @param address - Address to validate
  * @returns true if valid

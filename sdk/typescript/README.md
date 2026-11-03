@@ -265,14 +265,17 @@ formatNumber(1234567.89)  // "1,234,567.89"
 ### isValidAddress(address)
 
 Validate address format: plain base58, the agent form (`r0` followed by the
-plain base58 address), or `0x` hex. A format check only; the node checks the
-checksum.
+plain base58 address), or `0x` hex. The plain form is base58 that decodes to
+the 24 bytes the node requires (the address and a 4-byte checksum), which is 24
+to 33 characters: the zero address is 26. A format check only; the node checks
+the checksum.
 
 ```typescript
-isValidAddress("5HqX...")    // true
-isValidAddress("r05HqX...")  // true (agent form)
-isValidAddress("0x...")      // true
-isValidAddress("invalid")    // false
+isValidAddress("5HqX...")                     // true
+isValidAddress("r05HqX...")                   // true (agent form)
+isValidAddress("111111111111111111112u6Gvy")  // true (the zero address)
+isValidAddress("0x...")                       // true
+isValidAddress("invalid")                     // false
 ```
 
 ### toRaddress(address) / fromRaddress(raddress) / isRaddress(address)
