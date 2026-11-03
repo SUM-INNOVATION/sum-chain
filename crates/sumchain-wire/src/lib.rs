@@ -65,7 +65,7 @@ pub mod token_ops;
 pub mod transaction;
 pub mod validator_authority;
 
-pub use address::Address;
+pub use address::{Address, AddressText};
 pub use hash::Hash;
 pub use governance::GovernanceParams;
 pub use validator_authority::ValidatorApproval;

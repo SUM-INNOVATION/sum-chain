@@ -2,6 +2,22 @@
 //!
 //! Addresses are derived from Ed25519 public keys using Blake3,
 //! taking the last 20 bytes. Displayed in base58 with a checksum.
+//!
+//! ## Text forms
+//!
+//! An address has two text forms, both naming the same 20 bytes (sum-chain #309,
+//! SwUM specification 5.2, decision D2):
+//!
+//! - the plain form, [`Address::to_base58`]: base58 of the bytes followed by a
+//!   4-byte checksum;
+//! - the agent form ("raddress"), [`Address::to_raddress`]: the two characters
+//!   `r0` followed by the plain form, unchanged — the same bytes, key and
+//!   checksum.
+//!
+//! `0` is not in the base58 alphabet, so no plain address begins with `r0` and
+//! the two forms never overlap. [`AddressText`] parses either and records which
+//! one was written. The form is text only: no encoded byte, hash, signature or
+//! state key involves it, and nothing on chain says which accounts are agents.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -86,6 +102,12 @@ impl Address {
         bs58::encode(with_checksum).into_string()
     }
 
+    /// Convert to the agent text form ("raddress"): `r0` followed by
+    /// [`Address::to_base58`], unchanged. See the [module docs](self).
+    pub fn to_raddress(&self) -> String {
+        format!("r0{}", self.to_base58())
+    }
+
     /// Create from hex string
     pub fn from_hex(s: &str) -> Result<Self> {
         let s = s.strip_prefix("0x").unwrap_or(s);
@@ -130,6 +152,76 @@ impl AsRef<[u8]> for Address {
 impl From<[u8; 20]> for Address {
     fn from(bytes: [u8; 20]) -> Self {
         Address(bytes)
+    }
+}
+
+/// An address together with the text form it was written in.
+///
+/// The variant records the form of the text, not a fact about the account:
+/// `Agent` means the text carried the `r0` prefix, `Human` means it did not.
+/// Both hold the same [`Address`] for the same key; compare with
+/// [`AddressText::address`] when only the account matters. A caller that
+/// expects one kind of account may refuse the other form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AddressText {
+    /// The plain base58 form ([`Address::to_base58`]).
+    Human(Address),
+    /// The agent form ([`Address::to_raddress`]): `r0` then the plain form.
+    Agent(Address),
+}
+
+impl AddressText {
+    /// Parse the plain base58 form or the agent (`r0`) form.
+    ///
+    /// The `r0` prefix is decided first: text that starts with it is the agent
+    /// form or an error, never retried as plain text. The base58 text is not of
+    /// fixed length (most addresses encode to 33 characters, some to 32, and
+    /// addresses with leading zero bytes to fewer); it is decoded and its length
+    /// and checksum checked by [`Address::from_base58`].
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.strip_prefix("r0") {
+            Some(plain) => Address::from_base58(plain).map(AddressText::Agent),
+            None => Address::from_base58(s).map(AddressText::Human),
+        }
+    }
+
+    /// As [`AddressText::parse`], and also hex ([`Address::from_hex`], `0x`
+    /// optional), which parses as `Human`: only the `r0` prefix marks the agent
+    /// form. Text that starts with `r0` is never retried as hex (`r` is not a
+    /// hex digit, so it could never be hex either).
+    ///
+    /// For input that does not start with `r0` the result, and the error, are
+    /// those of `Address::from_base58(s).or_else(|_| Address::from_hex(s))`.
+    pub fn parse_or_hex(s: &str) -> Result<Self> {
+        match s.strip_prefix("r0") {
+            Some(plain) => Address::from_base58(plain).map(AddressText::Agent),
+            None => Address::from_base58(s)
+                .or_else(|_| Address::from_hex(s))
+                .map(AddressText::Human),
+        }
+    }
+
+    /// The address, whichever form it was written in.
+    pub fn address(self) -> Address {
+        match self {
+            AddressText::Human(a) | AddressText::Agent(a) => a,
+        }
+    }
+
+    /// Whether the text was the agent (`r0`) form.
+    pub fn is_agent(self) -> bool {
+        matches!(self, AddressText::Agent(_))
+    }
+}
+
+/// Writes the form that was parsed: [`Address::to_base58`] for `Human`,
+/// [`Address::to_raddress`] for `Agent`.
+impl fmt::Display for AddressText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AddressText::Human(a) => f.write_str(&a.to_base58()),
+            AddressText::Agent(a) => f.write_str(&a.to_raddress()),
+        }
     }
 }
 
@@ -179,5 +271,150 @@ mod tests {
     #[test]
     fn test_zero_address() {
         assert!(Address::ZERO.is_zero());
+    }
+
+    // ── text forms (#309) ──────────────────────────────────────────────────
+    //
+    // Deterministic table-and-loop checks; the crate has no property-testing
+    // dependency.
+
+    /// `n` addresses from distinct keys, in a fixed order.
+    fn sample(n: u32) -> Vec<Address> {
+        (0..n)
+            .map(|i| {
+                let mut pubkey = [0u8; 32];
+                pubkey[..4].copy_from_slice(&i.to_le_bytes());
+                Address::from_public_key(&pubkey)
+            })
+            .collect()
+    }
+
+    /// Addresses whose plain text is unusually short or long.
+    fn edges() -> Vec<Address> {
+        let mut leading_zero = [0x5Au8; 20];
+        leading_zero[0] = 0;
+        vec![
+            Address::ZERO,
+            Address::new([0xFF; 20]),
+            Address::new(leading_zero),
+            Address::new({
+                let mut b = [0u8; 20];
+                b[19] = 1;
+                b
+            }),
+        ]
+    }
+
+    fn assert_both_forms_round_trip(a: Address) {
+        let plain = a.to_base58();
+        let agent = a.to_raddress();
+        assert_eq!(agent, format!("r0{plain}"));
+
+        let h = AddressText::parse(&plain).unwrap();
+        let g = AddressText::parse(&agent).unwrap();
+        assert_eq!(h, AddressText::Human(a));
+        assert_eq!(g, AddressText::Agent(a));
+        assert!(!h.is_agent());
+        assert!(g.is_agent());
+        // One key, two forms: the same Address, distinct texts.
+        assert_eq!(h.address(), g.address());
+        assert_ne!(h, g);
+        // Display writes back exactly the text that was parsed.
+        assert_eq!(h.to_string(), plain);
+        assert_eq!(g.to_string(), agent);
+        // parse_or_hex agrees on both base58 forms and reads hex as Human.
+        assert_eq!(AddressText::parse_or_hex(&plain).unwrap(), h);
+        assert_eq!(AddressText::parse_or_hex(&agent).unwrap(), g);
+        assert_eq!(AddressText::parse_or_hex(&a.to_hex()).unwrap(), h);
+        assert_eq!(
+            AddressText::parse_or_hex(a.to_hex().trim_start_matches("0x")).unwrap(),
+            h
+        );
+    }
+
+    #[test]
+    fn text_forms_round_trip_and_have_no_fixed_length() {
+        let mut by_len = std::collections::BTreeMap::<usize, usize>::new();
+        for a in sample(4096) {
+            let plain = a.to_base58();
+            // `0` is not base58, so no plain address can look like an agent one.
+            assert!(!plain.starts_with("r0"), "{plain}");
+            *by_len.entry(plain.len()).or_default() += 1;
+            assert_both_forms_round_trip(a);
+        }
+        // Both common plain lengths occur, so neither may be assumed.
+        assert!(by_len.contains_key(&32), "no 32-character address: {by_len:?}");
+        assert!(by_len.contains_key(&33), "no 33-character address: {by_len:?}");
+        assert!(by_len.keys().all(|&n| n <= 33), "{by_len:?}");
+
+        for a in edges() {
+            assert_both_forms_round_trip(a);
+        }
+        // Leading zero bytes shorten the text well below 32 characters.
+        assert!(Address::ZERO.to_base58().len() < 32);
+    }
+
+    #[test]
+    fn r0_followed_by_anything_but_a_plain_address_is_refused() {
+        let a = Address::from_public_key(&[7u8; 32]);
+        let plain = a.to_base58();
+        let mut bad_checksum = plain.clone();
+        let last = bad_checksum.pop().unwrap();
+        bad_checksum.push(if last == 'a' { 'b' } else { 'a' });
+        let hex = a.to_hex();
+
+        let refused = [
+            "r0".to_string(),                              // nothing after the prefix
+            format!("r0{}", &plain[..plain.len() - 1]),    // truncated
+            format!("r0{plain}1"),                         // one character too many
+            format!("r0{bad_checksum}"),                   // checksum fails
+            format!("r0{}0", &plain[..plain.len() - 1]),   // `0` is not base58
+            format!("r0{}O", &plain[..plain.len() - 1]),   // `O` is not base58
+            format!("r0{}l", &plain[..plain.len() - 1]),   // `l` is not base58
+            format!("r0{hex}"),                            // the agent form is not over hex
+            format!("r0{}", hex.trim_start_matches("0x")), // nor over bare hex
+            format!("r0r0{plain}"),                        // one prefix only
+            format!("R0{plain}"),                          // the prefix is lower-case
+            format!("r1{plain}"),                          // a different prefix
+            format!(" r0{plain}"),                         // no trimming
+            format!("r0 {plain}"),
+            format!("r0{plain} "),
+        ];
+        for s in &refused {
+            assert!(AddressText::parse(s).is_err(), "parse accepted {s:?}");
+            assert!(AddressText::parse_or_hex(s).is_err(), "parse_or_hex accepted {s:?}");
+        }
+        // The agent form is never read as hex, and hex is not a parse form.
+        assert!(AddressText::parse(&hex).is_err());
+        // Sanity: the unmodified agent form is accepted.
+        assert_eq!(AddressText::parse(&format!("r0{plain}")).unwrap(), AddressText::Agent(a));
+    }
+
+    #[test]
+    fn parse_or_hex_matches_the_base58_then_hex_rule_off_the_prefix() {
+        let a = Address::from_public_key(&[9u8; 32]);
+        let old = |s: &str| Address::from_base58(s).or_else(|_| Address::from_hex(s));
+        let inputs = [
+            a.to_base58(),
+            a.to_hex(),
+            a.to_hex().trim_start_matches("0x").to_string(),
+            String::new(),
+            "notanaddress".to_string(),
+            "0x1234".to_string(),
+            "0xzz".to_string(),
+            "1111".to_string(),
+        ];
+        for s in &inputs {
+            match (old(s), AddressText::parse_or_hex(s)) {
+                (Ok(x), Ok(t)) => assert_eq!(t, AddressText::Human(x), "{s:?}"),
+                (Err(e1), Err(e2)) => assert_eq!(e1.to_string(), e2.to_string(), "{s:?}"),
+                (o, n) => panic!("{s:?}: old {o:?}, new {n:?}"),
+            }
+            match (Address::from_base58(s), AddressText::parse(s)) {
+                (Ok(x), Ok(t)) => assert_eq!(t, AddressText::Human(x), "{s:?}"),
+                (Err(e1), Err(e2)) => assert_eq!(e1.to_string(), e2.to_string(), "{s:?}"),
+                (o, n) => panic!("{s:?}: old {o:?}, new {n:?}"),
+            }
+        }
     }
 }
