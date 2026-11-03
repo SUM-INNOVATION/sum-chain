@@ -122,23 +122,93 @@ export function formatNumber(value: number | string): string {
 }
 
 /**
+ * Prefix of the agent ("raddress") text form of an address: `r0` followed by
+ * the plain base58 address, unchanged (sum-chain #309). `0` is not in the
+ * base58 alphabet, so no plain address starts with it.
+ */
+export const RADDRESS_PREFIX = 'r0';
+
+/** The plain base58 form, by format (the node checks the checksum). */
+function isPlainBase58Address(address: string): boolean {
+  return (
+    /^[1-9A-HJ-NP-Za-km-z]+$/.test(address) && address.length >= 32 && address.length <= 44
+  );
+}
+
+/**
  * Validate address format
+ *
+ * Accepts the plain base58 form, the agent form (`r0` followed by the plain
+ * base58 form) and `0x` hex. A format check only: the node checks the
+ * checksum.
  *
  * @param address - Address to validate
  * @returns true if valid
  */
 export function isValidAddress(address: string): boolean {
-  // Check base58 format (starts with alphanumeric)
-  if (/^[1-9A-HJ-NP-Za-km-z]+$/.test(address)) {
-    return address.length >= 32 && address.length <= 44;
+  // Plain base58, or the agent form: `r0` then a plain base58 address
+  if (isPlainBase58Address(address) || isRaddress(address)) {
+    return true;
   }
 
   // Check hex format (starts with 0x)
-  if (address.startsWith('0x')) {
-    return /^0x[0-9a-fA-F]{40}$/.test(address);
-  }
+  return /^0x[0-9a-fA-F]{40}$/.test(address);
+}
 
-  return false;
+/**
+ * Whether an address is written in the agent form: `r0` followed by a plain
+ * base58 address. A format check only. A caller that expects a human account
+ * may refuse such an address; the node accepts both forms as the same account.
+ *
+ * @param address - Address to check
+ * @returns true for the agent form
+ */
+export function isRaddress(address: string): boolean {
+  return (
+    address.startsWith(RADDRESS_PREFIX) &&
+    isPlainBase58Address(address.slice(RADDRESS_PREFIX.length))
+  );
+}
+
+/**
+ * Convert a plain base58 address to its agent form: `r0` followed by the same
+ * text. The same 20 bytes, key and checksum; the node treats both forms as
+ * the same account and returns addresses in the plain form.
+ *
+ * @param address - A plain base58 address
+ * @returns The agent form
+ * @throws If `address` is not a plain base58 address (hex is not converted)
+ *
+ * @example
+ * ```ts
+ * toRaddress('jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j')  // 'r0jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j'
+ * ```
+ */
+export function toRaddress(address: string): string {
+  if (!isPlainBase58Address(address)) {
+    throw new Error('toRaddress: expected a plain base58 address');
+  }
+  return RADDRESS_PREFIX + address;
+}
+
+/**
+ * Convert an agent-form address back to the plain base58 form: the text after
+ * `r0`.
+ *
+ * @param raddress - An address in the agent form
+ * @returns The plain base58 address
+ * @throws If `raddress` is not `r0` followed by a plain base58 address
+ *
+ * @example
+ * ```ts
+ * fromRaddress('r0jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j')  // 'jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j'
+ * ```
+ */
+export function fromRaddress(raddress: string): string {
+  if (!isRaddress(raddress)) {
+    throw new Error('fromRaddress: expected r0 followed by a plain base58 address');
+  }
+  return raddress.slice(RADDRESS_PREFIX.length);
 }
 
 /**

@@ -49,6 +49,9 @@ export {
   formatKoppa,
   formatNumber,
   isValidAddress,
+  isRaddress,
+  toRaddress,
+  fromRaddress,
   isValidHash,
   sleep,
   retry,
@@ -56,6 +59,7 @@ export {
   KOPPA_SYMBOL,
   KOPPA_NAME,
   KOPPA_DECIMALS,
+  RADDRESS_PREFIX,
 } from './utils.js';
 
 export type {

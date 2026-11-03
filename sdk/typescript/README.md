@@ -264,12 +264,31 @@ formatNumber(1234567.89)  // "1,234,567.89"
 
 ### isValidAddress(address)
 
-Validate address format.
+Validate address format: plain base58, the agent form (`r0` followed by the
+plain base58 address), or `0x` hex. A format check only; the node checks the
+checksum.
 
 ```typescript
-isValidAddress("5HqX...")  // true
-isValidAddress("0x...")    // true
-isValidAddress("invalid")  // false
+isValidAddress("5HqX...")    // true
+isValidAddress("r05HqX...")  // true (agent form)
+isValidAddress("0x...")      // true
+isValidAddress("invalid")    // false
+```
+
+### toRaddress(address) / fromRaddress(raddress) / isRaddress(address)
+
+Convert between the plain base58 form and the agent ("raddress") form, `r0`
+followed by the same text: the same 20 bytes, key and checksum. The node
+accepts either form wherever it takes an address, as the same account, and
+always returns the plain form. `isRaddress` lets a caller that expects a human
+account refuse the agent form. `toRaddress` throws on anything but a plain
+base58 address (hex is not converted); `fromRaddress` throws on anything but
+`r0` followed by one.
+
+```typescript
+toRaddress("jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j")      // "r0jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j"
+fromRaddress("r0jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j")  // "jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j"
+isRaddress("r0jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j")    // true
 ```
 
 ### isValidHash(hash)
