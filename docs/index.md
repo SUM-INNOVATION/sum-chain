@@ -84,12 +84,12 @@ exposes five of the seven (sponsored attestation, consistency, verifier bonding,
 `service_grants` and `monetary_policy`) and reports `null` for all five, so for
 those five the live RPC, not this page, is the source of truth. It does not
 expose assignment targeting or the assignment-aware scheduler;
-`chain_getConsensusConfig` reports both absent. The website currently derives
-all seven from the hard-coded constant `9,200,000` (`POST_SUPPLY_GATE` in
-`website/src/lib/chainStatus.ts`) and the live block height. That constant is
-not a record of the live configuration, so the status the website shows for
-these seven gates is wrong; the website is to be corrected to read the gates
-from the RPC.
+`chain_getConsensusConfig` reports both absent. The website
+(`website/src/lib/chainStatus.ts`) reads each of the seven gates by name from
+these two methods: a gate shows active only when it is set and the live head
+has reached it, an unset gate shows "not set", and an unreadable RPC shows
+"status unavailable". 9,200,000 appears there only as the height #113 states as
+intended.
 
 Token / NFT / messaging / docclass / employment families have **no activation
 gate** — they are always available when the node binary is running.

@@ -5,11 +5,9 @@ import { SpecList } from '@/components/ui/blocks';
 import {
   koppa,
   postSupplyGateLabel,
-  postSupplyGateState,
   useSupplyStatus,
   type GateState,
 } from '@/lib/supplyStatus';
-import { POST_SUPPLY_GATE } from '@/lib/chainStatus';
 
 /**
  * Live governance-configuration dashboards (v2 + monetary policy).
@@ -22,6 +20,7 @@ import { POST_SUPPLY_GATE } from '@/lib/chainStatus';
 
 function pill(state: GateState) {
   if (state === 'unknown') return <span className="mono text-xs text-muted">status unavailable</span>;
+  if (state === 'not-set') return <StatusPill status="dormant" label="Not set" />;
   const label = state === 'dormant' ? 'Dormant' : state === 'pending' ? 'Pending' : 'Active';
   return <StatusPill status={state} label={label} />;
 }
@@ -35,10 +34,10 @@ function fmtGate(gate: number | null, exposed: boolean): string {
 export function MonetaryGovernanceStatus() {
   const s = useSupplyStatus();
   // Reserve release and MonetaryPolicyMint share the monetary-policy gate, one
-  // of the seven post-supply gates deployed in runtime genesis at height
-  // 9,200,000. chain_getChainParams does not reliably expose it, so state comes
-  // from the live block height (auto-flips at the gate), never a null RPC field.
-  const monetary = postSupplyGateState(s.gates.height);
+  // of the seven post-supply gates. Its state is read live from the chain: active
+  // only when set and reached, "not set" when unset, unknown when unreadable.
+  const monetaryGate = s.supplyGateStatus('monetaryPolicy');
+  const monetary = monetaryGate.state;
   return (
     <div>
       <ul className="space-y-4">
@@ -53,7 +52,7 @@ export function MonetaryGovernanceStatus() {
         <li className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
           <span className="text-sm text-muted-strong">Activation height</span>
           <span className="mono text-xs text-muted-strong">
-            {POST_SUPPLY_GATE.toLocaleString('en-US')} (deployed)
+            {postSupplyGateLabel(monetaryGate)}
           </span>
         </li>
         <li className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
@@ -75,10 +74,11 @@ export function MonetaryGovernanceStatus() {
         </li>
       </ul>
       <p className="mono mt-4 text-[11px] text-muted">
-        The monetary-policy gate is deployed in runtime genesis and activates at
-        height {POST_SUPPLY_GATE.toLocaleString('en-US')}; the state above is
-        derived from the live block height, not a chain_getChainParams field
-        (which does not expose every gate).
+        The monetary-policy gate is read live from chain_getChainParams and
+        chain_getConsensusConfig; it shows active only once it is set and the
+        chain has reached it. A live read on 2026-11-03 found it not set on
+        mainnet. 9,200,000 is the height #113 states as intended; setting it is a
+        separate coordinated configuration change.
       </p>
     </div>
   );
@@ -104,12 +104,11 @@ export function GovernanceParamsDashboard() {
     { k: 'voting_period_blocks', v: g ? g.voting_period_blocks.toLocaleString('en-US') : 'not exposed by current RPC' },
     { k: 'max_snapshot_holders', v: g ? g.max_snapshot_holders.toLocaleString('en-US') : 'not exposed by current RPC' },
     { k: 'min_koppa_for_eligibility', v: g ? `${koppa(g.min_koppa_for_eligibility)} Ϙ` : 'not exposed by current RPC' },
-    // Two of the seven post-supply gates. chain_getChainParams does not reliably
-    // expose them, so the site uses the operator-verified runtime-genesis height
-    // (9,200,000) and derives active/pending from the live block height, rather
-    // than treating a missing RPC field as dormant.
-    { k: 'monetary_policy_enabled_from_height', v: postSupplyGateLabel(s.gates.height) },
-    { k: 'service_grants_enabled_from_height', v: postSupplyGateLabel(s.gates.height) },
+    // Two of the seven post-supply gates, read live by name: a set height shows
+    // active/pending against the live head, unset shows "not set", and an
+    // unreadable RPC shows "status unavailable".
+    { k: 'monetary_policy_enabled_from_height', v: postSupplyGateLabel(s.supplyGateStatus('monetaryPolicy')) },
+    { k: 'service_grants_enabled_from_height', v: postSupplyGateLabel(s.supplyGateStatus('serviceGrants')) },
   ];
   return (
     <div>
@@ -122,10 +121,9 @@ export function GovernanceParamsDashboard() {
       <p className="mono mt-2 text-[11px] text-muted">
         The <span className="text-muted-strong">monetary_policy</span> and{' '}
         <span className="text-muted-strong">service_grants</span> gates are two of
-        seven post-supply gates that chain_getChainParams does not expose. The
-        site uses their operator-verified runtime-genesis height (
-        {POST_SUPPLY_GATE.toLocaleString('en-US')}) and derives active/pending
-        from the live block height, so they are never shown as null/dormant.
+        the seven post-supply gates. Both are read live; a live read on
+        2026-11-03 found both not set on mainnet, so neither is active. 9,200,000
+        is the height #113 states as intended, not the live configuration.
       </p>
     </div>
   );
