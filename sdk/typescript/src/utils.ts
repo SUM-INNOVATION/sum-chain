@@ -175,9 +175,10 @@ function base58DecodedLength(text: string): number {
 }
 
 /**
- * The plain base58 form, by shape: base58 characters that decode to exactly
- * the 24 bytes the node requires. This is what the node accepts, except that
- * the node also checks the checksum and this does not.
+ * The plain base58 form, by shape only: base58 characters that decode to 24
+ * bytes, the same shape the node parses. A format check; the 4-byte checksum
+ * is verified only by the node, which refuses a bad checksum with -32602
+ * (Invalid params). Text that passes here can still be refused there.
  */
 function isPlainBase58Address(address: string): boolean {
   return (
@@ -191,12 +192,15 @@ function isPlainBase58Address(address: string): boolean {
  * Validate address format
  *
  * Accepts the plain base58 form, the agent form (`r0` followed by the plain
- * base58 form) and `0x` hex. The plain form is base58 that decodes to the 24
- * bytes the node requires, 24 to 33 characters. A format check only: the node
- * checks the checksum.
+ * base58 form) and `0x` hex. The plain form is base58 that decodes to 24
+ * bytes, 24 to 33 characters: the same shape the node parses.
+ *
+ * A format check; the 4-byte checksum is verified only by the node, which
+ * refuses a bad checksum with -32602 (Invalid params). `true` means the text
+ * has the shape of an address, not that the node will accept it.
  *
  * @param address - Address to validate
- * @returns true if valid
+ * @returns true if the text has the format of an address
  */
 export function isValidAddress(address: string): boolean {
   // Plain base58, or the agent form: `r0` then a plain base58 address
@@ -210,10 +214,11 @@ export function isValidAddress(address: string): boolean {
 
 /**
  * Whether an address is written in the agent form: `r0` followed by a plain
- * base58 address. A format check of the text only: the `r0` form does not
- * identify an agent or grant anything, and the node accepts both forms as the
- * same account. A caller may refuse a form it does not expect, as a check on
- * its input and nothing more.
+ * base58 address. A format check; the 4-byte checksum is verified only by the
+ * node, which refuses a bad checksum with -32602 (Invalid params). The `r0`
+ * form does not identify an agent or grant anything, and the node takes both
+ * forms as the same account. A caller may refuse a form it does not expect, as
+ * a check on its input and nothing more.
  *
  * @param address - Address to check
  * @returns true for the agent form
@@ -231,9 +236,14 @@ export function isRaddress(address: string): boolean {
  * the same account and returns addresses in the plain form. A text form only;
  * it does not identify an agent or grant anything.
  *
+ * Checks the format of `address` only; the 4-byte checksum is verified only by
+ * the node, which refuses a bad checksum with -32602 (Invalid params), in
+ * either form.
+ *
  * @param address - A plain base58 address
  * @returns The agent form
- * @throws If `address` is not a plain base58 address (hex is not converted)
+ * @throws If `address` does not have the format of a plain base58 address (hex
+ *   is not converted)
  *
  * @example
  * ```ts
@@ -251,9 +261,13 @@ export function toRaddress(address: string): string {
  * Convert an agent-form address back to the plain base58 form: the text after
  * `r0`. The same account; the `r0` form is text only and grants nothing.
  *
+ * Checks the format of `raddress` only; the 4-byte checksum is verified only
+ * by the node, which refuses a bad checksum with -32602 (Invalid params).
+ *
  * @param raddress - An address in the agent form
  * @returns The plain base58 address
- * @throws If `raddress` is not `r0` followed by a plain base58 address
+ * @throws If `raddress` is not `r0` followed by text in the format of a plain
+ *   base58 address
  *
  * @example
  * ```ts

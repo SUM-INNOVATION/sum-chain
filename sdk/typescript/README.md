@@ -265,15 +265,19 @@ formatNumber(1234567.89)  // "1,234,567.89"
 ### isValidAddress(address)
 
 Validate address format: plain base58, the agent form (`r0` followed by the
-plain base58 address), or `0x` hex. The plain form is base58 that decodes to
-the 24 bytes the node requires (the address and a 4-byte checksum), which is 24
-to 33 characters: the zero address is 26. A format check only; the node checks
-the checksum.
+plain base58 address), or `0x` hex. The plain form is base58 that decodes to 24
+bytes (the address and a 4-byte checksum), which is 24 to 33 characters: the
+same shape the node parses. The zero address is 26.
+
+This is a format check; the 4-byte checksum is verified only by the node,
+which refuses a bad checksum with -32602 (Invalid params). `true` means the
+text has the shape of an address, not that the node will accept it.
 
 ```typescript
 isValidAddress("5HqX...")                     // true
 isValidAddress("r05HqX...")                   // true (agent form)
 isValidAddress("111111111111111111112u6Gvy")  // true (the zero address)
+isValidAddress("111111111111111111111111")    // true: right shape, but the node refuses its checksum
 isValidAddress("0x...")                       // true
 isValidAddress("invalid")                     // false
 ```
@@ -286,8 +290,10 @@ accepts either form wherever it takes an address, as the same account, and
 always returns the plain form. The `r0` form is a text form only; it does not
 identify an agent or grant anything. `isRaddress` lets a caller refuse a form
 it does not expect, as a check on its input. `toRaddress` throws on anything
-but a plain base58 address (hex is not converted); `fromRaddress` throws on
-anything but `r0` followed by one.
+without the format of a plain base58 address (hex is not converted);
+`fromRaddress` throws on anything but `r0` followed by such text. All three
+check the format only, as `isValidAddress` does: the checksum is verified only
+by the node, which refuses a bad one with -32602 in either form.
 
 ```typescript
 toRaddress("jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j")      // "r0jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j"

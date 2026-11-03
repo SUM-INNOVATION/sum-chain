@@ -2,11 +2,13 @@ import { Provider } from '../provider';
 import { fromRaddress, isRaddress, isValidAddress, RADDRESS_PREFIX, toRaddress } from '../utils';
 
 // The agent ("raddress") text form, issue #309: `r0` followed by the plain
-// base58 address. Format checks only; no network, no keys.
+// base58 address. Format checks only: the 4-byte checksum is verified only by
+// the node, which refuses a bad checksum with -32602. No network, no keys.
 
 // Vectors shared with the Rust parser (crates/sumchain-wire/src/address.rs,
 // `shared_vectors_pin_the_lengths_the_parser_accepts`): keep the two tables
-// equal, so this format check and the node accept the same text.
+// equal, so this format check and the node parse the same shape; the node also
+// verifies the checksum, which this does not.
 //
 // The plain text is base58 of 24 bytes (the 20-byte address and a 4-byte
 // checksum): 24 to 33 characters, and under 32 only with two or more leading
@@ -95,8 +97,8 @@ describe('raddress text form (issue #309)', () => {
     expect(() => fromRaddress(HEX)).toThrow();
   });
 
-  it('takes exactly the plain shapes the node decodes, short ones included', () => {
-    // Short valid addresses, in both forms: the 24-to-31 range the node accepts.
+  it('checks the shape the node parses, short addresses included, not the checksum', () => {
+    // Short valid addresses, in both forms: the node accepts these too.
     for (const plain of [ZERO_ADDRESS, SHORT_KEY_ADDRESS]) {
       expect(plain.length).toBeLessThan(32);
       expect(isValidAddress(plain)).toBe(true);

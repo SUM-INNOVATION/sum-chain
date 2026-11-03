@@ -44,14 +44,15 @@ An address is 20 bytes. A parameter that takes an address accepts it as a string
 
 Base58-only parameters (plain or `r0`, no hex): `employment_getIssuer`, `employment_getCredentialsByEmployeeAddress`, `employment_getActiveCredentialsByEmployeeAddress`, `employment_getIncomeAttestationsByHolderAddress`, `employment_createCredential` (`employee_address`), `docclass_issueAcademicCredential` (`holder_address`), `docclass_getAcademicCredentialsByHolder`, and the member and approver addresses of `policy_buildCreateAccount` and `policy_buildSubmitProposal`.
 
-- **No fixed length.** The plain text is base58 of 24 bytes (the address and its checksum), so it is 24 to 33 characters: most addresses are 33, about 4% are 32, and only an address with two or more leading zero bytes is shorter (`Address::ZERO`, `111111111111111111112u6Gvy`, is 26). The node decodes the text and checks that it is 24 bytes with a valid checksum; a client should do the same rather than count characters. The SDK's `isValidAddress` checks the same shape, without the checksum.
+- **No fixed length.** The plain text is base58 of 24 bytes (the address and its checksum), so it is 24 to 33 characters: most addresses are 33, about 4% are 32, and only an address with two or more leading zero bytes is shorter (`Address::ZERO`, `111111111111111111112u6Gvy`, is 26). The node decodes the text and checks that it is 24 bytes with a valid checksum; a client should decode rather than count characters.
+- **The node verifies the checksum.** A plain or `r0` address whose 4-byte checksum does not match is refused with `-32602` (Invalid params), like any malformed address, in every method that takes one. The node is the only place the checksum is verified.
 - **`r0` is unambiguous.** `0` is not in the base58 alphabet and `r` is not a hex digit, so no plain or hex address starts with `r0`. An argument that starts with `r0` is the agent form or `-32602`; it is never retried as hex.
 - **The form changes nothing.** No method refuses either form, and the node keeps no list of which accounts are agents. A plain address and its `r0` form are the same account in every method.
 - **Output is unchanged.** No response contains the `r0` form: every address in a response is printed in the plain base58 form, as before, including an address echoed from a request that used the `r0` form or hex.
 - **Text only.** Transactions, blocks, state and digests carry the 20 bytes; the `r0` form is not part of any of them.
 - **It grants nothing.** `r0` is a text form only; it does not identify an agent or grant anything. No permission, signature, fee or account rule depends on the form an address was written in.
 
-The TypeScript SDK's `toRaddress` / `fromRaddress` convert between the plain and agent forms, and `isValidAddress` accepts all three.
+The TypeScript SDK's `toRaddress` / `fromRaddress` convert between the plain and agent forms, and `isValidAddress` accepts all three. The SDK functions (`isValidAddress`, `isRaddress`, `toRaddress`, `fromRaddress`) are a format check: they check the same shape the node parses (base58 that decodes to 24 bytes, 24 to 33 characters; `isValidAddress` also takes `0x` hex), and the 4-byte checksum is verified only by the node, which refuses a bad checksum with `-32602`. Text the SDK accepts can still be refused by the node.
 
 ## Methods
 

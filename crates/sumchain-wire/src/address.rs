@@ -450,8 +450,9 @@ mod tests {
     // ── vectors shared with the TypeScript SDK ─────────────────────────────
     //
     // The same strings are in sdk/typescript/src/__tests__/raddress.test.ts, so
-    // the SDK's format check and this parser are pinned to the same text. Keep
-    // the two tables equal.
+    // the SDK's format check and this parser are pinned to the same vectors.
+    // The SDK checks only their shape; this parser also verifies the checksum
+    // (the RPC refuses a bad one with -32602). Keep the two tables equal.
     //
     // The plain text is base58 of 24 bytes: the 20-byte address and a 4-byte
     // checksum. Each leading zero byte is one `1` and the rest, as a number,
