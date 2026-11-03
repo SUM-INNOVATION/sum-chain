@@ -813,11 +813,22 @@ const QUIET: Duration = Duration::from_millis(1500);
 /// request counts these tests assert are exactly the requests they script.
 /// The stall check's own test sets a short interval.
 fn full_node(dir: &Path, genesis: &Genesis, bootnode: Option<&str>) -> Node {
+    full_node_with_request_timeout(dir, genesis, bootnode, sumchain_p2p::sync::SYNC_REQUEST_TIMEOUT)
+}
+
+/// [`full_node`] whose outbound sync requests time out after `timeout`.
+fn full_node_with_request_timeout(
+    dir: &Path,
+    genesis: &Genesis,
+    bootnode: Option<&str>,
+    timeout: Duration,
+) -> Node {
     let network = NetworkConfig {
         listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
         bootnodes: bootnode.map(str::to_string).into_iter().collect(),
         enable_mdns: false,
         node_key_file: None,
+        sync_request_timeout: timeout,
         ..Default::default()
     };
     Node::with_rpc_config(
@@ -1067,6 +1078,72 @@ impl ScriptedPeer {
         self.send(NetworkCommand::SendSyncBlocksResponse { request_id, blocks })
             .await;
         (from, to)
+    }
+
+    /// The next block request from `node`, left unanswered: its request id
+    /// and range.
+    async fn block_request(&mut self, node: PeerId, what: &str) -> (u64, BlockHeight, BlockHeight) {
+        self.next(what, |e| match e {
+            NetworkEvent::SyncBlocksRequest {
+                request_id,
+                peer,
+                from_height,
+                to_height,
+            } if *peer == node => Some((*request_id, *from_height, *to_height)),
+            _ => None,
+        })
+        .await
+    }
+
+    /// Answer block request `request_id` with heights `from..=to` of `chain`.
+    async fn answer_blocks(&self, request_id: u64, chain: &[Block], from: BlockHeight, to: BlockHeight) {
+        let blocks = chain[(from - 1) as usize..to as usize].to_vec();
+        self.send(NetworkCommand::SendSyncBlocksResponse { request_id, blocks })
+            .await;
+    }
+
+    /// Refuse request `request_id` with an error answer: on the node's side,
+    /// that request fails.
+    async fn answer_error(&self, request_id: u64) {
+        self.send(NetworkCommand::SendSyncErrorResponse {
+            request_id,
+            error: "refused by the scripted peer".to_string(),
+        })
+        .await;
+    }
+
+    /// Answer every status request from `node` with `head` until the node
+    /// sends a block request, and return that request, unanswered.
+    async fn answer_statuses_until_block_request(
+        &mut self,
+        node: PeerId,
+        head: &Block,
+        what: &str,
+    ) -> (u64, BlockHeight, BlockHeight) {
+        enum Seen {
+            Status(u64),
+            Blocks(u64, BlockHeight, BlockHeight),
+        }
+        loop {
+            match self
+                .next(what, |e| match e {
+                    NetworkEvent::SyncStatusRequest { request_id, peer } if *peer == node => {
+                        Some(Seen::Status(*request_id))
+                    }
+                    NetworkEvent::SyncBlocksRequest {
+                        request_id,
+                        peer,
+                        from_height,
+                        to_height,
+                    } if *peer == node => Some(Seen::Blocks(*request_id, *from_height, *to_height)),
+                    _ => None,
+                })
+                .await
+            {
+                Seen::Status(id) => self.answer_status(id, head).await,
+                Seen::Blocks(id, from, to) => return (id, from, to),
+            }
+        }
     }
 
     /// The node's own answer to a status request from this peer: its height.
@@ -1646,6 +1723,236 @@ async fn a_stalled_node_asks_its_peer_again_and_fetches_what_nothing_pointed_at(
             peer.status_requests >= 2,
             "asked on connect and again after the stall"
         );
+    })
+    .await;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 9. Issue #354: the sync stream is correlated with its own requests
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The wire messages carry no request id. The network now reports which of the
+// node's requests a batch answers and which one failed (`SyncRequestKind`, the
+// block request's tag), and the stream continues or ends only on its own
+// request. Each block request the peer sees is checked against the node's
+// actual outstanding block requests (`NetworkService::outstanding_block_requests`).
+
+/// The race the correlation closes. A block request to P is out; an unrelated
+/// status request to P fails; P's next status shows it ahead. Before, the
+/// failure ended the stream, the status started a replacement to P, and the
+/// first request's late batch was taken as the replacement's and started
+/// another. Now the failure is the status request's, the stream keeps waiting,
+/// the status only raises its target, and its own batch continues it once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unrelated_failure_does_not_end_a_sync_and_its_batch_continues_it_once() {
+    let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
+    let tip = blocks.last().expect("a chain").clone();
+    let head: BlockHeight = 1;
+    let ahead = blocks[(head + 2 - 1) as usize].clone();
+    let dir = left_at(&genesis, &blocks, head).await;
+
+    let mut peer = ScriptedPeer::start().await;
+    let peer_id = peer.id();
+    let mut node = full_node(dir.path(), &genesis, Some(peer.dial.as_str()));
+    node.sync_stall_check = Duration::from_secs(1);
+    let (compat, consensus, net, digest) = (
+        node.peer_compat.clone(),
+        node.consensus.clone(),
+        node.network.clone(),
+        node.protocol_digest,
+    );
+
+    drive(&mut node, async {
+        let (node_id, digest_req, status_req) = peer.connected().await;
+        peer.declare(digest_req, digest).await;
+        assert!(eventually(|| compat.status(&peer_id) == PeerCompat::Verified).await);
+        peer.answer_status(status_req, &ahead).await;
+
+        // 1. The stream's first block request, held.
+        let (r1, from, to) = peer.block_request(node_id, "the stream's first block request").await;
+        assert_eq!((from, to), (head + 1, ahead.height()));
+        assert_eq!(net.outstanding_block_requests(), 1);
+
+        // 2. The head is stalled, so the stall check asks P again: that
+        //    request fails.
+        let s1 = peer.status_request(node_id, "a status request from the stall check").await;
+        peer.answer_error(s1).await;
+
+        // 3. P's next status shows it ahead: it may only raise the target.
+        let s2 = peer.status_request(node_id, "the next stall check's status request").await;
+        peer.answer_status(s2, &tip).await;
+        peer.quiet("a second block request while the first is out", |e| {
+            matches!(e, NetworkEvent::SyncBlocksRequest { .. })
+        })
+        .await;
+        assert_eq!(net.outstanding_block_requests(), 1);
+
+        // 4. The first request's batch continues the stream to the raised
+        //    target, in one request.
+        peer.answer_blocks(r1, &blocks, from, to).await;
+        let (r2, from2, to2) = peer.block_request(node_id, "the stream's next request").await;
+        assert_eq!((from2, to2), (ahead.height() + 1, tip.height()));
+        assert_eq!(net.outstanding_block_requests(), 1);
+        peer.answer_blocks(r2, &blocks, from2, to2).await;
+        assert!(
+            eventually(|| consensus.current_height() == tip.height()).await,
+            "the node never reached the tip; it is at {}",
+            consensus.current_height()
+        );
+        peer.quiet("another block request", |e| {
+            matches!(e, NetworkEvent::SyncBlocksRequest { .. })
+        })
+        .await;
+        assert_eq!(net.outstanding_block_requests(), 0);
+    })
+    .await;
+}
+
+/// A stream ended while its request is still out (the backstop, standing in
+/// for a failure event that never came), then a replacement to the same peer.
+/// The ended stream's batch arrives late: it is imported, and it does not
+/// advance the replacement.
+///
+/// The backstop is set to 2 s here and the network's request timeout stays at
+/// 30 s, so the first request is still out when its stream ends. In production
+/// the backstop is the request timeout plus one stall interval, so a request
+/// has failed or been answered before the backstop can end its stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_late_batch_of_an_ended_stream_does_not_advance_its_replacement() {
+    let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
+    let tip = blocks.last().expect("a chain").clone();
+    let head: BlockHeight = 1;
+    let ahead = blocks[(head + 2 - 1) as usize].clone();
+    let dir = left_at(&genesis, &blocks, head).await;
+
+    let mut peer = ScriptedPeer::start().await;
+    let peer_id = peer.id();
+    let mut node = full_node(dir.path(), &genesis, Some(peer.dial.as_str()));
+    node.sync_stall_check = Duration::from_secs(1);
+    node.sync_stream_backstop = Duration::from_secs(2);
+    let (compat, consensus, net, digest) = (
+        node.peer_compat.clone(),
+        node.consensus.clone(),
+        node.network.clone(),
+        node.protocol_digest,
+    );
+
+    drive(&mut node, async {
+        let (node_id, digest_req, status_req) = peer.connected().await;
+        peer.declare(digest_req, digest).await;
+        assert!(eventually(|| compat.status(&peer_id) == PeerCompat::Verified).await);
+        peer.answer_status(status_req, &ahead).await;
+        let (r1, from1, to1) = peer.block_request(node_id, "the first stream's request").await;
+        assert_eq!((from1, to1), (head + 1, ahead.height()));
+
+        // The backstop ends that stream; a stall check's status, answered,
+        // then starts the replacement. Earlier statuses only raise the target.
+        let (r2, from2, to2) = peer
+            .answer_statuses_until_block_request(node_id, &tip, "the replacement's request")
+            .await;
+        assert_eq!((from2, to2), (head + 1, tip.height()));
+        assert_eq!(
+            net.outstanding_block_requests(),
+            2,
+            "the ended stream's request is still out beside the replacement's"
+        );
+
+        // The ended stream's batch, late, from the same peer: imported, and
+        // it starts nothing.
+        peer.answer_blocks(r1, &blocks, from1, to1).await;
+        assert!(
+            eventually(|| consensus.current_height() == ahead.height()).await,
+            "the late batch was not imported; the node is at {}",
+            consensus.current_height()
+        );
+        peer.quiet("a block request started by the late batch", |e| {
+            matches!(e, NetworkEvent::SyncBlocksRequest { .. })
+        })
+        .await;
+        assert_eq!(net.outstanding_block_requests(), 1, "only the replacement's request");
+
+        // The replacement's own batch completes the sync.
+        peer.answer_blocks(r2, &blocks, from2, to2).await;
+        assert!(
+            eventually(|| consensus.current_height() == tip.height()).await,
+            "the node never reached the tip; it is at {}",
+            consensus.current_height()
+        );
+        peer.quiet("another block request", |e| {
+            matches!(e, NetworkEvent::SyncBlocksRequest { .. })
+        })
+        .await;
+        assert_eq!(net.outstanding_block_requests(), 0);
+    })
+    .await;
+}
+
+/// A block request that times out ends its stream (its own failure, by tag),
+/// and the stall check retries: one new request, answered, completes the
+/// sync. The timed-out request's answer, sent afterwards, starts nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_timed_out_block_request_ends_its_stream_and_the_stall_check_retries_once() {
+    let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
+    let tip = blocks.last().expect("a chain").clone();
+    let head: BlockHeight = 1;
+    let dir = left_at(&genesis, &blocks, head).await;
+
+    let mut peer = ScriptedPeer::start().await;
+    let peer_id = peer.id();
+    let mut node =
+        full_node_with_request_timeout(dir.path(), &genesis, Some(peer.dial.as_str()), Duration::from_secs(2));
+    node.sync_stall_check = Duration::from_secs(1);
+    // Only the request's own failure may end the stream here.
+    node.sync_stream_backstop = Duration::from_secs(3600);
+    let (compat, consensus, net, digest) = (
+        node.peer_compat.clone(),
+        node.consensus.clone(),
+        node.network.clone(),
+        node.protocol_digest,
+    );
+
+    drive(&mut node, async {
+        let (node_id, digest_req, status_req) = peer.connected().await;
+        peer.declare(digest_req, digest).await;
+        assert!(eventually(|| compat.status(&peer_id) == PeerCompat::Verified).await);
+        peer.answer_status(status_req, &tip).await;
+        let (r1, from1, to1) = peer.block_request(node_id, "the stream's request").await;
+        assert_eq!((from1, to1), (head + 1, tip.height()));
+        assert_eq!(net.outstanding_block_requests(), 1);
+
+        // Unanswered, it times out on the node's side and its stream ends.
+        assert!(
+            eventually(|| net.outstanding_block_requests() == 0).await,
+            "the block request never timed out"
+        );
+
+        // A stall check asks again; answered, it starts the retry.
+        let (r2, from2, to2) = peer
+            .answer_statuses_until_block_request(node_id, &tip, "the retried block request")
+            .await;
+        assert_eq!((from2, to2), (head + 1, tip.height()));
+        assert_eq!(net.outstanding_block_requests(), 1);
+
+        // The timed-out request's answer, now: whatever reaches the node of
+        // it, no request follows.
+        peer.answer_blocks(r1, &blocks, from1, to1).await;
+        peer.quiet("a block request started by the timed-out request's answer", |e| {
+            matches!(e, NetworkEvent::SyncBlocksRequest { .. })
+        })
+        .await;
+        assert_eq!(net.outstanding_block_requests(), 1, "only the retry's request");
+
+        peer.answer_blocks(r2, &blocks, from2, to2).await;
+        assert!(
+            eventually(|| consensus.current_height() == tip.height()).await,
+            "the node never reached the tip; it is at {}",
+            consensus.current_height()
+        );
+        peer.quiet("another block request", |e| {
+            matches!(e, NetworkEvent::SyncBlocksRequest { .. })
+        })
+        .await;
+        assert_eq!(net.outstanding_block_requests(), 0);
     })
     .await;
 }
