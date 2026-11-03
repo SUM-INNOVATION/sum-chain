@@ -5,6 +5,10 @@
 //! ([`AddressText`]), as the same address. Which form was written is not kept
 //! and changes nothing a method does: no method refuses either form, and every
 //! address the RPC returns is printed in the plain base58 form.
+//!
+//! `r0` is a text form only: it does not identify an agent or grant anything.
+//! No permission, signature, fee or account rule reads it; both parsers return
+//! the bare [`Address`].
 
 use sumchain_primitives::Address;
 use sumchain_wire::address::AddressText;

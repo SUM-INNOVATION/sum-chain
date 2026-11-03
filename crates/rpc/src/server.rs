@@ -14815,6 +14815,36 @@ mod address_label_tests {
         }
     }
 
+    /// #309: `r0` is a text form only. The answer depends on the account and
+    /// never on the form: one key gives one answer in every form, and two keys
+    /// give two answers whichever forms they are written in.
+    #[tokio::test]
+    async fn the_answer_follows_the_account_not_the_text_form() {
+        let (srv, db, _dir) = server();
+        let registered = KeyPair::generate().address();
+        let unregistered = KeyPair::generate().address();
+        seed_docclass(&db, registered, "Form Institute", DocClassIssuerStatus::Active);
+        seed_tax(&db, registered);
+
+        let mut answers = Vec::new();
+        for a in [registered, unregistered] {
+            let forms = [a.to_base58(), a.to_raddress(), a.to_hex()];
+            let first = serde_json::to_value(srv.sum_resolve_address_labels(forms[0].clone()).await.unwrap()).unwrap();
+            for arg in &forms[1..] {
+                let out = srv.sum_resolve_address_labels(arg.clone()).await.unwrap();
+                assert_eq!(serde_json::to_value(&out).unwrap(), first, "{arg}");
+            }
+            answers.push(first);
+        }
+        assert_eq!(answers[0]["primary_label"], "Form Institute");
+        assert_eq!(answers[0]["labels"].as_array().unwrap().len(), 2);
+        assert!(answers[1]["primary_label"].is_null());
+        assert!(answers[1]["labels"].as_array().unwrap().is_empty());
+        // The agent form of the unregistered key does not borrow the other's labels.
+        let crossed = srv.sum_resolve_address_labels(unregistered.to_raddress()).await.unwrap();
+        assert_ne!(serde_json::to_value(&crossed).unwrap(), answers[0]);
+    }
+
     /// #309: a method that takes base58 only takes the `r0` form too, and still
     /// refuses hex.
     #[tokio::test]

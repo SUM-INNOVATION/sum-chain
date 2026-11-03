@@ -49,6 +49,7 @@ Base58-only parameters (plain or `r0`, no hex): `employment_getIssuer`, `employm
 - **The form changes nothing.** No method refuses either form, and the node keeps no list of which accounts are agents. A plain address and its `r0` form are the same account in every method.
 - **Output is unchanged.** No response contains the `r0` form: every address in a response is printed in the plain base58 form, as before, including an address echoed from a request that used the `r0` form or hex.
 - **Text only.** Transactions, blocks, state and digests carry the 20 bytes; the `r0` form is not part of any of them.
+- **It grants nothing.** `r0` is a text form only; it does not identify an agent or grant anything. No permission, signature, fee or account rule depends on the form an address was written in.
 
 The TypeScript SDK's `toRaddress` / `fromRaddress` convert between the plain and agent forms, and `isValidAddress` accepts all three.
 

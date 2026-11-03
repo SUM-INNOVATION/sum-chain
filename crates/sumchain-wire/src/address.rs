@@ -18,6 +18,7 @@
 //! the two forms never overlap. [`AddressText`] parses either and records which
 //! one was written. The form is text only: no encoded byte, hash, signature or
 //! state key involves it, and nothing on chain says which accounts are agents.
+//! `r0` is a text form only; it does not identify an agent or grant anything.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -103,7 +104,8 @@ impl Address {
     }
 
     /// Convert to the agent text form ("raddress"): `r0` followed by
-    /// [`Address::to_base58`], unchanged. See the [module docs](self).
+    /// [`Address::to_base58`], unchanged. A text form only; it does not
+    /// identify an agent or grant anything. See the [module docs](self).
     pub fn to_raddress(&self) -> String {
         format!("r0{}", self.to_base58())
     }
@@ -160,8 +162,12 @@ impl From<[u8; 20]> for Address {
 /// The variant records the form of the text, not a fact about the account:
 /// `Agent` means the text carried the `r0` prefix, `Human` means it did not.
 /// Both hold the same [`Address`] for the same key; compare with
-/// [`AddressText::address`] when only the account matters. A caller that
-/// expects one kind of account may refuse the other form.
+/// [`AddressText::address`] when only the account matters.
+///
+/// `r0` is a text form only; it does not identify an agent or grant anything.
+/// No permission, signature, fee or account rule may read the variant: those
+/// work on the [`Address`]. A caller may refuse a form it does not expect, as a
+/// check on its input and nothing more.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AddressText {
     /// The plain base58 form ([`Address::to_base58`]).
@@ -210,7 +216,8 @@ impl AddressText {
         }
     }
 
-    /// Whether the text was the agent (`r0`) form.
+    /// Whether the text was the agent (`r0`) form. It says nothing about the
+    /// account: the text form only.
     pub fn is_agent(self) -> bool {
         matches!(self, AddressText::Agent(_))
     }
@@ -417,6 +424,26 @@ mod tests {
                 (Err(e1), Err(e2)) => assert_eq!(e1.to_string(), e2.to_string(), "{s:?}"),
                 (o, n) => panic!("{s:?}: old {o:?}, new {n:?}"),
             }
+        }
+    }
+
+    /// `r0` is a text form only: one key gives one `Address` in either form,
+    /// with the same bytes, the same wire encoding and the same hash-map key,
+    /// so nothing downstream of the parser can tell the forms apart.
+    #[test]
+    fn one_key_gives_one_address_in_either_form() {
+        use std::collections::HashSet;
+        for i in 0u32..64 {
+            let mut pubkey = [0u8; 32];
+            pubkey[..4].copy_from_slice(&i.to_le_bytes());
+            let key_address = Address::from_public_key(&pubkey);
+            let plain = AddressText::parse(&key_address.to_base58()).unwrap().address();
+            let agent = AddressText::parse(&key_address.to_raddress()).unwrap().address();
+            assert_eq!(plain, key_address);
+            assert_eq!(agent, key_address);
+            assert_eq!(plain.as_bytes(), agent.as_bytes());
+            assert_eq!(bincode::serialize(&plain).unwrap(), bincode::serialize(&agent).unwrap());
+            assert_eq!(HashSet::from([plain, agent]).len(), 1);
         }
     }
 

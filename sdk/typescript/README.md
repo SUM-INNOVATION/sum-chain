@@ -283,10 +283,11 @@ isValidAddress("invalid")                     // false
 Convert between the plain base58 form and the agent ("raddress") form, `r0`
 followed by the same text: the same 20 bytes, key and checksum. The node
 accepts either form wherever it takes an address, as the same account, and
-always returns the plain form. `isRaddress` lets a caller that expects a human
-account refuse the agent form. `toRaddress` throws on anything but a plain
-base58 address (hex is not converted); `fromRaddress` throws on anything but
-`r0` followed by one.
+always returns the plain form. The `r0` form is a text form only; it does not
+identify an agent or grant anything. `isRaddress` lets a caller refuse a form
+it does not expect, as a check on its input. `toRaddress` throws on anything
+but a plain base58 address (hex is not converted); `fromRaddress` throws on
+anything but `r0` followed by one.
 
 ```typescript
 toRaddress("jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j")      // "r0jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j"

@@ -124,7 +124,8 @@ export function formatNumber(value: number | string): string {
 /**
  * Prefix of the agent ("raddress") text form of an address: `r0` followed by
  * the plain base58 address, unchanged (sum-chain #309). `0` is not in the
- * base58 alphabet, so no plain address starts with it.
+ * base58 alphabet, so no plain address starts with it. A text form only; it
+ * does not identify an agent or grant anything.
  */
 export const RADDRESS_PREFIX = 'r0';
 
@@ -209,8 +210,10 @@ export function isValidAddress(address: string): boolean {
 
 /**
  * Whether an address is written in the agent form: `r0` followed by a plain
- * base58 address. A format check only. A caller that expects a human account
- * may refuse such an address; the node accepts both forms as the same account.
+ * base58 address. A format check of the text only: the `r0` form does not
+ * identify an agent or grant anything, and the node accepts both forms as the
+ * same account. A caller may refuse a form it does not expect, as a check on
+ * its input and nothing more.
  *
  * @param address - Address to check
  * @returns true for the agent form
@@ -225,7 +228,8 @@ export function isRaddress(address: string): boolean {
 /**
  * Convert a plain base58 address to its agent form: `r0` followed by the same
  * text. The same 20 bytes, key and checksum; the node treats both forms as
- * the same account and returns addresses in the plain form.
+ * the same account and returns addresses in the plain form. A text form only;
+ * it does not identify an agent or grant anything.
  *
  * @param address - A plain base58 address
  * @returns The agent form
@@ -245,7 +249,7 @@ export function toRaddress(address: string): string {
 
 /**
  * Convert an agent-form address back to the plain base58 form: the text after
- * `r0`.
+ * `r0`. The same account; the `r0` form is text only and grants nothing.
  *
  * @param raddress - An address in the agent form
  * @returns The plain base58 address
