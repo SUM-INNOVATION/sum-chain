@@ -35,6 +35,37 @@ The leaf deliberately depends on **no** `ed25519` / state / rpc / consensus /
 networking / rocksdb / libp2p crate, and **not** on `sumchain-primitives` —
 keeping the dependency graph acyclic (`wire ← primitives ← crypto ← …`).
 
+## Cargo features: `std` and the `no_std` subset
+
+- **`std`** (default) is the whole crate. A default build has the same items,
+  derives, `Display` strings and encoded bytes as it had before the feature
+  existed. It enables `serde`, `serde_json`, `bincode`, `thiserror`,
+  `serde-big-array`, and the `std` features of `hex`, `bs58` and `blake3`.
+- **Without `std`** (`default-features = false`) the crate is `#![no_std]`,
+  needs `alloc` (a global allocator), and contains only:
+  - `Address` and `AddressText`, with the base58, `r0` agent, and hex text
+    forms, `from_public_key`, `Display` and `Debug`;
+  - `Hash`, with `hash`, `hash_many`, `merkle_root`, hex, `Display` and `Debug`;
+  - `ChainId`, `BlockHeight`, `Nonce`, `Balance`, `Timestamp`, `Result` and
+    `PrimitiveError`;
+  - in `inference_attestation`: `DOMAIN_TAG`, `MAX_SESSION_ID_BYTES`,
+    `InferenceAttestationDigest`, `AttestationError`, `canonical_digest_bytes`,
+    `signing_input_bytes` and `verifier_address`.
+
+  These have no serde derives without `std`, and `PrimitiveError` and
+  `AttestationError` implement `Debug` only. Everything else in the crate
+  needs `std`.
+
+```toml
+[dependencies]
+sumchain-wire = { version = "…", default-features = false }
+```
+
+`std` is additive: when anything in a build enables it, the subset's items are
+the same items with the same bytes, plus the rest of the crate. There is no
+`no_std` feature, so feature unification cannot remove items from a crate
+that needs them.
+
 ## B0-PRE candidate-neutral wire types (`b0`)
 
 The [`b0`](src/b0/) module (added in **0.2.0**) holds the frozen B0-PRE
@@ -87,6 +118,12 @@ compatible release.
 - **Serializer:** `bincode` 1.3, **default config** (fixed-int encoding, u32
   little-endian enum variant tags, little-endian scalars).
 - **Signing hash:** `signing_hash = blake3(bincode(tx))`.
+- **Without `std`:** `bincode` is not available, so
+  `inference_attestation::canonical_digest_bytes` writes the digest's bytes
+  with an encoder written by hand in this crate (`session_id` as a u64-LE byte
+  length and its UTF-8 bytes, then the four 32-byte arrays in field order). A
+  default build still calls `bincode`. The encoder's tests pin it to bincode's
+  bytes (see "Golden fixtures").
 - **Decoder tolerance (pinned, not aspirational):**
   - As of **0.2.1**, the canonical `SignedTransaction::from_bytes` /
     `from_hex` path **REJECTS trailing bytes**: the input must be exactly one
@@ -175,6 +212,14 @@ Byte-stability is enforced by hardcoded, pre-extraction golden vectors:
 These exercise the types through the `sumchain-primitives` re-exports and MUST
 stay byte-identical across any change to this crate. Additional per-module wire
 fixtures live alongside them in `crates/primitives/tests/`.
+
+The hand-written digest encoder of the `no_std` subset is pinned by the tests in
+`src/inference_attestation.rs`, against golden bytes from `bincode`. Those are the
+three OmniNode Stage 6 vectors (canonical bytes and signing input) and one
+vector per field shape: empty, one-byte, multi-byte UTF-8 and NUL-bearing
+`session_id`s, the length-prefix boundaries 255, 256, 257 and 65537, and
+arrays that pin field order and byte position. Every vector is checked
+against `bincode` as well, as is a sweep of lengths.
 
 ## Safety
 

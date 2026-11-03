@@ -28,6 +28,17 @@
 //! [`b0::proof_envelope::ProductionProofEnvelopeV1`] (235 B). These are strictly
 //! additive: they introduce no transaction ordinal and change no existing 0.1.1
 //! bytes.
+//!
+//! ## Cargo features
+//!
+//! `std` (default) is the whole crate. With `default-features = false` the crate
+//! is `no_std` + `alloc` (sum-chain #312) and has only [`Address`],
+//! [`AddressText`], [`Hash`](struct@Hash), the scalar aliases, [`Result`] and
+//! [`PrimitiveError`], and from [`inference_attestation`] the digest, its
+//! canonical bytes and signing input, `DOMAIN_TAG`, `MAX_SESSION_ID_BYTES`,
+//! `AttestationError` and `verifier_address`. Without `std` there are no serde
+//! derives, and the error types implement `Debug` only. Every other module needs
+//! `std`. See the README's "Cargo features" section.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
