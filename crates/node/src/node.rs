@@ -53,6 +53,21 @@ pub(crate) fn missing_ancestor_range(our_height: u64, block_height: u64) -> Opti
     Some((next, last.min(block_height)))
 }
 
+/// Issue #354, second trigger: how long the chain head may stay at one height
+/// before this node asks every connected peer for its height.
+///
+/// A block can be missed with nothing ever pointing at it again: it was
+/// produced while this node was not connected to its producer, and the peer
+/// this node later obtained it through got it by sync, which is not
+/// re-gossiped. Round-robin production then stops at the first height whose
+/// proposer lacks it. A sync-status answer from a peer that is ahead already
+/// requests the missing blocks, so asking again is all it takes. The head
+/// moves every block interval on a producing network, so the check never asks
+/// anything there; it costs one status request per connected peer per
+/// interval only while the head is stalled. A node-local constant: no wire,
+/// consensus or digest change.
+pub(crate) const SYNC_STALL_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// What the consensus boundary did with a block a peer supplied.
 ///
 /// Three outcomes and not a `bool`, because the caller has to tell a REFUSAL
@@ -1024,6 +1039,16 @@ impl Node {
         // asks afresh.
         let mut resync_on_declaration: HashSet<PeerId> = HashSet::new();
 
+        // Issue #354, second trigger: notice a head that stopped moving. See
+        // `SYNC_STALL_CHECK`. The first check is one interval after start, so
+        // a node that is starting up asks nothing extra.
+        let mut stall_check = tokio::time::interval_at(
+            tokio::time::Instant::now() + SYNC_STALL_CHECK,
+            SYNC_STALL_CHECK,
+        );
+        stall_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut height_at_last_check = consensus.current_height();
+
         loop {
             tokio::select! {
                 // Handle consensus events
@@ -1486,6 +1511,28 @@ impl Node {
                             }
                         }
                     }
+                }
+
+                // Issue #354, second trigger: the head has not moved for a
+                // whole check interval. Ask every connected peer for its
+                // height. An answer from a peer that is ahead requests the
+                // missing blocks in the `SyncStatusResponse` arm, behind the
+                // same participation check as every other status answer.
+                _ = stall_check.tick() => {
+                    let height = consensus.current_height();
+                    if height == height_at_last_check {
+                        let peers = network.connected_peers();
+                        if !peers.is_empty() {
+                            info!(
+                                "No new block for {:?} at height {}; asking {} peer(s) for their height",
+                                SYNC_STALL_CHECK, height, peers.len()
+                            );
+                        }
+                        for peer in peers {
+                            let _ = command_sender.send(NetworkCommand::RequestSyncStatus(peer)).await;
+                        }
+                    }
+                    height_at_last_check = height;
                 }
 
                 // Handle transactions from RPC
