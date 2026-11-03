@@ -2,6 +2,7 @@
 //!
 //! JSON-RPC server for querying chain state and submitting transactions.
 
+pub mod address_arg;
 pub mod api;
 pub mod auth;
 pub mod custodial;

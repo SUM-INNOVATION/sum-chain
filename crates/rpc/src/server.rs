@@ -16,6 +16,7 @@ use sumchain_state::education_executor::{
     StoredGradeRecord, StoredOffering, StoredSubmissionReceipt, MAX_EDU_LIST_LIMIT,
 };
 use sumchain_state::{Mempool, StateManager};
+use crate::address_arg::{parse_address_arg, parse_base58_address_arg};
 use crate::pagination::page_of;
 use sumchain_storage::{BlockStore, Database, DelegationStore, DocClassStore, EmploymentCredentialStore, EmploymentIssuerStore, IncomeAttestationStore, MessagingStore, NftStore, PolicyAccountStorage, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxIndexStore, TxStore, ValidatorSetStore, MESSAGING_LIST_DEFAULT};
 use tokio::sync::mpsc;
@@ -1043,10 +1044,10 @@ impl RpcServer {
         }
     }
 
-    /// Parse address from string
+    /// Parse an address argument: base58, the `r0` agent form, or hex
+    /// ([`parse_address_arg`]).
     fn parse_address(&self, s: &str) -> Result<Address> {
-        Address::from_base58(s)
-            .or_else(|_| Address::from_hex(s))
+        parse_address_arg(s)
             .map_err(|_| RpcError::InvalidParams(format!("Invalid address: {}", s)))
     }
 
@@ -4032,8 +4033,7 @@ impl SumChainApiServer for RpcServer {
         &self,
         address: String,
     ) -> std::result::Result<MessagingQuotaInfo, jsonrpsee::types::ErrorObjectOwned> {
-        let addr = Address::from_base58(&address)
-            .or_else(|_| Address::from_hex(&address))
+        let addr = parse_address_arg(&address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
         let store = MessagingStore::new(&self.db);
@@ -4076,8 +4076,7 @@ impl SumChainApiServer for RpcServer {
         &self,
         address: String,
     ) -> std::result::Result<Option<InboxFilterInfo>, jsonrpsee::types::ErrorObjectOwned> {
-        let addr = Address::from_base58(&address)
-            .or_else(|_| Address::from_hex(&address))
+        let addr = parse_address_arg(&address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
         // Compute recipient hash from address
@@ -4142,8 +4141,7 @@ impl SumChainApiServer for RpcServer {
         limit: Option<u32>,
         offset: Option<u32>,
     ) -> std::result::Result<Vec<MessageEventInfo>, jsonrpsee::types::ErrorObjectOwned> {
-        let addr = Address::from_base58(&sender)
-            .or_else(|_| Address::from_hex(&sender))
+        let addr = parse_address_arg(&sender)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid sender address: {}", e)))?;
 
         let store = MessagingStore::new(&self.db);
@@ -4318,8 +4316,7 @@ impl SumChainApiServer for RpcServer {
         &self,
         recipient: String,
     ) -> std::result::Result<Vec<PendingPaymentInfo>, jsonrpsee::types::ErrorObjectOwned> {
-        let addr = Address::from_base58(&recipient)
-            .or_else(|_| Address::from_hex(&recipient))
+        let addr = parse_address_arg(&recipient)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid recipient address: {}", e)))?;
         let recipient_hash = sumchain_crypto::recipient_hash(&addr);
 
@@ -4346,8 +4343,7 @@ impl SumChainApiServer for RpcServer {
         &self,
         address: String,
     ) -> std::result::Result<String, jsonrpsee::types::ErrorObjectOwned> {
-        let addr = Address::from_base58(&address)
-            .or_else(|_| Address::from_hex(&address))
+        let addr = parse_address_arg(&address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
         let store = MessagingStore::new(&self.db);
@@ -4360,8 +4356,7 @@ impl SumChainApiServer for RpcServer {
         &self,
         address: String,
     ) -> std::result::Result<SpamReportInfo, jsonrpsee::types::ErrorObjectOwned> {
-        let addr = Address::from_base58(&address)
-            .or_else(|_| Address::from_hex(&address))
+        let addr = parse_address_arg(&address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
         let store = MessagingStore::new(&self.db);
@@ -4383,12 +4378,10 @@ impl SumChainApiServer for RpcServer {
         owner: String,
         contact: String,
     ) -> std::result::Result<bool, jsonrpsee::types::ErrorObjectOwned> {
-        let owner_addr = Address::from_base58(&owner)
-            .or_else(|_| Address::from_hex(&owner))
+        let owner_addr = parse_address_arg(&owner)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid owner address: {}", e)))?;
 
-        let contact_addr = Address::from_base58(&contact)
-            .or_else(|_| Address::from_hex(&contact))
+        let contact_addr = parse_address_arg(&contact)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid contact address: {}", e)))?;
 
         // Compute hashes
@@ -4406,12 +4399,10 @@ impl SumChainApiServer for RpcServer {
         owner: String,
         sender: String,
     ) -> std::result::Result<bool, jsonrpsee::types::ErrorObjectOwned> {
-        let owner_addr = Address::from_base58(&owner)
-            .or_else(|_| Address::from_hex(&owner))
+        let owner_addr = parse_address_arg(&owner)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid owner address: {}", e)))?;
 
-        let sender_addr = Address::from_base58(&sender)
-            .or_else(|_| Address::from_hex(&sender))
+        let sender_addr = parse_address_arg(&sender)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid sender address: {}", e)))?;
 
         // Compute owner hash
@@ -4798,8 +4789,7 @@ impl SumChainApiServer for RpcServer {
         &self,
         address: String,
     ) -> std::result::Result<Option<PublicKeyInfo>, jsonrpsee::types::ErrorObjectOwned> {
-        let addr = Address::from_base58(&address)
-            .or_else(|_| Address::from_hex(&address))
+        let addr = parse_address_arg(&address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
         let store = MessagingStore::new(&self.db);
@@ -4926,8 +4916,7 @@ impl SumChainApiServer for RpcServer {
         &self,
         controller: String,
     ) -> std::result::Result<Option<DocClassIdentityInfo>, jsonrpsee::types::ErrorObjectOwned> {
-        let addr = Address::from_base58(&controller)
-            .or_else(|_| Address::from_hex(&controller))
+        let addr = parse_address_arg(&controller)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid controller address: {}", e)))?;
 
         let store = DocClassStore::new(&self.db);
@@ -5026,8 +5015,7 @@ impl SumChainApiServer for RpcServer {
         limit: Option<u32>,
         offset: Option<u32>,
     ) -> std::result::Result<Vec<DocClassCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
-        let addr = Address::from_base58(&issuer)
-            .or_else(|_| Address::from_hex(&issuer))
+        let addr = parse_address_arg(&issuer)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid issuer address: {}", e)))?;
 
         // As for `docclass_getCredentialsBySubject`: each of the two reads is
@@ -5128,8 +5116,7 @@ impl SumChainApiServer for RpcServer {
         &self,
         address: String,
     ) -> std::result::Result<Option<DocClassIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
-        let addr = Address::from_base58(&address)
-            .or_else(|_| Address::from_hex(&address))
+        let addr = parse_address_arg(&address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
         let store = DocClassStore::new(&self.db);
@@ -6489,8 +6476,7 @@ impl SumChainApiServer for RpcServer {
         subcode: u16,
         jurisdiction: String,
     ) -> std::result::Result<bool, jsonrpsee::types::ErrorObjectOwned> {
-        let addr = Address::from_base58(&issuer)
-            .or_else(|_| Address::from_hex(&issuer))
+        let addr = parse_address_arg(&issuer)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid issuer address: {}", e)))?;
 
         let doc_subcode = sumchain_primitives::DocSubcode::from_u16(subcode)
@@ -6513,8 +6499,7 @@ impl SumChainApiServer for RpcServer {
         limit: Option<u32>,
         offset: Option<u64>,
     ) -> std::result::Result<TransactionHistoryResponse, jsonrpsee::types::ErrorObjectOwned> {
-        let addr = Address::from_base58(&address)
-            .or_else(|_| Address::from_hex(&address))
+        let addr = parse_address_arg(&address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
         let limit = limit.unwrap_or(50).min(100) as usize;
@@ -6585,8 +6570,7 @@ impl SumChainApiServer for RpcServer {
         limit: Option<u32>,
         offset: Option<u64>,
     ) -> std::result::Result<TransactionHistoryResponse, jsonrpsee::types::ErrorObjectOwned> {
-        let addr = Address::from_base58(&address)
-            .or_else(|_| Address::from_hex(&address))
+        let addr = parse_address_arg(&address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
         let limit = limit.unwrap_or(50).min(100) as usize;
@@ -6653,8 +6637,7 @@ impl SumChainApiServer for RpcServer {
         limit: Option<u32>,
         offset: Option<u64>,
     ) -> std::result::Result<TransactionHistoryResponse, jsonrpsee::types::ErrorObjectOwned> {
-        let addr = Address::from_base58(&address)
-            .or_else(|_| Address::from_hex(&address))
+        let addr = parse_address_arg(&address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
         let limit = limit.unwrap_or(50).min(100) as usize;
@@ -6719,8 +6702,7 @@ impl SumChainApiServer for RpcServer {
         &self,
         address: String,
     ) -> std::result::Result<u64, jsonrpsee::types::ErrorObjectOwned> {
-        let addr = Address::from_base58(&address)
-            .or_else(|_| Address::from_hex(&address))
+        let addr = parse_address_arg(&address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
         let tx_index_store = TxIndexStore::new(&self.db);
@@ -6737,7 +6719,7 @@ impl SumChainApiServer for RpcServer {
         &self,
         issuer_address: String,
     ) -> std::result::Result<Option<EmploymentIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
-        let address = Address::from_base58(&issuer_address)
+        let address = parse_base58_address_arg(&issuer_address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
         let store = EmploymentIssuerStore::new(&self.db);
@@ -7028,7 +7010,7 @@ impl SumChainApiServer for RpcServer {
         offset: Option<u32>,
     ) -> std::result::Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
         let page = page_of("employment_getCredentialsByEmployeeAddress", limit, offset)?;
-        let address = Address::from_base58(&employee_address)
+        let address = parse_base58_address_arg(&employee_address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
         let store = EmploymentCredentialStore::new(&self.db);
@@ -7050,7 +7032,7 @@ impl SumChainApiServer for RpcServer {
         offset: Option<u32>,
     ) -> std::result::Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
         let page = page_of("employment_getActiveCredentialsByEmployeeAddress", limit, offset)?;
-        let address = Address::from_base58(&employee_address)
+        let address = parse_base58_address_arg(&employee_address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
         let store = EmploymentCredentialStore::new(&self.db);
@@ -7072,7 +7054,7 @@ impl SumChainApiServer for RpcServer {
         offset: Option<u32>,
     ) -> std::result::Result<Vec<IncomeAttestationInfo>, jsonrpsee::types::ErrorObjectOwned> {
         let page = page_of("employment_getIncomeAttestationsByHolderAddress", limit, offset)?;
-        let address = Address::from_base58(&holder_address)
+        let address = parse_base58_address_arg(&holder_address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
 
         let store = IncomeAttestationStore::new(&self.db);
@@ -7339,7 +7321,7 @@ impl SumChainApiServer for RpcServer {
         }
 
         // Parse employee address
-        let employee_address = Address::from_base58(&request.employee_address)
+        let employee_address = parse_base58_address_arg(&request.employee_address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid employee address: {}", e)))?;
 
         // Parse employee reference
@@ -8036,7 +8018,7 @@ impl SumChainApiServer for RpcServer {
         }
 
         // Parse holder address
-        let holder_address = Address::from_base58(&request.holder_address)
+        let holder_address = parse_base58_address_arg(&request.holder_address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid holder address: {}", e)))?;
 
         // Parse subject commitment
@@ -8420,7 +8402,7 @@ impl SumChainApiServer for RpcServer {
         let page = page_of("docclass_getAcademicCredentialsByHolder", limit, offset)?;
 
         // Parse holder address
-        let holder = Address::from_base58(&holder_address)
+        let holder = parse_base58_address_arg(&holder_address)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid holder address: {}", e)))?;
 
         let docclass_store = DocClassStore::new(&self.db);
@@ -14807,6 +14789,47 @@ mod address_label_tests {
         for forbidden in ["commitment", "attributes_hash", "policy_id", "jurisdiction", "holder", "stake", "private", "mnemonic", "seed"] {
             assert!(!json.contains(forbidden), "leaked private field: {forbidden}");
         }
+    }
+
+    /// #309: the `r0` agent form names the same account as the plain form, and
+    /// the answer still prints the plain form.
+    #[tokio::test]
+    async fn agent_form_resolves_like_the_plain_form_and_is_echoed_plain() {
+        let (srv, db, _dir) = server();
+        let a = KeyPair::generate().address();
+        seed_docclass(&db, a, "Agent Institute", DocClassIssuerStatus::Active);
+        let plain = srv.sum_resolve_address_labels(a.to_base58()).await.unwrap();
+        for arg in [a.to_raddress(), a.to_hex()] {
+            let out = srv.sum_resolve_address_labels(arg.clone()).await.unwrap();
+            assert_eq!(out.address, a.to_base58(), "{arg}: echoed in the plain form");
+            assert_eq!(
+                serde_json::to_value(&out).unwrap(),
+                serde_json::to_value(&plain).unwrap(),
+                "{arg}"
+            );
+        }
+        // `r0` followed by anything but a plain address is -32602; never read as hex.
+        for arg in [format!("r0{}", a.to_hex()), "r0".to_string()] {
+            let err = srv.sum_resolve_address_labels(arg.clone()).await.unwrap_err();
+            assert_eq!(err.code(), -32602, "{arg}");
+        }
+    }
+
+    /// #309: a method that takes base58 only takes the `r0` form too, and still
+    /// refuses hex.
+    #[tokio::test]
+    async fn base58_only_method_takes_the_agent_form_and_still_refuses_hex() {
+        let (srv, db, _dir) = server();
+        let a = KeyPair::generate().address();
+        seed_employment(&db, a, "Agent Payroll");
+        let plain = srv.employment_get_issuer(a.to_base58()).await.unwrap().expect("seeded");
+        let agent = srv.employment_get_issuer(a.to_raddress()).await.unwrap().expect("seeded");
+        assert_eq!(agent.issuer_address, a.to_base58());
+        assert_eq!(
+            serde_json::to_value(&agent).unwrap(),
+            serde_json::to_value(&plain).unwrap()
+        );
+        assert_eq!(srv.employment_get_issuer(a.to_hex()).await.unwrap_err().code(), -32602);
     }
 }
 

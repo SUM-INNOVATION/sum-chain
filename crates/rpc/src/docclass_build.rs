@@ -43,10 +43,10 @@ pub fn parse_hex32(field: &str, s: &str) -> Result<[u8; 32], String> {
         .map_err(|_| format!("{field}: expected 32 bytes of hex"))
 }
 
-/// Parse a base58 (or hex) address.
+/// Parse a base58 (or hex) address, or its `r0` agent form
+/// ([`parse_address_arg`](crate::address_arg::parse_address_arg)).
 pub fn parse_address(field: &str, s: &str) -> Result<Address, String> {
-    Address::from_base58(s)
-        .or_else(|_| Address::from_hex(s))
+    crate::address_arg::parse_address_arg(s)
         .map_err(|_| format!("{field}: invalid address"))
 }
 

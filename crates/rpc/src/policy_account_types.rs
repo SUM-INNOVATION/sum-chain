@@ -285,7 +285,8 @@ impl PolicyMemberInfo {
     }
 
     pub fn to_address(&self) -> Result<Address, String> {
-        Address::from_base58(&self.address).map_err(|e| format!("Invalid address: {}", e))
+        crate::address_arg::parse_base58_address_arg(&self.address)
+            .map_err(|e| format!("Invalid address: {}", e))
     }
 }
 
@@ -381,7 +382,7 @@ impl ApprovalInfo {
     /// address, public key, and signature. Does not verify the signature —
     /// that happens in the executor against the canonical signing bytes.
     pub fn to_member_approval(&self) -> Result<MemberApproval, String> {
-        let approver = Address::from_base58(&self.approver_address)
+        let approver = crate::address_arg::parse_base58_address_arg(&self.approver_address)
             .map_err(|e| format!("Invalid approver address: {}", e))?;
         let pk = hex::decode(self.approver_pubkey.strip_prefix("0x").unwrap_or(&self.approver_pubkey))
             .map_err(|e| format!("Invalid approver pubkey hex: {}", e))?;
