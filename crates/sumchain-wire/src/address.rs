@@ -20,13 +20,18 @@
 //! state key involves it, and nothing on chain says which accounts are agents.
 //! `r0` is a text form only; it does not identify an agent or grant anything.
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt;
+#[cfg(feature = "std")]
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 use crate::{PrimitiveError, Result};
 
 /// 20-byte address derived from public key
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
 pub struct Address([u8; 20]);
 
 impl Address {

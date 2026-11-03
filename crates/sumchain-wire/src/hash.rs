@@ -6,13 +6,18 @@
 //! - The reference implementation is written in Rust
 //! - Parallelizable and SIMD-optimized
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt;
+#[cfg(feature = "std")]
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 use crate::{PrimitiveError, Result};
 
 /// 32-byte hash (Blake3 output)
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
 pub struct Hash([u8; 32]);
 
 // `Hash::hash` is a long-standing public constructor named after the type;
@@ -138,13 +143,13 @@ impl From<[u8; 32]> for Hash {
 }
 
 impl PartialOrd for Hash {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for Hash {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.0.cmp(&other.0)
     }
 }

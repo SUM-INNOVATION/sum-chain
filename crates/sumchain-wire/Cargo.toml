@@ -30,15 +30,39 @@ include = [
 # ed25519 / state / rpc / consensus / networking / rocksdb / libp2p crate, and
 # NOT on `sumchain-primitives` — keeping the dependency graph acyclic.
 
+[features]
+# `std` (on by default) is the whole crate, exactly as before the feature existed.
+# Without it (`default-features = false`) the crate is `no_std` + `alloc` and
+# carries only `Address`, `AddressText`, `Hash`, their hex/base58 text forms, and
+# the inference attestation digest with its canonical bytes (sum-chain #312; see
+# README "Cargo features"). The feature is additive: enabling it only adds items.
+default = ["std"]
+std = [
+    "dep:serde",
+    "dep:serde_json",
+    "dep:bincode",
+    "dep:thiserror",
+    "dep:serde-big-array",
+    "hex/std",
+    "bs58/std",
+    "blake3/std",
+]
+
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
-bincode = { workspace = true }
-hex = { workspace = true }
-bs58 = { workspace = true }
-blake3 = { workspace = true }
-thiserror = { workspace = true }
-serde-big-array = { workspace = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+bincode = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+serde-big-array = { workspace = true, optional = true }
+# Used with and without `std`. The version requirements repeat the workspace's
+# (`hex = "0.4"`, `bs58 = "0.5"`, `blake3 = "1.5"`) rather than inheriting them:
+# Cargo ignores `default-features = false` on a `workspace = true` dependency
+# whose workspace entry leaves default features on, so inheriting would always
+# pull their `std`. The `std` feature above turns it back on, so a default build
+# uses them with exactly the features it used before.
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+bs58 = { version = "0.5", default-features = false, features = ["alloc"] }
+blake3 = { version = "1.5", default-features = false }
 
 [dev-dependencies]
 # Test-only: mechanically recompute the corroboration fixture's provenance

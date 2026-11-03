@@ -20,7 +20,10 @@
 //!
 //! See `docs/SUBPROTOCOLS/INFERENCE-ATTESTATION.md` for full protocol notes.
 
+use alloc::string::String;
+#[cfg(feature = "std")]
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "std")]
 use serde_big_array::BigArray;
 
 use crate::address::Address;
@@ -37,7 +40,8 @@ pub const MAX_SESSION_ID_BYTES: usize = 256;
 /// Inner digest signed by the verifier. Field order is the on-wire bincode
 /// order and is **frozen** for v1 — changing it silently invalidates every
 /// historical attestation. New fields require a new variant.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
 pub struct InferenceAttestationDigest {
     pub session_id: String,
     pub model_hash: [u8; 32],
@@ -50,6 +54,7 @@ pub struct InferenceAttestationDigest {
 /// (verifier signing the full `SignedTransaction.inner`) and the inner
 /// `verifier_signature` (verifier signing `DOMAIN_TAG || bincode(digest)`)
 /// are produced by the same Ed25519 key but under different inputs.
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferenceAttestationTxData {
     pub digest: InferenceAttestationDigest,
@@ -59,15 +64,28 @@ pub struct InferenceAttestationTxData {
 
 /// Errors surfaced when validating an `InferenceAttestationTxData` against
 /// chain rules or its inner signature.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+///
+/// With `std` it implements `Display` and `std::error::Error` (through
+/// `thiserror`); without `std` it implements `Debug` only.
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "std", derive(thiserror::Error))]
 pub enum AttestationError {
-    #[error("session_id is {0} bytes; max is {MAX_SESSION_ID_BYTES}")]
+    #[cfg_attr(
+        feature = "std",
+        error("session_id is {0} bytes; max is {MAX_SESSION_ID_BYTES}")
+    )]
     SessionIdTooLong(usize),
-    #[error("inner verifier signature is invalid for the supplied public key")]
+    #[cfg_attr(
+        feature = "std",
+        error("inner verifier signature is invalid for the supplied public key")
+    )]
     InvalidSignature,
-    #[error("verifier public key is not a valid Ed25519 point")]
+    #[cfg_attr(
+        feature = "std",
+        error("verifier public key is not a valid Ed25519 point")
+    )]
     InvalidPublicKey,
-    #[error("bincode-serializing digest failed: {0}")]
+    #[cfg_attr(feature = "std", error("bincode-serializing digest failed: {0}"))]
     Serialization(String),
 }
 
@@ -82,6 +100,7 @@ pub enum AttestationError {
 /// attestation changes who pays to submit the attestation, not who made it — the
 /// verifier remains the attestation identity for deduplication, storage, and
 /// settlement.
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferenceAttestationV2TxData {
     pub digest: InferenceAttestationDigest,
@@ -96,6 +115,7 @@ pub struct InferenceAttestationV2TxData {
 
 /// Canonical bytes of the digest under bincode 1.3 default config.
 /// Matches OmniNode Stage 6 fixture's `canonical_digest_bytes`.
+#[cfg(feature = "std")]
 pub fn canonical_digest_bytes(
     digest: &InferenceAttestationDigest,
 ) -> Result<Vec<u8>, AttestationError> {
@@ -105,6 +125,7 @@ pub fn canonical_digest_bytes(
 /// `DOMAIN_TAG.as_bytes() || canonical_digest_bytes(digest)` — the exact
 /// byte sequence Ed25519 signs over. Matches OmniNode Stage 6 fixture's
 /// `signing_input_bytes`.
+#[cfg(feature = "std")]
 pub fn signing_input_bytes(
     digest: &InferenceAttestationDigest,
 ) -> Result<Vec<u8>, AttestationError> {
@@ -126,6 +147,7 @@ pub fn verifier_address(public_key: &[u8; 32]) -> Address {
 /// Domain string for the inference-attestation CF key derivation.
 /// Bumping this string (e.g. to `…V2`) is the path to a CF-schema
 /// migration without breaking lookups against historical entries.
+#[cfg(feature = "std")]
 pub const INFERENCE_ATTESTATION_KEY_DOMAIN: &[u8] = b"InferenceAttestationKeyV1";
 
 /// Stable 32-byte CF key for the `inference_attestations` column family.
@@ -143,6 +165,7 @@ pub const INFERENCE_ATTESTATION_KEY_DOMAIN: &[u8] = b"InferenceAttestationKeyV1"
 ///   point-lookup cost bounded on RocksDB.
 /// - **Fixture-locked**: the wire-fixture test asserts the exact key bytes
 ///   for OmniNode's three reference vectors. Drift = red CI.
+#[cfg(feature = "std")]
 pub fn inference_attestation_key(
     session_id: &str,
     verifier_address: &Address,
@@ -158,12 +181,14 @@ pub fn inference_attestation_key(
 /// Domain string for the session-id-keyed index CF (`INFERENCE_ATTESTATIONS_BY_SESSION`).
 /// Versioned so future index-key rotations can use a `V2` namespace
 /// without colliding with historical entries.
+#[cfg(feature = "std")]
 pub const INFERENCE_ATTESTATION_SESSION_INDEX_DOMAIN: &[u8] =
     b"InferenceAttestationSessionIndexV1";
 
 /// Number of bytes of the session-id BLAKE3 hash used as the prefix
 /// portion of the session-index key. 16 bytes = 128 bits of session-id
 /// distinguishability, sufficient for any practical attestation rate.
+#[cfg(feature = "std")]
 pub const SESSION_ID_HASH_BYTES: usize = 16;
 
 /// 36-byte index key for the `INFERENCE_ATTESTATIONS_BY_SESSION` CF:
@@ -174,6 +199,7 @@ pub const SESSION_ID_HASH_BYTES: usize = 16;
 /// returns every `(session_id, verifier)` pair for the given session.
 /// The trailing 20 bytes are the verifier's chain Address, so the
 /// caller can recover the verifier without a second lookup.
+#[cfg(feature = "std")]
 pub fn session_index_key(
     session_id: &str,
     verifier_address: &Address,
@@ -187,6 +213,7 @@ pub fn session_index_key(
 /// 16-byte prefix portion of [`session_index_key`]. Used by the RPC
 /// `list_by_session` path to bound a prefix scan to one session's
 /// attestations.
+#[cfg(feature = "std")]
 pub fn session_index_prefix(session_id: &str) -> [u8; SESSION_ID_HASH_BYTES] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(INFERENCE_ATTESTATION_SESSION_INDEX_DOMAIN);
@@ -208,6 +235,7 @@ pub fn session_index_prefix(session_id: &str) -> [u8; SESSION_ID_HASH_BYTES] {
 /// internal storage record. Field order is still frozen for forward
 /// compatibility with stored data: changing it would require a CF schema
 /// migration (rotate to `InferenceAttestationKeyV2`).
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferenceAttestationRecord {
     pub digest: InferenceAttestationDigest,
@@ -225,6 +253,7 @@ pub struct InferenceAttestationRecord {
 /// submissions (`sender == verifier`) write no sponsor entry, so absence means
 /// "not sponsored". This is observability-only: the sponsor never becomes the
 /// attestation identity and settlement never reads it.
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferenceAttestationSponsor {
     /// The outer transaction sender that paid to submit the attestation.
