@@ -28,6 +28,10 @@
 //! network at heights `[0, 2, 2]` for good. With the fix it requests the
 //! missing blocks from the peer that gossiped block 2, imports them, produces
 //! block 3, and the chain continues.
+//!
+//! The second test reproduces #354's second trigger, a missed block that no
+//! later block points at, with the same three roles in another order; see its
+//! doc comment.
 #![cfg(unix)]
 
 use std::fs;
@@ -152,11 +156,9 @@ fn wait_until(what: &str, within: Duration, nodes: &[&Validator], mut cond: impl
     panic!("{what}: not within {within:?}{logs}");
 }
 
-#[test]
-fn a_validator_missing_a_parent_fetches_it_from_the_sender_and_the_network_keeps_producing() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path();
-    let names = ["leaf", "isolated", "hub"];
+/// Keys for `names` and a genesis listing them in that order, so height `h`
+/// is proposed by `names[h mod 3]`.
+fn write_genesis(p: &Path, names: [&str; 3]) {
     let pk: Vec<String> = names
         .iter()
         .map(|n| keygen(&p.join(format!("{n}.json"))))
@@ -174,6 +176,13 @@ fn a_validator_missing_a_parent_fetches_it_from_the_sender_and_the_network_keeps
         ),
     )
     .unwrap();
+}
+
+#[test]
+fn a_validator_missing_a_parent_fetches_it_from_the_sender_and_the_network_keeps_producing() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    write_genesis(p, ["leaf", "isolated", "hub"]);
 
     let hub_port = free_port();
 
@@ -209,15 +218,93 @@ fn a_validator_missing_a_parent_fetches_it_from_the_sender_and_the_network_keeps
         &all,
         || leaf.produced(3),
     );
+    // Through the missing-parent request (#354's first trigger) or, if a
+    // stall check of `leaf` happened to fall in the second between `hub`
+    // obtaining block 1 and gossiping block 2, through the stall check (the
+    // second trigger). Never through neither. The request itself is pinned by
+    // `missing_ancestor_range`'s unit tests and by the declared-peer test in
+    // `peer_block_admission_tests.rs`.
+    let leaf_log = leaf.log_text();
     assert!(
-        leaf.log_text().contains("requesting them from"),
-        "leaf recovered without the missing-parent request:\n{}",
-        leaf.log_text()
+        leaf_log.contains("requesting them from") || leaf_log.contains("asking 1 peer(s) for their height"),
+        "leaf recovered without the missing-parent request or the stall check:\n{leaf_log}"
     );
     wait_until(
         "the network keeps producing (isolated at 4, hub at 5)",
         Duration::from_secs(45),
         &all,
         || isolated.produced(4) && hub.produced(5),
+    );
+}
+
+/// #354's second trigger: a block nothing later points at.
+///
+/// | name | index | role |
+/// |---|---|---|
+/// | `hub`      | 0 | proposer of 3, 6, … |
+/// | `isolated` | 1 | proposer of 1, 4, …; bootnode: the hub, which is not up when it starts |
+/// | `leaf`     | 2 | proposer of 2, 5, …; bootnode: the hub |
+///
+/// 1. `isolated` starts alone and produces block 1, which reaches nobody.
+/// 2. `hub` and `leaf` start and connect, both at height 0.
+/// 3. About 30 s later `isolated` re-dials its bootnode, and `hub` fetches
+///    block 1 from it by sync, which is not re-gossiped.
+///
+/// `leaf` is then the only node without block 1, and it proposes height 2, so
+/// no block ever arrives to start the missing-parent request. Without the
+/// stall check the network stays at `[1, 1, 0]` for good. With it, `leaf`'s
+/// head has not moved for a whole check interval, so it asks `hub` for its
+/// height, fetches block 1 through the existing sync, and produces block 2.
+#[test]
+fn a_validator_that_missed_a_block_nothing_points_at_fetches_it_after_a_stall() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    write_genesis(p, ["hub", "isolated", "leaf"]);
+
+    let hub_port = free_port();
+
+    // 1. `isolated` produces block 1 with no peers.
+    let isolated = start(p, "isolated", 0, Some(hub_port));
+    wait_until("isolated produces block 1 alone", Duration::from_secs(60), &[&isolated], || {
+        isolated.produced(1)
+    });
+
+    // 2. `hub` and `leaf`, both at height 0, connect. `leaf` starts once the
+    //    hub listens, as in the first test.
+    let hub = start(p, "hub", hub_port, None);
+    wait_until("hub listens", Duration::from_secs(60), &[&hub], || {
+        hub.log_text().contains("P2P listening on")
+    });
+    let leaf = start(p, "leaf", 0, Some(hub_port));
+    let all = [&leaf, &isolated, &hub];
+    wait_until("leaf connects to hub", Duration::from_secs(60), &all, || {
+        leaf.log_text().contains("Peer connected")
+    });
+
+    // 3. `isolated` re-dials (every 30 s while it has no peer), and `hub`
+    //    fetches block 1 from it by sync.
+    wait_until("hub obtains block 1 by sync", Duration::from_secs(90), &all, || {
+        hub.log_text().contains("Sync complete at height 1")
+    });
+
+    // 4. Nothing gossips block 1 to `leaf`. Its stall check must fetch it
+    //    (one interval, `SYNC_STALL_CHECK`, plus the sync) before it can
+    //    propose height 2.
+    wait_until(
+        "leaf fetches block 1 after a stall and produces block 2",
+        Duration::from_secs(45),
+        &all,
+        || leaf.produced(2),
+    );
+    assert!(
+        leaf.log_text().contains("asking 1 peer(s) for their height"),
+        "leaf recovered without the stall check:\n{}",
+        leaf.log_text()
+    );
+    wait_until(
+        "the network keeps producing (hub at 3, isolated at 4)",
+        Duration::from_secs(45),
+        &all,
+        || hub.produced(3) && isolated.produced(4),
     );
 }
