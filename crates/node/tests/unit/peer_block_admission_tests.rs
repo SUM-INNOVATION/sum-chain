@@ -808,6 +808,10 @@ const QUIET: Duration = Duration::from_millis(1500);
 ///
 /// Not a validator: without a key its head moves only by importing a peer's
 /// block, so its height is a direct reading of whether it synced.
+///
+/// Its stall check (#354, second trigger) is set an hour out, so that the
+/// request counts these tests assert are exactly the requests they script.
+/// The stall check's own test sets a short interval.
 fn full_node(dir: &Path, genesis: &Genesis, bootnode: Option<&str>) -> Node {
     let network = NetworkConfig {
         listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
@@ -827,6 +831,10 @@ fn full_node(dir: &Path, genesis: &Genesis, bootnode: Option<&str>) -> Node {
         sumchain_rpc::RateLimitConfig::disabled(),
         crate::config::ConsensusSettings::default(),
     )
+    .map(|mut node| {
+        node.sync_stall_check = Duration::from_secs(3600);
+        node
+    })
     .expect("the real boot must succeed")
 }
 
@@ -1490,4 +1498,154 @@ async fn a_missed_block_from_a_declared_peer_is_fetched_from_it_once() {
     .await;
 
     assert!(BlockStore::new(&node.db).contains(&missed.hash()).unwrap());
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 8. Issue #354: one block-sync stream, and the stall check
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// A reason to sync while a stream runs only raises its target (`SyncStream`).
+// Before, every gossiped block above the target started one more stream over
+// the same ranges. And a node whose head stops moving asks its peers again,
+// which is how it learns of a block nothing points at.
+
+/// A block gossiped while a block request is still unanswered starts no second
+/// request. It raises the running stream's target, and the stream fetches the
+/// rest from where its first batch ended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_block_gossiped_while_a_sync_runs_raises_its_target_and_starts_no_second_request() {
+    let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
+    let tip = blocks.last().expect("a chain").clone();
+    let head: BlockHeight = 1;
+    let ahead = blocks[(head + 2 - 1) as usize].clone();
+    assert!(
+        ahead.height() + 1 < tip.height(),
+        "the gossiped block must be above the stream's first target"
+    );
+    let dir = left_at(&genesis, &blocks, head).await;
+
+    let mut peer = ScriptedPeer::start().await;
+    let peer_id = peer.id();
+    let mut node = full_node(dir.path(), &genesis, Some(peer.dial.as_str()));
+    let (compat, consensus, metrics, digest) = (
+        node.peer_compat.clone(),
+        node.consensus.clone(),
+        node.metrics.clone(),
+        node.protocol_digest,
+    );
+
+    drive(&mut node, async {
+        let (node_id, digest_req, status_req) = peer.connected().await;
+        peer.declare(digest_req, digest).await;
+        assert!(eventually(|| compat.status(&peer_id) == PeerCompat::Verified).await);
+
+        // Two ahead: the node starts a stream with one request, held here.
+        peer.answer_status(status_req, &ahead).await;
+        let (held, from, to) = peer
+            .next("the stream's first block request", |e| match e {
+                NetworkEvent::SyncBlocksRequest {
+                    request_id,
+                    peer,
+                    from_height,
+                    to_height,
+                } if *peer == node_id => Some((*request_id, *from_height, *to_height)),
+                _ => None,
+            })
+            .await;
+        assert_eq!((from, to), (head + 1, ahead.height()));
+
+        // The tip, gossiped while that request is out: it cannot be imported,
+        // and it starts no request of its own.
+        let deadline = Instant::now() + WAIT;
+        while metrics.blocks.block_errors.load(Ordering::Relaxed) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the gossiped block never reached the node"
+            );
+            peer.send(NetworkCommand::BroadcastBlock(tip.clone())).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        peer.quiet("a second block request while the first is out", |e| {
+            matches!(e, NetworkEvent::SyncBlocksRequest { .. })
+        })
+        .await;
+
+        // The first batch; the stream then continues to the raised target.
+        peer.send(NetworkCommand::SendSyncBlocksResponse {
+            request_id: held,
+            blocks: blocks[(from - 1) as usize..to as usize].to_vec(),
+        })
+        .await;
+        assert_eq!(
+            peer.serve_blocks(node_id, &blocks).await,
+            (ahead.height() + 1, tip.height()),
+            "the stream continues from its first batch to the gossiped block"
+        );
+        assert!(
+            eventually(|| consensus.current_height() == tip.height()).await,
+            "the node never reached the gossiped block; it is at {}",
+            consensus.current_height()
+        );
+        peer.quiet("a third block request", |e| {
+            matches!(e, NetworkEvent::SyncBlocksRequest { .. })
+        })
+        .await;
+    })
+    .await;
+}
+
+/// #354's second trigger at the event loop: a peer level with the node when it
+/// connected, which later holds blocks it never gossips. Nothing points the
+/// node at them, so its head stops moving; the stall check asks the peer
+/// again, and one request fetches them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stalled_node_asks_its_peer_again_and_fetches_what_nothing_pointed_at() {
+    let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
+    let tip = blocks.last().expect("a chain").clone();
+    let head = tip.height() - 2;
+    let level = blocks[(head - 1) as usize].clone();
+    let dir = left_at(&genesis, &blocks, head).await;
+
+    let mut peer = ScriptedPeer::start().await;
+    let peer_id = peer.id();
+    let mut node = full_node(dir.path(), &genesis, Some(peer.dial.as_str()));
+    node.sync_stall_check = Duration::from_secs(1);
+    let (compat, consensus, digest) = (
+        node.peer_compat.clone(),
+        node.consensus.clone(),
+        node.protocol_digest,
+    );
+
+    drive(&mut node, async {
+        let (node_id, digest_req, status_req) = peer.connected().await;
+        peer.declare(digest_req, digest).await;
+        assert!(eventually(|| compat.status(&peer_id) == PeerCompat::Verified).await);
+        peer.answer_status(status_req, &level).await;
+        assert_eq!(peer.node_height(node_id).await, head);
+
+        // The head does not move, so a stall check asks again. The peer now
+        // holds the tip, and one request fetches both blocks.
+        let again = peer
+            .status_request(node_id, "a status request from the stall check")
+            .await;
+        peer.answer_status(again, &tip).await;
+        assert_eq!(
+            peer.serve_blocks(node_id, &blocks).await,
+            (head + 1, tip.height())
+        );
+        assert!(
+            eventually(|| consensus.current_height() == tip.height()).await,
+            "the stalled node never fetched the blocks; it is at {}",
+            consensus.current_height()
+        );
+        peer.quiet("a second block request", |e| {
+            matches!(e, NetworkEvent::SyncBlocksRequest { .. })
+        })
+        .await;
+        assert!(
+            peer.status_requests >= 2,
+            "asked on connect and again after the stall"
+        );
+    })
+    .await;
 }
