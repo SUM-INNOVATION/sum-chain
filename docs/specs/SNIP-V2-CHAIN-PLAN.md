@@ -505,17 +505,19 @@ struct ArchiveCoverageSummaryV2 {
 
 V2 doesn't introduce Filecoin-style PoRep, Arweave-style randomized recall packing, or per-chunk continuous proof. Those would be a separate redesign with their own scope. **V2's value is privacy, not stronger storage proofs.**
 
-> **Update (issue #81): shipped and gated.** A deterministic, bounded,
-> assignment-aware challenge scheduler that guarantees per-chunk-assignment
-> coverage over time without an `O(files × chunks)` sweep is specified in
+> **Update (issue #81): shipped behind gates that are not set on mainnet.** A
+> deterministic, bounded, assignment-aware challenge scheduler that guarantees
+> per-chunk-assignment coverage over time without an `O(files × chunks)` sweep is
+> specified in
 > [snip-assignment-aware-por-scheduling.md](./snip-assignment-aware-por-scheduling.md).
 > Phase 1 (`por_assignment_targeting_enabled_from_height`) and Phase 2
-> (`assignment_aware_por_scheduler_enabled_from_height`) are implemented and
-> **deployed in runtime genesis, activation-gated at height 9,200,000** (two of
-> the seven post-supply gates). Below the gate the v1 probabilistic selector
-> above remains the only active path; at height 9,200,000 the extension activates
-> automatically. Neither gate is exposed by `chain_getChainParams`, so runtime
-> genesis is the source of truth.
+> (`assignment_aware_por_scheduler_enabled_from_height`) are implemented, behind
+> two of the seven post-supply gates. **Neither gate is set on mainnet** (live
+> read 2026-11-03: `chain_getChainParams` does not expose them;
+> `chain_getConsensusConfig` reports both absent), so **neither phase is
+> active**, and the v1 probabilistic selector above remains the only active
+> path. 9,200,000 is the height #113 states as intended; setting it is a separate
+> coordinated configuration change.
 
 ### 5.2 Initial replication proof (revised v3 — `AcceptAssignmentV2` brought into Phase 1)
 

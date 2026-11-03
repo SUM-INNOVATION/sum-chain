@@ -186,12 +186,13 @@ network participation** or **native-Koppa consensus governance releases**:
 - Validator cohorts decline: validators 3–12 → 5M Ϙ, 13–100 → 2.5M, 101–1,000
   → 1M, 1,001–10,000 → 250k, then none unless governance changes the schedule
   (worst case ≈ 3.42B of the 80B pool).
-- Grant claiming is **deployed in runtime genesis and activation-gated at height
-  9,200,000** (`service_grants_enabled_from_height`, one of the seven post-supply
-  gates); it is **not usable before that height** and auto-activates when the
-  chain reaches it. The reserve accounting itself is live from the migration.
-  This gate is not exposed by `chain_getChainParams`, so runtime genesis is the
-  source of truth.
+- Grant claiming is gated by `service_grants_enabled_from_height`, one of the
+  seven post-supply gates, which is **not set on mainnet** (live read
+  2026-11-03: `chain_getChainParams` reports `null`; `chain_getConsensusConfig`
+  reports it absent), so grant claiming is **not active**. 9,200,000 is the
+  height #113 states as intended; setting it is a separate coordinated
+  configuration change. The reserve accounting itself is live from the
+  migration.
 - Grants carry **no proposer-selection weight** — consensus rotation is
   unchanged by grant or stake size.
 
@@ -202,11 +203,11 @@ Reserve releases (`ReserveRelease*`) and any future supply expansion
 native Koppa consensus voting, 1 eligible address = 1 vote, fixed 6667 bps pass
 threshold. Validator-quorum authority and SRC-20/equity governance are rejected
 at both proposal creation and execution. Both classes are additionally gated by
-`monetary_policy_enabled_from_height`, which is **deployed in runtime genesis and
-activation-gated at height 9,200,000** (one of the seven post-supply gates):
-reserve release and minting are **not usable before that height** and activate
-automatically when the chain reaches it. This gate is not exposed by
-`chain_getChainParams`, so runtime genesis is the source of truth. Every
+`monetary_policy_enabled_from_height` (one of the seven post-supply gates),
+which is **not set on mainnet** (live read 2026-11-03: `chain_getChainParams`
+reports `null`; `chain_getConsensusConfig` reports it absent), so reserve
+release and minting are **not active**. 9,200,000 is the height #113 states as
+intended; setting it is a separate coordinated configuration change. Every
 release/mint writes an append-only audit event keyed by the proposal id.
 
 ## Comparison: SUM Chain vs Traditional Finance

@@ -46,13 +46,13 @@ deployed genesis (not exposed over RPC):
 | `archive_unbonding_enabled_from_height` | `8900000` | Archive-node unbonding withdrawal **implemented**; gate **set to 8,900,000 — active at that height** (≈2026-07-12) (issue #20) |
 | `archive_reassignment_enabled_from_height` | `8900000` | Archive-node chunk reassignment **implemented**; gate **set to 8,900,000 — active at that height** (≈2026-07-12) (issue #62) |
 | `inference_settlement_enabled_from_height` | `8900000` | OmniNode inference settlement **implemented**; gate **set to 8,900,000 — active at that height** (≈2026-07-12) (issue #61; separate from attestation, which is already active). Dispute resolution is validator-quorum controlled via `inference_settlement_dispute_threshold_bps` (6667). |
-| `omninode_sponsored_attestation_enabled_from_height` | `9200000` | Sponsored inference attestation (v2 envelope, code-backed, issue #79; a payer/sponsor may submit an attestation, but it stays verifier-keyed for dedup/storage/settlement). **Deployed and activation-gated at height 9,200,000.** Separate from base attestation, which is already active. |
-| `por_assignment_targeting_enabled_from_height` | `9200000` | Assignment-targeted PoR challenge selection (issue #81 Phase 1). **Deployed and activation-gated at height 9,200,000.** A separate extension of base PoR / SNIP V2, which is already active. |
-| `assignment_aware_por_scheduler_enabled_from_height` | `9200000` | Assignment-aware bounded PoR challenge scheduler (issue #81 Phase 2). **Deployed and activation-gated at height 9,200,000.** A separate extension of base PoR / SNIP V2. |
+| `omninode_sponsored_attestation_enabled_from_height` | `null` (live) | Sponsored inference attestation (v2 envelope, code-backed, issue #79; a payer/sponsor may submit an attestation, but it stays verifier-keyed for dedup/storage/settlement). **Not set on mainnet:** the public `chain_getChainParams` reports `null` and `chain_getConsensusConfig` reports the field absent (live read 2026-11-03), so sponsored attestation is **not active**. 9,200,000 is the height #113 states as intended; it is not the live configuration, and setting it is a separate coordinated configuration change. Separate from base attestation, which is already active. |
+| `por_assignment_targeting_enabled_from_height` | absent (live) | Assignment-targeted PoR challenge selection (code-backed, issue #81 Phase 1). **Not set on mainnet:** `chain_getChainParams` does not expose this gate, and `chain_getConsensusConfig` reports it absent (live read 2026-11-03), so targeting is **not active**. 9,200,000 is the height #113 states as intended; it is not the live configuration, and setting it is a separate coordinated configuration change. A separate extension of base PoR / SNIP V2, which is already active. |
+| `assignment_aware_por_scheduler_enabled_from_height` | absent (live) | Assignment-aware bounded PoR challenge scheduler (code-backed, issue #81 Phase 2). **Not set on mainnet:** `chain_getChainParams` does not expose this gate, and `chain_getConsensusConfig` reports it absent (live read 2026-11-03), so the scheduler is **not active**. 9,200,000 is the height #113 states as intended; it is not the live configuration, and setting it is a separate coordinated configuration change. A separate extension of base PoR / SNIP V2. |
 | `inference_settlement_consistency_enabled_from_height` | `null` (live) | Consistency/plurality settlement mode (code-backed, issue #77; opt-in claim rule layered on settlement). **Not set on mainnet:** the public `chain_getChainParams` (served by the deployed binary, which exposes this gate since #122) reports `null` (read 2026-10-16, recorded on #135), so the mode is **not active**. 9,200,000 is the height #113 states as intended; it is not the live configuration, and setting it is a separate configuration change. A separate extension of base inference settlement, which is active at 8,900,000. |
 | `inference_verifier_bonding_enabled_from_height` | `null` (live) | Verifier bonding + slashing (code-backed, issue #78; opt-in per-session bond requirement, slash only on a validator-quorum denied dispute, burned to the zero address). **Not set on mainnet:** the public `chain_getChainParams` (served by the deployed binary, which exposes this gate since #122) reports `null` (read 2026-10-16, recorded on #135), so bonding is **not active**. 9,200,000 is the height #113 states as intended, not the live configuration. A separate extension of base inference settlement. |
-| `service_grants_enabled_from_height` | `9200000` | ProtocolReserve service-grant claiming (validator / archive / compute bootstrap and milestone grants). **Deployed and activation-gated at height 9,200,000; not usable before that height.** |
-| `monetary_policy_enabled_from_height` | `9200000` | Reserve release + `MonetaryPolicyMint`, native-Koppa consensus governance at 6667 bps. **Deployed and activation-gated at height 9,200,000; not usable before that height.** |
+| `service_grants_enabled_from_height` | `null` (live) | ProtocolReserve service-grant claiming (validator / archive / compute bootstrap and milestone grants). **Not set on mainnet:** the public `chain_getChainParams` reports `null` and `chain_getConsensusConfig` reports the field absent (live read 2026-11-03), so grant claiming is **not active**. 9,200,000 is the height #113 states as intended; it is not the live configuration, and setting it is a separate coordinated configuration change. |
+| `monetary_policy_enabled_from_height` | `null` (live) | Reserve release + `MonetaryPolicyMint`, native-Koppa consensus governance at 6667 bps. **Not set on mainnet:** the public `chain_getChainParams` reports `null` and `chain_getConsensusConfig` reports the field absent (live read 2026-11-03), so reserve release and minting are **not active**. 9,200,000 is the height #113 states as intended; it is not the live configuration, and setting it is a separate coordinated configuration change. |
 
 The 8,900,000-cohort rows are **deployed and code-backed; the activation gate is
 set to height 8,900,000 — active once the chain reaches it (≈2026-07-12)**. They
@@ -61,34 +61,35 @@ required beyond the coordinated genesis that set the gate. OmniNode inference
 **attestation** is already active; inference **settlement** (escrow-funded
 rewards/refunds) is a separate subprotocol whose gate is set to 8,900,000.
 
-### Post-supply cohort — gate set to 9,200,000
+### Post-supply cohort — not set on mainnet (9,200,000 intended)
 
-The final seven gates in the table above form a separate **post-supply cohort**,
-code-backed and recorded here at **9,200,000**, the operator-recorded
-runtime-genesis height. **Two of them are not set on mainnet:**
-`inference_settlement_consistency_enabled_from_height` and
-`inference_verifier_bonding_enabled_from_height`. The deployed binary exposes
-both through `chain_getChainParams` (since #122), and the live read on
-2026-10-16 (recorded on #135) reports `null` for both, so consistency mode and
-verifier bonding are **not active**. For them, 9,200,000 is the intended height
-#113 states, not the live configuration. The other five are recorded at
-9,200,000 from operator-verified runtime genesis. Each is a strict extension of an already-active
-base subprotocol: sponsored attestation extends base attestation; assignment
-targeting and the assignment-aware scheduler extend base PoR / SNIP V2;
-consistency and verifier bonding extend base inference settlement (active at
-8,900,000). Service grants and monetary policy (reserve release / mint) are
-**not usable before height 9,200,000**.
+The final seven gates in the table above form a separate **post-supply cohort**.
+All seven are code-backed, and **none of them is set on mainnet.** A live read
+of the public RPC on 2026-11-03 (chain head ≈15,569,863) found
+`chain_getChainParams` reporting `null` for every one of the seven it exposes,
+and `chain_getConsensusConfig` reporting all seven absent, so **none of these
+features is active**: sponsored attestation, assignment targeting, the
+assignment-aware scheduler, consistency mode, verifier bonding, service-grant
+claiming and reserve release / monetary-policy mint. 9,200,000 is the height #113
+states as intended; it is not the live configuration, and setting it is a
+separate coordinated configuration change. Five of the seven are strict
+extensions of an already-active base subprotocol: sponsored attestation extends
+base attestation; assignment targeting and the assignment-aware scheduler extend
+base PoR / SNIP V2; consistency and verifier bonding extend base inference
+settlement (active at 8,900,000). Service grants and monetary policy (reserve
+release / mint) are **not usable** while their gates are unset.
 
-**What the public RPC exposes.** On the deployed binary, `chain_getChainParams`
-exposes four of the seven (`monetary_policy`, `service_grants`, consistency and
-verifier bonding), so for those four the live RPC, not this page, is the source
-of truth. It does not expose sponsored attestation (#329 adds it; not yet
-released), assignment targeting or the assignment-aware scheduler; for those
-three the operator-recorded runtime genesis is the only record. The website
-currently derives all seven from the hard-coded constant `9,200,000` and the
-live block height; for the two gates the RPC reports as `null` that status is
-wrong, and the website is to be corrected to read the exposed gates from the
-RPC.
+**What the public RPC exposes.** On the live chain, `chain_getChainParams`
+exposes five of the seven (sponsored attestation, consistency, verifier bonding,
+`service_grants` and `monetary_policy`) and reports `null` for all five, so for
+those five the live RPC, not this page, is the source of truth. It does not
+expose assignment targeting or the assignment-aware scheduler;
+`chain_getConsensusConfig` reports both absent. The website currently derives
+all seven from the hard-coded constant `9,200,000` (`POST_SUPPLY_GATE` in
+`website/src/lib/chainStatus.ts`) and the live block height. That constant is
+not a record of the live configuration, so the status the website shows for
+these seven gates is wrong; the website is to be corrected to read the gates
+from the RPC.
 
 Token / NFT / messaging / docclass / employment families have **no activation
 gate** — they are always available when the node binary is running.
@@ -106,7 +107,7 @@ gate** — they are always available when the node binary is running.
   education activation.
 - **Design specs (non-token):** [specs/](./specs/) (SNIP V2 storage plan, incl.
   §5.4 [archive reassignment](./specs/SNIP-V2-CHAIN-PLAN.md) (implemented; gate set to 8,900,000, issue #62);
-  [assignment-aware PoR scheduling](./specs/snip-assignment-aware-por-scheduling.md) (deployed and **activation-gated at height 9,200,000**, issue #81 — post-supply extension of base PoR);
+  [assignment-aware PoR scheduling](./specs/snip-assignment-aware-por-scheduling.md) (implemented, issue #81 — post-supply extension of base PoR; its gates are **not set on mainnet**, so it is not active; 9,200,000 is the height #113 states as intended);
   [Governance v1](./specs/GOVERNANCE-V1.md) design spec).
   Archive-node unbonding withdrawal (implemented; gate set to 8,900,000, issue #20) and reassignment are
   separate landed storage mechanics — see the RPC cheatsheet. Token-family usage

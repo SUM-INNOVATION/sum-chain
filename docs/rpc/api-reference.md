@@ -112,7 +112,7 @@ Eligibility snapshot: verifiable milestone counters (PoR proofs / settlement cla
 
 #### `chain_buildClaimServiceGrant` / `chain_buildUnlockServiceGrant`
 
-No-key builders for the supply/service-grant transactions (claim a bootstrap/milestone grant; unlock locked grant 1:1 against protocol-earned credit). Return an unsigned tx + signing hash; sign offline and submit via `sum_sendRawTransaction`. `service_grants_enabled_from_height` is **deployed in runtime genesis and activation-gated at height 9,200,000** (one of the seven post-supply gates); both operations are **not usable before height 9,200,000** (submitted early → `Failed(380)`), then activate automatically when the chain reaches it. Note this gate is not exposed by `chain_getChainParams` — runtime genesis is the source of truth.
+No-key builders for the supply/service-grant transactions (claim a bootstrap/milestone grant; unlock locked grant 1:1 against protocol-earned credit). Return an unsigned tx + signing hash; sign offline and submit via `sum_sendRawTransaction`. `service_grants_enabled_from_height` (one of the seven post-supply gates) is **not set on mainnet** (live read 2026-11-03: `chain_getChainParams` reports `null`; `chain_getConsensusConfig` reports it absent), so both operations are **not active**: submitted while the gate is unset → `Failed(380)`. 9,200,000 is the height #113 states as intended; setting it is a separate coordinated configuration change. This gate is exposed by `chain_getChainParams` (see above), so the live RPC is the source of truth.
 
 **Parameters:**
 1. `request` (object) - `{ from, service_kind, fee?, nonce?, chain_id? }`
