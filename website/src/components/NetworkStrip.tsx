@@ -1,7 +1,7 @@
 'use client';
 
 import { Reveal, StatusPill } from '@/components/ui/primitives';
-import { useChainStatus, type FeatureKey } from '@/lib/chainStatus';
+import { useChainStatus, type CohortFeature } from '@/lib/chainStatus';
 
 /*
   Live network readout. Fixed params are pinned from mainnet chain_getChainParams
@@ -18,7 +18,7 @@ const PARAMS = [
   { k: 'assignment_replication_factor', v: '3', note: 'chunk replicas' },
 ];
 
-const GATES: { label: string; feature: FeatureKey }[] = [
+const GATES: { label: string; feature: CohortFeature }[] = [
   { label: 'SNIP V2 storage', feature: 'snipV2' },
   { label: 'OmniNode attestation', feature: 'omninodeAttestation' },
   { label: 'Inference settlement', feature: 'inferenceSettlement' },

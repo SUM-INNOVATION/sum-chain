@@ -224,7 +224,7 @@ export default function GovernancePage() {
             <SectionHeader
               kicker="Monetary governance"
               title="Reserve release and future minting are native-only"
-              intro="The ProtocolReserve's governance pools and any future supply expansion beyond 800B are executable only through native-Koppa consensus governance. The monetary-policy gate is deployed in runtime genesis and activates at height 9,200,000; because chain_getChainParams does not expose every gate, the status below uses that operator-verified height and flips to active from the live block height."
+              intro="The ProtocolReserve's governance pools and any future supply expansion beyond 800B are executable only through native-Koppa consensus governance. The monetary-policy gate is not set on mainnet (live read 2026-11-03), so reserve release and minting are not active; 9,200,000 is the height #113 states as intended, and setting it is a separate coordinated configuration change. The status below is read live from the chain."
             />
             <div className="mt-8">
               <MonetaryGovernanceStatus />

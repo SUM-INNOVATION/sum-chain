@@ -129,7 +129,7 @@ export default function TokenomicsPage() {
             <SectionHeader
               kicker="Service grants"
               title="Grants are earned by network work, not handed out"
-              intro="The reserve's service pools bootstrap operators without a supply shock: every grant is mostly locked, and liquidity comes from verifiable protocol work. Claiming is gate-controlled: the service-grants gate is deployed in runtime genesis and activates at height 9,200,000, after which claims go live automatically."
+              intro="The reserve's service pools bootstrap operators without a supply shock: every grant is mostly locked, and liquidity comes from verifiable protocol work. Claiming is gate-controlled: the service-grants gate is not set on mainnet (live read 2026-11-03), so claiming is not active; 9,200,000 is the height #113 states as intended, and setting it is a separate coordinated configuration change."
             />
             <ul className="mt-6 space-y-3 text-sm leading-relaxed text-muted">
               <li>
@@ -161,7 +161,7 @@ export default function TokenomicsPage() {
                   { k: 'early_archive_nodes', v: 'eligible via service evidence' },
                   { k: 'retroactive_grants', v: 'none, counting starts at correction' },
                   { k: 'slashing', v: 'forfeits locked stake to reserve' },
-                  { k: 'claiming', v: 'gate-controlled · activates at height 9,200,000' },
+                  { k: 'claiming', v: 'gate-controlled · not set on mainnet (9,200,000 intended)' },
                 ]}
               />
             </Card>

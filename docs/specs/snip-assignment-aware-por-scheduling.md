@@ -9,11 +9,10 @@
 > `chain_getConsensusConfig` reports both absent), so **neither phase is
 > active**. 9,200,000 is the height #113 states as intended; it is not the live
 > configuration, and setting it is a separate coordinated configuration change.
-> The website derives active/pending for these gates from a hard-coded constant
-> `9,200,000` (`POST_SUPPLY_GATE` in `website/src/lib/chainStatus.ts`) and the
-> live block height. That constant is not operator-verified truth and does not
-> reflect the live configuration, so the status it shows is wrong. The design
-> rationale below is retained as written.
+> `9,200,000` is not operator-verified truth: the website
+> (`website/src/lib/chainStatus.ts`) reads both gates live from
+> `chain_getConsensusConfig` and shows a gate active only when it is set and the
+> live head has reached it. The design rationale below is retained as written.
 
 **Refs:** #62 (epoch-aware assignment/coverage), #20 (archive unbonding), #80
 (operator tooling). See also [SNIP-V2-CHAIN-PLAN.md](./SNIP-V2-CHAIN-PLAN.md) §5.

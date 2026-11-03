@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import PageShell from '@/components/PageShell';
 import SystemMap from '@/components/SystemMap';
-import { LiveStatus } from '@/components/LiveStatus';
+import { LivePostSupplyGates } from '@/components/LiveStatus';
 import { SectionHeader, Reveal, MonoTag } from '@/components/ui/primitives';
 import { Card, SpecList, Callout, SourceLinks } from '@/components/ui/blocks';
 
@@ -99,25 +99,30 @@ export default function ComputePage() {
             </Callout>
           </Reveal>
           <Reveal delay={0.12}>
-            <Callout tone="note" title="Deployed in runtime genesis, activates at height 9,200,000">
+            <Callout tone="note" title="Not set on mainnet (9,200,000 intended)">
               <p>
-                Three further OmniNode gates are already in runtime genesis and
-                activate together at height <MonoTag>9,200,000</MonoTag>, with no
-                redeploy: sponsored attestation
+                Three further OmniNode gates are code-backed but not set on
+                mainnet: sponsored attestation
                 (<MonoTag>omninode_sponsored_attestation_enabled_from_height</MonoTag>),
                 settlement consistency
                 (<MonoTag>inference_settlement_consistency_enabled_from_height</MonoTag>),
                 and verifier bonding
                 (<MonoTag>inference_verifier_bonding_enabled_from_height</MonoTag>).
+                A live read on 2026-11-03 found all three unset, so none is
+                active. <MonoTag>9,200,000</MonoTag> is the height #113 states as
+                intended; setting it is a separate coordinated configuration
+                change.
               </p>
               <p className="mt-3">
-                <MonoTag>chain_getChainParams</MonoTag> does not expose every one
-                of these gates, so this status uses the operator-verified
-                runtime-genesis height and flips to active from the live block
-                height.
+                The status below is read live from{' '}
+                <MonoTag>chain_getChainParams</MonoTag> and{' '}
+                <MonoTag>chain_getConsensusConfig</MonoTag>: a gate shows active
+                only once it is set and the chain has reached it.
               </p>
               <div className="mt-3">
-                <LiveStatus feature="verifierBonding" />
+                <LivePostSupplyGates
+                  features={['sponsoredAttestation', 'settlementConsistency', 'verifierBonding']}
+                />
               </div>
             </Callout>
           </Reveal>

@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import PageShell from '@/components/PageShell';
-import { LiveStatus } from '@/components/LiveStatus';
+import { LivePostSupplyGates } from '@/components/LiveStatus';
 import { SectionHeader, Reveal, MonoTag } from '@/components/ui/primitives';
 import { Card, SpecList, StepFlow, Callout, SourceLinks } from '@/components/ui/blocks';
 
@@ -62,23 +62,26 @@ export default function StoragePage() {
               not rewrite epoch-0 assignments. Challenge coverage remains probabilistic, not
               per-chunk guaranteed.
             </Callout>
-            <Callout tone="note" title="Deployed in runtime genesis, activates at height 9,200,000">
+            <Callout tone="note" title="Not set on mainnet (9,200,000 intended)">
               <p>
-                Two further PoR gates are already in runtime genesis and activate
-                together at height <MonoTag>9,200,000</MonoTag>, with no redeploy:
+                Two further PoR gates are code-backed but not set on mainnet:
                 assignment targeting
                 (<MonoTag>por_assignment_targeting_enabled_from_height</MonoTag>)
                 and the assignment-aware bounded challenge scheduler
                 (<MonoTag>assignment_aware_por_scheduler_enabled_from_height</MonoTag>).
+                A live read on 2026-11-03 found both unset, so neither is active.{' '}
+                <MonoTag>9,200,000</MonoTag> is the height #113 states as
+                intended; setting it is a separate coordinated configuration
+                change.
               </p>
               <p className="mt-3">
-                <MonoTag>chain_getChainParams</MonoTag> does not expose every one
-                of these gates, so this status uses the operator-verified
-                runtime-genesis height and flips to active from the live block
-                height.
+                <MonoTag>chain_getChainParams</MonoTag> does not expose these two
+                gates, so the status below is read live from{' '}
+                <MonoTag>chain_getConsensusConfig</MonoTag>: a gate shows active
+                only once it is set and the chain has reached it.
               </p>
               <div className="mt-3">
-                <LiveStatus feature="porBoundedScheduler" />
+                <LivePostSupplyGates features={['porAssignmentTargeting', 'porBoundedScheduler']} />
               </div>
             </Callout>
           </Reveal>

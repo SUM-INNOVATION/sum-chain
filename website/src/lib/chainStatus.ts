@@ -17,50 +17,52 @@ import { useEffect, useState } from 'react';
  * used as the cohort's activation height. Pinned fallbacks (below) keep the page
  * correct if the RPC is briefly unreachable.
  *
- * A separate cohort of seven gates was added to runtime genesis AFTER the 8.9M
- * batch and activates together at height 9,200,000 (see `POST_SUPPLY_GATE`).
- * `chain_getChainParams` does NOT expose every one of these, so the site uses
- * the operator-verified runtime-genesis value as the gate height rather than
- * inferring null/dormant from a missing RPC field. Active/pending is still
- * derived from the LIVE block height, so the UI auto-flips to active the moment
- * the chain crosses 9,200,000, with no redeploy.
+ * The seven post-supply gates are read one by one from the live chain, by name:
+ * `chain_getChainParams` where it exposes the gate (`null` = not set), and
+ * `chain_getConsensusConfig` otherwise (`"absent"` = not set). A gate is ACTIVE
+ * only when its live value is a height at or below the live head; an unset gate
+ * is NOT SET; an unreadable RPC is UNKNOWN, never active. They have no pinned
+ * fallback. A live read on 2026-11-03 found all seven unset.
  */
 
 export const RPC_URL = 'https://rpc.sumchain.io';
 
 /**
- * Operator-verified runtime-genesis activation height for the seven post-supply
- * gates, deployed and scheduled to activate together at this height:
- *   - omninode_sponsored_attestation_enabled_from_height
- *   - por_assignment_targeting_enabled_from_height
- *   - assignment_aware_por_scheduler_enabled_from_height
- *   - inference_settlement_consistency_enabled_from_height
- *   - inference_verifier_bonding_enabled_from_height
- *   - service_grants_enabled_from_height
- *   - monetary_policy_enabled_from_height
- * `chain_getChainParams` does not expose all of these, so this constant is the
- * source of truth for their activation height; active/pending is decided by the
- * live block height (`liveHeight >= POST_SUPPLY_GATE`).
+ * The height #113 states as intended for the seven post-supply gates. It is NOT
+ * the live configuration (a live read on 2026-11-03 found all seven unset), and
+ * it is never used to derive status; setting it is a separate coordinated
+ * configuration change. Shown only where a page names the intended height.
  */
-export const POST_SUPPLY_GATE = 9_200_000;
+export const POST_SUPPLY_INTENDED_HEIGHT = 9_200_000;
 
 /** Deployed gate values (fallback when the RPC is unreachable). Verified live
  * 2026-07-09 at height 8,916,052: the chain has crossed the 8,900,000 cohort
  * gate, so the whole batch (governance, contracts, archive unbonding /
  * reassignment, inference settlement, education) is ACTIVE. The pinned height
  * stays above that gate so an RPC blip never falsely reverts the UI to pending.
- * The post-supply cohort (9,200,000) is still ahead of the live height, so the
- * pinned fallback correctly shows it pending; once the live chain crosses
- * 9,200,000 the live height flips it to active automatically. */
+ * The post-supply gates have no pinned value: without a live read they are
+ * shown as unknown. */
 const PINNED = {
   height: 8_916_052,
   v2: 5_200_000,
   omninode: 6_000_000,
   education: 8_900_000,
-  postSupply: POST_SUPPLY_GATE,
 };
 
-export type FeatureKey =
+/** The seven post-supply gates, by the field name the chain reports. */
+export const POST_SUPPLY_GATES = {
+  sponsoredAttestation: 'omninode_sponsored_attestation_enabled_from_height',
+  porAssignmentTargeting: 'por_assignment_targeting_enabled_from_height',
+  porBoundedScheduler: 'assignment_aware_por_scheduler_enabled_from_height',
+  settlementConsistency: 'inference_settlement_consistency_enabled_from_height',
+  verifierBonding: 'inference_verifier_bonding_enabled_from_height',
+  serviceGrants: 'service_grants_enabled_from_height',
+  monetaryPolicy: 'monetary_policy_enabled_from_height',
+} as const;
+
+export type PostSupplyFeature = keyof typeof POST_SUPPLY_GATES;
+
+export type CohortFeature =
   | 'snipV2'
   | 'por'
   | 'omninodeAttestation'
@@ -69,17 +71,23 @@ export type FeatureKey =
   | 'archiveUnbonding'
   | 'archiveReassignment'
   | 'inferenceSettlement'
-  | 'governance'
-  // Post-supply cohort (all activate at POST_SUPPLY_GATE = 9,200,000).
-  | 'sponsoredAttestation'
-  | 'porAssignmentTargeting'
-  | 'porBoundedScheduler'
-  | 'settlementConsistency'
-  | 'verifierBonding'
-  | 'serviceGrants'
-  | 'monetaryPolicy';
+  | 'governance';
+
+export type FeatureKey = CohortFeature | PostSupplyFeature;
 
 export type ActivationState = 'active' | 'pending';
+
+/** Live status of a post-supply gate. */
+export type GateStatus = 'active' | 'pending' | 'not-set' | 'unknown';
+
+/** What the chain reports for one gate. */
+export type GateReading = { kind: 'set'; height: number } | { kind: 'not-set' } | { kind: 'unknown' };
+
+export interface PostSupplyGate {
+  status: GateStatus;
+  /** The live gate height when set, else null. */
+  height: number | null;
+}
 
 export interface ChainStatus {
   /** Live chain height, or the pinned fallback. */
@@ -88,22 +96,124 @@ export interface ChainStatus {
   loading: boolean;
   /** True if the last live fetch succeeded. */
   live: boolean;
-  /** Activation gate height for a feature (from RPC where exposed, else the cohort/education gate). */
-  gateOf: (f: FeatureKey) => number;
+  /** Activation gate height for a cohort feature (from RPC where exposed, else the education gate). */
+  gateOf: (f: CohortFeature) => number;
   /** ACTIVE if height >= gate, else PENDING. */
-  stateOf: (f: FeatureKey) => ActivationState;
+  stateOf: (f: CohortFeature) => ActivationState;
+  /** Live status of a post-supply gate; never active without a live read. */
+  postSupplyOf: (f: PostSupplyFeature) => PostSupplyGate;
 }
+
+export function isPostSupplyFeature(f: FeatureKey): f is PostSupplyFeature {
+  return Object.prototype.hasOwnProperty.call(POST_SUPPLY_GATES, f);
+}
+
+/** A non-negative integer height from a number or a decimal string, else null. */
+function toHeight(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0) return v;
+  if (typeof v === 'string' && /^\d+$/.test(v)) {
+    const n = Number(v);
+    return Number.isSafeInteger(n) ? n : null;
+  }
+  return null;
+}
+
+/** Minimal shape of `chain_getConsensusConfig` that the gate reading uses. */
+export interface ConsensusConfigLike {
+  matches_baseline?: boolean | null;
+  fields?: { name?: unknown; value?: unknown }[];
+}
+
+/**
+ * Read one gate by name. `chain_getChainParams` reports `null` for an unset gate
+ * it exposes; `chain_getConsensusConfig` reports `"absent"`. The consensus
+ * fields are the node's recorded baseline, so they are used only while the node
+ * reports that its running configuration matches it. If both sources report the
+ * gate and disagree, the reading is unknown.
+ */
+export function readGate(
+  name: string,
+  params: Record<string, unknown> | null,
+  config: ConsensusConfigLike | null,
+): GateReading {
+  let fromParams: GateReading | null = null;
+  if (params && Object.prototype.hasOwnProperty.call(params, name)) {
+    const v = params[name];
+    const h = toHeight(v);
+    fromParams = v === null ? { kind: 'not-set' } : h != null ? { kind: 'set', height: h } : { kind: 'unknown' };
+  }
+  let fromConfig: GateReading | null = null;
+  if (config && config.matches_baseline === true && Array.isArray(config.fields)) {
+    const field = config.fields.find((f) => f?.name === name);
+    if (field) {
+      const h = toHeight(field.value);
+      fromConfig =
+        field.value === 'absent' ? { kind: 'not-set' } : h != null ? { kind: 'set', height: h } : { kind: 'unknown' };
+    }
+  }
+  if (fromParams && fromConfig) {
+    const same =
+      fromParams.kind === fromConfig.kind &&
+      (fromParams.kind !== 'set' || (fromConfig.kind === 'set' && fromParams.height === fromConfig.height));
+    return same ? fromParams : { kind: 'unknown' };
+  }
+  return fromParams ?? fromConfig ?? { kind: 'unknown' };
+}
+
+/** ACTIVE only when the gate is set and the live head has reached it. */
+export function gateStatusOf(reading: GateReading, head: number | null): PostSupplyGate {
+  if (reading.kind === 'unknown') return { status: 'unknown', height: null };
+  if (reading.kind === 'not-set') return { status: 'not-set', height: null };
+  if (head == null) return { status: 'unknown', height: reading.height };
+  return { status: head >= reading.height ? 'active' : 'pending', height: reading.height };
+}
+
+/** Read all seven post-supply gates. */
+export function readPostSupplyGates(
+  params: Record<string, unknown> | null,
+  config: ConsensusConfigLike | null,
+): Record<PostSupplyFeature, GateReading> {
+  const out = {} as Record<PostSupplyFeature, GateReading>;
+  for (const f of Object.keys(POST_SUPPLY_GATES) as PostSupplyFeature[]) {
+    out[f] = readGate(POST_SUPPLY_GATES[f], params, config);
+  }
+  return out;
+}
+
+/** Parse a `chain_getBlockHeight` result into a height, or null. */
+export function headHeight(head: unknown): number | null {
+  if (head && typeof head === 'object' && 'height' in head) return toHeight((head as { height: unknown }).height);
+  return null;
+}
+
+/** One JSON-RPC call against the public RPC. */
+export async function rpcCall<T>(method: string, signal: AbortSignal): Promise<T> {
+  const res = await fetch(RPC_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: [] }),
+    signal,
+  });
+  if (!res.ok) throw new Error(`${method} ${res.status}`);
+  const json = await res.json();
+  if (json.error) throw new Error(`${method}: ${json.error.message ?? 'rpc error'}`);
+  return json.result as T;
+}
+
+const UNKNOWN_POST_SUPPLY = readPostSupplyGates(null, null);
 
 interface Raw {
   height: number;
   v2: number;
   omninode: number;
   education: number;
-  postSupply: number;
   live: boolean;
+  /** Live head for the post-supply gates; null without a live read. */
+  liveHead: number | null;
+  postSupply: Record<PostSupplyFeature, GateReading>;
 }
 
-function gateFor(f: FeatureKey, raw: Raw): number {
+function gateFor(f: CohortFeature, raw: Raw): number {
   switch (f) {
     case 'snipV2':
     case 'por':
@@ -119,74 +229,60 @@ function gateFor(f: FeatureKey, raw: Raw): number {
     case 'inferenceSettlement':
     case 'governance':
       return raw.education;
-    // Post-supply cohort: operator-verified runtime-genesis height 9,200,000,
-    // not exposed (fully) by chain_getChainParams. Active/pending still derives
-    // from raw.height below, so the UI auto-flips at the gate.
-    case 'sponsoredAttestation':
-    case 'porAssignmentTargeting':
-    case 'porBoundedScheduler':
-    case 'settlementConsistency':
-    case 'verifierBonding':
-    case 'serviceGrants':
-    case 'monetaryPolicy':
-      return raw.postSupply;
   }
 }
 
-async function fetchRaw(signal: AbortSignal): Promise<Raw> {
-  const call = async (method: string) => {
-    const res = await fetch(RPC_URL, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: [] }),
-      signal,
-    });
-    if (!res.ok) throw new Error(`${method} ${res.status}`);
-    const json = await res.json();
-    if (json.error) throw new Error(`${method}: ${json.error.message ?? 'rpc error'}`);
-    return json.result;
-  };
-  const [params, head] = await Promise.all([
-    call('chain_getChainParams'),
-    call('chain_getBlockHeight'),
+async function fetchRaw(signal: AbortSignal, withConfig: boolean): Promise<Raw> {
+  const [params, head, config] = await Promise.all([
+    rpcCall<Record<string, unknown> | null>('chain_getChainParams', signal),
+    rpcCall<{ height?: unknown } | null>('chain_getBlockHeight', signal),
+    // Only fetched where a post-supply gate is shown (the response is large).
+    // Optional: a node without it still serves the other reads; the gates it
+    // alone reports then stay unknown.
+    withConfig
+      ? rpcCall<ConsensusConfigLike | null>('chain_getConsensusConfig', signal).catch(() => null)
+      : Promise.resolve(null),
   ]);
+  const liveHead = headHeight(head);
   return {
-    height: Number(head?.height ?? PINNED.height),
+    height: liveHead ?? PINNED.height,
     v2: Number(params?.v2_enabled_from_height ?? PINNED.v2),
     omninode: Number(params?.omninode_enabled_from_height ?? PINNED.omninode),
     education: Number(params?.education_enabled_from_height ?? PINNED.education),
-    // Operator-verified constant; chain_getChainParams does not reliably expose
-    // the post-supply cohort, so the gate height is never read from RPC.
-    postSupply: PINNED.postSupply,
     live: true,
+    liveHead,
+    postSupply: readPostSupplyGates(params ?? null, config ?? null),
   };
 }
 
 /**
  * Live chain status hook. Renders pinned fallbacks immediately (correct as of the
- * last verification), then updates from the live RPC on mount.
+ * last verification), then updates from the live RPC on mount. Post-supply gates
+ * are unknown until the live read succeeds; pass `{ postSupply: true }` where
+ * they are shown, so `chain_getConsensusConfig` is read too.
  */
-export function useChainStatus(): ChainStatus {
+export function useChainStatus({ postSupply = false }: { postSupply?: boolean } = {}): ChainStatus {
   const [raw, setRaw] = useState<Raw>({
     height: PINNED.height,
     v2: PINNED.v2,
     omninode: PINNED.omninode,
     education: PINNED.education,
-    postSupply: PINNED.postSupply,
     live: false,
+    liveHead: null,
+    postSupply: UNKNOWN_POST_SUPPLY,
   });
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const ctrl = new AbortController();
-    fetchRaw(ctrl.signal)
+    fetchRaw(ctrl.signal, postSupply)
       .then((r) => setRaw(r))
       .catch(() => {
-        /* keep pinned fallback */
+        /* keep pinned fallback; post-supply gates stay unknown */
       })
       .finally(() => setLoading(false));
     return () => ctrl.abort();
-  }, []);
+  }, [postSupply]);
 
   return {
     height: raw.height,
@@ -194,10 +290,25 @@ export function useChainStatus(): ChainStatus {
     live: raw.live,
     gateOf: (f) => gateFor(f, raw),
     stateOf: (f) => (raw.height >= gateFor(f, raw) ? 'active' : 'pending'),
+    postSupplyOf: (f) => gateStatusOf(raw.postSupply[f], raw.liveHead),
   };
 }
 
 /** Format an activation gate + state into a compact human label. */
 export function activationLabel(state: ActivationState, gate: number): string {
   return state === 'active' ? 'active' : `activates at height ${gate.toLocaleString()}`;
+}
+
+/** Compact label for a post-supply gate's live status. */
+export function postSupplyLabel(g: PostSupplyGate, loading = false): string {
+  switch (g.status) {
+    case 'active':
+      return 'active';
+    case 'pending':
+      return `set to height ${(g.height ?? 0).toLocaleString('en-US')} · pending`;
+    case 'not-set':
+      return 'not set on mainnet';
+    case 'unknown':
+      return loading ? 'checking chain…' : 'status unavailable';
+  }
 }

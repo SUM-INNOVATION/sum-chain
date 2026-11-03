@@ -51,7 +51,7 @@ export const categories: Category[] = [
       {
         name: 'chain_buildClaimServiceGrant',
         description:
-          'Build an unsigned claim-service-grant transaction (no keys). The service_grants gate is deployed in runtime genesis and activates at height 9,200,000 (not exposed by chain_getChainParams; the site uses that operator-verified height).',
+          'Build an unsigned claim-service-grant transaction (no keys). The service_grants gate is not set on mainnet (live read 2026-11-03: chain_getChainParams reports null), so a claim fails with Failed(380); 9,200,000 is the height #113 states as intended.',
       },
       {
         name: 'chain_buildUnlockServiceGrant',
@@ -246,7 +246,7 @@ export const categories: Category[] = [
   {
     id: 'omninode-settlement',
     title: 'OmniNode Inference Settlement',
-    blurb: 'Escrow-funded verifier rewards keyed by attestations, active on mainnet (inference_settlement_enabled_from_height = 8,900,000 reached, issue #61). No bond slashing in v1 (reward denial / claim withholding / escrow refund). Reads + unsigned-tx builders (no keys). Settlement consistency and verifier bonding are separate post-supply gates that activate at height 9,200,000.',
+    blurb: 'Escrow-funded verifier rewards keyed by attestations, active on mainnet (inference_settlement_enabled_from_height = 8,900,000 reached, issue #61). No bond slashing in v1 (reward denial / claim withholding / escrow refund). Reads + unsigned-tx builders (no keys). Settlement consistency and verifier bonding are separate post-supply gates, not set on mainnet (live read 2026-11-03), so neither is active; 9,200,000 is the height #113 states as intended.',
     methods: [
       { name: 'omninode_getInferenceSession', description: 'Per-session settlement record (funder, reward terms, remaining escrow, status), or null.' },
       { name: 'omninode_getInferenceClaims', description: 'All paid reward claims for a session.' },
