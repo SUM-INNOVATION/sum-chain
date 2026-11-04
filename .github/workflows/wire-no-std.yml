@@ -1,0 +1,80 @@
+name: sumchain-wire without std
+
+# #312: `sumchain-wire` built without its default `std` feature. The subset's
+# unit tests and clippy on the host, then builds for three targets that have no
+# `std`, on the pinned toolchain (rust-toolchain.toml), and a check that no
+# dependency's `std` feature is on there.
+#
+# Path-filtered: it runs when the crate, the lockfile, the workspace manifest,
+# the toolchain pin or this workflow changes. NOT a branch-protection required
+# context.
+on:
+  pull_request:
+    paths:
+      - "crates/sumchain-wire/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - ".github/workflows/wire-no-std.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/sumchain-wire/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - ".github/workflows/wire-no-std.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wire-no-std:
+    name: sumchain-wire without std
+    runs-on: ubuntu-latest
+    env:
+      # Targets with no `std` at all: a dependency that needs `std` cannot build.
+      TARGETS: thumbv7em-none-eabihf riscv32imac-unknown-none-elf x86_64-unknown-none
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup reads rust-toolchain.toml (the pinned 1.88.0), as in rust-ci.yml,
+      # and adds the targets' prebuilt `core` and `alloc` to that toolchain.
+      - name: Set up pinned toolchain and the targets without std
+        run: |
+          rustup show
+          rustup component add clippy
+          rustup target add $TARGETS
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test without default features (host)
+        run: cargo test -p sumchain-wire --no-default-features --locked
+
+      - name: Clippy without default features
+        run: cargo clippy -p sumchain-wire --no-default-features --tests --locked
+
+      - name: Build without default features for targets without std
+        run: |
+          for t in $TARGETS; do
+            cargo build -p sumchain-wire --no-default-features --lib --locked --target "$t"
+          done
+
+      # Build scripts run on the host, and dev-dependencies only in tests, so
+      # only normal dependency edges are checked.
+      - name: No dependency's std feature on a target without std
+        run: |
+          on=$(cargo tree -p sumchain-wire --no-default-features --locked \
+            -e normal,features --target thumbv7em-none-eabihf | grep 'feature "std"' || true)
+          if [ -n "$on" ]; then
+            echo "::error::a dependency of sumchain-wire enables std without the std feature:"
+            echo "$on"
+            exit 1
+          fi
+          echo "ok - no dependency of sumchain-wire enables std without the std feature"
