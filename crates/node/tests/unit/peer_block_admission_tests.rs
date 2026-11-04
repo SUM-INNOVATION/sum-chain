@@ -1124,7 +1124,12 @@ impl ScriptedPeer {
             Status(u64),
             Blocks(u64, BlockHeight, BlockHeight),
         }
+        let deadline = Instant::now() + WAIT;
         loop {
+            assert!(
+                Instant::now() < deadline,
+                "no {what} within {WAIT:?}, only status requests"
+            );
             match self
                 .next(what, |e| match e {
                     NetworkEvent::SyncStatusRequest { request_id, peer } if *peer == node => {
