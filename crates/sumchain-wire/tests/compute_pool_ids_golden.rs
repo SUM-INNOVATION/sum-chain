@@ -19,6 +19,9 @@
 //! `job_id` and `unit_id` are frozen and unchanged; they appear here only as
 //! inputs, via their own frozen KATs. `legacy_session_id_hash` is deferred.
 
+// These tests cover items that need the `std` feature.
+#![cfg(feature = "std")]
+
 use sumchain_wire::b0::codec::DecodeError;
 use sumchain_wire::compute_pool_graph::*;
 use sumchain_wire::registry_wire::{GRAPH_DEFINITION_TAG, TOKENIZER_ID_TAG, VK_ID_TAG};

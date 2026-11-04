@@ -13,6 +13,9 @@
 //! / `to_bytes`; the production encoders MUST reproduce them byte-for-byte forever
 //! (append-only — never edit an existing constant; only add new ones).
 
+// These tests cover items that need the `std` feature.
+#![cfg(feature = "std")]
+
 use sumchain_wire::beacon_wire::*;
 use sumchain_wire::compute_pool_wire::{CancelJobV1, ComputePoolOperation};
 use sumchain_wire::transaction::{

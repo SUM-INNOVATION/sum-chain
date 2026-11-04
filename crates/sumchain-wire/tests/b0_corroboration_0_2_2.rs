@@ -10,6 +10,9 @@
 //! This is TEST CORROBORATION ONLY: it is not the B0 protocol artifact, changes
 //! no B0 protocol hash rule, and asserts no semantic protocol change.
 
+// These tests cover items that need the `std` feature.
+#![cfg(feature = "std")]
+
 use sumchain_wire::b0::enums::{ObjectKind, SlotKind};
 use sumchain_wire::b0::manifest::{OutputManifestV1, SlotDescriptorV1};
 use sumchain_wire::b0::merkle;

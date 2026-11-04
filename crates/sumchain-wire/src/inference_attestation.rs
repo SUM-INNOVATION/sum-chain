@@ -327,8 +327,13 @@ mod tests {
     //!   existed, one for each shape a field can take.
     //!
     //! Each is checked against the encoder, against `bincode` and against
-    //! `canonical_digest_bytes`, which calls `bincode` in this (`std`) build.
+    //! `canonical_digest_bytes`, which calls `bincode` in a `std` build and the
+    //! encoder without `std`. Without `std` the `bincode` comparisons are left
+    //! out, so those builds check the encoder and `canonical_digest_bytes`
+    //! against the same golden bytes.
     use super::*;
+    use alloc::format;
+    use alloc::string::ToString;
 
     fn bytes32(f: impl Fn(u8) -> u8) -> [u8; 32] {
         core::array::from_fn(|i| f(i as u8))
@@ -348,6 +353,7 @@ mod tests {
     /// The encoder, `bincode` and `canonical_digest_bytes` all write `expected`.
     fn assert_all_write(d: &InferenceAttestationDigest, expected: &[u8], name: &str) {
         assert_eq!(digest_bytes_by_hand(d), expected, "{name}: hand encoder");
+        #[cfg(feature = "std")]
         assert_eq!(bincode::serialize(d).unwrap(), expected, "{name}: bincode");
         assert_eq!(
             canonical_digest_bytes(d).unwrap(),
@@ -509,6 +515,7 @@ mod tests {
     /// (NUL and controls included), and runs of 2-, 3- and 4-byte characters,
     /// each with arrays that change with the length: the encoder and `bincode`
     /// agree on all of them.
+    #[cfg(feature = "std")]
     #[test]
     fn agrees_with_bincode_across_lengths_and_characters() {
         for n in 0..=1024usize {

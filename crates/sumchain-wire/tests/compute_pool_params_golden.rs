@@ -6,6 +6,9 @@
 //! TEST_ONLY patterns chosen to make every byte position distinguishable; none
 //! is a proposed parameter value.
 
+// These tests cover items that need the `std` feature.
+#![cfg(feature = "std")]
+
 use sumchain_wire::b0::codec::DecodeError;
 use sumchain_wire::compute_pool_params::ComputePoolParamsV1;
 

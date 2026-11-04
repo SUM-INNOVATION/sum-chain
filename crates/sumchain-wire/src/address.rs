@@ -242,6 +242,21 @@ impl fmt::Display for AddressText {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::{String, ToString};
+    use alloc::vec;
+
+    /// An error's message: its `Display` text with `std`, its `Debug` text
+    /// without, where `PrimitiveError` implements only `Debug`.
+    fn err_text(e: &PrimitiveError) -> String {
+        #[cfg(feature = "std")]
+        {
+            e.to_string()
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            alloc::format!("{e:?}")
+        }
+    }
 
     #[test]
     fn test_from_public_key() {
@@ -348,7 +363,7 @@ mod tests {
 
     #[test]
     fn text_forms_round_trip_and_have_no_fixed_length() {
-        let mut by_len = std::collections::BTreeMap::<usize, usize>::new();
+        let mut by_len = alloc::collections::BTreeMap::<usize, usize>::new();
         for a in sample(4096) {
             let plain = a.to_base58();
             // `0` is not base58, so no plain address can look like an agent one.
@@ -421,12 +436,12 @@ mod tests {
         for s in &inputs {
             match (old(s), AddressText::parse_or_hex(s)) {
                 (Ok(x), Ok(t)) => assert_eq!(t, AddressText::Human(x), "{s:?}"),
-                (Err(e1), Err(e2)) => assert_eq!(e1.to_string(), e2.to_string(), "{s:?}"),
+                (Err(e1), Err(e2)) => assert_eq!(err_text(&e1), err_text(&e2), "{s:?}"),
                 (o, n) => panic!("{s:?}: old {o:?}, new {n:?}"),
             }
             match (Address::from_base58(s), AddressText::parse(s)) {
                 (Ok(x), Ok(t)) => assert_eq!(t, AddressText::Human(x), "{s:?}"),
-                (Err(e1), Err(e2)) => assert_eq!(e1.to_string(), e2.to_string(), "{s:?}"),
+                (Err(e1), Err(e2)) => assert_eq!(err_text(&e1), err_text(&e2), "{s:?}"),
                 (o, n) => panic!("{s:?}: old {o:?}, new {n:?}"),
             }
         }
@@ -437,7 +452,6 @@ mod tests {
     /// so nothing downstream of the parser can tell the forms apart.
     #[test]
     fn one_key_gives_one_address_in_either_form() {
-        use std::collections::HashSet;
         for i in 0u32..64 {
             let mut pubkey = [0u8; 32];
             pubkey[..4].copy_from_slice(&i.to_le_bytes());
@@ -447,8 +461,12 @@ mod tests {
             assert_eq!(plain, key_address);
             assert_eq!(agent, key_address);
             assert_eq!(plain.as_bytes(), agent.as_bytes());
-            assert_eq!(bincode::serialize(&plain).unwrap(), bincode::serialize(&agent).unwrap());
-            assert_eq!(HashSet::from([plain, agent]).len(), 1);
+            #[cfg(feature = "std")]
+            {
+                assert_eq!(bincode::serialize(&plain).unwrap(), bincode::serialize(&agent).unwrap());
+                assert_eq!(std::collections::HashSet::from([plain, agent]).len(), 1);
+            }
+            assert_eq!(alloc::collections::BTreeSet::from([plain, agent]).len(), 1);
         }
     }
 

@@ -21,6 +21,9 @@
 //! DORMANT: consensus bytes only — ComputePool execution stays gate-closed
 //! (`compute_pool_enabled_from_height = None`).
 
+// These tests cover items that need the `std` feature.
+#![cfg(feature = "std")]
+
 use sumchain_wire::compute_pool_wire::*;
 use sumchain_wire::Address;
 

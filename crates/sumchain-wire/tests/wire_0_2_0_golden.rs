@@ -15,6 +15,9 @@
 //! Plus strict-decoder negatives and the pure cross-binding checks for the two
 //! new proof types (`PartialComputeProofV1`, `ProductionProofEnvelopeV1`).
 
+// These tests cover items that need the `std` feature.
+#![cfg(feature = "std")]
+
 use sumchain_wire::b0::allowlist::{BuilderArch, GuestProgramAllowlistV1, GuestProgramEntryV1};
 use sumchain_wire::b0::codec::DecodeError;
 use sumchain_wire::b0::derived_input::DerivedInputV1;

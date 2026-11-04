@@ -17,6 +17,9 @@
 //!   (c) positive: a 72-byte `MessageHeader` followed by body bytes still
 //!       parses and equals the header (locks the permissive prefix parse).
 
+// These tests cover items that need the `std` feature.
+#![cfg(feature = "std")]
+
 use sumchain_wire::{
     Address, ContentType, MessageFlags, MessageHeader, SignedTransaction, Transaction,
     TransactionV2, SRC201_HEADER_SIZE, SRC201_MAGIC, SRC201_VERSION,
