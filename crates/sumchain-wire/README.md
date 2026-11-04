@@ -66,6 +66,15 @@ the same items with the same bytes, plus the rest of the crate. There is no
 `no_std` feature, so feature unification cannot remove items from a crate
 that needs them.
 
+**Targets without `std`.** CI (`.github/workflows/wire-no-std.yml`, when the
+crate, the lockfile or the toolchain pin changes) builds the subset on the
+pinned toolchain for `thumbv7em-none-eabihf`, `riscv32imac-unknown-none-elf`
+and `x86_64-unknown-none`, runs its unit tests and clippy without `std`, and
+checks that no dependency's `std` feature is on there. On such a target the
+subset's only dependencies are `blake3` (with `arrayref`, `arrayvec`, `cfg-if`
+and `constant_time_eq`), `bs58` and `hex`; `blake3`'s build script runs on the
+host. The integration tests cover items that need `std` and run only with it.
+
 ## B0-PRE candidate-neutral wire types (`b0`)
 
 The [`b0`](src/b0/) module (added in **0.2.0**) holds the frozen B0-PRE
