@@ -4641,6 +4641,11 @@ impl BlockExecutor {
         // Use parent block hash as deterministic seed
         let parent_hash = &block.header.parent_hash;
 
+        // Which assigned archives the assignment-aware paths may target: from
+        // the attested-target gate on, only those whose attestation covers the
+        // chunk; below it, or while it is unset, every assigned Active archive.
+        let targets = crate::storage_metadata::por_targets(&self.params, height);
+
         // Issue #100 (Phase 2): when the scheduler gate is open, emit a bounded,
         // deterministic set of assignment-aware challenges instead of the single
         // #97/legacy challenge. Runs the one-time challengeable-index backfill
@@ -4655,7 +4660,7 @@ impl BlockExecutor {
             // closure takes its own.
             let backfill = StorageMetadataExecutor::v_backfill_challengeable_index(view);
             let emitted = run_scheduler_after_backfill(backfill, height, || {
-                StorageMetadataExecutor::generate_challenge_schedule(
+                StorageMetadataExecutor::generate_challenge_schedule_with_targets(
                     view,
                     parent_hash,
                     height,
@@ -4663,6 +4668,7 @@ impl BlockExecutor {
                     self.params.max_files_sampled_per_interval,
                     self.params.max_chunks_sampled_per_file,
                     self.params.max_assignment_aware_challenges_per_block,
+                    targets,
                 )
             })?;
             debug!(
@@ -4678,13 +4684,14 @@ impl BlockExecutor {
         // target is drawn from all active archives (exact legacy behavior).
         let assignment_targeting = por_assignment_targeting_gate_open(&self.params, height);
 
-        match StorageMetadataExecutor::generate_challenge(
+        match StorageMetadataExecutor::generate_challenge_with_targets(
             view,
             parent_hash,
             height,
             &archive_nodes,
             assignment_targeting,
             self.params.assignment_replication_factor,
+            targets,
         )? {
             Some(_challenge) => {
                 // Challenge was created and written to ACTIVE_CHALLENGES

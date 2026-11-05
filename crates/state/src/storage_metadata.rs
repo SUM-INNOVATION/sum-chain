@@ -507,6 +507,40 @@ fn access_list_byte_cap_violated(
     }
 }
 
+/// Which of a chunk's assigned archives a storage challenge may target, on the
+/// assignment-aware challenge paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PorTargets {
+    /// Every assigned archive that is currently Active: the rule while
+    /// `ChainParams::por_attested_targets_enabled_from_height` is closed.
+    AssignedActive,
+    /// Only an assigned, currently Active archive whose attestation covers the
+    /// chunk in the file's latest assignment epoch, the epoch whose snapshot
+    /// the target set is computed from: one bitmap read per assigned, Active
+    /// archive. An attestation bit is only ever set for a chunk assigned to the
+    /// attesting archive in that epoch (`AcceptAssignmentV2` refuses any other
+    /// index), so a set bit always means "attested while assigned".
+    AttestedOnly,
+}
+
+/// The height from which a storage challenge targets only an archive that
+/// attested the chunk: `ChainParams::por_attested_targets_enabled_from_height`
+/// (a provisional name).
+#[inline]
+fn attested_targets_activation(params: &ChainParams) -> Option<u64> {
+    params.por_attested_targets_enabled_from_height
+}
+
+/// The target rule in force at `block_height`: [`PorTargets::AttestedOnly`]
+/// at and above the attested-target gate, [`PorTargets::AssignedActive`]
+/// below it or while it is unset.
+pub fn por_targets(params: &ChainParams, block_height: u64) -> PorTargets {
+    match attested_targets_activation(params) {
+        Some(h) if block_height >= h => PorTargets::AttestedOnly,
+        _ => PorTargets::AssignedActive,
+    }
+}
+
 /// True iff this archive is currently `Active` per its node-registry record,
 /// as this block's candidate sees it — so an archive slashed earlier in the
 /// same block is already excluded.
@@ -1072,6 +1106,29 @@ impl StorageMetadataExecutor {
         assignment_targeting: bool,
         replication_factor: u32,
     ) -> Result<Option<StorageChallenge>> {
+        Self::generate_challenge_with_targets(
+            view,
+            parent_hash,
+            height,
+            archive_nodes,
+            assignment_targeting,
+            replication_factor,
+            PorTargets::AssignedActive,
+        )
+    }
+
+    /// [`Self::generate_challenge`] with the target rule `targets` (see
+    /// [`por_targets`]). `targets` matters only when `assignment_targeting` is
+    /// set: the legacy path draws its target from all active archives.
+    pub fn generate_challenge_with_targets(
+        view: &mut ExecutionView<'_, '_>,
+        parent_hash: &Hash,
+        height: u64,
+        archive_nodes: &[sumchain_primitives::NodeRecord],
+        assignment_targeting: bool,
+        replication_factor: u32,
+        targets: PorTargets,
+    ) -> Result<Option<StorageChallenge>> {
         // Filter to active nodes only (caller should pre-filter, but be safe)
         let active_nodes: Vec<_> = archive_nodes
             .iter()
@@ -1129,6 +1186,7 @@ impl StorageMetadataExecutor {
                 chunk_index,
                 seed_u64(12), // byte-identical to the historical seed_bytes[12..20] pick
                 replication_factor,
+                targets,
             )? {
                 Some(addr) => addr,
                 None => {
@@ -1203,16 +1261,22 @@ impl StorageMetadataExecutor {
     /// `u64::from_be_bytes(seed_bytes[12..20])` (byte-identical to the historical
     /// pick); the #100 scheduler passes a per-`(file, chunk)` derived seed.
     ///
+    /// Under [`PorTargets::AttestedOnly`] the set is further restricted to
+    /// archives whose attestation covers the chunk in the file's latest
+    /// assignment epoch, before the pick, so the pick is over that set.
+    ///
     /// Returns `Ok(None)` when the file has no V2 assignment metadata, or when
-    /// no assigned archive is currently Active — the caller then skips the
-    /// challenge for this interval. Cost is `O(snapshot_len)` (one assignment
-    /// computation for the single selected chunk); it never sweeps files×chunks.
+    /// no assigned archive qualifies — the caller then skips the challenge for
+    /// this interval. Cost is `O(snapshot_len)` (one assignment computation for
+    /// the single selected chunk) plus, under `AttestedOnly`, one bitmap read
+    /// per assigned, Active archive; it never sweeps files×chunks.
     fn v_select_assigned_active_target(
         view: &ExecutionView<'_, '_>,
         merkle_root: &Hash,
         chunk_index: u32,
         pick_seed: u64,
         replication_factor: u32,
+        targets: PorTargets,
     ) -> Result<Option<Address>> {
         // A funded file with no V2 assignment metadata has no assigned archives.
         let row = match Self::v_get_metadata_v2(view, merkle_root)? {
@@ -1242,9 +1306,15 @@ impl StorageMetadataExecutor {
         );
         let mut assigned_active: Vec<Address> = Vec::with_capacity(assigned.len());
         for addr in assigned {
-            if v_is_currently_active(view, &addr)? {
-                assigned_active.push(addr);
+            if !v_is_currently_active(view, &addr)? {
+                continue;
             }
+            if targets == PorTargets::AttestedOnly
+                && !Self::v_attested_chunk_in_latest_epoch(view, &row, &epochs, &addr, chunk_index)?
+            {
+                continue;
+            }
+            assigned_active.push(addr);
         }
         if assigned_active.is_empty() {
             return Ok(None);
@@ -1253,6 +1323,24 @@ impl StorageMetadataExecutor {
         // Deterministic pick from the assigned-active set.
         let idx = pick_seed % assigned_active.len() as u64;
         Ok(Some(assigned_active[idx as usize]))
+    }
+
+    /// Whether `archive`'s attestation covers `chunk_index` of `row` in the
+    /// file's latest assignment epoch. `epochs` is the file's epoch list
+    /// (`v_file_epochs`). A bitmap of the wrong length is read as no
+    /// attestation, as the coverage union does.
+    fn v_attested_chunk_in_latest_epoch(
+        view: &ExecutionView<'_, '_>,
+        row: &StorageMetadataV2,
+        epochs: &[u64],
+        archive: &Address,
+        chunk_index: u32,
+    ) -> Result<bool> {
+        let latest = *epochs.last().expect("epoch 0 always present");
+        Ok(match Self::v_get_attestation_bitmap(view, row, latest, archive)? {
+            Some(bm) => bm.len() == bitmap_byte_len(row.chunk_count) && bitmap_get(&bm, chunk_index),
+            None => false,
+        })
     }
 
     // =========================================================================
@@ -1365,6 +1453,32 @@ impl StorageMetadataExecutor {
         max_chunks: u32,
         max_emit: u32,
     ) -> Result<Vec<StorageChallenge>> {
+        Self::generate_challenge_schedule_with_targets(
+            view,
+            parent_hash,
+            height,
+            replication_factor,
+            max_files,
+            max_chunks,
+            max_emit,
+            PorTargets::AssignedActive,
+        )
+    }
+
+    /// [`Self::generate_challenge_schedule`] with the target rule `targets`
+    /// (see [`por_targets`]). A `(file, chunk)` pair with no qualifying target
+    /// is skipped and costs no challenge from `max_emit`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_challenge_schedule_with_targets(
+        view: &mut ExecutionView<'_, '_>,
+        parent_hash: &Hash,
+        height: u64,
+        replication_factor: u32,
+        max_files: u32,
+        max_chunks: u32,
+        max_emit: u32,
+        targets: PorTargets,
+    ) -> Result<Vec<StorageChallenge>> {
         let mut emitted: Vec<StorageChallenge> = Vec::new();
         if max_emit == 0 || max_files == 0 || max_chunks == 0 {
             return Ok(emitted);
@@ -1436,7 +1550,7 @@ impl StorageMetadataExecutor {
                 let pick = Hash::hash_many(&[seed.as_bytes(), root.as_bytes(), &chunk_index.to_be_bytes(), POR_SCHEDULE_PICK_TAG]);
                 let pick_seed = u64::from_be_bytes(pick.as_bytes()[0..8].try_into().unwrap());
                 let target = match Self::v_select_assigned_active_target(
-                    view, &root, chunk_index, pick_seed, replication_factor,
+                    view, &root, chunk_index, pick_seed, replication_factor, targets,
                 )? {
                     Some(addr) => addr,
                     None => continue, // no assigned-active archive → skip, no bystander

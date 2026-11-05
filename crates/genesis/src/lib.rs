@@ -2969,6 +2969,36 @@ pub struct ChainParams {
     #[serde(default)]
     pub archive_unbonding_own_challenges_enabled_from_height: Option<u64>,
 
+    /// A storage challenge targets only an archive that attested the chunk.
+    ///
+    /// The field's name is adopted; its schema-4 allocation is provisional.
+    ///
+    /// On the assignment-aware challenge paths (the targeting gate
+    /// `por_assignment_targeting_enabled_from_height` and the scheduler gate
+    /// `assignment_aware_por_scheduler_enabled_from_height`) the target is
+    /// drawn from the archives assigned to the challenged chunk that are
+    /// currently Active. Activation needs only the union of attestations to
+    /// cover each chunk, so an assigned archive that never attested the chunk
+    /// (and so need not hold it) can be drawn, fail to answer, and be slashed.
+    ///
+    /// At and above this height an assigned, currently Active archive is a
+    /// target only if its attestation in the file's latest assignment epoch
+    /// covers the chunk; when no assigned archive qualifies, the challenge for
+    /// that chunk is skipped, as when no assigned archive is Active. The legacy
+    /// path (both gates above closed) is unchanged at every height.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub por_attested_targets_enabled_from_height: Option<u64>,
+
     /// Contract execution is metered (#279).
     ///
     /// Below this height a contract deploy or call runs on the unmetered
@@ -3477,6 +3507,8 @@ impl Default for ChainParams {
             node_registry_update_status_unsupported_enabled_from_height: None,
             // Production-safe default: BeginUnstake's challenge check reads as before — dormant.
             archive_unbonding_own_challenges_enabled_from_height: None,
+            // Production-safe default: a storage challenge may target any assigned, Active archive — dormant.
+            por_attested_targets_enabled_from_height: None,
             // Production-safe default: contracts run on the unmetered engine — dormant.
             contract_metering_enabled_from_height: None,
             // No block-level contract gas budget (inert while the metering gate is closed).
@@ -4172,6 +4204,10 @@ impl ChainParams {
                 self.archive_unbonding_own_challenges_enabled_from_height,
             ),
             (
+                "por_attested_targets_enabled_from_height",
+                self.por_attested_targets_enabled_from_height,
+            ),
+            (
                 "contract_metering_enabled_from_height",
                 self.contract_metering_enabled_from_height,
             ),
@@ -4215,7 +4251,7 @@ impl ChainParams {
     }
 }
 
-/// The forty-seven remediation gates, by field name.
+/// The forty-eight remediation gates, by field name.
 ///
 /// The count in this sentence has been wrong twice, both times because a wave
 /// added gates and nothing checked the prose. It is checked now:
@@ -4283,6 +4319,7 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "messaging_timestamp_units_enabled_from_height",
     "node_registry_update_status_unsupported_enabled_from_height",
     "archive_unbonding_own_challenges_enabled_from_height",
+    "por_attested_targets_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started

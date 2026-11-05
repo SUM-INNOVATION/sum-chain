@@ -62,7 +62,8 @@ struct Template {
 // encoding and commitment are unchanged.
 //
 // Re-pinned when the gate under which BeginUnstake counts only the sender's own
-// open challenges (#369) was declared in the draft schema 4, for the same reason: canonical JSON, and the activation and
+// open challenges (#369), and then the attested-target storage-challenge gate,
+// were declared in the draft schema 4, for the same reason: canonical JSON, and the activation and
 // protocol digests, moved; block hash and every consensus-configuration
 // encoding and commitment did not (the gate is a draft field this binary never
 // writes).
@@ -73,10 +74,10 @@ struct Template {
 const PINS: &[Pin] = &[
     Pin {
         file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-1v.json",
-        json: "0xd8ce7cd112c58069d8fbdaf5b5305250f1717d2387cc096b9f32a55a49141d03",
+        json: "0xf1172cc570cc67c9f4e4173b6516317848be544140efe0257585ef668be82c92",
         block: "0x9c22b13ee6c753f288538165afac3dd48ea79a5581341fa2d08e23035726e28e",
-        activation: "0x198e8932230b5abe96532ea720615e5639adfbb0c257e3711080fb8b894a05a9",
-        protocol: "0xacda2e0fc4ebcd6c48b4f194f47fef77db9baa3abcb4d5345837169ca213ed6a",
+        activation: "0xce897bfa809e345d0f9943802bced949b8aa3de4e0a1a525b553911ce28fedcb",
+        protocol: "0xe919aad74f275f75ede568f02d6b5833c8412c1524307474d8c34c94c4b7d6de",
         ccfg_encoding: "0xc9bb4182295ac07b0bf71136259679caa1639cb6ab96a627ca409616e3d76c32",
         ccfg_commitment: "0x66ef2cb66e07cb457a998c4361226ee114877f92666addd599caa89d07d53b79",
         ccfg3_encoding: "0xb288184ea98d1c7203d55133138c8cfcfb21c0a6083530ad9ec1dffa65d30f4a",
@@ -84,10 +85,10 @@ const PINS: &[Pin] = &[
     },
     Pin {
         file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-2v.json",
-        json: "0x9b0bc6ff2a2aab607d4400f6eb8df90a105b9c1a790d9e424b93ecd2dc2eae77",
+        json: "0xa9a18ae49a924c7bfcc3b6d3e58e1c49ba9a59b1b3f9547de8a3097005ec1155",
         block: "0xf92241d3986ae1c5a30ef34e61dbec5e851ee289404e3276792dd0a27cf3083c",
-        activation: "0x0550dd95836b4a968c491ea930759ff4293e408e762687c2133bc3e70a9d1c7b",
-        protocol: "0xd0f1add431e6a54a3bc86f6f2097a8c02c3143abfd9be46f9bf5d876c158474f",
+        activation: "0x9c1775407e2adf5ee5093aba69fbd8f1f19a010ea27e969ce2931af7746d125e",
+        protocol: "0x128e3d861947087e8b586dd582f0e1ac180b091d5fd598e13c0e9e3325082197",
         ccfg_encoding: "0xa518ff0db6253e80545b24b5d20aadee593cb7a8692671aabc5f7710ebf22d7c",
         ccfg_commitment: "0x075b28ec3521f49c6ca7fb12ae5297c79f74bada8649899771bd1cdb1fdce564",
         ccfg3_encoding: "0xf91dbc6a2fd1661cfbc2fb074e5edad6d80725ab3776d67c0635cc3c64a73ee9",
@@ -95,10 +96,10 @@ const PINS: &[Pin] = &[
     },
     Pin {
         file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-A.json",
-        json: "0x53948ee57bc5d3e8e4c00036a55f11ccff8163bd6f8aa3a252245deb4f561e76",
+        json: "0xf3b92d449dc34fb91197d0436afe6500045d34302a19999633bbbccfb283ee24",
         block: "0x9c22b13ee6c753f288538165afac3dd48ea79a5581341fa2d08e23035726e28e",
-        activation: "0x5568e892f95d7defd2efc103e2c737baf8f8e59ac0bdc8e9bfedb05870239411",
-        protocol: "0x2493ace1e9b2b06392e9a942a9524a4377f53769cec445b124cf8ed5616d376a",
+        activation: "0xb347c55ccce282b83a7e35fd7846ead212a0c34cc0b011e2e1b9ede3f31323f0",
+        protocol: "0x736bb3f62ddcc3b417fe49f91b565b14af3a8ba1379e3c9c54283464a4afec13",
         ccfg_encoding: "0x62cc58e670135f46769fae95eb7a41ee7aff3a6de2fe5e783b726ed9281b0aa4",
         ccfg_commitment: "0xfb73f20bec922b4c256098ea2a4f78f230271a42fe961ac913a97a511c217eb0",
         ccfg3_encoding: "0x9d8dc2b7f8bbfd4e3adb635568e8316c6f4d5a220d88c20b98df62570270f52b",
@@ -106,10 +107,10 @@ const PINS: &[Pin] = &[
     },
     Pin {
         file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-B.json",
-        json: "0xcb5303ad2e0313b61c21b135157b58079e7c1bd358ca5c413c69f6c8c1537a6e",
+        json: "0x619ac9e04695d3b82f4e0cd259716d28e5605ff4fb015d7dbc1137a96e3e268d",
         block: "0x9c22b13ee6c753f288538165afac3dd48ea79a5581341fa2d08e23035726e28e",
-        activation: "0xd3748559c7bf9d096ce872463408e199153c3cca93f90cb6b2529b07e0f7c050",
-        protocol: "0xaa56abeb3182f68e75028a6a30ab0209120a36fe0d65018e2f8b29b61027e399",
+        activation: "0xc95b884825e19aaf60cb0fdbb652c218c134982d80652045868dd9f9e35d051a",
+        protocol: "0x0a9b0910f0daac12b60ff71b408756e27dbf7174e0d6dc7534a94b7ebe763664",
         ccfg_encoding: "0x67b53cfd13cb2ac5eca5150f1e0dd163fb41134afe74d7fce86534c77d471efc",
         ccfg_commitment: "0x2f3026bc8d54499c35c0cf657e431c8cf7b5731e3acc1ca3735e8bf7d3a309d9",
         ccfg3_encoding: "0x6140a1bb966583aacde73103f6783fbdd5c10597e3cb8d9a5b1cb981d9df8005",
@@ -117,10 +118,10 @@ const PINS: &[Pin] = &[
     },
     Pin {
         file: "genesis.json",
-        json: "0x0472ae74aefdced6d650fd176752c03db3e2e91b8a0255f02b02cdda399c1ecb",
+        json: "0x39030ca45287b2d47cc8b498b58795a44da5c50578f9137d239372a8235cd3cb",
         block: "0x1156d350e7d0ac45cb96bfca25d57c71675ceea5949ea44d81432d08baed68e6",
-        activation: "0xe15146209ee16771c57a76ebf426042fe0bc6571b89302ced2038039a39cc406",
-        protocol: "0x58d683b129008ad345ac3c2afb4af11207b27f1741be576d1a1e79ba1a8014d5",
+        activation: "0x0c378ac19c362ca4553dfd4a6adc5055833b1ace41a5be77a8ed9e5ee39edf32",
+        protocol: "0xe9f21b772b98aecf90ac198292e00784ec423e53453b0d62df37e743ac0635b6",
         ccfg_encoding: "0xd3d4f1ccf5cde71083d000b87d9425d08b9e6817d30614ed312747968f0af3e3",
         ccfg_commitment: "0x2afc2d46fbad85cdeac914d3c6ccb5e4457f596f36d3265997710a42268f979b",
         ccfg3_encoding: "0x1b3979f0684772f2c49c1f1d16103126645873f666981869545520a759f98001",
@@ -128,10 +129,10 @@ const PINS: &[Pin] = &[
     },
     Pin {
         file: "genesis/local_genesis.json",
-        json: "0xd70a54b13bf9d033a19fc8236a2807fabbda913432ef4d5eada17d5bfda70988",
+        json: "0x79eadb6be2d8a90a24b67c3a261f53c5d61ebf0753e5cd49f59511576e05de05",
         block: "0xe5e3fccc545ef9b0f29fb4204d4e79da04d47661e89eaebe23352abba269e1b4",
-        activation: "0xefa957d79b1b2efb71b9fa40e68db41604a265d9d8982b45454e722ee3661965",
-        protocol: "0x289958178a07cff864257324a5c00d0cdf80777e423dc572d707f4d0f6b40449",
+        activation: "0xabfb6102387a8bb1cd681728b2fd38d9c5fcb41974826ce2f6399b8ce91a2959",
+        protocol: "0x01c304bd5b60374ba4e3fa1f2b3da2bfe94ddf385b0da966c7b7b22cdecf9ca9",
         ccfg_encoding: "0x708b1cc7fe7aa9ac8e823d6ecb9ec2eccf495e7a79b6f9da41bc3703416b574a",
         ccfg_commitment: "0x1d61e756ad20cd078dbde4d89ad38fa28ef6b04b98f6eb3b7a18a7653fcdf591",
         ccfg3_encoding: "0x97c1a0e8c53813ae5bc3539291bb412b5484531f4464a2fe39a6d62ec7d17bc8",
@@ -142,7 +143,7 @@ const PINS: &[Pin] = &[
 const TEMPLATES: &[Template] = &[
     Template {
         file: "genesis/mainnet_genesis.json",
-        json: "0xed661a3ab523c4ae318b2121cd95bae6818e1b301eabb372848e9e3d91ab5013",
+        json: "0x56f2748b7e80f0ecc518b80455460ad0dc1486af68990bdff764cabd867e80ba",
         error: "Invalid validator public key: validator[0]: VALIDATOR1_PUBKEY_PLACEHOLDER",
     },
     // Added by #118 (not on 1f017f55): the synthetic topology template,
@@ -151,12 +152,12 @@ const TEMPLATES: &[Template] = &[
     // line is new in what serde reads.
     Template {
         file: "genesis/snip-mirror-genesis.template.json",
-        json: "0x189755d531de5a8069a88e2d4bcc98c755007fba8e8118feac596069d71e009d",
+        json: "0xc35e7ca9f7620ae0cbfb178641a6fdf4273571dcdfc587a4e0baf35bb6e32b87",
         error: "Invalid validator public key: validator[0]: DEVNET_VALIDATOR1_PUBKEY",
     },
     Template {
         file: "genesis/testnet_genesis.json",
-        json: "0x35f635ab18e55e9cc5201386176ef8ecaa72f7f6f563e3dda324b18d0a14343c",
+        json: "0x5720b6931a2a281bc8fe17aed90ea62972d9144f89f42f02d9b7061d774d95e4",
         error: "Invalid validator public key: validator[0]: TESTNET_VALIDATOR1_PUBKEY",
     },
 ];

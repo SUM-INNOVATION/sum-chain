@@ -1305,26 +1305,37 @@ const GOLDEN_3_SET_ENCODING_DIGEST: &str =
 const GOLDEN_3_SET_COMMITMENT: &str =
     "0x2553f741bbc7fdeeecd01e1099d5abc8a6c8196702d9c90057de1a3c08331e98";
 
-/// The gate under which `BeginUnstake` counts only the sender's own open
-/// challenges (#369) is registered in the draft schema 4 (0x1044; its name is
-/// provisional). Dormant, it leaves the schema-3
-/// configuration this binary writes byte-identical to the schema-3 golden
-/// vector; set, build refuses, because this binary writes schema 3 and a draft
-/// field can be declared but never activated.
+/// The draft schema-4 gates: 0x1044, under which `BeginUnstake` counts only
+/// the sender's own open challenges (#369; its name is provisional), and
+/// 0x1045, under which a storage challenge targets only an archive that
+/// attested the chunk (its allocation is provisional). Dormant, they leave the
+/// schema-3 configuration this binary writes byte-identical to the schema-3
+/// golden vector; set, either refuses to build, because this binary writes
+/// schema 3 and a draft field can be declared but never activated.
+/// Sets one draft schema-4 gate in a genesis's parameters.
+type SetGate = fn(&mut ChainParams);
+
 #[test]
-fn the_draft_schema_4_gate_is_held_dormant_and_refused_when_set() {
-    let name = "archive_unbonding_own_challenges_enabled_from_height";
-    assert_eq!(ccfg::fields::gate_id(name), Some(0x1044));
-    assert!(ccfg::SCHEMA_4
-        .added
-        .iter()
-        .any(|a| a.spec.id == 0x1044 && a.spec.name == name));
-    assert!(!SCHEMA_3.added.iter().any(|a| a.spec.name == name));
+fn the_draft_schema_4_gates_are_held_dormant_and_refused_when_set() {
+    let gates: [(&str, u16, SetGate); 2] = [
+        (
+            "archive_unbonding_own_challenges_enabled_from_height",
+            0x1044,
+            |p| p.archive_unbonding_own_challenges_enabled_from_height = Some(10),
+        ),
+        (
+            "por_attested_targets_enabled_from_height",
+            0x1045,
+            |p| p.por_attested_targets_enabled_from_height = Some(10),
+        ),
+    ];
+    assert_eq!(ccfg::SCHEMA_4.added.len(), gates.len());
     assert!(std::ptr::eq(ccfg::PRODUCTION.writes, &SCHEMA_3));
     assert!(std::ptr::eq(ccfg::PRODUCTION.knows, &ccfg::SCHEMA_4));
 
     let base = full_genesis();
     assert_eq!(base.params.archive_unbonding_own_challenges_enabled_from_height, None);
+    assert_eq!(base.params.por_attested_targets_enabled_from_height, None);
     let c = ccfg::build(&base).unwrap();
     assert_eq!(c.schema().number, 3);
     let bytes = c.encode();
@@ -1339,12 +1350,21 @@ fn the_draft_schema_4_gate_is_held_dormant_and_refused_when_set() {
             GOLDEN_3_ENCODING_DIGEST.to_string(),
             GOLDEN_3_COMMITMENT.to_string()
         ),
-        "dormant, the draft gate changes nothing the binary writes"
+        "dormant, the draft gates change nothing the binary writes"
     );
 
-    let mut set = full_genesis();
-    set.params.archive_unbonding_own_challenges_enabled_from_height = Some(10);
-    let err = ccfg::build(&set).expect_err("a draft field is never activated");
-    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
-    assert!(err.to_string().contains(name), "{err}");
+    for (name, id, set_gate) in gates {
+        assert_eq!(ccfg::fields::gate_id(name), Some(id), "{name}");
+        assert!(ccfg::SCHEMA_4
+            .added
+            .iter()
+            .any(|a| a.spec.id == id && a.spec.name == name));
+        assert!(!SCHEMA_3.added.iter().any(|a| a.spec.name == name));
+
+        let mut set = full_genesis();
+        set_gate(&mut set.params);
+        let err = ccfg::build(&set).expect_err("a draft field is never activated");
+        assert!(matches!(err, ConfigError::Refused(_)), "{name}: {err}");
+        assert!(err.to_string().contains(name), "{err}");
+    }
 }

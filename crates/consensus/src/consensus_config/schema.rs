@@ -703,6 +703,19 @@ pub const SCHEMA_4_ADDED: &[AddedField] = &[
         },
         source: Source::Gate,
     },
+    // A storage challenge targets only an archive that attested the chunk in
+    // the file's latest assignment epoch.
+    AddedField {
+        spec: FieldSpec {
+            id: 0x1045,
+            name: "por_attested_targets_enabled_from_height",
+            ty: Ty::U64,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Gate,
+    },
 ];
 
 /// Schema 4: schema 3 plus [`SCHEMA_4_ADDED`]. DRAFT.
