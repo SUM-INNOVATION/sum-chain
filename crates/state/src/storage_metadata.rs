@@ -349,6 +349,25 @@ pub fn challenge_key(challenge_id: &Hash) -> Vec<u8> {
     key
 }
 
+/// `[b'N', target_node]`: the start of `target_node`'s node-index keys.
+fn challenge_node_index_prefix(target_node: &Address) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(21);
+    prefix.push(b'N');
+    prefix.extend_from_slice(target_node.as_bytes());
+    prefix
+}
+
+/// The challenge id of a node-index key `[b'N', target_node, challenge_id]`
+/// (53 bytes) whose address is `target_node`; `None` for any other key.
+fn own_challenge_node_index_id(key: &[u8], target_node: &Address) -> Result<Option<Hash>> {
+    if key.len() != 53 || key[0] != b'N' || &key[1..21] != target_node.as_bytes() {
+        return Ok(None);
+    }
+    Hash::from_slice(&key[21..53])
+        .map(Some)
+        .map_err(|e| StateError::DeserializationError(e.to_string()))
+}
+
 pub fn challenge_node_index_key(target_node: &Address, challenge_id: &Hash) -> Vec<u8> {
     let mut key = Vec::with_capacity(53);
     key.push(b'N');
@@ -3311,21 +3330,24 @@ impl StorageMetadataExecutor {
         Ok(challenges)
     }
 
+    /// The open challenges whose target is `target_node` on the published
+    /// chain (RPC `storage_getActiveChallenges`): the node-index keys
+    /// `[b'N', target_node, challenge_id]` only. The scan stops at the first
+    /// key past `target_node`'s, so another archive's challenges are never
+    /// returned (#369).
     pub fn get_challenges_by_node(&self, target_node: &Address) -> Result<Vec<StorageChallenge>> {
-        let mut prefix = Vec::with_capacity(21);
-        prefix.push(b'N');
-        prefix.extend_from_slice(target_node.as_bytes());
-
+        let prefix = challenge_node_index_prefix(target_node);
         let mut challenges = Vec::new();
 
-        let entries: Vec<_> = self.db
+        let entries: Vec<_> = self
+            .db
             .prefix_iter(CF_ACTIVE_CHALLENGES, &prefix)
             .map_err(StateError::Storage)?
+            .take_while(|(key, _)| key.starts_with(&prefix))
             .collect();
 
         for (key, _) in entries {
-            // key = [b'N'(1), target_node(20), challenge_id(32)] = 53 bytes
-            if let Some(challenge_id) = challenge_node_index_id(&key)? {
+            if let Some(challenge_id) = own_challenge_node_index_id(&key, target_node)? {
                 if let Some(challenge) = self.get_challenge(&challenge_id)? {
                     challenges.push(challenge);
                 }
