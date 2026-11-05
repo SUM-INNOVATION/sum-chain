@@ -68,11 +68,24 @@ jobs:
       - name: BR1 reconciliation regression guard (#127)
         run: bash scripts/br1-reconciliation-guard.sh
 
+      # Disk headroom (the x86_64 job once ran out of space linking test
+      # binaries): the runner's free space and what the build tree holds.
+      - name: Disk usage before build
+        run: |
+          df -h /
+          du -sh target "$HOME/.cargo/registry" "$HOME/.cargo/git" 2>/dev/null || true
+
       - name: Build (workspace)
         run: cargo build --workspace --locked
 
       - name: Test (workspace)
         run: cargo test --workspace --locked
+
+      - name: Disk usage after build and test
+        if: always()
+        run: |
+          df -h /
+          du -sh target target/debug/deps target/debug/build "$HOME/.cargo/registry" 2>/dev/null || true
 
       # Error-gated only: catches clippy/compile-error regressions. The workspace
       # is not yet warning-clean, so `-D warnings` is deferred to a separate
@@ -176,11 +189,24 @@ jobs:
       - name: BR1 reconciliation regression guard (#127)
         run: bash scripts/br1-reconciliation-guard.sh
 
+      # Disk headroom (the x86_64 job once ran out of space linking test
+      # binaries): the runner's free space and what the build tree holds.
+      - name: Disk usage before build
+        run: |
+          df -h /
+          du -sh target "$HOME/.cargo/registry" "$HOME/.cargo/git" 2>/dev/null || true
+
       - name: Build (workspace)
         run: cargo build --workspace --locked
 
       - name: Test (workspace)
         run: cargo test --workspace --locked
+
+      - name: Disk usage after build and test
+        if: always()
+        run: |
+          df -h /
+          du -sh target target/debug/deps target/debug/build "$HOME/.cargo/registry" 2>/dev/null || true
 
       - name: Clippy (workspace, tests)
         run: cargo clippy --workspace --tests --locked
