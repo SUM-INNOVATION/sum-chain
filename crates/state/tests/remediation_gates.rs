@@ -281,6 +281,11 @@ const WIRING: &[(&str, &str, &str)] = &[
         "update_status_unsupported_activation",
         "node_registry_update_status_unsupported_enabled_from_height",
     ),
+    (
+        "node_registry.rs",
+        "own_challenges_activation",
+        "archive_unbonding_own_challenges_enabled_from_height",
+    ),
 ];
 
 fn source(file: &str) -> String {
@@ -409,16 +414,17 @@ fn every_remediation_gate_reads_the_field_it_names() {
 /// `timestamp_units_activation`, is the first accessor in
 /// `messaging_executor.rs` (#278). The forty-sixth,
 /// `update_status_unsupported_activation`, is the first accessor in
-/// `node_registry.rs`.
+/// `node_registry.rs`. The forty-seventh, `own_challenges_activation`, is
+/// the second accessor in `node_registry.rs`.
 #[test]
-fn the_forty_six_gates_are_forty_six_distinct_fields() {
+fn the_forty_seven_gates_are_forty_seven_distinct_fields() {
     let fields: BTreeSet<&str> = WIRING.iter().map(|(_, _, f)| *f).collect();
     assert_eq!(
         fields.len(),
-        46,
-        "expected forty-six distinct fields: {fields:?}"
+        47,
+        "expected forty-seven distinct fields: {fields:?}"
     );
-    assert_eq!(WIRING.len(), 46, "expected forty-six accessors");
+    assert_eq!(WIRING.len(), 47, "expected forty-seven accessors");
 }
 
 /// Wiring a gate is not opening it: the release configuration is unchanged.
@@ -616,6 +622,10 @@ fn every_remediation_gate_is_dormant_by_default() {
             "node_registry_update_status_unsupported_enabled_from_height",
             p.node_registry_update_status_unsupported_enabled_from_height,
         ),
+        (
+            "archive_unbonding_own_challenges_enabled_from_height",
+            p.archive_unbonding_own_challenges_enabled_from_height,
+        ),
     ];
     assert_eq!(dormant.len(), WIRING.len());
     for (name, value) in dormant {
@@ -657,6 +667,7 @@ fn a_genesis_written_before_these_fields_still_parses_dormant() {
         back.node_registry_update_status_unsupported_enabled_from_height,
         None
     );
+    assert_eq!(back.archive_unbonding_own_challenges_enabled_from_height, None);
     assert_eq!(back.tax_authorization_enabled_from_height, None);
     assert_eq!(back.subsystem_tx_index_enabled_from_height, None);
     assert_eq!(back.subsystem_allocation_bound_enabled_from_height, None);
@@ -725,5 +736,5 @@ fn the_genesis_gate_list_matches_the_accessor_table() {
     // such branches lost three attributes, three doc blocks and two
     // activation_heights entries, and left this list at 20 against a table of
     // 28, all of which compiled.
-    assert_eq!(in_genesis.len(), 46);
+    assert_eq!(in_genesis.len(), 47);
 }

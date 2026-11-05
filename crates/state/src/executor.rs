@@ -1373,12 +1373,26 @@ impl BlockExecutor {
                                         fee_paid: 0,
                                     });
                                 }
+                                // From the own-challenges gate on, only challenges
+                                // targeting the sender count (#369); below it the
+                                // check counts what it always counted.
                                 let has_open_challenge =
-                                    !StorageMetadataExecutor::v_get_challenges_by_node(
-                                        view,
-                                        &v2_tx.from,
-                                    )?
-                                    .is_empty();
+                                    if NodeRegistryExecutor::unstake_counts_own_challenges_only(
+                                        &self.params,
+                                        block_height,
+                                    ) {
+                                        !StorageMetadataExecutor::v_get_own_challenges_by_node(
+                                            view,
+                                            &v2_tx.from,
+                                        )?
+                                        .is_empty()
+                                    } else {
+                                        !StorageMetadataExecutor::v_get_challenges_by_node(
+                                            view,
+                                            &v2_tx.from,
+                                        )?
+                                        .is_empty()
+                                    };
                                 NodeRegistryExecutor::execute_begin_unstake(
                                     view,
                                     &v2_tx.from,

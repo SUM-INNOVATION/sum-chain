@@ -86,7 +86,7 @@ pub use record::{
     TransitionKind,
 };
 pub use schema::{
-    AddedField, Schema, SchemaPolicy, Source, PRODUCTION, SCHEMA_1, SCHEMA_2, SCHEMA_3,
+    AddedField, Schema, SchemaPolicy, Source, PRODUCTION, SCHEMA_1, SCHEMA_2, SCHEMA_3, SCHEMA_4,
 };
 
 /// Why a configuration could not be built, decoded, compared or recorded.

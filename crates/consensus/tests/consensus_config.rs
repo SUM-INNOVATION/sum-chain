@@ -148,7 +148,7 @@ fn open(dir: &TempDir) -> Database {
 static SCHEMA_2_DRAFT: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1],
     writes: &SCHEMA_1,
-    knows: &ccfg::SCHEMA_3,
+    knows: &ccfg::SCHEMA_4,
 };
 
 /// The release that wrote schema 2: it read schemas 1 and 2, wrote schema 2 and
@@ -157,7 +157,7 @@ static SCHEMA_2_DRAFT: SchemaPolicy = SchemaPolicy {
 static SCHEMA_2_RELEASE: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &SCHEMA_2],
     writes: &SCHEMA_2,
-    knows: &ccfg::SCHEMA_3,
+    knows: &ccfg::SCHEMA_4,
 };
 
 /// TEST_ONLY compute-pool parameters (no proposed value): every cap 1,
@@ -247,10 +247,18 @@ static METERED_STAND_IN_SCHEMA_3: Schema = Schema {
     added: ccfg::schema::SCHEMA_3_ADDED,
 };
 
+/// [`METERED_STAND_IN_SCHEMA_3`] plus the draft schema 4, as
+/// [`ccfg::PRODUCTION`] knows it.
+static METERED_STAND_IN_SCHEMA_4: Schema = Schema {
+    number: 4,
+    previous: Some(&METERED_STAND_IN_SCHEMA_3),
+    added: ccfg::schema::SCHEMA_4_ADDED,
+};
+
 static METERED_STAND_IN: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &METERED_STAND_IN_SCHEMA_2],
     writes: &METERED_STAND_IN_SCHEMA_2,
-    knows: &METERED_STAND_IN_SCHEMA_3,
+    knows: &METERED_STAND_IN_SCHEMA_4,
 };
 
 /// [`full_schema_2_genesis`]'s configuration: every schema-2 field set.
@@ -1296,3 +1304,47 @@ const GOLDEN_3_SET_ENCODING_DIGEST: &str =
     "0x78b7f5ff7267ed02a1a54d94b398d41937599ffc24fa3b932b954607f7d3a70b";
 const GOLDEN_3_SET_COMMITMENT: &str =
     "0x2553f741bbc7fdeeecd01e1099d5abc8a6c8196702d9c90057de1a3c08331e98";
+
+/// The gate under which `BeginUnstake` counts only the sender's own open
+/// challenges (#369) is registered in the draft schema 4 (0x1044; its name is
+/// provisional). Dormant, it leaves the schema-3
+/// configuration this binary writes byte-identical to the schema-3 golden
+/// vector; set, build refuses, because this binary writes schema 3 and a draft
+/// field can be declared but never activated.
+#[test]
+fn the_draft_schema_4_gate_is_held_dormant_and_refused_when_set() {
+    let name = "archive_unbonding_own_challenges_enabled_from_height";
+    assert_eq!(ccfg::fields::gate_id(name), Some(0x1044));
+    assert!(ccfg::SCHEMA_4
+        .added
+        .iter()
+        .any(|a| a.spec.id == 0x1044 && a.spec.name == name));
+    assert!(!SCHEMA_3.added.iter().any(|a| a.spec.name == name));
+    assert!(std::ptr::eq(ccfg::PRODUCTION.writes, &SCHEMA_3));
+    assert!(std::ptr::eq(ccfg::PRODUCTION.knows, &ccfg::SCHEMA_4));
+
+    let base = full_genesis();
+    assert_eq!(base.params.archive_unbonding_own_challenges_enabled_from_height, None);
+    let c = ccfg::build(&base).unwrap();
+    assert_eq!(c.schema().number, 3);
+    let bytes = c.encode();
+    assert_eq!(
+        (
+            bytes.len(),
+            Hash::hash(&bytes).to_string(),
+            c.commitment().to_string()
+        ),
+        (
+            GOLDEN_3_LEN,
+            GOLDEN_3_ENCODING_DIGEST.to_string(),
+            GOLDEN_3_COMMITMENT.to_string()
+        ),
+        "dormant, the draft gate changes nothing the binary writes"
+    );
+
+    let mut set = full_genesis();
+    set.params.archive_unbonding_own_challenges_enabled_from_height = Some(10);
+    let err = ccfg::build(&set).expect_err("a draft field is never activated");
+    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
+    assert!(err.to_string().contains(name), "{err}");
+}

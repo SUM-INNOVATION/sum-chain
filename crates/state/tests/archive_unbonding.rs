@@ -429,6 +429,130 @@ fn begin_unstake_open_challenge_rejects_324() {
     assert_eq!(node_of(&candidate.view(), &node.address()).unwrap().status, NodeStatus::Active);
 }
 
+// ── #369: whose open challenges BeginUnstake counts ─────────────────────────
+//
+// The open-challenge check reads the challenge node index, keyed
+// `[b'N', target_node, challenge_id]`, from `[b'N', sender]` onward. Below
+// `archive_unbonding_own_challenges_enabled_from_height` the scan does not stop
+// at the sender's keys, so another archive's challenge counts when that
+// archive's address sorts after the sender's; that rule is kept below the gate
+// so existing blocks execute as they did. From the gate on, only the sender's
+// own challenges count.
+
+/// An address whose node-index keys sort after those of any archive a test
+/// generates.
+fn higher_address() -> Address {
+    Address::new([0xFF; 20])
+}
+
+fn params_own_challenges(gate: Option<u64>) -> ChainParams {
+    let mut p = params_enabled(10);
+    p.archive_unbonding_own_challenges_enabled_from_height = gate;
+    p
+}
+
+fn open_challenge_on(tag: &[u8], target: Address) -> StorageChallenge {
+    StorageChallenge {
+        challenge_id: Hash::hash(tag),
+        merkle_root: Hash::hash(b"file-369"),
+        chunk_index: 0,
+        target_node: target,
+        created_at_height: 1,
+        expires_at_height: 1_000,
+    }
+}
+
+/// Register a funded archive at height 1, stage an open challenge on
+/// `challenge_target(archive)` into the same candidate, then submit
+/// `BeginUnstake` at each height in `heights` (one nonce each). Returns the
+/// statuses and the archive's final status.
+fn begin_unstake_at(
+    params: ChainParams,
+    challenge_target: impl Fn(Address) -> Address,
+    heights: &[u64],
+) -> (Vec<TxStatus>, NodeStatus) {
+    let (_state, db, _dir, executor) = setup_with_params(params);
+    let mut candidate = common::candidate(&db);
+    let node = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&db, &node, (STAKE as u128) + 1_000_000);
+    assert!(
+        node.address().as_bytes() < higher_address().as_bytes(),
+        "the fixture needs the archive to sort below the other address"
+    );
+
+    executor
+        .execute_tx(&mut candidate.view(), &register_tx(&node, 0), &proposer.address(), 1, 1000)
+        .unwrap();
+    StorageMetadataExecutor::v_put_challenge(
+        &mut candidate.view(),
+        &open_challenge_on(b"open-challenge-369", challenge_target(node.address())),
+    )
+    .unwrap();
+
+    let mut statuses = Vec::new();
+    for (i, h) in heights.iter().enumerate() {
+        let res = executor
+            .execute_tx(
+                &mut candidate.view(),
+                &nr_signed(
+                    &node,
+                    FEE,
+                    1 + i as u64,
+                    NodeRegistryOperation::BeginUnstake { amount: STAKE },
+                ),
+                &proposer.address(),
+                *h,
+                1000,
+            )
+            .unwrap();
+        statuses.push(res.status);
+    }
+    let status = node_of(&candidate.view(), &node.address()).unwrap().status;
+    (statuses, status)
+}
+
+/// Gate closed: the rule below the gate is kept. A challenge on an archive
+/// whose address sorts after this one's refuses this one's BeginUnstake with
+/// 324, although it has no challenge of its own.
+#[test]
+fn below_the_own_challenges_gate_a_higher_archives_challenge_refuses_324() {
+    let (statuses, status) =
+        begin_unstake_at(params_own_challenges(None), |_| higher_address(), &[2]);
+    assert!(matches!(statuses[0], TxStatus::Failed(324)), "got {:?}", statuses[0]);
+    assert_eq!(status, NodeStatus::Active);
+}
+
+/// Gate open: another archive's challenge no longer counts, and the archive
+/// begins unbonding.
+#[test]
+fn from_the_own_challenges_gate_another_archives_challenge_does_not_count() {
+    let (statuses, status) =
+        begin_unstake_at(params_own_challenges(Some(0)), |_| higher_address(), &[2]);
+    assert_eq!(statuses[0], TxStatus::Success);
+    assert_eq!(status, NodeStatus::Unbonding);
+}
+
+/// Gate open: an archive's own open challenge still refuses with 324.
+#[test]
+fn from_the_own_challenges_gate_an_archives_own_challenge_still_refuses_324() {
+    let (statuses, status) = begin_unstake_at(params_own_challenges(Some(0)), |own| own, &[2]);
+    assert!(matches!(statuses[0], TxStatus::Failed(324)), "got {:?}", statuses[0]);
+    assert_eq!(status, NodeStatus::Active);
+}
+
+/// The boundary: one block below the gate the old rule refuses; at the gate
+/// height the same archive, with the same other-archive challenge open, begins
+/// unbonding.
+#[test]
+fn the_own_challenges_gate_applies_from_its_height() {
+    let (statuses, status) =
+        begin_unstake_at(params_own_challenges(Some(5)), |_| higher_address(), &[4, 5]);
+    assert!(matches!(statuses[0], TxStatus::Failed(324)), "height 4: {:?}", statuses[0]);
+    assert_eq!(statuses[1], TxStatus::Success, "height 5");
+    assert_eq!(status, NodeStatus::Unbonding);
+}
+
 // ── Slashing while unbonding ─────────────────────────────────────────────────
 
 #[test]

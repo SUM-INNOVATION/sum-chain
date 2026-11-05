@@ -2943,6 +2943,32 @@ pub struct ChainParams {
     #[serde(default)]
     pub node_registry_update_status_unsupported_enabled_from_height: Option<u64>,
 
+    /// `BeginUnstake` counts only the sender's own open storage challenges
+    /// (#369).
+    ///
+    /// PROVISIONAL NAME, for review: the field's name is not settled; it
+    /// changes before any release that writes the schema registering it.
+    ///
+    /// An archive with an open retrievability challenge cannot begin unbonding
+    /// (code 324). Below this height the check reads the challenge node index
+    /// from `[b'N', sender]` onward without stopping at the sender's keys, so
+    /// it also counts the open challenges of every archive whose address sorts
+    /// after the sender's, and an archive with no challenge of its own can be
+    /// refused. At and above this height only challenges whose node-index key
+    /// is `[b'N', sender, challenge_id]` count.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub archive_unbonding_own_challenges_enabled_from_height: Option<u64>,
+
     /// Contract execution is metered (#279).
     ///
     /// Below this height a contract deploy or call runs on the unmetered
@@ -3449,6 +3475,8 @@ impl Default for ChainParams {
             messaging_timestamp_units_enabled_from_height: None,
             // Production-safe default: a node-registry UpdateStatus executes as before — dormant.
             node_registry_update_status_unsupported_enabled_from_height: None,
+            // Production-safe default: BeginUnstake's challenge check reads as before — dormant.
+            archive_unbonding_own_challenges_enabled_from_height: None,
             // Production-safe default: contracts run on the unmetered engine — dormant.
             contract_metering_enabled_from_height: None,
             // No block-level contract gas budget (inert while the metering gate is closed).
@@ -4140,6 +4168,10 @@ impl ChainParams {
                 self.node_registry_update_status_unsupported_enabled_from_height,
             ),
             (
+                "archive_unbonding_own_challenges_enabled_from_height",
+                self.archive_unbonding_own_challenges_enabled_from_height,
+            ),
+            (
                 "contract_metering_enabled_from_height",
                 self.contract_metering_enabled_from_height,
             ),
@@ -4183,7 +4215,7 @@ impl ChainParams {
     }
 }
 
-/// The forty-six remediation gates, by field name.
+/// The forty-seven remediation gates, by field name.
 ///
 /// The count in this sentence has been wrong twice, both times because a wave
 /// added gates and nothing checked the prose. It is checked now:
@@ -4250,6 +4282,7 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "contract_error_rollback_enabled_from_height",
     "messaging_timestamp_units_enabled_from_height",
     "node_registry_update_status_unsupported_enabled_from_height",
+    "archive_unbonding_own_challenges_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started

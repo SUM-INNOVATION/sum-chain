@@ -31,7 +31,7 @@ use sumchain_consensus::consensus_config::{
     },
     schema::{SCHEMA_2_ADDED, SCHEMA_3_ADDED},
     ConfigError, ConsensusConfig, SchemaPolicy, Source, StartupOutcome, TransitionKind, Value,
-    PRODUCTION, SCHEMA_1, SCHEMA_2, SCHEMA_3,
+    PRODUCTION, SCHEMA_1, SCHEMA_2, SCHEMA_3, SCHEMA_4,
 };
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::{ChainParams, Genesis, GenesisError};
@@ -46,13 +46,13 @@ const GATE_NAME: &str = "node_registry_update_status_unsupported_enabled_from_he
 const PEER: u16 = 0x1029;
 
 /// The release before schema 2: it read and wrote schema 1. (It knew schema 2
-/// only as a draft; it is given schema 3 to know because a policy must name
-/// every gate `ChainParams` declares to build at all, and with the gate unset
-/// that adds nothing to the schema-1 record it writes.)
+/// only as a draft; it is given the draft schema 4 to know because a policy
+/// must name every gate `ChainParams` declares to build at all, and with those
+/// gates unset that adds nothing to the schema-1 record it writes.)
 static PREVIOUS: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1],
     writes: &SCHEMA_1,
-    knows: &SCHEMA_3,
+    knows: &SCHEMA_4,
 };
 
 /// The release that wrote schema 2: it read schemas 1 and 2, wrote 2, and knew
@@ -60,7 +60,7 @@ static PREVIOUS: SchemaPolicy = SchemaPolicy {
 static SCHEMA_2_RELEASE: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &SCHEMA_2],
     writes: &SCHEMA_2,
-    knows: &SCHEMA_3,
+    knows: &SCHEMA_4,
 };
 
 // ── the schema-1 fixture (as in `consensus_config_schema2.rs`) ──────────────
@@ -198,7 +198,9 @@ fn schema_3_is_schema_2_plus_the_remediation_gate_and_this_binary_writes_it() {
     );
 
     assert!(std::ptr::eq(PRODUCTION.writes, &SCHEMA_3));
-    assert!(std::ptr::eq(PRODUCTION.knows, &SCHEMA_3));
+    // It knows the draft schema 4, which extends schema 3.
+    assert!(std::ptr::eq(PRODUCTION.knows, &SCHEMA_4));
+    assert!(std::ptr::eq(SCHEMA_4.previous.unwrap(), &SCHEMA_3));
     assert_eq!(
         PRODUCTION
             .reads

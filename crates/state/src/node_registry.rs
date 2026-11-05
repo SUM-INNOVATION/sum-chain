@@ -265,6 +265,23 @@ impl NodeRegistryExecutor {
         matches!(Self::update_status_unsupported_activation(params), Some(h) if block_height >= h)
     }
 
+    /// The height from which `BeginUnstake` counts only the sender's own open
+    /// storage challenges (#369):
+    /// `ChainParams::archive_unbonding_own_challenges_enabled_from_height`
+    /// (a provisional name).
+    #[inline]
+    fn own_challenges_activation(params: &ChainParams) -> Option<u64> {
+        params.archive_unbonding_own_challenges_enabled_from_height
+    }
+
+    /// Whether `BeginUnstake` at `block_height` counts only the sender's own
+    /// open challenges ([`crate::StorageMetadataExecutor::v_get_own_challenges_by_node`]).
+    /// Below the gate, or while it is unset, it counts what
+    /// [`crate::StorageMetadataExecutor::v_get_challenges_by_node`] returns, as before.
+    pub fn unstake_counts_own_challenges_only(params: &ChainParams, block_height: u64) -> bool {
+        matches!(Self::own_challenges_activation(params), Some(h) if block_height >= h)
+    }
+
     /// An `UpdateStatus` transaction at or above the gate. It is charged as any
     /// other failed node-registry operation is, through `deduct_fee`:
     /// a non-zero fee goes to the proposer and advances the nonce, and a zero

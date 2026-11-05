@@ -148,7 +148,7 @@ fn the_baseline_runs_after_the_gate_check_and_before_consensus_exists() {
 static PREVIOUS: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
     reads: &[&ccfg::SCHEMA_1],
     writes: &ccfg::SCHEMA_1,
-    knows: &ccfg::SCHEMA_3,
+    knows: &ccfg::SCHEMA_4,
 };
 
 /// #277's gate (schema-2 field 0x103f) through the real boot sequence:

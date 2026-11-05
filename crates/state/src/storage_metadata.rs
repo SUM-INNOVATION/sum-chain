@@ -3293,9 +3293,16 @@ impl StorageMetadataExecutor {
     // Challenge CRUD
     // =========================================================================
 
-    /// Get all active challenges assigned to a specific node.
-    /// Scans the N (node) prefix index: key = [b'N', target_node(20), challenge_id(32)]
-    /// Open challenges against a node as this block's candidate sees them.
+    /// Open challenges against a node as this block's candidate sees them, as
+    /// `BeginUnstake` counts them below
+    /// `ChainParams::archive_unbonding_own_challenges_enabled_from_height`.
+    ///
+    /// Scans the N (node) index, key = `[b'N', target_node(20), challenge_id(32)]`,
+    /// from `[b'N', target_node]` onward. The scan does not stop at the end of
+    /// `target_node`'s keys, so the result also holds the open challenges of
+    /// every archive whose address sorts after `target_node`'s (#369). Kept
+    /// as is so that blocks below the gate execute exactly as they did; from
+    /// the gate on, `BeginUnstake` uses [`Self::v_get_own_challenges_by_node`].
     ///
     /// This is the `BeginUnstake` gate: a challenge issued earlier in the same
     /// block must block the unbond, and a challenge settled earlier in the same
@@ -3317,6 +3324,43 @@ impl StorageMetadataExecutor {
             // let an archive unbond out of an open challenge.
             let (key, _) = item.map_err(StateError::Storage)?;
             if let Some(id) = challenge_node_index_id(&key)? {
+                ids.push(id);
+            }
+        }
+
+        let mut challenges = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(challenge) = Self::v_get_challenge(view, &id)? {
+                challenges.push(challenge);
+            }
+        }
+        Ok(challenges)
+    }
+
+    /// The open challenges whose target is `target_node`, as this block's
+    /// candidate sees them: the node-index keys `[b'N', target_node,
+    /// challenge_id]` only (#369). The scan stops at the first key past
+    /// `target_node`'s.
+    ///
+    /// `BeginUnstake` counts these from
+    /// `ChainParams::archive_unbonding_own_challenges_enabled_from_height` on.
+    pub fn v_get_own_challenges_by_node(
+        view: &ExecutionView<'_, '_>,
+        target_node: &Address,
+    ) -> Result<Vec<StorageChallenge>> {
+        let prefix = challenge_node_index_prefix(target_node);
+        let mut ids = Vec::new();
+        for item in view
+            .prefix_iter(CF_ACTIVE_CHALLENGES, &prefix)
+            .map_err(StateError::Storage)?
+        {
+            // A read error ends the scan: an under-reported challenge set would
+            // let an archive unbond out of an open challenge.
+            let (key, _) = item.map_err(StateError::Storage)?;
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            if let Some(id) = own_challenge_node_index_id(&key, target_node)? {
                 ids.push(id);
             }
         }

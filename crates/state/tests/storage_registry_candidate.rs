@@ -378,6 +378,46 @@ fn staging_a_challenge_carries_both_indexes_with_it() {
 
 /// A file row and its owner index are staged together, so the funded-file scan
 /// a challenge is drawn from sees a file this block registered.
+/// The sender-only lookup BeginUnstake uses from the own-challenges gate on
+/// (#369) sees what the candidate stages and deletes in the same block, and
+/// never another archive's challenge; the lookup it uses below the gate still
+/// also returns the challenges of archives whose addresses sort after the
+/// queried one, as it always did.
+#[test]
+fn the_own_challenge_lookup_sees_this_block_and_only_the_target() {
+    let (_dir, db, _state) = open_db();
+    let mut overlay = ApplicationOverlay::new(&db, LIMIT);
+    let mut view = ExecutionView::new(&mut overlay);
+
+    let low = Address::new([0x11; 20]);
+    let high = Address::new([0xA1; 20]);
+    let on_low = challenge(1, low, 50);
+    let on_high = challenge(2, high, 50);
+    StorageMetadataExecutor::v_put_challenge(&mut view, &on_low).unwrap();
+    StorageMetadataExecutor::v_put_challenge(&mut view, &on_high).unwrap();
+
+    let own = |view: &ExecutionView<'_, '_>, a: &Address| {
+        StorageMetadataExecutor::v_get_own_challenges_by_node(view, a)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.challenge_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(own(&view, &low), vec![on_low.challenge_id]);
+    assert_eq!(own(&view, &high), vec![on_high.challenge_id]);
+    assert_eq!(
+        StorageMetadataExecutor::v_get_challenges_by_node(&view, &low)
+            .unwrap()
+            .len(),
+        2,
+        "below the gate the lookup also returns the higher address's challenge"
+    );
+
+    StorageMetadataExecutor::v_delete_challenge(&mut view, &on_low).unwrap();
+    assert!(own(&view, &low).is_empty(), "a challenge settled in this block no longer counts");
+    assert_eq!(own(&view, &high), vec![on_high.challenge_id]);
+}
+
 #[test]
 fn a_file_funded_in_this_block_is_challengeable_in_it() {
     let (_dir, db, _state) = open_db();

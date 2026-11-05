@@ -684,6 +684,34 @@ pub static SCHEMA_3: Schema = Schema {
     added: SCHEMA_3_ADDED,
 };
 
+/// Fields schema 4 adds to schema 3. DRAFT: [`PRODUCTION`] knows these fields
+/// but neither writes nor reads schema-4 records, and refuses to start if any
+/// of them is non-absent, so a gate registered here can be declared but never
+/// activated by this binary. Append-only, like every later schema. The
+/// allocation is provisional.
+pub const SCHEMA_4_ADDED: &[AddedField] = &[
+    // BeginUnstake counts only the sender's own open storage challenges
+    // (#369). The field's name is provisional.
+    AddedField {
+        spec: FieldSpec {
+            id: 0x1044,
+            name: "archive_unbonding_own_challenges_enabled_from_height",
+            ty: Ty::U64,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Gate,
+    },
+];
+
+/// Schema 4: schema 3 plus [`SCHEMA_4_ADDED`]. DRAFT.
+pub static SCHEMA_4: Schema = Schema {
+    number: 4,
+    previous: Some(&SCHEMA_3),
+    added: SCHEMA_4_ADDED,
+};
+
 /// What this binary does.
 ///
 /// It writes schema 3: a fresh database records schema 3 directly. It reads
@@ -694,9 +722,10 @@ pub static SCHEMA_3: Schema = Schema {
 /// `acknowledge-consensus-config-schema`, one step from either, which changes
 /// no rule. Until a node has moved, a schema-2 or schema-3 field set in its
 /// genesis that its record's schema cannot express refuses start and names that
-/// command. No field is a draft. Nothing here sets any gate.
+/// command. It knows the draft schema 4, whose fields must all be absent.
+/// Nothing here sets any gate.
 pub static PRODUCTION: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &SCHEMA_2, &SCHEMA_3],
     writes: &SCHEMA_3,
-    knows: &SCHEMA_3,
+    knows: &SCHEMA_4,
 };

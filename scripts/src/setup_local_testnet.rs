@@ -443,6 +443,7 @@ fn run_local(output_dir: Option<PathBuf>, opts: &DevnetOptions) -> Result<()> {
             contract_error_rollback_enabled_from_height: None,
             messaging_timestamp_units_enabled_from_height: None,
             node_registry_update_status_unsupported_enabled_from_height: None,
+            archive_unbonding_own_challenges_enabled_from_height: None,
             contract_metering_enabled_from_height: None,
             max_block_contract_gas: None,
             max_contract_deploy_gas: None,
