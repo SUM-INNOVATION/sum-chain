@@ -889,7 +889,7 @@ impl NetworkService {
             // mDNS event arms removed (#202): mDNS discovery is gone; peers arrive via
             // bootnodes (dialed at startup) + identify + gossipsub.
 
-            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+            SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
                 // Determine connection direction from endpoint
                 let direction = if endpoint.is_dialer() {
                     ConnectionDirection::Outbound
@@ -937,19 +937,37 @@ impl NetworkService {
                     return;
                 }
 
-                // Register with peer manager
-                self.peer_manager.peer_connected(peer_id, direction, None);
-
-                info!("Connected to peer: {} ({:?})", peer_id, direction);
-                self.peers.write().insert(peer_id);
-                let _ = self.event_tx.send(NetworkEvent::PeerConnected(peer_id));
+                // Register with peer manager. Only the peer's FIRST admitted
+                // connection makes it connected and is announced; a second
+                // connection to a peer already connected (a simultaneous dial,
+                // or a redial while a dead connection has not timed out yet) is
+                // recorded and nothing more. See `PeerManager::peer_connected`.
+                if self.peer_manager.peer_connected(peer_id, connection_id, direction, None) {
+                    info!("Connected to peer: {} ({:?})", peer_id, direction);
+                    self.peers.write().insert(peer_id);
+                    let _ = self.event_tx.send(NetworkEvent::PeerConnected(peer_id));
+                }
             }
 
-            SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                self.peer_manager.peer_disconnected(&peer_id);
-                info!("Disconnected from peer: {}", peer_id);
-                self.peers.write().remove(&peer_id);
-                let _ = self.event_tx.send(NetworkEvent::PeerDisconnected(peer_id));
+            SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
+                // Only the LAST admitted connection closing disconnects the
+                // peer. Treating every close as the peer leaving dropped a peer
+                // from the connected set while another connection to it was
+                // still up, and the bootnode retry then redialled a peer this
+                // node was talking to.
+                if self.peer_manager.peer_disconnected(&peer_id, connection_id) {
+                    info!("Disconnected from peer: {}", peer_id);
+                    self.peers.write().remove(&peer_id);
+                    let _ = self.event_tx.send(NetworkEvent::PeerDisconnected(peer_id));
+                } else {
+                    debug!(
+                        "Connection {:?} to {} closed; {} admitted still open, {} at the swarm",
+                        connection_id,
+                        peer_id,
+                        self.peer_manager.open_connections(&peer_id),
+                        num_established
+                    );
+                }
             }
 
             SwarmEvent::OutgoingConnectionError { peer_id, .. } => {

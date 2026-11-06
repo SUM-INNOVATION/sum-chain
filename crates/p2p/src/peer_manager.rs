@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use libp2p_core::Multiaddr;
 use libp2p_identity::PeerId;
+use libp2p_swarm::ConnectionId;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -116,12 +117,31 @@ pub struct PeerInfo {
     pub tags: Vec<String>,
 }
 
+/// One admitted connection: what it was counted as when it opened.
+#[derive(Debug, Clone, Copy)]
+struct AdmittedConnection {
+    direction: ConnectionDirection,
+    remote_ip: Option<IpAddr>,
+}
+
 /// Internal peer state
 struct PeerEntry {
     peer_id: PeerId,
     addresses: Vec<Multiaddr>,
     state: PeerState,
+    /// The direction this peer is counted in while it is connected: that of
+    /// its FIRST admitted connection, kept until the LAST one closes, so the
+    /// counter it moved up is the one that moves back down.
     direction: Option<ConnectionDirection>,
+    /// Every admitted connection to this peer that has not closed yet.
+    ///
+    /// libp2p routinely holds more than one connection to a peer (a
+    /// simultaneous dial, or a redial while a dead connection has not timed
+    /// out yet). The peer is connected while this is non-empty, and only the
+    /// first insert and the last removal change `state` or a counter. A
+    /// connection the admission gate refused is never inserted, so its
+    /// `ConnectionClosed` changes nothing.
+    connections: HashMap<ConnectionId, AdmittedConnection>,
     score: i64,
     first_seen: Instant,
     last_seen: Instant,
@@ -142,6 +162,7 @@ impl PeerEntry {
             addresses: Vec::new(),
             state: PeerState::Disconnected,
             direction: None,
+            connections: HashMap::new(),
             score: thresholds::DEFAULT_SCORE,
             first_seen: now,
             last_seen: now,
@@ -509,24 +530,53 @@ impl PeerManager {
     /// refuses every inbound connection forever, so the fix is a precondition of
     /// the wiring and not a tidy-up. The counters now mean "connected peers in
     /// this direction", which is the unit `ConnectionLimits` is written in.
-    pub fn peer_connected(&self, peer_id: PeerId, direction: ConnectionDirection, remote_ip: Option<IpAddr>) {
+    ///
+    /// # One admitted connection, identified
+    ///
+    /// Counting on the first connection was half of it. The other half is
+    /// knowing WHICH connection closes: [`Self::peer_disconnected`] used to
+    /// treat every `ConnectionClosed` as the peer leaving, so with two
+    /// connections open the first close marked the peer disconnected and
+    /// released its slot while the second was still carrying traffic. Each
+    /// admitted connection is now recorded by its [`ConnectionId`], and the
+    /// peer is connected from the first one admitted until the last one closes.
+    ///
+    /// Returns `true` only for the peer's first admitted connection: the one
+    /// that changes `state` and a counter, and the only one the caller should
+    /// announce. A repeated notification for a connection already recorded
+    /// changes nothing and returns `false`.
+    pub fn peer_connected(
+        &self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        direction: ConnectionDirection,
+        remote_ip: Option<IpAddr>,
+    ) -> bool {
         let mut peers = self.peers.write();
         let entry = peers.entry(peer_id).or_insert_with(|| PeerEntry::new(peer_id));
 
-        let was_connected = entry.state == PeerState::Connected;
-        entry.state = PeerState::Connected;
-        entry.direction = Some(direction);
+        if entry.connections.contains_key(&connection_id) {
+            debug!("Connection {:?} to {} is already recorded", connection_id, peer_id);
+            return false;
+        }
+        let first = entry.connections.is_empty();
+        entry
+            .connections
+            .insert(connection_id, AdmittedConnection { direction, remote_ip });
         entry.last_seen = Instant::now();
         entry.successful_connections += 1;
 
-        if !was_connected {
+        if first {
+            entry.state = PeerState::Connected;
+            entry.direction = Some(direction);
             match direction {
                 ConnectionDirection::Inbound => *self.inbound_count.write() += 1,
                 ConnectionDirection::Outbound => *self.outbound_count.write() += 1,
             }
         }
+        let open = entry.connections.len();
 
-        // Track IP mapping
+        // Track IP mapping: one entry per admitted connection, removed with it.
         if let Some(ip) = remote_ip {
             self.ip_to_peers.write()
                 .entry(ip)
@@ -534,64 +584,136 @@ impl PeerManager {
                 .push(peer_id);
         }
 
-        info!(
-            "Peer connected: {} ({:?}) - total: {}/{}",
-            peer_id,
-            direction,
-            *self.inbound_count.read() + *self.outbound_count.read(),
-            self.limits.max_total
-        );
-    }
-
-    /// Mark peer as disconnected
-    pub fn peer_disconnected(&self, peer_id: &PeerId) {
-        let mut peers = self.peers.write();
-
-        if let Some(entry) = peers.get_mut(peer_id) {
-            if let Some(direction) = entry.direction {
-                match direction {
-                    ConnectionDirection::Inbound => {
-                        let mut count = self.inbound_count.write();
-                        *count = count.saturating_sub(1);
-                    }
-                    ConnectionDirection::Outbound => {
-                        let mut count = self.outbound_count.write();
-                        *count = count.saturating_sub(1);
-                    }
-                }
-            }
-            // A peer hung up on BECAUSE it is banned must not read back as
-            // merely `Disconnected`: closing the connection is the enforcement
-            // of the ban, not the end of it. `ban_until` survived this already,
-            // so `is_banned` was right and only `state` lied — and `state` is
-            // what `PeerInfo` exposes to everything above.
-            entry.state = if entry.is_banned() {
-                PeerState::Banned
-            } else {
-                PeerState::Disconnected
-            };
-            entry.direction = None;
-
+        if first {
             info!(
-                "Peer disconnected: {} - total: {}/{}",
+                "Peer connected: {} ({:?}) - total: {}/{}",
                 peer_id,
+                direction,
+                *self.inbound_count.read() + *self.outbound_count.read(),
+                self.limits.max_total
+            );
+        } else {
+            info!(
+                "Additional {:?} connection to {} ({} open); still counted once - total: {}/{}",
+                direction,
+                peer_id,
+                open,
                 *self.inbound_count.read() + *self.outbound_count.read(),
                 self.limits.max_total
             );
         }
-
-        // Clean up IP mapping
-        let mut ip_peers = self.ip_to_peers.write();
-        for peers_list in ip_peers.values_mut() {
-            peers_list.retain(|p| p != peer_id);
-        }
+        first
     }
 
-    /// Record a failed connection attempt
+    /// Record that one admitted connection to `peer_id` has closed.
+    ///
+    /// Returns `true` only when it was the peer's LAST admitted connection: the
+    /// peer is then disconnected, its counter is released, and the caller
+    /// should announce it. While another admitted connection remains the peer
+    /// stays connected and nothing else changes. A connection that was never
+    /// admitted (the gate refused it, so [`Self::peer_connected`] never saw
+    /// it) is ignored.
+    pub fn peer_disconnected(&self, peer_id: &PeerId, connection_id: ConnectionId) -> bool {
+        let mut peers = self.peers.write();
+
+        let Some(entry) = peers.get_mut(peer_id) else {
+            return false;
+        };
+        let Some(closed) = entry.connections.remove(&connection_id) else {
+            debug!(
+                "Connection {:?} to {} closed but was never admitted; nothing to release",
+                connection_id, peer_id
+            );
+            return false;
+        };
+
+        // Clean up the IP mapping for this connection only.
+        if let Some(ip) = closed.remote_ip {
+            let mut ip_peers = self.ip_to_peers.write();
+            if let Some(list) = ip_peers.get_mut(&ip) {
+                if let Some(pos) = list.iter().position(|p| p == peer_id) {
+                    list.remove(pos);
+                }
+                if list.is_empty() {
+                    ip_peers.remove(&ip);
+                }
+            }
+        }
+
+        if !entry.connections.is_empty() {
+            info!(
+                "Closed one {:?} connection to {}; {} still open, peer stays connected - total: {}/{}",
+                closed.direction,
+                peer_id,
+                entry.connections.len(),
+                *self.inbound_count.read() + *self.outbound_count.read(),
+                self.limits.max_total
+            );
+            return false;
+        }
+
+        if let Some(direction) = entry.direction {
+            match direction {
+                ConnectionDirection::Inbound => {
+                    let mut count = self.inbound_count.write();
+                    *count = count.saturating_sub(1);
+                }
+                ConnectionDirection::Outbound => {
+                    let mut count = self.outbound_count.write();
+                    *count = count.saturating_sub(1);
+                }
+            }
+        }
+        // A peer hung up on BECAUSE it is banned must not read back as
+        // merely `Disconnected`: closing the connection is the enforcement
+        // of the ban, not the end of it. `ban_until` survived this already,
+        // so `is_banned` was right and only `state` lied — and `state` is
+        // what `PeerInfo` exposes to everything above.
+        entry.state = if entry.is_banned() {
+            PeerState::Banned
+        } else {
+            PeerState::Disconnected
+        };
+        entry.direction = None;
+
+        info!(
+            "Peer disconnected: {} - total: {}/{}",
+            peer_id,
+            *self.inbound_count.read() + *self.outbound_count.read(),
+            self.limits.max_total
+        );
+        true
+    }
+
+    /// How many admitted connections to `peer_id` are open.
+    pub fn open_connections(&self, peer_id: &PeerId) -> usize {
+        self.peers
+            .read()
+            .get(peer_id)
+            .map_or(0, |e| e.connections.len())
+    }
+
+    /// Record a failed connection attempt.
+    ///
+    /// A dial can fail for a peer this node is already connected to: a
+    /// redundant redial, or the losing side of a simultaneous dial. That
+    /// failure says nothing about the connection that is up, so it changes no
+    /// state, counter or score; it is only counted. Writing `Disconnected`
+    /// there used to make the next connection to the same peer look like the
+    /// first and count the peer twice.
     pub fn connection_failed(&self, peer_id: &PeerId) {
         let mut peers = self.peers.write();
         if let Some(entry) = peers.get_mut(peer_id) {
             entry.failed_connections += 1;
+            if !entry.connections.is_empty() {
+                debug!(
+                    "Dial to {} failed while {} admitted connection(s) are open; \
+                     state, counters and score unchanged",
+                    peer_id,
+                    entry.connections.len()
+                );
+                return;
+            }
             entry.record_connection_attempt();
             entry.adjust_score(score_adjustments::CONNECTION_TIMEOUT);
             entry.state = PeerState::Disconnected;
@@ -737,7 +859,13 @@ impl PeerManager {
         let mut peers = self.peers.write();
         if let Some(entry) = peers.get_mut(peer_id) {
             entry.ban_until = None;
-            entry.state = PeerState::Disconnected;
+            // A connection still open (the ban's hang-up not yet complete) is
+            // still a connection: `state` follows the admitted connections.
+            entry.state = if entry.connections.is_empty() {
+                PeerState::Disconnected
+            } else {
+                PeerState::Connected
+            };
             info!("Unbanned peer {}", peer_id);
         }
     }
@@ -890,6 +1018,10 @@ mod tests {
         PeerId::random()
     }
 
+    fn cid(n: usize) -> ConnectionId {
+        ConnectionId::new_unchecked(n)
+    }
+
     #[test]
     fn test_peer_registration() {
         let manager = PeerManager::new(ConnectionLimits::default());
@@ -938,14 +1070,14 @@ mod tests {
 
         // First peer should connect
         assert!(manager.can_accept_inbound(&peer1, None));
-        manager.peer_connected(peer1, ConnectionDirection::Inbound, None);
+        manager.peer_connected(peer1, cid(1), ConnectionDirection::Inbound, None);
 
         // Second peer should not be able to connect inbound (limit reached)
         assert!(!manager.can_accept_inbound(&peer2, None));
 
         // But can connect outbound
         assert!(manager.can_connect_outbound(&peer2));
-        manager.peer_connected(peer2, ConnectionDirection::Outbound, None);
+        manager.peer_connected(peer2, cid(2), ConnectionDirection::Outbound, None);
 
         // Third peer should not connect (total limit reached)
         assert!(!manager.can_accept_inbound(&peer3, None));
@@ -981,7 +1113,7 @@ mod tests {
         let _regular = test_peer_id();
 
         manager.add_protected_peer(bootnode);
-        manager.peer_connected(bootnode, ConnectionDirection::Outbound, None);
+        manager.peer_connected(bootnode, cid(3), ConnectionDirection::Outbound, None);
 
         // Lower bootnode score
         for _ in 0..10 {
@@ -1019,12 +1151,199 @@ mod tests {
 
         manager.register_peer(peer1, vec![]);
         manager.register_peer(peer2, vec![]);
-        manager.peer_connected(peer1, ConnectionDirection::Inbound, None);
+        manager.peer_connected(peer1, cid(4), ConnectionDirection::Inbound, None);
 
         let stats = manager.stats();
         assert_eq!(stats.total_known, 2);
         assert_eq!(stats.connected, 1);
         assert_eq!(stats.inbound, 1);
         assert_eq!(stats.outbound, 0);
+    }
+
+    // ── Connection accounting with more than one connection per peer ───────
+    //
+    // libp2p can hold several connections to one peer. Each case below opens
+    // two (or more) and closes them in a given order; the peer must be
+    // connected exactly while at least one admitted connection is open, and
+    // counted exactly once, in one direction, for that whole span.
+
+    fn assert_counts(m: &PeerManager, inbound: usize, outbound: usize, why: &str) {
+        let s = m.stats();
+        assert_eq!((s.inbound, s.outbound), (inbound, outbound), "{why}");
+    }
+
+    #[test]
+    fn closing_the_first_of_two_connections_keeps_the_peer_connected() {
+        let m = PeerManager::new(ConnectionLimits::default());
+        let p = test_peer_id();
+        assert!(m.peer_connected(p, cid(1), ConnectionDirection::Inbound, None), "first connection announces the peer");
+        assert!(!m.peer_connected(p, cid(2), ConnectionDirection::Inbound, None), "second connection is not a new peer");
+        assert_counts(&m, 1, 0, "two connections, one peer");
+
+        assert!(!m.peer_disconnected(&p, cid(1)), "closing the first while the second is open is not a disconnect");
+        assert!(m.is_connected(&p));
+        assert_eq!(m.open_connections(&p), 1);
+        assert_counts(&m, 1, 0, "the slot is held while a connection remains");
+
+        assert!(m.peer_disconnected(&p, cid(2)), "closing the last one is the disconnect");
+        assert!(!m.is_connected(&p));
+        assert_counts(&m, 0, 0, "and releases the slot exactly once");
+    }
+
+    #[test]
+    fn closing_the_second_of_two_connections_keeps_the_peer_connected() {
+        let m = PeerManager::new(ConnectionLimits::default());
+        let p = test_peer_id();
+        m.peer_connected(p, cid(1), ConnectionDirection::Outbound, None);
+        m.peer_connected(p, cid(2), ConnectionDirection::Outbound, None);
+
+        assert!(!m.peer_disconnected(&p, cid(2)));
+        assert!(m.is_connected(&p));
+        assert_counts(&m, 0, 1, "closing the newer connection keeps the peer counted");
+
+        assert!(m.peer_disconnected(&p, cid(1)));
+        assert_counts(&m, 0, 0, "the last close releases it");
+    }
+
+    #[test]
+    fn opposite_directions_count_once_in_the_first_direction_either_closure_order() {
+        for close_first_first in [true, false] {
+            let m = PeerManager::new(ConnectionLimits::default());
+            let p = test_peer_id();
+            m.peer_connected(p, cid(1), ConnectionDirection::Inbound, None);
+            m.peer_connected(p, cid(2), ConnectionDirection::Outbound, None);
+            assert_counts(&m, 1, 0, "counted once, as its first (inbound) connection");
+            assert_eq!(m.get_peer_info(&p).unwrap().direction, Some(ConnectionDirection::Inbound));
+
+            let (a, b) = if close_first_first { (cid(1), cid(2)) } else { (cid(2), cid(1)) };
+            assert!(!m.peer_disconnected(&p, a));
+            assert!(m.is_connected(&p));
+            assert_counts(&m, 1, 0, "the counted direction does not move while connected");
+            assert!(m.peer_disconnected(&p, b));
+            assert_counts(&m, 0, 0, "the inbound counter it moved up is the one that moves down");
+            assert_eq!(m.get_peer_info(&p).unwrap().direction, None);
+        }
+    }
+
+    #[test]
+    fn repeated_reconnect_cycles_neither_leak_nor_drop_the_peer() {
+        let m = PeerManager::new(ConnectionLimits::default());
+        let p = test_peer_id();
+        m.peer_connected(p, cid(1), ConnectionDirection::Inbound, None);
+        // The pattern of a dead connection being replaced: a new connection
+        // opens while the old one is still open, then the old one closes.
+        let mut live = cid(1);
+        for n in 2..50 {
+            let dir = if n % 2 == 0 { ConnectionDirection::Outbound } else { ConnectionDirection::Inbound };
+            assert!(!m.peer_connected(p, cid(n), dir, None), "cycle {n}: a replacement is not a new peer");
+            assert!(!m.peer_disconnected(&p, live), "cycle {n}: the old one closing is not a disconnect");
+            assert!(m.is_connected(&p), "cycle {n}");
+            assert_counts(&m, 1, 0, "no leak and no release across cycles");
+            live = cid(n);
+        }
+        assert!(m.peer_disconnected(&p, live));
+        assert_counts(&m, 0, 0, "after the last close, nothing is left counted");
+        assert_eq!(m.stats().connected, 0);
+    }
+
+    #[test]
+    fn a_failed_secondary_dial_leaves_the_connected_peer_alone() {
+        let m = PeerManager::new(ConnectionLimits::default());
+        let p = test_peer_id();
+        m.peer_connected(p, cid(1), ConnectionDirection::Inbound, None);
+        let score = m.get_peer_info(&p).unwrap().score;
+
+        m.connection_failed(&p);
+        assert!(m.is_connected(&p), "a failed extra dial does not disconnect a connected peer");
+        assert_eq!(m.get_peer_info(&p).unwrap().score, score, "nor cost it score");
+        assert_eq!(m.get_peer_info(&p).unwrap().failed_connections, 1, "it is still counted as a failure");
+
+        // Before, the failure wrote `Disconnected`, so the next connection
+        // looked like the first and counted the peer a second time.
+        assert!(!m.peer_connected(p, cid(2), ConnectionDirection::Outbound, None));
+        assert_counts(&m, 1, 0, "the next connection is still not a new peer");
+        assert!(!m.peer_disconnected(&p, cid(1)));
+        assert!(m.peer_disconnected(&p, cid(2)));
+        assert_counts(&m, 0, 0, "balanced");
+
+        // Once the peer has no connection, a failure is a failure again.
+        m.connection_failed(&p);
+        assert_eq!(m.get_peer_info(&p).unwrap().state, PeerState::Disconnected);
+        assert!(m.get_peer_info(&p).unwrap().score < score);
+    }
+
+    #[test]
+    fn a_connection_that_was_never_admitted_changes_nothing_when_it_closes() {
+        let m = PeerManager::new(ConnectionLimits::default());
+        let p = test_peer_id();
+        m.peer_connected(p, cid(1), ConnectionDirection::Inbound, None);
+        // cid(7) was refused by the gate, so it was never recorded.
+        assert!(!m.peer_disconnected(&p, cid(7)));
+        assert!(m.is_connected(&p));
+        assert_counts(&m, 1, 0, "a refused connection's close releases nothing");
+        // Nor for a peer this manager has never seen.
+        assert!(!m.peer_disconnected(&test_peer_id(), cid(8)));
+        assert_counts(&m, 1, 0, "unchanged");
+        // A repeated notification for a recorded connection is idempotent.
+        assert!(!m.peer_connected(p, cid(1), ConnectionDirection::Inbound, None));
+        assert_eq!(m.open_connections(&p), 1);
+    }
+
+    #[test]
+    fn a_second_connection_to_a_connected_peer_takes_no_new_slot() {
+        let limits = ConnectionLimits { max_total: 1, max_inbound: 1, ..Default::default() };
+        let m = PeerManager::new(limits);
+        let p = test_peer_id();
+        let other = test_peer_id();
+        m.peer_connected(p, cid(1), ConnectionDirection::Inbound, None);
+        assert!(m.can_accept_inbound(&p, None), "the connected peer's extra connection is admitted");
+        assert!(!m.can_accept_inbound(&other, None), "a new peer is refused at the limit");
+        m.peer_connected(p, cid(2), ConnectionDirection::Inbound, None);
+        m.peer_disconnected(&p, cid(1));
+        assert!(!m.can_accept_inbound(&other, None), "the slot is still held by the surviving connection");
+        m.peer_disconnected(&p, cid(2));
+        assert!(m.can_accept_inbound(&other, None), "and freed only by the last close");
+    }
+
+    #[test]
+    fn per_ip_entries_follow_each_connection() {
+        let limits = ConnectionLimits { max_per_ip: 2, ..Default::default() };
+        let m = PeerManager::new(limits);
+        let ip: IpAddr = "10.0.0.7".parse().unwrap();
+        let p = test_peer_id();
+        let q = test_peer_id();
+        m.peer_connected(p, cid(1), ConnectionDirection::Inbound, Some(ip));
+        m.peer_connected(p, cid(2), ConnectionDirection::Inbound, Some(ip));
+        assert!(!m.can_accept_inbound(&q, Some(ip)), "two connections from the IP");
+        m.peer_disconnected(&p, cid(1));
+        assert!(m.can_accept_inbound(&q, Some(ip)), "one closed: one entry removed, not every entry of the peer");
+        m.peer_disconnected(&p, cid(2));
+        assert!(m.ip_to_peers.read().get(&ip).is_none(), "the last close leaves nothing behind");
+    }
+
+    #[test]
+    fn a_ban_with_two_connections_open_is_released_by_the_last_close() {
+        let m = PeerManager::new(ConnectionLimits::default());
+        let p = test_peer_id();
+        m.peer_connected(p, cid(1), ConnectionDirection::Inbound, None);
+        m.peer_connected(p, cid(2), ConnectionDirection::Outbound, None);
+        m.ban_peer(&p, Duration::from_secs(3600));
+        assert!(!m.peer_disconnected(&p, cid(2)));
+        assert_counts(&m, 1, 0, "held until the last connection closes");
+        assert!(m.peer_disconnected(&p, cid(1)));
+        assert_counts(&m, 0, 0, "released once");
+        assert_eq!(m.get_peer_info(&p).unwrap().state, PeerState::Banned, "and the ban survives the close");
+    }
+
+    #[test]
+    fn unbanning_a_peer_whose_connection_is_still_open_keeps_it_connected() {
+        let m = PeerManager::new(ConnectionLimits::default());
+        let p = test_peer_id();
+        m.peer_connected(p, cid(1), ConnectionDirection::Inbound, None);
+        m.ban_peer(&p, Duration::from_secs(3600));
+        m.unban_peer(&p);
+        assert!(m.is_connected(&p), "the connection is still open");
+        assert!(m.peer_disconnected(&p, cid(1)));
+        assert_eq!(m.get_peer_info(&p).unwrap().state, PeerState::Disconnected);
     }
 }

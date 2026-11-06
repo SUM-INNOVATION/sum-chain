@@ -20,6 +20,8 @@ pub use config::NetworkConfig;
 /// Re-exported so crates above this one can name a peer without taking their own
 /// direct dependency on the libp2p identity crate.
 pub use libp2p_identity::PeerId;
+/// Names one connection in [`PeerManager::peer_connected`] / [`PeerManager::peer_disconnected`].
+pub use libp2p_swarm::ConnectionId;
 pub use network::{NetworkCommand, NetworkEvent, NetworkService, RateLimitConfig, SyncRequestId};
 pub use peer_compat::{PeerCompat, PeerCompatRegistry};
 pub use node_key::load_or_generate_keypair;

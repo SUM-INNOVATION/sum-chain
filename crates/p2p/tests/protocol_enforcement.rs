@@ -52,7 +52,7 @@
 
 use sumchain_p2p::peer_compat::PeerCompat;
 use sumchain_p2p::{
-    BanOutcome, BlockSyncer, BlockSyncerConfig, ConnectionDirection, ConnectionLimits,
+    BanOutcome, BlockSyncer, BlockSyncerConfig, ConnectionDirection, ConnectionId, ConnectionLimits,
     NetworkConfig, NetworkService, PeerCompatRegistry, PeerId, PeerManager, PeerState,
 };
 use sumchain_primitives::{Block, BlockHeader, BlockHeight, Hash};
@@ -628,7 +628,7 @@ fn a_ban_binds_on_a_peer_this_node_has_never_seen() {
     // `true` for a connected peer until the ban lands and `false` after, so the
     // change is attributable to the ban and to nothing else.
     let peer = PeerId::random();
-    pm.peer_connected(peer, ConnectionDirection::Inbound, None);
+    pm.peer_connected(peer, ConnectionId::new_unchecked(1), ConnectionDirection::Inbound, None);
     assert!(pm.can_accept_inbound(&peer, None));
     assert_eq!(
         pm.ban_peer(&peer, std::time::Duration::from_secs(24 * 60 * 60)),
@@ -670,7 +670,7 @@ async fn banning_a_mismatched_peer_closes_the_connection_it_already_has() {
     let peer = PeerId::random();
     network
         .peer_manager()
-        .peer_connected(peer, ConnectionDirection::Inbound, None);
+        .peer_connected(peer, ConnectionId::new_unchecked(1), ConnectionDirection::Inbound, None);
     assert_eq!(network.peer_manager().stats().inbound, 1);
     assert!(
         commands.try_recv().is_err(),
@@ -729,11 +729,11 @@ fn a_banned_peer_stays_banned_through_the_disconnect_and_its_redial_is_refused()
     let pm = PeerManager::new(ConnectionLimits::default());
     let peer = PeerId::random();
 
-    pm.peer_connected(peer, ConnectionDirection::Inbound, None);
+    pm.peer_connected(peer, ConnectionId::new_unchecked(1), ConnectionDirection::Inbound, None);
     pm.ban_peer(&peer, std::time::Duration::from_secs(24 * 60 * 60));
 
     // What `SwarmEvent::ConnectionClosed` does after `disconnect_peer_id` runs.
-    pm.peer_disconnected(&peer);
+    pm.peer_disconnected(&peer, ConnectionId::new_unchecked(1));
     assert_eq!(
         pm.stats().inbound,
         0,
@@ -863,7 +863,7 @@ async fn an_undeclared_peer_is_refused_above_the_height_but_never_disconnected()
 
     // And the peer manager agrees: nothing banned it.
     let pm = PeerManager::new(ConnectionLimits::default());
-    pm.peer_connected(legacy, ConnectionDirection::Inbound, None);
+    pm.peer_connected(legacy, ConnectionId::new_unchecked(1), ConnectionDirection::Inbound, None);
     assert!(!pm.is_banned(&legacy));
     assert!(pm.can_accept_inbound(&legacy, None));
 }
@@ -896,7 +896,7 @@ async fn a_matching_peer_is_neither_banned_nor_disconnected() {
         NetworkService::with_limits(NetworkConfig::default(), ConnectionLimits::default());
     network
         .peer_manager()
-        .peer_connected(peer, ConnectionDirection::Inbound, None);
+        .peer_connected(peer, ConnectionId::new_unchecked(1), ConnectionDirection::Inbound, None);
     assert!(!network.peer_manager().is_banned(&peer));
     assert!(network.peer_manager().can_accept_inbound(&peer, None));
     assert!(
@@ -1040,7 +1040,7 @@ fn the_disconnect_command_reaches_the_swarm_and_the_admission_gate_precedes_regi
     );
 
     let established = src
-        .find("SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {")
+        .find("SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {")
         .expect("the swarm handler must have a ConnectionEstablished arm");
     let body = &src[established..];
     let register = body
