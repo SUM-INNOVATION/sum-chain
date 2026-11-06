@@ -26,7 +26,7 @@ tracing = { workspace = true }
 parking_lot = { workspace = true }
 hex = { workspace = true }
 blake3 = { workspace = true }
-lru = "0.12"
+lru = "0.18.5"
 
 [dev-dependencies]
 # `JournalActivation::pinned` is feature-gated OFF in production builds, so it
