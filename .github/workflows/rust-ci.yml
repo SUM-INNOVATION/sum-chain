@@ -147,6 +147,12 @@ jobs:
       - name: cargo-audit — vendored object 0.32.2 as its crates.io identity (#306)
         run: bash scripts/check-vendored-object.sh advisories
 
+      # RUSTSEC-2026-0186: the same for the vendored memmap2 0.5.10 and 0.6.2. Every
+      # advisory against their crates.io identities fails except that one, which
+      # their backported bounds checks fix. vendored-object.yml also runs this daily.
+      - name: cargo-audit — vendored memmap2 0.5.10 / 0.6.2 as their crates.io identities (RUSTSEC-2026-0186)
+        run: bash scripts/check-vendored-memmap2.sh advisories
+
   build-test-clippy-aarch64:
     # C3 (issue #127 dependency hardening): build/test/clippy the ENTIRE workspace
     # — including the `blst`-backed `sumchain-beacon-crypto` now linked into

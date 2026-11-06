@@ -13,6 +13,8 @@ name: rollout-tooling
 #   * scrape configuration points at the port /metrics is served on
 #   * no activation height baked into tracked genesis
 #   * vendored object 0.32.2 is the crates.io crate but for its default features
+#   * vendored memmap2 0.5.10 and 0.6.2 are the crates.io crates but for the
+#     bounds checks backported from 0.9.11 (RUSTSEC-2026-0186)
 #   * git diff --check, no AI attribution in commit messages, clean tree
 
 on:
@@ -73,6 +75,9 @@ jobs:
 
       - name: Vendored object 0.32.2 matches crates.io but for its default features (#306)
         run: bash scripts/check-vendored-object.sh
+
+      - name: Vendored memmap2 0.5.10 / 0.6.2 match crates.io but for the backported bounds checks (RUSTSEC-2026-0186)
+        run: bash scripts/check-vendored-memmap2.sh
 
       - name: git diff --check over the change
         run: |

@@ -46,7 +46,9 @@ a `[patch]` path crate. `scripts/check-vendored-object.sh advisories` audits the
 crates.io `object` 0.32.2 that the vendored copy is (apart from one manifest hunk)
 in `supply-chain-audit` and daily in `vendored-object.yml`, and
 `scripts/check-vendored-object.sh` (CI job `rollout-tooling`) checks that the copy
-matches crates.io. See the #306 section below.
+matches crates.io. See the #306 section below. The vendored `memmap2` 0.5.10 and
+0.6.2 (RUSTSEC-2026-0186) are checked the same way by
+`scripts/check-vendored-memmap2.sh`; see the RUSTSEC-2026-0186 section below.
 
 ## License policy
 
@@ -152,13 +154,33 @@ is not an option either: wasmer ≥ 6.0.0 is BUSL-1.1 (see `WASMER-5-MIGRATION.m
 | Monitoring | `scripts/check-vendored-object.sh advisories` writes a synthetic `Cargo.lock` declaring `object` 0.32.2 with its crates.io source and the pinned checksum, and runs `cargo audit --file Cargo.lock --deny warnings` on it with the repository's `.cargo/audit.toml`. Any vulnerability, unsound, unmaintained or yanked advisory against `object` 0.32.2 fails it (checked with the probe database); an exception recorded in `.cargo/audit.toml` applies to it as to the main gate. It runs in `supply-chain-audit` (`rust-ci.yml`) on every PR and push to main, and daily at 05:17 UTC in `vendored-object.yml`. Both modes of the script fail first if the pin drifts from what is built: the vendored manifest must be `object` 0.32.2, `[patch.crates-io]` must point at it, and `Cargo.lock` must resolve `object` 0.32.2 to that path crate only, with no unused patch. `cargo deny` takes no lockfile (it builds its graph from `cargo metadata`), so it is not part of this check. GitHub disables a public repository's scheduled workflows after 60 days without repository activity. |
 | Exit | Delete the patch and the vendored directory once wasmer resolves to an `object` without `compression` in its defaults, or with `ruzstd` ≥ 0.9.1. That is an engine dependency change and needs review for consensus impact. If `wasmer-compiler` stops resolving to `object 0.32.2`, cargo reports the patch as unused; remove it then. |
 
+### Resolved — RUSTSEC-2026-0186 (`memmap2` 0.5.10 / 0.6.2), by vendored backports
+
+[RUSTSEC-2026-0186](https://rustsec.org/advisories/RUSTSEC-2026-0186.html) (2026-06-20, informational: unsound): before 0.9.11,
+`MmapMut::flush_range`, `MmapMut::flush_async_range`, and `Mmap`/`MmapMut`/`MmapRaw` `advise_range` (and their `unchecked_`
+forms) pass an unchecked offset to `pointer::offset`/`add` before `msync`/`madvise` (`FlushViewOfFile` on Windows), which is
+undefined behaviour for an out-of-range offset or length. `wasmer 5.0.6` reaches `memmap2` 0.6.2 through `shared-buffer` 0.1.4 and
+`wasmer-compiler-singlepass 5.0.6` reaches 0.5.10 through `dynasmrt` 1.2.3, both in the validator binary through `sumc-runtime`.
+Every `shared-buffer` 0.1.x requires `memmap2` ^0.6.1, the `dynasmrt` lines on 0.9 need `wasmer-compiler-singlepass` ≥ 6.0.1,
+and wasmer ≥ 6.0.0 is BUSL-1.1 (`WASMER-5-MIGRATION.md`), so no version update reaches 0.9.11. The fix patches both versions.
+
+| Item | Finding |
+|---|---|
+| Change | The root `Cargo.toml` `[patch.crates-io]` points `memmap2` at `crates/third_party/memmap2-0.6.2` and `memmap2-0510` (`package = "memmap2"`) at `crates/third_party/memmap2-0.5.10`. Each directory is the crates.io `.crate` extracted verbatim (0.6.2 sha256 `6d28bba84adfe6646737845bc5ebbfa2c08424eb1c37e94a1fd2a82adb56a872`, 0.5.10 `83faa42c0a078c393f6b29d5db232d8be22776a891f8f56e5284faee4a20b327`, the checksums `Cargo.lock` recorded), including its `Cargo.lock`, which the crate's own `.gitignore` would otherwise drop. The only edits are memmap2 0.9.11's bounds checks, each under a `// SUM-CHAIN` comment: `offset > len \|\| len > len - offset` → `InvalidInput` at the top of `MmapInner::flush` and `flush_async` (`unix.rs`) and `flush_async` (`windows.rs`), and upstream's `offset > len \|\| len > len` in `MmapInner::advise` (`unix.rs`). Neither is a workspace member. |
+| `Cargo.lock` | Both `memmap2` entries lose their `source` and `checksum` lines. Nothing else changes. |
+| Callers | A scan of the source of every crates.io package in the lock (572) finds no call to `flush_range`, `flush_async_range`, `advise_range` or `unchecked_advise_range` outside `memmap2` itself, and the workspace calls none. `flush()`, `flush_async()` and `advise()` pass `0` and the map's length, which the checks accept, so in-range behaviour is unchanged; only a call that was undefined behaviour now returns an error. |
+| Equivalence | `vendored-object.yml`'s `wasmer artifacts base vs head` jobs run on PRs that touch `crates/third_party/**`, so `scripts/compare-wasmer-artifacts.sh` requires every `Module::serialize()` artifact to be byte-identical at base and head on x86_64 and aarch64 Linux. |
+| Verify | `bash scripts/check-vendored-memmap2.sh` (CI job `rollout-tooling`, and `vendored-object.yml`) downloads both crates from crates.io, checks the pinned sha256s, and fails unless `diff -r` against each vendored directory is exactly the backport hunks. Mutations checked: an extra line in a vendored file, a weakened check, and a removed `[patch]` entry each fail it. |
+| Monitoring | `scripts/check-vendored-memmap2.sh advisories` writes a synthetic `Cargo.lock` with both crates.io identities and runs `cargo audit --file Cargo.lock --deny warnings --ignore RUSTSEC-2026-0186` with the repository's `.cargo/audit.toml`: any other advisory against either version fails. **RUSTSEC-2026-0186 is ignored in this check only, because the backport fixes it.** It runs in `supply-chain-audit` on every PR and push to main, and daily in `vendored-object.yml`. Both modes fail first if a pin drifts from what is built. |
+| Exit | Delete a patch and its directory once its dependent no longer resolves to that version (cargo then reports the patch as unused, which the script refuses). That is an engine dependency change and needs review for consensus impact. |
+
 ### Non-security warnings (documented, non-blocking)
 
 RustSec informational warnings present at this snapshot — surfaced by `cargo
 audit`, not failed, and not broadly allowed:
 
 - **unmaintained:** bincode, derivative, paste, proc-macro-error, instant, fxhash, rustls-pemfile
-- **unsound:** anyhow, lru, memmap2, rand, keccak
+- **unsound:** anyhow, lru, memmap2, rand, keccak (memmap2: resolved by the vendored backports above, RUSTSEC-2026-0186)
 - **yanked:** core2, keccak
 
 ## Maintenance

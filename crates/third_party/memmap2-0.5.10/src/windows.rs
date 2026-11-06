@@ -397,6 +397,10 @@ impl MmapInner {
     }
 
     pub fn flush_async(&self, offset: usize, len: usize) -> io::Result<()> {
+        // SUM-CHAIN: bounds check backported from memmap2 0.9.11 (RUSTSEC-2026-0186).
+        if offset > self.len || len > self.len - offset {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
         if self.ptr == empty_slice_ptr() {
             return Ok(());
         }

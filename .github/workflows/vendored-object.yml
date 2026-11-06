@@ -8,6 +8,9 @@ name: vendored-object
 #     advisories against a path crate, so this is the advisory check that covers
 #     it. It also runs daily, so a new advisory surfaces without a PR. (The same
 #     advisories check runs in rust-ci's supply-chain-audit on every PR.)
+#   * vendored memmap2 0.5.10 and 0.6.2 (RUSTSEC-2026-0186): the same two checks
+#     for crates/third_party/memmap2-*, the crates.io crates with memmap2
+#     0.9.11's bounds checks backported (scripts/check-vendored-memmap2.sh).
 #   * wasmer artifacts base vs head: Module::serialize() of the test WAT corpus,
 #     plain and metered Singlepass, is byte-identical at the PR's merge base and
 #     head, on x86_64 and aarch64 Linux (scripts/compare-wasmer-artifacts.sh).
@@ -22,6 +25,7 @@ on:
       - crates/third_party/**
       - crates/sumc-runtime/examples/artifact_hash.rs
       - scripts/check-vendored-object.sh
+      - scripts/check-vendored-memmap2.sh
       - scripts/compare-wasmer-artifacts.sh
       - .cargo/audit.toml
       - .github/workflows/vendored-object.yml
@@ -53,6 +57,12 @@ jobs:
 
       - name: No RustSec advisory against crates.io object 0.32.2, the vendored copy's identity
         run: bash scripts/check-vendored-object.sh advisories
+
+      - name: Vendored memmap2 0.5.10 / 0.6.2 are the crates.io crates but for the backported bounds checks
+        run: bash scripts/check-vendored-memmap2.sh source
+
+      - name: No RustSec advisory but RUSTSEC-2026-0186 against crates.io memmap2 0.5.10 / 0.6.2
+        run: bash scripts/check-vendored-memmap2.sh advisories
 
   artifacts:
     name: wasmer artifacts base vs head (${{ matrix.arch }})

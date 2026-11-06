@@ -148,6 +148,16 @@ ethabi = "18"
 # that in CI. It is not a workspace member. See docs/security/DEPENDENCY-AUDIT.md.
 [patch.crates-io]
 object = { path = "crates/third_party/object-0.32.2" }
+# RUSTSEC-2026-0186: memmap2 before 0.9.11 does not bounds-check the offset and
+# length that flush_range, flush_async_range and advise_range use for pointer
+# arithmetic. wasmer 5.0.6 reaches 0.6.2 through shared-buffer and 0.5.10 through
+# dynasmrt, and no wasmer release that builds on this toolchain moves either to
+# 0.9.11. crates/third_party/memmap2-{0.5.10,0.6.2} are the crates.io crates
+# verbatim except for upstream's 0.9.11 bounds checks in unix.rs and windows.rs;
+# scripts/check-vendored-memmap2.sh proves that in CI. Neither is a workspace
+# member. See docs/security/DEPENDENCY-AUDIT.md.
+memmap2 = { path = "crates/third_party/memmap2-0.6.2" }
+memmap2-0510 = { package = "memmap2", path = "crates/third_party/memmap2-0.5.10" }
 
 [profile.release]
 lto = true

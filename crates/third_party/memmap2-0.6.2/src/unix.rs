@@ -175,6 +175,10 @@ impl MmapInner {
     }
 
     pub fn flush(&self, offset: usize, len: usize) -> io::Result<()> {
+        // SUM-CHAIN: bounds check backported from memmap2 0.9.11 (RUSTSEC-2026-0186).
+        if offset > self.len || len > self.len - offset {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
         let alignment = (self.ptr as usize + offset) % page_size();
         let offset = offset as isize - alignment as isize;
         let len = len + alignment;
@@ -188,6 +192,10 @@ impl MmapInner {
     }
 
     pub fn flush_async(&self, offset: usize, len: usize) -> io::Result<()> {
+        // SUM-CHAIN: bounds check backported from memmap2 0.9.11 (RUSTSEC-2026-0186).
+        if offset > self.len || len > self.len - offset {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
         let alignment = (self.ptr as usize + offset) % page_size();
         let offset = offset as isize - alignment as isize;
         let len = len + alignment;
@@ -242,6 +250,10 @@ impl MmapInner {
     }
 
     pub fn advise(&self, advice: Advice, offset: usize, len: usize) -> io::Result<()> {
+        // SUM-CHAIN: bounds check backported from memmap2 0.9.11 (RUSTSEC-2026-0186).
+        if offset > self.len || len > self.len {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
         let alignment = (self.ptr as usize + offset) % page_size();
         let offset = offset as isize - alignment as isize;
         let len = len + alignment;
