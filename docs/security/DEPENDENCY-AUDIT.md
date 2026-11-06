@@ -171,7 +171,8 @@ and wasmer ≥ 6.0.0 is BUSL-1.1 (`WASMER-5-MIGRATION.md`), so no version update
 | Callers | A scan of the source of every crates.io package in the lock (572) finds no call to `flush_range`, `flush_async_range`, `advise_range` or `unchecked_advise_range` outside `memmap2` itself, and the workspace calls none. `flush()`, `flush_async()` and `advise()` pass `0` and the map's length, which the checks accept, so in-range behaviour is unchanged; only a call that was undefined behaviour now returns an error. |
 | Equivalence | `vendored-object.yml`'s `wasmer artifacts base vs head` jobs run on PRs that touch `crates/third_party/**`, so `scripts/compare-wasmer-artifacts.sh` requires every `Module::serialize()` artifact to be byte-identical at base and head on x86_64 and aarch64 Linux. |
 | Verify | `bash scripts/check-vendored-memmap2.sh` (CI job `rollout-tooling`, and `vendored-object.yml`) downloads both crates from crates.io, checks the pinned sha256s, and fails unless `diff -r` against each vendored directory is exactly the backport hunks. Mutations checked: an extra line in a vendored file, a weakened check, and a removed `[patch]` entry each fail it. |
-| Monitoring | `scripts/check-vendored-memmap2.sh advisories` writes a synthetic `Cargo.lock` with both crates.io identities and runs `cargo audit --file Cargo.lock --deny warnings --ignore RUSTSEC-2026-0186` with the repository's `.cargo/audit.toml`: any other advisory against either version fails. **RUSTSEC-2026-0186 is ignored in this check only, because the backport fixes it. That scoped ignore is an advisory exception, and it is PENDING the owner's decision (2026-11-06); this change does not merge before that decision.** It runs in `supply-chain-audit` on every PR and push to main, and daily in `vendored-object.yml`. Both modes fail first if a pin drifts from what is built. |
+| Monitoring | `scripts/check-vendored-memmap2.sh advisories` writes a synthetic `Cargo.lock` with both crates.io identities and runs `cargo audit --file Cargo.lock --deny warnings --ignore RUSTSEC-2026-0186` with the repository's `.cargo/audit.toml`: any other advisory against either version fails. It runs in `supply-chain-audit` on every PR and push to main, and daily in `vendored-object.yml`. Both modes fail first if a pin drifts from what is built. Checked with local probe databases: the real database passes, and a test unsound advisory and a test vulnerability against `memmap2`, and a test advisory against 0.5.x only, each fail it. |
+| Exception | **Adopted by the owner on 2026-11-06, for the verified, backported 0.5.10 and 0.6.2 copies only.** RUSTSEC-2026-0186 is ignored in the `advisories` check above and nowhere else: `.cargo/audit.toml` and `deny.toml` keep empty `ignore` lists, and the workspace `cargo audit` gate has no exception for it. The `source` check keeps verifying that each vendored directory is the crates.io crate plus exactly the backported checks, and any other advisory against either version still fails. |
 | Exit | Delete a patch and its directory once its dependent no longer resolves to that version (cargo then reports the patch as unused, which the script refuses). That is an engine dependency change and needs review for consensus impact. |
 
 ### Resolved — RUSTSEC-2026-0386 (`tokio` 1.48.0), by tokio 1.51.6
@@ -188,7 +189,7 @@ still in epoll: a use-after-free on the next readiness event. Fixed in 1.51.6 (a
 | Trigger | Not reached: `TokioSocket` owns its `Socket` inside the `AsyncFd` (`Socket::drop` closes the descriptor; `AsyncFd` deregisters before dropping it), the only mutable use on this path is `if-watch`'s `bind()`, and the `unsafe` `FromRawFd` constructor is not used. |
 | Change | `tokio` 1.48.0 → 1.51.6, with `tokio-macros` 2.7.2, `mio` 1.2.4, `socket2` 0.6.5 and `libc` 0.2.191, which 1.51.6 and `mio` 1.2.4 require; `hyper-util`'s `socket2` edge follows to 0.6.5; `windows-sys` 0.60.2 leaves the lock. No manifest change. |
 
-### Partly resolved — RUSTSEC-2026-0253 and RUSTSEC-2026-0002 (`lru` 0.12.5)
+### Open — RUSTSEC-2026-0253 and RUSTSEC-2026-0002 (`lru` 0.12.5 under libp2p); the state cache moved to 0.18.5
 
 [RUSTSEC-2026-0253](https://rustsec.org/advisories/RUSTSEC-2026-0253.html) (unsound): before 0.18.2, `LruCache::pop()` frees a node before
 detaching it, so a key whose `Drop` panics under `catch_unwind` leaves a dangling list pointer that a later eviction writes through.
@@ -199,7 +200,8 @@ detaching it, so a key whose `Drop` panics under `catch_unwind` leaves a danglin
 | Callers | `sumchain-state`'s `StateCache` (`pop()` on `LruCache<Address, …>` and `LruCache<(Address, Hash), …>`), and `libp2p-swarm` 0.44.2's `PeerAddresses` (`pop()` on `LruCache<PeerId, LruCache<Multiaddr, ()>>`; `libp2p-identify` uses it). No `LruCache::iter_mut` anywhere. |
 | Trigger | Not reached: none of these key types has a `Drop` that can panic, the workspace has no `catch_unwind`, and release builds use `panic = "abort"`. |
 | Change | `crates/state` moves to `lru` 0.18.5 (the API it uses is unchanged). |
-| Remaining | `lru` 0.12.5 stays for `libp2p-identify` and `libp2p-swarm` 0.44.2 (`^0.12.3`); removing it needs libp2p ≥ 0.46, a breaking networking upgrade of the validator. **Its disposition (accept on the analysis above, or schedule the libp2p upgrade) is PENDING the owner's decision (2026-11-06).** `cargo audit` keeps reporting both advisories against 0.12.5 until then. |
+| Remaining | `lru` 0.12.5 stays for `libp2p-identify` and `libp2p-swarm` 0.44.2 (`^0.12.3`); removing it needs libp2p ≥ 0.46, a breaking networking upgrade of the validator. **Not fixed.** The owner decided on 2026-11-06 to retain it temporarily on the trigger analysis above. Both advisories stay open against 0.12.5 and no exception is recorded for them, so `cargo audit` keeps reporting them. Their removal (the libp2p upgrade) is planned separately. |
+| Reassess | Repeat the analysis above if any of these change: the callers of `LruCache` 0.12.5 (`pop()`, `iter_mut()`), its key types (`PeerId`, `Multiaddr`), the panic setting (`panic = "abort"`, no `catch_unwind`), or the networking dependencies (`libp2p-*`). |
 
 ### Non-security warnings (documented, non-blocking)
 
@@ -207,7 +209,7 @@ RustSec informational warnings present at this snapshot — surfaced by `cargo
 audit`, not failed, and not broadly allowed:
 
 - **unmaintained:** bincode, derivative, paste, proc-macro-error, instant, fxhash, rustls-pemfile
-- **unsound:** anyhow, lru, memmap2, rand, keccak (memmap2: resolved by the vendored backports above, RUSTSEC-2026-0186; lru: `sumchain-state` on 0.18.5, libp2p's 0.12.5 pending, see above; tokio, RUSTSEC-2026-0386 after this snapshot: resolved above)
+- **unsound:** anyhow, lru, memmap2, rand, keccak (memmap2: resolved by the vendored backports above, RUSTSEC-2026-0186; lru: `sumchain-state` on 0.18.5, libp2p's 0.12.5 open and retained temporarily, see above; tokio, RUSTSEC-2026-0386 after this snapshot: resolved above)
 - **yanked:** core2, keccak
 
 ## Maintenance
