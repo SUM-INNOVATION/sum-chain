@@ -16,8 +16,8 @@
 #
 #   source       (default) Integrity. Downloads lru-0.12.5.crate from crates.io,
 #                checks its sha256 against the pin below (the checksum Cargo.lock
-#                carried before the patch), extracts it, and requires `diff -r`
-#                against the vendored directory to be exactly the backport.
+#                carried before the patch), extracts it, and requires git's diff
+#                of it against the vendored directory to be exactly the backport.
 #   advisories   Monitoring. Writes a synthetic Cargo.lock declaring the crates.io
 #                identity and runs `cargo audit --file` on it with the
 #                repository's .cargo/audit.toml and `--deny warnings`. Any RustSec
@@ -37,7 +37,7 @@
 # 0.12.5, the root Cargo.toml patches lru to it, and Cargo.lock resolves lru
 # 0.12.5 to it (and to nothing from a registry) with no unused patch.
 #
-# Needs curl, tar, diff and sha256sum (or shasum); `advisories` needs
+# Needs curl, tar, git and sha256sum (or shasum); `advisories` needs
 # cargo-audit; `regressions --miri` needs MIRI_TOOLCHAIN with the miri and
 # rust-src components. Writes only to a temp dir.
 # Run locally:  bash scripts/check-vendored-lru.sh [source|advisories|regressions [--miri] [--without-fixes]]
@@ -209,121 +209,124 @@ fi
 # --- source -------------------------------------------------------------------
 expected_diff() {
   cat <<'EOF'
-diff -r upstream/src/lib.rs vendored/src/lib.rs
-1117,1118c1117,1124
-<                 let mut old_node = unsafe {
-<                     let mut old_node = *Box::from_raw(old_node.as_ptr());
----
->                 // SUM-CHAIN: backported from lru 0.18.2 (RUSTSEC-2026-0253): detach
->                 // the node from the list BEFORE freeing it and dropping the key, so
->                 // a key whose `Drop` panics cannot leave dangling list pointers.
->                 let node_ptr: *mut LruEntry<K, V> = old_node.as_ptr();
->                 self.detach(node_ptr);
->
->                 let mut old_node = unsafe { *Box::from_raw(node_ptr) };
->                 unsafe {
-1119a1126
->                 }
-1121,1125d1127
-<                     old_node
-<                 };
-<
-<                 self.detach(&mut old_node);
-<
-1636c1638,1640
-<         let key = unsafe { &mut (*(*self.ptr).key.as_mut_ptr()) as &mut K };
----
->         // SUM-CHAIN: backported from lru 0.16.3 (RUSTSEC-2026-0002): the key is
->         // only ever handed out shared, so it is not reborrowed mutably.
->         let key = unsafe { &(*(*self.ptr).key.as_ptr()) as &K };
-1660c1664,1665
-<         let key = unsafe { &mut (*(*self.end).key.as_mut_ptr()) as &mut K };
----
->         // SUM-CHAIN: backported from lru 0.16.3 (RUSTSEC-2026-0002), as in `next`.
->         let key = unsafe { &(*(*self.end).key.as_ptr()) as &K };
-2677a2683,2754
->     }
->
->     // SUM-CHAIN: regression backported from lru 0.16.3 (jeromefroe/lru-rs#224,
->     // RUSTSEC-2026-0002). Run it under Miri: natively the aliasing is not detected.
->     #[test]
->     fn iter_mut_stacked_borrows_violation() {
->         let mut cache: LruCache<i32, i32> = LruCache::new(NonZeroUsize::new(3).unwrap());
->         cache.put(1, 10);
->         cache.put(2, 20);
->         cache.put(3, 30);
->
->         for (_k, v) in cache.iter_mut() {
->             *v *= 2;
->         }
->
->         assert_eq!(cache.get(&1), Some(&20));
->         assert_eq!(cache.get(&2), Some(&40));
->         assert_eq!(cache.get(&3), Some(&60));
->     }
->
->     // SUM-CHAIN: the same regression in the other direction, through
->     // `DoubleEndedIterator::next_back`, which the backport also changes.
->     #[test]
->     fn iter_mut_rev_stacked_borrows_violation() {
->         let mut cache: LruCache<i32, i32> = LruCache::new(NonZeroUsize::new(3).unwrap());
->         cache.put(1, 10);
->         cache.put(2, 20);
->         cache.put(3, 30);
->
->         for (_k, v) in cache.iter_mut().rev() {
->             *v *= 2;
->         }
->
->         assert_eq!(cache.get(&1), Some(&20));
->         assert_eq!(cache.get(&2), Some(&40));
->         assert_eq!(cache.get(&3), Some(&60));
->     }
->
->     // SUM-CHAIN: regression backported from lru 0.18.2 (jeromefroe/lru-rs#238,
->     // RUSTSEC-2026-0253): a key whose `Drop` panics inside `pop`, caught, then the
->     // cache is reused (insertions, an eviction, a lookup, a full iteration).
->     #[test]
->     fn test_pop_panicking_key_drop_keeps_list_consistent() {
->         use std::panic::{catch_unwind, AssertUnwindSafe};
->         use std::sync::atomic::{AtomicBool, Ordering};
->
->         static ARMED: AtomicBool = AtomicBool::new(false);
->
->         #[derive(PartialEq, Eq, Hash)]
->         struct PanicKey(u32);
->         impl Drop for PanicKey {
->             fn drop(&mut self) {
->                 if ARMED.swap(false, Ordering::SeqCst) {
->                     panic!("PanicKey::drop");
->                 }
->             }
->         }
->
->         let mut cache = LruCache::new(NonZeroUsize::new(4).unwrap());
->         cache.put(PanicKey(1), "a");
->         cache.put(PanicKey(2), "b");
->         cache.put(PanicKey(3), "c");
->
->         ARMED.store(true, Ordering::SeqCst);
->         let _ = catch_unwind(AssertUnwindSafe(|| {
->             cache.pop(&PanicKey(2));
->         }));
->
->         cache.put(PanicKey(4), "d");
->         cache.put(PanicKey(5), "e");
->         let _ = cache.get(&PanicKey(3));
->         for (_k, _v) in cache.iter() {}
+diff --git a/upstream/src/lib.rs b/vendored/src/lib.rs
+index 5ab978edb2eb0f61de411c3c6d104ba9646b3d3d..ef83783f8be4ceb91b3660667fe95f8b4f4b4512 100644
+--- a/upstream/src/lib.rs
++++ b/vendored/src/lib.rs
+@@ -1117,6 +1117,5 @@ impl<K: Hash + Eq, V, S: BuildHasher> LruCache<K, V, S> {
+-                let mut old_node = unsafe {
+-                    let mut old_node = *Box::from_raw(old_node.as_ptr());
+-                    ptr::drop_in_place(old_node.key.as_mut_ptr());
+-
+-                    old_node
+-                };
++                // SUM-CHAIN: backported from lru 0.18.2 (RUSTSEC-2026-0253): detach
++                // the node from the list BEFORE freeing it and dropping the key, so
++                // a key whose `Drop` panics cannot leave dangling list pointers.
++                let node_ptr: *mut LruEntry<K, V> = old_node.as_ptr();
++                self.detach(node_ptr);
+@@ -1124 +1123,4 @@ impl<K: Hash + Eq, V, S: BuildHasher> LruCache<K, V, S> {
+-                self.detach(&mut old_node);
++                let mut old_node = unsafe { *Box::from_raw(node_ptr) };
++                unsafe {
++                    ptr::drop_in_place(old_node.key.as_mut_ptr());
++                }
+@@ -1636 +1638,3 @@ impl<'a, K, V> Iterator for IterMut<'a, K, V> {
+-        let key = unsafe { &mut (*(*self.ptr).key.as_mut_ptr()) as &mut K };
++        // SUM-CHAIN: backported from lru 0.16.3 (RUSTSEC-2026-0002): the key is
++        // only ever handed out shared, so it is not reborrowed mutably.
++        let key = unsafe { &(*(*self.ptr).key.as_ptr()) as &K };
+@@ -1660 +1664,2 @@ impl<'a, K, V> DoubleEndedIterator for IterMut<'a, K, V> {
+-        let key = unsafe { &mut (*(*self.end).key.as_mut_ptr()) as &mut K };
++        // SUM-CHAIN: backported from lru 0.16.3 (RUSTSEC-2026-0002), as in `next`.
++        let key = unsafe { &(*(*self.end).key.as_ptr()) as &K };
+@@ -2678,0 +2684,72 @@ mod tests {
++
++    // SUM-CHAIN: regression backported from lru 0.16.3 (jeromefroe/lru-rs#224,
++    // RUSTSEC-2026-0002). Run it under Miri: natively the aliasing is not detected.
++    #[test]
++    fn iter_mut_stacked_borrows_violation() {
++        let mut cache: LruCache<i32, i32> = LruCache::new(NonZeroUsize::new(3).unwrap());
++        cache.put(1, 10);
++        cache.put(2, 20);
++        cache.put(3, 30);
++
++        for (_k, v) in cache.iter_mut() {
++            *v *= 2;
++        }
++
++        assert_eq!(cache.get(&1), Some(&20));
++        assert_eq!(cache.get(&2), Some(&40));
++        assert_eq!(cache.get(&3), Some(&60));
++    }
++
++    // SUM-CHAIN: the same regression in the other direction, through
++    // `DoubleEndedIterator::next_back`, which the backport also changes.
++    #[test]
++    fn iter_mut_rev_stacked_borrows_violation() {
++        let mut cache: LruCache<i32, i32> = LruCache::new(NonZeroUsize::new(3).unwrap());
++        cache.put(1, 10);
++        cache.put(2, 20);
++        cache.put(3, 30);
++
++        for (_k, v) in cache.iter_mut().rev() {
++            *v *= 2;
++        }
++
++        assert_eq!(cache.get(&1), Some(&20));
++        assert_eq!(cache.get(&2), Some(&40));
++        assert_eq!(cache.get(&3), Some(&60));
++    }
++
++    // SUM-CHAIN: regression backported from lru 0.18.2 (jeromefroe/lru-rs#238,
++    // RUSTSEC-2026-0253): a key whose `Drop` panics inside `pop`, caught, then the
++    // cache is reused (insertions, an eviction, a lookup, a full iteration).
++    #[test]
++    fn test_pop_panicking_key_drop_keeps_list_consistent() {
++        use std::panic::{catch_unwind, AssertUnwindSafe};
++        use std::sync::atomic::{AtomicBool, Ordering};
++
++        static ARMED: AtomicBool = AtomicBool::new(false);
++
++        #[derive(PartialEq, Eq, Hash)]
++        struct PanicKey(u32);
++        impl Drop for PanicKey {
++            fn drop(&mut self) {
++                if ARMED.swap(false, Ordering::SeqCst) {
++                    panic!("PanicKey::drop");
++                }
++            }
++        }
++
++        let mut cache = LruCache::new(NonZeroUsize::new(4).unwrap());
++        cache.put(PanicKey(1), "a");
++        cache.put(PanicKey(2), "b");
++        cache.put(PanicKey(3), "c");
++
++        ARMED.store(true, Ordering::SeqCst);
++        let _ = catch_unwind(AssertUnwindSafe(|| {
++            cache.pop(&PanicKey(2));
++        }));
++
++        cache.put(PanicKey(4), "d");
++        cache.put(PanicKey(5), "e");
++        let _ = cache.get(&PanicKey(3));
++        for (_k, _v) in cache.iter() {}
++    }
 EOF
 }
 
 fetch_upstream
 cp -R "$VENDORED" "$tmp/vendored"
 rc=0
-# Compared with trailing whitespace stripped, so the expected diff below carries
-# none (`git diff --check` runs over this file).
-raw="$(cd "$tmp" && diff -r upstream vendored)" || rc=$?
-[ "$rc" -le 1 ] || fail "diff -r failed (exit $rc)"
+# git's own diff, every option that shapes its output pinned, so the result is the
+# same on every platform (GNU and BSD `diff -r` align changed lines differently).
+# -U0 prints no context lines; --full-index pins both files' blob ids. Compared
+# with trailing whitespace stripped, as the expected diff below is stored.
+raw="$(cd "$tmp" && git -c core.quotepath=false -c diff.noprefix=false -c diff.mnemonicPrefix=false \
+  -c diff.renames=false -c diff.algorithm=myers -c diff.indentHeuristic=true -c color.ui=never \
+  diff --no-index --no-color --no-ext-diff --no-textconv --full-index -U0 upstream vendored)" || rc=$?
+[ "$rc" -le 1 ] || fail "git diff --no-index failed (exit $rc)"
 actual="$(printf '%s\n' "$raw" | sed 's/[[:space:]]*$//')"
 expected="$(expected_diff)"
 if [ "$actual" != "$expected" ]; then
