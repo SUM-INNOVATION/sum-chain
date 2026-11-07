@@ -11,6 +11,12 @@ name: vendored-object
 #   * vendored memmap2 0.5.10 and 0.6.2 (RUSTSEC-2026-0186): the same two checks
 #     for crates/third_party/memmap2-*, the crates.io crates with memmap2
 #     0.9.11's bounds checks backported (scripts/check-vendored-memmap2.sh).
+#   * vendored lru 0.12.5 (RUSTSEC-2026-0253, RUSTSEC-2026-0002): the same two
+#     checks for crates/third_party/lru-0.12.5, the crates.io crate with
+#     upstream's pop and IterMut fixes backported, and a job running the
+#     backported regressions natively and under Miri, plus, under Miri, against
+#     the crates.io source with only the regressions added, where they must
+#     report undefined behaviour (scripts/check-vendored-lru.sh).
 #   * wasmer artifacts base vs head: Module::serialize() of the test WAT corpus,
 #     plain and metered Singlepass, is byte-identical at the PR's merge base and
 #     head, on x86_64 and aarch64 Linux (scripts/compare-wasmer-artifacts.sh).
@@ -26,6 +32,7 @@ on:
       - crates/sumc-runtime/examples/artifact_hash.rs
       - scripts/check-vendored-object.sh
       - scripts/check-vendored-memmap2.sh
+      - scripts/check-vendored-lru.sh
       - scripts/compare-wasmer-artifacts.sh
       - .cargo/audit.toml
       - .github/workflows/vendored-object.yml
@@ -63,6 +70,37 @@ jobs:
 
       - name: No RustSec advisory but RUSTSEC-2026-0186 against crates.io memmap2 0.5.10 / 0.6.2
         run: bash scripts/check-vendored-memmap2.sh advisories
+
+      - name: Vendored lru 0.12.5 is the crates.io crate but for the backported fixes and their regressions
+        run: bash scripts/check-vendored-lru.sh source
+
+      - name: No RustSec advisory but RUSTSEC-2026-0253 / RUSTSEC-2026-0002 against crates.io lru 0.12.5
+        run: bash scripts/check-vendored-lru.sh advisories
+
+  lru-regressions:
+    name: vendored lru regressions (native and Miri)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # The nightly whose Miri the regressions were validated with.
+      MIRI_TOOLCHAIN: nightly-2026-10-23
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pinned toolchain
+        run: rustup show
+
+      - name: Install the pinned nightly with Miri
+        run: rustup toolchain install "$MIRI_TOOLCHAIN" --profile minimal --component miri,rust-src
+
+      - name: Backported regressions pass natively
+        run: bash scripts/check-vendored-lru.sh regressions
+
+      - name: Backported regressions pass under Miri
+        run: bash scripts/check-vendored-lru.sh regressions --miri
+
+      - name: Without the fixes, Miri reports undefined behaviour in every regression
+        run: bash scripts/check-vendored-lru.sh regressions --miri --without-fixes
 
   artifacts:
     name: wasmer artifacts base vs head (${{ matrix.arch }})

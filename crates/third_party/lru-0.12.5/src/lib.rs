@@ -1114,14 +1114,16 @@ impl<K: Hash + Eq, V, S: BuildHasher> LruCache<K, V, S> {
         match self.map.remove(KeyWrapper::from_ref(k)) {
             None => None,
             Some(old_node) => {
-                let mut old_node = unsafe {
-                    let mut old_node = *Box::from_raw(old_node.as_ptr());
+                // SUM-CHAIN: backported from lru 0.18.2 (RUSTSEC-2026-0253): detach
+                // the node from the list BEFORE freeing it and dropping the key, so
+                // a key whose `Drop` panics cannot leave dangling list pointers.
+                let node_ptr: *mut LruEntry<K, V> = old_node.as_ptr();
+                self.detach(node_ptr);
+
+                let mut old_node = unsafe { *Box::from_raw(node_ptr) };
+                unsafe {
                     ptr::drop_in_place(old_node.key.as_mut_ptr());
-
-                    old_node
-                };
-
-                self.detach(&mut old_node);
+                }
 
                 let LruEntry { key: _, val, .. } = old_node;
                 unsafe { Some(val.assume_init()) }
@@ -1633,7 +1635,9 @@ impl<'a, K, V> Iterator for IterMut<'a, K, V> {
             return None;
         }
 
-        let key = unsafe { &mut (*(*self.ptr).key.as_mut_ptr()) as &mut K };
+        // SUM-CHAIN: backported from lru 0.16.3 (RUSTSEC-2026-0002): the key is
+        // only ever handed out shared, so it is not reborrowed mutably.
+        let key = unsafe { &(*(*self.ptr).key.as_ptr()) as &K };
         let val = unsafe { &mut (*(*self.ptr).val.as_mut_ptr()) as &mut V };
 
         self.len -= 1;
@@ -1657,7 +1661,8 @@ impl<'a, K, V> DoubleEndedIterator for IterMut<'a, K, V> {
             return None;
         }
 
-        let key = unsafe { &mut (*(*self.end).key.as_mut_ptr()) as &mut K };
+        // SUM-CHAIN: backported from lru 0.16.3 (RUSTSEC-2026-0002), as in `next`.
+        let key = unsafe { &(*(*self.end).key.as_ptr()) as &K };
         let val = unsafe { &mut (*(*self.end).val.as_mut_ptr()) as &mut V };
 
         self.len -= 1;
@@ -2675,6 +2680,78 @@ mod tests {
 
         assert_eq!(cache.pop_lru(), None);
         assert_eq!(cloned.pop_lru(), None);
+    }
+
+    // SUM-CHAIN: regression backported from lru 0.16.3 (jeromefroe/lru-rs#224,
+    // RUSTSEC-2026-0002). Run it under Miri: natively the aliasing is not detected.
+    #[test]
+    fn iter_mut_stacked_borrows_violation() {
+        let mut cache: LruCache<i32, i32> = LruCache::new(NonZeroUsize::new(3).unwrap());
+        cache.put(1, 10);
+        cache.put(2, 20);
+        cache.put(3, 30);
+
+        for (_k, v) in cache.iter_mut() {
+            *v *= 2;
+        }
+
+        assert_eq!(cache.get(&1), Some(&20));
+        assert_eq!(cache.get(&2), Some(&40));
+        assert_eq!(cache.get(&3), Some(&60));
+    }
+
+    // SUM-CHAIN: the same regression in the other direction, through
+    // `DoubleEndedIterator::next_back`, which the backport also changes.
+    #[test]
+    fn iter_mut_rev_stacked_borrows_violation() {
+        let mut cache: LruCache<i32, i32> = LruCache::new(NonZeroUsize::new(3).unwrap());
+        cache.put(1, 10);
+        cache.put(2, 20);
+        cache.put(3, 30);
+
+        for (_k, v) in cache.iter_mut().rev() {
+            *v *= 2;
+        }
+
+        assert_eq!(cache.get(&1), Some(&20));
+        assert_eq!(cache.get(&2), Some(&40));
+        assert_eq!(cache.get(&3), Some(&60));
+    }
+
+    // SUM-CHAIN: regression backported from lru 0.18.2 (jeromefroe/lru-rs#238,
+    // RUSTSEC-2026-0253): a key whose `Drop` panics inside `pop`, caught, then the
+    // cache is reused (insertions, an eviction, a lookup, a full iteration).
+    #[test]
+    fn test_pop_panicking_key_drop_keeps_list_consistent() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static ARMED: AtomicBool = AtomicBool::new(false);
+
+        #[derive(PartialEq, Eq, Hash)]
+        struct PanicKey(u32);
+        impl Drop for PanicKey {
+            fn drop(&mut self) {
+                if ARMED.swap(false, Ordering::SeqCst) {
+                    panic!("PanicKey::drop");
+                }
+            }
+        }
+
+        let mut cache = LruCache::new(NonZeroUsize::new(4).unwrap());
+        cache.put(PanicKey(1), "a");
+        cache.put(PanicKey(2), "b");
+        cache.put(PanicKey(3), "c");
+
+        ARMED.store(true, Ordering::SeqCst);
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            cache.pop(&PanicKey(2));
+        }));
+
+        cache.put(PanicKey(4), "d");
+        cache.put(PanicKey(5), "e");
+        let _ = cache.get(&PanicKey(3));
+        for (_k, _v) in cache.iter() {}
     }
 }
 
