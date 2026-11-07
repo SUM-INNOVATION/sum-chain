@@ -158,6 +158,14 @@ object = { path = "crates/third_party/object-0.32.2" }
 # member. See docs/security/DEPENDENCY-AUDIT.md.
 memmap2 = { path = "crates/third_party/memmap2-0.6.2" }
 memmap2-0510 = { package = "memmap2", path = "crates/third_party/memmap2-0.5.10" }
+# RUSTSEC-2026-0253 / RUSTSEC-2026-0002: lru 0.12.5, reached only through
+# libp2p-swarm and libp2p-identify 0.44.2, frees a node before detaching it in
+# pop() (a key whose Drop panics leaves dangling list pointers) and reborrows keys
+# mutably in IterMut. crates/third_party/lru-0.12.5 is the crates.io crate
+# verbatim except for upstream's fixes (lru 0.18.2 and 0.16.3) and their
+# regressions in src/lib.rs; scripts/check-vendored-lru.sh proves that in CI.
+# sumchain-state's lru 0.18.5 is not patched. See docs/security/DEPENDENCY-AUDIT.md.
+lru = { path = "crates/third_party/lru-0.12.5" }
 
 [profile.release]
 lto = true

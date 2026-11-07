@@ -153,6 +153,12 @@ jobs:
       - name: cargo-audit — vendored memmap2 0.5.10 / 0.6.2 as their crates.io identities (RUSTSEC-2026-0186)
         run: bash scripts/check-vendored-memmap2.sh advisories
 
+      # RUSTSEC-2026-0253 / RUSTSEC-2026-0002: the same for the vendored lru 0.12.5.
+      # Every advisory against its crates.io identity fails except those two, which
+      # the backported fixes address. vendored-object.yml also runs this daily.
+      - name: cargo-audit — vendored lru 0.12.5 as its crates.io identity (RUSTSEC-2026-0253, RUSTSEC-2026-0002)
+        run: bash scripts/check-vendored-lru.sh advisories
+
   build-test-clippy-aarch64:
     # C3 (issue #127 dependency hardening): build/test/clippy the ENTIRE workspace
     # — including the `blst`-backed `sumchain-beacon-crypto` now linked into
