@@ -48,7 +48,9 @@ in `supply-chain-audit` and daily in `vendored-object.yml`, and
 `scripts/check-vendored-object.sh` (CI job `rollout-tooling`) checks that the copy
 matches crates.io. See the #306 section below. The vendored `memmap2` 0.5.10 and
 0.6.2 (RUSTSEC-2026-0186) are checked the same way by
-`scripts/check-vendored-memmap2.sh`; see the RUSTSEC-2026-0186 section below.
+`scripts/check-vendored-memmap2.sh`, and the vendored `lru` 0.12.5
+(RUSTSEC-2026-0253, RUSTSEC-2026-0002) by `scripts/check-vendored-lru.sh`; see
+their sections below.
 
 ## License policy
 
@@ -189,7 +191,7 @@ still in epoll: a use-after-free on the next readiness event. Fixed in 1.51.6 (a
 | Trigger | Not reached: `TokioSocket` owns its `Socket` inside the `AsyncFd` (`Socket::drop` closes the descriptor; `AsyncFd` deregisters before dropping it), the only mutable use on this path is `if-watch`'s `bind()`, and the `unsafe` `FromRawFd` constructor is not used. |
 | Change | `tokio` 1.48.0 → 1.51.6, with `tokio-macros` 2.7.2, `mio` 1.2.4, `socket2` 0.6.5 and `libc` 0.2.191, which 1.51.6 and `mio` 1.2.4 require; `hyper-util`'s `socket2` edge follows to 0.6.5; `windows-sys` 0.60.2 leaves the lock. No manifest change. |
 
-### Open — RUSTSEC-2026-0253 and RUSTSEC-2026-0002 (`lru` 0.12.5 under libp2p); the state cache moved to 0.18.5
+### Resolved — RUSTSEC-2026-0253 and RUSTSEC-2026-0002 (`lru`): the state cache on 0.18.5, libp2p's 0.12.5 by vendored backport
 
 [RUSTSEC-2026-0253](https://rustsec.org/advisories/RUSTSEC-2026-0253.html) (unsound): before 0.18.2, `LruCache::pop()` frees a node before
 detaching it, so a key whose `Drop` panics under `catch_unwind` leaves a dangling list pointer that a later eviction writes through.
@@ -199,9 +201,14 @@ detaching it, so a key whose `Drop` panics under `catch_unwind` leaves a danglin
 |---|---|
 | Callers | `sumchain-state`'s `StateCache` (`pop()` on `LruCache<Address, …>` and `LruCache<(Address, Hash), …>`), and `libp2p-swarm` 0.44.2's `PeerAddresses` (`pop()` on `LruCache<PeerId, LruCache<Multiaddr, ()>>`; `libp2p-identify` uses it). No `LruCache::iter_mut` anywhere. |
 | Trigger | Not reached: none of these key types has a `Drop` that can panic, the workspace has no `catch_unwind`, and release builds use `panic = "abort"`. |
-| Change | `crates/state` moves to `lru` 0.18.5 (the API it uses is unchanged). |
-| Remaining | `lru` 0.12.5 stays for `libp2p-identify` and `libp2p-swarm` 0.44.2 (`^0.12.3`); removing it needs libp2p ≥ 0.46, a breaking networking upgrade of the validator. **Not fixed.** The owner decided on 2026-11-06 to retain it temporarily on the trigger analysis above. Both advisories stay open against 0.12.5 and no exception is recorded for them, so `cargo audit` keeps reporting them. Their removal (the libp2p upgrade) is planned separately. |
-| Reassess | Repeat the analysis above if any of these change: the callers of `LruCache` 0.12.5 (`pop()`, `iter_mut()`), its key types (`PeerId`, `Multiaddr`), the panic setting (`panic = "abort"`, no `catch_unwind`), or the networking dependencies (`libp2p-*`). |
+| Change (state cache) | `crates/state` moves to `lru` 0.18.5 (the API it uses is unchanged). |
+| Change (libp2p) | `lru` 0.12.5 stays the version `libp2p-swarm` and `libp2p-identify` 0.44.2 require (`^0.12.3`); removing it needs libp2p ≥ 0.46, a breaking networking upgrade of the validator. Instead the root `Cargo.toml` `[patch.crates-io]` points `lru` at `crates/third_party/lru-0.12.5`: the crates.io `.crate` extracted verbatim (sha256 `234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38`, the checksum `Cargo.lock` recorded), with upstream's two fixes backported into `src/lib.rs`, each under a `// SUM-CHAIN` comment: `LruCache::pop` detaches the node before freeing it and dropping the key (lru 0.18.2, jeromefroe/lru-rs#238), and `IterMut::next` / `next_back` hand out the key as `&K` (lru 0.16.3, jeromefroe/lru-rs#224). It is not a workspace member. The patch applies only to the `^0.12` requirement; `sumchain-state`'s 0.18.5 is not patched. |
+| `Cargo.lock` | The `lru` 0.12.5 entry loses its `source` and `checksum` lines. Nothing else changes. |
+| Regressions | Upstream's tests are added to the vendored crate's tests: `test_pop_panicking_key_drop_keeps_list_consistent` (a key's `Drop` panics inside `pop`, the panic is caught, then the cache is reused: insertions, an eviction, a lookup and a full iteration) and `iter_mut_stacked_borrows_violation`, plus `iter_mut_rev_stacked_borrows_violation` for `next_back`. `scripts/check-vendored-lru.sh regressions` runs them from a copy outside the workspace, natively and with `--miri` under Miri (pinned `nightly-2026-10-23`). With `--miri --without-fixes` it runs them on the crates.io source plus only the tests and requires Miri to report undefined behaviour in each: it does (a Stacked Borrows retag violation in both `IterMut` directions, and failed pointer arithmetic on the freed node in `pop`). |
+| Verify | `bash scripts/check-vendored-lru.sh` (CI job `rollout-tooling`, and `vendored-object.yml`) downloads the crate from crates.io, checks the pinned sha256, and fails unless `diff -r` against the vendored directory is exactly the backported fixes and their regressions. Mutations checked: an extra line in the vendored source, the `pop` fix reverted, the `[patch]` entry removed, and `Cargo.lock` resolving 0.12.5 from the registry each fail it. |
+| Monitoring | `scripts/check-vendored-lru.sh advisories` writes a synthetic `Cargo.lock` declaring the crates.io identity and runs `cargo audit --file Cargo.lock --deny warnings --ignore RUSTSEC-2026-0253 --ignore RUSTSEC-2026-0002` with the repository's `.cargo/audit.toml`: any other advisory against `lru` 0.12.5 fails. It runs in `supply-chain-audit` on every PR and push to main, and daily in `vendored-object.yml` with the source check and the regressions job. Every mode fails first if the pin drifts from what is built. Checked with local probe databases: the real database passes, and a test unsound advisory and a test vulnerability against `lru` each fail it. |
+| Exception | **Adopted by the owner on 2026-11-07, for this verified, patched `lru` 0.12.5 copy only.** RUSTSEC-2026-0253 and RUSTSEC-2026-0002 are ignored in the `advisories` check above and nowhere else: `.cargo/audit.toml` and `deny.toml` keep empty `ignore` lists, and the workspace `cargo audit` gate has no exception for them. Other advisories and any source drift fail the guards. |
+| Exit | Delete the patch and the directory once libp2p no longer resolves `lru` 0.12.x (cargo then reports the patch as unused, which the script refuses). That is the libp2p upgrade, tracked separately. |
 
 ### Non-security warnings (documented, non-blocking)
 
@@ -209,7 +216,7 @@ RustSec informational warnings present at this snapshot — surfaced by `cargo
 audit`, not failed, and not broadly allowed:
 
 - **unmaintained:** bincode, derivative, paste, proc-macro-error, instant, fxhash, rustls-pemfile
-- **unsound:** anyhow, lru, memmap2, rand, keccak (memmap2: resolved by the vendored backports above, RUSTSEC-2026-0186; lru: `sumchain-state` on 0.18.5, libp2p's 0.12.5 open and retained temporarily, see above; tokio, RUSTSEC-2026-0386 after this snapshot: resolved above)
+- **unsound:** anyhow, lru, memmap2, rand, keccak (memmap2: resolved by the vendored backports above, RUSTSEC-2026-0186; lru: `sumchain-state` on 0.18.5, libp2p's 0.12.5 resolved by the vendored backport above; tokio, RUSTSEC-2026-0386 after this snapshot: resolved above)
 - **yanked:** core2, keccak
 
 ## Maintenance
