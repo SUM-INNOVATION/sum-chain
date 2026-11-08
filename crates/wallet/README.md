@@ -14,6 +14,20 @@ transactions against a SUM Chain node's RPC.
 - `keystore` — key storage/loading; `tx` — transaction build/sign/submit;
   `currency` — Koppa/base-unit conversion; `display` — output formatting.
 
+## Swarm roster (display only)
+
+`--swarm-roster <FILE>` (a global option) names a file of accounts whose addresses the wallet prints in the agent form
+`r0…` (#309). Every other address prints as before.
+
+- **Source:** the file is the roster's only source; the chain has no swarm registry yet.
+- **Default:** without the option there is no roster, and every address prints in the plain form.
+- **Format:** entries are separated by newlines, commas or whitespace, and `#` starts a comment. Each entry is a plain,
+  `r0` or hex address. An entry that is not an address stops the wallet with an error naming its line.
+- **Display only:** `r0` is a text form of the same address and grants nothing. The roster is read only when printing;
+  no signature, fee, permission or consensus rule reads it. A transfer to `r0…` is byte-for-byte the transaction to the
+  plain form (tested).
+- **Input:** address arguments also accept the `r0` form, so a printed address can be pasted back.
+
 ## Not for
 
 - Library/server use — this is an end-user CLI, not a stable embedding API. For

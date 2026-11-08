@@ -737,9 +737,7 @@ pub async fn messaging_get_messages(
         recipient.to_string()
     } else {
         // Try to parse as address and hash it
-        let addr = sumchain_primitives::Address::from_base58(recipient)
-            .or_else(|_| sumchain_primitives::Address::from_hex(recipient))
-            .context("Invalid recipient address")?;
+        let addr = crate::roster::parse_address(recipient).context("Invalid recipient address")?;
         let hash = blake3::hash(addr.as_bytes());
         format!("0x{}", hex::encode(hash.as_bytes()))
     };

@@ -12,6 +12,7 @@ use colored::Colorize;
 mod currency;
 mod display;
 mod keystore;
+mod roster;
 mod tx;
 
 use currency::{format_koppa, parse_koppa, KOPPA_SYMBOL};
@@ -49,6 +50,11 @@ struct Cli {
     /// Disable colored output
     #[arg(long, global = true)]
     no_color: bool,
+
+    /// Swarm roster file: addresses (plain, r0 or hex; `#` comments) printed in
+    /// the agent form `r0…`. Display only; `r0` grants nothing (#309).
+    #[arg(long, global = true, value_name = "FILE")]
+    swarm_roster: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -801,6 +807,10 @@ async fn main() -> Result<()> {
         colored::control::set_override(false);
     }
 
+    if let Some(path) = &cli.swarm_roster {
+        roster::init(roster::Roster::load(path).map_err(anyhow::Error::msg)?);
+    }
+
     match cli.command {
         Commands::Info => {
             print_banner();
@@ -834,7 +844,7 @@ async fn main() -> Result<()> {
             print_success("Keypair generated successfully!");
             println!();
             print_field("Public Key", &keystore.public_key().to_base58());
-            print_field("Address", &keystore.address().to_base58());
+            print_field("Address", &roster::show(&keystore.address()));
             print_field("Saved to", &format!("{:?}", output));
             println!();
             print_warning("Back up your keystore file and remember your password!");
@@ -842,7 +852,7 @@ async fn main() -> Result<()> {
 
         Commands::Address { key } => {
             let keystore = load_keystore(&key)?;
-            println!("{}", keystore.address().to_base58().cyan());
+            println!("{}", roster::show(&keystore.address()).cyan());
         }
 
         Commands::Pubkey { key } => {
@@ -865,13 +875,12 @@ async fn main() -> Result<()> {
             let fee_units = parse_koppa(&fee)
                 .context("Invalid fee format. Use e.g., '0.001' for 0.001 Koppa")?;
 
-            let to_addr = sumchain_primitives::Address::from_base58(&to)
-                .or_else(|_| sumchain_primitives::Address::from_hex(&to))
+            let to_addr = roster::parse_address(&to)
                 .context("Invalid recipient address")?;
 
             print_transaction_summary(
-                &keystore.address().to_base58(),
-                &to,
+                &roster::show(&keystore.address()),
+                &roster::show_text(&to),
                 amount_units,
                 fee_units,
                 nonce,
@@ -907,14 +916,14 @@ async fn main() -> Result<()> {
             if raw {
                 println!("{}", balance);
             } else {
-                print_field("Address", &address);
+                print_field("Address", &roster::show_text(&address));
                 print_field("Balance", &format_koppa(balance).green().to_string());
             }
         }
 
         Commands::Nonce { rpc, address } => {
             let nonce = tx::get_nonce(&rpc, &address).await?;
-            print_field("Address", &address);
+            print_field("Address", &roster::show_text(&address));
             print_field("Nonce", &nonce.to_string());
         }
 
@@ -934,8 +943,7 @@ async fn main() -> Result<()> {
             let fee_units = parse_koppa(&fee)
                 .context("Invalid fee format. Use e.g., '0.001' for 0.001 Koppa")?;
 
-            let to_addr = sumchain_primitives::Address::from_base58(&to)
-                .or_else(|_| sumchain_primitives::Address::from_hex(&to))
+            let to_addr = roster::parse_address(&to)
                 .context("Invalid recipient address")?;
 
             // Get current nonce
@@ -947,7 +955,7 @@ async fn main() -> Result<()> {
 
             print_header(&format!("Transfer {} Koppa", KOPPA_SYMBOL));
             println!();
-            print_field("From", &keystore.address().to_base58());
+            print_field("From", &roster::show(&keystore.address()));
             print_field("Current Balance", &format_koppa(balance));
             print_separator();
             print_field("To", &to);
@@ -1155,7 +1163,7 @@ async fn main() -> Result<()> {
 
             print_header("Archive-Node Unbonding Status");
             println!();
-            print_field("Archive Node", &address);
+            print_field("Archive Node", &roster::show_text(&address));
             match unbonding {
                 Some(u) => {
                     print_koppa_field("Unbonding Amount", u.amount as u128);
@@ -1233,7 +1241,7 @@ async fn main() -> Result<()> {
                 for (i, n) in nodes.iter().enumerate() {
                     print_list_item(
                         i,
-                        &format!("{} — {} / {} — stake {}", n.address, n.role, n.status, n.staked_balance),
+                        &format!("{} — {} / {} — stake {}", roster::show_text(&n.address), n.role, n.status, n.staked_balance),
                     );
                 }
             }
@@ -1620,7 +1628,7 @@ async fn main() -> Result<()> {
                 Some(c) => {
                     print_header("Smart Contract");
                     println!();
-                    print_field("Address", &c.address);
+                    print_field("Address", &roster::show_text(&c.address));
                     print_field("Code Hash", &c.code_hash);
                     print_field("Owner", &c.owner);
                     print_separator();
@@ -1638,7 +1646,7 @@ async fn main() -> Result<()> {
         Commands::IsContract { rpc, address } => {
             let is_contract = tx::contract_is_contract(&rpc, &address).await?;
 
-            print_field("Address", &address);
+            print_field("Address", &roster::show_text(&address));
             if is_contract {
                 println!("  {}: {}", "Is Contract".dimmed(), "Yes".green().bold());
             } else {
@@ -1708,11 +1716,11 @@ async fn main() -> Result<()> {
 
             match hash {
                 Some(h) => {
-                    print_field("Address", &address);
+                    print_field("Address", &roster::show_text(&address));
                     print_field("Code Hash", &h.cyan().to_string());
                 }
                 None => {
-                    print_field("Address", &address);
+                    print_field("Address", &roster::show_text(&address));
                     print_warning("No contract found at this address");
                 }
             }
@@ -1721,7 +1729,7 @@ async fn main() -> Result<()> {
         Commands::ContractStorage { rpc, address, key } => {
             let value = tx::contract_get_storage(&rpc, &address, &key).await?;
 
-            print_field("Contract", &address);
+            print_field("Contract", &roster::show_text(&address));
             print_field("Key", &key);
             match value {
                 Some(v) => {
@@ -1737,7 +1745,7 @@ async fn main() -> Result<()> {
             let balance_str = tx::contract_get_balance(&rpc, &address).await?;
             let balance: u128 = balance_str.parse().unwrap_or(0);
 
-            print_field("Contract", &address);
+            print_field("Contract", &roster::show_text(&address));
             print_koppa_field("Balance", balance);
         }
 
@@ -1813,7 +1821,7 @@ async fn main() -> Result<()> {
 
                     print_header("Staking Validator");
                     println!();
-                    print_field("Address", &v.address);
+                    print_field("Address", &roster::show_text(&v.address));
                     print_field("Public Key", &v.pubkey);
                     print_separator();
                     println!("  {}: {}", "Status".dimmed(), status_color);
@@ -1927,7 +1935,7 @@ async fn main() -> Result<()> {
                     print_header("Delegation");
                     println!();
                     print_field("Delegator", &d.delegator);
-                    print_field("Validator Address", &d.validator_address);
+                    print_field("Validator Address", &roster::show_text(&d.validator_address));
                     print_field("Validator Pubkey", &d.validator_pubkey);
                     print_separator();
                     print_koppa_field("Delegated Amount", amount);
@@ -2022,7 +2030,7 @@ async fn main() -> Result<()> {
             print_header("Validator Delegation Summary");
             println!();
             print_field("Validator Pubkey", &summary.validator_pubkey);
-            print_field("Validator Address", &summary.validator_address);
+            print_field("Validator Address", &roster::show_text(&summary.validator_address));
             print_separator();
             print_koppa_field("Total Delegated", total_delegated);
             print_field("Delegator Count", &summary.delegator_count.to_string());
@@ -2052,7 +2060,7 @@ async fn main() -> Result<()> {
 
             print_header("Messaging Quota");
             println!();
-            print_field("Address", &quota.address);
+            print_field("Address", &roster::show_text(&quota.address));
             print_separator();
             print_field("Daily Quota", &quota.daily_quota.to_string());
             print_field("Used Today", &quota.used_today.to_string());
@@ -2077,7 +2085,7 @@ async fn main() -> Result<()> {
 
             print_header("Inbox Filter");
             println!();
-            print_field("Address", &address);
+            print_field("Address", &roster::show_text(&address));
             match filter {
                 Some(f) => {
                     print_field("Mode", &f.mode);
@@ -2120,7 +2128,7 @@ async fn main() -> Result<()> {
 
             print_header("Trust Stake");
             println!();
-            print_field("Address", &address);
+            print_field("Address", &roster::show_text(&address));
             print_koppa_field("Stake Amount", stake_amount);
         }
 
