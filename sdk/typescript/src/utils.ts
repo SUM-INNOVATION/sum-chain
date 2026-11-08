@@ -282,6 +282,57 @@ export function fromRaddress(raddress: string): string {
 }
 
 /**
+ * Parse a swarm roster for display (sum-chain #309 item 3): the accounts whose
+ * addresses are shown in the agent form `r0…`. Display only: the `r0` form does
+ * not identify an agent or grant anything, and being on a roster changes how an
+ * address is shown, nothing else. Until the chain has a swarm registry, a
+ * configured list like this is the roster's only source.
+ *
+ * Entries are separated by commas or whitespace, and `#` starts a comment to
+ * the end of its line. Each entry is a plain base58 address or its `r0` form;
+ * hex is not accepted here. A format check, as for {@link isValidAddress}: the
+ * 4-byte checksum is verified only by the node.
+ *
+ * @param text - The roster text, for example a configuration value
+ * @returns The members, as plain base58 addresses
+ * @throws On an entry in neither form, naming its line, so a typo cannot
+ *   silently leave a member out
+ */
+export function parseSwarmRoster(text: string): Set<string> {
+  const members = new Set<string>();
+  text.split(/\r?\n/).forEach((rawLine, i) => {
+    for (const entry of rawLine.split('#')[0].split(/[\s,]+/)) {
+      if (entry === '') {
+        continue;
+      }
+      if (isRaddress(entry)) {
+        members.add(fromRaddress(entry));
+      } else if (isPlainBase58Address(entry)) {
+        members.add(entry);
+      } else {
+        throw new Error(`parseSwarmRoster: line ${i + 1}: '${entry}' is not a plain or r0 address`);
+      }
+    }
+  });
+  return members;
+}
+
+/**
+ * The text to show for an address, given a swarm roster from
+ * {@link parseSwarmRoster}: the `r0` form for a member, whichever of the two
+ * forms `address` is in, and `address` unchanged otherwise, including hex and
+ * text that is not an address. Display only.
+ *
+ * @param address - An address as received or typed
+ * @param roster - The members, as plain base58 addresses
+ * @returns The text to show
+ */
+export function displayAddress(address: string, roster: ReadonlySet<string>): string {
+  const plain = isRaddress(address) ? fromRaddress(address) : address;
+  return roster.has(plain) ? RADDRESS_PREFIX + plain : address;
+}
+
+/**
  * Validate transaction hash format
  *
  * @param hash - Hash to validate

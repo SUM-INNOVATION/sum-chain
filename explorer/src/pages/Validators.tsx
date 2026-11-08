@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { provider } from '../utils/provider';
 import { RowSkeleton, ErrorState } from '../components/States';
 import type { ValidatorSetInfo } from '@sumchain/sdk';
+import { showAddress } from '../utils/roster';
 
 export default function Validators() {
   const [validators, setValidators] = useState<ValidatorSetInfo | null>(null);
@@ -81,7 +82,7 @@ export default function Validators() {
             <div className="space-y-3">
               <div>
                 <div className="mb-1 text-xs text-muted">Address</div>
-                <div className="break-all font-mono text-foreground">{validator.address}</div>
+                <div className="break-all font-mono text-foreground">{showAddress(validator.address)}</div>
               </div>
               <div>
                 <div className="mb-1 text-xs text-muted">Public key</div>

@@ -42,7 +42,22 @@ Create a `.env` file in the explorer directory:
 ```env
 # RPC endpoint for SUM Chain node
 VITE_RPC_URL=http://localhost:8545
+
+# Optional swarm roster: addresses (plain or r0, separated by commas or spaces)
+# shown in the agent form r0… (#309).
+VITE_SWARM_ROSTER=
 ```
+
+**Swarm roster (`VITE_SWARM_ROSTER`).**
+- **Source:** this build-time setting is the roster's only source; the chain has no swarm registry yet. Vite compiles
+  `VITE_` values into the bundle, so changing the roster needs a rebuild.
+- **Default:** unset or empty, every address shows in the plain form, as before.
+- **Effect:** a member's address text, short form and copied text show the `r0` form, while links keep the plain form.
+  An `/address/r0…` URL (a pasted `r0` address) shows the same account as the plain URL.
+- **Display only:** `r0` identifies nothing and grants nothing. The roster changes no query, signature, fee, permission or
+  consensus rule.
+- **A roster that does not parse** is logged in the browser console and ignored; every address then shows in the plain
+  form.
 
 Or use the default (localhost:8545).
 

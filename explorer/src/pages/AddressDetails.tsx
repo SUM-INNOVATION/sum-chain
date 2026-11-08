@@ -5,6 +5,7 @@ import { formatKoppa, formatTimestamp } from '../utils/formatters';
 import { DetailSkeleton, ErrorState, Skeleton } from '../components/States';
 import { TransactionTypeBadge, TransactionActionLabel } from '../components/TransactionType';
 import { AddressLabel } from '../components/AddressLabel';
+import { plainAddress, showAddress } from '../utils/roster';
 
 interface TransactionHistoryEntry {
   tx_hash: string;
@@ -33,7 +34,10 @@ interface TransactionHistoryResponse {
 }
 
 export default function AddressDetails() {
-  const { address } = useParams<{ address: string }>();
+  const { address: addressParam } = useParams<{ address: string }>();
+  // The r0 form (shown and copied for a swarm roster member) is the same account: work on the plain form, so the
+  // RPC queries, the "This address" matches and the +/- signs are those of the account whichever form the URL holds.
+  const address = addressParam && plainAddress(addressParam);
   const [balance, setBalance] = useState<bigint | null>(null);
   const [nonce, setNonce] = useState<number | null>(null);
   const [transactions, setTransactions] = useState<TransactionHistoryEntry[]>([]);
@@ -99,7 +103,8 @@ export default function AddressDetails() {
 
   function shortenAddress(addr: string): string {
     if (!addr || addr.length < 16) return addr || 'Unknown';
-    return `${addr.slice(0, 8)}...${addr.slice(-6)}`;
+    const shown = showAddress(addr);
+    return `${shown.slice(0, 8)}...${shown.slice(-6)}`;
   }
 
   if (loading) {
@@ -130,7 +135,7 @@ export default function AddressDetails() {
             <AddressLabel address={address} mode="chip" />
           </div>
         )}
-        <div className="mb-6 break-all font-mono text-lg text-foreground">{address}</div>
+        <div className="mb-6 break-all font-mono text-lg text-foreground">{showAddress(address ?? '')}</div>
 
         <div className="grid grid-cols-2 gap-6">
           <div>

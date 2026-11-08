@@ -52,6 +52,8 @@ export {
   isRaddress,
   toRaddress,
   fromRaddress,
+  parseSwarmRoster,
+  displayAddress,
   isValidHash,
   sleep,
   retry,

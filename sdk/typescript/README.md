@@ -301,6 +301,24 @@ fromRaddress("r0jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j")  // "jVrcPSDyUaqqVJLXbgbYRuhG
 isRaddress("r0jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j")    // true
 ```
 
+### parseSwarmRoster(text) / displayAddress(address, roster)
+
+Show the accounts on a swarm roster in the `r0` form, for display only. Being on a roster changes how an address is
+shown and nothing else: no signature, fee, permission or consensus rule reads it. The roster is whatever list the
+application configures; the chain has no swarm registry yet. With an empty roster, `displayAddress` returns every
+address unchanged.
+
+`parseSwarmRoster` reads entries separated by commas or whitespace, with `#` starting a comment. Each entry is a plain
+or `r0` address (hex is not accepted). It returns the members as plain addresses, and throws on an entry in neither
+form, naming its line. `displayAddress` returns the `r0` form for a member, whichever form the address arrives in, and
+any other text unchanged. Both check the format only, as `isValidAddress` does.
+
+```typescript
+const roster = parseSwarmRoster("# swarm A\njVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j");
+displayAddress("jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j", roster)   // "r0jVrcPSDyUaqqVJLXbgbYRuhG9bPp4E6j"
+displayAddress("ChBEvSC2DKPKr8qFgbSv69Xnm8JNAKdiY", roster)  // unchanged: not a member
+```
+
 ### isValidHash(hash)
 
 Validate transaction/block hash format.

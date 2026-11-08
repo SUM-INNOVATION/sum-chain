@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import type { AddressLabelsInfo } from '@sumchain/sdk';
 import { provider } from '../utils/provider';
 import { formatAddress } from '../utils/formatters';
+import { showAddress } from '../utils/roster';
 import { Copyable } from './Copyable';
 
 /**
@@ -58,21 +59,34 @@ function RoleTag() {
  * - `chip`: just the label (+ role tag), or `null` when there is no label — for
  *   contexts that already render the raw address separately.
  */
-export function AddressLabel({
-  address,
-  mode = 'full',
-  chars = 6,
-  className = '',
-}: {
+export function AddressLabel(props: {
   address: string;
   mode?: 'full' | 'inline' | 'chip';
   chars?: number;
   className?: string;
 }) {
-  const info = useLabels(address);
+  return <AddressLabelView {...props} info={useLabels(props.address)} />;
+}
+
+/** {@link AddressLabel}'s rendering, given the label lookup's result (`null` while there is none). */
+export function AddressLabelView({
+  address,
+  info,
+  mode = 'full',
+  chars = 6,
+  className = '',
+}: {
+  address: string;
+  info: AddressLabelsInfo | null;
+  mode?: 'full' | 'inline' | 'chip';
+  chars?: number;
+  className?: string;
+}) {
   const primary = info?.primary_label ?? null;
   const kind = primary ? info?.labels.find((l) => l.label === primary)?.kind : undefined;
-  const short = formatAddress(address, chars);
+  // Swarm roster members show in the r0 form (#309); links keep the plain form.
+  const shown = showAddress(address);
+  const short = formatAddress(shown, chars);
 
   if (mode === 'chip') {
     if (!primary) return null;
@@ -110,7 +124,7 @@ export function AddressLabel({
         to={`/address/${address}`}
         className={`tnum break-all font-mono text-accent-soft hover:text-primary-200 ${className}`}
       >
-        {address}
+        {shown}
       </Link>
     );
   }
@@ -127,7 +141,7 @@ export function AddressLabel({
       <span aria-hidden className="shrink-0 text-muted">
         ·
       </span>
-      <Copyable text={address} title="Copy address">
+      <Copyable text={shown} title="Copy address">
         <span className="tnum shrink-0 font-mono text-xs text-muted">{short}</span>
       </Copyable>
     </span>
