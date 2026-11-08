@@ -958,7 +958,7 @@ async fn main() -> Result<()> {
             print_field("From", &roster::show(&keystore.address()));
             print_field("Current Balance", &format_koppa(balance));
             print_separator();
-            print_field("To", &to);
+            print_field("To", &roster::show_text(&to));
             print_koppa_field("Amount", amount_units);
             print_koppa_field("Fee", fee_units);
             print_koppa_field("Total Cost", amount_units + fee_units);
@@ -1054,7 +1054,7 @@ async fn main() -> Result<()> {
 
             print_header("Begin Archive-Node Unbonding (full exit)");
             println!();
-            print_field("Archive Node", &addr_b58);
+            print_field("Archive Node", &roster::show_text(&addr_b58));
             print_field("Status", status);
             print_koppa_field("Unbonding Stake", staked_balance as u128);
             print_koppa_field("Fee", fee_units);
@@ -1117,7 +1117,7 @@ async fn main() -> Result<()> {
 
             print_header("Withdraw Unbonded Archive-Node Stake");
             println!();
-            print_field("Archive Node", &addr_b58);
+            print_field("Archive Node", &roster::show_text(&addr_b58));
             match &unbonding {
                 Some(u) => {
                     print_koppa_field("Withdrawable", u.remaining_amount as u128);
@@ -1273,7 +1273,7 @@ async fn main() -> Result<()> {
 
             print_header("Archive Reassignment (append assignment epoch)");
             println!();
-            print_field("File Owner", &addr_b58);
+            print_field("File Owner", &roster::show_text(&addr_b58));
             print_field("Merkle Root", &merkle_root);
             print_field("Latest Epoch", &cov.latest_assignment_epoch.to_string());
             print_field("Reassignment Needed", &cov.reassignment_needed.to_string());
@@ -1342,7 +1342,7 @@ async fn main() -> Result<()> {
                     print_field("Timestamp", &format_timestamp(b.timestamp));
                     print_field("State Root", &b.state_root);
                     print_field("Tx Root", &b.tx_root);
-                    print_field("Proposer", &b.proposer);
+                    print_field("Proposer", &roster::show_text(&b.proposer));
                     print_field("Tx Count", &b.tx_count.to_string());
 
                     if !b.transactions.is_empty() {
@@ -1374,7 +1374,7 @@ async fn main() -> Result<()> {
                 println!(
                     "  {} {}{}",
                     format!("[{}]", i).dimmed(),
-                    v.address.cyan(),
+                    roster::show_text(&v.address).cyan(),
                     marker
                 );
                 println!("      {}: {}", "Pubkey".dimmed(), v.public_key);
@@ -1397,8 +1397,8 @@ async fn main() -> Result<()> {
                     println!(
                         "  {} {} → {}",
                         format_address_short(&t.hash).yellow(),
-                        format_address_short(&t.from),
-                        format_address_short(&t.to).cyan()
+                        format_address_short(&roster::show_text(&t.from)),
+                        format_address_short(&roster::show_text(&t.to)).cyan()
                     );
                     println!(
                         "      {} {} (fee: {})",
@@ -1421,8 +1421,8 @@ async fn main() -> Result<()> {
                     print_header("Transaction");
                     println!();
                     print_field("Hash", &t.hash);
-                    print_field("From", &t.from);
-                    print_field("To", &t.to);
+                    print_field("From", &roster::show_text(&t.from));
+                    print_field("To", &roster::show_text(&t.to));
                     print_koppa_field("Amount", amount);
                     print_koppa_field("Fee", fee);
                     print_field("Nonce", &t.nonce.to_string());
@@ -1513,7 +1513,7 @@ async fn main() -> Result<()> {
                     print_field("Name", &c.name);
                     print_field("Symbol", &c.symbol);
                     print_field("Description", &c.description);
-                    print_field("Owner", &c.owner);
+                    print_field("Owner", &roster::show_text(&c.owner));
                     print_separator();
                     print_field("Max Supply", &if c.max_supply == 0 {
                         "Unlimited".to_string()
@@ -1527,7 +1527,10 @@ async fn main() -> Result<()> {
                     print_status_indicator("Metadata Updatable", c.metadata_updatable);
                     print_separator();
                     if c.royalty_bps > 0 {
-                        print_field("Royalty", &format!("{}% ({})", c.royalty_bps as f64 / 100.0, c.royalty_recipient));
+                        print_field(
+                            "Royalty",
+                            &format!("{}% ({})", c.royalty_bps as f64 / 100.0, roster::show_text(&c.royalty_recipient)),
+                        );
                     } else {
                         print_field("Royalty", "None");
                     }
@@ -1550,10 +1553,10 @@ async fn main() -> Result<()> {
                     print_field("Collection", &t.collection_id);
                     print_field("Token ID", &t.token_id.to_string());
                     print_separator();
-                    print_field("Owner", &t.owner);
-                    print_field("Creator", &t.creator);
+                    print_field("Owner", &roster::show_text(&t.owner));
+                    print_field("Creator", &roster::show_text(&t.creator));
                     if let Some(approved) = &t.approved {
-                        print_field("Approved", approved);
+                        print_field("Approved", &roster::show_text(approved));
                     }
                     print_separator();
                     print_status_indicator("Document", t.is_document);
@@ -1579,11 +1582,11 @@ async fn main() -> Result<()> {
             let result = tx::nft_get_tokens_by_owner(&rpc, &owner).await?;
 
             if result.tokens.is_empty() {
-                print_info(&format!("No NFTs found for {}", owner));
+                print_info(&format!("No NFTs found for {}", roster::show_text(&owner)));
             } else {
-                print_header(&format!("NFTs owned by {}", format_address_short(&owner)));
+                print_header(&format!("NFTs owned by {}", format_address_short(&roster::show_text(&owner))));
                 println!();
-                print_field("Owner", &result.owner);
+                print_field("Owner", &roster::show_text(&result.owner));
                 print_field("Total NFTs", &result.count.to_string());
                 println!();
 
@@ -1600,7 +1603,7 @@ async fn main() -> Result<()> {
 
         Commands::NftBalance { rpc, owner } => {
             let count = tx::nft_balance_of(&rpc, &owner).await?;
-            print_field("Address", &owner);
+            print_field("Address", &roster::show_text(&owner));
             print_field("NFT Balance", &count.to_string().cyan().to_string());
         }
 
@@ -1630,7 +1633,7 @@ async fn main() -> Result<()> {
                     println!();
                     print_field("Address", &roster::show_text(&c.address));
                     print_field("Code Hash", &c.code_hash);
-                    print_field("Owner", &c.owner);
+                    print_field("Owner", &roster::show_text(&c.owner));
                     print_separator();
                     let balance: u128 = c.balance.parse().unwrap_or(0);
                     print_koppa_field("Balance", balance);
@@ -1784,7 +1787,7 @@ async fn main() -> Result<()> {
                     println!(
                         "  {} {} [{}]",
                         format!("[{}]", i + 1).dimmed(),
-                        format_address_short(&v.address).cyan(),
+                        format_address_short(&roster::show_text(&v.address)).cyan(),
                         status_color
                     );
                     println!(
@@ -1899,9 +1902,9 @@ async fn main() -> Result<()> {
             let delegations = tx::delegation_get_delegations_by_delegator(&rpc, &delegator).await?;
 
             if delegations.is_empty() {
-                print_info(&format!("No delegations found for {}", delegator));
+                print_info(&format!("No delegations found for {}", roster::show_text(&delegator)));
             } else {
-                print_header(&format!("Delegations for {}", format_address_short(&delegator)));
+                print_header(&format!("Delegations for {}", format_address_short(&roster::show_text(&delegator))));
                 println!();
 
                 for (i, d) in delegations.iter().enumerate() {
@@ -1911,7 +1914,7 @@ async fn main() -> Result<()> {
                     println!(
                         "  {} → {}",
                         format!("[{}]", i + 1).dimmed(),
-                        format_address_short(&d.validator_address).cyan()
+                        format_address_short(&roster::show_text(&d.validator_address)).cyan()
                     );
                     println!(
                         "      {}: {} | {}: {}",
@@ -1934,7 +1937,7 @@ async fn main() -> Result<()> {
 
                     print_header("Delegation");
                     println!();
-                    print_field("Delegator", &d.delegator);
+                    print_field("Delegator", &roster::show_text(&d.delegator));
                     print_field("Validator Address", &roster::show_text(&d.validator_address));
                     print_field("Validator Pubkey", &d.validator_pubkey);
                     print_separator();
@@ -1954,7 +1957,7 @@ async fn main() -> Result<()> {
 
             print_header("Delegator Summary");
             println!();
-            print_field("Delegator", &summary.delegator);
+            print_field("Delegator", &roster::show_text(&summary.delegator));
             print_separator();
             print_koppa_field("Total Delegated", total_delegated);
             print_koppa_field("Pending Rewards", total_rewards);
@@ -1968,9 +1971,9 @@ async fn main() -> Result<()> {
             let unbondings = tx::delegation_get_unbonding_delegations(&rpc, &delegator).await?;
 
             if unbondings.is_empty() {
-                print_info(&format!("No unbonding delegations for {}", delegator));
+                print_info(&format!("No unbonding delegations for {}", roster::show_text(&delegator)));
             } else {
-                print_header(&format!("Unbonding Delegations for {}", format_address_short(&delegator)));
+                print_header(&format!("Unbonding Delegations for {}", format_address_short(&roster::show_text(&delegator))));
                 println!();
 
                 for (i, u) in unbondings.iter().enumerate() {
@@ -1984,7 +1987,7 @@ async fn main() -> Result<()> {
                     println!(
                         "  {} → {}",
                         format!("[{}]", i + 1).dimmed(),
-                        format_address_short(&u.validator_address).cyan()
+                        format_address_short(&roster::show_text(&u.validator_address)).cyan()
                     );
                     println!(
                         "      {}: {} | {}",
@@ -2013,7 +2016,7 @@ async fn main() -> Result<()> {
                     println!(
                         "  {} {} delegated {}",
                         format!("[{}]", i + 1).dimmed(),
-                        format_address_short(&d.delegator).cyan(),
+                        format_address_short(&roster::show_text(&d.delegator)).cyan(),
                         format_koppa(amount)
                     );
                 }
@@ -2110,7 +2113,7 @@ async fn main() -> Result<()> {
                         "  {} Block {} | {}",
                         format!("[{}]", i + 1).dimmed(),
                         msg.block_height,
-                        format_address_short(&msg.sender).cyan()
+                        format_address_short(&roster::show_text(&msg.sender)).cyan()
                     );
                     println!(
                         "      {}: {} | Payment: {}",
@@ -2137,7 +2140,7 @@ async fn main() -> Result<()> {
 
             print_header("Spam Score");
             println!();
-            print_field("Address", &info.sender);
+            print_field("Address", &roster::show_text(&info.sender));
             print_field("Score", &info.spam_score.to_string());
             print_field("Report Count", &info.report_count.to_string());
             print_field(
@@ -2154,9 +2157,9 @@ async fn main() -> Result<()> {
             let is_contact = tx::messaging_is_contact(&rpc, &owner, &contact).await?;
 
             if is_contact {
-                print_success(&format!("{} is a contact of {}", contact, owner));
+                print_success(&format!("{} is a contact of {}", roster::show_text(&contact), roster::show_text(&owner)));
             } else {
-                print_info(&format!("{} is NOT a contact of {}", contact, owner));
+                print_info(&format!("{} is NOT a contact of {}", roster::show_text(&contact), roster::show_text(&owner)));
             }
         }
 
@@ -2164,9 +2167,9 @@ async fn main() -> Result<()> {
             let is_blocked = tx::messaging_is_blocked(&rpc, &owner, &sender).await?;
 
             if is_blocked {
-                print_warning(&format!("{} is BLOCKED by {}", sender, owner));
+                print_warning(&format!("{} is BLOCKED by {}", roster::show_text(&sender), roster::show_text(&owner)));
             } else {
-                print_info(&format!("{} is not blocked by {}", sender, owner));
+                print_info(&format!("{} is not blocked by {}", roster::show_text(&sender), roster::show_text(&owner)));
             }
         }
 
@@ -2180,7 +2183,7 @@ async fn main() -> Result<()> {
                     print_header("Pending Payment");
                     println!();
                     print_field("Message ID", &p.message_id);
-                    print_field("Sender", &p.sender);
+                    print_field("Sender", &roster::show_text(&p.sender));
                     print_field("Recipient Hash", &p.recipient_hash);
                     print_separator();
                     print_koppa_field("Amount", amount);
