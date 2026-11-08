@@ -19,7 +19,8 @@ transactions against a SUM Chain node's RPC.
 `--swarm-roster <FILE>` (a global option) names a file of accounts whose addresses the wallet prints in the agent form
 `r0…` (#309), wherever it prints an account address: balances and transfers, transaction details and pending rows,
 blocks and validators, NFT owners, creators, approvals and royalty recipients, contracts, delegators and their validators,
-archive and storage accounts, and messaging senders and contacts. Every other address prints as before. Public keys,
+archive and storage accounts, NFT owner lookups, contract call results (the contract and each event's contract),
+gas estimates, and messaging senders and contacts. Every other address prints as before. Public keys,
 hashes, raw transactions and the addresses sent to the RPC are never rewritten.
 
 - **Source:** the file is the roster's only source; the chain has no swarm registry yet.

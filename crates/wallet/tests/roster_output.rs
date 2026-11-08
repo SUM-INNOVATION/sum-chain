@@ -567,3 +567,135 @@ fn transfer_confirmation_and_offline_signing() {
         );
     }
 }
+
+#[test]
+fn nft_owner_contract_call_events_and_gas_estimate() {
+    let f = Fixture::new("contract");
+    let topic = format!("0x{}", "11".repeat(32));
+    let stub = Stub::start(vec![
+        ("nft_ownerOf", json!(f.member.to_base58())),
+        (
+            "contract_call",
+            json!({"tx_hash": null, "return_data": "0x01", "gas_used": 21000, "success": true,
+            "error": null, "events": [
+                {"contract": f.member.to_base58(), "topics": [topic], "data": "0xff"},
+                {"contract": f.other.to_base58(), "topics": [], "data": ""}]}),
+        ),
+        (
+            "contract_estimateGas",
+            json!({"gas_estimate": 50000, "gas_price": "1", "total_cost": "50000"}),
+        ),
+    ]);
+    let (m, o, mr) = (
+        f.member.to_base58(),
+        f.other.to_base58(),
+        f.member.to_raddress(),
+    );
+    let only_r0 = |run: &Run, label: &str| {
+        assert!(
+            run.out.contains(&mr) && !run.out.replace(&mr, "").contains(&m),
+            "{label}: member must show only as r0:\n{}",
+            run.out
+        );
+    };
+    let only_plain = |run: &Run, label: &str| {
+        assert!(
+            run.out.contains(&m) && !run.out.contains("r0"),
+            "{label}: default output must be plain:\n{}",
+            run.out
+        );
+    };
+
+    // nft-owner: the owner, coloured after the roster is applied.
+    let args = [
+        "nft-owner",
+        "--rpc",
+        &stub.url,
+        "--collection",
+        "c1",
+        "--token-id",
+        "1",
+    ];
+    only_r0(&wallet(Some(&f.roster), &args), "nft-owner");
+    only_plain(&wallet(None, &args), "nft-owner");
+
+    // contract-call: the contract field and each event's contract address; topics and data unchanged.
+    let args = [
+        "contract-call",
+        "--rpc",
+        &stub.url,
+        "--contract",
+        &m,
+        "--method",
+        "get",
+        "--from",
+        &o,
+    ];
+    let (with, without) = (wallet(Some(&f.roster), &args), wallet(None, &args));
+    f.check(
+        &with,
+        &without,
+        "contract-call (contract field, event addresses)",
+    );
+    assert!(
+        with.out.contains(&format!("Contract: {mr}"))
+            && with.out.contains(&format!("Contract: {o}")),
+        "event rows:\n{}",
+        with.out
+    );
+    assert!(
+        with.out.contains(&topic) && without.out.contains(&topic),
+        "topics printed unchanged"
+    );
+
+    // contract-estimate-gas: the contract field.
+    let args = [
+        "contract-estimate-gas",
+        "--rpc",
+        &stub.url,
+        "--contract",
+        &m,
+        "--method",
+        "get",
+    ];
+    only_r0(&wallet(Some(&f.roster), &args), "contract-estimate-gas");
+    only_plain(&wallet(None, &args), "contract-estimate-gas");
+
+    // RPC inputs go out as given (plain here), never rewritten to r0; and a contract given in the r0 form is
+    // passed on in that form.
+    let sent = stub.requests.lock().unwrap().clone();
+    for r in sent
+        .iter()
+        .filter(|r| r["method"] == "contract_call" || r["method"] == "contract_estimateGas")
+    {
+        let p = r["params"].to_string();
+        assert!(
+            p.contains(&m) && !p.contains("r0"),
+            "RPC input rewritten: {r}"
+        );
+    }
+    let _ = wallet(
+        Some(&f.roster),
+        &[
+            "contract-estimate-gas",
+            "--rpc",
+            &stub.url,
+            "--contract",
+            &mr,
+            "--method",
+            "get",
+        ],
+    );
+    let last = stub.requests.lock().unwrap().last().cloned().unwrap();
+    assert!(
+        last["params"].to_string().contains(&mr),
+        "an r0 contract argument is passed as given: {last}"
+    );
+    // Only queries were made.
+    assert!(stub.methods().iter().all(|x| [
+        "nft_ownerOf",
+        "contract_call",
+        "contract_estimateGas"
+    ]
+    .contains(&x.as_str())));
+}

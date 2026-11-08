@@ -1614,7 +1614,7 @@ async fn main() -> Result<()> {
                 Some(o) => {
                     print_field("Collection", &collection);
                     print_field("Token ID", &token_id.to_string());
-                    print_field("Owner", &o.cyan().to_string());
+                    print_field("Owner", &roster::show_text(&o).cyan().to_string());
                 }
                 None => print_warning("Token not found"),
             }
@@ -1663,7 +1663,7 @@ async fn main() -> Result<()> {
 
             print_header("Contract Call Result");
             println!();
-            print_field("Contract", &contract);
+            print_field("Contract", &roster::show_text(&contract));
             print_field("Method", &method);
             if !args.is_empty() {
                 print_field("Args", &args);
@@ -1688,7 +1688,7 @@ async fn main() -> Result<()> {
                 println!();
                 println!("  {}:", "Events".dimmed());
                 for (i, event) in result.events.iter().enumerate() {
-                    print_list_item(i, &format!("Contract: {}", event.contract));
+                    print_list_item(i, &format!("Contract: {}", roster::show_text(&event.contract)));
                     for topic in &event.topics {
                         println!("      Topic: {}", topic);
                     }
@@ -1705,7 +1705,7 @@ async fn main() -> Result<()> {
 
             print_header("Gas Estimate");
             println!();
-            print_field("Contract", &contract);
+            print_field("Contract", &roster::show_text(&contract));
             print_field("Method", &method);
             print_separator();
             print_field("Estimated Gas", &result.gas_estimate.to_string());
