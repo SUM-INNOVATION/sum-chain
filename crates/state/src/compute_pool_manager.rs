@@ -32,14 +32,15 @@
 //!   so the manager is **never constructed** on a dormant chain: the whole layer
 //!   is inert (no model, no store handle, no writes). The gate-off test proves a
 //!   closed gate constructs nothing and touches no column family.
-//! * This module is **not wired into consensus / PoA block application / the live
-//!   `handle_reorg` path**. Nothing calls it during live block execution. Hooking
-//!   [`apply_block`](ComputePoolManager::apply_block) /
-//!   [`revert_block`](ComputePoolManager::revert_block) into the live driver is a
-//!   separate, gated step and is deliberately out of scope here.
-//! * It introduces **no** `TxPayload` ordinal, receipt code, activation height, or
-//!   economic magnitude. Block transitions are expressed as closures over the
-//!   model's already-ratified operations, so no new state-transition semantics are
+//! * Block execution constructs it once per block, at the executor's apply
+//!   seam, with [`ComputePoolManager::load_enabled`] — and only when the gate is
+//!   open. Reorgs do not go through the manager: the reorg paths replay the C1
+//!   journal each block published, in the same batch as the account and
+//!   contract journals. [`revert_block`](ComputePoolManager::revert_block) is
+//!   the standalone form those tests drive.
+//! * It introduces **no** receipt code, activation height, or economic
+//!   magnitude. Block transitions are expressed as closures over the model's
+//!   already-ratified operations, so no new state-transition semantics are
 //!   invented — the manager only *sequences and persists* the ratified ops.
 //!
 //! ## Per-block revert symmetry

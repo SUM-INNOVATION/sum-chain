@@ -127,6 +127,26 @@ score preimage = "OMNINODE-POOL-ASSIGN:v1:" ‖ beacon ‖ job_id ‖ unit_id
 Actor = the job requester (tx sender); refunds/burns are settlement concerns
 applied at execution.
 
+## Execution (dormant, gate-open only)
+
+With `compute_pool_enabled_from_height` unset, the production default and
+refused at genesis load on every network, a ComputePool transaction is refused
+as it always was: `Failed(0)`, no fee, no state. Nothing below runs.
+
+With the gate open (test-local parameters only),
+`crates/state/src/compute_pool_executor.rs` decodes each transaction's
+operation and decides it against the block's C1 model, which is rebuilt from
+the stored rows each block:
+
+- **Refusals** are free and stateless: `Failed(0)`, no fee, no nonce, no row.
+  The reason is a typed `ComputePoolReject`; no receipt code is allocated.
+- **Successes** charge the fee and advance the nonce. The block's successful
+  steps are replayed once, at the apply seam, through the C1 manager, which
+  stages the row delta and its undo journal. Account effects and C1 rows
+  revert together on reorg.
+- **Not executable** (their rules are undecided): create job, accept, expire,
+  cancel, assign and reassign. Each decodes and is refused.
+
 ## Encoding rulings applied (owner, 2026-09-02)
 
 - Ids that **reference** an existing entity are carried; **derived or

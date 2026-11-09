@@ -8,20 +8,35 @@
 //!   unset, ComputePool transactions, valid operations among them, fail free
 //!   and change nothing, with the parameters absent or declared. Their roots
 //!   and receipts are pinned to the values computed before routing existed.
+//! * [`gate_open_refuses_what_has_no_execution_rules`]: the operations whose
+//!   rules are undecided, and bytes that decode as nothing, are refused free
+//!   with the gate open, and the block still publishes its empty C1 record.
+//! * Each block rebuilds the model from the stored rows, so a parent that
+//!   already holds C1 rows no longer makes every later block fail at the
+//!   apply seam: [`blocks_over_existing_c1_rows_rebuild_the_model_and_publish`].
 
 mod common;
+
+use std::sync::Arc;
 
 use common::{fund, publish_block_returning, setup_with_params, CHAIN_ID};
 use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::compute_pool_params::ComputePoolParamsV1;
 use sumchain_primitives::transaction::ComputePoolTxData;
-use sumchain_primitives::{Hash, Receipt, SignedTransaction, TransactionV2, TxPayload, TxStatus};
+use sumchain_primitives::{
+    Address, Block, Hash, Receipt, SignedTransaction, TransactionV2, TxPayload, TxStatus,
+};
+use sumchain_state::compute_pool::{
+    ComputePoolModel, ExposureInputs, JobId, UnitId, UnitSizing, UnitState, WorkUnit,
+};
 use sumchain_state::compute_pool_store::ComputePoolStore;
-use sumchain_storage::Database;
+use sumchain_state::executor::BlockExecutor;
+use sumchain_state::state::StateManager;
+use sumchain_storage::{cf, Database};
 use sumchain_wire::compute_pool_wire::{
-    CancelJobV1, ComputePoolOperation, CreateComputePoolJobV1, DeclineWorkUnitV1,
-    PublishBondedOfferV1, WorkItemRef,
+    AcceptWorkUnitV1, AssignWorkUnitV1, CancelJobV1, ComputePoolOperation, CreateComputePoolJobV1,
+    DeclineWorkUnitV1, ExpireWorkUnitV1, PublishBondedOfferV1, ReassignWorkUnitV1, WorkItemRef,
 };
 
 const FEE: u128 = 1_000;
@@ -194,4 +209,183 @@ fn gate_unset_compute_pool_transactions_change_nothing() {
     declared_params.compute_pool_params = Some(declared());
     declared_params.validate().unwrap();
     assert_eq!(gate_unset_run(declared_params), run);
+}
+
+// ── gate open, in test-local parameters ────────────────────────────────────
+
+const WORKER: u8 = 0x41;
+const OTHER: u8 = 0x42;
+const PROPOSER: u8 = 0x50;
+
+/// Test-local: genesis validation refuses an open compute-pool gate on every
+/// network.
+fn params_open() -> ChainParams {
+    let mut p = ChainParams::with_v2_enabled();
+    p.compute_pool_enabled_from_height = Some(0);
+    p.compute_pool_params = Some(declared());
+    p
+}
+
+/// One node: its own database and executor, with the worker and the other
+/// sender funded.
+struct Node {
+    state: Arc<StateManager>,
+    db: Arc<Database>,
+    executor: BlockExecutor,
+    _dir: tempfile::TempDir,
+}
+
+impl Node {
+    fn new(params: ChainParams) -> Self {
+        let (state, db, dir, executor) = setup_with_params(params);
+        fund(&db, &key(WORKER), FUNDS);
+        fund(&db, &key(OTHER), FUNDS);
+        Node {
+            state,
+            db,
+            executor,
+            _dir: dir,
+        }
+    }
+
+    /// Execute and publish one block; its receipts as `(status, fee)`.
+    fn block(&self, height: u64, txs: Vec<SignedTransaction>) -> (Vec<(TxStatus, u128)>, Block) {
+        let (receipts, block) = publish_block_returning(
+            &self.state,
+            &self.executor,
+            height,
+            key(PROPOSER).public_key().as_bytes(),
+            txs,
+            &[],
+        );
+        let outcomes = receipts.iter().map(|r| (r.status, r.fee_paid)).collect();
+        (outcomes, block)
+    }
+
+    fn store(&self) -> ComputePoolStore<'_> {
+        ComputePoolStore::new(&self.db)
+    }
+}
+
+/// A model holding one job of one blocked unit, requested by `requester`.
+fn one_job(job: JobId, unit: UnitId, requester: Address) -> ComputePoolModel {
+    let mut m = ComputePoolModel::new();
+    m.create_job(
+        job,
+        requester,
+        1,
+        vec![WorkUnit {
+            job_id: job,
+            unit_id: unit,
+            predecessors: vec![],
+            required_inputs: vec![],
+            generation: 0,
+            state: UnitState::Blocked,
+        }],
+        &[UnitSizing { slots: 0 }],
+        1,
+        0,
+        1_000,
+        ExposureInputs {
+            q: 100,
+            reprovision_allowance: 10,
+            job_max_retention_files: 0,
+            max_reassignments_per_file: 2,
+            reassign_reimb: 5,
+        },
+        1_000_000,
+    )
+    .unwrap();
+    m
+}
+
+/// Write `model`'s rows into committed state, as the blocks that built it
+/// would have left them.
+///
+/// SEEDING, not publishing. Job creation and assignment do not execute
+/// (their rules are not decided), so no block can produce these rows; a
+/// parent that holds them is seeded instead.
+fn seed_rows(db: &Database, model: &ComputePoolModel) {
+    let rows = ComputePoolStore::materialize(model).unwrap();
+    let mut batch = db.batch();
+    for (k, v) in &rows {
+        batch.put(cf::COMPUTE_POOL_STATE, k, v).unwrap();
+    }
+    batch.commit().unwrap();
+}
+
+/// With the gate open, the operations whose execution rules are undecided,
+/// and bytes that decode as nothing, are refused free and write nothing. The
+/// block still publishes its C1 record, empty, as every gate-open block does.
+#[test]
+fn gate_open_refuses_what_has_no_execution_rules() {
+    let node = Node::new(params_open());
+    let (worker, other) = (key(WORKER), key(OTHER));
+    let item = WorkItemRef {
+        job_id: [1; 32],
+        unit_id: [2; 32],
+        generation: 0,
+    };
+    let undecided = vec![
+        ComputePoolOperation::CreateJob(CreateComputePoolJobV1 {
+            client_job_salt: [3; 32],
+            graph_definition_root: [4; 32],
+            unit_count: 1,
+        }),
+        ComputePoolOperation::AcceptUnit(AcceptWorkUnitV1 {
+            work_item: item,
+            commit_bond_id: [5; 32],
+            accepted_bytes: 1,
+        }),
+        ComputePoolOperation::ExpireUnit(ExpireWorkUnitV1 { work_item: item }),
+        ComputePoolOperation::CancelJob(CancelJobV1 { job_id: [1; 32] }),
+        ComputePoolOperation::AssignUnit(AssignWorkUnitV1 { work_item: item }),
+        ComputePoolOperation::ReassignUnit(ReassignWorkUnitV1 { work_item: item }),
+    ];
+    // A refusal advances no nonce, so every one of these is nonce 0.
+    let mut txs: Vec<SignedTransaction> = undecided
+        .into_iter()
+        .map(|op| op_tx(&worker, 0, op))
+        .collect();
+    txs.push(pool_tx(&other, 0, vec![0xff; 3]));
+
+    let (receipts, block) = node.block(1, txs);
+    assert_eq!(receipts, vec![(TxStatus::Failed(0), 0); 7]);
+    assert_eq!(account(&node.db, &worker), (FUNDS, 0));
+    assert_eq!(account(&node.db, &other), (FUNDS, 0));
+    assert!(node.store().load_state_map().unwrap().is_empty());
+    let record = node.store().load_journal(1, &block.hash()).unwrap();
+    assert!(record
+        .expect("a gate-open block publishes a record")
+        .is_empty());
+}
+
+/// Each block rebuilds the model from the stored rows. Before it did, the
+/// manager started every block empty, and once a parent held a C1 row,
+/// staging against that empty predecessor was refused, so every later block
+/// failed at the apply seam, even an empty one.
+#[test]
+fn blocks_over_existing_c1_rows_rebuild_the_model_and_publish() {
+    let node = Node::new(params_open());
+    seed_rows(
+        &node.db,
+        &one_job(
+            JobId::from_bytes([1; 32]),
+            UnitId::from_bytes([2; 32]),
+            key(OTHER).address(),
+        ),
+    );
+    let rows = node.store().load_state_map().unwrap();
+    assert!(!rows.is_empty());
+
+    let (receipts, empty) = node.block(1, vec![]);
+    assert!(receipts.is_empty());
+    let (receipts, refused) = node.block(2, vec![pool_tx(&key(OTHER), 0, vec![0xff; 3])]);
+    assert_eq!(receipts, vec![(TxStatus::Failed(0), 0)]);
+
+    assert_eq!(node.store().load_state_map().unwrap(), rows);
+    for (height, block) in [(1, &empty), (2, &refused)] {
+        let record = node.store().load_journal(height, &block.hash()).unwrap();
+        assert!(record.unwrap().is_empty());
+    }
 }

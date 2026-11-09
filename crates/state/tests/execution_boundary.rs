@@ -934,6 +934,8 @@ fn migrated_execution_paths_take_no_self_receiver() {
         ("compute_pool_store.rs", "fn v_load_state_map("),
         ("compute_pool_store.rs", "fn v_state_digest("),
         ("compute_pool_store.rs", "fn stage_transition("),
+        ("compute_pool_store.rs", "fn v_load_model("),
+        ("compute_pool_executor.rs", "fn execute("),
         ("beacon_store.rs", "fn v_load_state_map("),
         ("beacon_store.rs", "fn v_state_digest("),
         ("beacon_store.rs", "fn v_get_membership("),
@@ -2197,7 +2199,9 @@ fn top_level_fns(src: &str) -> Vec<(String, String)> {
 /// in the executor's interior-mutable slot across the per-transaction dispatch
 /// loop without borrowing the database. `&self` on `stage` therefore cannot
 /// reach committed state, and the blanket rule above would be forbidding a
-/// receiver that carries no hazard.
+/// receiver that carries no hazard. `ComputePoolBlockState`, the compute pool's
+/// per-block state, is the same shape: `fn model` loads from the view it is
+/// handed.
 ///
 /// The exemption is not taken on trust: the struct definition is checked to hold
 /// no `Database`. Add a field of that type and this test fails, which is the
@@ -2205,11 +2209,18 @@ fn top_level_fns(src: &str) -> Vec<(String, String)> {
 #[test]
 fn a_self_receiver_is_allowed_only_where_the_type_holds_no_database() {
     /// `(file, receiver type, execution-path signature)`.
-    const EXEMPT: &[(&str, &str, &str)] = &[(
-        "beacon_manager.rs",
-        "pub struct BeaconBlockState {",
-        "fn stage(",
-    )];
+    const EXEMPT: &[(&str, &str, &str)] = &[
+        (
+            "beacon_manager.rs",
+            "pub struct BeaconBlockState {",
+            "fn stage(",
+        ),
+        (
+            "compute_pool_executor.rs",
+            "pub struct ComputePoolBlockState {",
+            "fn model(",
+        ),
+    ];
 
     let files = rust_files();
     for (file, type_decl, sig) in EXEMPT {
@@ -2266,13 +2277,15 @@ fn partially_migrated_execution_paths_are_declared() {
         (
             "executor.rs",
             "fn apply_compute_pool_transitions(",
-            "nothing — it only forwards; the receiver goes when apply_compute_pool_ops does",
+            "nothing — it takes the block's steps from the receiver's per-block \
+             slot and forwards them; the receiver goes when apply_compute_pool_ops does",
         ),
         (
             "executor.rs",
             "fn apply_compute_pool_ops<F>(",
-            "ComputePoolManager::new_enabled(&self.db, ..), which the manager uses for \
-             typed point reads and for the reorg-path revert",
+            "ComputePoolManager::load_enabled(&self.db, ..), which rebuilds the model \
+             from the candidate and keeps the handle for typed point reads and for \
+             the standalone revert",
         ),
         (
             "executor.rs",

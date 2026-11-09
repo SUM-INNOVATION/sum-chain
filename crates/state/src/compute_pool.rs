@@ -5,8 +5,10 @@
 //! the deterministic scheduler inputs + canonical ordering, the
 //! capacity/exposure relations, the write-once accepted-leaf and
 //! unique-entitlement enforcement, and the lifecycle. Everything here is
-//! **dormant**: the `compute_pool_enabled_from_height` gate stays `None`, no
-//! `TxPayload` ordinal is added, and no consensus bytes are chosen.
+//! **dormant**: the `compute_pool_enabled_from_height` gate stays `None` and no
+//! consensus bytes are chosen here. `TxPayload::ComputePool` (ordinal 27)
+//! reaches this model only through [`crate::compute_pool_executor`], behind
+//! that gate.
 //!
 //! ## Why in-memory only (no persistence here)
 //!
