@@ -2,7 +2,12 @@
 //! versioned keys in the existing `meta` family, the first valid record per
 //! slot kept (D5).
 //!
-//! Five groups: namespace, first-wins, corruption, rollback, dormancy.
+//! Five groups: namespace, first-wins, corruption, rollback, dormancy. The
+//! namespace group holds the namespace-collision tests the owner required
+//! with the adoption of `finality/evidence/v1/` (2026-11-09): every META key
+//! and prefix in the workspace stays clear of both evidence namespaces, and
+//! the evidence keys cannot be confused with each other or with the other
+//! `finality/` keys.
 //!
 //! The record checks here are STAND-INS for the merged codecs in
 //! `sumchain-finality-foundations` (`evidence`), which this crate may not name
@@ -27,7 +32,9 @@ use sumchain_storage::candidate::{
     BlockJournals, CandidateExecution, ExecutedCandidate, ExecutionSubject, JournalRecord,
 };
 use sumchain_storage::certified_guard::{audit_at_start, certified_block};
-use sumchain_storage::certified_meta::{CERTIFICATE_KEY_PREFIX, FINALIZED_POINTER_KEY};
+use sumchain_storage::certified_meta::{
+    certificate_key, parse_certificate_key, CERTIFICATE_KEY_PREFIX, FINALIZED_POINTER_KEY,
+};
 use sumchain_storage::db::{cf, Database, ALL_CFS};
 use sumchain_storage::evidence_meta::{
     audit_evidence, equivocation_record, parse_equivocation_key, parse_upgrade_conflict_key,
@@ -37,7 +44,10 @@ use sumchain_storage::evidence_meta::{
     EQUIVOCATION_KEY_PREFIX, EQUIVOCATION_SLOT_LEN, UPGRADE_CONFLICT_KEY_LEN,
     UPGRADE_CONFLICT_KEY_PREFIX,
 };
-use sumchain_storage::schema::{journal_key, BlockStore};
+use sumchain_storage::journal::{FORMAT_HIGH_WATER_META_KEY, UNDO_HISTORY_FLOOR_META_KEY};
+use sumchain_storage::messaging_store::REGISTRY_SEED_META_KEY;
+use sumchain_storage::pruner::DISK_BUDGET_META_KEY;
+use sumchain_storage::schema::{journal_key, meta_keys, BlockStore};
 use sumchain_storage::ApplicationJournal;
 use tempfile::TempDir;
 
@@ -356,20 +366,22 @@ fn sources(subs: &[&str]) -> Vec<PathBuf> {
     files
 }
 
-/// Every `b"…"` literal in `src` (simple escapes only).
-fn byte_literals(src: &str) -> Vec<Vec<u8>> {
+/// Every `b"…"` and `"…"` literal in `src` (simple escapes only), so a key
+/// spelled either way is seen.
+fn key_literals(src: &str) -> Vec<Vec<u8>> {
     let bytes = src.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
-    while i + 1 < bytes.len() {
-        let starts = bytes[i] == b'b'
-            && bytes[i + 1] == b'"'
-            && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'));
-        if !starts {
+    while i < bytes.len() {
+        // A quote opens a literal unless it is the character literal `'"'`
+        // or `'\"'`.
+        let opens =
+            bytes[i] == b'"' && !(i > 0 && (bytes[i - 1] == b'\\' || bytes[i - 1] == b'\''));
+        if !opens {
             i += 1;
             continue;
         }
-        let mut j = i + 2;
+        let mut j = i + 1;
         let mut lit = Vec::new();
         while j < bytes.len() && bytes[j] != b'"' {
             if bytes[j] == b'\\' && j + 1 < bytes.len() {
@@ -393,29 +405,372 @@ fn byte_literals(src: &str) -> Vec<Vec<u8>> {
 
 const OWN: &str = "storage/src/evidence_meta.rs";
 
+/// The signer mirror's META key (B6, adopted 2026-11-09). Spelled as a literal
+/// because it lands with the signer wiring (#382), not on this layout's base.
+const SIGNER_MIRROR_KEY: &[u8] = b"finality/signer-mirror/v1";
+
+/// Whether a META name is one key or the prefix of a key family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Name {
+    Key,
+    Prefix,
+}
+
+/// Every META key and key prefix in the workspace other than this layout's,
+/// with where it is defined. Storage's own come from their constants; the
+/// rest are literals, which
+/// `every_known_meta_name_is_still_spelled_in_the_source` keeps current.
+/// `PENDING_META_NAMES` are adopted keys whose code is not on this base.
+fn known_meta_names() -> Vec<(&'static [u8], Name, &'static str)> {
+    use Name::{Key, Prefix};
+    vec![
+        (meta_keys::LATEST_BLOCK_HASH, Key, "storage/src/schema.rs"),
+        (meta_keys::LATEST_BLOCK_HEIGHT, Key, "storage/src/schema.rs"),
+        (meta_keys::GENESIS_HASH, Key, "storage/src/schema.rs"),
+        (meta_keys::CHAIN_ID, Key, "storage/src/schema.rs"),
+        (meta_keys::FINALIZED_HEIGHT, Key, "storage/src/schema.rs"),
+        (meta_keys::FINALIZED_HASH, Key, "storage/src/schema.rs"),
+        (
+            CERTIFICATE_KEY_PREFIX,
+            Prefix,
+            "storage/src/certified_meta.rs",
+        ),
+        (FINALIZED_POINTER_KEY, Key, "storage/src/certified_meta.rs"),
+        (UNDO_HISTORY_FLOOR_META_KEY, Key, "storage/src/journal.rs"),
+        (FORMAT_HIGH_WATER_META_KEY, Key, "storage/src/journal.rs"),
+        (
+            REGISTRY_SEED_META_KEY,
+            Key,
+            "storage/src/messaging_store.rs",
+        ),
+        (DISK_BUDGET_META_KEY, Key, "storage/src/pruner.rs"),
+        (
+            b"consensus_config/v1/record",
+            Key,
+            "consensus/src/consensus_config/record.rs",
+        ),
+        (
+            b"consensus_config/v1/transition/",
+            Prefix,
+            "consensus/src/consensus_config/record.rs",
+        ),
+        (b"activation/heights", Key, "node/src/node.rs"),
+        (b"registry/freeze/v1", Key, "state/src/registry_ingress.rs"),
+        (
+            b"registry/freeze/gate/v1",
+            Key,
+            "state/src/registry_ingress.rs",
+        ),
+        (
+            b"por_scheduler_index_backfilled",
+            Key,
+            "state/src/storage_metadata.rs",
+        ),
+        (
+            b"test-only/certified/cert/",
+            Prefix,
+            "storage/tests/certified_commit.rs",
+        ),
+        (
+            b"test-only/certified/finalized",
+            Key,
+            "storage/tests/certified_commit.rs",
+        ),
+    ]
+}
+
+const PENDING_META_NAMES: &[(&[u8], Name, &str)] = &[(
+    SIGNER_MIRROR_KEY,
+    Name::Key,
+    "B6 signer mirror, with the signer wiring (#382)",
+)];
+
+/// A few slots at the edges of every field.
+fn edge_slots() -> Vec<EquivocationSlot> {
+    let mut out = Vec::new();
+    for height in [0, 7, u64::MAX] {
+        for round in [0, 1 << 20, u32::MAX] {
+            for vote_type in [0, 1, 2, u8::MAX] {
+                for validator_index in [0, u16::MAX] {
+                    out.push(EquivocationSlot {
+                        height,
+                        round,
+                        vote_type,
+                        validator_index,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+const EDGE_SEQUENCES: [u64; 6] = [0, 1, 255, 256, 1 << 32, u64::MAX];
+
+#[test]
+fn every_known_meta_name_is_still_spelled_in_the_source() {
+    let mut literals = BTreeSet::new();
+    for f in sources(&["src", "tests"]) {
+        // This file and the certified layout's test list the names; neither
+        // counts as their definition.
+        if f.ends_with("storage/tests/evidence_meta_v1.rs")
+            || f.ends_with("storage/tests/certified_meta_v1.rs")
+        {
+            continue;
+        }
+        literals.extend(key_literals(&std::fs::read_to_string(&f).unwrap()));
+    }
+    for (name, _, home) in known_meta_names() {
+        assert!(
+            literals.contains(name),
+            "{} ({home}) is no longer a literal; update known_meta_names",
+            String::from_utf8_lossy(name)
+        );
+    }
+}
+
+/// No META key or key family in the workspace can collide with an evidence
+/// key: no known key equals, and no known prefix starts, any
+/// `finality/evidence/v1/` ‖ 15 bytes or `upgrade/conflict/v1/` ‖ 8 bytes, and
+/// no known key or family lies inside either namespace. Prefix-freedom in
+/// both directions is exactly that; the edge keys check it key by key.
+#[test]
+fn every_known_meta_name_stays_clear_of_the_evidence_keys() {
+    let ours: [(&[u8], usize); 2] = [
+        (EQUIVOCATION_KEY_PREFIX, EQUIVOCATION_KEY_LEN),
+        (UPGRADE_CONFLICT_KEY_PREFIX, UPGRADE_CONFLICT_KEY_LEN),
+    ];
+    let mut keys: Vec<Vec<u8>> = edge_slots().iter().map(EquivocationSlot::key).collect();
+    keys.extend(EDGE_SEQUENCES.map(upgrade_conflict_key));
+    let known = known_meta_names();
+    assert!(known.len() >= 20, "the known list lost entries");
+    for (name, kind, home) in known.into_iter().chain(PENDING_META_NAMES.iter().copied()) {
+        let shown = String::from_utf8_lossy(name);
+        for (prefix, len) in ours {
+            assert!(
+                !prefix.starts_with(name) && !name.starts_with(prefix),
+                "{shown} ({home}) and {} are not prefix-free",
+                String::from_utf8_lossy(prefix)
+            );
+            assert!(
+                kind == Name::Prefix || name.len() != len || !name.starts_with(prefix),
+                "{shown} ({home}) has the shape of an evidence key"
+            );
+        }
+        for key in &keys {
+            match kind {
+                Name::Key => assert_ne!(key.as_slice(), name, "{shown} ({home})"),
+                Name::Prefix => assert!(!key.starts_with(name), "{shown} ({home})"),
+            }
+        }
+    }
+}
+
+/// The 36-byte evidence key, the 28-byte conflict key and the other
+/// `finality/` keys (certificate rows, the finalized pointer, the signer
+/// mirror) cannot be taken for one another: their names are prefix-free,
+/// their lengths differ, and each strict parser accepts only its own keys.
+#[test]
+fn the_evidence_keys_cannot_be_confused_with_each_other_or_the_finality_keys() {
+    let names: [(&[u8], &str); 5] = [
+        (EQUIVOCATION_KEY_PREFIX, "evidence"),
+        (UPGRADE_CONFLICT_KEY_PREFIX, "upgrade conflict"),
+        (CERTIFICATE_KEY_PREFIX, "certificate"),
+        (FINALIZED_POINTER_KEY, "finalized pointer"),
+        (SIGNER_MIRROR_KEY, "signer mirror"),
+    ];
+    for (i, (a, an)) in names.iter().enumerate() {
+        for (b, bn) in names.iter().skip(i + 1) {
+            assert!(
+                !a.starts_with(b) && !b.starts_with(a),
+                "{an} and {bn} are not prefix-free"
+            );
+        }
+    }
+    // The four `finality/` names part at the byte after `finality/`.
+    let finality = [
+        EQUIVOCATION_KEY_PREFIX,
+        CERTIFICATE_KEY_PREFIX,
+        FINALIZED_POINTER_KEY,
+        SIGNER_MIRROR_KEY,
+    ];
+    let at = finality[0].iter().position(|&b| b == b'/').unwrap() + 1;
+    assert!(finality.iter().all(|n| n[..at] == finality[0][..at]));
+    let parting: BTreeSet<u8> = finality.iter().map(|n| n[at]).collect();
+    assert_eq!(parting.len(), finality.len(), "one distinct byte each");
+
+    let evidence: Vec<Vec<u8>> = edge_slots().iter().map(EquivocationSlot::key).collect();
+    let conflict: Vec<Vec<u8>> = EDGE_SEQUENCES.map(upgrade_conflict_key).to_vec();
+    let certificate: Vec<Vec<u8>> = [
+        (0, Hash::ZERO),
+        (7, Hash::hash(b"block")),
+        (u64::MAX, Hash::from_slice(&[0xff; 32]).unwrap()),
+    ]
+    .iter()
+    .map(|(height, hash)| certificate_key(*height, hash))
+    .collect();
+    let singles = [FINALIZED_POINTER_KEY.to_vec(), SIGNER_MIRROR_KEY.to_vec()];
+    assert!(evidence.iter().all(|k| k.len() == 36));
+    assert!(conflict.iter().all(|k| k.len() == 28));
+    assert!(certificate.iter().all(|k| k.len() == 57));
+    assert_eq!((singles[0].len(), singles[1].len()), (21, 25));
+
+    for (slot, k) in edge_slots().into_iter().zip(&evidence) {
+        assert_eq!(parse_equivocation_key(k), Some(slot));
+        assert_eq!(parse_upgrade_conflict_key(k), None);
+        assert_eq!(parse_certificate_key(k), None);
+    }
+    for (sequence, k) in EDGE_SEQUENCES.into_iter().zip(&conflict) {
+        assert_eq!(parse_upgrade_conflict_key(k), Some(sequence));
+        assert_eq!(parse_equivocation_key(k), None);
+        assert_eq!(parse_certificate_key(k), None);
+    }
+    for k in &certificate {
+        assert!(parse_certificate_key(k).is_some());
+        assert_eq!(parse_equivocation_key(k), None);
+        assert_eq!(parse_upgrade_conflict_key(k), None);
+    }
+    for k in &singles {
+        assert_eq!(parse_equivocation_key(k), None);
+        assert_eq!(parse_upgrade_conflict_key(k), None);
+        assert_eq!(parse_certificate_key(k), None);
+    }
+    // No key of one kind lies under another kind's name.
+    let kinds: [(&[Vec<u8>], &[u8]); 5] = [
+        (&evidence, EQUIVOCATION_KEY_PREFIX),
+        (&conflict, UPGRADE_CONFLICT_KEY_PREFIX),
+        (&certificate, CERTIFICATE_KEY_PREFIX),
+        (&singles[..1], FINALIZED_POINTER_KEY),
+        (&singles[1..], SIGNER_MIRROR_KEY),
+    ];
+    for (i, (keys, _)) in kinds.iter().enumerate() {
+        for (j, (_, name)) in kinds.iter().enumerate() {
+            if i != j {
+                assert!(keys.iter().all(|k| !k.starts_with(name)), "{i} under {j}");
+            }
+        }
+    }
+}
+
+fn scan(db: &Database, prefix: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for entry in db.prefix_iter_checked(cf::META, prefix).unwrap() {
+        let (key, _) = entry.unwrap();
+        if !key.starts_with(prefix) {
+            break;
+        }
+        out.push(key.to_vec());
+    }
+    out
+}
+
+/// With a row under every other META name, the signer mirror and near misses
+/// on both sides of each evidence namespace, the first valid record still
+/// takes its empty slot and holds it against a second (D5; the first-wins
+/// group below covers it alone). The foreign rows are untouched, each
+/// prefix scan sees only its own rows, and the audit counts only evidence.
+#[test]
+fn foreign_meta_rows_neither_hold_an_evidence_slot_nor_move() {
+    let dir = TempDir::new().unwrap();
+    let db = open(dir.path());
+    let mut foreign: Vec<Vec<u8>> = known_meta_names()
+        .into_iter()
+        .chain(PENDING_META_NAMES.iter().copied())
+        .map(|(name, kind, _)| match kind {
+            Name::Key => name.to_vec(),
+            Name::Prefix => [name, b"row"].concat(),
+        })
+        .collect();
+    foreign.push(certificate_key(7, &Hash::hash(b"block")));
+    // Near misses, built from the prefixes: without the final `/`, and one
+    // version up, each before and after the namespace in key order.
+    for (prefix, tails) in [
+        (
+            EQUIVOCATION_KEY_PREFIX,
+            [DRAFT_SLOT.slot_bytes().to_vec(), vec![0xff; 15]],
+        ),
+        (
+            UPGRADE_CONFLICT_KEY_PREFIX,
+            [1u64.to_be_bytes().to_vec(), vec![0xff; 8]],
+        ),
+    ] {
+        let unslashed = &prefix[..prefix.len() - 1];
+        let mut bumped = prefix.to_vec();
+        let v = bumped.len() - 2;
+        bumped[v] += 1;
+        for tail in &tails {
+            foreign.push([unslashed, tail].concat());
+            foreign.push([bumped.as_slice(), tail].concat());
+        }
+    }
+    for key in &foreign {
+        db.put(cf::META, key, b"foreign").unwrap();
+        assert_eq!(parse_equivocation_key(key), None);
+        assert_eq!(parse_upgrade_conflict_key(key), None);
+    }
+    let before = meta_rows(&db);
+    assert!(scan(&db, EQUIVOCATION_KEY_PREFIX).is_empty());
+    assert!(scan(&db, UPGRADE_CONFLICT_KEY_PREFIX).is_empty());
+
+    let table = draft_table();
+    assert_eq!(
+        record_equivocation(&db, &EvShape, &draft_equivocation()).unwrap(),
+        Insert::Stored
+    );
+    assert_eq!(
+        record_upgrade_conflict(&db, &table, &draft_conflict()).unwrap(),
+        Insert::Stored
+    );
+    assert_eq!(
+        record_equivocation(&db, &EvShape, &equivocation(DRAFT_SLOT, 0, 1)).unwrap(),
+        Insert::SlotHeld { identical: false }
+    );
+
+    let after = meta_rows(&db);
+    assert!(before.is_subset(&after), "every foreign row is unchanged");
+    let added: BTreeSet<_> = after.difference(&before).cloned().collect();
+    assert_eq!(
+        added,
+        BTreeSet::from([
+            (DRAFT_SLOT.key(), draft_equivocation()),
+            (upgrade_conflict_key(1), draft_conflict()),
+        ])
+    );
+    assert_eq!(scan(&db, EQUIVOCATION_KEY_PREFIX), vec![DRAFT_SLOT.key()]);
+    assert_eq!(
+        scan(&db, UPGRADE_CONFLICT_KEY_PREFIX),
+        vec![upgrade_conflict_key(1)]
+    );
+    let mut certificate_rows: Vec<Vec<u8>> = foreign
+        .iter()
+        .filter(|k| k.starts_with(CERTIFICATE_KEY_PREFIX))
+        .cloned()
+        .collect();
+    certificate_rows.sort();
+    assert_eq!(scan(&db, CERTIFICATE_KEY_PREFIX), certificate_rows);
+    assert_eq!(
+        audit_evidence(&db, &EvShape, &table).unwrap(),
+        EvidenceAudit {
+            equivocations: 1,
+            upgrade_conflicts: 1
+        }
+    );
+}
+
 #[test]
 fn the_prefixes_are_disjoint_from_every_other_key_in_production_code() {
     let names: [&[u8]; 2] = [EQUIVOCATION_KEY_PREFIX, UPGRADE_CONFLICT_KEY_PREFIX];
-    // Prefix-free with each other and with the certified layout's keys, the
-    // only other names in the `finality/` namespace.
-    for (i, a) in names.iter().enumerate() {
-        for b in names.iter().skip(i + 1) {
-            assert!(!a.starts_with(b) && !b.starts_with(a));
-        }
-        for c in [CERTIFICATE_KEY_PREFIX, FINALIZED_POINTER_KEY] {
-            assert!(!a.starts_with(c) && !c.starts_with(a));
-        }
-    }
-    // No production literal outside this layout names a key under either
-    // prefix, equals one, or is a key-family prefix (a literal ending in `/`,
-    // the repository's convention for scan prefixes) that a scan could reach
-    // them through.
+    // No production literal outside this layout, byte string or string, names
+    // a key under either prefix, equals one, or is a key-family prefix (a
+    // literal ending in `/`, the repository's convention for scan prefixes)
+    // that a scan could reach them through. A future colliding key fails here
+    // whether or not it is added to `known_meta_names`.
     let mut hits = Vec::new();
     for f in sources(&["src"]) {
         if f.ends_with(OWN) {
             continue;
         }
-        for lit in byte_literals(&std::fs::read_to_string(&f).unwrap()) {
+        for lit in key_literals(&std::fs::read_to_string(&f).unwrap()) {
             for name in names {
                 if lit.starts_with(name) || (lit.ends_with(b"/") && name.starts_with(&lit)) {
                     hits.push(format!(
