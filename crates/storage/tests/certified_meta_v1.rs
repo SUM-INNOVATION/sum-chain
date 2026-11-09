@@ -427,13 +427,21 @@ fn v1_keys_are_disjoint_from_every_meta_key_in_the_repository() {
     }
     // Nothing else in the repository spells a key in the `finality/`
     // namespace but the evidence layout's prefix (prefix-free with both v1
-    // names, above), and no key-family prefix (a literal ending in `/`, the
-    // repository's convention for scan prefixes) is the start of a v1 name,
-    // so no prefix scan reaches v1 rows. (Literals such as the state value
-    // `b"final"` are not keys.)
+    // names, above) and the signer mirror's key (B6), and no key-family
+    // prefix (a literal ending in `/`, the repository's convention for scan
+    // prefixes) is the start of a v1 name, so no prefix scan reaches v1 rows.
+    // (Literals such as the state value `b"final"` are not keys.)
+    let signer_mirror: &[u8] = b"finality/signer-mirror/v1";
+    for name in v1 {
+        assert!(!name.starts_with(signer_mirror) && !signer_mirror.starts_with(name));
+    }
     let reserved: Vec<String> = literals
         .iter()
-        .filter(|l| l.starts_with(b"finality/") && l.as_slice() != EQUIVOCATION_KEY_PREFIX)
+        .filter(|l| {
+            l.starts_with(b"finality/")
+                && l.as_slice() != EQUIVOCATION_KEY_PREFIX
+                && l.as_slice() != signer_mirror
+        })
         .map(|l| String::from_utf8_lossy(l).into_owned())
         .collect();
     assert!(

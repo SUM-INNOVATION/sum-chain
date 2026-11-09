@@ -17,15 +17,19 @@
 //!   ([`EquivocationSlot::slot_bytes`]), unchanged. The draft made them the
 //!   whole key of a new `finality_evidence` column family. The prefix is
 //!   named after that family, as the certificate prefix `finality/cert/v1/`
-//!   was after `finality_certificates` ([`crate::certified_meta`]); the name
-//!   is this layout's proposal.
+//!   was after `finality_certificates` ([`crate::certified_meta`]). The owner
+//!   adopted this namespace on 2026-11-09 (decision ledger, B3 evidence
+//!   namespace), requiring namespace-collision tests and the
+//!   first-valid-record rule (`tests/evidence_meta_v1.rs`).
 //! * The upgrade-conflict key is the adopted 28-byte META key as drafted.
 //!
 //! Integers are big-endian only in keys, so rows sort by height, round, type
 //! and index, or by sequence (A1, D0). The two prefixes are prefix-free with
-//! each other and with every other META key, including the certified layout's
-//! `finality/cert/v1/` and `finality/finalized/v1`: the certified-crossing
-//! guard and its start-up audit never read these rows.
+//! each other and with every other META key and key prefix, including the
+//! certified layout's `finality/cert/v1/` and `finality/finalized/v1` and the
+//! signer mirror key `finality/signer-mirror/v1` (B6): no other exact read or
+//! prefix scan reaches these rows, and the certified-crossing guard and its
+//! start-up audit never read them.
 //!
 //! # Why `meta` and not a new column family
 //!
