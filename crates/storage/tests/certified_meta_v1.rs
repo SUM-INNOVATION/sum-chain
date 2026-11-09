@@ -26,10 +26,12 @@ use sumchain_storage::certified::{
     CertificateRefusal, CertificateVerifier, CertifiedError, CertifiedStore, CommitStep,
     FinalizedPointer, Recovery,
 };
+use sumchain_storage::certified_guard::{audit_at_start, certified_block};
 use sumchain_storage::certified_meta::{
     audit_namespace, certificate_key, decode_pointer, encode_pointer, parse_certificate_key,
     recover_v1, MetaLayoutV1, NamespaceError, NamespaceViolation, RecoverV1Error,
     CERTIFICATE_KEY_LEN, CERTIFICATE_KEY_PREFIX, FINALIZED_POINTER_KEY, FINALIZED_POINTER_LEN,
+    SIGNER_MIRROR_KEY,
 };
 use sumchain_storage::db::{cf, Database, ALL_CFS};
 use sumchain_storage::schema::{meta_keys, BlockStore};
@@ -211,6 +213,8 @@ fn seam_corrupt(r: Result<Recovery, RecoverV1Error>) -> String {
 fn key_and_pointer_encodings_are_exact() {
     assert_eq!(CERTIFICATE_KEY_PREFIX, b"finality/cert/v1/");
     assert_eq!(FINALIZED_POINTER_KEY, b"finality/finalized/v1");
+    // The signer mirror's name, adopted with B6 (owner, 2026-11-09).
+    assert_eq!(SIGNER_MIRROR_KEY, b"finality/signer-mirror/v1");
     let h = Hash::hash(b"block");
     let k = certificate_key(0x0102_0304_0506_0708, &h);
     assert_eq!(k.len(), CERTIFICATE_KEY_LEN);
@@ -396,9 +400,18 @@ fn v1_keys_are_disjoint_from_every_meta_key_in_the_repository() {
         );
     }
 
-    let v1: [&[u8]; 2] = [CERTIFICATE_KEY_PREFIX, FINALIZED_POINTER_KEY];
-    // The two v1 names are prefix-free with each other.
-    assert!(!v1[0].starts_with(v1[1]) && !v1[1].starts_with(v1[0]));
+    // The v1 names, and the signer mirror's name beside them in `finality/`.
+    let v1: [&[u8]; 3] = [
+        CERTIFICATE_KEY_PREFIX,
+        FINALIZED_POINTER_KEY,
+        SIGNER_MIRROR_KEY,
+    ];
+    // The names are prefix-free with each other.
+    for (i, a) in v1.iter().enumerate() {
+        for b in &v1[i + 1..] {
+            assert!(!a.starts_with(b) && !b.starts_with(a));
+        }
+    }
     // Prefix-free with every known META key, in both directions, so no
     // existing exact read or prefix scan can see a v1 row, and no v1 scan can
     // see an existing row.
@@ -439,6 +452,42 @@ fn v1_keys_are_disjoint_from_every_meta_key_in_the_repository() {
         prefixes.is_empty(),
         "literals that are a prefix of a v1 name: {prefixes:?}"
     );
+}
+
+/// The signer mirror (B6) is not a certified-finality record: a mirror row
+/// changes nothing that the seam's recovery, the namespace audit, the
+/// start-up audit or the crossing guard decide, on a database that was never
+/// certified and on one with certified blocks, and none of them touches it.
+#[test]
+fn a_signer_mirror_row_is_invisible_to_every_certified_audit() {
+    let mirror = vec![0x5Au8; 413];
+
+    let dir = TempDir::new().unwrap();
+    let db = open(dir.path());
+    genesis(&db);
+    db.put(cf::META, SIGNER_MIRROR_KEY, &mirror).unwrap();
+    assert_eq!(recover_v1(&db, &V1Shape).unwrap(), Recovery::NeverCertified);
+    assert_eq!(audit_at_start(&db).unwrap(), None);
+    assert_eq!(certified_block(&db).unwrap(), None);
+    assert_eq!(
+        db.get(cf::META, SIGNER_MIRROR_KEY).unwrap(),
+        Some(mirror.clone())
+    );
+
+    let dir = TempDir::new().unwrap();
+    let db = open(dir.path());
+    let chain = certified_chain(&db, 3);
+    let audit = audit_namespace(&db, &V1Shape).unwrap();
+    db.put(cf::META, SIGNER_MIRROR_KEY, &mirror).unwrap();
+    assert_eq!(audit_namespace(&db, &V1Shape).unwrap(), audit);
+    assert_eq!(
+        recover_v1(&db, &V1Shape).unwrap(),
+        Recovery::Finalized(FinalizedPointer {
+            height: 3,
+            hash: chain[3].hash(),
+        })
+    );
+    assert_eq!(db.get(cf::META, SIGNER_MIRROR_KEY).unwrap(), Some(mirror));
 }
 
 #[test]

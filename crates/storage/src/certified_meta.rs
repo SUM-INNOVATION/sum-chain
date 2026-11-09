@@ -17,10 +17,16 @@
 //! |---|---|---|
 //! | certificate | [`CERTIFICATE_KEY_PREFIX`] `finality/cert/v1/` ‖ height u64 **BE** ‖ block hash (32), 57 bytes | the `FinalityCertificateV1` bytes, opaque here |
 //! | finalized pointer | [`FINALIZED_POINTER_KEY`] `finality/finalized/v1` | height u64 **LE** ‖ block hash (32), 40 bytes |
+//! | signer mirror | [`SIGNER_MIRROR_KEY`] `finality/signer-mirror/v1` | the durable signer's 413-byte state, a byte-identical copy of its state file, opaque here |
 //!
 //! Integers are big-endian only in keys, so certificate keys sort by height,
 //! and little-endian in values (A1, D0). The legacy local-depth records
 //! `finalized_height` / `finalized_hash` are neither read nor written.
+//!
+//! The signer mirror is not part of the certified seam: the seam, the
+//! namespace audit and the crossing guard never read or write it. Its name
+//! lives here so that the `finality/` names in `meta` have one home and stay
+//! prefix-free with each other and with every other key.
 //!
 //! # Why `meta` and not a new column family
 //!
@@ -61,6 +67,11 @@ use crate::StorageError;
 pub const CERTIFICATE_KEY_PREFIX: &[u8] = b"finality/cert/v1/";
 /// The finalized pointer's key in `cf::META`.
 pub const FINALIZED_POINTER_KEY: &[u8] = b"finality/finalized/v1";
+/// The durable signer's full-state mirror in `cf::META` (the mirror's
+/// database key, adopted by the owner with B6, 2026-11-09; dormant). The value
+/// is the 413-byte signer state, written with a synced WAL write after the
+/// signer directory's state file (the persistence protocol's step P2).
+pub const SIGNER_MIRROR_KEY: &[u8] = b"finality/signer-mirror/v1";
 /// Length of a certificate key: prefix ‖ height u64 ‖ block hash.
 pub const CERTIFICATE_KEY_LEN: usize = CERTIFICATE_KEY_PREFIX.len() + 8 + 32;
 /// Length of the pointer value: height u64 LE ‖ block hash.
