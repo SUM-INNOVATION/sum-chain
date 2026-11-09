@@ -1,4 +1,4 @@
-//! Signer persistence (the 413-byte record adopted by the owner, 2026-10-22 (decision ledger, as enumerated there); dormant, no node wiring; other elements PROPOSED): the recovery
+//! Signer persistence (the 413-byte record adopted by the owner, 2026-10-22 (decision ledger, as enumerated there); dormant, no node wiring; the other elements adopted by the owner, 2026-11-09, B6): the recovery
 //! invariants and the crash-point matrix, over the file-backed store in
 //! `signer_file` and the ratified G2-b signer core; on Unix, round trips
 //! through a real directory, including a conflict halt and its recovery.

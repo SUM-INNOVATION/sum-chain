@@ -22,9 +22,16 @@
 //! accepting a recovered record over a halted mirror only when the matching
 //! archive verifies.
 //!
-//! **PROPOSED (not adopted):** the persistence protocol (G/P0/P1/P2, how each
-//! file is made durable, file names), the side-file names, the trimming of the
-//! resume certificate, the open-time degraded mode and orphan cleanup.
+//! **ADOPTED by the owner, 2026-11-09 (decision ledger, "2026-11-09 owner
+//! ADOPTION addendum", B6: the nine enumerated elements, as one unit);
+//! dormant:** the persistence protocol (G/P0/P1/P2, including how each
+//! archive file is made durable and the `.tmp` names); the file names
+//! `signer.v1`, `signer.v1.tmp`, `proof.tmp` and `proof-<hex>.v1`; the
+//! mirror's database key `finality/signer-mirror/v1`; the degraded open
+//! ([`ProofStatus`], `RetainedProofCheck`) and orphan cleanup;
+//! conflict-evidence verification during recovery; the trimming of the
+//! resume certificate; the initialization refusals; successor floors above
+//! signed heights; and the request bounds.
 //! Verified only within the bounds and limits of the ratification packet
 //! (§6–§7, summarised in #340).
 //!
@@ -64,7 +71,8 @@
 //! # Side file: the retained proof
 //!
 //! The objects, their trimming and the size bound are adopted (2026-10-22);
-//! the file name `proof-<64 hex digest>.v1` is PROPOSED: not adopted 2026-10-22.
+//! the file name `proof-<64 hex digest>.v1` is ADOPTED by the owner,
+//! 2026-11-09 (B6); dormant.
 //!
 //! `proof-<64 hex digest>.v1` holds the bytes `proof_digest` names: the
 //! `PolkaProofV1` that justified the current lock, or, in a halted state, the
@@ -81,8 +89,8 @@
 //! files `conflict-H.{state,evidence,resume,receipt}` (never overwritten or
 //! deleted once completed), the receipt, and the archive being durable before
 //! the recovered record are RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant. How each file is made durable
-//! (temp, fsync, rename, directory fsync) is PROPOSED with the persistence
-//! protocol.
+//! (temp, fsync, rename, directory fsync) is ADOPTED by the owner, 2026-11-09
+//! (B6), with the persistence protocol; dormant.
 //!
 //! `conflict-<H>.state` (the halted record), `.evidence` (the conflicting
 //! proof), `.resume` (the verified resume certificate), and last
@@ -91,7 +99,7 @@
 //! repaired into the mirror) only when this archive matches it. The archive
 //! is kept: initialization refuses while any `conflict-*` file exists.
 //!
-//! # Persistence protocol (PROPOSED: not adopted 2026-10-22)
+//! # Persistence protocol (ADOPTED by the owner, 2026-11-09, B6; dormant)
 //!
 //! Persistence before release is the G2-b semantics ratified 2026-10-16; this
 //! sequence is how this store meets it.
@@ -111,7 +119,7 @@
 //! R0 and R1 as the only repairs are adopted (2026-10-22). R1 accepting a
 //! recovered record over a halted mirror only when the matching archive
 //! verifies is RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant. The degraded open and the orphan cleanup are
-//! PROPOSED: not adopted.
+//! ADOPTED by the owner, 2026-11-09 (B6); dormant.
 //!
 //! See [`FileSignerStore::load`]: leftover temp files are removed; the state
 //! file and the mirror are classified (two repairs only, each after making
@@ -195,11 +203,11 @@ pub const HALT_SET: u8 = 1;
 pub const STATE_LEN: usize = 413;
 /// Bytes covered by the checksum.
 pub const CHECKSUMMED_LEN: usize = offset::CHECKSUM;
-/// The state file (name PROPOSED: not adopted 2026-10-22).
+/// The state file (name ADOPTED by the owner, 2026-11-09, B6; dormant).
 pub const STATE_FILE: &str = "signer.v1";
-/// The temporary file renamed over [`STATE_FILE`] (PROPOSED: not adopted 2026-10-22).
+/// The temporary file renamed over [`STATE_FILE`] (ADOPTED by the owner, 2026-11-09, B6; dormant).
 pub const TEMP_FILE: &str = "signer.v1.tmp";
-/// The temporary file renamed to a proof's digest name (PROPOSED: not adopted 2026-10-22).
+/// The temporary file renamed to a proof's digest name (ADOPTED by the owner, 2026-11-09, B6; dormant).
 pub const PROOF_TEMP: &str = "proof.tmp";
 /// Recovery-receipt checksum domain (RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant).
 pub const D_RECEIPT: &[u8; 37] = b"SUMCHAIN/FINALITY/SIGNER-RECOVERY/v1\0";
@@ -1099,7 +1107,7 @@ pub trait SignerDir {
 }
 
 /// The mirror record in the node database. The full-state mirror is adopted
-/// (2026-10-22); the key name `finality/signer-mirror/v1` is PROPOSED: not adopted 2026-10-22.
+/// (2026-10-22); the key name `finality/signer-mirror/v1` is ADOPTED by the owner, 2026-11-09 (B6); dormant.
 pub trait MirrorStore {
     fn read(&mut self) -> Result<Option<Vec<u8>>, IoError>;
     /// Returns `Ok` only once the bytes are durable (synced WAL write).

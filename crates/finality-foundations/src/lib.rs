@@ -3,8 +3,9 @@
 //! the encoding conventions of byte group A1 ratified on 2026-10-17, the
 //! finality vote format (group V) ratified on 2026-10-17, and the signer-state
 //! elements of group A2 (#340) that the owner adopted on 2026-10-22, as
-//! enumerated in the decision ledger; dormant, no node wiring. The rest of
-//! #340's format remains PROPOSED.
+//! enumerated in the decision ledger, with the conflict archive ratified on
+//! 2026-10-23 and the remaining nine signer elements adopted on 2026-11-09
+//! (B6); dormant, no node wiring.
 //!
 //! # This is NOT certified finality
 //!
@@ -25,7 +26,7 @@
 //! | Rule | Ratified semantics (2026-10-16) | Implemented here |
 //! |------|----------------------------------|------------------|
 //! | G2-a | A block is published as canonical only together with a verified certificate, its post-state and the finalized pointer, in one durable atomic batch. | Not here: the storage half is the dormant `sumchain-storage` certified-commit seam (#292). |
-//! | G2-b | Signer state is durable before any signature is released; exclusive ownership; explicit initialization; fail-closed recovery. | [`signer`]; the file-backed store and recovery rules in [`signer_file`], proof-gated height advancement, and the prevote-quorum proof in [`proofs`] (the elements enumerated on 2026-10-22 are adopted; the rest PROPOSED: see [`signer_file`]) |
+//! | G2-b | Signer state is durable before any signature is released; exclusive ownership; explicit initialization; fail-closed recovery. | [`signer`]; the file-backed store and recovery rules in [`signer_file`], proof-gated height advancement, and the prevote-quorum proof in [`proofs`] (the elements enumerated on 2026-10-22 and, with B6, on 2026-11-09 are adopted: see [`signer_file`]) |
 //! | G2-c | Quorum-signed, sequence-chained bootstrap authorization shipped with the release. Genesis membership authenticates the first bootstrap only; handshake announcements never authorize or halt; conflicting fully verified authorizations halt safely without reverting accepted history; late arrival does not invalidate authentic applied history. | [`bootstrap`] |
 //! | G2-d | No dynamic membership before certified finality. | [`containment`], enforced when an authorization is recorded as applied |
 //!
@@ -45,7 +46,7 @@
 //!
 //! | Object | Elements adopted by the owner, 2026-10-22 (decision ledger, as enumerated there); dormant, no node wiring | Implemented here |
 //! |--------|------|------------------|
-//! | Signer state (group A2) | the 413-byte `SignerStateV1` with the halt flag; the full-state mirror and context-bound proof digest; trimmed, re-verified side-file objects with the size bound; R0/R1 only; `PolkaProofV1`; recovery with `R > H`, floor `R + 1` and a verified resume certificate against the node's chain; permanent preservation of completed archives. **RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant:** the conflict archive as one unit (the files `conflict-H.{state,evidence,resume,receipt}`, never overwritten or deleted once completed; the 185-byte `RecoveryReceipt` and `SIGNER-RECOVERY/v1`; the resume-certificate evidence context; the archive durable before the recovered record; R1 over a halted mirror only with a verified matching archive). **PROPOSED (not adopted):** the persistence protocol G/P0/P1/P2 and file names. Verified only within the bounds and limits of the ratification packet (§6–§7, summarised in #340). | [`signer_file`], [`proofs`], [`signer`] |
+//! | Signer state (group A2) | the 413-byte `SignerStateV1` with the halt flag; the full-state mirror and context-bound proof digest; trimmed, re-verified side-file objects with the size bound; R0/R1 only; `PolkaProofV1`; recovery with `R > H`, floor `R + 1` and a verified resume certificate against the node's chain; permanent preservation of completed archives. **RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant:** the conflict archive as one unit (the files `conflict-H.{state,evidence,resume,receipt}`, never overwritten or deleted once completed; the 185-byte `RecoveryReceipt` and `SIGNER-RECOVERY/v1`; the resume-certificate evidence context; the archive durable before the recovered record; R1 over a halted mirror only with a verified matching archive). **ADOPTED by the owner, 2026-11-09 (decision ledger, B6: the nine enumerated elements, as one unit); dormant:** the persistence protocol G/P0/P1/P2; the file names `signer.v1`, `signer.v1.tmp`, `proof.tmp`, `proof-<hex>.v1`; the mirror's database key `finality/signer-mirror/v1`; the degraded open and orphan cleanup; conflict-evidence verification; the trimming of the resume certificate; the initialization refusals; successor floors above signed heights; the request bounds. Verified only within the bounds and limits of the ratification packet (§6–§7, summarised in #340). | [`signer_file`], [`proofs`], [`signer`] |
 //!
 //! # Still unratified (deliberately absent)
 //!
