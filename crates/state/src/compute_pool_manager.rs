@@ -676,6 +676,48 @@ mod tests {
         assert!(!mgr.has_pending_undo(6), "no undo entry on failed op");
     }
 
+    // ---- one-time entitlements are staged and reverted like any row ----
+
+    #[test]
+    fn one_time_entitlements_stage_and_revert_with_their_block() {
+        let (db, _d) = open_db();
+        let mut mgr = ComputePoolManager::new_enabled(&db, &params_enabled_from(5), 5).unwrap();
+        let item = WorkItemKey::new(jid(1), uid(2), 0);
+        let mut ids = Vec::new();
+        apply_and_seed(&db, &mut mgr, 5, |m| {
+            for kind in [
+                EntitlementKind::AcceptReimb,
+                EntitlementKind::ReprovisionReimb,
+            ] {
+                ids.push(m.register_one_time_entitlement(&item, kind, addr(7), 50)?);
+            }
+            Ok(())
+        })
+        .unwrap();
+        for id in &ids {
+            let row = mgr.store().get_entitlement(id).unwrap().expect("staged");
+            assert_eq!(row.entitlement_id, *id.as_bytes());
+        }
+
+        // A block that registers the same event again is refused whole.
+        let err = apply_and_seed(&db, &mut mgr, 6, |m| {
+            m.register_one_time_entitlement(&item, EntitlementKind::AcceptReimb, addr(9), 1)
+                .map(|_| ())
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&PoolError::DuplicateEntitlement.to_string()),
+            "got {err}"
+        );
+
+        mgr.revert_block(5, &bh(5)).unwrap();
+        for id in &ids {
+            assert!(mgr.store().get_entitlement(id).unwrap().is_none());
+        }
+        assert_eq!(mgr.model(), &ComputePoolModel::new());
+    }
+
     // ---- block execution rebuilds the model from the rows ----
 
     #[test]

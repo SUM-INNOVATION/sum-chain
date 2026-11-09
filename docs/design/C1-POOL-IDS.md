@@ -120,6 +120,13 @@ append-only: a new kind takes the next free value when its issue is ratified.
 A nonzero `occurrence` for kind 0 or 2, or a kind outside {0, 1, 2}, is
 refused by the derivation and by the strict kind decode.
 
+**Registration (dormant).** `ComputePoolModel::register_one_time_entitlement`
+registers a kind-0 or kind-2 event under its derived id with `occurrence = 0`,
+refusing a second registration of the same event whoever it would pay. Kind 1
+is refused until its counter row is decided. The beneficiary and the amount are
+the caller's. No operation calls it yet: accept and re-provisioning, the steps
+that register these events, do not execute.
+
 ## Chain separation
 
 - `offer_bond_id` carries `chain_id` directly (offset 27).
