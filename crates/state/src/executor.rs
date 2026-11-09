@@ -399,6 +399,15 @@ pub struct BlockExecutor {
     /// after. `None` while dormant (production default) — then the beacon dispatch is
     /// byte/state-identical to the fail-closed seam.
     beacon_block: parking_lot::Mutex<Option<crate::beacon_manager::BeaconBlockState>>,
+    /// C1 compute-pool (#130) per-block state: the model the block's
+    /// ComputePool transactions are decided against, and the steps they took.
+    /// Interior-mutable for the same reason as `beacon_block`. Built at block
+    /// start only when the gate is open at the block's height, and taken by
+    /// the apply seam. `None` while dormant (production default) — then the
+    /// ComputePool dispatch is the fail-closed seam, byte/state-identical to a
+    /// chain that never saw the transaction.
+    compute_pool_block:
+        parking_lot::Mutex<Option<crate::compute_pool_executor::ComputePoolBlockState>>,
     /// The dormant G5 validator-set wiring (#351). `None` unless
     /// [`Self::with_dormant_membership`] is called, which no production path
     /// does: [`Self::new`] leaves it `None`, and then execution stages no
@@ -487,6 +496,7 @@ impl BlockExecutor {
             contract_executor,
             inference_settlement_executor,
             beacon_block: parking_lot::Mutex::new(None),
+            compute_pool_block: parking_lot::Mutex::new(None),
             membership: None,
         }
     }
@@ -2125,21 +2135,49 @@ impl BlockExecutor {
                             }),
                         }
                     }
-                    TxPayload::ComputePool(_cp_data) => {
+                    TxPayload::ComputePool(cp_data) => {
                         // C1/ComputePool (#130). Registered payload (TxType 27).
-                        // EXECUTION is gate-CLOSED: `compute_pool_enabled_from_height`
-                        // is None (production default) and no pool executor is wired
-                        // yet, so a decoded ComputePool tx is refused FAIL-CLOSED with
-                        // NO state mutation and NO fee charged (byte/state-identical to
-                        // a chain that never saw it) — the dormant seam, mirroring
-                        // beacon at 28/29. Mempool admission rejects these upstream; this
-                        // is defense-in-depth. When C1 activates, this routes to the
-                        // pool executor. No numeric receipt code is allocated yet.
-                        Ok(TxExecutionResult {
+                        // Gate-CLOSED (`compute_pool_enabled_from_height` is None,
+                        // the production default): there is no per-block state, so
+                        // the tx is refused FAIL-CLOSED with NO state mutation and NO
+                        // fee charged (byte/state-identical to a chain that never saw
+                        // it) — the dormant seam, mirroring beacon at 28/29. Mempool
+                        // admission rejects these upstream; this is defense-in-depth.
+                        // Gate-OPEN: the operation runs against this block's C1 state
+                        // (crate::compute_pool_executor). A success charges the fee;
+                        // every refusal is the same free `Failed(0)`, its reason a
+                        // typed `ComputePoolReject`. No numeric receipt code is
+                        // allocated yet.
+                        let refused = TxExecutionResult {
                             tx_hash,
                             status: TxStatus::Failed(0),
                             fee_paid: 0,
-                        })
+                        };
+                        let mut slot = self.compute_pool_block.lock();
+                        let Some(pool) = slot.as_mut().filter(|p| p.height() == block_height)
+                        else {
+                            return Ok(refused);
+                        };
+                        match crate::compute_pool_executor::execute(
+                            view,
+                            pool,
+                            self.state.chain_id(),
+                            &self.params,
+                            &v2_tx.from,
+                            v2_tx.fee,
+                            proposer,
+                            cp_data,
+                        )? {
+                            Ok(()) => Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            }),
+                            Err(reject) => {
+                                debug!("ComputePool tx {} refused: {}", tx_hash, reject);
+                                Ok(refused)
+                            }
+                        }
                     }
                     TxPayload::BeaconSetup(beacon_data) | TxPayload::BeaconSigning(beacon_data) => {
                         // BR1 randomness beacon (#127). Registered payload (TxType
@@ -3539,6 +3577,14 @@ impl BlockExecutor {
             self.init_beacon_block(&view, block.height(), active_validator_pubkeys)?;
         }
 
+        // ── C1 compute pool (#130): the per-block state the ComputePool
+        // dispatch decides each transaction against. Only when the gate is
+        // open; its model is loaded from THIS BLOCK'S CANDIDATE at the first
+        // ComputePool transaction. Under the None gate the slot is cleared and
+        // the dispatch keeps its fail-closed seam.
+        *self.compute_pool_block.lock() = compute_pool_gate_open(&self.params, block.height())
+            .then(|| crate::compute_pool_executor::ComputePoolBlockState::new(block.height()));
+
         // ── loaded-code cap (#279, D8): decided before any transaction runs ──
         //
         // The code this block makes a node load (deploys, plus every distinct
@@ -4096,36 +4142,43 @@ impl BlockExecutor {
     ///
     /// GATE-CLOSED / dormant: under the production default
     /// (`compute_pool_enabled_from_height == None`) the gate is closed at every
-    /// height, so [`ComputePoolManager::new_enabled`] returns `None`, the manager
-    /// is never constructed, and this seam applies nothing and writes nothing.
+    /// height, so there is no per-block state to take,
+    /// [`ComputePoolManager::load_enabled`] returns `None`, the manager is never
+    /// constructed, and this seam applies nothing and writes nothing.
     ///
-    /// #125 dependency: there is no `ComputePool` `TxPayload` on the live path
-    /// yet — sourcing per-block operations from a block's transactions is #125's
-    /// gate-closed dispatch. Until that lands there is no operation source, so
-    /// even a hypothetically-open gate drives an EMPTY transition here (which
-    /// mutates no rows and writes no revert journal). The full apply→persist path
-    /// is exercised end-to-end by driving [`Self::apply_compute_pool_ops`] with a
-    /// real operation source in tests.
+    /// GATE-OPEN: the operation source is the block's ComputePool transactions.
+    /// The steps they took (crate::compute_pool_executor) are taken from the
+    /// per-block slot and replayed through [`Self::apply_compute_pool_ops`],
+    /// onto the model rebuilt from the candidate's rows. A block with no step
+    /// replays nothing, stages nothing and still publishes its (empty) record.
     fn apply_compute_pool_transitions(
         &self,
         view: &mut ExecutionView<'_, '_>,
         height: BlockHeight,
     ) -> Result<JournalRecord> {
-        // No live operation source yet (blocked on #125's dispatch) ⇒ the block
-        // contributes an empty (no-op) compute-pool transition.
-        self.apply_compute_pool_ops(view, height, |_model| Ok(()))
+        let steps = self
+            .compute_pool_block
+            .lock()
+            .take()
+            .filter(|pool| pool.height() == height)
+            .map(crate::compute_pool_executor::ComputePoolBlockState::into_steps)
+            .unwrap_or_default();
+        self.apply_compute_pool_ops(view, height, |model| {
+            crate::compute_pool_executor::PoolStep::replay(&steps, model)
+        })
     }
 
     /// The gated compute-pool apply seam, parameterized by the operation source
-    /// `ops` so the end-to-end apply→stage lifecycle is exercisable through the
-    /// real gated machinery without a live #125 dispatch.
+    /// `ops`: the block's replayed steps on the live path, a closure over the
+    /// model's operations in tests.
     ///
-    /// Inert under the production `None` gate: `new_enabled` yields `None`, so the
-    /// manager is never constructed, `ops` never runs, and the returned journal is
-    /// `NothingToUndo`. When the gate is (hypothetically / test-) enabled, `ops`
-    /// runs against the manager's working model and, on success, the transition is
-    /// STAGED into the block's candidate and its undo journal returned. Nothing
-    /// is committed here.
+    /// Inert under the production `None` gate: `load_enabled` yields `None`, so
+    /// the manager is never constructed, `ops` never runs, and the returned
+    /// journal is `NothingToUndo`. When the gate is (test-) enabled, the manager
+    /// is built over the model rebuilt from the candidate's rows, `ops` runs
+    /// against a working copy of it and, on success, the transition is STAGED
+    /// into the block's candidate and its undo journal returned. Nothing is
+    /// committed here.
     fn apply_compute_pool_ops<F>(
         &self,
         view: &mut ExecutionView<'_, '_>,
@@ -4135,7 +4188,9 @@ impl BlockExecutor {
     where
         F: FnOnce(&mut ComputePoolModel) -> PoolResult<()>,
     {
-        if let Some(mut manager) = ComputePoolManager::new_enabled(&self.db, &self.params, height) {
+        if let Some(mut manager) =
+            ComputePoolManager::load_enabled(&self.db, &self.params, view, height)?
+        {
             let (_mutated, journal) = manager.apply_block(view, height, ops)?;
             return gate_open_journal(journal, || {
                 crate::compute_pool_store::ComputePoolStateDiff::new().encode()

@@ -327,10 +327,10 @@ const ARMS: &[(&str, ArmKind, &str)] = &[
     ),
 ];
 
-/// What 27 of the 30 arms do with the account row they debit. The fee debit,
+/// What 28 of the 30 arms do with the account row they debit. The fee debit,
 /// the proposer credit and the nonce bump now stage into the block's candidate;
-/// ComputePool, BeaconSetup and BeaconSigning are `fee_paid: 0` on every path
-/// and debit nothing at all. Accounts were the widest single hole, which is why
+/// BeaconSetup and BeaconSigning are `fee_paid: 0` on every path and debit
+/// nothing at all. Accounts were the widest single hole, which is why
 /// they migrated first.
 const ACCOUNT_WRITE_IS_UNIVERSAL: &str =
     "StateManager::v_put_account stages cf::STATE into the block's candidate";
@@ -2212,16 +2212,13 @@ fn each_arms_kind_is_derived_from_what_it_can_reach() {
 ///   stages into the block's candidate;
 /// * NO arm reaches `StateStore::put_account`, which commits.
 ///
-/// Three arms reach neither, and are declared: they are free.
+/// Two arms reach neither, and are declared: they are free. ComputePool was
+/// a third until its gate-open path (#130) began charging the fee and
+/// `B_offer`; it now stages its account write like every other arm.
 #[test]
 fn every_arm_stages_its_account_write_and_none_commits_one() {
     /// Arms that debit no account at all, with why.
     const NO_ACCOUNT_WRITE: &[(&str, &str)] = &[
-        (
-            "ComputePool",
-            "gate-closed seam: Failed(0) with fee_paid 0 and no state mutation, \
-             byte-identical to a chain that never saw the tx (#130)",
-        ),
         (
             "BeaconSetup",
             "fee_paid 0 on BOTH paths — the dormant fail-closed seam and the \

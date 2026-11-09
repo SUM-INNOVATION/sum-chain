@@ -11,6 +11,7 @@ pub mod beacon_manager;
 pub mod beacon_store;
 pub mod cache;
 pub mod compute_pool;
+pub mod compute_pool_executor;
 pub mod compute_pool_manager;
 /// The #129 retention-relation validator. It lives in `sumchain-genesis`,
 /// next to the `ChainParams` validation that calls it, and is re-exported
