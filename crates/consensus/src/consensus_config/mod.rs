@@ -81,9 +81,10 @@ pub mod schema;
 pub use codec::{commitment_of, ConsensusConfig, Field, FieldChange, Value, SCHEMA_V1};
 pub use fields::{build, build_with, FieldSpec, SCHEMA_V1_FIELDS};
 pub use record::{
-    acknowledge, acknowledge_schema_transition, check_at_startup, pending_schema_transition,
-    pending_schema_transition_for, read_record, read_transitions, Acknowledged, BaselineRecord,
-    BaselineStatus, PendingSchemaTransition, SchemaTransitioned, StartupOutcome, Transition,
+    acknowledge, acknowledge_schema_transition, check_at_startup, pending_schema_revert,
+    pending_schema_transition, pending_schema_transition_for, read_record, read_transitions,
+    revert_schema_transition, Acknowledged, BaselineRecord, BaselineStatus, PendingSchemaRevert,
+    PendingSchemaTransition, SchemaReverted, SchemaTransitioned, StartupOutcome, Transition,
     TransitionKind,
 };
 pub use schema::{

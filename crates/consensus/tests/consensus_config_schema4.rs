@@ -968,3 +968,287 @@ fn half_a_move_is_refused_and_never_repaired() {
         assert_eq!(all_rows(&db), before, "{what}: nothing written");
     }
 }
+
+// ── the pre-start revert ────────────────────────────────────────────────────
+
+/// The chain head this database reports, as a node's blocks would set it.
+fn set_head(db: &Database, height: u64) {
+    sumchain_storage::schema::BlockStore::new(db)
+        .set_latest_height(height)
+        .unwrap();
+}
+
+/// A block-height index entry at `height`, as an imported block writes one.
+fn index_block_at(db: &Database, height: u64) {
+    db.put(cf::BLOCK_HEIGHT, &height.to_be_bytes(), &[7u8; 32])
+        .unwrap();
+}
+
+/// The release that reads `schema` as its newest: the one a node returns to
+/// when the move is abandoned.
+fn release_writing(schema: u16) -> &'static SchemaPolicy {
+    match schema {
+        1 => &SCHEMA_1_RELEASE,
+        2 => &SCHEMA_2_RELEASE,
+        3 => &SCHEMA_3_RELEASE,
+        n => panic!("no release writes schema {n}"),
+    }
+}
+
+/// Before the node first starts on the moved record, the move reverts to the
+/// exact rows it replaced — every column family, byte for byte — from schema
+/// 1, 2, 3 and the production shape. The release the node came from then reads
+/// and starts on it unchanged, and this binary offers the same move again.
+#[test]
+fn before_the_first_start_the_move_reverts_to_exactly_the_old_rows() {
+    for (label, from, g, (_d, db)) in [
+        ("schema 1", 1, g2(), schema_1_database()),
+        ("schema 2", 2, g2(), schema_2_database()),
+        ("schema 3", 3, g2(), schema_3_database()),
+        ("production-shaped", 3, g_ph(), production_shaped_database()),
+    ] {
+        set_head(&db, HEAD);
+        let before = all_rows(&db);
+        let r = ccfg::read_record(&db).unwrap().unwrap();
+        let offered = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+        let moved = move_to_schema_4(&db, HEAD);
+
+        let p = ccfg::pending_schema_revert(&db).unwrap();
+        assert_eq!(p.seq, r.transition_count + 1, "{label}");
+        assert_eq!(p.at_height, HEAD, "{label}");
+        assert_eq!((p.from_schema, p.to_schema), (4, from), "{label}");
+        assert_eq!((p.old, p.new), (moved.to, r.commitment), "{label}");
+
+        let done = ccfg::revert_schema_transition(&db, p.old, p.new).unwrap();
+        assert_eq!(
+            (
+                done.seq,
+                done.from_schema,
+                done.to_schema,
+                done.from,
+                done.to
+            ),
+            (p.seq, 4, from, moved.to, r.commitment),
+            "{label}"
+        );
+        assert_eq!(all_rows(&db), before, "{label}: exactly the old rows");
+
+        let old_release = release_writing(from);
+        assert_eq!(
+            read_record_with(&db, old_release).unwrap().unwrap(),
+            r,
+            "{label}"
+        );
+        assert_eq!(
+            check_at_startup_with(&db, &g, HEAD, old_release).unwrap(),
+            StartupOutcome::Unchanged {
+                commitment: r.commitment
+            },
+            "{label}: the old release starts on it"
+        );
+        assert_eq!(all_rows(&db), before, "{label}: and writes nothing");
+        assert_eq!(
+            ccfg::pending_schema_transition(&db).unwrap(),
+            Some(offered),
+            "{label}: the same move is offered again"
+        );
+        assert!(ccfg::pending_schema_revert(&db).is_err(), "{label}");
+    }
+}
+
+/// The revert names both commitments exactly; anything else refuses and
+/// writes nothing. The refusal of a wrong `--new` names the right one.
+#[test]
+fn the_revert_must_name_both_commitments_exactly() {
+    let (_d, db) = production_shaped_database();
+    set_head(&db, HEAD);
+    move_to_schema_4(&db, HEAD);
+    let p = ccfg::pending_schema_revert(&db).unwrap();
+    let zero = Hash::from_hex(&format!("0x{}", "00".repeat(32))).unwrap();
+    let before = all_rows(&db);
+    for (old, new) in [(zero, p.new), (p.old, zero), (p.new, p.old), (p.old, p.old)] {
+        let err = ccfg::revert_schema_transition(&db, old, new).unwrap_err();
+        assert!(matches!(err, ConfigError::Refused(_)), "{err}");
+    }
+    let err = ccfg::revert_schema_transition(&db, p.old, zero).unwrap_err();
+    assert!(err.to_string().contains(&p.new.to_string()), "{err}");
+    assert_eq!(all_rows(&db), before);
+}
+
+/// Once the chain has moved off the height the move was made at — a block
+/// above it, the head above it, or the head below it — the revert is refused
+/// and nothing is written. Recovery is then forward only.
+#[test]
+fn the_revert_is_refused_once_the_chain_has_moved_past_the_move() {
+    type Advance = fn(&Database);
+    let cases: [(&str, Advance); 4] = [
+        ("one block above, as imported", |db| {
+            index_block_at(db, HEAD + 1);
+            set_head(db, HEAD + 1);
+        }),
+        ("many blocks above", |db| {
+            for h in HEAD + 1..=HEAD + 10 {
+                index_block_at(db, h);
+            }
+            set_head(db, HEAD + 10);
+        }),
+        ("an indexed block above an unmoved head", |db| {
+            index_block_at(db, HEAD + 3)
+        }),
+        ("the head below the move", |db| set_head(db, HEAD - 1)),
+    ];
+    for (what, advance) in cases {
+        let (_d, db) = production_shaped_database();
+        set_head(&db, HEAD);
+        index_block_at(&db, HEAD);
+        move_to_schema_4(&db, HEAD);
+        let p = ccfg::pending_schema_revert(&db).unwrap();
+        advance(&db);
+        let before = all_rows(&db);
+        let err = ccfg::pending_schema_revert(&db).unwrap_err();
+        assert!(matches!(err, ConfigError::Refused(_)), "{what}: {err}");
+        let err = ccfg::revert_schema_transition(&db, p.old, p.new).unwrap_err();
+        assert!(matches!(err, ConfigError::Refused(_)), "{what}: {err}");
+        let text = err.to_string();
+        if what != "the head below the move" {
+            assert!(text.contains("forward only"), "{what}: {text}");
+        }
+        assert_eq!(all_rows(&db), before, "{what}: nothing written");
+        assert_eq!(
+            ccfg::read_record(&db).unwrap().unwrap().commitment,
+            p.old,
+            "{what}: still moved"
+        );
+    }
+}
+
+/// Only an unstarted move reverts: a database whose last transition is not
+/// this binary's schema transition — a later gate reschedule, an older
+/// release's own move, an operator acknowledgement, or no transition at all —
+/// refuses, and nothing is written.
+#[test]
+fn the_revert_is_refused_without_an_unstarted_move() {
+    // A start that recorded a reschedule after the move.
+    let (_d1, rescheduled) = production_shaped_database();
+    move_to_schema_4(&rescheduled, HEAD);
+    ccfg::check_at_startup(&rescheduled, &with_gate(0, HEAD + 100), HEAD).unwrap();
+    // The schema-3 release's own move (last transition: a schema transition
+    // into schema 3).
+    let (_d2, schema_3) = schema_3_database();
+    set_head(&schema_3, HEIGHT);
+    // The schema-1 release's history (last: an operator acknowledgement).
+    let (_d3, schema_1) = schema_1_database();
+    // A fresh schema-4 record (no transition).
+    let fresh_dir = TempDir::new().unwrap();
+    let fresh = Database::open_default(fresh_dir.path()).unwrap();
+    ccfg::check_at_startup(&fresh, &g2(), 0).unwrap();
+    let empty_dir = TempDir::new().unwrap();
+    let empty = Database::open_default(empty_dir.path()).unwrap();
+
+    for (what, db, says) in [
+        ("a later reschedule", &rescheduled, "gate-reschedule"),
+        (
+            "the schema-3 release's move",
+            &schema_3,
+            "this binary writes schema 4",
+        ),
+        ("an acknowledgement", &schema_1, "operator-acknowledged"),
+        ("a fresh record", &fresh, "no transition"),
+        ("no record", &empty, "no consensus configuration baseline"),
+    ] {
+        let before = all_rows(db);
+        let err = ccfg::pending_schema_revert(db).unwrap_err();
+        assert!(matches!(err, ConfigError::Refused(_)), "{what}: {err}");
+        assert!(err.to_string().contains(says), "{what}: {err}");
+        let c = h(C2);
+        assert!(ccfg::revert_schema_transition(db, c, c).is_err(), "{what}");
+        assert_eq!(all_rows(db), before, "{what}: nothing written");
+    }
+}
+
+/// A second revert has nothing to undo; a damaged record, or one of a schema
+/// this binary does not read, is refused as damaged. Nothing is written.
+#[test]
+fn the_revert_refuses_a_second_run_and_a_damaged_or_unknown_record() {
+    let (_d, db) = production_shaped_database();
+    set_head(&db, HEAD);
+    move_to_schema_4(&db, HEAD);
+    let p = ccfg::pending_schema_revert(&db).unwrap();
+    ccfg::revert_schema_transition(&db, p.old, p.new).unwrap();
+    let before = all_rows(&db);
+    let err = ccfg::revert_schema_transition(&db, p.old, p.new).unwrap_err();
+    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
+    assert_eq!(all_rows(&db), before, "a second run writes nothing");
+
+    let (_d2, db) = production_shaped_database();
+    set_head(&db, HEAD);
+    move_to_schema_4(&db, HEAD);
+    let p = ccfg::pending_schema_revert(&db).unwrap();
+    tamper(&db, RECORD_KEY, |r| *r.last_mut().unwrap() ^= 1);
+    let before = all_rows(&db);
+    let err = ccfg::revert_schema_transition(&db, p.old, p.new).unwrap_err();
+    assert!(matches!(err, ConfigError::RecordCorrupt(_)), "{err}");
+    assert_eq!(all_rows(&db), before, "damaged: nothing written");
+
+    let dir = TempDir::new().unwrap();
+    let db = Database::open_default(dir.path()).unwrap();
+    ccfg::check_at_startup(&db, &g2(), 0).unwrap();
+    tamper(&db, RECORD_KEY, |r| {
+        r[87 + 7..87 + 9].copy_from_slice(&5u16.to_le_bytes());
+        let c = commitment_of(&r[87..]);
+        r[11..43].copy_from_slice(c.as_bytes());
+        r[51..83].copy_from_slice(c.as_bytes());
+    });
+    let before = all_rows(&db);
+    let err = ccfg::pending_schema_revert(&db).unwrap_err();
+    assert!(err.to_string().contains("newer binary"), "{err}");
+    assert_eq!(all_rows(&db), before, "schema 5: nothing written");
+}
+
+/// The restored record and the removal of the move's transition are one
+/// durable batch. A batch staged and lost leaves the moved database row for
+/// row, and the revert can be run again; half a revert — which one batch rules
+/// out — is refused by this binary and by the schema-3 release, never
+/// repaired.
+#[test]
+fn a_lost_revert_leaves_the_moved_record_and_half_a_revert_is_refused() {
+    let (dir, db) = production_shaped_database();
+    set_head(&db, HEAD);
+    let unmoved = all_rows(&db);
+    let original = db.get(cf::META, RECORD_KEY).unwrap().unwrap();
+    move_to_schema_4(&db, HEAD);
+    let p = ccfg::pending_schema_revert(&db).unwrap();
+    let moved = all_rows(&db);
+    {
+        let mut batch = db.batch();
+        batch.delete(cf::META, &transition_key(p.seq)).unwrap();
+        batch.put(cf::META, RECORD_KEY, &original).unwrap();
+        drop(batch);
+    }
+    drop(db);
+    let db = Database::open_default(dir.path()).unwrap();
+    assert_eq!(all_rows(&db), moved);
+    ccfg::revert_schema_transition(&db, p.old, p.new).unwrap();
+    assert_eq!(all_rows(&db), unmoved);
+
+    for what in ["the record restored alone", "the transition removed alone"] {
+        let (_d, db) = production_shaped_database();
+        set_head(&db, HEAD);
+        move_to_schema_4(&db, HEAD);
+        if what == "the record restored alone" {
+            db.put(cf::META, RECORD_KEY, &original).unwrap();
+        } else {
+            db.delete(cf::META, &transition_key(p.seq)).unwrap();
+        }
+        let before = all_rows(&db);
+        for policy in [&PRODUCTION, &SCHEMA_3_RELEASE] {
+            let err = check_at_startup_with(&db, &g_ph(), HEAD, policy).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::RecordCorrupt(_)),
+                "{what}: {err}"
+            );
+        }
+        assert!(ccfg::pending_schema_revert(&db).is_err(), "{what}");
+        assert_eq!(all_rows(&db), before, "{what}: nothing written");
+    }
+}

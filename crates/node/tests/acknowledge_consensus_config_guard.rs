@@ -412,3 +412,169 @@ fn the_schema_transition_refuses_while_the_database_is_held() {
     assert!(text(&out).contains("must be stopped"), "{}", text(&out));
     assert!(ccfg::read_transitions(&held).unwrap().is_empty());
 }
+
+fn revert_schema(data_dir: &Path, old: &str, new: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_sumchain"))
+        .args([
+            "revert-consensus-config-schema",
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "--old",
+            old,
+            "--new",
+            new,
+            "--yes",
+        ])
+        .output()
+        .expect("running the node binary")
+}
+
+fn show_revert(data_dir: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_sumchain"))
+        .args([
+            "revert-consensus-config-schema",
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "--show",
+        ])
+        .output()
+        .expect("running the node binary")
+}
+
+/// Every row of every column family.
+fn all_rows(data: &Path) -> Vec<(String, Vec<u8>, Vec<u8>)> {
+    let db = Database::open_default(data).unwrap();
+    let mut out = Vec::new();
+    for name in sumchain_storage::db::ALL_CFS {
+        for (k, v) in db.iter(name).unwrap() {
+            out.push((name.to_string(), k.to_vec(), v.to_vec()));
+        }
+    }
+    out
+}
+
+/// The operator's pre-start abort through the real binary: on a schema-3
+/// database (as a schema-3 release records), the move, then `--show` on the revert,
+/// then the revert with exactly what it printed, leaves every row of every
+/// column family as it was before the move. Afterwards there is nothing to
+/// revert, and the move is offered again with the same commitments.
+#[test]
+fn the_pre_start_revert_restores_exactly_the_rows_the_move_replaced() {
+    let (_dir, data, old, new) = schema_3_fixture();
+    let before = all_rows(&data);
+    let nothing = show_revert(&data);
+    assert!(nothing.status.success(), "{}", text(&nothing));
+    assert!(
+        text(&nothing).contains("No pre-start revert is available"),
+        "{}",
+        text(&nothing)
+    );
+    assert_eq!(all_rows(&data), before, "--show writes nothing");
+
+    let moved = ack_schema(&data, &old, &new);
+    assert!(moved.status.success(), "{}", text(&moved));
+    let after_move = all_rows(&data);
+
+    let out = show_revert(&data);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("restore schema 3"), "{}", text(&out));
+    assert_eq!(shown(&out, "--old").as_deref(), Some(new.as_str()));
+    assert_eq!(shown(&out, "--new").as_deref(), Some(old.as_str()));
+    assert_eq!(all_rows(&data), after_move, "--show writes nothing");
+
+    let done = revert_schema(
+        &data,
+        &shown(&out, "--old").unwrap(),
+        &shown(&out, "--new").unwrap(),
+    );
+    assert!(done.status.success(), "{}", text(&done));
+    assert!(text(&done).contains("schema 4 -> 3"), "{}", text(&done));
+    assert_eq!(all_rows(&data), before, "exactly the rows before the move");
+
+    let again = revert_schema(&data, &new, &old);
+    assert!(!again.status.success(), "{}", text(&again));
+    assert_eq!(all_rows(&data), before, "a second revert writes nothing");
+    let offered = show_schema(&data);
+    assert_eq!(shown(&offered, "--old").as_deref(), Some(old.as_str()));
+    assert_eq!(shown(&offered, "--new").as_deref(), Some(new.as_str()));
+}
+
+/// Anything but both exact commitments refuses the revert and writes nothing.
+#[test]
+fn the_revert_refuses_wrong_commitments() {
+    let (_dir, data, old, new) = schema_3_fixture();
+    assert!(ack_schema(&data, &old, &new).status.success());
+    let before = all_rows(&data);
+    let zero = format!("0x{}", "00".repeat(32));
+    for (o, n) in [(&zero, &old), (&new, &zero), (&old, &new), (&new, &new)] {
+        let out = revert_schema(&data, o, n);
+        assert!(!out.status.success(), "{o} -> {n}: {}", text(&out));
+    }
+    assert_eq!(all_rows(&data), before, "nothing written");
+}
+
+/// Once the chain has a block above the move's height, the revert is refused,
+/// names forward recovery, and writes nothing.
+#[test]
+fn the_revert_is_refused_once_a_block_above_the_move_exists() {
+    let (_dir, data, old, new) = schema_3_fixture();
+    assert!(ack_schema(&data, &old, &new).status.success());
+    {
+        let db = Database::open_default(&data).unwrap();
+        db.put(
+            sumchain_storage::cf::BLOCK_HEIGHT,
+            &1u64.to_be_bytes(),
+            &[7u8; 32],
+        )
+        .unwrap();
+        sumchain_storage::schema::BlockStore::new(&db)
+            .set_latest_height(1)
+            .unwrap();
+    }
+    let before = all_rows(&data);
+    let show = show_revert(&data);
+    assert!(show.status.success(), "{}", text(&show));
+    assert!(text(&show).contains("forward only"), "{}", text(&show));
+    let out = revert_schema(&data, &new, &old);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("forward only"), "{}", text(&out));
+    assert_eq!(all_rows(&data), before, "nothing written");
+}
+
+/// While a node holds the database, neither the move nor the revert runs, and
+/// nothing is written — with the right commitments in hand.
+#[test]
+fn the_move_and_the_revert_refuse_while_the_database_is_held() {
+    let (_dir, data, old, new) = schema_3_fixture();
+    {
+        let held = Database::open_default(&data).unwrap();
+        let out = ack_schema(&data, &old, &new);
+        assert!(!out.status.success(), "{}", text(&out));
+        assert!(text(&out).contains("must be stopped"), "{}", text(&out));
+        assert_eq!(
+            ccfg::read_record(&held)
+                .unwrap()
+                .unwrap()
+                .commitment
+                .to_string(),
+            old
+        );
+    }
+    assert!(ack_schema(&data, &old, &new).status.success());
+    let before = all_rows(&data);
+    {
+        let held = Database::open_default(&data).unwrap();
+        let out = revert_schema(&data, &new, &old);
+        assert!(!out.status.success(), "{}", text(&out));
+        assert!(text(&out).contains("must be stopped"), "{}", text(&out));
+        assert_eq!(
+            ccfg::read_record(&held)
+                .unwrap()
+                .unwrap()
+                .commitment
+                .to_string(),
+            new
+        );
+    }
+    assert_eq!(all_rows(&data), before, "nothing written");
+}

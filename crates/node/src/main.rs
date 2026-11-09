@@ -399,6 +399,8 @@ enum Commands {
     ///
     /// Local only. It authorizes nothing on the network and activates nothing.
     /// A binary that records the schema the database already holds refuses.
+    /// Until the node first runs on the moved record,
+    /// `revert-consensus-config-schema` can undo the move.
     AcknowledgeConsensusConfigSchema {
         /// Data directory
         #[arg(short, long, default_value = "data")]
@@ -419,6 +421,47 @@ enum Commands {
         /// Print the move this binary would make, with both commitments exactly
         /// as `--old` and `--new` take them, and exit. Opens the database
         /// read-only and writes nothing; meant for a stopped node.
+        #[arg(long, conflicts_with_all = ["old", "new", "yes"])]
+        show: bool,
+    },
+
+    /// PRE-START ONLY: undo this binary's consensus-configuration schema move
+    /// (#268) on a stopped node that has not run on the moved record.
+    ///
+    /// For an upgrade abandoned after `acknowledge-consensus-config-schema`
+    /// and before the node's first start: a binary that does not read the
+    /// newer schema refuses the moved record. This writes back exactly the
+    /// record the move replaced, which the move kept, and removes the move's
+    /// history entry, so the configuration rows are byte for byte what they
+    /// were before the move. It touches no block, no state and no other row;
+    /// it is not a rollback of the chain.
+    ///
+    /// Refused unless the move is the last recorded change and the chain is
+    /// still exactly at the height the move was made at, with no block above
+    /// it. Once a block above that height exists, the node has run on the
+    /// moved record and recovery is forward only, with a binary that reads the
+    /// newer schema. The operator names BOTH commitments: `--show` prints them
+    /// without writing.
+    RevertConsensusConfigSchema {
+        /// Data directory
+        #[arg(short, long, default_value = "data")]
+        data_dir: PathBuf,
+
+        /// The commitment recorded in this database (the moved record), exactly
+        #[arg(long, required_unless_present = "show")]
+        old: Option<String>,
+
+        /// The commitment the move replaced, which is restored, exactly
+        #[arg(long, required_unless_present = "show")]
+        new: Option<String>,
+
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+
+        /// Print the revert this binary would make, with both commitments
+        /// exactly as `--old` and `--new` take them, or why none is available,
+        /// and exit. Opens the database read-only and writes nothing.
         #[arg(long, conflicts_with_all = ["old", "new", "yes"])]
         show: bool,
     },
@@ -1605,8 +1648,9 @@ async fn main() -> Result<()> {
             println!("  Re-encoded:     {new}");
             println!();
             println!("The recorded rules are unchanged; fields the newer schema adds are");
-            println!("recorded absent. This does not make any other node agree, and it");
-            println!("cannot be undone: the history is append-only.");
+            println!("recorded absent. This does not make any other node agree. Until this");
+            println!("node first runs on the moved record, `revert-consensus-config-schema`");
+            println!("can undo it; once a block above this height exists, it cannot.");
             if !yes {
                 println!();
                 println!("Type 'yes' to proceed:");
@@ -1629,6 +1673,84 @@ async fn main() -> Result<()> {
                 done.from,
                 done.to,
                 done.added.len()
+            );
+        }
+
+        Commands::RevertConsensusConfigSchema {
+            data_dir,
+            old,
+            new,
+            yes,
+            show,
+        } => {
+            use sumchain_consensus::consensus_config as ccfg;
+
+            init_logging("info", false)?;
+
+            if show {
+                // Read-only: no lock, no write. The record, its whole history
+                // and the chain position are checked exactly as the revert
+                // checks them.
+                let db = Database::open_read_only(&data_dir)
+                    .with_context(|| format!("cannot open {data_dir:?} read-only"))?;
+                match ccfg::pending_schema_revert(&db) {
+                    Ok(p) => {
+                        println!(
+                            "Recorded in schema {} by schema transition {} at height {}; the \
+                             chain is still at height {}. This binary can restore schema {}.",
+                            p.from_schema, p.seq, p.at_height, p.at_height, p.to_schema
+                        );
+                        println!("  --old {}", p.old);
+                        println!("  --new {}", p.new);
+                    }
+                    Err(ccfg::ConfigError::Refused(why)) => {
+                        println!("No pre-start revert is available: {why}");
+                    }
+                    Err(e) => anyhow::bail!("{e}"),
+                }
+                return Ok(());
+            }
+            let (Some(old), Some(new)) = (old, new) else {
+                anyhow::bail!("--old and --new are both required");
+            };
+            let old = sumchain_primitives::Hash::from_hex(&old)
+                .map_err(|e| anyhow::anyhow!("--old is not a commitment: {e}"))?;
+            let new = sumchain_primitives::Hash::from_hex(&new)
+                .map_err(|e| anyhow::anyhow!("--new is not a commitment: {e}"))?;
+
+            // Opening takes RocksDB's exclusive lock on the data directory, so
+            // this fails while a node holds it.
+            let db = Database::open_default(&data_dir).with_context(|| {
+                format!("cannot open {data_dir:?}; the node must be stopped before reverting")
+            })?;
+            sumchain_storage::journal::validate_startup(&db)
+                .context("application journal format check failed")?;
+
+            println!("Reverting this node's consensus configuration schema move (pre-start only).");
+            println!("  Data directory: {data_dir:?}");
+            println!("  Recorded:       {old}");
+            println!("  Restored:       {new}");
+            println!();
+            println!("This restores the record the move replaced and removes the move's");
+            println!("history entry. It touches no block and no state, and it is refused");
+            println!("if any block above the move's height exists.");
+            if !yes {
+                println!();
+                println!("Type 'yes' to proceed:");
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if input.trim().to_lowercase() != "yes" {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+            }
+
+            let done = ccfg::revert_schema_transition(&db, old, new)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!();
+            println!(
+                "Reverted transition {} at height {}: schema {} -> {} ({} -> {})",
+                done.seq, done.at_height, done.from_schema, done.to_schema, done.from, done.to
             );
         }
 
