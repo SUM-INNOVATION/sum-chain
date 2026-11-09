@@ -446,6 +446,28 @@ enum Commands {
         #[arg(short, long, default_value = "data")]
         data_dir: PathBuf,
     },
+
+    /// Check a STOPPED node's stored validator-set rows before an upgrade to
+    /// the validator-set rules, and write nothing: the rules' stored-row check,
+    /// run against the schedule given by --epoch-length and
+    /// --activation-height, must find no legacy validator_sets row, no vset/
+    /// row and no malformed key. Opens the database read-only. Exit status: 0
+    /// when it finds none; 2 when it finds one or cannot scan the rows; 1 when
+    /// nothing was checked (no schedule, an epoch length of 0, no data
+    /// directory, no database, no head).
+    CheckMembershipRows {
+        /// Data directory
+        #[arg(short, long, default_value = "data")]
+        data_dir: PathBuf,
+
+        /// The schedule's epoch length L, above 0 (required)
+        #[arg(long)]
+        epoch_length: Option<u64>,
+
+        /// The schedule's activation height A (required)
+        #[arg(long)]
+        activation_height: Option<u64>,
+    },
 }
 
 #[tokio::main]
@@ -1722,6 +1744,18 @@ async fn main() -> Result<()> {
                 std::process::exit(2);
             }
         }
+
+        Commands::CheckMembershipRows {
+            data_dir,
+            epoch_length,
+            activation_height,
+        } => {
+            init_logging("warn", false)?;
+            if !check_membership_rows(&data_dir, epoch_length, activation_height)? {
+                // As `check-finality-record`: 2 is the refusal.
+                std::process::exit(2);
+            }
+        }
     }
 
     Ok(())
@@ -1815,6 +1849,102 @@ fn check_finality_record(data_dir: &std::path::Path) -> Result<bool> {
                  an empty one."
             );
             println!("Result: START_REFUSES");
+            Ok(false)
+        }
+    }
+}
+
+/// `sumchain check-membership-rows`: the pre-upgrade check of the dormant G5
+/// validator-set rules (#351, #352). On a stopped validator, a read-only run
+/// of `check_stored_rows` against the configured schedule must find no legacy
+/// `validator_sets` row, no `vset/` row and no malformed key.
+///
+/// `Ok(true)` when it finds none, `Ok(false)` when it finds one or cannot scan
+/// the rows, and an error when there is nothing to check (no schedule, an
+/// epoch length of 0, no directory, no database, no head). The schedule comes
+/// from the command line: no configuration carries one yet. Read-only handle:
+/// nothing is created, locked, repaired or written, and no configuration is
+/// built.
+fn check_membership_rows(
+    data_dir: &std::path::Path,
+    epoch_length: Option<u64>,
+    activation_height: Option<u64>,
+) -> Result<bool> {
+    use sumchain_storage::cf;
+    use sumchain_storage::schema::BlockStore;
+    use sumchain_storage::validator_set_g5::{check_stored_rows, EpochSchedule, VsetLayout};
+
+    let (Some(epoch_length), Some(activation_height)) = (epoch_length, activation_height) else {
+        anyhow::bail!(
+            "no schedule: pass both --epoch-length and --activation-height, the values the \
+             upgrade configures; nothing was checked"
+        );
+    };
+    let schedule = EpochSchedule::new(epoch_length, activation_height)
+        .map_err(|e| anyhow::anyhow!("the schedule is refused ({e}); nothing was checked"))?;
+    // `open_read_only` creates nothing either; this only says so plainly.
+    if !data_dir.is_dir() {
+        anyhow::bail!("no data directory at {data_dir:?}; nothing was checked or created");
+    }
+    let db = Database::open_read_only(data_dir)
+        .with_context(|| format!("cannot open {data_dir:?} read-only"))?;
+    // A directory without a chain proves nothing about a validator.
+    let head = BlockStore::new(&db)
+        .get_latest()
+        .context("reading the recorded head")?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{data_dir:?} records no chain head, so there is no chain to check; is this the \
+                 validator's data directory?"
+            )
+        })?;
+    println!("Data directory:  {} (opened read-only)", data_dir.display());
+    println!(
+        "Head:            height {} ({})",
+        head.height(),
+        head.hash()
+    );
+    println!("Schedule:        epoch length {epoch_length}, activation height {activation_height}");
+
+    let finding = match check_stored_rows(&db, &schedule) {
+        Err(refusal) => Some(refusal.to_string()),
+        // It accepts a row for an epoch that is not rowless. Before the rules
+        // first govern a database no transition block has written one, so any
+        // `vset/` row is a finding here.
+        Ok(()) => {
+            let prefix = VsetLayout::prefix();
+            match db.iter_checked_from(cf::STATE, Some(prefix)) {
+                Err(e) => Some(format!("scanning stored validator-set rows failed: {e}")),
+                Ok(mut rows) => match rows.next() {
+                    Some(Err(e)) => Some(format!("scanning stored validator-set rows failed: {e}")),
+                    Some(Ok((key, _))) if key.starts_with(prefix) => {
+                        let epoch = <[u8; 8]>::try_from(&key[prefix.len()..]).map_or_else(
+                            |_| "?".to_string(),
+                            |e| u64::from_be_bytes(e).to_string(),
+                        );
+                        Some(format!(
+                            "a validator-set row is stored for epoch {epoch} (key {key:02x?})"
+                        ))
+                    }
+                    _ => None,
+                },
+            }
+        }
+    };
+    match finding {
+        None => {
+            println!(
+                "Stored rows:     no legacy validator_sets row, no vset/ row, no malformed key"
+            );
+            println!("Result: ROWS_CLEAN");
+            Ok(true)
+        }
+        Some(finding) => {
+            println!("Stored rows:     {finding}");
+            println!(
+                "  None may be stored before the validator-set rules first govern a database."
+            );
+            println!("Result: ROWS_REFUSED");
             Ok(false)
         }
     }
