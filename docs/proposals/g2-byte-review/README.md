@@ -36,7 +36,14 @@
   Ratified 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"): the conflict archive as one unit: `conflict-H.{state,evidence,resume,receipt}` (completed files never overwritten or deleted), the 185-byte `RecoveryReceipt` and `SUMCHAIN/FINALITY/SIGNER-RECOVERY/v1\0`, the resume-certificate evidence context, the archive durable before the recovered record, and R1 over a halted mirror only with a verified matching archive.
 
   Dormant code is in `crates/finality-foundations` (`signer_file`, `proofs`, `signer`). Every other signer detail stays PROPOSED. Production durability and activation are separate requirements. It supersedes §8's draft 1. Of the §9 choices it settles **S1** (see §9); **D3** and **D6** stay open.
-- **Still unresolved:** D3, D5, D6, M1–M5 and H1 (groups A2–A5), and every object layout and key composition in this draft other than the vote, the §2 validator-set commitment and the adopted group A2 signer-state items above.
+- **Adopted since drafting (owner, 2026-11-09, decision ledger "2026-11-09 owner ADOPTION addendum", B3): the evidence records of §5 and D5,** "using versioned META keys rather than a new column family. No penalties are introduced." Exactly these items:
+  - D5: the first valid record per slot is kept;
+  - `EquivocationEvidenceV1` (§5a), 363 bytes, and its 15-byte key;
+  - `UpgradeConflictEvidenceV1` (§5b), 573 + 66·(k_a + k_b) bytes, and its 28-byte META key `upgrade/conflict/v1/` ‖ sequence;
+  - storage in the existing `meta` column family, not the drafted `finality_evidence` family.
+
+  Dormant code is in `crates/finality-foundations` (`evidence`: both codecs) and `crates/storage` (`evidence_meta`: the first-wins store). The equivocation key there is the 15 bytes after the versioned prefix `finality/evidence/v1/`, a name that change proposes, as the certificate layout did with `finality/cert/v1/`. The manifest inside §5b (§6, A4) is not adopted: the record reads only each manifest's signer count, and verifying a manifest is injected. Nothing consumes either record.
+- **Still unresolved:** D3, D6, M1–M5 and H1 (groups A2, A4 and A5), and every object layout and key composition in this draft other than the vote, the §2 validator-set commitment, the adopted group A2 signer-state items and the group A3 evidence records above.
   - **Why D6 stays open:** the adopted format keeps the lock in the one signer-state record (no `FLCKv1`; valid_round and valid_value are not persisted). But its durable safety data also includes the full-state mirror, retained-proof side files and conflict archives, so "one file" does not map 1:1.
 
 These semantics alone are **not** complete certified finality. See §10 for what is still missing.
@@ -207,7 +214,7 @@ The legacy `finalized_height`/`finalized_hash` META records are not reused.
 
 There is exactly one canonical encoding; non-canonical order and identical blocks are refused. No penalty is attached; that ruling stands.
 
-**Storage (D5).** CF `finality_evidence`, key = height u64 BE ‖ round u32 BE ‖ type u8 ‖ index u16 BE (15 bytes). The first valid record is kept.
+**Storage (D5).** CF `finality_evidence`, key = height u64 BE ‖ round u32 BE ‖ type u8 ‖ index u16 BE (15 bytes). The first valid record is kept. **Adopted 2026-11-09 with versioned META keys instead of the family:** the same 15 bytes follow a versioned prefix in the existing `meta` family.
 
 ### 5b. `UpgradeConflictEvidenceV1` (new)
 
@@ -392,7 +399,7 @@ Only full manifest bytes can produce this record; a hint never does.
 | **D2** | Explicit n in the certificate | **Omit.** n is implied by the valset commitment the verifier must resolve anyway. | Add `n u16` at offset 117 (+2 bytes, plus a new mismatch refusal) |
 | **D3** | Creating signer state | **An explicit operator initialization** that writes counter 0 with the floor, and refuses if the file or mirror exists. **Still open after the 2026-10-22 adoption:** the counter-0 record with the floor is adopted, but the initialization refusals are not. | Automatic creation on first start, which cannot tell a fresh signer from a lost one (the double-sign case) |
 | **D4** | Round range | **u32 with the validity rule `round ≤ 2^20`** on every round field | Unbounded u32; u16 |
-| **D5** | Evidence retention | **First valid record per slot**: (h, r, type, index) for votes, and sequence for upgrade conflicts | Keep all (unbounded under spam); keep latest (overwritable) |
+| **D5** | Evidence retention | **First valid record per slot**: (h, r, type, index) for votes, and sequence for upgrade conflicts. **Adopted (owner, 2026-11-09), under versioned META keys.** | Keep all (unbounded under spam); keep latest (overwritable) |
 | **D6** | Durable safety files | **One file, the signer state.** No `FLCKv1` record; valid_round and valid_value are not persisted. **Still open after #340:** the adopted format keeps the lock in the one record, but adds a full-state mirror, side files and conflict archives, so "one file" does not map 1:1. | A separate lock record, with a cross-file consistency failure mode |
 | **M1** | Manifest signature message | **`D_MSIGN ‖ body`**, the full 276-byte body with its magic | `D_MSIGN ‖ digest` (32 bytes); or B-1's `domain ‖ body[7..]` |
 | **M2** | Handler identity | **One digest over (name, version)**. The new commitment and the release bind the rules themselves. | B-1's separate `handler_version` plus a digest including an undefined "migration digest" |
