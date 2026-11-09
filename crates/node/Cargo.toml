@@ -20,6 +20,9 @@ sumc-runtime = { path = "../sumc-runtime" }
 sumchain-consensus = { path = "../consensus" }
 sumchain-p2p = { path = "../p2p" }
 sumchain-rpc = { path = "../rpc" }
+# The durable finality signer (`finality_signer`, #350, B6). DORMANT: only the
+# `signer init` and `signer status` commands reach it; `run` never opens it.
+sumchain-finality-foundations = { path = "../finality-foundations" }
 jsonrpsee = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }

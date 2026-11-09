@@ -1,5 +1,6 @@
-//! A file-backed [`SignerStore`] for the G2-b signer. Dormant: nothing calls
-//! it.
+//! A file-backed [`SignerStore`] for the G2-b signer. Dormant: only the node's
+//! signer commands (`sumchain signer init` and `status`) and tests call it;
+//! nothing signs.
 //!
 //! **Semantics RATIFIED (2026-10-20):** proof-gated height advancement, the
 //! persisted conflict halt, and `PolkaProofV1` verification of lock changes.

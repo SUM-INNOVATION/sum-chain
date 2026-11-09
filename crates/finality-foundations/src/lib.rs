@@ -5,7 +5,7 @@
 //! elements of group A2 (#340) that the owner adopted on 2026-10-22, as
 //! enumerated in the decision ledger, with the conflict archive ratified on
 //! 2026-10-23 and the remaining nine signer elements adopted on 2026-11-09
-//! (B6); dormant, no node wiring. The evidence records of group A3 (B3) were
+//! (B6); consensus use remains dormant. The evidence records of group A3 (B3) were
 //! adopted on 2026-11-09.
 //!
 //! # This is NOT certified finality
@@ -18,12 +18,14 @@
 //! under E1, count) and the certificate ([`certificate`]: encode, decode,
 //! verify every reconstructed PRECOMMIT under E1), and the evidence records
 //! ([`evidence`]: encode, decode, verify). No production path calls these codecs.
-//! `tests/dormant.rs`,
-//! narrowed with the owner's authorization (2026-11-09), permits one consumer
-//! only, the node's reviewed signer wiring (`crates/node/src/finality_signer.rs`
-//! and its `signer init` and `signer status` commands), and fails on any other
-//! consumer, on any use of the vote, certificate, proof, bootstrap or
-//! containment modules by that wiring, on any other caller in the node, and on
+//! No consensus, storage or RPC code calls this crate. The node names it in
+//! one module only, `crates/node/src/finality_signer.rs` (#350, B6), whose
+//! operator commands `sumchain signer init` and `sumchain signer status`
+//! create and inspect the signer state; no node path opens a signer or
+//! produces a vote. `tests/dormant.rs`, narrowed with the owner's
+//! authorization (2026-11-09), permits exactly that wiring: it fails on any
+//! other consumer, on any use of the vote, certificate, proof, bootstrap or
+//! containment modules by the wiring, on any other caller in the node, and on
 //! the wiring opening or driving a signer.
 //! The code exists so that the ratified *semantics* are implemented and tested
 //! before any bytes are reviewed; wiring it in is a separate, reviewed change.
@@ -86,11 +88,12 @@
 //!
 //! # Before wiring
 //!
-//! When any of this is wired into a node path, add this crate to the
-//! consensus-crate and constants-census lists in
-//! `crates/consensus/tests/consensus_config_census.rs`, and widen
-//! `tests/dormant.rs` only to the newly reviewed callers, in the same reviewed
-//! change.
+//! When more of this is wired into a node path, add this crate to the
+//! constants-census list in `crates/consensus/tests/consensus_config_census.rs`
+//! (the signer wiring added it to the consensus-crate list; the constants
+//! census waits on whether its constants become committed configuration
+//! fields, E-cover, PROPOSED), and widen `tests/dormant.rs` only to the newly
+//! reviewed callers, in the same reviewed change.
 
 pub mod bootstrap;
 pub mod certificate;

@@ -1,13 +1,14 @@
 //! Storage layout v1 for the DORMANT certified-commit seam ([`crate::certified`]):
 //! versioned keys in the EXISTING `meta` column family.
 //!
-//! No production code outside `sumchain-storage` names this module (the
-//! seam's dormancy test still holds). Its readers have production callers in
-//! this crate: the crossing guard ([`crate::certified_guard`]) decodes the
-//! pointer and probes the certificate prefix on every chain switch and
-//! rollback, and its start-up audit runs [`recover_v1`]. Nothing writes these
-//! keys outside tests, so on the databases this binary produces those reads
-//! find nothing and change nothing.
+//! Outside `sumchain-storage`, production code names only
+//! [`SIGNER_MIRROR_KEY`] here (the node's dormant signer wiring), never the
+//! seam's layout (the seam's dormancy test still holds). Its readers have
+//! production callers in this crate: the crossing guard
+//! ([`crate::certified_guard`]) decodes the pointer and probes the certificate
+//! prefix on every chain switch and rollback, and its start-up audit runs
+//! [`recover_v1`]. Nothing writes the seam's keys outside tests, so on the
+//! databases this binary produces those reads find nothing and change nothing.
 //! The dormant G5 wiring's certified-height read (#351) is one more reader;
 //! it runs only under a configuration no production path constructs.
 //!
