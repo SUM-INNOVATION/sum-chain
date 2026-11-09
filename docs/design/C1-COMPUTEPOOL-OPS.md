@@ -150,6 +150,11 @@ the stored rows each block:
   together, and the offer row records `B_offer` as locked. With no parameters
   declared it is refused. When an offer ends and its bond returns is not
   decided, so nothing withdraws one yet.
+- **`DeclineWorkUnitV1`**: only the identity that published the work item's
+  winning offer may decline, only at the unit's current generation, and only
+  while the unit is `Assigned`. The unit goes `Assigned → Reassignable` and
+  nothing else moves: no bond is slashed or released (Decision A), and the
+  assignment entry stays as the record of whom the work item was assigned to.
 - **Not executable** (their rules are undecided): create job, accept, expire,
   cancel, assign and reassign. Each decodes and is refused.
 

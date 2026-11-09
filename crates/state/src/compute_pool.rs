@@ -323,6 +323,23 @@ pub enum PoolError {
     #[error("unknown job")]
     UnknownJob,
 
+    /// A referenced offer is not present in the model.
+    #[error("unknown offer")]
+    UnknownOffer,
+
+    /// A work item names a generation other than its unit's current one.
+    #[error("generation {requested} is not the unit's current generation {current}")]
+    StaleGeneration { current: u64, requested: u64 },
+
+    /// No assignment is recorded for the work item.
+    #[error("no assignment for this work item")]
+    UnassignedWorkItem,
+
+    /// The sender is not the identity of the offer the work item is assigned
+    /// to.
+    #[error("sender is not the assigned worker")]
+    NotAssignedWorker,
+
     /// The retention tracker is already in the reverse index.
     #[error("retention tracker already indexed")]
     RetentionTrackerAlreadyIndexed,
@@ -1278,6 +1295,48 @@ impl ComputePoolModel {
         let unit = self.units.get_mut(unit_key).ok_or(PoolError::UnknownUnit)?;
         let next = unit.state.transition(to)?; // validate before mutate
         unit.state = next;
+        Ok(())
+    }
+
+    /// `DeclineWorkUnitV1` from `sender` (structure): the assigned worker
+    /// hands the work item back to the pool, `Assigned → Reassignable`.
+    ///
+    /// Nothing else changes. No bond is touched, so a decline never slashes
+    /// (Decision A, #217 B10). The assignment entry stays as the record of
+    /// whom the work item was assigned to; what reassignment does with it is
+    /// not decided here. Validate-before-mutate.
+    pub fn decline_unit(&mut self, work_item: &WorkItemKey, sender: &Address) -> PoolResult<()> {
+        self.check_decline_unit(work_item, sender)?;
+        self.transition_unit(&work_item.unit_key(), UnitState::Reassignable)
+    }
+
+    /// The checks [`decline_unit`](Self::decline_unit) runs, without
+    /// declining: the unit exists at `work_item`'s generation and is
+    /// `Assigned`, an assignment is recorded for the work item, and `sender`
+    /// is the identity that published the winning offer.
+    pub fn check_decline_unit(&self, work_item: &WorkItemKey, sender: &Address) -> PoolResult<()> {
+        let unit = self
+            .units
+            .get(&work_item.unit_key())
+            .ok_or(PoolError::UnknownUnit)?;
+        if unit.generation != work_item.generation {
+            return Err(PoolError::StaleGeneration {
+                current: unit.generation,
+                requested: work_item.generation,
+            });
+        }
+        unit.state.transition(UnitState::Reassignable)?;
+        let assignment = self
+            .assignments
+            .get(work_item)
+            .ok_or(PoolError::UnassignedWorkItem)?;
+        let winner = self
+            .offers
+            .get(&assignment.winner_offer_bond_id)
+            .ok_or(PoolError::UnknownOffer)?;
+        if winner.identity != *sender {
+            return Err(PoolError::NotAssignedWorker);
+        }
         Ok(())
     }
 
@@ -2579,6 +2638,160 @@ mod tests {
             m.transition_unit(&UnitKey::new(j, unit(99)), UnitState::Eligible),
             Err(PoolError::UnknownUnit)
         );
+    }
+
+    /// Job 1 with unit 2 at generation 0, taken to `state` along legal
+    /// edges, and offer 3, published by `addr(8)`. With `assign`, the work
+    /// item's assignment names offer 3.
+    fn decline_model(state: UnitState, assign: bool) -> (ComputePoolModel, WorkItemKey) {
+        let mut m = ComputePoolModel::new();
+        let j = job(1);
+        m.create_job(
+            j,
+            addr(9),
+            1,
+            vec![simple_unit(j, unit(2))],
+            &[UnitSizing { slots: 0 }],
+            1,
+            0,
+            1_000,
+            safe_exposure(),
+            1_000_000,
+        )
+        .unwrap();
+        m.publish_offer(BondedOffer {
+            offer_bond_id: offer(3),
+            identity: addr(8),
+            payment_addr: addr(50),
+            offered_bytes: 1_000,
+            offer_seq: 0,
+            bond_locked: 500,
+            active: true,
+        })
+        .unwrap();
+        let key = WorkItemKey::new(j, unit(2), 0);
+        let path: &[UnitState] = match state {
+            UnitState::Blocked => &[],
+            UnitState::Assigned => &[UnitState::Eligible, UnitState::Assigned],
+            UnitState::Accepted => &[
+                UnitState::Eligible,
+                UnitState::Assigned,
+                UnitState::Accepted,
+            ],
+            other => panic!("no fixture for {other:?}"),
+        };
+        for to in path {
+            m.transition_unit(&key.unit_key(), *to).unwrap();
+        }
+        if assign {
+            m.put_assignment(AssignmentIndexEntry {
+                key,
+                winner_offer_bond_id: offer(3),
+                winner_payment_addr: addr(50),
+            })
+            .unwrap();
+        }
+        (m, key)
+    }
+
+    #[test]
+    fn the_assigned_worker_declines_back_to_the_pool_without_a_slash() {
+        let (mut m, key) = decline_model(UnitState::Assigned, true);
+        let before = m.clone();
+        m.decline_unit(&key, &addr(8)).unwrap();
+        assert_eq!(
+            m.get_unit(&key.unit_key()).unwrap().state,
+            UnitState::Reassignable
+        );
+
+        // Only the unit's state moved: the offer and its locked bond, the
+        // capacity ledger and the assignment record are as they were.
+        let mut expected = before;
+        expected
+            .transition_unit(&key.unit_key(), UnitState::Reassignable)
+            .unwrap();
+        assert_eq!(m, expected);
+        assert_eq!(m.get_offer(&offer(3)).unwrap().bond_locked, 500);
+        assert!(m.get_assignment(&key).is_some());
+
+        // A declined unit can be assigned again; it cannot be declined again.
+        assert!(UnitState::Reassignable
+            .transition(UnitState::Assigned)
+            .is_ok());
+        let again = m.clone();
+        assert_eq!(
+            m.decline_unit(&key, &addr(8)),
+            Err(PoolError::InvalidTransition {
+                from: UnitState::Reassignable,
+                to: UnitState::Reassignable
+            })
+        );
+        assert_eq!(m, again);
+    }
+
+    #[test]
+    fn a_decline_needs_the_assigned_worker_and_the_current_assigned_work_item() {
+        let refused = |(mut m, _): (ComputePoolModel, WorkItemKey),
+                       target: WorkItemKey,
+                       sender: Address,
+                       want: PoolError| {
+            let before = m.clone();
+            assert_eq!(m.check_decline_unit(&target, &sender), Err(want));
+            assert!(m.decline_unit(&target, &sender).is_err());
+            assert_eq!(m, before, "a refused decline changes nothing");
+        };
+        let assigned = || decline_model(UnitState::Assigned, true);
+        let key = assigned().1;
+
+        refused(assigned(), key, addr(7), PoolError::NotAssignedWorker);
+        refused(
+            assigned(),
+            WorkItemKey {
+                generation: 1,
+                ..key
+            },
+            addr(8),
+            PoolError::StaleGeneration {
+                current: 0,
+                requested: 1,
+            },
+        );
+        refused(
+            assigned(),
+            WorkItemKey {
+                unit_id: unit(5),
+                ..key
+            },
+            addr(8),
+            PoolError::UnknownUnit,
+        );
+        refused(
+            decline_model(UnitState::Assigned, false),
+            key,
+            addr(8),
+            PoolError::UnassignedWorkItem,
+        );
+        for state in [UnitState::Blocked, UnitState::Accepted] {
+            refused(
+                decline_model(state, true),
+                key,
+                addr(8),
+                PoolError::InvalidTransition {
+                    from: state,
+                    to: UnitState::Reassignable,
+                },
+            );
+        }
+
+        // An assignment naming an offer the model does not hold.
+        let (mut m, key) = decline_model(UnitState::Assigned, false);
+        m.put_assignment(AssignmentIndexEntry {
+            key,
+            winner_offer_bond_id: offer(4),
+            winner_payment_addr: addr(50),
+        })
+        .unwrap();
+        refused((m, key), key, addr(8), PoolError::UnknownOffer);
     }
 
     #[test]
