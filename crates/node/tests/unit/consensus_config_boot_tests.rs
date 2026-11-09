@@ -401,7 +401,7 @@ fn as_an_older_binary_records(dir: &Path) {
 }
 
 /// Empty blocks on `dir`, published as [`genesis`]'s one validator, up to
-/// `height`.
+/// `height`, from genesis or from the chain `dir` already holds.
 async fn extend_to(dir: &Path, g: &Genesis, height: u64) {
     use sumchain_consensus::ConsensusEngine;
     use sumchain_storage::schema::BlockStore;
@@ -420,6 +420,8 @@ async fn extend_to(dir: &Path, g: &Genesis, height: u64) {
     .unwrap();
     if BlockStore::new(&db).get_latest_height().unwrap().is_none() {
         engine.init_genesis(g).unwrap();
+    } else {
+        engine.load_chain().unwrap();
     }
     while BlockStore::new(&db)
         .get_latest_height()
@@ -557,4 +559,286 @@ async fn a_dropped_gate_name_is_not_restored_from_an_unverifiable_record() {
     let err = boot(dir.path(), &g).unwrap_err();
     refused_as_already_passed(&err);
     assert_eq!(activation_heights(dir.path()), before, "nothing rewritten");
+}
+
+// ── schema 4 through the boot sequence ──────────────────────────────────────
+
+/// The releases that wrote schema 3, the deployed one among them: they read
+/// schemas 1, 2 and 3, wrote 3, and knew schema 4 only as a draft.
+static SCHEMA_3_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
+    reads: &[&ccfg::SCHEMA_1, &ccfg::SCHEMA_2, &ccfg::SCHEMA_3],
+    writes: &ccfg::SCHEMA_3,
+    knows: &ccfg::SCHEMA_4,
+};
+
+/// The four schema-4 gates, with a setter for each.
+type SetGate = fn(&mut ChainParams, Option<u64>);
+const SCHEMA_4_GATES: [(u16, &str, SetGate); 4] = [
+    (
+        0x1044,
+        "archive_unbonding_own_challenges_enabled_from_height",
+        |p, h| p.archive_unbonding_own_challenges_enabled_from_height = h,
+    ),
+    (
+        0x1045,
+        "por_attested_targets_enabled_from_height",
+        |p, h| p.por_attested_targets_enabled_from_height = h,
+    ),
+    (
+        0x1046,
+        "strict_transaction_signatures_enabled_from_height",
+        |p, h| p.strict_transaction_signatures_enabled_from_height = h,
+    ),
+    (
+        0x1047,
+        "staking_submit_evidence_unsupported_enabled_from_height",
+        |p, h| p.staking_submit_evidence_unsupported_enabled_from_height = h,
+    ),
+];
+
+/// The gate names the deployed schema-3 release does not declare: started by
+/// mistake on a moved node, it rewrites the activation record without them.
+const NAMES_THE_SCHEMA_3_RELEASE_LACKS: &[&str] = &[
+    "strict_transaction_signatures_enabled_from_height",
+    "staking_submit_evidence_unsupported_enabled_from_height",
+];
+
+/// A directory the schema-3 release recorded at height 0.
+fn schema_3_directory(g: &Genesis) -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = Database::open_default(dir.path()).unwrap();
+    ccfg::record::check_at_startup_with(&db, g, 0, &SCHEMA_3_RELEASE).unwrap();
+    dir
+}
+
+/// Each schema-4 gate through the real boot sequence, on a directory the
+/// deployed schema-3 release recorded:
+///
+/// * unset, this binary boots it unchanged, still schema 3;
+/// * set (with its peer-declaration deadline) before the move, the boot is
+///   refused, naming the stopped-node command with both commitments, and the
+///   configuration record is not rewritten; with the genesis restored, the
+///   next boot accepts that as a future reschedule;
+/// * after the move, the set genesis boots as a future-gate reschedule of
+///   exactly the gate and its deadline, and a fresh directory commits the gate
+///   from its first boot, in schema 4.
+#[test]
+fn the_schema_4_gates_through_the_boot_sequence() {
+    let peer_gate =
+        ccfg::fields::gate_id("peer_protocol_declaration_required_from_height").unwrap();
+    let g = genesis();
+    for (id, name, set_gate) in SCHEMA_4_GATES {
+        let scheduled = {
+            let mut s = genesis();
+            s.params.peer_protocol_declaration_required_from_height = Some(900);
+            set_gate(&mut s.params, Some(1_000));
+            s
+        };
+        let dir = schema_3_directory(&g);
+        let before = record(dir.path()).unwrap();
+        assert_eq!(before.config.schema().number, 3);
+
+        boot(dir.path(), &g).unwrap();
+        assert_eq!(
+            record(dir.path()).unwrap(),
+            before,
+            "{name}: runs as it stands"
+        );
+
+        let pending = {
+            let db = Database::open_default(dir.path()).unwrap();
+            ccfg::pending_schema_transition(&db).unwrap().unwrap()
+        };
+        assert_eq!((pending.from_schema, pending.to_schema), (3, 4));
+        let err = boot(dir.path(), &scheduled).unwrap_err();
+        assert!(err.contains(name), "{err}");
+        assert!(
+            err.contains(&format!(
+                "acknowledge-consensus-config-schema --old {} --new {}",
+                pending.old, pending.new
+            )),
+            "{err}"
+        );
+        assert_eq!(record(dir.path()).unwrap(), before, "{name}: not rewritten");
+        assert_eq!(
+            height_of(&activation_heights(dir.path()), name),
+            Some(1_000)
+        );
+
+        boot(dir.path(), &g).unwrap();
+        assert_eq!(record(dir.path()).unwrap(), before);
+        assert_eq!(height_of(&activation_heights(dir.path()), name), None);
+
+        {
+            let db = Database::open_default(dir.path()).unwrap();
+            ccfg::acknowledge_schema_transition(&db, 0, pending.old, pending.new).unwrap();
+        }
+        boot(dir.path(), &g).unwrap();
+        assert_eq!(record(dir.path()).unwrap().commitment, pending.new);
+        boot(dir.path(), &scheduled).unwrap();
+        let r = record(dir.path()).unwrap();
+        assert_eq!(r.config.schema().number, 4);
+        assert_eq!(r.config.get(id), Some(&ccfg::Value::U64(1_000)), "{name}");
+        {
+            let db = Database::open_default(dir.path()).unwrap();
+            let last = ccfg::read_transitions(&db).unwrap().pop().unwrap();
+            assert_eq!(last.kind, TransitionKind::GateReschedule);
+            let mut ids = last.changed_ids.clone();
+            ids.sort();
+            let mut expected = vec![id, peer_gate];
+            expected.sort();
+            assert_eq!(ids, expected, "{name}");
+        }
+
+        let fresh = tempfile::TempDir::new().unwrap();
+        boot(fresh.path(), &scheduled).unwrap();
+        let r = record(fresh.path()).unwrap();
+        assert_eq!(r.config.schema().number, 4);
+        assert_eq!(r.config.get(id), Some(&ccfg::Value::U64(1_000)), "{name}");
+    }
+}
+
+/// The pre-start revert against a real chain. A directory the schema-3
+/// release recorded holds real blocks to height 5 and is moved at its head.
+/// Until a block above the move exists — a boot of this binary that imports
+/// nothing included — the revert is available; it restores every row it
+/// changed and the schema-3 release then starts on the directory at the same
+/// head. Once one more real block is accepted, the revert is refused, says
+/// recovery is forward only, and writes nothing; this binary still boots.
+#[tokio::test]
+async fn the_pre_start_revert_is_refused_once_a_real_block_is_accepted() {
+    let g = genesis();
+    let rows = |dir: &Path| {
+        let db = Database::open_default(dir).unwrap();
+        let mut out = Vec::new();
+        for name in sumchain_storage::db::ALL_CFS {
+            for (k, v) in db.iter(name).unwrap() {
+                out.push((name.to_string(), k.to_vec(), v.to_vec()));
+            }
+        }
+        out
+    };
+    let head = |dir: &Path| {
+        let db = Database::open_default(dir).unwrap();
+        let b = sumchain_storage::schema::BlockStore::new(&db);
+        (
+            b.get_latest_height().unwrap().unwrap(),
+            b.get_latest_hash().unwrap().unwrap(),
+        )
+    };
+    let move_at_head = |dir: &Path| {
+        let db = Database::open_default(dir).unwrap();
+        let p = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+        let h = sumchain_storage::schema::BlockStore::new(&db)
+            .get_latest_height()
+            .unwrap()
+            .unwrap();
+        ccfg::acknowledge_schema_transition(&db, h, p.old, p.new).unwrap()
+    };
+
+    // Abort after the move, before the first start: reverted.
+    let dir = schema_3_directory(&g);
+    extend_to(dir.path(), &g, 5).await;
+    let at = head(dir.path());
+    let before = rows(dir.path());
+    let moved = move_at_head(dir.path());
+    {
+        let db = Database::open_default(dir.path()).unwrap();
+        let p = ccfg::revert_schema_transition(&db, moved.to, moved.from).unwrap();
+        assert_eq!(p.at_height, 5);
+        assert!(matches!(
+            ccfg::record::check_at_startup_with(&db, &g, 5, &SCHEMA_3_RELEASE).unwrap(),
+            ccfg::StartupOutcome::Unchanged { .. }
+        ));
+    }
+    assert_eq!(rows(dir.path()), before, "every row as before the move");
+    assert_eq!(head(dir.path()), at, "the same agreed height and head");
+
+    // A boot that imports nothing leaves the revert available.
+    let dir = schema_3_directory(&g);
+    extend_to(dir.path(), &g, 5).await;
+    let moved = move_at_head(dir.path());
+    boot(dir.path(), &g).unwrap();
+    {
+        let db = Database::open_default(dir.path()).unwrap();
+        assert_eq!(ccfg::pending_schema_revert(&db).unwrap().at_height, 5);
+    }
+
+    // One real block above the move: forward only.
+    extend_to(dir.path(), &g, 6).await;
+    let after = rows(dir.path());
+    {
+        let db = Database::open_default(dir.path()).unwrap();
+        let err = ccfg::revert_schema_transition(&db, moved.to, moved.from).unwrap_err();
+        assert!(err.to_string().contains("forward only"), "{err}");
+        assert!(err.to_string().contains("now at height 6"), "{err}");
+        assert!(ccfg::record::read_record_with(&db, &SCHEMA_3_RELEASE).is_err());
+    }
+    assert_eq!(rows(dir.path()), after, "nothing written");
+    boot(dir.path(), &g).unwrap();
+}
+
+/// The deployed schema-3 release, started by mistake on a moved node, drops
+/// the two schema-4 names it does not declare from the activation record and
+/// is refused by the schema-4 record. Unset, the missing names change
+/// nothing and this binary boots; scheduled and passed, the verified schema-4
+/// record holds the same height and this binary restores the name.
+#[tokio::test]
+async fn names_the_schema_3_release_drops_are_restored_from_a_schema_4_record() {
+    let as_the_schema_3_release_records = |dir: &Path| {
+        let mut heights = activation_heights(dir);
+        heights.retain(|(n, _)| !NAMES_THE_SCHEMA_3_RELEASE_LACKS.contains(&n.as_str()));
+        write_activation_heights(dir, &heights);
+    };
+
+    // Unset: nothing to restore.
+    let g = genesis();
+    let dir = schema_3_directory(&g);
+    boot(dir.path(), &g).unwrap();
+    {
+        let db = Database::open_default(dir.path()).unwrap();
+        let p = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+        ccfg::acknowledge_schema_transition(&db, 0, p.old, p.new).unwrap();
+    }
+    boot(dir.path(), &g).unwrap();
+    as_the_schema_3_release_records(dir.path());
+    boot(dir.path(), &g).unwrap();
+    assert_eq!(
+        activation_heights(dir.path()),
+        g.params.recorded_activation_heights()
+    );
+
+    // Scheduled and passed: restored from the verified schema-4 record.
+    let mut gated = genesis();
+    gated.params.peer_protocol_declaration_required_from_height = Some(2);
+    gated
+        .params
+        .strict_transaction_signatures_enabled_from_height = Some(3);
+    let dir = schema_3_directory(&g);
+    boot(dir.path(), &g).unwrap();
+    {
+        let db = Database::open_default(dir.path()).unwrap();
+        let p = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+        ccfg::acknowledge_schema_transition(&db, 0, p.old, p.new).unwrap();
+    }
+    boot(dir.path(), &gated).unwrap();
+    extend_to(dir.path(), &gated, 5).await;
+    as_the_schema_3_release_records(dir.path());
+    assert_eq!(
+        height_of(
+            &activation_heights(dir.path()),
+            "strict_transaction_signatures_enabled_from_height"
+        ),
+        None
+    );
+    boot(dir.path(), &gated).unwrap();
+    assert_eq!(
+        activation_heights(dir.path()),
+        gated.params.recorded_activation_heights(),
+        "the full activation record is back"
+    );
+    assert_eq!(
+        record(dir.path()).unwrap().config.get(0x1046),
+        Some(&ccfg::Value::U64(3))
+    );
 }
