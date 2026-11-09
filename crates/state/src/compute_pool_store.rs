@@ -81,7 +81,7 @@ use sumchain_storage::subsystem_journal::{self, Expectation, Family};
 use sumchain_storage::{cf, Database};
 
 use crate::compute_pool::{
-    AcceptedLeaf, AssignmentIndexEntry, BondedOffer, ComputePoolModel, EntitlementId,
+    AcceptedLeaf, AssignmentIndexEntry, BondedOffer, CommitBondId, ComputePoolModel, EntitlementId,
     EntitlementKind, EntitlementRecord, Job, JobId, JobState, OfferBondId, RequiredInput,
     Reservation, SlotId, UnitId, UnitState, WorkItemKey, WorkUnit,
 };
@@ -444,6 +444,17 @@ impl StoredJob {
     pub fn state(&self) -> Result<JobState> {
         job_state_from_tag(self.state_tag)
     }
+    /// Reconstruct the model [`Job`] (validating the state tag).
+    pub fn to_model(&self) -> Result<Job> {
+        Ok(Job {
+            job_id: JobId::from_bytes(self.job_id),
+            requester: Address::new(self.requester),
+            r_job: self.r_job,
+            job_max_retention_files: self.job_max_retention_files,
+            requester_debit: self.requester_debit,
+            state: self.state()?,
+        })
+    }
 }
 
 impl StoredWorkUnit {
@@ -514,6 +525,18 @@ impl StoredOffer {
             active: o.active,
         }
     }
+    /// Reconstruct the model [`BondedOffer`].
+    pub fn to_model(&self) -> BondedOffer {
+        BondedOffer {
+            offer_bond_id: OfferBondId::from_bytes(self.offer_bond_id),
+            identity: Address::new(self.identity),
+            payment_addr: Address::new(self.payment_addr),
+            offered_bytes: self.offered_bytes,
+            offer_seq: self.offer_seq,
+            bond_locked: self.bond_locked,
+            active: self.active,
+        }
+    }
 }
 
 impl StoredReservation {
@@ -523,6 +546,14 @@ impl StoredReservation {
             offer_bond_id: *r.offer_bond_id.as_bytes(),
             offered: r.offered,
             reserved: r.reserved,
+        }
+    }
+    /// Reconstruct the model [`Reservation`].
+    pub fn to_model(&self) -> Reservation {
+        Reservation {
+            offer_bond_id: OfferBondId::from_bytes(self.offer_bond_id),
+            offered: self.offered,
+            reserved: self.reserved,
         }
     }
     /// Storage-level consistency guard (corruption detection): a persisted
@@ -558,6 +589,15 @@ impl StoredAcceptedLeaf {
             self.generation,
         )
     }
+    /// Reconstruct the model [`AcceptedLeaf`].
+    pub fn to_model(&self) -> AcceptedLeaf {
+        AcceptedLeaf {
+            key: self.work_item_key(),
+            offer_bond_id: OfferBondId::from_bytes(self.offer_bond_id),
+            commit_bond_id: CommitBondId::from_bytes(self.commit_bond_id),
+            accepted_bytes: self.accepted_bytes,
+        }
+    }
 }
 
 impl StoredAssignment {
@@ -569,6 +609,18 @@ impl StoredAssignment {
             generation: a.key.generation,
             winner_offer_bond_id: *a.winner_offer_bond_id.as_bytes(),
             winner_payment_addr: *a.winner_payment_addr.as_bytes(),
+        }
+    }
+    /// Reconstruct the model [`AssignmentIndexEntry`].
+    pub fn to_model(&self) -> AssignmentIndexEntry {
+        AssignmentIndexEntry {
+            key: WorkItemKey::new(
+                JobId::from_bytes(self.job_id),
+                UnitId::from_bytes(self.unit_id),
+                self.generation,
+            ),
+            winner_offer_bond_id: OfferBondId::from_bytes(self.winner_offer_bond_id),
+            winner_payment_addr: Address::new(self.winner_payment_addr),
         }
     }
 }
@@ -586,6 +638,15 @@ impl StoredEntitlement {
     /// The typed [`EntitlementKind`], validating the stored tag.
     pub fn kind(&self) -> Result<EntitlementKind> {
         entitlement_kind_from_tag(self.kind_tag)
+    }
+    /// Reconstruct the model [`EntitlementRecord`] (validating the kind tag).
+    pub fn to_model(&self) -> Result<EntitlementRecord> {
+        Ok(EntitlementRecord {
+            entitlement_id: EntitlementId::from_bytes(self.entitlement_id),
+            beneficiary: Address::new(self.beneficiary),
+            kind: self.kind()?,
+            amount: self.amount,
+        })
     }
 }
 
@@ -859,6 +920,81 @@ impl<'a> ComputePoolStore<'a> {
             map.insert(k, v);
         }
         Ok(map)
+    }
+
+    /// The C1 model as this block sees it: every row in the candidate,
+    /// decoded and rebuilt into a [`ComputePoolModel`].
+    ///
+    /// This is how block execution gets the model it stages a transition
+    /// against. The rows are the state; the model is rebuilt from them each
+    /// block rather than carried across blocks in memory, so it cannot drift
+    /// from what the chain committed, and a node that restarts or switches
+    /// branches rebuilds the same one.
+    ///
+    /// Fails closed. A row that does not decode, belongs to no key domain,
+    /// sits under a key other than its record's, or is otherwise not the
+    /// canonical encoding of the rebuilt model (a missing or stray
+    /// active-offer index row, say) is an error, never a row skipped: the
+    /// state digest folded into the block root covers every row.
+    pub fn v_load_model(view: &ExecutionView<'_, '_>) -> Result<ComputePoolModel> {
+        Self::model_of(&Self::v_load_state_map(view)?)
+    }
+
+    /// Rebuild the model a row set encodes, refusing any row set that is not
+    /// exactly [`materialize`](Self::materialize) of that model.
+    fn model_of(rows: &BTreeMap<Vec<u8>, Vec<u8>>) -> Result<ComputePoolModel> {
+        let mut jobs = Vec::new();
+        let mut units = Vec::new();
+        let mut offers = Vec::new();
+        let mut reservations = Vec::new();
+        let mut leaves = Vec::new();
+        let mut assignments = Vec::new();
+        let mut entitlements = Vec::new();
+        for (key, value) in rows {
+            match key.first() {
+                Some(&domain::JOB) => jobs.push(decode_job(value)?.to_model()?),
+                Some(&domain::UNIT) => units.push(decode_work_unit(value)?.to_model()?),
+                Some(&domain::OFFER) => offers.push(decode_offer(value)?.to_model()),
+                // Derived from the offers' `active` flags, so it carries
+                // nothing to rebuild; the round trip below checks it.
+                Some(&domain::ACTIVE_OFFER_INDEX) => {
+                    decode_active_offer_index(value)?;
+                }
+                Some(&domain::RESERVATION) => {
+                    reservations.push(decode_reservation(value)?.to_model())
+                }
+                Some(&domain::ACCEPTED_LEAF) => {
+                    leaves.push(decode_accepted_leaf(value)?.to_model())
+                }
+                Some(&domain::ASSIGNMENT) => assignments.push(decode_assignment(value)?.to_model()),
+                Some(&domain::ENTITLEMENT) => {
+                    entitlements.push(decode_entitlement(value)?.to_model()?)
+                }
+                other => {
+                    return Err(StateError::DeserializationError(format!(
+                        "C1 row under unrecognized key domain {other:?}"
+                    )))
+                }
+            }
+        }
+        let model = ComputePoolModel::from_records(
+            jobs,
+            units,
+            offers,
+            reservations,
+            leaves,
+            assignments,
+            entitlements,
+        )
+        .map_err(|e| StateError::DeserializationError(format!("C1 rows form no model: {e}")))?;
+        if Self::materialize(&model)? != *rows {
+            return Err(StateError::DeserializationError(
+                "C1 rows are not the canonical encoding of the model they decode to: a \
+                 record under another record's key, or a missing or stray index row"
+                    .to_string(),
+            ));
+        }
+        Ok(model)
     }
 
     /// The C1 state digest over the candidate's rows.
@@ -1794,6 +1930,108 @@ mod tests {
         })
         .unwrap();
         m
+    }
+
+    // ---- rebuilding the model from its rows ----
+
+    /// Stage `rows` into a fresh candidate over `db` and rebuild the model
+    /// from that candidate.
+    fn load_from(db: &Database, rows: &BTreeMap<Vec<u8>, Vec<u8>>) -> Result<ComputePoolModel> {
+        let mut overlay = ApplicationOverlay::new(db, 1 << 30);
+        let mut view = ExecutionView::new(&mut overlay);
+        for (k, v) in rows {
+            view.put(cf::COMPUTE_POOL_STATE, k, v)?;
+        }
+        ComputePoolStore::v_load_model(&view)
+    }
+
+    #[test]
+    fn a_model_rebuilds_from_its_rows() {
+        let (db, _d) = open_db();
+        assert_eq!(
+            load_from(&db, &BTreeMap::new()).unwrap(),
+            ComputePoolModel::new()
+        );
+
+        // Every record category, plus an inactive offer and a unit with a
+        // predecessor and a required input.
+        let mut m = full_model();
+        m.publish_offer(BondedOffer {
+            active: false,
+            ..active_offer(oid(5), addr(8))
+        })
+        .unwrap();
+        let mut downstream = simple_unit(jid(7), uid(9));
+        downstream.predecessors = vec![uid(8)];
+        downstream.required_inputs = vec![RequiredInput {
+            predecessor: uid(8),
+            required_output_slot_id: SlotId::from_bytes([0x21; 32]),
+            pred_output_manifest_identity: Hash::new([0x22; 32]),
+            required_slot_state_object_identity: Hash::new([0x23; 32]),
+        }];
+        add_job(
+            &mut m,
+            jid(7),
+            vec![simple_unit(jid(7), uid(8)), downstream],
+        );
+
+        let rows = ComputePoolStore::materialize(&m).unwrap();
+        assert_eq!(load_from(&db, &rows).unwrap(), m);
+    }
+
+    #[test]
+    fn rows_that_encode_no_model_are_refused() {
+        let (db, _d) = open_db();
+        let rows = ComputePoolStore::materialize(&full_model()).unwrap();
+        let refused = |rows: &BTreeMap<Vec<u8>, Vec<u8>>, what: &str| {
+            assert!(
+                matches!(
+                    load_from(&db, rows),
+                    Err(StateError::DeserializationError(_))
+                ),
+                "{what} was accepted"
+            );
+        };
+
+        // An offer under another offer's key.
+        let mut misplaced = rows.clone();
+        let offer = misplaced.remove(&offer_key_bytes(&oid(3))).unwrap();
+        misplaced.insert(offer_key_bytes(&oid(4)), offer);
+        refused(&misplaced, "a misplaced offer");
+
+        // The active-offer index missing a row, and holding a stray one.
+        let mut missing = rows.clone();
+        missing
+            .remove(&active_offer_index_key_bytes(&addr(8)))
+            .unwrap();
+        refused(&missing, "a missing index row");
+        let mut stray = rows.clone();
+        stray.insert(
+            active_offer_index_key_bytes(&addr(99)),
+            c1_encode(&StoredActiveOfferIndex {
+                schema_version: C1_SCHEMA_VERSION,
+                identity: [99; 20],
+                offer_bond_id: [3; 32],
+            })
+            .unwrap(),
+        );
+        refused(&stray, "a stray index row");
+
+        // Two active offers for one identity.
+        let mut two_active = rows.clone();
+        two_active.insert(
+            offer_key_bytes(&oid(5)),
+            c1_encode(&StoredOffer::from_model(&active_offer(oid(5), addr(8)))).unwrap(),
+        );
+        refused(&two_active, "a second active offer for one identity");
+
+        // A key domain no record has, and a value that does not decode.
+        let mut unknown = rows.clone();
+        unknown.insert(vec![0x09, 0x00], vec![C1_SCHEMA_VERSION]);
+        refused(&unknown, "an unknown key domain");
+        let mut corrupt = rows.clone();
+        corrupt.insert(job_key_bytes(&jid(1)), vec![0xff]);
+        refused(&corrupt, "an undecodable job");
     }
 
     // ---- round trip + faithful mapping ----

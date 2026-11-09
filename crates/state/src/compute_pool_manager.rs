@@ -107,11 +107,10 @@ impl<'a> ComputePoolManager<'a> {
     /// dormancy guarantee: a dormant chain never constructs the manager, so it
     /// holds no model, opens no store, and writes nothing.
     ///
-    /// The manager starts from an empty model. While dormant, the C1 keyspace is
-    /// always empty, so the empty model matches the live persisted state. (Re-
-    /// hydrating a *non-empty* persisted keyspace into a model on restart would
-    /// need a ratified rows -> model decoder, which is intentionally not built
-    /// here — see the crate-level notes on unresolved codec ratification.)
+    /// The manager starts from an empty model, which matches the live state
+    /// only while the C1 keyspace is empty. Block execution uses
+    /// [`load_enabled`](Self::load_enabled), which rebuilds the model from the
+    /// candidate's rows.
     pub fn new_enabled(
         db: &'a Database,
         params: &ChainParams,
@@ -127,6 +126,34 @@ impl<'a> ComputePoolManager<'a> {
         } else {
             None
         }
+    }
+
+    /// Construct the manager over the model rebuilt from the candidate's rows,
+    /// **iff** the compute-pool gate is open at `height` (`Ok(None)` while it
+    /// is closed, reading nothing).
+    ///
+    /// This is the constructor block execution uses, once per block. A
+    /// manager that started empty would match the live state only until the
+    /// first block published a C1 row; after that, `stage_transition` would
+    /// find its `before` stale and refuse every later block. Rebuilding from
+    /// the rows ([`ComputePoolStore::v_load_model`], the ratified row codec
+    /// read back) keeps the model equal to what the transition is staged
+    /// against, on every node, after a restart or a branch switch too.
+    pub fn load_enabled(
+        db: &'a Database,
+        params: &ChainParams,
+        view: &ExecutionView<'_, '_>,
+        height: BlockHeight,
+    ) -> Result<Option<Self>> {
+        if !compute_pool_gate_open(params, height) {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            db,
+            params: params.clone(),
+            model: ComputePoolStore::v_load_model(view)?,
+            undo: BTreeMap::new(),
+        }))
     }
 
     /// The authoritative in-memory model (read-only).
@@ -646,6 +673,51 @@ mod tests {
             "no journal on failed op"
         );
         assert!(!mgr.has_pending_undo(6), "no undo entry on failed op");
+    }
+
+    // ---- block execution rebuilds the model from the rows ----
+
+    #[test]
+    fn load_enabled_rebuilds_the_model_from_the_candidates_rows() {
+        let (db, _d) = open_db();
+
+        // Gate closed: nothing is constructed.
+        {
+            let mut overlay = ApplicationOverlay::new(&db, 1 << 30);
+            let view = ExecutionView::new(&mut overlay);
+            assert!(
+                ComputePoolManager::load_enabled(&db, &dormant_params(), &view, 5)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        // A parent that already holds C1 rows, as an earlier block left them.
+        let mut parent = ComputePoolModel::new();
+        add_job(&mut parent, jid(1), vec![simple_unit(jid(1), uid(2))]).unwrap();
+        let parent_rows = ComputePoolStore::materialize(&parent).unwrap();
+        seed_rows_and_journal(&db, &BTreeMap::new(), &parent_rows, 5).unwrap();
+
+        // A manager that starts empty stages against a stale predecessor, and
+        // even a no-op block is refused.
+        let mut empty = ComputePoolManager::new_enabled(&db, &params_enabled_from(5), 6).unwrap();
+        assert!(apply_only(&db, &mut empty, 6, |_m| Ok(())).is_err());
+
+        // Rebuilt from the rows, the next block's transition stages.
+        let mut overlay = ApplicationOverlay::new(&db, 1 << 30);
+        let mut view = ExecutionView::new(&mut overlay);
+        let mut mgr = ComputePoolManager::load_enabled(&db, &params_enabled_from(5), &view, 6)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mgr.model(), &parent);
+        let (mutated, journal) = mgr
+            .apply_block(&mut view, 6, |m| {
+                add_job(m, jid(3), vec![simple_unit(jid(3), uid(4))])
+            })
+            .unwrap();
+        assert!(mutated > 0);
+        assert!(matches!(journal, JournalRecord::Recorded(_)));
+        assert_eq!(ComputePoolStore::v_load_model(&view).unwrap(), *mgr.model());
     }
 
     // ---- a genuine no-op transition: an empty record, no undo entry ----
