@@ -162,6 +162,14 @@ static SCHEMA_2_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
     knows: &ccfg::SCHEMA_4,
 };
 
+/// The releases that wrote schema 3: they
+/// read schemas 1, 2 and 3, wrote 3, and knew schema 4 only as a draft.
+static SCHEMA_3_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
+    reads: &[&ccfg::SCHEMA_1, &ccfg::SCHEMA_2, &ccfg::SCHEMA_3],
+    writes: &ccfg::SCHEMA_3,
+    knows: &ccfg::SCHEMA_4,
+};
+
 /// A database whose baseline the previous release recorded (schema 1), and the
 /// commitment this binary moves it to.
 fn schema_1_fixture() -> (tempfile::TempDir, std::path::PathBuf, String, String) {
@@ -173,7 +181,7 @@ fn schema_1_fixture() -> (tempfile::TempDir, std::path::PathBuf, String, String)
     assert_eq!(r.config.schema().number, 1);
     let pending = ccfg::pending_schema_transition(&db)
         .unwrap()
-        .expect("this binary offers schema 3");
+        .expect("this binary offers schema 4");
     (dir, data, r.commitment.to_string(), pending.new.to_string())
 }
 
@@ -188,7 +196,22 @@ fn schema_2_fixture() -> (tempfile::TempDir, std::path::PathBuf, String, String)
     assert_eq!(r.config.schema().number, 2);
     let pending = ccfg::pending_schema_transition(&db)
         .unwrap()
-        .expect("this binary offers schema 3");
+        .expect("this binary offers schema 4");
+    (dir, data, r.commitment.to_string(), pending.new.to_string())
+}
+
+/// A database a schema-3 release created (schema 3, as a schema-3 release records),
+/// and the commitment this binary moves it to.
+fn schema_3_fixture() -> (tempfile::TempDir, std::path::PathBuf, String, String) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let data = dir.path().join("data");
+    let db = Database::open_default(&data).unwrap();
+    ccfg::record::check_at_startup_with(&db, &genesis(), 0, &SCHEMA_3_RELEASE).unwrap();
+    let r = ccfg::read_record(&db).unwrap().unwrap();
+    assert_eq!(r.config.schema().number, 3);
+    let pending = ccfg::pending_schema_transition(&db)
+        .unwrap()
+        .expect("this binary offers schema 4");
     (dir, data, r.commitment.to_string(), pending.new.to_string())
 }
 
@@ -223,7 +246,7 @@ fn meta(data: &Path) -> Vec<(Vec<u8>, Vec<u8>)> {
         .collect()
 }
 
-/// The command moves a schema-1 database to schema 3 in one step when told
+/// The command moves a schema-1 database to schema 4 in one step when told
 /// both commitments exactly, keeps the old encoding in the history, and has
 /// nothing left to do afterwards.
 #[test]
@@ -231,11 +254,11 @@ fn the_schema_transition_moves_a_schema_1_database() {
     let (_dir, data, old, new) = schema_1_fixture();
     let out = ack_schema(&data, &old, &new);
     assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("schema 1 -> 3"), "{}", text(&out));
+    assert!(text(&out).contains("schema 1 -> 4"), "{}", text(&out));
 
     let db = Database::open_default(&data).unwrap();
     let r = ccfg::read_record(&db).unwrap().unwrap();
-    assert_eq!(r.config.schema().number, 3);
+    assert_eq!(r.config.schema().number, 4);
     assert_eq!(r.commitment.to_string(), new);
     let history = ccfg::read_transitions(&db).unwrap();
     assert_eq!(history.len(), 1);
@@ -245,7 +268,7 @@ fn the_schema_transition_moves_a_schema_1_database() {
     let again = ack_schema(&data, &new, &new);
     assert!(!again.status.success(), "{}", text(&again));
     assert!(
-        text(&again).contains("already recorded in schema 3"),
+        text(&again).contains("already recorded in schema 4"),
         "{}",
         text(&again)
     );
@@ -253,27 +276,52 @@ fn the_schema_transition_moves_a_schema_1_database() {
     assert_eq!(ccfg::read_transitions(&db).unwrap().len(), 1);
 }
 
-/// A schema-2 database moves to schema 3 the same way.
+/// A schema-2 database moves to schema 4 the same way, adding 0x1043 and the
+/// four schema-4 gates.
 #[test]
 fn the_schema_transition_moves_a_schema_2_database() {
     let (_dir, data, old, new) = schema_2_fixture();
     let out = ack_schema(&data, &old, &new);
     assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("schema 2 -> 3"), "{}", text(&out));
+    assert!(text(&out).contains("schema 2 -> 4"), "{}", text(&out));
     assert!(
-        text(&out).contains("1 field(s) added absent"),
+        text(&out).contains("5 field(s) added absent"),
         "{}",
         text(&out)
     );
     let db = Database::open_default(&data).unwrap();
     let r = ccfg::read_record(&db).unwrap().unwrap();
-    assert_eq!(r.config.schema().number, 3);
+    assert_eq!(r.config.schema().number, 4);
     assert_eq!(r.commitment.to_string(), new);
+}
+
+/// A schema-3 database, as a schema-3 release records, moves to schema 4 the same
+/// way, adding exactly the four schema-4 gates.
+#[test]
+fn the_schema_transition_moves_a_schema_3_database() {
+    let (_dir, data, old, new) = schema_3_fixture();
+    let out = ack_schema(&data, &old, &new);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("schema 3 -> 4"), "{}", text(&out));
+    assert!(
+        text(&out).contains("4 field(s) added absent"),
+        "{}",
+        text(&out)
+    );
+    let db = Database::open_default(&data).unwrap();
+    let r = ccfg::read_record(&db).unwrap().unwrap();
+    assert_eq!(r.config.schema().number, 4);
+    assert_eq!(r.commitment.to_string(), new);
+    let history = ccfg::read_transitions(&db).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].kind, ccfg::TransitionKind::SchemaTransition);
+    assert_eq!(history[0].changed_ids, vec![0x1044, 0x1045, 0x1046, 0x1047]);
+    assert_eq!(history[0].old_commitment.to_string(), old);
 }
 
 /// `--show` prints both commitments exactly as the move takes them and writes
 /// nothing; the operator's sequence — show, then move with what it printed —
-/// lands on schema 3. On a database already in schema 3 it says there is
+/// lands on schema 4. On a database already in schema 4 it says there is
 /// nothing to move.
 #[test]
 fn show_prints_the_exact_move_and_writes_nothing() {
@@ -340,15 +388,15 @@ fn the_schema_transition_refuses_wrong_commitments() {
     assert_eq!(meta(&data), before, "nothing written");
 }
 
-/// A database this binary created records schema 3 already: nothing to move.
+/// A database this binary created records schema 4 already: nothing to move.
 #[test]
-fn the_schema_transition_refuses_a_database_already_in_schema_3() {
+fn the_schema_transition_refuses_a_database_already_in_schema_4() {
     let f = fixture();
     let before = meta(&f.data);
     let out = ack_schema(&f.data, &f.old, &f.old);
     assert!(!out.status.success(), "{}", text(&out));
     assert!(
-        text(&out).contains("already recorded in schema 3"),
+        text(&out).contains("already recorded in schema 4"),
         "{}",
         text(&out)
     );

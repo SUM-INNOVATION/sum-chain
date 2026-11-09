@@ -153,7 +153,7 @@ static PREVIOUS: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
 
 /// #277's gate (schema-2 field 0x103f) through the real boot sequence:
 ///
-/// * unset (every committed genesis), a fresh node records schema 3;
+/// * unset (every committed genesis), a fresh node records schema 4;
 /// * set on a fresh directory, the node boots and commits the height;
 /// * set as a future height on a directory this binary records, the boot is an
 ///   ordinary gate reschedule;
@@ -179,11 +179,11 @@ fn the_credential_schema_gate_through_the_boot_sequence() {
         None
     );
 
-    // Unset, fresh: schema 3, the gate absent.
+    // Unset, fresh: schema 4, the gate absent.
     let dir = tempfile::TempDir::new().unwrap();
     boot(dir.path(), &g).unwrap();
     let r = record(dir.path()).expect("recorded at first boot");
-    assert_eq!(r.config.schema().number, 3);
+    assert_eq!(r.config.schema().number, 4);
     assert_eq!(r.config.get(GATE), Some(&ccfg::Value::Absent));
     assert_eq!(r.commitment, ccfg::build(&g).unwrap().commitment());
 
@@ -232,7 +232,7 @@ fn the_credential_schema_gate_through_the_boot_sequence() {
     }
     boot(old.path(), &set(1_000)).unwrap();
     let r = record(old.path()).unwrap();
-    assert_eq!(r.config.schema().number, 3);
+    assert_eq!(r.config.schema().number, 4);
     assert_eq!(r.config.get(GATE), Some(&ccfg::Value::U64(1_000)));
 }
 
@@ -298,7 +298,7 @@ fn the_node_registry_gate_through_the_boot_sequence() {
         let db = Database::open_default(old.path()).unwrap();
         ccfg::pending_schema_transition(&db).unwrap().unwrap()
     };
-    assert_eq!((pending.from_schema, pending.to_schema), (1, 3));
+    assert_eq!((pending.from_schema, pending.to_schema), (1, 4));
     let err = boot(old.path(), &scheduled(900, 1_000)).unwrap_err();
     assert!(err.contains(NAME), "{err}");
     assert!(
@@ -335,7 +335,7 @@ fn the_node_registry_gate_through_the_boot_sequence() {
     );
     boot(old.path(), &scheduled(900, 1_000)).unwrap();
     let r = record(old.path()).unwrap();
-    assert_eq!(r.config.schema().number, 3);
+    assert_eq!(r.config.schema().number, 4);
     assert_eq!(r.config.get(GATE), Some(&ccfg::Value::U64(1_000)));
     {
         let db = Database::open_default(old.path()).unwrap();
@@ -353,7 +353,7 @@ fn the_node_registry_gate_through_the_boot_sequence() {
     let fresh = tempfile::TempDir::new().unwrap();
     boot(fresh.path(), &scheduled(900, 1_000)).unwrap();
     let r = record(fresh.path()).unwrap();
-    assert_eq!(r.config.schema().number, 3);
+    assert_eq!(r.config.schema().number, 4);
     assert_eq!(r.config.get(GATE), Some(&ccfg::Value::U64(1_000)));
 }
 
@@ -363,7 +363,7 @@ const H_NAME: &str = "node_registry_update_status_unsupported_enabled_from_heigh
 const P_NAME: &str = "peer_protocol_declaration_required_from_height";
 
 /// Activation names a binary released before them does not declare. Such a
-/// binary, started by mistake on a moved node, is refused by the schema-3
+/// binary, started by mistake on a moved node, is refused by the moved
 /// configuration record, but its activation-height check runs first and
 /// rewrites the activation record with only the names it knows.
 const NAMES_AN_OLDER_BINARY_LACKS: &[&str] = &[
@@ -436,7 +436,7 @@ async fn extend_to(dir: &Path, g: &Genesis, height: u64) {
 }
 
 /// A directory the schema-1 release recorded, booted by this binary, moved to
-/// schema 3, booted under `scheduled` at height 0, then extended to `height`.
+/// schema 4, booted under `scheduled` at height 0, then extended to `height`.
 async fn moved_and_extended(scheduled: &Genesis, height: u64) -> tempfile::TempDir {
     let dir = tempfile::TempDir::new().unwrap();
     {
@@ -460,7 +460,7 @@ fn refused_as_already_passed(err: &str) {
 }
 
 /// (a) A moved node whose gate has passed, after an older binary dropped the
-/// gate's name from the activation record: the verified schema-3
+/// gate's name from the activation record: the verified moved
 /// configuration record holds the same height, so this binary starts and
 /// restores the full activation record.
 #[tokio::test]

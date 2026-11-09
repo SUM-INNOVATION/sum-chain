@@ -2946,9 +2946,6 @@ pub struct ChainParams {
     /// `BeginUnstake` counts only the sender's own open storage challenges
     /// (#369).
     ///
-    /// PROVISIONAL NAME, for review: the field's name is not settled; it
-    /// changes before any release that writes the schema registering it.
-    ///
     /// An archive with an open retrievability challenge cannot begin unbonding
     /// (code 324). Below this height the check reads the challenge node index
     /// from `[b'N', sender]` onward without stopping at the sender's keys, so
@@ -2966,12 +2963,17 @@ pub struct ChainParams {
     /// every validator must run the identical reviewed binary and observe the
     /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
     /// in this branch.
+    ///
+    /// It is consensus-configuration field `0x1044`, which only schema 4 can
+    /// express. A node whose recorded configuration is schema 1, 2 or 3
+    /// refuses to start with it set, naming the stopped-node
+    /// `acknowledge-consensus-config-schema` that moves the record to schema 4;
+    /// genesis validation also requires
+    /// `peer_protocol_declaration_required_from_height` at or below it.
     #[serde(default)]
     pub archive_unbonding_own_challenges_enabled_from_height: Option<u64>,
 
     /// A storage challenge targets only an archive that attested the chunk.
-    ///
-    /// The field's name is adopted; its schema-4 allocation is provisional.
     ///
     /// On the assignment-aware challenge paths (the targeting gate
     /// `por_assignment_targeting_enabled_from_height` and the scheduler gate
@@ -2996,12 +2998,14 @@ pub struct ChainParams {
     /// every validator must run the identical reviewed binary and observe the
     /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
     /// in this branch.
+    ///
+    /// It is consensus-configuration field `0x1045`, which only schema 4 can
+    /// express, with the same start-up refusal and peer-declaration rule as
+    /// `0x1044` above.
     #[serde(default)]
     pub por_attested_targets_enabled_from_height: Option<u64>,
 
     /// Transaction signatures are checked with the strict Ed25519 rule.
-    ///
-    /// It is the third field of the draft schema 4 (`0x1046`).
     ///
     /// Below this height, or while it is unset, a transaction's signature is
     /// checked with `sumchain_crypto::verify_bytes`, exactly as every existing
@@ -3022,12 +3026,14 @@ pub struct ChainParams {
     /// every validator must run the identical reviewed binary and observe the
     /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
     /// in this branch.
+    ///
+    /// It is consensus-configuration field `0x1046`, which only schema 4 can
+    /// express, with the same start-up refusal and peer-declaration rule as
+    /// `0x1044` above.
     #[serde(default)]
     pub strict_transaction_signatures_enabled_from_height: Option<u64>,
 
     /// The legacy staking `SubmitEvidence` operation is refused.
-    ///
-    /// It is the fourth field of the draft schema 4 (`0x1047`).
     ///
     /// Below this height, or while it is unset, `SubmitEvidence` executes
     /// exactly as before. At and above it, a `SubmitEvidence` transaction,
@@ -3046,6 +3052,10 @@ pub struct ChainParams {
     /// every validator must run the identical reviewed binary and observe the
     /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
     /// in this branch.
+    ///
+    /// It is consensus-configuration field `0x1047`, which only schema 4 can
+    /// express, with the same start-up refusal and peer-declaration rule as
+    /// `0x1044` above.
     #[serde(default)]
     pub staking_submit_evidence_unsupported_enabled_from_height: Option<u64>,
 

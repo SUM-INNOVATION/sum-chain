@@ -1,5 +1,5 @@
 //! ConsensusConfig schema 3 (#268): schema 2 plus the node-registry
-//! `UpdateStatus` remediation gate (0x1043), which this binary writes.
+//! `UpdateStatus` remediation gate (0x1043).
 //!
 //! Every upgrade test starts from `tests/data/consensus_config_schema1_db.tsv`:
 //! the exact `cf::META` entries the schema-1 release writes (a baseline, a
@@ -7,10 +7,17 @@
 //! database byte for byte. A schema-2 database is that one moved by the
 //! release that wrote schema 2 ([`SCHEMA_2_RELEASE`]).
 //!
-//! What an operator relies on, in order:
+//! The releases that wrote schema 3 read schemas 1, 2 and 3 and wrote 3:
+//! [`SCHEMA_3_RELEASE`] models them, and is this file's subject (the
+//! functions below of the same names as the module's run under it). This
+//! binary writes schema 4 ([`PRODUCTION`], `consensus_config_schema4.rs`) and
+//! still runs a schema-3 record as it stands.
 //!
-//! * installing this binary changes nothing: a schema-1 or schema-2 record runs
-//!   as it stands, compared in its own schema, never re-encoded at start;
+//! What an operator relied on, in order:
+//!
+//! * installing the schema-3 release changed nothing: a schema-1 or schema-2
+//!   record runs as it stands, compared in its own schema, never re-encoded
+//!   at start;
 //! * the gate cannot be set until the record is schema 3: before the move, a
 //!   genesis that sets it refuses start and names the exact stopped-node
 //!   command, both commitments included;
@@ -19,9 +26,8 @@
 //! * after the move, setting the gate and its peer-declaration deadline at
 //!   future heights is an ordinary future-gate reschedule; a height already
 //!   reached, or a gate already passed, is refused;
-//! * an older binary refuses a schema-3 record and rewrites nothing, so a
-//!   moved node goes back to an older binary only from a copy of its
-//!   database taken before the move.
+//! * an older binary refuses a schema-3 record and rewrites nothing: a moved
+//!   node runs only a binary that reads schema 3.
 
 use sumchain_consensus::consensus_config::{
     self as ccfg,
@@ -62,6 +68,62 @@ static SCHEMA_2_RELEASE: SchemaPolicy = SchemaPolicy {
     writes: &SCHEMA_2,
     knows: &SCHEMA_4,
 };
+
+/// The releases that wrote schema 3: they
+/// read schemas 1, 2 and 3, wrote 3, and knew schema 4 only as a draft whose
+/// fields must stay absent.
+static SCHEMA_3_RELEASE: SchemaPolicy = SchemaPolicy {
+    reads: &[&SCHEMA_1, &SCHEMA_2, &SCHEMA_3],
+    writes: &SCHEMA_3,
+    knows: &SCHEMA_4,
+};
+
+// ── the schema-3 release's operations, this file's subject ──────────────────
+
+fn build(g: &Genesis) -> Result<ConsensusConfig, ConfigError> {
+    ccfg::build_with(g, &SCHEMA_3_RELEASE)
+}
+
+fn check_at_startup(
+    db: &Database,
+    g: &Genesis,
+    height: u64,
+) -> Result<StartupOutcome, ConfigError> {
+    check_at_startup_with(db, g, height, &SCHEMA_3_RELEASE)
+}
+
+fn read_record(db: &Database) -> Result<Option<ccfg::BaselineRecord>, ConfigError> {
+    read_record_with(db, &SCHEMA_3_RELEASE)
+}
+
+fn read_transitions(db: &Database) -> Result<Vec<ccfg::Transition>, ConfigError> {
+    read_transitions_with(db, &SCHEMA_3_RELEASE)
+}
+
+fn pending_schema_transition(
+    db: &Database,
+) -> Result<Option<ccfg::PendingSchemaTransition>, ConfigError> {
+    pending_schema_transition_with(db, &SCHEMA_3_RELEASE)
+}
+
+fn acknowledge_schema_transition(
+    db: &Database,
+    height: u64,
+    old: Hash,
+    new: Hash,
+) -> Result<ccfg::SchemaTransitioned, ConfigError> {
+    acknowledge_schema_transition_with(db, height, old, new, &SCHEMA_3_RELEASE)
+}
+
+fn acknowledge(
+    db: &Database,
+    g: &Genesis,
+    height: u64,
+    old: Hash,
+    new: Hash,
+) -> Result<ccfg::Acknowledged, ConfigError> {
+    acknowledge_with(db, g, height, old, new, &SCHEMA_3_RELEASE)
+}
 
 // ── the schema-1 fixture (as in `consensus_config_schema2.rs`) ──────────────
 
@@ -163,8 +225,8 @@ fn entries(db: &Database) -> Vec<(Vec<u8>, Vec<u8>)> {
 /// This binary's one-step move of `db` to schema 3, with the commitments it
 /// offers.
 fn move_to_schema_3(db: &Database) -> ccfg::SchemaTransitioned {
-    let p = ccfg::pending_schema_transition(db).unwrap().unwrap();
-    ccfg::acknowledge_schema_transition(db, HEIGHT, p.old, p.new).unwrap()
+    let p = pending_schema_transition(db).unwrap().unwrap();
+    acknowledge_schema_transition(db, HEIGHT, p.old, p.new).unwrap()
 }
 
 fn ids(changes: &[ccfg::FieldChange]) -> Vec<u16> {
@@ -176,7 +238,7 @@ fn ids(changes: &[ccfg::FieldChange]) -> Vec<u16> {
 // ── schema 3 ────────────────────────────────────────────────────────────────
 
 #[test]
-fn schema_3_is_schema_2_plus_the_remediation_gate_and_this_binary_writes_it() {
+fn schema_3_is_schema_2_plus_the_remediation_gate_and_was_written() {
     assert_eq!(SCHEMA_3.number, 3);
     assert!(std::ptr::eq(SCHEMA_3.previous.unwrap(), &SCHEMA_2));
     let added: Vec<(u16, &str)> = SCHEMA_3_ADDED
@@ -197,12 +259,13 @@ fn schema_3_is_schema_2_plus_the_remediation_gate_and_this_binary_writes_it() {
         SCHEMA_2_ADDED.len() + 1
     );
 
-    assert!(std::ptr::eq(PRODUCTION.writes, &SCHEMA_3));
-    // It knows the draft schema 4, which extends schema 3.
-    assert!(std::ptr::eq(PRODUCTION.knows, &SCHEMA_4));
+    // The releases that wrote it read schemas 1, 2 and 3, and knew the draft
+    // schema 4, which extends schema 3.
+    assert!(std::ptr::eq(SCHEMA_3_RELEASE.writes, &SCHEMA_3));
+    assert!(std::ptr::eq(SCHEMA_3_RELEASE.knows, &SCHEMA_4));
     assert!(std::ptr::eq(SCHEMA_4.previous.unwrap(), &SCHEMA_3));
     assert_eq!(
-        PRODUCTION
+        SCHEMA_3_RELEASE
             .reads
             .iter()
             .map(|s| s.number)
@@ -210,7 +273,11 @@ fn schema_3_is_schema_2_plus_the_remediation_gate_and_this_binary_writes_it() {
         [1, 2, 3],
         "older schemas are read for good"
     );
-    for p in [&PRODUCTION, &PREVIOUS, &SCHEMA_2_RELEASE] {
+    // This binary keeps reading it for good and writes schema 4, which
+    // extends it; schema 3 itself is unchanged.
+    assert!(PRODUCTION.reads.iter().any(|s| std::ptr::eq(*s, &SCHEMA_3)));
+    assert!(std::ptr::eq(PRODUCTION.writes, &SCHEMA_4));
+    for p in [&PRODUCTION, &PREVIOUS, &SCHEMA_2_RELEASE, &SCHEMA_3_RELEASE] {
         p.check().unwrap();
     }
 
@@ -219,27 +286,27 @@ fn schema_3_is_schema_2_plus_the_remediation_gate_and_this_binary_writes_it() {
         ChainParams::default().node_registry_update_status_unsupported_enabled_from_height,
         None
     );
-    assert_eq!(ccfg::build(&g2()).unwrap().get(GATE), Some(&Value::Absent));
+    assert_eq!(build(&g2()).unwrap().get(GATE), Some(&Value::Absent));
 }
 
 #[test]
 fn a_fresh_database_records_schema_3_directly() {
     let dir = TempDir::new().unwrap();
     let db = Database::open_default(dir.path()).unwrap();
-    let expected = ccfg::build(&g2()).unwrap();
+    let expected = build(&g2()).unwrap();
     assert_eq!(expected.schema().number, 3);
     assert_eq!(
-        ccfg::check_at_startup(&db, &g2(), 0).unwrap(),
+        check_at_startup(&db, &g2(), 0).unwrap(),
         StartupOutcome::Initialized {
             commitment: expected.commitment(),
             baseline_height: 0
         }
     );
-    let r = ccfg::read_record(&db).unwrap().unwrap();
+    let r = read_record(&db).unwrap().unwrap();
     assert_eq!(r.config, expected);
     assert_eq!(r.config.get(GATE), Some(&Value::Absent));
     assert_eq!(r.transition_count, 0);
-    assert_eq!(ccfg::pending_schema_transition(&db).unwrap(), None);
+    assert_eq!(pending_schema_transition(&db).unwrap(), None);
     // And it is the schema-2 configuration plus the gate, absent.
     assert_eq!(
         ccfg::build_with(&g2(), &SCHEMA_2_RELEASE)
@@ -259,14 +326,14 @@ fn a_schema_1_database_runs_as_it_stands_and_is_offered_schema_3_in_one_step() {
     let (_d, db) = schema_1_database();
     for _ in 0..3 {
         assert_eq!(
-            ccfg::check_at_startup(&db, &g2(), HEIGHT).unwrap(),
+            check_at_startup(&db, &g2(), HEIGHT).unwrap(),
             StartupOutcome::Unchanged { commitment: h(C2) }
         );
     }
     assert_eq!(entries(&db), fixture_entries(), "nothing written at start");
-    let r = ccfg::read_record(&db).unwrap().unwrap();
+    let r = read_record(&db).unwrap().unwrap();
     assert_eq!(r.config.schema().number, 1);
-    let p = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+    let p = pending_schema_transition(&db).unwrap().unwrap();
     assert_eq!((p.from_schema, p.to_schema), (1, 3));
     assert_eq!(p.old, h(C2));
     assert_eq!(p.new, r.config.extend_to(&SCHEMA_3).unwrap().commitment());
@@ -277,17 +344,17 @@ fn a_schema_1_database_runs_as_it_stands_and_is_offered_schema_3_in_one_step() {
 fn a_schema_2_database_runs_as_it_stands_and_is_offered_schema_3() {
     let (_d, db) = schema_2_database();
     let before = entries(&db);
-    let r = ccfg::read_record(&db).unwrap().unwrap();
+    let r = read_record(&db).unwrap().unwrap();
     for _ in 0..3 {
         assert_eq!(
-            ccfg::check_at_startup(&db, &g2(), HEIGHT).unwrap(),
+            check_at_startup(&db, &g2(), HEIGHT).unwrap(),
             StartupOutcome::Unchanged {
                 commitment: r.commitment
             }
         );
     }
     assert_eq!(entries(&db), before, "nothing written at start");
-    let p = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+    let p = pending_schema_transition(&db).unwrap().unwrap();
     assert_eq!((p.from_schema, p.to_schema), (2, 3));
     assert_eq!(p.old, r.commitment);
 }
@@ -300,7 +367,7 @@ fn a_schema_2_database_runs_as_it_stands_and_is_offered_schema_3() {
 #[test]
 fn the_one_step_move_from_schema_1_keeps_the_rules_and_the_history() {
     let (_d, db) = schema_1_database();
-    let old_history = ccfg::read_transitions(&db).unwrap();
+    let old_history = read_transitions(&db).unwrap();
     let done = move_to_schema_3(&db);
     assert_eq!((done.from_schema, done.to_schema), (1, 3));
     assert_eq!(done.from, h(C2));
@@ -312,13 +379,13 @@ fn the_one_step_move_from_schema_1_keeps_the_rules_and_the_history() {
     expected_added.sort();
     assert_eq!(done.added, expected_added);
 
-    let r = ccfg::read_record(&db).unwrap().unwrap();
+    let r = read_record(&db).unwrap().unwrap();
     assert_eq!(r.config.schema().number, 3);
     assert_eq!(r.commitment, done.to);
     for id in &expected_added {
         assert_eq!(r.config.get(*id), Some(&Value::Absent), "{id:#06x}");
     }
-    let history = ccfg::read_transitions(&db).unwrap();
+    let history = read_transitions(&db).unwrap();
     assert_eq!(history.len(), old_history.len() + 1);
     assert_eq!(&history[..old_history.len()], &old_history[..]);
     assert_eq!(
@@ -327,16 +394,16 @@ fn the_one_step_move_from_schema_1_keeps_the_rules_and_the_history() {
     );
 
     assert_eq!(
-        ccfg::check_at_startup(&db, &g2(), HEIGHT).unwrap(),
+        check_at_startup(&db, &g2(), HEIGHT).unwrap(),
         StartupOutcome::Unchanged {
             commitment: done.to
         }
     );
-    assert_eq!(ccfg::pending_schema_transition(&db).unwrap(), None);
+    assert_eq!(pending_schema_transition(&db).unwrap(), None);
 
     // Nothing left to move; a second run refuses and writes nothing.
     let before = entries(&db);
-    let err = ccfg::acknowledge_schema_transition(&db, HEIGHT, done.to, done.to).unwrap_err();
+    let err = acknowledge_schema_transition(&db, HEIGHT, done.to, done.to).unwrap_err();
     assert!(
         err.to_string().contains("already recorded in schema 3"),
         "{err}"
@@ -357,7 +424,7 @@ fn the_move_from_schema_2_adds_only_the_gate_and_matches_the_one_step_move() {
     assert_eq!(done.added, vec![GATE]);
     assert_eq!(done.to, via_one.to);
     assert_eq!(
-        ccfg::check_at_startup(&two, &g2(), HEIGHT).unwrap(),
+        check_at_startup(&two, &g2(), HEIGHT).unwrap(),
         StartupOutcome::Unchanged {
             commitment: done.to
         }
@@ -369,15 +436,15 @@ fn the_move_from_schema_2_adds_only_the_gate_and_matches_the_one_step_move() {
 #[test]
 fn the_move_must_name_both_commitments_exactly() {
     let (_d, db) = schema_1_database();
-    let p = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+    let p = pending_schema_transition(&db).unwrap().unwrap();
     let zero = Hash::from_hex(&format!("0x{}", "00".repeat(32))).unwrap();
     let before = entries(&db);
     for (old, new) in [(zero, p.new), (p.old, zero), (p.new, p.old), (p.old, p.old)] {
-        let err = ccfg::acknowledge_schema_transition(&db, HEIGHT, old, new).unwrap_err();
+        let err = acknowledge_schema_transition(&db, HEIGHT, old, new).unwrap_err();
         assert!(matches!(err, ConfigError::Refused(_)), "{err}");
     }
     // The refusal of a wrong `--new` names the right one.
-    let err = ccfg::acknowledge_schema_transition(&db, HEIGHT, p.old, zero).unwrap_err();
+    let err = acknowledge_schema_transition(&db, HEIGHT, p.old, zero).unwrap_err();
     assert!(err.to_string().contains(&p.new.to_string()), "{err}");
     assert_eq!(entries(&db), before);
 }
@@ -396,12 +463,12 @@ fn before_the_move_scheduling_the_gate_refuses_and_names_the_command() {
         ("schema 2", schema_2_database()),
     ] {
         let before = entries(&db);
-        let r = ccfg::read_record(&db).unwrap().unwrap();
-        let p = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+        let r = read_record(&db).unwrap().unwrap();
+        let p = pending_schema_transition(&db).unwrap().unwrap();
         let g = scheduled(HEIGHT + 100, HEIGHT + 200);
         g.validate().unwrap();
 
-        let err = ccfg::check_at_startup(&db, &g, HEIGHT).unwrap_err();
+        let err = check_at_startup(&db, &g, HEIGHT).unwrap_err();
         let text = err.to_string();
         assert!(matches!(err, ConfigError::Refused(_)), "{label}: {text}");
         assert!(text.contains(GATE_NAME), "{label}: {text}");
@@ -413,7 +480,7 @@ fn before_the_move_scheduling_the_gate_refuses_and_names_the_command() {
             "{label}: {text}"
         );
 
-        let ack = ccfg::acknowledge(&db, &g, HEIGHT, r.commitment, r.commitment).unwrap_err();
+        let ack = acknowledge(&db, &g, HEIGHT, r.commitment, r.commitment).unwrap_err();
         assert!(
             ack.to_string()
                 .contains("acknowledge-consensus-config-schema"),
@@ -422,7 +489,7 @@ fn before_the_move_scheduling_the_gate_refuses_and_names_the_command() {
         assert_eq!(entries(&db), before, "{label}: nothing written");
 
         assert_eq!(
-            ccfg::check_at_startup(&db, &g2(), HEIGHT).unwrap(),
+            check_at_startup(&db, &g2(), HEIGHT).unwrap(),
             StartupOutcome::Unchanged {
                 commitment: r.commitment
             },
@@ -439,33 +506,33 @@ fn after_the_move_scheduling_the_gate_is_a_future_gate_reschedule() {
     let (_d, db) = schema_1_database();
     let moved = move_to_schema_3(&db);
     let g = scheduled(HEIGHT + 100, HEIGHT + 200);
-    let out = ccfg::check_at_startup(&db, &g, HEIGHT).unwrap();
+    let out = check_at_startup(&db, &g, HEIGHT).unwrap();
     let StartupOutcome::GatesRescheduled { from, to, changes } = out else {
         panic!("expected a reschedule, got {out:?}");
     };
     assert_eq!(from, moved.to);
-    assert_eq!(to, ccfg::build(&g).unwrap().commitment());
+    assert_eq!(to, build(&g).unwrap().commitment());
     assert_eq!(ids(&changes), vec![PEER, GATE]);
 
-    let history = ccfg::read_transitions(&db).unwrap();
+    let history = read_transitions(&db).unwrap();
     let last = history.last().unwrap();
     assert_eq!(last.kind, TransitionKind::GateReschedule);
     let mut changed = last.changed_ids.clone();
     changed.sort();
     assert_eq!(changed, vec![PEER, GATE]);
 
-    let r = ccfg::read_record(&db).unwrap().unwrap();
+    let r = read_record(&db).unwrap().unwrap();
     assert_eq!(r.config.get(GATE), Some(&Value::U64(HEIGHT + 200)));
     assert_eq!(r.config.get(PEER), Some(&Value::U64(HEIGHT + 100)));
     assert_eq!(
-        ccfg::check_at_startup(&db, &g, HEIGHT + 1).unwrap(),
+        check_at_startup(&db, &g, HEIGHT + 1).unwrap(),
         StartupOutcome::Unchanged { commitment: to }
     );
 
     // Still ahead of the chain: it can be moved later, or unset again.
     let later = scheduled(HEIGHT + 100, HEIGHT + 300);
     assert!(matches!(
-        ccfg::check_at_startup(&db, &later, HEIGHT + 2).unwrap(),
+        check_at_startup(&db, &later, HEIGHT + 2).unwrap(),
         StartupOutcome::GatesRescheduled { .. }
     ));
 }
@@ -479,7 +546,7 @@ fn a_reached_height_or_a_passed_gate_is_refused() {
     move_to_schema_3(&db);
     let before = entries(&db);
     for at in [HEIGHT - 1, HEIGHT] {
-        let err = ccfg::check_at_startup(&db, &scheduled(at, at), HEIGHT).unwrap_err();
+        let err = check_at_startup(&db, &scheduled(at, at), HEIGHT).unwrap_err();
         assert!(err.to_string().contains("already passed"), "{at}: {err}");
         assert!(err.to_string().contains(GATE_NAME), "{at}: {err}");
     }
@@ -487,7 +554,7 @@ fn a_reached_height_or_a_passed_gate_is_refused() {
 
     // Scheduled, then passed.
     let g = scheduled(HEIGHT + 100, HEIGHT + 200);
-    ccfg::check_at_startup(&db, &g, HEIGHT).unwrap();
+    check_at_startup(&db, &g, HEIGHT).unwrap();
     let passed = HEIGHT + 200;
     let before = entries(&db);
     for (label, moved) in [
@@ -498,23 +565,23 @@ fn a_reached_height_or_a_passed_gate_is_refused() {
             u
         }),
     ] {
-        let err = ccfg::check_at_startup(&db, &moved, passed).unwrap_err();
+        let err = check_at_startup(&db, &moved, passed).unwrap_err();
         assert!(err.to_string().contains("already passed"), "{label}: {err}");
         assert!(err.to_string().contains(GATE_NAME), "{label}: {err}");
-        let r = ccfg::read_record(&db).unwrap().unwrap();
-        let ack = ccfg::acknowledge(
+        let r = read_record(&db).unwrap().unwrap();
+        let ack = acknowledge(
             &db,
             &moved,
             passed,
             r.commitment,
-            ccfg::build(&moved).unwrap().commitment(),
+            build(&moved).unwrap().commitment(),
         )
         .unwrap_err();
         assert!(ack.to_string().contains("already passed"), "{label}: {ack}");
     }
     assert_eq!(entries(&db), before);
     assert!(matches!(
-        ccfg::check_at_startup(&db, &g, passed).unwrap(),
+        check_at_startup(&db, &g, passed).unwrap(),
         StartupOutcome::Unchanged { .. }
     ));
 }
@@ -544,9 +611,9 @@ fn the_gate_needs_the_peer_deadline_at_or_below_it() {
 // ── older binaries ──────────────────────────────────────────────────────────
 
 /// The release that recorded schema 1, and the one that wrote schema 2, both
-/// refuse a schema-3 record — moved or fresh — and rewrite nothing. A moved
-/// node returns to an older binary only from a copy of its database taken
-/// before the move.
+/// refuse a schema-3 record — moved or fresh — and rewrite nothing: a moved
+/// node runs only a binary that reads schema 3. The schema-3 release and this
+/// binary both run it as it stands.
 #[test]
 fn older_binaries_refuse_a_schema_3_record_and_rewrite_nothing() {
     let (_d1, moved_from_1) = schema_1_database();
@@ -555,7 +622,7 @@ fn older_binaries_refuse_a_schema_3_record_and_rewrite_nothing() {
     move_to_schema_3(&moved_from_2);
     let fresh_dir = TempDir::new().unwrap();
     let fresh = Database::open_default(fresh_dir.path()).unwrap();
-    ccfg::check_at_startup(&fresh, &g2(), 0).unwrap();
+    check_at_startup(&fresh, &g2(), 0).unwrap();
 
     for (label, db) in [
         ("moved from schema 1", &moved_from_1),
@@ -589,10 +656,13 @@ fn older_binaries_refuse_a_schema_3_record_and_rewrite_nothing() {
             );
             assert_eq!(&entries(db), &before, "{label}, {who}: nothing rewritten");
         }
-        // This binary starts on it.
-        assert!(matches!(
-            ccfg::check_at_startup(db, &g2(), HEIGHT).unwrap(),
-            StartupOutcome::Unchanged { .. }
-        ));
+        // The schema-3 release, and this binary, start on it.
+        for policy in [&SCHEMA_3_RELEASE, &PRODUCTION] {
+            assert!(matches!(
+                check_at_startup_with(db, &g2(), HEIGHT, policy).unwrap(),
+                StartupOutcome::Unchanged { .. }
+            ));
+        }
+        assert_eq!(&entries(db), &before, "{label}: nothing rewritten");
     }
 }

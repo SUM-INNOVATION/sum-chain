@@ -9,7 +9,7 @@
 //!
 //! The release that wrote schema 2 read schemas 1 and 2 and wrote 2:
 //! [`SCHEMA_2_RELEASE`] models it, and is this file's subject. This binary
-//! writes schema 3 ([`PRODUCTION`], `consensus_config_schema3.rs`) and still
+//! writes schema 4 ([`PRODUCTION`], `consensus_config_schema4.rs`) and still
 //! runs a schema-2 record as it stands. The release before schema 2 read and
 //! wrote schema 1 and knew schema 2 only as a draft: [`PREVIOUS`] models it, for
 //! what an older binary does with a schema-2 database. [`TEST_SCHEMA_2`] adds
@@ -115,7 +115,7 @@ static TEST_SCHEMA_3: Schema = Schema {
     added: ccfg::schema::SCHEMA_3_ADDED,
 };
 
-/// [`TEST_SCHEMA_3`] plus the draft schema 4, as [`PRODUCTION`] knows it.
+/// [`TEST_SCHEMA_3`] plus schema 4, as [`PRODUCTION`] knows it.
 static TEST_SCHEMA_4: Schema = Schema {
     number: 4,
     previous: Some(&TEST_SCHEMA_3),
@@ -380,11 +380,11 @@ fn schema_2_is_frozen_and_was_written() {
             .collect::<Vec<_>>(),
         [1, 2]
     );
-    // This binary keeps reading it for good and writes schema 3, which extends
+    // This binary keeps reading it for good and writes schema 4, which extends
     // it; schema 2 itself is unchanged.
     assert!(PRODUCTION.reads.iter().any(|s| std::ptr::eq(*s, &SCHEMA_2)));
-    assert!(std::ptr::eq(PRODUCTION.writes, &ccfg::SCHEMA_3));
-    assert!(ccfg::SCHEMA_3.extends(&SCHEMA_2));
+    assert!(std::ptr::eq(PRODUCTION.writes, &ccfg::SCHEMA_4));
+    assert!(ccfg::SCHEMA_4.extends(&SCHEMA_2));
     PRODUCTION.check().unwrap();
     SCHEMA_2_RELEASE.check().unwrap();
     PREVIOUS.check().unwrap();

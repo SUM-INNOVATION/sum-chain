@@ -8,9 +8,11 @@
 //! consensus-configuration encoding and commitment (#268) a node records.
 //!
 //! The consensus-configuration pins are the frozen schema-2 encoding, built
-//! under the policy of the release that wrote schema 2, and the schema-3
-//! encoding this binary records, which must be exactly the schema-2 one with
-//! schema 3's one field absent.
+//! under the policy of the release that wrote schema 2, the frozen schema-3
+//! encoding, built under the policy of the releases that wrote schema 3 and
+//! exactly the schema-2 one with schema 3's one field absent, and the schema-4
+//! encoding this binary records, which must be exactly the schema-3 one with
+//! schema 4's four fields absent.
 //!
 //! The two network templates hold placeholder validator keys and are refused
 //! by validation, before and after, with the same error; what serde reads from
@@ -35,16 +37,27 @@ struct Pin {
     /// BLAKE3 of the schema-2 consensus-configuration encoding.
     ccfg_encoding: &'static str,
     ccfg_commitment: &'static str,
-    /// BLAKE3 of the schema-3 consensus-configuration encoding, which this
-    /// binary records.
+    /// BLAKE3 of the schema-3 consensus-configuration encoding.
     ccfg3_encoding: &'static str,
     ccfg3_commitment: &'static str,
+    /// BLAKE3 of the schema-4 consensus-configuration encoding, which this
+    /// binary records.
+    ccfg4_encoding: &'static str,
+    ccfg4_commitment: &'static str,
 }
 
 /// The release that wrote schema 2: reads schemas 1 and 2, writes 2.
 static SCHEMA_2_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
     reads: &[&ccfg::SCHEMA_1, &ccfg::SCHEMA_2],
     writes: &ccfg::SCHEMA_2,
+    knows: &ccfg::SCHEMA_4,
+};
+
+/// The releases that wrote schema 3: read schemas 1, 2 and 3, write 3, and
+/// know schema 4 only as a draft.
+static SCHEMA_3_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
+    reads: &[&ccfg::SCHEMA_1, &ccfg::SCHEMA_2, &ccfg::SCHEMA_3],
+    writes: &ccfg::SCHEMA_3,
     knows: &ccfg::SCHEMA_4,
 };
 
@@ -76,6 +89,12 @@ struct Template {
 // When this binary began writing schema 3, the schema-3 pins were added beside
 // the frozen schema-2 ones, which did not move: `identity` checks that each
 // schema-3 configuration is its schema-2 one plus 0x1043 absent.
+//
+// When this binary began writing schema 4, the schema-4 pins were added beside
+// the frozen schema-2 and schema-3 ones, which did not move, and neither did
+// canonical JSON, the block hash or the two digests: `identity` checks that
+// each schema-4 configuration is its schema-3 one plus 0x1044 to 0x1047
+// absent.
 const PINS: &[Pin] = &[
     Pin {
         file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-1v.json",
@@ -87,6 +106,8 @@ const PINS: &[Pin] = &[
         ccfg_commitment: "0x66ef2cb66e07cb457a998c4361226ee114877f92666addd599caa89d07d53b79",
         ccfg3_encoding: "0xb288184ea98d1c7203d55133138c8cfcfb21c0a6083530ad9ec1dffa65d30f4a",
         ccfg3_commitment: "0xea325096bd25e2f7a4c5935f265e52b512fc46525002fc502048486428949842",
+        ccfg4_encoding: "0xc10cd4afd71c0eff58a7135a6928175f704a0d17a59726e04242a652b1829ce8",
+        ccfg4_commitment: "0x024d960dfefb282a04c75b3ffcc9c2b15a1888ee35e84e8f1b106229f4f5be5d",
     },
     Pin {
         file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-2v.json",
@@ -98,6 +119,8 @@ const PINS: &[Pin] = &[
         ccfg_commitment: "0x075b28ec3521f49c6ca7fb12ae5297c79f74bada8649899771bd1cdb1fdce564",
         ccfg3_encoding: "0xf91dbc6a2fd1661cfbc2fb074e5edad6d80725ab3776d67c0635cc3c64a73ee9",
         ccfg3_commitment: "0x70cb4bd4242d57f83d63fa7879b167b07a084c3eea13f792069ca4090ea09fa7",
+        ccfg4_encoding: "0x20d971d8c96d4780ef286bf4577294607322724e4cf325f8e7c6288b67fdfc56",
+        ccfg4_commitment: "0x631cc72dd5146bc8a00edf2c3af6e27c12091c60678e63b4f1be0f1325ad5f01",
     },
     Pin {
         file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-A.json",
@@ -109,6 +132,8 @@ const PINS: &[Pin] = &[
         ccfg_commitment: "0xfb73f20bec922b4c256098ea2a4f78f230271a42fe961ac913a97a511c217eb0",
         ccfg3_encoding: "0x9d8dc2b7f8bbfd4e3adb635568e8316c6f4d5a220d88c20b98df62570270f52b",
         ccfg3_commitment: "0x29c78ebd241a2c25325c7f54e915363684af3775be676c7a2419e85b122f492c",
+        ccfg4_encoding: "0x4ba8c5fa2e12b0ea8015db93436147575c9b0f80f0a06ceaa467a495955d3b22",
+        ccfg4_commitment: "0xe5f46cb0000906ed7f9f7621111ba2502a04354a29d57c1a814f0b539a4b9edd",
     },
     Pin {
         file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-B.json",
@@ -120,6 +145,8 @@ const PINS: &[Pin] = &[
         ccfg_commitment: "0x2f3026bc8d54499c35c0cf657e431c8cf7b5731e3acc1ca3735e8bf7d3a309d9",
         ccfg3_encoding: "0x6140a1bb966583aacde73103f6783fbdd5c10597e3cb8d9a5b1cb981d9df8005",
         ccfg3_commitment: "0x452c12e896e5187255653d358ba10aa67deb35de367c0d9c780362812c187880",
+        ccfg4_encoding: "0x8a33ef0551b054dac35b8c91601bf1c31bb303db3ea94debf8cc1015390c57e1",
+        ccfg4_commitment: "0xa412b1594a443b66a9ec5b27e7beecdaa2299e71adcd6eee7c468f8e759de694",
     },
     Pin {
         file: "genesis.json",
@@ -131,6 +158,8 @@ const PINS: &[Pin] = &[
         ccfg_commitment: "0x2afc2d46fbad85cdeac914d3c6ccb5e4457f596f36d3265997710a42268f979b",
         ccfg3_encoding: "0x1b3979f0684772f2c49c1f1d16103126645873f666981869545520a759f98001",
         ccfg3_commitment: "0x23e7f5a5d78889d8f363d73963eda02be837e43e2115c6c54b7d2bd3f581cb28",
+        ccfg4_encoding: "0xa74c4cd08c2b265f80d2dcc3123a596a7f62f392da6900f6bd7b7ffd9d76ff4a",
+        ccfg4_commitment: "0x8646e7dd068f1f422bca024f86504354dc8cddcb1e74621db439b6c67e679dc6",
     },
     Pin {
         file: "genesis/local_genesis.json",
@@ -142,6 +171,8 @@ const PINS: &[Pin] = &[
         ccfg_commitment: "0x1d61e756ad20cd078dbde4d89ad38fa28ef6b04b98f6eb3b7a18a7653fcdf591",
         ccfg3_encoding: "0x97c1a0e8c53813ae5bc3539291bb412b5484531f4464a2fe39a6d62ec7d17bc8",
         ccfg3_commitment: "0x50222daa238087b6f29b83b4024cd0158cfe33f9638fe0137168889b0a29ec0b",
+        ccfg4_encoding: "0x874abad24bfaa862a60a4b9d3bafff5065b31962b9820dcb09ed109475ac71bf",
+        ccfg4_commitment: "0x2a90db93196d63fd7003dcf10239849753893186ec892626a8927b03409849bc",
     },
 ];
 
@@ -197,19 +228,25 @@ fn canonical_json(g: &Genesis) -> String {
     .unwrap()
 }
 
-fn identity(file: &str) -> [String; 8] {
+fn identity(file: &str) -> [String; 10] {
     let g = Genesis::from_file(repo().join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
     let two = ccfg::build_with(&g, &SCHEMA_2_RELEASE).unwrap_or_else(|e| panic!("{file}: {e}"));
-    let three = ccfg::build(&g).unwrap_or_else(|e| panic!("{file}: {e}"));
+    let three = ccfg::build_with(&g, &SCHEMA_3_RELEASE).unwrap_or_else(|e| panic!("{file}: {e}"));
+    let four = ccfg::build(&g).unwrap_or_else(|e| panic!("{file}: {e}"));
     assert_eq!(
-        three.schema().number,
-        3,
-        "{file}: this binary records schema 3"
+        four.schema().number,
+        4,
+        "{file}: this binary records schema 4"
     );
     assert_eq!(
         two.extend_to(&ccfg::SCHEMA_3).unwrap(),
         three,
         "{file}: schema 3 is schema 2 plus its one field, absent"
+    );
+    assert_eq!(
+        three.extend_to(&ccfg::SCHEMA_4).unwrap(),
+        four,
+        "{file}: schema 4 is schema 3 plus its four fields, absent"
     );
     [
         blake3(canonical_json(&g).as_bytes()),
@@ -222,6 +259,8 @@ fn identity(file: &str) -> [String; 8] {
         two.commitment().to_string(),
         blake3(&three.encode()),
         three.commitment().to_string(),
+        blake3(&four.encode()),
+        four.commitment().to_string(),
     ]
 }
 
@@ -281,7 +320,7 @@ fn every_tracked_genesis_file_is_pinned() {
 #[test]
 fn loadable_genesis_files_keep_their_identity() {
     for pin in PINS {
-        let [json, block, activation, protocol, ccfg_encoding, ccfg_commitment, ccfg3_encoding, ccfg3_commitment] =
+        let [json, block, activation, protocol, ccfg_encoding, ccfg_commitment, ccfg3_encoding, ccfg3_commitment, ccfg4_encoding, ccfg4_commitment] =
             identity(pin.file);
         assert_eq!(json, pin.json, "{}: canonical JSON", pin.file);
         assert_eq!(block, pin.block, "{}: genesis block hash", pin.file);
@@ -309,6 +348,16 @@ fn loadable_genesis_files_keep_their_identity() {
         assert_eq!(
             ccfg3_commitment, pin.ccfg3_commitment,
             "{}: schema-3 consensus-configuration commitment",
+            pin.file
+        );
+        assert_eq!(
+            ccfg4_encoding, pin.ccfg4_encoding,
+            "{}: schema-4 consensus-configuration encoding",
+            pin.file
+        );
+        assert_eq!(
+            ccfg4_commitment, pin.ccfg4_commitment,
+            "{}: schema-4 consensus-configuration commitment",
             pin.file
         );
     }
