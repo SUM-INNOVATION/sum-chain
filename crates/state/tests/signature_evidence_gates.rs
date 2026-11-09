@@ -992,6 +992,30 @@ mod key_holder {
         );
     }
 
+    /// The `pub` test-only `execute_tx_v2` arm (no production caller) makes the
+    /// same height-based selection as the live path: a legacy-only signature is
+    /// accepted below the gate and refused at it. This arm was otherwise
+    /// unexercised under the gate, so a height that ignored the gate here would
+    /// have gone unnoticed.
+    #[test]
+    fn the_test_only_execute_tx_v2_arm_selects_by_height() {
+        let to = Address::new([0xE7; 20]);
+        let pk = pubkey();
+        let from = Address::from_public_key(&pk);
+        let proposer = Address::from_public_key(&PROPOSER);
+        for (height, expected) in [(H - 1, TxStatus::Success), (H, TxStatus::InvalidSignature)] {
+            let n = node(strict_from(Some(H)));
+            let mut c = common::candidate(&n.db);
+            let tx = TransactionV2::transfer(CHAIN_ID, from, to, 3, FEE, 0);
+            let sig = identity_r_sig(tx.signing_hash().as_bytes());
+            let r = n
+                .executor
+                .execute_tx_v2(&mut c.view(), &tx, &sig, &pk, &proposer, height, 1000, 0)
+                .unwrap();
+            assert_eq!(r.status, expected, "execute_tx_v2 at height {height}");
+        }
+    }
+
     #[test]
     fn a_legacy_chain_replays_identically_with_the_gate_above_it() {
         let (legacy, status) = chain(None);
