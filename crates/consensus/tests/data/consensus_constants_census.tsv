@@ -51,6 +51,7 @@ crates/consensus/src/consensus_config/fields.rs	QUORUM_NONE	COMMITTED	registry	c
 crates/consensus/src/consensus_config/fields.rs	SCHEMA_V1_FIELDS	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/fields.rs	TIMESTAMP_AFTER_PARENT	COMMITTED	registry	committed as 0x0017 timestamp_rule
 crates/consensus/src/consensus_config/fields.rs	UNFINALIZED_UNBOUNDED	COMMITTED	registry	committed as 0x0016 unfinalized_rule
+crates/consensus/src/consensus_config/handshake.rs	HANDSHAKE_DIGEST_DOMAIN	EXCLUDE	self-domain	handshake value; no block-validity reader: the handshake digest's own domain (handshake.rs), compared at the peer handshake and held in no block, state root or database row
 crates/consensus/src/consensus_config/record.rs	MAX_TRANSITIONS	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/record.rs	RECORD_KEY	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/record.rs	RECORD_VERSION	EXCLUDE	consensus-config-self	the configuration format itself
