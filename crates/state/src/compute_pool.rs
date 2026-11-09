@@ -1075,6 +1075,58 @@ impl ComputePoolModel {
         self.entitlements.values()
     }
 
+    /// Rebuild a model from records read back from storage.
+    ///
+    /// Offers, accepted leaves and entitlements go through the operations
+    /// that enforce their invariants, so two active offers for one identity,
+    /// or a repeated offer, leaf or entitlement id, is refused and nothing is
+    /// built. Jobs and units refuse a repeated id too. Reservations and
+    /// assignments are keyed maps with no invariant across records.
+    ///
+    /// The caller is
+    /// [`ComputePoolStore::v_load_model`](crate::compute_pool_store::ComputePoolStore::v_load_model),
+    /// which also checks that the model rebuilt here materializes back to
+    /// exactly the rows it was read from.
+    pub(crate) fn from_records(
+        jobs: Vec<Job>,
+        units: Vec<WorkUnit>,
+        offers: Vec<BondedOffer>,
+        reservations: Vec<Reservation>,
+        accepted_leaves: Vec<AcceptedLeaf>,
+        assignments: Vec<AssignmentIndexEntry>,
+        entitlements: Vec<EntitlementRecord>,
+    ) -> PoolResult<Self> {
+        let mut m = Self::new();
+        for job in jobs {
+            if m.jobs.insert(job.job_id, job).is_some() {
+                return Err(PoolError::DuplicateJob);
+            }
+        }
+        for unit in units {
+            let key = UnitKey::new(unit.job_id, unit.unit_id);
+            if m.units.insert(key, unit).is_some() {
+                return Err(PoolError::DuplicateUnitId);
+            }
+        }
+        for offer in offers {
+            m.publish_offer(offer)?;
+        }
+        for reservation in reservations {
+            m.reservations
+                .insert(reservation.offer_bond_id, reservation);
+        }
+        for leaf in accepted_leaves {
+            m.accept_leaf(leaf)?;
+        }
+        for assignment in assignments {
+            m.put_assignment(assignment)?;
+        }
+        for entitlement in entitlements {
+            m.register_entitlement(entitlement)?;
+        }
+        Ok(m)
+    }
+
     // --- operations (validate-all, THEN mutate). ---
 
     /// `CreateComputePoolJob` (structure): validate the retention bound against
