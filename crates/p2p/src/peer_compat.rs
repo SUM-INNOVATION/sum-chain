@@ -3,26 +3,35 @@
 //! # The gap this closes
 //!
 //! The protocol-digest handshake ([`crate::sync::SyncRequest::GetProtocolId`])
-//! sorts peers into three states, not two:
+//! sorts peers into four states, not two:
 //!
 //! | what the peer does | what it means |
 //! |---|---|
 //! | declares OUR digest | [`PeerCompat::Verified`] — proven to enforce our rules |
 //! | declares a DIFFERENT digest | [`PeerCompat::Incompatible`] — proven not to |
-//! | declares nothing | [`PeerCompat::Undeclared`] — nothing is proven either way |
+//! | has been asked on this connection and not answered yet | [`PeerCompat::Pending`] — not yet compared |
+//! | its request failed, or it was never asked | [`PeerCompat::Undeclared`] — nothing is proven either way |
 //!
-//! Admitting the third row is what makes the handshake deployable: every
-//! validator running today predates `GetProtocolId`, cannot decode it, answers
-//! with an inbound failure, and must stay exactly as usable as it is now. A
-//! refusal that fires on the current validator set is worse than the defect it
-//! closes.
+//! Admitting the last row is what makes the handshake deployable: a node built
+//! before `GetProtocolId` existed cannot decode it, answers with an inbound
+//! failure, and must stay exactly as usable as it is now. A refusal that fires
+//! on such a node is worse than the defect it closes.
 //!
-//! It is also correct only while it is true that nothing distinguishes the
-//! three. Below the first remediation activation every node executes the same
-//! rules, so an undeclared peer's blocks are blocks this node would have
-//! produced itself. At that height the rules diverge, and the same silence now
-//! means "this peer may be enforcing the rules we just stopped enforcing". An
-//! undeclared peer and an incompatible one become the same thing.
+//! `Pending` is what keeps that admission from reaching a peer whose answer is
+//! merely still in flight. Until a peer's declaration on the current connection
+//! has been compared, nothing it sends is acted on, in either phase: a block,
+//! a sync status or a vote that arrives first is refused, and the node asks
+//! again once the peer is resolved. Only a request that FAILS (an older peer's
+//! inbound failure, an error answer, the request timeout) leaves the peer
+//! `Undeclared`.
+//!
+//! Admitting silence is also correct only while it is true that nothing
+//! distinguishes the states. Below the first remediation activation every
+//! node executes the same rules, so an undeclared peer's blocks are blocks
+//! this node would have produced itself. At that height the rules diverge,
+//! and the same silence now means "this peer may be enforcing the rules we
+//! just stopped enforcing". An undeclared peer and an incompatible one become
+//! the same thing.
 //!
 //! # The two phases
 //!
@@ -30,15 +39,28 @@
 //! in `genesis.json`
 //! (`ChainParams::peer_protocol_declaration_required_from_height`):
 //!
-//! | phase | height | `Verified` | `Undeclared` | `Incompatible` |
-//! |---|---|---|---|---|
-//! | one | below the height, or the height unset | participates | participates | refused |
-//! | two | at or above the height | participates | REFUSED | refused |
+//! | phase | height | `Verified` | `Pending` | `Undeclared` | `Incompatible` |
+//! |---|---|---|---|---|---|
+//! | one | below the height, or the height unset | participates | refused | participates | refused |
+//! | two | at or above the height | participates | refused | REFUSED | refused |
 //!
 //! Only the `Undeclared` column changes, and only above a height an operator
 //! has to write down. A node whose genesis does not carry the field at all —
 //! every genesis distributed before this change — resolves it to `None` and
-//! stays in phase one forever, which is byte-for-byte today's behaviour.
+//! stays in phase one forever.
+//!
+//! # A declaration belongs to a connection
+//!
+//! | event | `Pending` | `Verified` | `Incompatible` | `Undeclared` |
+//! |---|---|---|---|---|
+//! | connected, asked ([`PeerCompatRegistry::on_requested`]) | stays | → `Pending` | stays | → `Pending` |
+//! | declares our digest ([`PeerCompatRegistry::on_declaration`]) | → `Verified` | stays | stays | → `Verified` |
+//! | declares another digest | → `Incompatible` | → `Incompatible` | stays | → `Incompatible` |
+//! | its request fails ([`PeerCompatRegistry::on_unanswered`]) | → `Undeclared` | stays | stays | stays |
+//!
+//! A peer that reconnects is asked again, and what it declared on its previous
+//! connection does not admit it on this one. `Incompatible` is permanent for
+//! the life of the process.
 //!
 //! # Why the height is in `ChainParams` and not in this binary
 //!
@@ -75,14 +97,16 @@
 //! enforcement boundary fail in opposite directions, and the release position
 //! on each is different:
 //!
-//! * **Below the height — ACCEPTED.** A restart re-admits a peer this node had
-//!   marked [`PeerCompat::Incompatible`]. Pre-enforcement compatibility state
-//!   may reset on restart. The cost is bounded by what phase one already
-//!   means: below the height every node executes the same rules, so the
-//!   re-admitted peer's blocks are blocks this node would have produced
-//!   itself. This is a decided property of the release, not a residual waiting
-//!   on a persistence change, and it should not be recorded as outstanding
-//!   work.
+//! * **Below the height — ACCEPTED.** A restart forgets that a peer was
+//!   [`PeerCompat::Incompatible`]. Its reconnection is asked again and is
+//!   [`PeerCompat::Pending`] until it answers, so it is refused again when it
+//!   re-declares, and re-admitted only if its request fails. Pre-enforcement
+//!   compatibility state may reset on restart. The cost is bounded by what
+//!   phase one already means: below the height every node executes the same
+//!   rules, so the re-admitted peer's blocks are blocks this node would have
+//!   produced itself. This is a decided property of the release, not a
+//!   residual waiting on a persistence change, and it should not be recorded
+//!   as outstanding work.
 //! * **At or above the height — NOT negotiable.** A restart re-refuses a peer
 //!   it had VERIFIED, until that peer answers `GetProtocolId` again. Post-
 //!   enforcement behaviour must remain fail-closed: an unverified peer is
@@ -108,18 +132,21 @@ use tracing::warn;
 /// What this node has PROVEN about one peer's rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerCompat {
-    /// The peer declared a protocol digest equal to ours. It enforces the same
-    /// activation heights and the same compiled-in constants, so a block it
-    /// accepts is a block this node accepts.
+    /// The peer declared a digest equal to ours on its current connection. It
+    /// says it enforces the same rules, so a block it accepts is a block this
+    /// node accepts.
     Verified,
-    /// The peer declared a protocol digest DIFFERENT from ours. It said, in its
-    /// own words, that it enforces other rules. Permanent: a peer never leaves
+    /// The peer declared a digest DIFFERENT from ours. It said, in its own
+    /// words, that it enforces other rules. Permanent: a peer never leaves
     /// this state, however it answers later.
     Incompatible,
-    /// The peer has declared nothing. Not evidence of anything — a node built
-    /// before `GetProtocolId` existed cannot decode the request and answers
-    /// with an inbound failure, which is indistinguishable here from a peer
-    /// whose answer is merely still in flight.
+    /// The peer has been asked for its digest on its current connection and
+    /// has not answered. Nothing it sends is acted on until it does, or until
+    /// the request fails.
+    Pending,
+    /// The peer has declared nothing: its request failed, or it was never
+    /// asked. Not evidence of anything — a node built before `GetProtocolId`
+    /// existed cannot decode the request and answers with an inbound failure.
     Undeclared,
 }
 
@@ -131,16 +158,17 @@ pub enum PeerCompat {
 /// `HashSet<PeerId>` and re-derived the rule, which is two chances to get a
 /// two-phase policy wrong instead of one.
 pub struct PeerCompatRegistry {
-    /// `sumchain_state::protocol_digest::protocol_digest` for THIS binary and
-    /// THIS genesis.
+    /// The digest THIS binary declares for THIS genesis, which every peer's
+    /// declaration is compared against.
     ours: Hash,
     /// The height from which an [`PeerCompat::Undeclared`] peer stops being
     /// allowed to take part. `None` is phase one forever, and is what a genesis
     /// written before the field existed resolves to.
     enforce_from: Option<BlockHeight>,
-    /// Declared states only. Absence is [`PeerCompat::Undeclared`], which is
-    /// why this is not a pair of sets: "not yet answered" and "answered
-    /// compatibly" are different, and phase two acts on the difference.
+    /// Every state but one. Absence is [`PeerCompat::Undeclared`], which is
+    /// why this is not a pair of sets: "not yet answered", "will not answer"
+    /// and "answered compatibly" are different, and the policy acts on each
+    /// difference.
     declared: RwLock<HashMap<PeerId, PeerCompat>>,
 }
 
@@ -158,7 +186,7 @@ impl PeerCompatRegistry {
         }
     }
 
-    /// The protocol digest this binary enforces.
+    /// The digest this binary declares, and compares every peer's against.
     pub fn protocol_digest(&self) -> Hash {
         self.ours
     }
@@ -175,6 +203,20 @@ impl PeerCompatRegistry {
     /// opinion is already unusable.
     pub fn enforcing_at(&self, height: BlockHeight) -> bool {
         self.enforce_from.is_some_and(|from| height >= from)
+    }
+
+    /// Record that `peer` has just been asked for its digest on a new
+    /// connection: it is [`PeerCompat::Pending`] until it answers or the
+    /// request fails.
+    ///
+    /// Called on every connection, so a peer verified on an earlier connection
+    /// is asked again and is not admitted on this one on the strength of the
+    /// old answer. A peer already [`PeerCompat::Incompatible`] stays so.
+    pub fn on_requested(&self, peer: PeerId) {
+        let mut declared = self.declared.write();
+        if declared.get(&peer) != Some(&PeerCompat::Incompatible) {
+            declared.insert(peer, PeerCompat::Pending);
+        }
     }
 
     /// Record a peer's declared digest. Returns `true` if it matched ours.
@@ -204,6 +246,24 @@ impl PeerCompatRegistry {
         }
     }
 
+    /// Record that `peer`'s request for its digest failed: an older peer's
+    /// inbound failure, an error answer, or the request timeout. Returns `true`
+    /// if the peer was [`PeerCompat::Pending`] and is now
+    /// [`PeerCompat::Undeclared`], which the two-phase rule admits below the
+    /// enforcement height and refuses at or above it.
+    ///
+    /// Any other state is kept: a failure says nothing about an answer the
+    /// peer has already given.
+    pub fn on_unanswered(&self, peer: PeerId) -> bool {
+        let mut declared = self.declared.write();
+        if declared.get(&peer) == Some(&PeerCompat::Pending) {
+            declared.remove(&peer);
+            true
+        } else {
+            false
+        }
+    }
+
     /// What has been proven about `peer`.
     pub fn status(&self, peer: &PeerId) -> PeerCompat {
         self.declared
@@ -215,10 +275,10 @@ impl PeerCompatRegistry {
 
     /// Whether `peer` declared a digest different from ours.
     ///
-    /// Distinct from "may not participate": in phase two an undeclared peer may
-    /// not participate and is still not incompatible, because it has not said
-    /// anything. The two are separate so that a log line, a metric or a ban
-    /// decision can tell a refusal from an absence.
+    /// Distinct from "may not participate": a pending peer, and in phase two an
+    /// undeclared one, may not participate and is still not incompatible,
+    /// because it has not said anything. The two are separate so that a log
+    /// line, a metric or a ban decision can tell a refusal from an absence.
     pub fn is_incompatible(&self, peer: &PeerId) -> bool {
         self.status(peer) == PeerCompat::Incompatible
     }
@@ -231,7 +291,7 @@ impl PeerCompatRegistry {
     pub fn may_participate_in_consensus(&self, peer: &PeerId, height: BlockHeight) -> bool {
         match self.status(peer) {
             PeerCompat::Verified => true,
-            PeerCompat::Incompatible => false,
+            PeerCompat::Incompatible | PeerCompat::Pending => false,
             PeerCompat::Undeclared => !self.enforcing_at(height),
         }
     }

@@ -19,10 +19,13 @@
 //! So the policy gains a boundary:
 //! `ChainParams::peer_protocol_declaration_required_from_height`.
 //!
-//! | phase | `Verified` | `Undeclared` | `Incompatible` |
-//! |---|---|---|---|
-//! | below the height, or unset | participates | participates | refused |
-//! | at or above the height | participates | REFUSED | refused |
+//! | phase | `Verified` | `Pending` | `Undeclared` | `Incompatible` |
+//! |---|---|---|---|---|
+//! | below the height, or unset | participates | refused | participates | refused |
+//! | at or above the height | participates | refused | REFUSED | refused |
+//!
+//! `Pending` is a peer asked on its current connection that has not answered:
+//! "declares nothing" is a request that FAILED, never one still in flight.
 //!
 //! # What "participate in consensus" is, from source
 //!
@@ -400,6 +403,7 @@ async fn row5_a_mismatched_peer_cannot_declare_its_way_back_in() {
 fn the_participation_predicate_is_the_whole_policy() {
     let verified = PeerId::random();
     let incompatible = PeerId::random();
+    let pending = PeerId::random();
     let undeclared = PeerId::random();
 
     for (enforce_from, height, undeclared_may) in [
@@ -419,10 +423,16 @@ fn the_participation_predicate_is_the_whole_policy() {
         let r = PeerCompatRegistry::new(ours(), enforce_from);
         assert!(r.on_declaration(verified, ours()));
         assert!(!r.on_declaration(incompatible, theirs()));
+        r.on_requested(pending);
 
         assert!(
             r.may_participate_in_consensus(&verified, height),
             "a peer that declared our digest participates at every height \
+             ({enforce_from:?} / {height})"
+        );
+        assert!(
+            !r.may_participate_in_consensus(&pending, height),
+            "a peer whose answer is still in flight participates at no height \
              ({enforce_from:?} / {height})"
         );
         assert!(
@@ -436,6 +446,200 @@ fn the_participation_predicate_is_the_whole_policy() {
             "undeclared peer, enforce_from={enforce_from:?}, height={height}"
         );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pending — a declaration belongs to a connection.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A peer asked for its digest and not yet answered participates in NEITHER
+/// phase, and is not called incompatible.
+///
+/// Before `Pending` existed such a peer was `Undeclared`, indistinguishable
+/// from one whose request had failed, and so admitted below the height: a
+/// block or a status that beat its declaration was acted on before anything
+/// had been compared.
+#[test]
+fn a_pending_peer_participates_in_neither_phase() {
+    for enforce_from in [None, Some(ENFORCE_FROM)] {
+        let r = PeerCompatRegistry::new(ours(), enforce_from);
+        let peer = PeerId::random();
+        r.on_requested(peer);
+        assert_eq!(r.status(&peer), PeerCompat::Pending);
+        assert!(!r.is_incompatible(&peer), "a pending peer has said nothing");
+        for h in [0, ENFORCE_FROM - 1, ENFORCE_FROM, u64::MAX] {
+            assert!(
+                !r.may_participate_in_consensus(&peer, h),
+                "a pending peer must be refused at height {h} ({enforce_from:?})"
+            );
+        }
+        // Asked again on the same connection: still pending.
+        r.on_requested(peer);
+        assert_eq!(r.status(&peer), PeerCompat::Pending);
+    }
+}
+
+/// `Pending` resolves exactly three ways: our digest, another digest, or a
+/// failed request.
+#[test]
+fn a_pending_peer_resolves_to_verified_incompatible_or_undeclared() {
+    let r = PeerCompatRegistry::new(ours(), Some(ENFORCE_FROM));
+    let (matching, other, silent) = (PeerId::random(), PeerId::random(), PeerId::random());
+    for p in [matching, other, silent] {
+        r.on_requested(p);
+    }
+
+    assert!(r.on_declaration(matching, ours()));
+    assert_eq!(r.status(&matching), PeerCompat::Verified);
+    assert!(r.may_participate_in_consensus(&matching, 0));
+    assert!(r.may_participate_in_consensus(&matching, ENFORCE_FROM));
+
+    assert!(!r.on_declaration(other, theirs()));
+    assert_eq!(r.status(&other), PeerCompat::Incompatible);
+    assert!(!r.may_participate_in_consensus(&other, 0));
+
+    assert!(r.on_unanswered(silent));
+    assert_eq!(r.status(&silent), PeerCompat::Undeclared);
+    assert!(r.may_participate_in_consensus(&silent, ENFORCE_FROM - 1));
+    assert!(!r.may_participate_in_consensus(&silent, ENFORCE_FROM));
+
+    // A failed request changes nothing it did not leave pending: an answer
+    // already given stands, and silence stays silence.
+    assert!(!r.on_unanswered(matching));
+    assert_eq!(r.status(&matching), PeerCompat::Verified);
+    assert!(!r.on_unanswered(other));
+    assert_eq!(r.status(&other), PeerCompat::Incompatible);
+    assert!(!r.on_unanswered(silent));
+    assert_eq!(r.status(&silent), PeerCompat::Undeclared);
+}
+
+/// A reconnect asks again. A peer verified on its previous connection is
+/// `Pending` on this one until it answers again; a peer that declared a
+/// mismatch stays `Incompatible`, however it answers.
+#[test]
+fn a_reconnect_re_asks_a_verified_peer_and_keeps_an_incompatible_one() {
+    let r = PeerCompatRegistry::new(ours(), Some(ENFORCE_FROM));
+    let (verified, refused) = (PeerId::random(), PeerId::random());
+    r.on_requested(verified);
+    assert!(r.on_declaration(verified, ours()));
+    r.on_requested(refused);
+    assert!(!r.on_declaration(refused, theirs()));
+
+    // The second connection.
+    r.on_requested(verified);
+    r.on_requested(refused);
+    assert_eq!(r.status(&verified), PeerCompat::Pending);
+    assert!(
+        !r.may_participate_in_consensus(&verified, 0),
+        "the answer given on the previous connection does not admit the peer \
+         on this one"
+    );
+    assert_eq!(r.status(&refused), PeerCompat::Incompatible);
+
+    // A different answer this time: refused, in both phases.
+    assert!(!r.on_declaration(verified, theirs()));
+    assert_eq!(r.status(&verified), PeerCompat::Incompatible);
+    // The refused peer cannot answer its way back in, nor time out into
+    // `Undeclared`.
+    assert!(!r.on_declaration(refused, ours()));
+    assert!(!r.on_unanswered(refused));
+    assert_eq!(r.status(&refused), PeerCompat::Incompatible);
+    assert!(!r.may_participate_in_consensus(&refused, 0));
+}
+
+/// A request that fails leaves the peer `Undeclared`: admitted below the
+/// height and refused at it, exactly the two-phase rule for a peer that never
+/// declares, and never disconnected for it.
+#[tokio::test]
+async fn an_unanswered_request_admits_below_the_height_only() {
+    let (s, mut rx) = syncer(Some(ENFORCE_FROM), ENFORCE_FROM - 3);
+    let peer = PeerId::random();
+    s.on_peer_connected(peer).await;
+    assert_eq!(s.compat_status(&peer), PeerCompat::Pending);
+    while rx.try_recv().is_ok() {}
+
+    s.on_protocol_id_unanswered(peer);
+    assert_eq!(s.compat_status(&peer), PeerCompat::Undeclared);
+    assert!(!s.is_incompatible(&peer));
+    assert!(s.may_supply_blocks(&peer, ENFORCE_FROM - 1));
+    assert!(!s.may_supply_blocks(&peer, ENFORCE_FROM));
+
+    let imported = s.on_blocks_received(
+        peer,
+        vec![
+            block_at(ENFORCE_FROM - 2),
+            block_at(ENFORCE_FROM - 1),
+            block_at(ENFORCE_FROM),
+        ],
+    );
+    assert_eq!(
+        imported.iter().map(|b| b.height()).collect::<Vec<_>>(),
+        vec![ENFORCE_FROM - 2, ENFORCE_FROM - 1],
+        "admitted below the height, refused at it"
+    );
+    while let Ok(cmd) = rx.try_recv() {
+        assert!(
+            !matches!(cmd, sumchain_p2p::NetworkCommand::DisconnectPeer { .. }),
+            "a peer whose request failed has accused itself of nothing: {cmd:?}"
+        );
+    }
+}
+
+/// The syncer's share of `Pending`: a status from a peer it has asked and not
+/// heard from is ignored, and the peer is asked for its status again once it
+/// declares our digest, or once its request fails and it may take part.
+#[tokio::test]
+async fn the_syncer_ignores_a_pending_peer_and_asks_again_once_it_is_resolved() {
+    let status_requests = |rx: &mut mpsc::Receiver<sumchain_p2p::NetworkCommand>, peer: PeerId| {
+        let mut n = 0;
+        while let Ok(cmd) = rx.try_recv() {
+            if matches!(cmd, sumchain_p2p::NetworkCommand::RequestSyncStatus(p) if p == peer) {
+                n += 1;
+            }
+        }
+        n
+    };
+
+    for (enforce_from, local) in [(None, 10), (Some(ENFORCE_FROM), 10)] {
+        // Resolved by a matching declaration.
+        let (s, mut rx) = syncer(enforce_from, local);
+        let peer = PeerId::random();
+        s.on_peer_connected(peer).await;
+        assert_eq!(status_requests(&mut rx, peer), 1, "asked on connect");
+        s.on_status_response(peer, 500, Hash::default(), CHAIN_ID);
+        assert_eq!(
+            (s.network_height(), s.stats().known_peers),
+            (local, 0),
+            "a pending peer's status is ignored ({enforce_from:?})"
+        );
+        assert!(s.on_protocol_id_response(peer, ours()));
+        assert_eq!(status_requests(&mut rx, peer), 1, "asked again");
+        s.on_status_response(peer, 500, Hash::default(), CHAIN_ID);
+        assert_eq!((s.network_height(), s.stats().known_peers), (500, 1));
+
+        // Resolved by a failed request, below the height.
+        let (s, mut rx) = syncer(enforce_from, local);
+        let peer = PeerId::random();
+        s.on_peer_connected(peer).await;
+        s.on_status_response(peer, 500, Hash::default(), CHAIN_ID);
+        assert_eq!(s.stats().known_peers, 0);
+        status_requests(&mut rx, peer);
+        s.on_protocol_id_unanswered(peer);
+        assert_eq!(status_requests(&mut rx, peer), 1, "asked again");
+        s.on_status_response(peer, 500, Hash::default(), CHAIN_ID);
+        assert_eq!(s.stats().known_peers, 1);
+    }
+
+    // A failed request at the height: undeclared and refused, so not asked
+    // again.
+    let (s, mut rx) = syncer(Some(ENFORCE_FROM), ENFORCE_FROM);
+    let peer = PeerId::random();
+    s.on_peer_connected(peer).await;
+    status_requests(&mut rx, peer);
+    s.on_protocol_id_unanswered(peer);
+    assert_eq!(status_requests(&mut rx, peer), 0);
+    s.on_status_response(peer, ENFORCE_FROM + 5, Hash::default(), CHAIN_ID);
+    assert_eq!(s.stats().known_peers, 0);
 }
 
 /// The wire is untouched by the two-phase policy.
@@ -522,10 +726,11 @@ async fn row5_a_mismatched_peer_is_evicted_along_with_the_requests_in_flight_to_
     let (s, mut rx) = syncer(Some(ENFORCE_FROM), 10);
     let peer = PeerId::random();
 
-    // It connects and reports a chain well ahead of ours, so the syncer starts
-    // fetching from it. Nothing here has asked about its digest yet, which is
-    // the race the eviction exists for: the status beat the declaration.
-    s.on_peer_connected(peer).await;
+    // It reports a chain well ahead of ours, so the syncer starts fetching
+    // from it. Nothing has asked about its digest, so it is undeclared and
+    // admitted below the height: a peer this syncer had asked would be
+    // `Pending` here and its status ignored (see
+    // `the_syncer_ignores_a_pending_peer_and_asks_again_once_it_is_resolved`).
     s.on_status_response(peer, 500, Hash::default(), CHAIN_ID);
     s.tick().await;
     assert_eq!(
