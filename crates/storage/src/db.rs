@@ -971,6 +971,69 @@ impl Database {
         Ok(Database { db, path: path_str })
     }
 
+    /// Open an EXISTING database read-write without changing its shape: it
+    /// never creates the database or a column family and never repairs.
+    ///
+    /// For a command that writes a few records into the database a node
+    /// created, on a stopped node (`sumchain signer init`). It refuses unless
+    /// the database holds exactly the column families this binary knows: a
+    /// missing one is an older database, which has to be prepared first (a
+    /// start of this binary prepares it); an unknown one is a newer binary's.
+    /// A refusal creates and changes nothing. Opened read-write, RocksDB still
+    /// writes its own bookkeeping (log, manifest, options files).
+    pub fn open_existing<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path_str = path.as_ref().to_string_lossy().to_string();
+        let config = DatabaseConfig::default();
+
+        let mut opts = Options::default();
+        opts.create_if_missing(false);
+        opts.create_missing_column_families(false);
+        let on_disk = DB::list_cf(&opts, &path_str).map_err(StorageError::RocksDb)?;
+        let missing: Vec<&str> = ALL_CFS
+            .iter()
+            .copied()
+            .filter(|name| !on_disk.iter().any(|d| d == name))
+            .collect();
+        if !missing.is_empty() {
+            return Err(StorageError::InvalidData(format!(
+                "the database at {path_str} lacks {} column families this binary uses ({}); \
+                 prepare the database first: this open creates none",
+                missing.len(),
+                missing.join(", ")
+            )));
+        }
+        let unknown: Vec<&str> = on_disk
+            .iter()
+            .map(String::as_str)
+            .filter(|d| *d != rocksdb::DEFAULT_COLUMN_FAMILY_NAME && !ALL_CFS.contains(d))
+            .collect();
+        if !unknown.is_empty() {
+            return Err(StorageError::InvalidData(format!(
+                "the database at {path_str} holds column families this binary does not know \
+                 ({}): a newer binary's database",
+                unknown.join(", ")
+            )));
+        }
+
+        opts.set_max_open_files(config.max_open_files);
+        opts.set_write_buffer_size(config.write_buffer_size);
+        opts.set_max_write_buffer_number(config.max_write_buffer_number);
+        if config.paranoid_checks {
+            opts.set_paranoid_checks(true);
+        }
+        let cf_descriptors: Vec<ColumnFamilyDescriptor> = ALL_CFS
+            .iter()
+            .map(|name| {
+                let mut cf_opts = Options::default();
+                cf_opts.set_write_buffer_size(config.write_buffer_size);
+                ColumnFamilyDescriptor::new(*name, cf_opts)
+            })
+            .collect();
+        let db = DB::open_cf_descriptors(&opts, &path_str, cf_descriptors)
+            .map_err(StorageError::RocksDb)?;
+        Ok(Database { db, path: path_str })
+    }
+
     /// Check if an error indicates database corruption
     ///
     /// NOT "invalid argument". RocksDB reports that for a caller error -- most
@@ -1603,6 +1666,67 @@ mod tests {
             !Database::is_corruption_error(&e),
             "a downgrade is not corruption, and must not route to a repair: {e}"
         );
+    }
+
+    /// `open_existing` writes into a database this binary made, and creates
+    /// nothing: no database where there is none, no family an older database
+    /// lacks, and it refuses a newer binary's database with every row kept.
+    #[test]
+    fn open_existing_changes_no_database_shape() {
+        let dir = TempDir::new().unwrap();
+
+        let made = dir.path().join("made");
+        Database::open_default(&made)
+            .unwrap()
+            .put(cf::META, b"k", b"v")
+            .unwrap();
+        let db = Database::open_existing(&made).expect("a database this binary made");
+        assert_eq!(db.get(cf::META, b"k").unwrap(), Some(b"v".to_vec()));
+        db.put(cf::META, b"k2", b"v2").unwrap();
+        drop(db);
+
+        let absent = dir.path().join("absent");
+        assert!(Database::open_existing(&absent).is_err());
+        assert!(!absent.exists(), "no database is created");
+
+        // An older database: one family this binary uses is missing.
+        let older = dir.path().join("older");
+        let lacking = ALL_CFS[ALL_CFS.len() - 1];
+        {
+            let mut opts = Options::default();
+            opts.create_if_missing(true);
+            opts.create_missing_column_families(true);
+            let db = DB::open_cf(&opts, &older, &ALL_CFS[..ALL_CFS.len() - 1]).unwrap();
+            let h = db.cf_handle(cf::META).unwrap();
+            db.put_cf(&h, b"k", b"v").unwrap();
+        }
+        let before = DB::list_cf(&Options::default(), &older).unwrap();
+        let err = Database::open_existing(&older)
+            .err()
+            .expect("an older database is refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("prepare the database first") && msg.contains(lacking),
+            "{msg}"
+        );
+        assert_eq!(
+            DB::list_cf(&Options::default(), &older).unwrap(),
+            before,
+            "no family is created"
+        );
+
+        // A newer binary's database.
+        let newer = dir.path().join("newer");
+        database_from_a_newer_binary(&newer, 50);
+        let err = Database::open_existing(&newer)
+            .err()
+            .expect("a newer binary's database is refused");
+        assert!(err.to_string().contains(FUTURE_CF), "{err}");
+        let mut names: Vec<&str> = ALL_CFS.to_vec();
+        names.push(FUTURE_CF);
+        let db = DB::open_cf(&Options::default(), &newer, &names).unwrap();
+        let h = db.cf_handle(cf::BLOCKS).unwrap();
+        assert_eq!(db.iterator_cf(&h, rocksdb::IteratorMode::Start).count(), 50);
     }
 
     #[test]
