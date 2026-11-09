@@ -132,8 +132,8 @@ fn model() -> ComputePoolModel {
     u4.required_inputs = vec![RequiredInput {
         predecessor: uid(2),
         required_output_slot_id: SlotId::from_bytes([0x21; 32]),
-        pred_output_manifest_root: Hash::new([0x22; 32]),
-        required_slot_state_object_root: Hash::new([0x23; 32]),
+        pred_output_manifest_identity: Hash::new([0x22; 32]),
+        required_slot_state_object_identity: Hash::new([0x23; 32]),
     }];
     let units = vec![unit(j, uid(2)), unit(j, uid(3)), u4];
     let sizing: Vec<UnitSizing> = units.iter().map(|_| UnitSizing { slots: 0 }).collect();

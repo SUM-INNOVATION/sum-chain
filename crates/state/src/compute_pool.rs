@@ -50,6 +50,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use sumchain_primitives::{Address, Hash};
+use sumchain_wire::b0::object_commitment::ObjectCommitmentV1;
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -300,7 +301,7 @@ pub enum PoolError {
     PredecessorsNotReady,
 
     /// Two required inputs from the SAME predecessor disagree on the
-    /// predecessor output-manifest root.
+    /// predecessor output-manifest identity.
     #[error("same-predecessor manifest mismatch")]
     ManifestMismatch,
 
@@ -451,14 +452,45 @@ impl JobState {
 }
 
 /// A required input a downstream unit consumes from a predecessor's output.
+///
+/// Both bindings are `ObjectCommitmentV1::identity()` values, BLAKE3 over the
+/// commitment's 80 canonical bytes, not Merkle roots (D2-7.1, adopted
+/// 2026-11-09). They are the identities the frozen `DependencyEdgeV1`
+/// carries as `predecessor_output_manifest_identity` and
+/// `required_state_object_identity`. An identity binds the object kind and
+/// the declared length as well as the root, so a residual-state slot and a
+/// KV-state slot over identical bytes bind differently.
+///
+/// An identity cannot find a SNIP file row, which is keyed by Merkle root. A
+/// step that has to look one up records the full commitment, not this.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequiredInput {
     pub predecessor: UnitId,
     pub required_output_slot_id: SlotId,
-    /// The predecessor output-manifest root this input binds to. All inputs
-    /// sharing a predecessor MUST agree on this (same-predecessor-manifest).
-    pub pred_output_manifest_root: Hash,
-    pub required_slot_state_object_root: Hash,
+    /// The predecessor's output-manifest identity. All inputs sharing a
+    /// predecessor MUST agree on this (same-predecessor-manifest).
+    pub pred_output_manifest_identity: Hash,
+    /// The required slot object's identity.
+    pub required_slot_state_object_identity: Hash,
+}
+
+impl RequiredInput {
+    /// The input that binds `manifest`, the predecessor's output-manifest
+    /// commitment, and `state_object`, the required slot object's commitment,
+    /// by their identities.
+    pub fn bind(
+        predecessor: UnitId,
+        required_output_slot_id: SlotId,
+        manifest: &ObjectCommitmentV1,
+        state_object: &ObjectCommitmentV1,
+    ) -> Self {
+        Self {
+            predecessor,
+            required_output_slot_id,
+            pred_output_manifest_identity: Hash::new(manifest.identity()),
+            required_slot_state_object_identity: Hash::new(state_object.identity()),
+        }
+    }
 }
 
 /// A node in a job's dependency graph.
@@ -487,19 +519,19 @@ impl WorkUnit {
 
     /// Structural `DerivedInputCommitmentV1` guard: every group of required
     /// inputs that share a predecessor must reference the SAME predecessor
-    /// output-manifest root. Independent of the DIC hash preimage (a typed
+    /// output-manifest identity. Independent of the DIC hash preimage (a typed
     /// boundary), this catches linear/fan-in/fan-out (incl. residual + KV)
     /// manifest disagreement.
     pub fn validate_same_predecessor_manifest(&self) -> PoolResult<()> {
         let mut seen: BTreeMap<&UnitId, &Hash> = BTreeMap::new();
         for input in &self.required_inputs {
             match seen.get(&input.predecessor) {
-                Some(root) if **root != input.pred_output_manifest_root => {
+                Some(identity) if **identity != input.pred_output_manifest_identity => {
                     return Err(PoolError::ManifestMismatch);
                 }
                 Some(_) => {}
                 None => {
-                    seen.insert(&input.predecessor, &input.pred_output_manifest_root);
+                    seen.insert(&input.predecessor, &input.pred_output_manifest_identity);
                 }
             }
         }
@@ -1624,6 +1656,8 @@ fn remove_pruning<K: Ord, V: Ord>(map: &mut BTreeMap<K, BTreeSet<V>>, bucket: &K
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sumchain_wire::b0::enums::{ObjectKind, SlotKind as ManifestSlotKind};
+    use sumchain_wire::b0::manifest::{OutputManifestV1, SlotDescriptorV1};
 
     // A deterministic, test-only scorer. This is NOT the ratified preimage
     // (which is a typed boundary): it just needs to be a pure function of
@@ -1892,8 +1926,8 @@ mod tests {
         let mk = |root: Hash, slot: u8| RequiredInput {
             predecessor: pred,
             required_output_slot_id: SlotId::from_bytes([slot; 32]),
-            pred_output_manifest_root: root,
-            required_slot_state_object_root: Hash::new([slot; 32]),
+            pred_output_manifest_identity: root,
+            required_slot_state_object_identity: Hash::new([slot; 32]),
         };
         // fan-in from the same predecessor, two slots (residual + KV):
         // agreeing manifest roots pass.
@@ -1913,6 +1947,170 @@ mod tests {
         };
         assert_eq!(
             bad_unit.validate_same_predecessor_manifest(),
+            Err(PoolError::ManifestMismatch)
+        );
+    }
+
+    // ---- D2-7.1: required inputs bind commitment identities ----
+
+    /// The slot object and the one-slot output manifest of the b0
+    /// corroboration vectors
+    /// (`sumchain-wire/tests/fixtures/wire-0-2-2-b0-corroboration.json`): two
+    /// independent b0 implementations agree on the manifest's commitment
+    /// identity, so the KAT below is not this implementation checking itself.
+    fn corroborated_manifest() -> (OutputManifestV1, ObjectCommitmentV1) {
+        let slot_object = ObjectCommitmentV1::commit(ObjectKind::ResidualState, b"g").unwrap();
+        let manifest = OutputManifestV1 {
+            slots: vec![SlotDescriptorV1 {
+                slot_kind: ManifestSlotKind::ResidualStream,
+                slot_index: 7,
+                commitment: slot_object.clone(),
+            }],
+        };
+        (manifest, slot_object)
+    }
+
+    #[test]
+    fn required_input_binds_identities_not_merkle_roots() {
+        let (om, slot_object) = corroborated_manifest();
+        let manifest = om.try_commitment().unwrap();
+
+        // The identity is BLAKE3 over the commitment's 80 canonical bytes.
+        assert_eq!(manifest.encode().len(), 80);
+        assert_eq!(
+            manifest.identity(),
+            *blake3::hash(&manifest.encode()).as_bytes()
+        );
+        assert_eq!(
+            hex::encode(manifest.identity()),
+            "f9d10ee4fa99a09f91de5401c9c0e3fd8a29bfe2a43f07fd04030203ceaad8d8"
+        );
+        assert_ne!(manifest.identity(), manifest.merkle_root());
+        assert_ne!(slot_object.identity(), slot_object.merkle_root());
+
+        let input = RequiredInput::bind(
+            unit(9),
+            SlotId::from_bytes([7; 32]),
+            &manifest,
+            &slot_object,
+        );
+        assert_eq!(
+            input.pred_output_manifest_identity,
+            Hash::new(manifest.identity())
+        );
+        assert_eq!(
+            input.required_slot_state_object_identity,
+            Hash::new(slot_object.identity())
+        );
+    }
+
+    #[test]
+    fn required_input_and_dependency_edge_carry_the_same_identities() {
+        use sumchain_wire::compute_pool_graph::{
+            unit_id, DependencyEdgeV1, GraphDefinitionV1, SlotKind as EdgeSlotKind, UnitDefV1,
+        };
+
+        let (om, slot_object) = corroborated_manifest();
+        let manifest = om.try_commitment().unwrap();
+        let job_id = [0x5a; 32];
+        let pred = unit_id(&job_id, 0);
+        let graph = GraphDefinitionV1 {
+            units: vec![
+                UnitDefV1 {
+                    retention_slots: 0,
+                    edges: vec![],
+                },
+                UnitDefV1 {
+                    retention_slots: 1,
+                    edges: vec![DependencyEdgeV1 {
+                        predecessor_unit_id: pred,
+                        predecessor_output_manifest_identity: manifest.identity(),
+                        required_slot_kind: EdgeSlotKind::ResidualStream,
+                        required_slot_index: 7,
+                        required_state_object_identity: slot_object.identity(),
+                    }],
+                },
+            ],
+        };
+        graph.verify_against_job(&job_id).unwrap();
+        let decoded = GraphDefinitionV1::decode_exact(&graph.try_encode().unwrap()).unwrap();
+        let edge = decoded.units[1].edges[0];
+
+        // Model -> edge: the input's bindings are the bytes the graph carries.
+        let slot = SlotId::from_bytes([7; 32]);
+        let input = RequiredInput::bind(UnitId::from_bytes(pred), slot, &manifest, &slot_object);
+        assert_eq!(*input.predecessor.as_bytes(), edge.predecessor_unit_id);
+        assert_eq!(
+            *input.pred_output_manifest_identity.as_bytes(),
+            edge.predecessor_output_manifest_identity
+        );
+        assert_eq!(
+            *input.required_slot_state_object_identity.as_bytes(),
+            edge.required_state_object_identity
+        );
+
+        // Edge -> model: an input rebuilt from the edge is the same input. The
+        // opaque `SlotId` is carried across as it is; how it resolves to
+        // `(required_slot_kind, required_slot_index)` is not defined here.
+        let back = RequiredInput {
+            predecessor: UnitId::from_bytes(edge.predecessor_unit_id),
+            required_output_slot_id: slot,
+            pred_output_manifest_identity: Hash::new(edge.predecessor_output_manifest_identity),
+            required_slot_state_object_identity: Hash::new(edge.required_state_object_identity),
+        };
+        assert_eq!(back, input);
+    }
+
+    #[test]
+    fn one_root_two_kinds_bind_differently_and_the_manifest_guard_refuses_the_mix() {
+        let (om, _) = corroborated_manifest();
+        let manifest = om.try_commitment().unwrap();
+        let as_input =
+            ObjectCommitmentV1::commit(ObjectKind::InputManifest, &om.try_encode().unwrap())
+                .unwrap();
+        assert_eq!(manifest.object_kind(), ObjectKind::OutputManifest);
+        assert_eq!(
+            manifest.merkle_root(),
+            as_input.merkle_root(),
+            "one Merkle root"
+        );
+        assert_ne!(manifest.identity(), as_input.identity(), "two bindings");
+
+        // A residual-state and a KV-state object over identical bytes.
+        let residual = ObjectCommitmentV1::commit(ObjectKind::ResidualState, b"state").unwrap();
+        let kv = ObjectCommitmentV1::commit(ObjectKind::KvState, b"state").unwrap();
+        assert_eq!(residual.merkle_root(), kv.merkle_root());
+        let pred = unit(9);
+        let residual_in =
+            RequiredInput::bind(pred, SlotId::from_bytes([1; 32]), &manifest, &residual);
+        let kv_in = RequiredInput::bind(pred, SlotId::from_bytes([2; 32]), &manifest, &kv);
+        assert_ne!(
+            residual_in.required_slot_state_object_identity,
+            kv_in.required_slot_state_object_identity
+        );
+
+        // Residual and KV inputs from one predecessor's one manifest pass.
+        let ok_unit = WorkUnit {
+            job_id: job(1),
+            unit_id: unit(2),
+            predecessors: vec![pred],
+            required_inputs: vec![residual_in.clone(), kv_in],
+            generation: 0,
+            state: UnitState::Blocked,
+        };
+        assert!(ok_unit.validate_same_predecessor_manifest().is_ok());
+
+        // The same root under another kind is another manifest: refused, where
+        // a Merkle-root binding would have read the two as one.
+        let mixed = WorkUnit {
+            required_inputs: vec![
+                residual_in,
+                RequiredInput::bind(pred, SlotId::from_bytes([2; 32]), &as_input, &kv),
+            ],
+            ..ok_unit
+        };
+        assert_eq!(
+            mixed.validate_same_predecessor_manifest(),
             Err(PoolError::ManifestMismatch)
         );
     }
