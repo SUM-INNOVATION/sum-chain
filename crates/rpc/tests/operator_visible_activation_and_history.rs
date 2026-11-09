@@ -278,6 +278,11 @@ async fn a_server_without_a_genesis_declines_rather_than_serving_a_default_diges
         status.digest
     );
     assert!(
+        status.handshake_digest.contains("unavailable"),
+        "expected a refusal, got {}",
+        status.handshake_digest
+    );
+    assert!(
         !one.server.has_genesis_identity(),
         "the tripwire predicate must agree with the served answer"
     );
@@ -637,4 +642,44 @@ async fn a_seeded_messaging_registry_is_visible_to_a_peer_and_two_seeds_are_comp
         diverged.digest, seen.digest,
         "a different set. A count alone would certify this pair as matching"
     );
+}
+
+/// The value the node declares to its peers is served beside the protocol
+/// digest it folds, computed from the same genesis.
+///
+/// `protocol_digest` keeps its meaning: two nodes whose genesis differs only
+/// in `min_fee` serve the same one. They serve different `handshake_digest`
+/// values, which is the difference their handshake refuses on.
+#[tokio::test]
+async fn the_served_handshake_digest_is_the_declared_value_and_covers_min_fee() {
+    let genesis = genesis_with(sound(Some(13_800_000)));
+    let status = serve(&genesis)
+        .server
+        .chain_get_activation_status()
+        .await
+        .unwrap();
+    assert_eq!(
+        status.handshake_digest,
+        sumchain_consensus::consensus_config::handshake_digest_for(&genesis)
+            .unwrap()
+            .to_string()
+    );
+    assert_eq!(
+        status.protocol_digest,
+        sumchain_state::protocol_digest::protocol_digest(&genesis)
+            .unwrap()
+            .to_string()
+    );
+    assert_ne!(status.handshake_digest, status.protocol_digest);
+
+    let mut other = genesis.clone();
+    other.params.min_fee += 1;
+    let other = serve(&other)
+        .server
+        .chain_get_activation_status()
+        .await
+        .unwrap();
+    assert_eq!(other.digest, status.digest);
+    assert_eq!(other.protocol_digest, status.protocol_digest);
+    assert_ne!(other.handshake_digest, status.handshake_digest);
 }

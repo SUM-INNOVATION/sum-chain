@@ -424,6 +424,9 @@ struct GenesisIdentity {
     digest: sumchain_primitives::Hash,
     /// The activation heights AND this binary's consensus constants.
     protocol_digest: Option<sumchain_primitives::Hash>,
+    /// The protocol digest and the running consensus configuration: the value
+    /// the node declares to its peers.
+    handshake_digest: Option<sumchain_primitives::Hash>,
     chain_id: u64,
 }
 
@@ -680,15 +683,20 @@ impl RpcServer {
     pub fn with_genesis(mut self, genesis: &sumchain_genesis::Genesis) -> Self {
         self.running_consensus_config =
             sumchain_consensus::consensus_config::build(genesis).ok();
+        // Computed from the same genesis, so the values cannot describe
+        // different configurations. `None` if one cannot be computed, reported
+        // as unavailable rather than fabricated.
+        let protocol_digest = sumchain_state::protocol_digest::protocol_digest(genesis).ok();
+        let handshake_digest = protocol_digest
+            .zip(self.running_consensus_config.as_ref())
+            .map(|(p, running)| sumchain_consensus::consensus_config::handshake_digest(p, running));
         self.genesis_identity = genesis
             .activation_digest()
             .ok()
             .map(|digest| GenesisIdentity {
                 digest,
-                // Computed from the same genesis, so the two values cannot
-                // describe different configurations. `None` if it cannot be
-                // computed, reported as unavailable rather than fabricated.
-                protocol_digest: sumchain_state::protocol_digest::protocol_digest(genesis).ok(),
+                protocol_digest,
+                handshake_digest,
                 chain_id: genesis.chain_id,
             });
         self
@@ -1996,19 +2004,25 @@ impl SumChainApiServer for RpcServer {
         // The digest covers chain identity as well as the heights, so it is
         // computed from the genesis this node holds rather than from
         // `chain_params` alone.
-        let (digest, protocol_digest, chain_id) = match &self.genesis_identity {
-            Some(id) => (
-                id.digest.to_string(),
-                id.protocol_digest
-                    .map(|d| d.to_string())
-                    .unwrap_or_else(|| "unavailable".to_string()),
-                id.chain_id,
-            ),
+        let (digest, protocol_digest, handshake_digest, chain_id) = match &self.genesis_identity {
+            Some(id) => {
+                let shown = |d: Option<sumchain_primitives::Hash>| {
+                    d.map(|d| d.to_string())
+                        .unwrap_or_else(|| "unavailable".to_string())
+                };
+                (
+                    id.digest.to_string(),
+                    shown(id.protocol_digest),
+                    shown(id.handshake_digest),
+                    id.chain_id,
+                )
+            }
             // An RPC server constructed without a genesis cannot produce the
             // comparable value. Saying so is better than returning a digest over
             // defaults, which would compare equal between two nodes that share
             // nothing — the exact false agreement this value exists to prevent.
             None => (
+                "unavailable: this RPC server was not given a genesis".to_string(),
                 "unavailable: this RPC server was not given a genesis".to_string(),
                 "unavailable: this RPC server was not given a genesis".to_string(),
                 0,
@@ -2018,6 +2032,7 @@ impl SumChainApiServer for RpcServer {
         Ok(crate::types::ActivationStatusInfo {
             digest,
             protocol_digest,
+            handshake_digest,
             chain_id,
             current_height,
             gates,
