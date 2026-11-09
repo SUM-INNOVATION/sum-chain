@@ -184,8 +184,10 @@ fn pool_unit_info(
             .map(|ri| PoolRequiredInputInfo {
                 predecessor: beacon_hex(&ri.predecessor),
                 required_output_slot_id: beacon_hex(&ri.required_output_slot_id),
-                pred_output_manifest_root: beacon_hex(&ri.pred_output_manifest_root),
-                required_slot_state_object_root: beacon_hex(&ri.required_slot_state_object_root),
+                pred_output_manifest_root: beacon_hex(&ri.pred_output_manifest_identity),
+                required_slot_state_object_root: beacon_hex(
+                    &ri.required_slot_state_object_identity,
+                ),
             })
             .collect(),
         assignment,

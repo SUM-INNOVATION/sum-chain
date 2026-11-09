@@ -1776,9 +1776,12 @@ pub struct PoolRequiredInputInfo {
     pub predecessor: String,
     /// The predecessor output slot this unit reads, 32 bytes.
     pub required_output_slot_id: String,
-    /// The predecessor's output manifest root, 32 bytes.
+    /// The predecessor output manifest's `ObjectCommitmentV1::identity()`, 32
+    /// bytes, not its Merkle root (D2-7.1). The key keeps the name the read
+    /// was ratified with.
     pub pred_output_manifest_root: String,
-    /// The required slot's state object root, 32 bytes.
+    /// The required slot object's `ObjectCommitmentV1::identity()`, 32 bytes
+    /// (D2-7.1). The key keeps its ratified name too.
     pub required_slot_state_object_root: String,
 }
 

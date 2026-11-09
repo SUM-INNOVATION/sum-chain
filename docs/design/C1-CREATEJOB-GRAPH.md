@@ -79,9 +79,16 @@ correction). The implied object kind (`ResidualState=6` / `KvState=7`) is derive
 never encoded. Reserved/unknown discriminants are rejected (`BadEnum`).
 
 The in-memory `RequiredInput` folds in: `predecessor` → `predecessor_unit_id`;
-`pred_output_manifest_root` → `predecessor_output_manifest_identity`; the opaque
-`SlotId` resolves to `(required_slot_kind, required_slot_index)`;
-`required_slot_state_object_root` → `required_state_object_identity`.
+`pred_output_manifest_identity` → `predecessor_output_manifest_identity`; the
+opaque `SlotId` resolves to `(required_slot_kind, required_slot_index)`;
+`required_slot_state_object_identity` → `required_state_object_identity`.
+
+Both identities are `ObjectCommitmentV1::identity()`, BLAKE3 over the
+commitment's 80 canonical bytes, never a Merkle root (D2-7.1, adopted
+2026-11-09). The model fields were `pred_output_manifest_root` and
+`required_slot_state_object_root` before that decision; the stored row layout
+is unchanged. Wherever the chain must find a SNIP file row, which is keyed by
+Merkle root, it records the full 80-byte commitment, not the identity alone.
 
 ## `GraphDefinitionV1` — the root's canonical preimage
 

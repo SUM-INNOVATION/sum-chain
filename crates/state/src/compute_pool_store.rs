@@ -347,12 +347,15 @@ pub struct StoredJob {
     pub state_tag: u8,
 }
 
+/// The two `…_identity` fields are `ObjectCommitmentV1::identity()` values
+/// (D2-7.1). The row layout did not change with their names: fields are
+/// encoded by position, and each is still 32 bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredRequiredInput {
     pub predecessor: [u8; 32],
     pub required_output_slot_id: [u8; 32],
-    pub pred_output_manifest_root: [u8; 32],
-    pub required_slot_state_object_root: [u8; 32],
+    pub pred_output_manifest_identity: [u8; 32],
+    pub required_slot_state_object_identity: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -456,8 +459,10 @@ impl StoredWorkUnit {
                 .map(|ri| StoredRequiredInput {
                     predecessor: *ri.predecessor.as_bytes(),
                     required_output_slot_id: *ri.required_output_slot_id.as_bytes(),
-                    pred_output_manifest_root: *ri.pred_output_manifest_root.as_bytes(),
-                    required_slot_state_object_root: *ri.required_slot_state_object_root.as_bytes(),
+                    pred_output_manifest_identity: *ri.pred_output_manifest_identity.as_bytes(),
+                    required_slot_state_object_identity: *ri
+                        .required_slot_state_object_identity
+                        .as_bytes(),
                 })
                 .collect(),
             generation: u.generation,
@@ -484,8 +489,10 @@ impl StoredWorkUnit {
                 .map(|ri| RequiredInput {
                     predecessor: UnitId::from_bytes(ri.predecessor),
                     required_output_slot_id: SlotId::from_bytes(ri.required_output_slot_id),
-                    pred_output_manifest_root: Hash::new(ri.pred_output_manifest_root),
-                    required_slot_state_object_root: Hash::new(ri.required_slot_state_object_root),
+                    pred_output_manifest_identity: Hash::new(ri.pred_output_manifest_identity),
+                    required_slot_state_object_identity: Hash::new(
+                        ri.required_slot_state_object_identity,
+                    ),
                 })
                 .collect(),
             generation: self.generation,
@@ -1670,8 +1677,8 @@ mod tests {
             required_inputs: vec![StoredRequiredInput {
                 predecessor: [0xb1; 32],
                 required_output_slot_id: [0xb2; 32],
-                pred_output_manifest_root: [0xb3; 32],
-                required_slot_state_object_root: [0xb4; 32],
+                pred_output_manifest_identity: [0xb3; 32],
+                required_slot_state_object_identity: [0xb4; 32],
             }],
             generation: 0x0102_0304_0506_0708,
             state_tag: 4,
