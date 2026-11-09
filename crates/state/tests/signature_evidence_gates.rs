@@ -365,3 +365,351 @@ mod admission {
         assert!(m.add(corrupted(transfer(&a, &b, 1, 0))).is_err());
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Legacy evidence refused (`staking_submit_evidence_unsupported_enabled_from_height`)
+// ═══════════════════════════════════════════════════════════════════════════
+
+mod evidence {
+    use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+    use sumchain_primitives::staking::DelegateData;
+    use sumchain_primitives::supply::{
+        GrantStatus, ServiceKind, SupplyOperation, SupplyTxData, GENESIS_ACCOUNTED_SUPPLY,
+    };
+    use sumchain_primitives::{Address, TxPayload};
+    use sumchain_state::staking_executor::StakingExecutor;
+    use sumchain_state::supply::SupplyStore;
+    use sumchain_storage::cf;
+    use sumchain_storage::db::ALL_CFS;
+    use sumchain_storage::schema::AccountState;
+    use sumchain_storage::StateStore;
+
+    /// The refusal gate's height in these tests.
+    const E: u64 = 10;
+    const DELEGATED: u128 = 50_000;
+
+    /// Every column family a staking penalty or a grant forfeiture writes.
+    const PENALTY_CFS: [&str; 9] = [
+        cf::VALIDATORS,
+        cf::DELEGATIONS,
+        cf::UNBONDING_DELEGATIONS,
+        cf::DELEGATION_VALIDATOR_INDEX,
+        cf::SLASHING_RECORDS,
+        cf::VALIDATOR_SIGNING_INFO,
+        cf::MISSED_BLOCKS,
+        cf::VALIDATOR_SETS,
+        cf::SUPPLY,
+    ];
+
+    fn params(refused_from: Option<u64>) -> ChainParams {
+        let mut p = ChainParams::with_v2_enabled();
+        p.service_grants_enabled_from_height = Some(0);
+        p.staking_submit_evidence_unsupported_enabled_from_height = refused_from;
+        p
+    }
+
+    type Dump = BTreeMap<&'static str, BTreeMap<Vec<u8>, Vec<u8>>>;
+
+    /// Every row of every column family.
+    fn dump(db: &Database) -> Dump {
+        ALL_CFS
+            .iter()
+            .map(|name| {
+                let rows = db
+                    .iter(name)
+                    .unwrap()
+                    .map(|(k, v)| (k.to_vec(), v.to_vec()))
+                    .collect();
+                (*name, rows)
+            })
+            .collect()
+    }
+
+    fn changed(before: &Dump, after: &Dump) -> BTreeSet<&'static str> {
+        ALL_CFS
+            .iter()
+            .copied()
+            .filter(|name| before[name] != after[name])
+            .collect()
+    }
+
+    fn account(db: &Database, addr: &Address) -> AccountState {
+        StateStore::new(db).get_account(addr).unwrap()
+    }
+
+    /// A node with the supply correction applied (block 1), a staking
+    /// validator V (seed 0x51, real key) holding an Active validator grant
+    /// with a locked remainder, and a delegation to V from D (seed 0x42), both
+    /// made in block 2. The submitter S (seed 0x43) has made no transaction.
+    struct GrantNode {
+        node: Node,
+        v: KeyPair,
+        s: KeyPair,
+    }
+
+    impl GrantNode {
+        fn new(p: ChainParams) -> GrantNode {
+            let (state, db, dir, executor) = setup_with_params(p);
+            // The correction requires exactly the genesis supply at migration.
+            let half = GENESIS_ACCOUNTED_SUPPLY / 2;
+            common::credit_committed(&db, &Address::new([0xE1; 20]), half);
+            common::credit_committed(&db, &Address::new([0xE2; 20]), half);
+            let node = Node {
+                _dir: dir,
+                db,
+                state,
+                executor,
+            };
+            node.publish(1, Vec::new());
+            assert!(SupplyStore::new(node.db.clone()).is_migration_applied().unwrap());
+
+            let (v, d, s) = (key(0x51), key(0x42), key(0x43));
+            for kp in [&v, &d, &s] {
+                seed_balance(&node.db, &kp.address(), FUNDS);
+            }
+            StakingStore::new(&node.db)
+                .put_validator(&ValidatorInfo::new(*v.public_key().as_bytes(), STAKE, 0, 0))
+                .unwrap();
+            let claim = signed(
+                &v,
+                TransactionV2 {
+                    chain_id: CHAIN_ID,
+                    from: v.address(),
+                    fee: FEE,
+                    nonce: 0,
+                    payload: TxPayload::Supply(SupplyTxData {
+                        operation: SupplyOperation::ClaimServiceGrant {
+                            service_kind: ServiceKind::Validator,
+                        },
+                    }),
+                },
+            );
+            let delegate = staking(
+                &d,
+                0,
+                StakingOperation::Delegate,
+                bincode::serialize(&DelegateData {
+                    validator_pubkey: *v.public_key().as_bytes(),
+                    amount: DELEGATED,
+                })
+                .unwrap(),
+            );
+            let r = node.publish(2, vec![claim, delegate]);
+            assert_eq!(r[0].status, TxStatus::Success, "grant claim");
+            assert_eq!(r[1].status, TxStatus::Success, "delegation");
+            let g = grant(&node.db, &v).expect("grant");
+            assert_eq!(g.status, GrantStatus::Active);
+            assert!(g.locked_remaining > 0);
+            GrantNode { node, v, s }
+        }
+
+        fn pubkey(&self) -> [u8; 32] {
+            *self.v.public_key().as_bytes()
+        }
+    }
+
+    fn grant(db: &Arc<Database>, v: &KeyPair) -> Option<sumchain_primitives::supply::ServiceGrant> {
+        let mut c = common::candidate(db);
+        let view = c.view();
+        SupplyStore::v_get_grant(&view, &v.address(), ServiceKind::Validator).unwrap()
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Variant {
+        DoubleSign,
+        Downtime,
+    }
+
+    fn evidence_tx(variant: Variant, from: &KeyPair, nonce: u64, v: [u8; 32], h: u64) -> SignedTransaction {
+        match variant {
+            Variant::DoubleSign => double_sign(from, nonce, v, h),
+            Variant::Downtime => downtime(from, nonce, v, h),
+        }
+    }
+
+    /// One evidence transaction against V in a block at `height` on a fresh
+    /// grant node: the node, the receipt, and the database before and after
+    /// that block.
+    struct Run {
+        g: GrantNode,
+        receipt: Receipt,
+        before: Dump,
+        after: Dump,
+        submitter_before: AccountState,
+        proposer_before: AccountState,
+    }
+
+    fn run(variant: Variant, refused_from: Option<u64>, height: u64) -> Run {
+        let g = GrantNode::new(params(refused_from));
+        let before = dump(&g.node.db);
+        let submitter_before = account(&g.node.db, &g.s.address());
+        let proposer_before = account(&g.node.db, &Address::from_public_key(&PROPOSER));
+        let tx = evidence_tx(variant, &g.s, 0, g.pubkey(), height);
+        let mut r = g.node.publish(height, vec![tx]);
+        let after = dump(&g.node.db);
+        Run {
+            g,
+            receipt: r.remove(0),
+            before,
+            after,
+            submitter_before,
+            proposer_before,
+        }
+    }
+
+    /// The column families an ordinary failed staking operation changes: an
+    /// `Unjail` from a non-validator, in a block at the same height.
+    fn ordinary_failure_footprint(height: u64) -> BTreeSet<&'static str> {
+        let g = GrantNode::new(params(Some(E)));
+        let before = dump(&g.node.db);
+        let r = g
+            .node
+            .publish(height, vec![staking(&g.s, 0, StakingOperation::Unjail, Vec::new())]);
+        assert_eq!(r[0].status, TxStatus::Failed(6));
+        changed(&before, &dump(&g.node.db))
+    }
+
+    #[test]
+    fn the_refusal_gate_is_closed_below_its_height_and_open_from_it() {
+        let p = params(Some(E));
+        assert!(!StakingExecutor::submit_evidence_unsupported(&p, E - 1));
+        assert!(StakingExecutor::submit_evidence_unsupported(&p, E));
+        assert!(StakingExecutor::submit_evidence_unsupported(&p, E + 1));
+        let absent = params(None);
+        for h in [0, E, u64::MAX] {
+            assert!(!StakingExecutor::submit_evidence_unsupported(&absent, h));
+        }
+        assert!(!StakingExecutor::submit_evidence_unsupported(
+            &ChainParams::default(),
+            u64::MAX
+        ));
+    }
+
+    /// At E and E+1, both variants are refused with `Failed(6)`, and the
+    /// whole-database difference the block makes touches no penalty column
+    /// family: no stake, jail, tombstone, signing info, slashing record,
+    /// delegation or grant changes. The block's footprint is exactly that of
+    /// an ordinary failed staking operation, and the only account changes are
+    /// the submitter's fee and nonce and the proposer's credit.
+    #[test]
+    fn refused_evidence_changes_no_staking_penalty_state_for_either_variant() {
+        let proposer = Address::from_public_key(&PROPOSER);
+        for height in [E, E + 1] {
+            let footprint = ordinary_failure_footprint(height);
+            for variant in [Variant::DoubleSign, Variant::Downtime] {
+                let what = format!("{variant:?} at {height}");
+                let Run {
+                    g,
+                    receipt,
+                    before,
+                    after,
+                    submitter_before,
+                    proposer_before,
+                } = run(variant, Some(E), height);
+                assert_eq!(receipt.status, TxStatus::Failed(6), "{what}");
+                assert_eq!(receipt.fee_paid, 0, "{what}: the receipt, as for every failed staking op");
+
+                let moved = changed(&before, &after);
+                for name in PENALTY_CFS {
+                    assert!(!moved.contains(name), "{what}: {name} changed");
+                    assert_eq!(before[name], after[name], "{what}: {name}");
+                }
+                assert_eq!(moved, footprint, "{what}: the footprint of an ordinary failed staking op");
+
+                // Typed reads of the same facts.
+                let store = StakingStore::new(&g.node.db);
+                let slashing = sumchain_storage::schema::SlashingStore::new(&g.node.db);
+                let v = store.get_validator(&g.pubkey()).unwrap().unwrap();
+                assert_eq!(v.stake, STAKE, "{what}");
+                assert_eq!(v.jailed_until, 0, "{what}");
+                assert_eq!(v.slash_count, 0, "{what}");
+                assert_eq!(v.status, ValidatorInfo::new(g.pubkey(), STAKE, 0, 0).status, "{what}");
+                assert!(slashing.get_slashing_records(&g.pubkey()).unwrap().is_empty(), "{what}");
+                assert!(slashing.get_signing_info(&g.pubkey()).unwrap().is_none(), "{what}");
+                let grant = grant(&g.node.db, &g.v).unwrap();
+                assert_eq!(grant.status, GrantStatus::Active, "{what}");
+                assert!(grant.locked_remaining > 0, "{what}");
+
+                // Fee and nonce: the ordinary failed-staking-operation charge.
+                let s = account(&g.node.db, &g.s.address());
+                assert_eq!(
+                    (s.balance, s.nonce),
+                    (submitter_before.balance - FEE, submitter_before.nonce + 1),
+                    "{what}: fee debited, nonce advanced"
+                );
+                let p = account(&g.node.db, &proposer);
+                assert_eq!(p.balance, proposer_before.balance + FEE, "{what}: proposer credited");
+            }
+        }
+    }
+
+    /// With a zero fee (possible only where `min_fee` is 0) the refused
+    /// transaction changes nothing at all: `deduct_fee` does nothing for a
+    /// zero fee, including the nonce, as for every staking operation.
+    #[test]
+    fn a_zero_fee_refusal_changes_nothing_including_the_nonce() {
+        let mut p = params(Some(E));
+        p.min_fee = 0;
+        let g = GrantNode::new(p);
+        let before = dump(&g.node.db);
+        let mut tx = TransactionV2::staking(
+            CHAIN_ID,
+            g.s.address(),
+            0,
+            0,
+            StakingTxData::new(StakingOperation::SubmitEvidence, Vec::new()),
+        );
+        tx.fee = 0;
+        let r = g.node.publish(E, vec![signed(&g.s, tx)]);
+        assert_eq!(r[0].status, TxStatus::Failed(6));
+        let s = account(&g.node.db, &g.s.address());
+        assert_eq!((s.balance, s.nonce), (FUNDS, 0));
+        let moved = changed(&before, &dump(&g.node.db));
+        for name in PENALTY_CFS {
+            assert!(!moved.contains(name), "{name}");
+        }
+    }
+
+    /// The payload is never read from the gate on. Below it, an undecodable
+    /// `SubmitEvidence` payload aborts the whole block, as it always has; from
+    /// the gate on, it is refused like any other evidence and charged.
+    #[test]
+    fn an_undecodable_payload_aborts_the_block_below_the_gate_and_is_refused_from_it() {
+        use sumchain_primitives::{Block, BlockHeader, Hash};
+        let garbage = vec![0xFF; 3];
+        // Below: the block cannot be executed.
+        let g = GrantNode::new(params(Some(E)));
+        let tx = staking(&g.s, 0, StakingOperation::SubmitEvidence, garbage.clone());
+        let mut block = Block::new(
+            BlockHeader::new(Hash::ZERO, E - 1, 1000, Hash::ZERO, Hash::ZERO, PROPOSER),
+            vec![tx],
+        );
+        block.header.tx_root = block.compute_tx_root();
+        assert!(g
+            .node
+            .executor
+            .execute_block(&block, g.node.state.state_root(), &[])
+            .is_err());
+        // From the gate: a receipt.
+        let g = GrantNode::new(params(Some(E)));
+        let r = g
+            .node
+            .publish(E, vec![staking(&g.s, 0, StakingOperation::SubmitEvidence, garbage)]);
+        assert_eq!(r[0].status, TxStatus::Failed(6));
+        let s = account(&g.node.db, &g.s.address());
+        assert_eq!((s.balance, s.nonce), (FUNDS - FEE, 1));
+    }
+
+    /// Historical replay: the pinned history gives the pinned roots and
+    /// receipts with the refusal gate set above every height it reaches.
+    #[test]
+    fn the_pinned_history_replays_identically_with_the_refusal_gate_above_it() {
+        let mut p = ChainParams::with_v2_enabled();
+        p.staking_submit_evidence_unsupported_enabled_from_height = Some(100);
+        assert_eq!(pinned_history(p), PINNED_HISTORY);
+        let mut both = strict_from(Some(100));
+        both.staking_submit_evidence_unsupported_enabled_from_height = Some(100);
+        assert_eq!(pinned_history(both), PINNED_HISTORY, "both gates above the history");
+    }
+}

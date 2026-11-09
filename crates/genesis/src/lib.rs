@@ -3025,6 +3025,30 @@ pub struct ChainParams {
     #[serde(default)]
     pub strict_transaction_signatures_enabled_from_height: Option<u64>,
 
+    /// The legacy staking `SubmitEvidence` operation is refused.
+    ///
+    /// It is the fourth field of the draft schema 4 (`0x1047`).
+    ///
+    /// Below this height, or while it is unset, `SubmitEvidence` executes
+    /// exactly as before. At and above it, a `SubmitEvidence` transaction,
+    /// `DoubleSign` or `Downtime`, is refused before its payload is read. A
+    /// refused transaction is charged as any other failed staking operation is:
+    /// the fee is debited, the proposer credited and the nonce advanced (all
+    /// three only when the fee is nonzero), and the receipt is `Failed(6)` with
+    /// `fee_paid: 0`.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub staking_submit_evidence_unsupported_enabled_from_height: Option<u64>,
+
     /// Contract execution is metered (#279).
     ///
     /// Below this height a contract deploy or call runs on the unmetered
@@ -3537,6 +3561,8 @@ impl Default for ChainParams {
             por_attested_targets_enabled_from_height: None,
             // Production-safe default: transaction signatures are checked as before — dormant.
             strict_transaction_signatures_enabled_from_height: None,
+            // Production-safe default: SubmitEvidence executes as before — dormant.
+            staking_submit_evidence_unsupported_enabled_from_height: None,
             // Production-safe default: contracts run on the unmetered engine — dormant.
             contract_metering_enabled_from_height: None,
             // No block-level contract gas budget (inert while the metering gate is closed).
@@ -4240,6 +4266,10 @@ impl ChainParams {
                 self.strict_transaction_signatures_enabled_from_height,
             ),
             (
+                "staking_submit_evidence_unsupported_enabled_from_height",
+                self.staking_submit_evidence_unsupported_enabled_from_height,
+            ),
+            (
                 "contract_metering_enabled_from_height",
                 self.contract_metering_enabled_from_height,
             ),
@@ -4283,7 +4313,7 @@ impl ChainParams {
     }
 }
 
-/// The forty-nine remediation gates, by field name.
+/// The fifty remediation gates, by field name.
 ///
 /// The count in this sentence has been wrong twice, both times because a wave
 /// added gates and nothing checked the prose. It is checked now:
@@ -4353,6 +4383,7 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "archive_unbonding_own_challenges_enabled_from_height",
     "por_attested_targets_enabled_from_height",
     "strict_transaction_signatures_enabled_from_height",
+    "staking_submit_evidence_unsupported_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started

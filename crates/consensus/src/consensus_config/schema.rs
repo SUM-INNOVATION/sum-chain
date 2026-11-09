@@ -729,6 +729,18 @@ pub const SCHEMA_4_ADDED: &[AddedField] = &[
         },
         source: Source::Gate,
     },
+    // The legacy staking `SubmitEvidence` operation is refused.
+    AddedField {
+        spec: FieldSpec {
+            id: 0x1047,
+            name: "staking_submit_evidence_unsupported_enabled_from_height",
+            ty: Ty::U64,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Gate,
+    },
 ];
 
 /// Schema 4: schema 3 plus [`SCHEMA_4_ADDED`]. DRAFT.
