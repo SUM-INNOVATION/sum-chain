@@ -75,12 +75,14 @@
 
 pub mod codec;
 pub mod fields;
+pub mod handshake;
 pub mod record;
 pub mod schema;
 pub mod start_marker;
 
 pub use codec::{commitment_of, ConsensusConfig, Field, FieldChange, Value, SCHEMA_V1};
 pub use fields::{build, build_with, FieldSpec, SCHEMA_V1_FIELDS};
+pub use handshake::{handshake_digest, handshake_digest_for, HANDSHAKE_DIGEST_DOMAIN};
 pub use record::{
     acknowledge, acknowledge_schema_transition, check_at_startup, migration_provenance,
     pending_schema_revert, pending_schema_transition, pending_schema_transition_for, read_record,
