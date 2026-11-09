@@ -79,6 +79,21 @@ const EXCLUDED: &[(&str, &str)] = &[
          never hashed into a block; read by the crossing guard and its start-up \
          audit, written by no production path",
     ),
+    // ── Evidence storage layout. `evidence_meta.rs` keeps the A3 evidence
+    //    records (first valid record per slot) under cf::META keys, which no
+    //    committed digest reads. No production path reads or writes them.
+    (
+        "EQUIVOCATION_KEY_PREFIX",
+        "cf::META key prefix of the v1 evidence storage layout (vote \
+         equivocation); node-local, never hashed into a block; read and written \
+         by no production path",
+    ),
+    (
+        "UPGRADE_CONFLICT_KEY_PREFIX",
+        "cf::META key prefix of the v1 evidence storage layout (upgrade \
+         conflict); node-local, never hashed into a block; read and written by \
+         no production path",
+    ),
     // ── Dormant C5 registry size bound. Read only by the unwired register
     //    validation, which no transaction decode reaches; the activation change
     //    moves MAX_REGISTRY_RECORDS into consensus_limits, and so into this

@@ -32,6 +32,7 @@ use sumchain_storage::certified_meta::{
     CERTIFICATE_KEY_LEN, CERTIFICATE_KEY_PREFIX, FINALIZED_POINTER_KEY, FINALIZED_POINTER_LEN,
 };
 use sumchain_storage::db::{cf, Database, ALL_CFS};
+use sumchain_storage::evidence_meta::EQUIVOCATION_KEY_PREFIX;
 use sumchain_storage::schema::{meta_keys, BlockStore};
 use tempfile::TempDir;
 
@@ -304,6 +305,14 @@ const KNOWN_META_KEYS: &[(&[u8], &str)] = &[
         b"test-only/certified/finalized",
         "storage/tests/certified_commit.rs",
     ),
+    (
+        b"finality/evidence/v1/",
+        "storage/src/evidence_meta.rs (prefix)",
+    ),
+    (
+        b"upgrade/conflict/v1/",
+        "storage/src/evidence_meta.rs (prefix)",
+    ),
 ];
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -417,13 +426,14 @@ fn v1_keys_are_disjoint_from_every_meta_key_in_the_repository() {
         assert!(!b"finality/".starts_with(legacy) && !legacy.starts_with(b"finality/"));
     }
     // Nothing else in the repository spells a key in the `finality/`
-    // namespace, and no key-family prefix (a literal ending in `/`, the
+    // namespace but the evidence layout's prefix (prefix-free with both v1
+    // names, above), and no key-family prefix (a literal ending in `/`, the
     // repository's convention for scan prefixes) is the start of a v1 name,
     // so no prefix scan reaches v1 rows. (Literals such as the state value
     // `b"final"` are not keys.)
     let reserved: Vec<String> = literals
         .iter()
-        .filter(|l| l.starts_with(b"finality/"))
+        .filter(|l| l.starts_with(b"finality/") && l.as_slice() != EQUIVOCATION_KEY_PREFIX)
         .map(|l| String::from_utf8_lossy(l).into_owned())
         .collect();
     assert!(
