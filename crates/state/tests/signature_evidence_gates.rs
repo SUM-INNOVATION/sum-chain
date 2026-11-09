@@ -701,6 +701,36 @@ mod evidence {
         assert_eq!((s.balance, s.nonce), (FUNDS - FEE, 1));
     }
 
+    /// The refusal is limited to `SubmitEvidence`: an ordinary staking
+    /// operation still succeeds at and above the boundary. In one block at E
+    /// and at E+1, a `SubmitEvidence` from the sender is refused while a
+    /// `Delegate` from the same sender succeeds and moves stake.
+    #[test]
+    fn an_ordinary_staking_operation_still_succeeds_at_and_above_the_boundary() {
+        for height in [E, E + 1] {
+            let g = GrantNode::new(params(Some(E)));
+            let store = StakingStore::new(&g.node.db);
+            let before = store.get_validator(&g.pubkey()).unwrap().unwrap().total_delegated;
+
+            let evidence = double_sign(&g.s, 0, g.pubkey(), height);
+            let delegate = staking(
+                &g.s,
+                1,
+                StakingOperation::Delegate,
+                bincode::serialize(&DelegateData {
+                    validator_pubkey: g.pubkey(),
+                    amount: DELEGATED,
+                })
+                .unwrap(),
+            );
+            let r = g.node.publish(height, vec![evidence, delegate]);
+            assert_eq!(r[0].status, TxStatus::Failed(6), "SubmitEvidence refused at {height}");
+            assert_eq!(r[1].status, TxStatus::Success, "an ordinary Delegate still succeeds at {height}");
+            let after = store.get_validator(&g.pubkey()).unwrap().unwrap().total_delegated;
+            assert_eq!(after, before + DELEGATED, "the delegation moved stake at {height}");
+        }
+    }
+
     /// Historical replay: the pinned history gives the pinned roots and
     /// receipts with the refusal gate set above every height it reaches.
     #[test]
