@@ -451,6 +451,18 @@ pub mod failpoints {
         /// The local-depth finality record's write fails (`PoAEngine`'s
         /// finality check, after a block is committed).
         FinalityWriteFails,
+        /// The consensus-configuration schema move: its one batch is staged
+        /// and not yet committed (a crash barrier only).
+        SchemaTransitionBeforeCommit,
+        /// The consensus-configuration schema move: its batch is committed,
+        /// and the command has not yet reported (a crash barrier only).
+        SchemaTransitionAfterCommit,
+        /// The pre-start schema revert: its one batch is staged and not yet
+        /// committed (a crash barrier only).
+        SchemaRevertBeforeCommit,
+        /// The pre-start schema revert: its batch is committed, and the
+        /// command has not yet reported (a crash barrier only).
+        SchemaRevertAfterCommit,
     }
 
     impl Failpoint {
@@ -467,6 +479,10 @@ pub mod failpoints {
                 Failpoint::AfterValidation => "after-validation".into(),
                 Failpoint::MidReconcile => "mid-reconcile".into(),
                 Failpoint::FinalityWriteFails => "finality-write-fails".into(),
+                Failpoint::SchemaTransitionBeforeCommit => "schema-transition-before-commit".into(),
+                Failpoint::SchemaTransitionAfterCommit => "schema-transition-after-commit".into(),
+                Failpoint::SchemaRevertBeforeCommit => "schema-revert-before-commit".into(),
+                Failpoint::SchemaRevertAfterCommit => "schema-revert-after-commit".into(),
             }
         }
     }

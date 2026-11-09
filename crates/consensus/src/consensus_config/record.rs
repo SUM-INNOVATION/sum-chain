@@ -774,12 +774,20 @@ pub fn revert_schema_transition_with(
         .delete(cf::META, &transition_key(pending.seq))
         .and_then(|_| batch.put(cf::META, RECORD_KEY, &encode_record(&previous)))
         .map_err(|e| ConfigError::Storage(format!("staging the schema revert: {e}")))?;
+    #[cfg(feature = "failpoints")]
+    crate::branch_switch::failpoints::barrier(
+        crate::branch_switch::failpoints::Failpoint::SchemaRevertBeforeCommit,
+    );
     batch.commit_durable().map_err(|e| {
         ConfigError::Storage(format!(
             "reverting consensus configuration transition {}: {e}",
             pending.seq
         ))
     })?;
+    #[cfg(feature = "failpoints")]
+    crate::branch_switch::failpoints::barrier(
+        crate::branch_switch::failpoints::Failpoint::SchemaRevertAfterCommit,
+    );
     // Read back what was written: it must verify, history included, and be
     // the record the move replaced.
     let back = read_record_with(db, policy)?.ok_or_else(|| {
@@ -1015,11 +1023,23 @@ fn write_transition(
         )
         .and_then(|_| batch.put(cf::META, RECORD_KEY, &encode_record(&next)))
         .map_err(|e| ConfigError::Storage(format!("staging the transition: {e}")))?;
+    #[cfg(feature = "failpoints")]
+    if kind == TransitionKind::SchemaTransition {
+        crate::branch_switch::failpoints::barrier(
+            crate::branch_switch::failpoints::Failpoint::SchemaTransitionBeforeCommit,
+        );
+    }
     batch.commit_durable().map_err(|e| {
         ConfigError::Storage(format!(
             "recording consensus configuration transition {seq}: {e}"
         ))
     })?;
+    #[cfg(feature = "failpoints")]
+    if kind == TransitionKind::SchemaTransition {
+        crate::branch_switch::failpoints::barrier(
+            crate::branch_switch::failpoints::Failpoint::SchemaTransitionAfterCommit,
+        );
+    }
     Ok(seq)
 }
 
