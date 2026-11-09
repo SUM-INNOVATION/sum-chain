@@ -122,9 +122,17 @@ has PROVEN about the rules it enforces, from the `GetProtocolId` handshake:
 
 | the peer | state |
 |---|---|
-| declares our protocol digest | `Verified` |
+| declares our handshake digest | `Verified` |
 | declares a different digest | `Incompatible` (permanent, within one process) |
-| declares nothing | `Undeclared` |
+| was asked on this connection and has not answered yet | `Pending` |
+| its request failed (it cannot decode it, answered with an error, or did not answer within 30 s) | `Undeclared` |
+
+A declaration belongs to a connection. Every connection, inbound or outbound,
+asks again, so a peer verified before a reconnect is `Pending` again until it
+re-answers. Nothing a `Pending` peer sends — a block by gossip or sync, a sync
+status, a vote — is acted on, in either phase; whatever was refused is asked
+for again once the peer is resolved, so a slow answer delays that peer's
+blocks by up to the request timeout and loses none of them.
 
 The policy has a boundary — the chain height in
 `ChainParams::peer_protocol_declaration_required_from_height`. Below it (or
@@ -132,24 +140,67 @@ with the field unset, which is what every genesis distributed before the field
 existed resolves to) an `Undeclared` peer participates. At or above it, an
 `Undeclared` peer is refused.
 
+### What peers compare: the handshake digest
+
+The 32 bytes a node declares in `SyncResponse::ProtocolId` are its handshake
+digest:
+
+```
+BLAKE3-256("sumchain/protocol-digest/v2" ‖ protocol digest ‖ running commitment)
+```
+
+- The protocol digest covers the chain identity, every activation height and
+  the compiled consensus limits.
+- The running commitment is the consensus-configuration commitment this binary
+  computes from its `genesis.json`, in the schema it writes
+  (`chain_getConsensusConfig.running_commitment`). It covers every genesis
+  parameter that execution reads (`min_fee`, `finality_depth`, the staking,
+  governance and other groups), the rule codes and the compiled consensus
+  constants. It is never the commitment recorded in the node's database, so a
+  node whose record is still in an older schema declares the same value.
+
+A peer whose handshake digest differs is `Incompatible`, banned for 24 hours
+and disconnected, in both phases. `chain_getActivationStatus` reports the
+value as `handshake_digest`; `protocol_digest` there is still the protocol
+digest alone.
+
+The handshake digest is not a consensus value. A peer can declare ours and
+enforce other rules; only block validity and the values bound in the state
+root refuse its blocks. This check detects and excludes; it substitutes for
+neither.
+
+**Same-window.** A handshake digest never equals a protocol digest, so a node
+that declares the handshake digest and a node that declares the protocol
+digest (every earlier release that answers the request) refuse each other at
+connect, whatever their rules. Installing a binary that declares it is itself the activation: stop
+every validator, install it on all of them with the same `genesis.json`, and
+start them together. From then on the same holds for every change to an input
+of the consensus configuration, a non-gate value such as `min_fee` included:
+nodes on different values refuse each other until all run the same inputs. A
+node that holds a stale refusal recovers when it restarts: the ban expiring
+after 24 hours lets the peer connect again, but the peer stays `Incompatible`
+for the life of the process.
+
 ### The accepted property
 
 **The registry is held in memory and nothing persists it. A restart forgets
 every declaration.** The two sides of the boundary fail in opposite directions:
 
-* **Below the enforcement height — ACCEPTED.** A restart re-admits a peer this
-  node had marked `Incompatible`. Pre-enforcement compatibility state may reset
-  on restart. This is a decided property of the release, **not an outstanding
-  residual**, and it is not tracked as pending work. The cost is bounded by
-  what phase one already means: below the height every node executes the same
-  rules, so the re-admitted peer's blocks are blocks this node would have
-  produced itself — the same admission phase one already makes for every silent
-  peer.
+* **Below the enforcement height — ACCEPTED.** A restart forgets that a peer
+  was `Incompatible`. Its reconnection is asked again and is `Pending` until it
+  answers: a peer that re-declares the mismatch is refused again, and only a
+  peer whose request then fails is re-admitted. Pre-enforcement compatibility
+  state may reset on restart. This is a decided property of the release, **not
+  an outstanding residual**, and it is not tracked as pending work. The cost is
+  bounded by what phase one already means: below the height every node
+  executes the same rules, so the re-admitted peer's blocks are blocks this
+  node would have produced itself — the same admission phase one already makes
+  for every silent peer.
 * **At or above the enforcement height — fail-closed, and not negotiable.** A
   restart re-refuses a peer it had VERIFIED, until that peer answers
-  `GetProtocolId` again. A verified peer is temporarily treated as undeclared,
-  which is a refusal, which is the safe direction. Post-enforcement behaviour
-  must remain fail-closed.
+  `GetProtocolId` again. A verified peer is `Pending` again, which is a
+  refusal, which is the safe direction. Post-enforcement behaviour must remain
+  fail-closed.
 
 The ban in `PeerManager` is forgotten across a restart too, and for the same
 reason: it is in memory.
@@ -158,11 +209,10 @@ reason: it is in memory.
 
 * Restarting a node **below** the enforcement height may briefly reconnect it
   to a peer it had refused. Nothing needs to be done about this.
-* Restarting a node **at or above** the enforcement height means a short window
-  in which peers it had already verified cannot supply blocks, until each
-  re-answers the handshake. Sync resumes on its own; a node that appears
-  peer-starved for a few seconds after a restart in phase two is this, and not
-  a configuration fault.
+* Restarting a node, in either phase, means a short window in which peers it
+  had already verified cannot supply blocks, until each re-answers the
+  handshake. Sync resumes on its own; a node that appears peer-starved for a
+  few seconds after a restart is this, and not a configuration fault.
 * A peer that re-declares a MISMATCH after the restart is refused again
   immediately, in both phases.
 
@@ -179,6 +229,14 @@ If a future change persists the declarations, seeds the registry, or widens the
 below-the-height admission, the above-the-height assertions in that test must
 keep refusing an undeclared peer. The accepted reset buys nothing above the
 height and must not be allowed to leak there.
+
+The `Pending` state and the transitions of a connection are pinned in the same
+file (`a_pending_peer_participates_in_neither_phase`,
+`a_pending_peer_resolves_to_verified_incompatible_or_undeclared`,
+`a_reconnect_re_asks_a_verified_peer_and_keeps_an_incompatible_one`,
+`an_unanswered_request_admits_below_the_height_only`), and against a running
+node in `crates/node/tests/unit/peer_block_admission_tests.rs`. The handshake
+digest itself is pinned in `crates/consensus/tests/handshake_digest.rs`.
 
 ---
 
