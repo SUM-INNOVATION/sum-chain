@@ -486,7 +486,7 @@ Run `python3 check.py` (standard library only; under a minute). It exits nonzero
 - Ed25519 against RFC 8032 TEST 1, plus a negative case;
 - byte-for-byte reproduction of the dalek-produced 2026-09-29 vectors: 4 public keys, the valset bytes and both commitments, the stand-in commitment, the vote preimage, signature and wire, the nil prevote, the n = 4 certificate, the evidence, and the storage key and pointer;
 - every length in these tables;
-- that each settled constant (`D_VOTE`, `FVOTv1\0`, `D_VALSET`, `FCRTv1\0`, `D_SIGNER`, `D_SIGNBYTES`, `FSGNv1\0`) is spelled only in its implementation file, and every other domain and magic nowhere under `crates/`;
+- that each settled constant (`D_VOTE`, `FVOTv1\0`, `D_VALSET`, `FCRTv1\0`, `D_SIGNER`, `D_SIGNBYTES`, `FSGNv1\0`, `FEVDv1\0`, `UCEVv1\0`) is spelled only in its implementation file, and every other domain and magic nowhere under `crates/`;
 - that every vector passes its strict decoder or verifier;
 - that **every single-byte flip**, truncation and trailing byte is refused, for:
   - the vote, both certificates, the equivocation evidence, both manifests, the upgrade-conflict evidence and both signer states;
