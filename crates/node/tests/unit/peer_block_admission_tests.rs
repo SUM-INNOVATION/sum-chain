@@ -121,10 +121,10 @@ impl Stack {
         .expect("engine");
         consensus.init_genesis(genesis).expect("init genesis");
         // Exactly the construction `Node::with_rpc_config` performs: this
-        // binary's protocol digest for this genesis, and the enforcement height
-        // read from `ChainParams`.
-        let digest =
-            sumchain_state::protocol_digest::protocol_digest(genesis).expect("protocol digest");
+        // binary's handshake digest for this genesis, and the enforcement
+        // height read from `ChainParams`.
+        let digest = sumchain_consensus::consensus_config::handshake_digest_for(genesis)
+            .expect("handshake digest");
         let compat = Arc::new(PeerCompatRegistry::new(
             digest,
             genesis
@@ -582,7 +582,7 @@ async fn a_verified_peer_must_declare_again_after_a_restart_and_is_then_admitted
 
     // ── run 1 ───────────────────────────────────────────────────────────────
     let first = boot(dir.path(), &genesis, secret);
-    let digest_before = first.protocol_digest;
+    let digest_before = first.handshake_digest;
     assert_eq!(
         first.peer_compat.enforcement_height(),
         Some(ENFORCE_FROM),
@@ -603,7 +603,7 @@ async fn a_verified_peer_must_declare_again_after_a_restart_and_is_then_admitted
     // ── run 2, same directory, same genesis ─────────────────────────────────
     let second = boot(dir.path(), &genesis, secret);
     assert_eq!(
-        second.protocol_digest, digest_before,
+        second.handshake_digest, digest_before,
         "the same binary on the same genesis must declare the same digest across \
          a restart, or every peer would see a mismatch on every restart"
     );
@@ -634,7 +634,7 @@ async fn a_verified_peer_must_declare_again_after_a_restart_and_is_then_admitted
     // The node re-asks on reconnect, the peer answers, and it is back.
     assert!(second
         .peer_compat
-        .on_declaration(peer, second.protocol_digest));
+        .on_declaration(peer, second.handshake_digest));
     assert!(
         second
             .peer_compat
@@ -700,20 +700,25 @@ async fn a_mismatching_peer_is_refused_again_after_a_restart() {
 /// `crates/state/tests/protocol_digest_mismatched_binaries.rs` proves the
 /// ceiling is folded by name and by value into
 /// `sumchain_state::protocol_digest`. That is a claim about a function. This is
-/// the claim that matters for the release condition: the function's output is
-/// what `Node::with_rpc_config` stores in `Node::protocol_digest`, what it hands
-/// `PeerCompatRegistry` as `ours`, and therefore what a peer has to match before
-/// `admit_peer_block` will let its blocks near the engine.
+/// the claim that matters for the release condition: the node declares the
+/// handshake digest, which folds that protocol digest whole with the running
+/// consensus configuration; `Node::with_rpc_config` stores it in
+/// `Node::handshake_digest` and hands it to `PeerCompatRegistry` as `ours`, and
+/// therefore it is what a peer has to match before `admit_peer_block` will let
+/// its blocks near the engine.
 ///
 /// Two nodes built with different ceilings would hold different values here, so
 /// each would mark the other `Incompatible` on its first declaration — which is
-/// what "covered by mandatory compatibility enforcement" has to mean.
+/// what "covered by mandatory compatibility enforcement" has to mean. (Such a
+/// binary's running configuration differs as well, in the ceiling's own field;
+/// the protocol digest alone already separates them.)
 ///
 /// The one link left to the source scan is the `NetworkEvent::ProtocolIdRequest`
-/// arm answering with `digest: self.protocol_digest`; that arm is inside
+/// arm answering with `digest: self.handshake_digest`; that arm is inside
 /// `Node::run`.
 #[tokio::test]
 async fn the_digest_this_node_declares_covers_the_block_write_set_ceiling() {
+    use sumchain_consensus::consensus_config::{build, handshake_digest, handshake_digest_for};
     use sumchain_state::protocol_digest::{
         consensus_limits, protocol_digest, protocol_digest_with_limits, LimitValue,
     };
@@ -724,15 +729,28 @@ async fn the_digest_this_node_declares_covers_the_block_write_set_ceiling() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let node = boot(dir.path(), &genesis, *validator.private_key().as_bytes());
 
+    let running = build(&genesis).expect("running configuration");
     assert_eq!(
-        node.protocol_digest,
+        node.handshake_digest,
+        handshake_digest(
+            protocol_digest(&genesis).expect("protocol digest"),
+            &running
+        ),
+        "the node must declare the handshake digest of the protocol digest and \
+         the running configuration for its genesis, and not some other value"
+    );
+    assert_eq!(
+        node.handshake_digest,
+        handshake_digest_for(&genesis).expect("handshake digest")
+    );
+    assert_ne!(
+        node.handshake_digest,
         protocol_digest(&genesis).expect("protocol digest"),
-        "the node must declare `sumchain_state::protocol_digest` for its genesis \
-         and not some other value"
+        "it no longer declares the protocol digest itself"
     );
     assert_eq!(
         node.peer_compat.protocol_digest(),
-        node.protocol_digest,
+        node.handshake_digest,
         "and must judge peers against the same value it declares, or it would \
          refuse peers that agree with it and admit peers that do not"
     );
@@ -752,10 +770,12 @@ async fn the_digest_this_node_declares_covers_the_block_write_set_ceiling() {
             }
         })
         .collect();
-    let other_binary =
-        protocol_digest_with_limits(&genesis, &doubled).expect("the other binary's digest");
+    let other_binary = handshake_digest(
+        protocol_digest_with_limits(&genesis, &doubled).expect("the other binary's digest"),
+        &running,
+    );
     assert_ne!(
-        other_binary, node.protocol_digest,
+        other_binary, node.handshake_digest,
         "a node built with a doubled block write-set ceiling would declare the \
          same digest as this one, and the ceiling would not be covered by \
          enforcement at all"
@@ -777,6 +797,20 @@ async fn the_digest_this_node_declares_covers_the_block_write_set_ceiling() {
              not a thing an operator gets to phase in"
         );
     }
+}
+
+/// A genesis that differs from `genesis` only in `min_fee`: the same protocol
+/// digest, a different running configuration, so a different handshake digest.
+fn with_min_fee_moved(genesis: &Genesis) -> Genesis {
+    let mut g = genesis.clone();
+    g.params.min_fee += 1;
+    let g = Genesis::from_json(&g.to_json().expect("serialize")).expect("genesis must validate");
+    assert_eq!(
+        sumchain_state::protocol_digest::protocol_digest(&g).unwrap(),
+        sumchain_state::protocol_digest::protocol_digest(genesis).unwrap(),
+        "min_fee is outside the protocol digest"
+    );
+    g
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -858,7 +892,7 @@ async fn left_at(genesis: &Genesis, blocks: &[Block], height: BlockHeight) -> te
     let seed = PeerId::random();
     assert!(first
         .peer_compat
-        .on_declaration(seed, first.protocol_digest));
+        .on_declaration(seed, first.handshake_digest));
     for b in blocks.iter().filter(|b| b.height() <= height) {
         let o =
             Node::admit_peer_block(&first.peer_compat, &first.consensus, &seed, b.clone()).await;
@@ -1194,7 +1228,7 @@ async fn a_status_that_beat_the_declaration_is_asked_for_again_and_the_node_sync
     let (compat, consensus, digest) = (
         node.peer_compat.clone(),
         node.consensus.clone(),
-        node.protocol_digest,
+        node.handshake_digest,
     );
 
     drive(&mut node, async {
@@ -1258,7 +1292,7 @@ async fn a_status_from_a_pending_peer_below_the_boundary_is_asked_for_again_on_r
     let (compat, consensus, digest) = (
         node.peer_compat.clone(),
         node.consensus.clone(),
-        node.protocol_digest,
+        node.handshake_digest,
     );
 
     drive(&mut node, async {
@@ -1373,7 +1407,7 @@ async fn a_block_gossiped_by_a_pending_peer_below_the_boundary_is_fetched_after_
         node.peer_compat.clone(),
         node.consensus.clone(),
         node.metrics.clone(),
-        node.protocol_digest,
+        node.handshake_digest,
     );
     let genesis_hash = one.header.parent_hash;
 
@@ -1444,7 +1478,7 @@ async fn a_gossiped_block_refused_before_the_declaration_is_fetched_again() {
         node.peer_compat.clone(),
         node.consensus.clone(),
         node.metrics.clone(),
-        node.protocol_digest,
+        node.handshake_digest,
     );
 
     drive(&mut node, async {
@@ -1509,7 +1543,7 @@ async fn a_declaration_that_wins_the_race_is_asked_for_status_once() {
     let (compat, consensus, digest) = (
         node.peer_compat.clone(),
         node.consensus.clone(),
-        node.protocol_digest,
+        node.handshake_digest,
     );
 
     drive(&mut node, async {
@@ -1571,7 +1605,7 @@ async fn a_missed_block_whose_peer_declares_late_is_fetched_once() {
         node.peer_compat.clone(),
         node.consensus.clone(),
         node.metrics.clone(),
-        node.protocol_digest,
+        node.handshake_digest,
     );
 
     drive(&mut node, async {
@@ -1652,7 +1686,7 @@ async fn a_missed_block_from_a_declared_peer_is_fetched_from_it_once() {
         node.peer_compat.clone(),
         node.consensus.clone(),
         node.metrics.clone(),
-        node.protocol_digest,
+        node.handshake_digest,
     );
 
     drive(&mut node, async {
@@ -1729,7 +1763,7 @@ async fn a_block_gossiped_while_a_sync_runs_raises_its_target_and_starts_no_seco
         node.peer_compat.clone(),
         node.consensus.clone(),
         node.metrics.clone(),
-        node.protocol_digest,
+        node.handshake_digest,
     );
 
     drive(&mut node, async {
@@ -1811,7 +1845,7 @@ async fn a_stalled_node_asks_its_peer_again_and_fetches_what_nothing_pointed_at(
     let (compat, consensus, digest) = (
         node.peer_compat.clone(),
         node.consensus.clone(),
-        node.protocol_digest,
+        node.handshake_digest,
     );
 
     drive(&mut node, async {
@@ -1880,7 +1914,7 @@ async fn an_unrelated_failure_does_not_end_a_sync_and_its_batch_continues_it_onc
         node.peer_compat.clone(),
         node.consensus.clone(),
         node.network.clone(),
-        node.protocol_digest,
+        node.handshake_digest,
     );
 
     drive(&mut node, async {
@@ -1955,7 +1989,7 @@ async fn a_late_batch_of_an_ended_stream_does_not_advance_its_replacement() {
         node.peer_compat.clone(),
         node.consensus.clone(),
         node.network.clone(),
-        node.protocol_digest,
+        node.handshake_digest,
     );
 
     drive(&mut node, async {
@@ -2029,7 +2063,7 @@ async fn a_timed_out_block_request_ends_its_stream_and_the_stall_check_retries_o
         node.peer_compat.clone(),
         node.consensus.clone(),
         node.network.clone(),
-        node.protocol_digest,
+        node.handshake_digest,
     );
 
     drive(&mut node, async {
@@ -2076,4 +2110,324 @@ async fn a_timed_out_block_request_ends_its_stream_and_the_stall_check_retries_o
         assert_eq!(net.outstanding_block_requests(), 0);
     })
     .await;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 10. The handshake digest at the event loop
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The node declares the handshake digest: the protocol digest and the running
+// consensus configuration. A peer whose configuration differs in a value the
+// protocol digest does not cover is refused before anything it sent is used,
+// and so is a peer that still declares the protocol digest.
+
+/// A peer whose genesis differs only in `min_fee` declares the same protocol
+/// digest, and a different handshake digest. Its gossiped block and its status
+/// arrive first and are not acted on; its declaration refuses it, bans it and
+/// disconnects it. Nothing it sent reaches the block store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_with_a_different_min_fee_is_refused_before_any_block_is_imported() {
+    let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
+    let tip = blocks.last().expect("a chain").clone();
+    let one = blocks[0].clone();
+    let theirs =
+        sumchain_consensus::consensus_config::handshake_digest_for(&with_min_fee_moved(&genesis))
+            .expect("the other node's handshake digest");
+    let dir = tempfile::TempDir::new().expect("temp dir");
+
+    let mut peer = ScriptedPeer::start().await;
+    let peer_id = peer.id();
+    let mut node = full_node(dir.path(), &genesis, Some(peer.dial.as_str()));
+    assert_ne!(theirs, node.handshake_digest);
+    let (compat, consensus, metrics, net) = (
+        node.peer_compat.clone(),
+        node.consensus.clone(),
+        node.metrics.clone(),
+        node.network.clone(),
+    );
+
+    drive(&mut node, async {
+        let (node_id, digest_req, status_req) = peer.connected().await;
+
+        // A block below the boundary, gossiped first: not imported.
+        let deadline = Instant::now() + WAIT;
+        while metrics.blocks.block_errors.load(Ordering::Relaxed) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the gossiped block never reached the node"
+            );
+            peer.send(NetworkCommand::BroadcastBlock(one.clone())).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        // Its status, ahead of the node: ignored.
+        peer.answer_status(status_req, &tip).await;
+        assert_eq!(peer.node_height(node_id).await, 0);
+        assert_eq!(compat.status(&peer_id), PeerCompat::Pending);
+
+        // The declaration: refused, banned, hung up on.
+        peer.declare(digest_req, theirs).await;
+        peer.next("the node hanging up", |e| match e {
+            NetworkEvent::PeerDisconnected(p) if *p == node_id => Some(()),
+            _ => None,
+        })
+        .await;
+        assert_eq!(compat.status(&peer_id), PeerCompat::Incompatible);
+        assert!(net.peer_manager().is_banned(&peer_id));
+        for h in [0, ENFORCE_FROM - 1, ENFORCE_FROM, u64::MAX] {
+            assert!(!compat.may_participate_in_consensus(&peer_id, h));
+        }
+        assert_eq!(consensus.current_height(), 0);
+    })
+    .await;
+
+    for b in &blocks {
+        assert!(
+            !BlockStore::new(&node.db).contains(&b.hash()).unwrap(),
+            "block {} from the refused peer reached the block store",
+            b.height()
+        );
+    }
+}
+
+/// A peer on a release that declares the protocol digest is refused, in both
+/// phases, and refuses this node in turn: the two values never agree, which is
+/// why installing this release is itself a same-window change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_that_declares_the_protocol_digest_is_refused_both_ways() {
+    let (_v, _f, genesis, _blocks, _producer_dir) = a_chain().await;
+    let pd1 = sumchain_state::protocol_digest::protocol_digest(&genesis).expect("protocol digest");
+    let dir = tempfile::TempDir::new().expect("temp dir");
+
+    let mut peer = ScriptedPeer::start().await;
+    let peer_id = peer.id();
+    let mut node = full_node(dir.path(), &genesis, Some(peer.dial.as_str()));
+    let ours = node.handshake_digest;
+    let (compat, net) = (node.peer_compat.clone(), node.network.clone());
+
+    drive(&mut node, async {
+        let (node_id, digest_req, _status_req) = peer.connected().await;
+        peer.declare(digest_req, pd1).await;
+        peer.next("the node hanging up", |e| match e {
+            NetworkEvent::PeerDisconnected(p) if *p == node_id => Some(()),
+            _ => None,
+        })
+        .await;
+        assert_eq!(compat.status(&peer_id), PeerCompat::Incompatible);
+        assert!(net.peer_manager().is_banned(&peer_id));
+        for h in [0, ENFORCE_FROM - 1, ENFORCE_FROM, u64::MAX] {
+            assert!(!compat.may_participate_in_consensus(&peer_id, h));
+        }
+    })
+    .await;
+
+    // The other direction: a node of the earlier release compares what this
+    // node declares against the protocol digest, with the same registry.
+    let earlier = PeerCompatRegistry::new(
+        pd1,
+        genesis
+            .params
+            .peer_protocol_declaration_required_from_height,
+    );
+    let this_node = PeerId::random();
+    assert!(!earlier.on_declaration(this_node, ours));
+    for h in [0, ENFORCE_FROM - 1, ENFORCE_FROM, u64::MAX] {
+        assert!(!earlier.may_participate_in_consensus(&this_node, h));
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 11. Two booted nodes
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Both ends run `Node::run`: each asks the other, each declares its own
+// handshake digest, and each decides.
+
+/// Run two nodes — each the real `Node::run` — until `script` finishes.
+async fn drive_two(a: &mut Node, b: &mut Node, script: impl std::future::Future<Output = ()>) {
+    let (run_a, run_b) = (a.run(), b.run());
+    tokio::pin!(run_a);
+    tokio::pin!(run_b);
+    tokio::select! {
+        stopped = &mut run_a => panic!("node A stopped: {stopped:?}"),
+        stopped = &mut run_b => panic!("node B stopped: {stopped:?}"),
+        () = script => {}
+    }
+}
+
+/// Once both swarms are running, have `from` dial `to`. Returns both ids.
+async fn dial(from: &NetworkService, to: &NetworkService) -> (PeerId, PeerId) {
+    assert!(
+        eventually(|| {
+            !to.listen_addrs().is_empty()
+                && to.local_peer_id().is_some()
+                && from.local_peer_id().is_some()
+        })
+        .await,
+        "the nodes never bound"
+    );
+    let addr = to.listen_addrs()[0].clone();
+    from.command_sender()
+        .send(NetworkCommand::Dial(addr))
+        .await
+        .expect("dial queued");
+    (from.local_peer_id().unwrap(), to.local_peer_id().unwrap())
+}
+
+/// The release that wrote schema 2: what a node not yet moved to schema 3
+/// recorded.
+static SCHEMA_2_RELEASE: sumchain_consensus::consensus_config::SchemaPolicy =
+    sumchain_consensus::consensus_config::SchemaPolicy {
+        reads: &[
+            &sumchain_consensus::consensus_config::SCHEMA_1,
+            &sumchain_consensus::consensus_config::SCHEMA_2,
+        ],
+        writes: &sumchain_consensus::consensus_config::SCHEMA_2,
+        knows: &sumchain_consensus::consensus_config::SCHEMA_4,
+    };
+
+/// Equal inputs, different records: one node's configuration record is in
+/// schema 3, the other's still in schema 2. Their recorded commitments differ;
+/// they declare the same handshake digest, verify each other both ways, and
+/// blocks flow.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_nodes_with_the_same_rules_verify_each_other_whatever_their_records_hold() {
+    use sumchain_consensus::consensus_config as ccfg;
+
+    let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
+    let tip = blocks.last().expect("a chain").clone();
+    let a_dir = left_at(&genesis, &blocks, tip.height()).await;
+    let b_dir = tempfile::TempDir::new().expect("temp dir");
+    {
+        let db = Database::open_default(b_dir.path()).expect("open database");
+        ccfg::record::check_at_startup_with(&db, &genesis, 0, &SCHEMA_2_RELEASE)
+            .expect("a schema-2 record");
+    }
+
+    let mut a = full_node(a_dir.path(), &genesis, None);
+    let mut b = full_node(b_dir.path(), &genesis, None);
+    let records: Vec<_> = [&a, &b]
+        .iter()
+        .map(|n| ccfg::read_record(&n.db).unwrap().unwrap())
+        .collect();
+    assert_eq!(
+        records
+            .iter()
+            .map(|r| r.config.schema().number)
+            .collect::<Vec<_>>(),
+        [3, 2]
+    );
+    assert_ne!(records[0].commitment, records[1].commitment);
+    assert_eq!(a.handshake_digest, b.handshake_digest);
+
+    let (a_compat, b_compat, b_consensus) = (
+        a.peer_compat.clone(),
+        b.peer_compat.clone(),
+        b.consensus.clone(),
+    );
+    let (a_net, b_net) = (a.network.clone(), b.network.clone());
+    drive_two(&mut a, &mut b, async {
+        let (b_id, a_id) = dial(&b_net, &a_net).await;
+        assert!(
+            eventually(|| {
+                a_compat.status(&b_id) == PeerCompat::Verified
+                    && b_compat.status(&a_id) == PeerCompat::Verified
+            })
+            .await,
+            "the two nodes never verified each other: A sees B {:?}, B sees A {:?}",
+            a_compat.status(&b_id),
+            b_compat.status(&a_id)
+        );
+        assert!(
+            eventually(|| b_consensus.current_height() == tip.height()).await,
+            "B never synced from A; it is at {}",
+            b_consensus.current_height()
+        );
+    })
+    .await;
+
+    assert!(BlockStore::new(&b.db).contains(&tip.hash()).unwrap());
+}
+
+/// Two nodes whose genesis differs only in `min_fee` declare the same protocol
+/// digest and different handshake digests. Whichever side dials, they refuse
+/// each other: the connection is closed, the declaration each compared is
+/// `Incompatible` and banned, neither is ever `Verified`, and no block moves.
+///
+/// Each side asks and answers at once, so the first side to compare the other's
+/// declaration bans it and hangs up, and may do so before its own answer
+/// reaches the other side. That side's request then fails and it holds the peer
+/// `Undeclared`, on a connection that is already closed and that the first
+/// side's ban keeps closed. Both orders are refusals; the test accepts either
+/// and requires at least one comparison.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_nodes_whose_min_fee_differs_refuse_each_other_whichever_side_dials() {
+    let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
+    let tip = blocks.last().expect("a chain").clone();
+    let other = with_min_fee_moved(&genesis);
+
+    for a_dials in [false, true] {
+        let a_dir = left_at(&genesis, &blocks, tip.height()).await;
+        let b_dir = tempfile::TempDir::new().expect("temp dir");
+        let mut a = full_node(a_dir.path(), &genesis, None);
+        let mut b = full_node(b_dir.path(), &other, None);
+        assert_ne!(a.handshake_digest, b.handshake_digest);
+
+        let (a_compat, b_compat, a_consensus, b_consensus) = (
+            a.peer_compat.clone(),
+            b.peer_compat.clone(),
+            a.consensus.clone(),
+            b.consensus.clone(),
+        );
+        let (a_net, b_net) = (a.network.clone(), b.network.clone());
+        drive_two(&mut a, &mut b, async {
+            let (a_id, b_id) = if a_dials {
+                dial(&a_net, &b_net).await
+            } else {
+                let (b_id, a_id) = dial(&b_net, &a_net).await;
+                (a_id, b_id)
+            };
+            let views = || (a_compat.status(&b_id), b_compat.status(&a_id));
+            let refused = |s: PeerCompat| s == PeerCompat::Incompatible;
+            assert!(
+                eventually(|| {
+                    let (x, y) = views();
+                    (refused(x) || refused(y))
+                        && !a_net.connected_peers().contains(&b_id)
+                        && !b_net.connected_peers().contains(&a_id)
+                })
+                .await,
+                "a_dials={a_dials}: (A sees B, B sees A) = {:?}, connected: {} / {}",
+                views(),
+                a_net.connected_peers().contains(&b_id),
+                b_net.connected_peers().contains(&a_id)
+            );
+            // Watched for a while: still refused, still apart, and B — behind
+            // by the whole chain — gets nothing.
+            tokio::time::sleep(QUIET).await;
+            let (x, y) = views();
+            for (side, view, banned) in [
+                ("A", x, a_net.peer_manager().is_banned(&b_id)),
+                ("B", y, b_net.peer_manager().is_banned(&a_id)),
+            ] {
+                assert_ne!(view, PeerCompat::Verified, "a_dials={a_dials}: {side}");
+                assert_eq!(
+                    refused(view),
+                    banned,
+                    "a_dials={a_dials}: {side} bans exactly when it compared and refused"
+                );
+            }
+            assert!(!a_net.connected_peers().contains(&b_id));
+            assert_eq!(b_consensus.current_height(), 0, "a_dials={a_dials}");
+            assert_eq!(
+                a_consensus.current_height(),
+                tip.height(),
+                "a_dials={a_dials}"
+            );
+        })
+        .await;
+
+        for blk in &blocks {
+            assert!(!BlockStore::new(&b.db).contains(&blk.hash()).unwrap());
+        }
+    }
 }
