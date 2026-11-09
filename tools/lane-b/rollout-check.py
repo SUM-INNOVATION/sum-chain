@@ -32,6 +32,13 @@ Per validator, required and checked:
   * image_id           ends in @<--expected-image-digest>.
   * activation_digest  present, not "unavailable", identical on every validator.
   * protocol_digest    present, not "unavailable", identical on every validator.
+  * handshake_digest   reported only by a release that declares the handshake
+                       digest at the peer handshake ("absent" in the record,
+                       or no line at all, for an earlier release). Where any
+                       validator reports one, every validator must, it must
+                       not be "unavailable", and it must be identical on
+                       every validator. Reported by some and absent on others
+                       is a failure, never a fallback.
   * chain_id           equal to --expected-chain-id.
   * current_height     an integer > 0.
   * gates_set          name=height pairs, EXACTLY the production predecessor
@@ -52,9 +59,15 @@ Across the set:
   * exactly N validators with a record, N >= 2;
   * for every ordered pair (v, u), v != u, a line in v's log
     "compatibility handshake accepted" with peer=<u's local_peer_id> and
-    digest=<the common protocol_digest>: N*(N-1) pairs, every one present;
-  * ZERO refusal lines ("REFUSING peer ..." / "declared protocol digest ...
-    but this binary enforces ...") in any log.
+    digest=<the declared digest>: the common handshake_digest where the
+    release reports one, the common protocol_digest for an earlier release.
+    N*(N-1) pairs, every one present;
+  * ZERO refusal lines in any log, in either release's wording: "REFUSING
+    peer <id>: it enforces protocol digest ..." / "declared protocol digest
+    ... but this binary enforces ..." (releases that declare the protocol
+    digest), "REFUSING peer <id>: it declares handshake digest ..." /
+    "declared digest ... but this binary declares ..." (releases that declare
+    the handshake digest).
 """
 from __future__ import annotations
 
@@ -81,10 +94,21 @@ REQUIRED = (
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 ACCEPTED = "compatibility handshake accepted"
+# Both wordings, so that a refusal is never missed on either side of the
+# release that moved the declaration from the protocol digest to the handshake
+# digest. The node's line is the `ProtocolIdResponse` arm of
+# crates/node/src/node.rs; the registry's is `PeerCompatRegistry::on_declaration`
+# in crates/p2p/src/peer_compat.rs. rollout-check-test.py builds the current
+# wording from those sources, so a change to either breaks the battery.
 REFUSAL = re.compile(
     r"REFUSING peer \S+: it enforces protocol digest"
     r"|declared protocol digest \S+ but this binary enforces"
+    r"|REFUSING peer \S+: it declares handshake digest"
+    r"|declared digest \S+ but this binary declares"
 )
+# What the recorder writes when the release reports no handshake digest.
+ABSENT = "absent"
+
 FIELD = re.compile(r"\b(peer|digest)=(\S+)")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -302,8 +326,40 @@ def check(evidence: Path, n: int, expected_sha: str, expected_chain: str,
     if len(set(ids)) != len(ids):
         failures.append(f"local_peer_id is not distinct across validators: {peer_of}")
 
-    digests = {rec.get("protocol_digest", "") for rec in records.values()}
-    common = digests.pop() if len(digests) == 1 else None
+    # Which digest the handshake lines must carry. A release that declares the
+    # handshake digest reports it in chain_getActivationStatus; an earlier one
+    # does not, and its peers declare the protocol digest. Any validator that
+    # reports one makes it the expected value for all of them, and every way
+    # that can be incomplete fails rather than falling back.
+    handshake = {name: rec.get("handshake_digest", ABSENT) for name, rec in records.items()}
+    reported = {name: v for name, v in handshake.items() if v != ABSENT}
+    if reported:
+        declared_key = "handshake_digest"
+        for name, v in reported.items():
+            if not v:
+                failures.append(f"{name}: handshake_digest is blank")
+            elif v.startswith("unavailable"):
+                failures.append(f"{name}: handshake_digest is unavailable: {v}")
+        missing = sorted(set(records) - set(reported))
+        if missing:
+            failures.append(
+                f"HANDSHAKE DIGEST REPORTED BY SOME VALIDATORS ONLY: {', '.join(missing)} "
+                f"report none, {', '.join(sorted(reported))} do; the validators are not on "
+                f"one release"
+            )
+        if len(set(reported.values())) > 1:
+            failures.append(
+                "DIGEST DISAGREEMENT on handshake_digest: "
+                + ", ".join(f"{k}={v}" for k, v in reported.items())
+            )
+        values = set(reported.values())
+        usable = (not missing and len(values) == 1
+                  and not any(not v or v.startswith("unavailable") for v in values))
+        common = values.pop() if usable else None
+    else:
+        declared_key = "protocol_digest"
+        digests = {rec.get("protocol_digest", "") for rec in records.values()}
+        common = digests.pop() if len(digests) == 1 else None
 
     pairs_found = 0
     for name in records:
@@ -326,7 +382,7 @@ def check(evidence: Path, n: int, expected_sha: str, expected_chain: str,
             else:
                 failures.append(
                     f"{name}: MISSING HANDSHAKE with {other} (peer={other_peer or '?'}, "
-                    f"digest={common or '?'}): no accepted line"
+                    f"{declared_key}={common or '?'}): no accepted line"
                 )
 
     required_pairs = n * (n - 1)
