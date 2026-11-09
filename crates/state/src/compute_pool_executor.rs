@@ -18,8 +18,15 @@
 //!   `compute_pool_params.b_offer`, and the offer row records it as locked.
 //!   With no parameters declared, `B_offer` has no value and the offer is
 //!   refused.
+//! * `DeclineWorkUnitV1`: the assigned worker, the identity that published
+//!   the winning offer, hands the work item back. The unit goes
+//!   `Assigned → Reassignable` and no bond moves (Decision A: timeouts never
+//!   slash).
 //!
-//! The rest decode and are refused ([`ComputePoolReject::NotExecutable`]).
+//! The other six decode and are refused
+//! ([`ComputePoolReject::NotExecutable`]): job creation, accept, expire,
+//! cancel, assign and reassign each wait on a decision not yet taken (D2-7.x).
+//! Nothing here stands in for them.
 //!
 //! ## Receipts
 //!
@@ -44,10 +51,12 @@ use sumchain_primitives::transaction::ComputePoolTxData;
 use sumchain_primitives::{Address, Balance, BlockHeight};
 use sumchain_storage::exec_view::ExecutionView;
 use sumchain_wire::b0::codec::DecodeError;
-use sumchain_wire::compute_pool_wire::ComputePoolOperation;
+use sumchain_wire::compute_pool_wire::{ComputePoolOperation, WorkItemRef};
 use thiserror::Error;
 
-use crate::compute_pool::{BondedOffer, ComputePoolModel, PoolError, PoolResult};
+use crate::compute_pool::{
+    BondedOffer, ComputePoolModel, JobId, PoolError, PoolResult, UnitId, WorkItemKey,
+};
 use crate::compute_pool_store::ComputePoolStore;
 use crate::state::StateManager;
 use crate::{Result, StateError};
@@ -92,6 +101,11 @@ pub enum ComputePoolReject {
 pub enum PoolStep {
     /// `PublishBondedOfferV1`: lock this offer.
     PublishOffer(BondedOffer),
+    /// `DeclineWorkUnitV1` from `sender`.
+    DeclineUnit {
+        work_item: WorkItemKey,
+        sender: Address,
+    },
 }
 
 impl PoolStep {
@@ -114,6 +128,10 @@ impl PoolStep {
                     chain_id, *sender, publish, b_offer,
                 )))
             }
+            ComputePoolOperation::DeclineUnit(decline) => Ok(Self::DeclineUnit {
+                work_item: work_item_key(&decline.work_item),
+                sender: *sender,
+            }),
             other => Err(ComputePoolReject::NotExecutable { op: other.op() }),
         }
     }
@@ -122,6 +140,7 @@ impl PoolStep {
     pub fn bond(&self) -> Balance {
         match self {
             Self::PublishOffer(offer) => offer.bond_locked,
+            Self::DeclineUnit { .. } => 0,
         }
     }
 
@@ -129,6 +148,7 @@ impl PoolStep {
     pub fn check(&self, model: &ComputePoolModel) -> PoolResult<()> {
         match self {
             Self::PublishOffer(offer) => model.check_publish_offer(offer),
+            Self::DeclineUnit { work_item, sender } => model.check_decline_unit(work_item, sender),
         }
     }
 
@@ -137,6 +157,7 @@ impl PoolStep {
     pub fn apply(&self, model: &mut ComputePoolModel) -> PoolResult<()> {
         match self {
             Self::PublishOffer(offer) => model.publish_offer(offer.clone()),
+            Self::DeclineUnit { work_item, sender } => model.decline_unit(work_item, sender),
         }
     }
 
@@ -144,6 +165,15 @@ impl PoolStep {
     pub fn replay(steps: &[PoolStep], model: &mut ComputePoolModel) -> PoolResult<()> {
         steps.iter().try_for_each(|step| step.apply(model))
     }
+}
+
+/// The model's key for the work item an operation names.
+fn work_item_key(r: &WorkItemRef) -> WorkItemKey {
+    WorkItemKey::new(
+        JobId::from_bytes(r.job_id),
+        UnitId::from_bytes(r.unit_id),
+        r.generation,
+    )
 }
 
 /// One block's compute-pool work: the model as the block's earlier

@@ -19,6 +19,12 @@
 //!   [`an_unpayable_or_unpriced_offer_is_refused_free`],
 //!   [`a_reorg_reverts_the_offer_and_its_bond_together`] and
 //!   [`the_same_blocks_give_the_same_rows_and_roots`].
+//! * `DeclineWorkUnitV1`: [`the_assigned_worker_declines_and_nothing_is_slashed`],
+//!   [`a_decline_from_anyone_else_or_for_anything_else_is_refused_free`],
+//!   [`a_reorg_reverts_a_decline`] and
+//!   [`the_same_decline_gives_the_same_rows_and_roots`]. Job creation and
+//!   assignment do not execute, so the assigned unit these start from is
+//!   seeded.
 
 mod common;
 
@@ -34,13 +40,15 @@ use sumchain_primitives::{
     Address, Block, Hash, Receipt, SignedTransaction, TransactionV2, TxPayload, TxStatus,
 };
 use sumchain_state::compute_pool::{
-    BondedOffer, ComputePoolModel, ExposureInputs, JobId, OfferBondId, UnitId, UnitSizing,
-    UnitState, WorkUnit,
+    AssignmentIndexEntry, BondedOffer, ComputePoolModel, ExposureInputs, JobId, OfferBondId,
+    UnitId, UnitKey, UnitSizing, UnitState, WorkItemKey, WorkUnit,
 };
-use sumchain_state::compute_pool_store::ComputePoolStore;
+use sumchain_state::compute_pool_store::{unit_key_bytes, ComputePoolStore};
 use sumchain_state::executor::BlockExecutor;
 use sumchain_state::reorg_undo::{stage_branch_unwind, MissingJournalPolicy, SubsystemJournals};
 use sumchain_state::state::StateManager;
+use sumchain_storage::exec_view::ExecutionView;
+use sumchain_storage::overlay::ApplicationOverlay;
 use sumchain_storage::subsystem_journal::SubsystemGates;
 use sumchain_storage::{cf, Database};
 use sumchain_wire::compute_pool_wire::{
@@ -279,6 +287,12 @@ impl Node {
 /// A model holding one job of one blocked unit, requested by `requester`.
 fn one_job(job: JobId, unit: UnitId, requester: Address) -> ComputePoolModel {
     let mut m = ComputePoolModel::new();
+    add_one_job(&mut m, job, unit, requester);
+    m
+}
+
+/// Add a job of one blocked unit, at generation 0, to `m`.
+fn add_one_job(m: &mut ComputePoolModel, job: JobId, unit: UnitId, requester: Address) {
     m.create_job(
         job,
         requester,
@@ -305,7 +319,6 @@ fn one_job(job: JobId, unit: UnitId, requester: Address) -> ComputePoolModel {
         1_000_000,
     )
     .unwrap();
-    m
 }
 
 /// Write `model`'s rows into committed state, as the blocks that built it
@@ -635,4 +648,204 @@ fn the_same_blocks_give_the_same_rows_and_roots() {
         y.store().state_digest().unwrap()
     );
     assert_eq!(on_x[1].0, vec![(TxStatus::Failed(0), 0); 2]);
+}
+
+// ── DeclineWorkUnitV1 ───────────────────────────────────────────────────────
+
+fn decline_of(item: &WorkItemKey) -> ComputePoolOperation {
+    decline(
+        *item.job_id.as_bytes(),
+        *item.unit_id.as_bytes(),
+        item.generation,
+    )
+}
+
+/// The model the committed rows encode.
+fn committed_model(db: &Database) -> ComputePoolModel {
+    let mut overlay = ApplicationOverlay::new(db, common::TEST_CANDIDATE_LIMIT);
+    let view = ExecutionView::new(&mut overlay);
+    ComputePoolStore::v_load_model(&view).unwrap()
+}
+
+/// Seed, beside the committed rows, a job whose one unit is assigned at
+/// generation 0 to `offer`: what job creation and assignment would leave.
+/// Neither executes yet (their rules are not decided), so this parent is
+/// seeded rather than produced.
+fn seed_assigned(node: &Node, offer: OfferBondId, payment: Address) -> WorkItemKey {
+    let (job, unit) = (
+        JobId::from_bytes([0x10; 32]),
+        UnitId::from_bytes([0x20; 32]),
+    );
+    let mut model = committed_model(&node.db);
+    add_one_job(&mut model, job, unit, key(OTHER).address());
+    for to in [UnitState::Eligible, UnitState::Assigned] {
+        model.transition_unit(&UnitKey::new(job, unit), to).unwrap();
+    }
+    let item = WorkItemKey::new(job, unit, 0);
+    model
+        .put_assignment(AssignmentIndexEntry {
+            key: item,
+            winner_offer_bond_id: offer,
+            winner_payment_addr: payment,
+        })
+        .unwrap();
+    seed_rows(&node.db, &model);
+    item
+}
+
+fn unit_state(node: &Node, item: &WorkItemKey) -> UnitState {
+    let unit = node.store().get_unit(&item.job_id, &item.unit_id).unwrap();
+    unit.expect("the unit is held").state().unwrap()
+}
+
+#[test]
+fn the_assigned_worker_declines_and_nothing_is_slashed() {
+    let node = Node::new(params_open());
+    let (worker, other) = (key(WORKER), key(OTHER));
+    node.block(1, vec![op_tx(&worker, 0, publish(0, 1 << 20, &other))]);
+    let item = seed_assigned(&node, offer_id(&worker, 0), other.address());
+    let rows = node.store().load_state_map().unwrap();
+    let offer = node.store().get_offer(&offer_id(&worker, 0)).unwrap();
+    let assignment = node.store().get_assignment(&item).unwrap();
+    assert!(offer.is_some() && assignment.is_some());
+
+    let (receipts, block) = node.block(2, vec![op_tx(&worker, 1, decline_of(&item))]);
+    assert_eq!(receipts, vec![(TxStatus::Success, FEE)]);
+
+    // The unit is back in the pool, at the same generation.
+    assert_eq!(unit_state(&node, &item), UnitState::Reassignable);
+
+    // Nothing else moved: the bond is still locked in the offer, the
+    // assignment record stays, and the worker paid the fee and nothing more.
+    assert_eq!(
+        node.store().get_offer(&offer_id(&worker, 0)).unwrap(),
+        offer
+    );
+    assert_eq!(node.store().get_assignment(&item).unwrap(), assignment);
+    assert_eq!(account(&node.db, &worker), (FUNDS - B_OFFER - 2 * FEE, 2));
+    let after = node.store().load_state_map().unwrap();
+    let changed: Vec<&Vec<u8>> = after
+        .iter()
+        .filter(|(k, v)| rows.get(*k) != Some(*v))
+        .map(|(k, _)| k)
+        .collect();
+    assert_eq!(after.len(), rows.len());
+    assert_eq!(changed, vec![&unit_key_bytes(&item.job_id, &item.unit_id)]);
+    let record = node
+        .store()
+        .load_journal(2, &block.hash())
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.records.len(), 1);
+}
+
+/// Only the identity behind the winning offer declines, only at the unit's
+/// current generation, and only while the unit is assigned. Every refusal is
+/// free and changes nothing.
+#[test]
+fn a_decline_from_anyone_else_or_for_anything_else_is_refused_free() {
+    let node = Node::new(params_open());
+    let (worker, other) = (key(WORKER), key(OTHER));
+    node.block(1, vec![op_tx(&worker, 0, publish(0, 1 << 20, &worker))]);
+    let item = seed_assigned(&node, offer_id(&worker, 0), worker.address());
+    let rows = node.store().load_state_map().unwrap();
+
+    let stale = WorkItemKey {
+        generation: 1,
+        ..item
+    };
+    let unknown = WorkItemKey {
+        unit_id: UnitId::from_bytes([0x77; 32]),
+        ..item
+    };
+    let (receipts, _) = node.block(
+        2,
+        vec![
+            // The job's requester, not the assigned worker.
+            op_tx(&other, 0, decline_of(&item)),
+            op_tx(&worker, 1, decline_of(&stale)),
+            op_tx(&worker, 1, decline_of(&unknown)),
+        ],
+    );
+    assert_eq!(receipts, vec![(TxStatus::Failed(0), 0); 3]);
+    assert_eq!(node.store().load_state_map().unwrap(), rows);
+    assert_eq!(account(&node.db, &other), (FUNDS, 0));
+    assert_eq!(account(&node.db, &worker), (FUNDS - FEE - B_OFFER, 1));
+
+    // Declined once, the unit is no longer assigned: a second decline is
+    // refused, in the same block and in a later one.
+    let (receipts, _) = node.block(
+        3,
+        vec![
+            op_tx(&worker, 1, decline_of(&item)),
+            op_tx(&worker, 2, decline_of(&item)),
+        ],
+    );
+    assert_eq!(
+        receipts,
+        vec![(TxStatus::Success, FEE), (TxStatus::Failed(0), 0)]
+    );
+    let (receipts, _) = node.block(4, vec![op_tx(&worker, 2, decline_of(&item))]);
+    assert_eq!(receipts, vec![(TxStatus::Failed(0), 0)]);
+    assert_eq!(unit_state(&node, &item), UnitState::Reassignable);
+}
+
+/// Reverting the block that declined restores the assigned unit and the
+/// worker's fee in one unwind; the same decline then applies again, to the
+/// same rows.
+#[test]
+fn a_reorg_reverts_a_decline() {
+    let node = Node::new(params_open());
+    let worker = key(WORKER);
+    node.block(1, vec![op_tx(&worker, 0, publish(0, 1 << 20, &worker))]);
+    let item = seed_assigned(&node, offer_id(&worker, 0), worker.address());
+    let parent = snapshot(&node.db);
+    let parent_root = node.state.state_root();
+
+    let (receipts, fork) = node.block(2, vec![op_tx(&worker, 1, decline_of(&item))]);
+    assert_eq!(receipts, vec![(TxStatus::Success, FEE)]);
+    assert_eq!(unit_state(&node, &item), UnitState::Reassignable);
+    let declined = node.store().load_state_map().unwrap();
+
+    unwind(&node.db, &[fork]);
+    assert_eq!(snapshot(&node.db), parent, "the decline left no trace");
+    assert_eq!(unit_state(&node, &item), UnitState::Assigned);
+    assert_eq!(account(&node.db, &worker), (FUNDS - FEE - B_OFFER, 1));
+    node.state.set_state_root(parent_root);
+
+    let (receipts, _) = node.block(2, vec![op_tx(&worker, 1, decline_of(&item))]);
+    assert_eq!(receipts, vec![(TxStatus::Success, FEE)]);
+    assert_eq!(node.store().load_state_map().unwrap(), declined);
+}
+
+/// Two nodes that decline the same work item in the same blocks hold the
+/// same rows and compute the same roots.
+#[test]
+fn the_same_decline_gives_the_same_rows_and_roots() {
+    let (worker, other) = (key(WORKER), key(OTHER));
+    let run = |node: &Node| {
+        let mut roots = Vec::new();
+        node.block(1, vec![op_tx(&worker, 0, publish(0, 1 << 20, &worker))]);
+        roots.push(node.state.state_root());
+        let item = seed_assigned(node, offer_id(&worker, 0), worker.address());
+        let (receipts, _) = node.block(
+            2,
+            vec![
+                op_tx(&other, 0, decline_of(&item)),
+                op_tx(&worker, 1, decline_of(&item)),
+            ],
+        );
+        assert_eq!(
+            receipts,
+            vec![(TxStatus::Failed(0), 0), (TxStatus::Success, FEE)]
+        );
+        roots.push(node.state.state_root());
+        roots
+    };
+    let (x, y) = (Node::new(params_open()), Node::new(params_open()));
+    assert_eq!(run(&x), run(&y));
+    assert_eq!(
+        x.store().load_state_map().unwrap(),
+        y.store().load_state_map().unwrap()
+    );
 }
