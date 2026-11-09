@@ -1203,16 +1203,23 @@ impl ComputePoolModel {
     /// FROM the model's own state and reject a duplicate offer-bond id, then
     /// lock the offer. Validate-before-mutate.
     pub fn publish_offer(&mut self, offer: BondedOffer) -> PoolResult<()> {
+        self.check_publish_offer(&offer)?;
+        let (id, identity, active) = (offer.offer_bond_id, offer.identity, offer.active);
+        self.offers.insert(id, offer);
+        if active {
+            self.active_offer_by_identity.insert(identity, id);
+        }
+        Ok(())
+    }
+
+    /// The checks [`publish_offer`](Self::publish_offer) runs, without
+    /// publishing: what an executor asks before it charges the bond.
+    pub fn check_publish_offer(&self, offer: &BondedOffer) -> PoolResult<()> {
         if offer.active && self.active_offer_by_identity.contains_key(&offer.identity) {
             return Err(PoolError::DuplicateActiveOffer);
         }
         if self.offers.contains_key(&offer.offer_bond_id) {
             return Err(PoolError::DuplicateOffer);
-        }
-        let (id, identity, active) = (offer.offer_bond_id, offer.identity, offer.active);
-        self.offers.insert(id, offer);
-        if active {
-            self.active_offer_by_identity.insert(identity, id);
         }
         Ok(())
     }
@@ -2379,6 +2386,48 @@ mod tests {
         m.publish_offer(o.clone()).unwrap();
         let before = m.clone();
         assert_eq!(m.publish_offer(o), Err(PoolError::DuplicateOffer));
+        assert_eq!(m, before);
+    }
+
+    #[test]
+    fn check_publish_offer_answers_as_publish_would_and_changes_nothing() {
+        let mut m = ComputePoolModel::new();
+        let first = BondedOffer::from_publish(
+            1,
+            addr(3),
+            &sumchain_wire::compute_pool_wire::PublishBondedOfferV1 {
+                offer_seq: 0,
+                offered_bytes: 1_000,
+                payment_addr: addr(4),
+            },
+            500,
+        );
+        assert_eq!(m.check_publish_offer(&first), Ok(()));
+        assert_eq!(m, ComputePoolModel::new(), "a check publishes nothing");
+        m.publish_offer(first.clone()).unwrap();
+
+        let second = BondedOffer {
+            offer_bond_id: offer(9),
+            offer_seq: 1,
+            ..first.clone()
+        };
+        let before = m.clone();
+        assert_eq!(
+            m.check_publish_offer(&second),
+            Err(PoolError::DuplicateActiveOffer)
+        );
+        assert_eq!(
+            m.check_publish_offer(&first),
+            Err(PoolError::DuplicateActiveOffer)
+        );
+        let inactive_repeat = BondedOffer {
+            active: false,
+            ..first
+        };
+        assert_eq!(
+            m.check_publish_offer(&inactive_repeat),
+            Err(PoolError::DuplicateOffer)
+        );
         assert_eq!(m, before);
     }
 

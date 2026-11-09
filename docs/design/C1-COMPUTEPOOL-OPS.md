@@ -144,6 +144,12 @@ the stored rows each block:
   steps are replayed once, at the apply seam, through the C1 manager, which
   stages the row delta and its undo journal. Account effects and C1 rows
   revert together on reorg.
+- **`PublishBondedOfferV1`**: the offer id is derived from the chain id, the
+  sender and `offer_seq`; an identity holds at most one active offer; the
+  sender pays the fee and `B_offer` (the declared `compute_pool_params.b_offer`)
+  together, and the offer row records `B_offer` as locked. With no parameters
+  declared it is refused. When an offer ends and its bond returns is not
+  decided, so nothing withdraws one yet.
 - **Not executable** (their rules are undecided): create job, accept, expire,
   cancel, assign and reassign. Each decodes and is refused.
 

@@ -14,9 +14,15 @@
 //! * Each block rebuilds the model from the stored rows, so a parent that
 //!   already holds C1 rows no longer makes every later block fail at the
 //!   apply seam: [`blocks_over_existing_c1_rows_rebuild_the_model_and_publish`].
+//! * `PublishBondedOfferV1`: [`a_published_offer_locks_b_offer_under_its_derived_id`],
+//!   [`an_identity_holds_one_active_offer`],
+//!   [`an_unpayable_or_unpriced_offer_is_refused_free`],
+//!   [`a_reorg_reverts_the_offer_and_its_bond_together`] and
+//!   [`the_same_blocks_give_the_same_rows_and_roots`].
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use common::{fund, publish_block_returning, setup_with_params, CHAIN_ID};
@@ -28,11 +34,14 @@ use sumchain_primitives::{
     Address, Block, Hash, Receipt, SignedTransaction, TransactionV2, TxPayload, TxStatus,
 };
 use sumchain_state::compute_pool::{
-    ComputePoolModel, ExposureInputs, JobId, UnitId, UnitSizing, UnitState, WorkUnit,
+    BondedOffer, ComputePoolModel, ExposureInputs, JobId, OfferBondId, UnitId, UnitSizing,
+    UnitState, WorkUnit,
 };
 use sumchain_state::compute_pool_store::ComputePoolStore;
 use sumchain_state::executor::BlockExecutor;
+use sumchain_state::reorg_undo::{stage_branch_unwind, MissingJournalPolicy, SubsystemJournals};
 use sumchain_state::state::StateManager;
+use sumchain_storage::subsystem_journal::SubsystemGates;
 use sumchain_storage::{cf, Database};
 use sumchain_wire::compute_pool_wire::{
     AcceptWorkUnitV1, AssignWorkUnitV1, CancelJobV1, ComputePoolOperation, CreateComputePoolJobV1,
@@ -388,4 +397,242 @@ fn blocks_over_existing_c1_rows_rebuild_the_model_and_publish() {
         let record = node.store().load_journal(height, &block.hash()).unwrap();
         assert!(record.unwrap().is_empty());
     }
+}
+
+// ── PublishBondedOfferV1 ────────────────────────────────────────────────────
+
+/// The id a publish from `kp` with `offer_seq` derives on this chain.
+fn offer_id(kp: &KeyPair, offer_seq: u64) -> OfferBondId {
+    OfferBondId::derive(CHAIN_ID, &kp.address(), offer_seq)
+}
+
+const GATES: SubsystemGates = SubsystemGates {
+    compute_pool: Some(0),
+    beacon: None,
+};
+
+/// Every row of the families a reorg must restore, plus the C1 undo records,
+/// so a revert that left a journal behind is caught too.
+fn snapshot(db: &Database) -> BTreeMap<(&'static str, Vec<u8>), Vec<u8>> {
+    let mut out = BTreeMap::new();
+    for family in [
+        cf::STATE,
+        cf::COMPUTE_POOL_STATE,
+        cf::COMPUTE_POOL_STATE_DIFFS,
+    ] {
+        for (k, v) in db.full_iter(family).unwrap() {
+            out.insert((family, k.to_vec()), v.to_vec());
+        }
+    }
+    out
+}
+
+/// Unwind `branch` (ancestor first) the way the consensus reorg does, and
+/// commit it.
+fn unwind(db: &Database, branch: &[Block]) {
+    let mut batch = db.batch();
+    let journals = SubsystemJournals::new(db, GATES);
+    stage_branch_unwind(
+        db,
+        &mut batch,
+        branch,
+        &journals,
+        MissingJournalPolicy::ToleratedEverywhere,
+    )
+    .expect("the branch unwinds");
+    batch.commit().unwrap();
+}
+
+#[test]
+fn a_published_offer_locks_b_offer_under_its_derived_id() {
+    let node = Node::new(params_open());
+    let (worker, other, proposer) = (key(WORKER), key(OTHER), key(PROPOSER));
+    let (receipts, block) = node.block(1, vec![op_tx(&worker, 0, publish(3, 1 << 30, &other))]);
+    assert_eq!(receipts, vec![(TxStatus::Success, FEE)]);
+
+    // The sender paid the fee and `B_offer`; the proposer was paid the fee.
+    assert_eq!(account(&node.db, &worker), (FUNDS - FEE - B_OFFER, 1));
+    assert_eq!(account(&node.db, &proposer), (FEE, 0));
+
+    // The offer sits under the ratified derivation of (chain id, sender,
+    // offer_seq), with the sender as its identity and `B_offer` locked.
+    let id = offer_id(&worker, 3);
+    assert_eq!(
+        *id.as_bytes(),
+        sumchain_wire::compute_pool_graph::offer_bond_id(CHAIN_ID, &worker.address(), 3)
+    );
+    let offer = node.store().get_offer(&id).unwrap().expect("published");
+    assert_eq!(
+        offer.to_model(),
+        BondedOffer {
+            offer_bond_id: id,
+            identity: worker.address(),
+            payment_addr: other.address(),
+            offered_bytes: 1 << 30,
+            offer_seq: 3,
+            bond_locked: B_OFFER,
+            active: true,
+        }
+    );
+    assert_eq!(
+        node.store().active_offer_of(&worker.address()).unwrap(),
+        Some(id)
+    );
+    assert_eq!(
+        node.store().load_state_map().unwrap().len(),
+        2,
+        "the offer and its index row, nothing else"
+    );
+
+    // The block published the record that undoes both rows.
+    let record = node
+        .store()
+        .load_journal(1, &block.hash())
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.records.len(), 2);
+}
+
+/// One active offer per identity: enforced against the model the block's
+/// earlier transactions left, and against the stored rows in later blocks.
+/// A refused publish pays nothing, not even its fee.
+#[test]
+fn an_identity_holds_one_active_offer() {
+    let node = Node::new(params_open());
+    let (worker, other) = (key(WORKER), key(OTHER));
+    let (receipts, _) = node.block(
+        1,
+        vec![
+            op_tx(&worker, 0, publish(0, 100, &worker)),
+            op_tx(&worker, 1, publish(1, 200, &worker)),
+            op_tx(&other, 0, publish(0, 300, &other)),
+        ],
+    );
+    assert_eq!(
+        receipts,
+        vec![
+            (TxStatus::Success, FEE),
+            (TxStatus::Failed(0), 0),
+            (TxStatus::Success, FEE),
+        ]
+    );
+    let (receipts, _) = node.block(2, vec![op_tx(&worker, 1, publish(2, 400, &worker))]);
+    assert_eq!(receipts, vec![(TxStatus::Failed(0), 0)]);
+
+    assert_eq!(account(&node.db, &worker), (FUNDS - FEE - B_OFFER, 1));
+    assert_eq!(account(&node.db, &other), (FUNDS - FEE - B_OFFER, 1));
+    assert_eq!(
+        node.store().load_state_map().unwrap().len(),
+        4,
+        "two offers and their index rows"
+    );
+    for refused in [1, 2] {
+        assert!(node
+            .store()
+            .get_offer(&offer_id(&worker, refused))
+            .unwrap()
+            .is_none());
+    }
+}
+
+/// A publish whose sender cannot pay the fee and `B_offer` together, or one
+/// on a chain that declares no `B_offer`, is refused free and writes nothing.
+#[test]
+fn an_unpayable_or_unpriced_offer_is_refused_free() {
+    let node = Node::new(params_open());
+    let poor = key(0x43);
+    fund(&node.db, &poor, FEE + B_OFFER - 1);
+    let (receipts, _) = node.block(1, vec![op_tx(&poor, 0, publish(0, 100, &poor))]);
+    assert_eq!(receipts, vec![(TxStatus::Failed(0), 0)]);
+    assert_eq!(account(&node.db, &poor), (FEE + B_OFFER - 1, 0));
+    assert!(node.store().load_state_map().unwrap().is_empty());
+
+    // One more unit and the same publish is paid for exactly.
+    common::credit_committed(&node.db, &poor.address(), 1);
+    let (receipts, _) = node.block(2, vec![op_tx(&poor, 0, publish(0, 100, &poor))]);
+    assert_eq!(receipts, vec![(TxStatus::Success, FEE)]);
+    assert_eq!(account(&node.db, &poor), (0, 1));
+
+    // The gate open with no parameters declared: `B_offer` has no value.
+    let mut unpriced = params_open();
+    unpriced.compute_pool_params = None;
+    let node = Node::new(unpriced);
+    let worker = key(WORKER);
+    let (receipts, _) = node.block(1, vec![op_tx(&worker, 0, publish(0, 100, &worker))]);
+    assert_eq!(receipts, vec![(TxStatus::Failed(0), 0)]);
+    assert_eq!(account(&node.db, &worker), (FUNDS, 0));
+    assert!(node.store().load_state_map().unwrap().is_empty());
+}
+
+/// Reverting a block that published an offer restores the sender's balance,
+/// removes the offer and its index row, and consumes the C1 record, in one
+/// unwind. The replacement block is then decided against the restored parent.
+#[test]
+fn a_reorg_reverts_the_offer_and_its_bond_together() {
+    let node = Node::new(params_open());
+    let (worker, other) = (key(WORKER), key(OTHER));
+    node.block(1, vec![op_tx(&other, 0, publish(0, 100, &other))]);
+    let parent = snapshot(&node.db);
+    let parent_root = node.state.state_root();
+
+    let (receipts, fork) = node.block(2, vec![op_tx(&worker, 0, publish(0, 200, &worker))]);
+    assert_eq!(receipts, vec![(TxStatus::Success, FEE)]);
+    assert_ne!(snapshot(&node.db), parent);
+
+    unwind(&node.db, &[fork]);
+    assert_eq!(snapshot(&node.db), parent, "the fork left no trace");
+    assert_eq!(account(&node.db, &worker), (FUNDS, 0));
+    assert!(node
+        .store()
+        .get_offer(&offer_id(&worker, 0))
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        node.store().active_offer_of(&worker.address()).unwrap(),
+        None
+    );
+    node.state.set_state_root(parent_root);
+
+    let (receipts, _) = node.block(2, vec![op_tx(&worker, 0, publish(0, 300, &worker))]);
+    assert_eq!(receipts, vec![(TxStatus::Success, FEE)]);
+    let offer = node.store().get_offer(&offer_id(&worker, 0)).unwrap();
+    assert_eq!(offer.unwrap().offered_bytes, 300);
+}
+
+/// Two nodes executing the same blocks hold the same C1 rows and compute the
+/// same roots, into which the C1 digest is folded.
+#[test]
+fn the_same_blocks_give_the_same_rows_and_roots() {
+    let (worker, other) = (key(WORKER), key(OTHER));
+    let blocks = || {
+        vec![
+            vec![
+                op_tx(&worker, 0, publish(7, 1 << 20, &other)),
+                op_tx(&other, 0, publish(0, 5, &other)),
+            ],
+            vec![
+                op_tx(&worker, 1, publish(8, 1, &worker)),
+                pool_tx(&other, 1, vec![1, 2, 3]),
+            ],
+        ]
+    };
+    let run = |node: &Node| -> Vec<(Vec<(TxStatus, u128)>, Hash)> {
+        blocks()
+            .into_iter()
+            .enumerate()
+            .map(|(i, txs)| (node.block(i as u64 + 1, txs).0, node.state.state_root()))
+            .collect()
+    };
+    let (x, y) = (Node::new(params_open()), Node::new(params_open()));
+    let on_x = run(&x);
+    assert_eq!(on_x, run(&y));
+    assert_eq!(
+        x.store().load_state_map().unwrap(),
+        y.store().load_state_map().unwrap()
+    );
+    assert_eq!(
+        x.store().state_digest().unwrap(),
+        y.store().state_digest().unwrap()
+    );
+    assert_eq!(on_x[1].0, vec![(TxStatus::Failed(0), 0); 2]);
 }
