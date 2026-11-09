@@ -10,7 +10,8 @@ publish = false
 
 # Deliberately no dependency on any other workspace crate: nothing here may reach
 # block import, consensus or storage until a reviewed wiring change, and
-# `tests/dormant.rs` fails if any workspace crate starts depending on this one.
+# `tests/dormant.rs` fails if any crate other than the node's reviewed signer
+# wiring depends on this one.
 [dependencies]
 thiserror = { workspace = true }
 # E1 strict verification of FinalityVoteV1 signatures (`vote`). The
