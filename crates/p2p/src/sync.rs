@@ -53,7 +53,10 @@ pub enum SyncRequest {
     },
     /// Request a specific block by hash
     GetBlockByHash(Hash),
-    /// Ask the peer which protocol digest its BINARY enforces.
+    /// Ask the peer which digest it declares: its handshake digest, which
+    /// folds the protocol digest its BINARY enforces with the commitment of the
+    /// consensus configuration it runs
+    /// (`sumchain_consensus::consensus_config::handshake`).
     ///
     /// APPENDED, never inserted. bincode encodes the variant as its declared
     /// index, so a new variant at the end is one a peer built before this change
@@ -82,13 +85,18 @@ pub enum SyncResponse {
     Block(Option<Block>),
     /// Error response
     Error(String),
-    /// The digest of the activation heights AND consensus constants the
-    /// responder's binary enforces (`sumchain_state::protocol_digest`).
+    /// The digest the responder declares: its handshake digest, over the
+    /// activation heights, the consensus constants and the consensus
+    /// configuration it runs (`sumchain_consensus::consensus_config::handshake`).
     ///
-    /// Appended for the same reason as `SyncRequest::GetProtocolId`.
+    /// Appended for the same reason as `SyncRequest::GetProtocolId`. A release
+    /// before the handshake digest put its protocol digest
+    /// (`sumchain_state::protocol_digest`) in these same 32 bytes; the two
+    /// values never agree, so such a peer is refused, and the message's shape
+    /// is unchanged.
     ProtocolId {
-        /// `sumchain_state::protocol_digest::protocol_digest`, as computed by
-        /// the responder from ITS genesis and ITS compiled-in constants.
+        /// `sumchain_consensus::consensus_config::handshake_digest_for`, as
+        /// computed by the responder from ITS genesis and ITS binary.
         digest: Hash,
     },
 }

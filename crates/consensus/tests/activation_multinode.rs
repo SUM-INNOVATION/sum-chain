@@ -614,7 +614,7 @@ async fn three_validators_crossing_one_activation_height_agree_at_every_height()
 /// | `Genesis::from_json` / `ChainParams::validate` | ACCEPTS both |
 /// | `validate_runtime_activation` | ACCEPTS both |
 /// | `Genesis::activation_digest` | DIFFERS — operator-facing, compared by eye |
-/// | `protocol_digest` | DIFFERS — and is now compared BY THE NODE, at the peer handshake |
+/// | `protocol_digest` | DIFFERS — and is compared BY THE NODE, folded into the handshake digest, at the peer handshake |
 /// | the peer handshake (`SyncRequest::GetProtocolId`) | REFUSES the odd node — see below |
 /// | block execution | the odd node computes a DIFFERENT root |
 /// | `accept_imported`, at these heights | ADOPTS the header root — no refusal |
@@ -699,10 +699,11 @@ async fn a_validator_with_a_different_activation_height_forks_silently_below_the
 
     // ── layer 3b: the protocol digest, which is the value the NODE compares ──
     //
-    // The same difference, in the value that now crosses the wire at the peer
-    // handshake. A peer declaring the odd node's digest is refused by
-    // `BlockSyncer::on_protocol_id_response` before it can offer a block, which
-    // is what turns the operator-facing signal above into a control.
+    // The same difference, in the value the handshake digest that crosses the
+    // wire at the peer handshake folds whole. A peer declaring the odd node's
+    // digest is refused by `BlockSyncer::on_protocol_id_response` before it can
+    // offer a block, which is what turns the operator-facing signal above into
+    // a control.
     assert_ne!(
         sumchain_state::protocol_digest::protocol_digest(&majority).expect("digest"),
         sumchain_state::protocol_digest::protocol_digest(&odd).expect("digest"),

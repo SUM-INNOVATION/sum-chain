@@ -54,10 +54,14 @@
 //! # What it is not
 //!
 //! It is not a consensus value and nothing in block validation reads it. It is a
-//! PRE-FLIGHT value: computed before consensus exists, published on the wire at
-//! handshake (`sumchain_p2p::SyncRequest::GetProtocolId`) and on the operator
-//! RPC surface. A peer that declares a different one is refused; a peer too old
-//! to declare one at all is not. See `crates/p2p/src/block_syncer.rs`.
+//! PRE-FLIGHT value: computed before consensus exists and published on the
+//! operator RPC surface. What a node declares at handshake
+//! (`sumchain_p2p::SyncRequest::GetProtocolId`) is the handshake digest, which
+//! folds this digest whole with the commitment of the consensus configuration
+//! the node runs (`sumchain_consensus::consensus_config::handshake`), so a
+//! difference here is a difference there. A peer that declares a different one
+//! is refused; a peer too old to declare one at all is not. See
+//! `crates/p2p/src/block_syncer.rs`.
 //!
 //! That last sentence is true UNCONDITIONALLY only below
 //! `ChainParams::peer_protocol_declaration_required_from_height`. Admitting a
