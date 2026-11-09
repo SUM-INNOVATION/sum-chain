@@ -26,8 +26,6 @@ use sumchain_storage::branch::BranchState;
 use sumchain_storage::candidate::{
     BlockJournals, CandidateExecution, ExecutionSubject, JournalRecord,
 };
-use sumchain_storage::certified::FinalizedPointer;
-use sumchain_storage::certified_meta::{certificate_key, encode_pointer, FINALIZED_POINTER_KEY};
 use sumchain_storage::db::{cf, Database};
 use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::journal::ApplicationJournal;
@@ -36,10 +34,10 @@ use sumchain_storage::schema::{
     ValidatorSetStore, ACCOUNT_KEY_PREFIX,
 };
 use sumchain_storage::validator_set_g5::{
-    certified_height, check_restart, check_stored_rows, governing_set, read_candidates,
-    read_candidates_in, require_transition_certified, resolve_set, select_members,
-    stage_boundary_row, stage_transition_row, BranchRows, Candidate, EpochSchedule, G5Error,
-    G5Membership, RowlessEpoch, Selection, StagedTransition, VsetLayout, EFFECTIVE_VALIDATOR_CAP,
+    check_restart, check_stored_rows, governing_set, read_candidates, read_candidates_in,
+    require_transition_certified, resolve_set, select_members, stage_boundary_row,
+    stage_transition_row, BranchRows, Candidate, EpochSchedule, G5Error, G5Membership,
+    RowlessEpoch, Selection, StagedTransition, VsetLayout, EFFECTIVE_VALIDATOR_CAP,
 };
 use sumchain_storage::validator_set_record::ValidatorSetRecord;
 use sumchain_storage::validator_set_state::StateError;
@@ -1248,31 +1246,6 @@ fn wiring_governing_set_checks_q2_before_it_reads_a_row() {
         governing_set(&d, 7, &m, Some(3)).unwrap(),
         smallest_five(31..=36)
     );
-}
-
-#[test]
-fn wiring_certified_height_reads_the_pointer_and_fails_closed() {
-    let (d, _t) = db();
-    assert_eq!(certified_height(&d).unwrap(), None);
-    // A certificate row without a pointer: the pointer was lost.
-    d.put(cf::META, &certificate_key(4, &Hash::hash(b"b4")), b"cert")
-        .unwrap();
-    assert!(matches!(
-        certified_height(&d),
-        Err(G5Error::CertifiedPointer(_))
-    ));
-    let pointer = FinalizedPointer {
-        height: 9,
-        hash: Hash::hash(b"b9"),
-    };
-    d.put(cf::META, FINALIZED_POINTER_KEY, &encode_pointer(&pointer))
-        .unwrap();
-    assert_eq!(certified_height(&d).unwrap(), Some(9));
-    d.put(cf::META, FINALIZED_POINTER_KEY, b"short").unwrap();
-    assert!(matches!(
-        certified_height(&d),
-        Err(G5Error::CertifiedPointer(_))
-    ));
 }
 
 // ── #351 wiring: restart and reorg ──────────────────────────────────────────

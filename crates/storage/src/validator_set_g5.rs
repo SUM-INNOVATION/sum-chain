@@ -146,7 +146,8 @@
 //! * **Header validation and the proposer (Q0, Q2).** The set for block H is
 //!   [`governing_set`]: Q2 first, then [`resolve_set`] over the rows of H's
 //!   parent's ancestry, never a "latest" row. Its `certified` argument is the
-//!   highest certified height on that ancestry: [`certified_height`], capped
+//!   highest certified height on that ancestry: the height the reorg and
+//!   rollback guard reads (`crate::certified_guard::certified_block`), capped
 //!   at the height where the ancestry leaves the canonical chain. With that
 //!   cap, a set whose transition block lies above the fork point never
 //!   governs, so every row that governs is on the canonical chain the
@@ -184,10 +185,12 @@
 //! * **Committed reads.** [`read_candidates`] reads committed state through a
 //!   [`Database`]. The wiring uses [`read_candidates_in`], which reads the
 //!   block's own [`ExecutionView`].
-//! * **Certificates.** [`certified_height`] reads the finalized pointer of the
-//!   certified-commit layout (`crate::certified_meta`) and fails closed. It
-//!   does not re-verify certificates; that is the certified-commit store's
-//!   start-up recovery, which is not wired here.
+//! * **Certificates.** This module reads no certified height: the caller
+//!   passes it. The engine passes the height of
+//!   `crate::certified_guard::certified_block`, the one reader of the
+//!   finalized pointer of the certified-commit layout (`crate::certified_meta`),
+//!   which fails closed. It does not re-verify certificates; that is the
+//!   start-up audit's.
 //! * **The engine's legacy-row refusal.** It is unchanged and runs with or
 //!   without a configuration. [`check_stored_rows`] is its G5 counterpart and
 //!   runs only with one.
@@ -197,7 +200,6 @@ use std::cmp::Ordering;
 use sumchain_primitives::{Balance, BlockHeight};
 
 use crate::branch::BranchState;
-use crate::certified_meta::{decode_pointer, CERTIFICATE_KEY_PREFIX, FINALIZED_POINTER_KEY};
 use crate::db::{cf, Database};
 use crate::exec_view::ExecutionView;
 use crate::schema::{
@@ -796,7 +798,7 @@ pub fn stage_boundary_row(
 /// Q2 is checked first: a set whose transition block is not at or below
 /// `certified` does not govern, and the block cannot be validated or proposed
 /// yet. `certified` is the highest certified height on the parent's ancestry
-/// (module docs: [`certified_height`] capped at the fork point).
+/// (module docs: the guard's certified height, capped at the fork point).
 pub fn governing_set<S>(
     rows: &S,
     height: BlockHeight,
@@ -808,35 +810,6 @@ where
 {
     require_transition_certified(height, &membership.schedule, certified)?;
     resolve_set(rows, &membership.anchor, height, &membership.schedule)
-}
-
-/// The certified height the certified-commit layout records: the height of
-/// its finalized pointer (`crate::certified_meta`).
-///
-/// Fail-closed. `Ok(None)` only when the pointer is absent and no certificate
-/// row exists. An unreadable or undecodable pointer, or certificate rows with
-/// no pointer, is an error, never "nothing certified". Certificates are not
-/// re-verified here (module docs).
-pub fn certified_height(db: &Database) -> Result<Option<BlockHeight>, G5Error> {
-    let pointer = db
-        .get(cf::META, FINALIZED_POINTER_KEY)
-        .map_err(|e| G5Error::CertifiedPointer(e.to_string()))?;
-    if let Some(bytes) = pointer {
-        let pointer = decode_pointer(&bytes).map_err(G5Error::CertifiedPointer)?;
-        return Ok(Some(pointer.height));
-    }
-    let mut rows = db
-        .prefix_iter_checked(cf::META, CERTIFICATE_KEY_PREFIX)
-        .map_err(|e| G5Error::CertifiedPointer(e.to_string()))?;
-    if let Some(entry) = rows.next() {
-        let (key, _) = entry.map_err(|e| G5Error::CertifiedPointer(e.to_string()))?;
-        if key.starts_with(CERTIFICATE_KEY_PREFIX) {
-            return Err(G5Error::CertifiedPointer(
-                "certificate rows exist but the finalized pointer is absent".to_string(),
-            ));
-        }
-    }
-    Ok(None)
 }
 
 /// Q5 and the restart rule: [`check_stored_rows`], then the set that governs
