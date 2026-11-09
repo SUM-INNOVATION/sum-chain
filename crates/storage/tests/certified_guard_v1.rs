@@ -440,6 +440,9 @@ fn code_lines(text: &str) -> impl Iterator<Item = &str> {
 ///
 /// * `crates/consensus/src/reorg.rs`: the chain-switch check the engine's
 ///   `import_reorg` calls, and the rollback check `execute_rollback` calls;
+/// * `crates/consensus/src/membership.rs`: Q2's certified height for the
+///   dormant G5 validator-set wiring (#351), read through `certified_block` so
+///   that there is one certified-height reader;
 /// * `crates/node/src/node.rs`: the start-up audit, before the engine exists;
 /// * `crates/node/src/main.rs`: the `rollback` command's start-up audit and its
 ///   early rollback check.
@@ -471,6 +474,7 @@ fn the_guard_is_consulted_by_fork_choice_rollback_and_start_up_only() {
     }
     assert!(scanned > 100, "the scan found too few sources");
     let expected: BTreeSet<String> = [
+        "crates/consensus/src/membership.rs",
         "crates/consensus/src/reorg.rs",
         "crates/node/src/main.rs",
         "crates/node/src/node.rs",

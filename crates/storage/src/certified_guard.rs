@@ -47,6 +47,12 @@
 //! * Node start-up and the `rollback` command run [`audit_at_start`] before
 //!   either of those can be reached.
 //!
+//! [`certified_block`] is also the one reader of the certified height for
+//! the dormant G5 validator-set wiring (#351): Q2's certified height in
+//! `sumchain_consensus::membership` is its height, so membership and the
+//! guard never read the pointer differently. No production path builds that
+//! configuration.
+//!
 //! Certified finality itself is still inactive. No production path writes a
 //! certificate or the pointer, and this binary has no certificate verifier, so
 //! [`audit_at_start`] passes only on a database that holds no certified-finality

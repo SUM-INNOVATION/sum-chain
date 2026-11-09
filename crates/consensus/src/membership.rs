@@ -19,13 +19,15 @@
 //!   resynchronization requirement.
 //! * **Header validation and the proposer.** The set for block H is
 //!   `governing_set`, read from the rows of H's parent's ancestry. Q2's
-//!   certified height is the certified pointer, capped where that ancestry
-//!   leaves the canonical chain, so only rows the ancestry shares with the
-//!   canonical chain can govern. They are read from committed state for a
-//!   block that arrives or is proposed, and from the replacement branch's
-//!   layer for a block of a chain switch. An arriving block whose parent is on
-//!   a side branch must show its proposer and signature under that set before
-//!   its ancestry is walked ([`set_for_arriving_block`]).
+//!   certified height is the certified pointer as the reorg and rollback
+//!   guard reads it (`certified_guard::certified_block`, the one reader of
+//!   the certified height), capped where that ancestry leaves the canonical
+//!   chain, so only rows the ancestry shares with the canonical chain can
+//!   govern. They are read from committed state for a block that arrives or
+//!   is proposed, and from the replacement branch's layer for a block of a
+//!   chain switch. An arriving block whose parent is on a side branch must
+//!   show its proposer and signature under that set before its ancestry is
+//!   walked ([`set_for_arriving_block`]).
 //! * **No membership in memory.** Every use resolves from rows. The legacy
 //!   in-memory set the engine keeps for protocol v1 is not read.
 
@@ -36,9 +38,9 @@ use sumchain_genesis::pool_topology::PRODUCT_MINIMUM;
 use sumchain_primitives::proposer::round_robin_proposer;
 use sumchain_primitives::{Balance, Block, BlockHeight};
 use sumchain_storage::branch::BranchState;
+use sumchain_storage::certified_guard::{certified_block, CrossingRefusal};
 use sumchain_storage::validator_set_g5::{
-    certified_height, check_stored_rows, governing_set, resolve_set, BranchRows, EpochSchedule,
-    G5Error,
+    check_stored_rows, governing_set, resolve_set, BranchRows, EpochSchedule, G5Error,
 };
 use sumchain_storage::{BlockStore, Database};
 
@@ -68,6 +70,27 @@ pub struct DormantMembershipRules {
 
 fn refused(e: G5Error) -> ConsensusError {
     ConsensusError::Membership(e.to_string())
+}
+
+/// Q2's certified height: the height of the certified block the reorg and
+/// rollback guard reads, `certified_guard::certified_block`, so the two never
+/// disagree (#351). Fail-closed: an unreadable or undecodable pointer,
+/// and certificate rows with no pointer, are `G5Error::CertifiedPointer`, never
+/// "nothing certified". Certificates are not re-verified here; that is the
+/// start-up audit's (`certified_guard::audit_at_start`).
+fn certified_height(db: &Database) -> std::result::Result<Option<BlockHeight>, G5Error> {
+    certified_block(db)
+        .map(|certified| certified.map(|c| c.height))
+        .map_err(|refusal| {
+            G5Error::CertifiedPointer(match refusal {
+                CrossingRefusal::UnreadablePointer(why) => why,
+                CrossingRefusal::CertificatesWithoutPointer { .. } => {
+                    "certificate rows exist but the finalized pointer is absent".to_string()
+                }
+                // A reorg or rollback verdict, which the reader never returns.
+                verdict => verdict.to_string(),
+            })
+        })
 }
 
 fn resynchronize(e: G5Error) -> ConsensusError {
@@ -408,5 +431,91 @@ mod tests {
         let b = block(parent.hash(), 6, &outsider, &outsider);
         let set = set_for_arriving_block(&db, &m, &b, Some(&parent), WALK).unwrap();
         assert_eq!(set, keys.iter().map(pk).collect::<Vec<_>>());
+    }
+
+    /// #351: Q2's certified height, at both of its call sites (a block on the
+    /// canonical ancestry, a block of a replacement branch), is the height the
+    /// reorg and rollback guard read, `certified_guard::certified_block`, in
+    /// every state of the pointer, and the refusals read as they did.
+    #[test]
+    fn both_q2_call_sites_see_the_certified_guard_height_in_every_state() {
+        use sumchain_storage::certified_meta::{
+            certificate_key, decode_pointer, FINALIZED_POINTER_KEY,
+        };
+
+        let (_dir, db) = open();
+        // L = 4, activation 0: block 8 is governed by epoch 2, whose transition
+        // block 7 is above every certified height below, so Q2 refuses it and
+        // names the certified height it was given.
+        let m = test_configuration(anchor_keys().iter().map(pk).collect(), 4);
+        let layer = BranchState::new(1 << 16);
+        let not_certified = |certified| G5Error::TransitionNotCertified {
+            height: 8,
+            epoch: 2,
+            transition: 7,
+            certified,
+        };
+        // Block 8 on an ancestry that leaves the canonical chain at `fork`:
+        // the canonical call site's refusal as the engine reports it, and the
+        // branch call site's.
+        let both = |fork: BlockHeight| -> (String, String) {
+            let canonical = set_on_canonical_ancestry(&db, &m, 8, fork).unwrap_err();
+            let branch = set_on_branch(&db, &layer, &m, 8, fork).unwrap_err();
+            (canonical.to_string(), branch.to_string())
+        };
+        let expect = |e: G5Error| -> (String, String) {
+            let text = e.to_string();
+            (refused(e).to_string(), text)
+        };
+
+        // Absent: nothing certified.
+        assert_eq!(certified_block(&db).unwrap(), None);
+        assert_eq!(both(100), expect(not_certified(None)));
+
+        // A certificate row without a pointer: refused, never "nothing
+        // certified".
+        db.put(cf::META, &certificate_key(4, &Hash::hash(b"b4")), b"cert")
+            .unwrap();
+        assert_eq!(
+            certified_block(&db),
+            Err(CrossingRefusal::CertificatesWithoutPointer { height: Some(4) })
+        );
+        let lost = G5Error::CertifiedPointer(
+            "certificate rows exist but the finalized pointer is absent".to_string(),
+        );
+        assert_eq!(
+            lost.to_string(),
+            "the certified finalized pointer cannot be read (certificate rows exist but the \
+             finalized pointer is absent); refusing rather than guessing which transitions are \
+             certified"
+        );
+        assert_eq!(both(100), expect(lost));
+
+        // Present (height LE ‖ hash, as the certified-commit layout writes
+        // it): the pointer's height, capped at the fork point.
+        let hash = Hash::hash(b"b5");
+        let mut pointer = 5u64.to_le_bytes().to_vec();
+        pointer.extend_from_slice(hash.as_bytes());
+        assert_eq!(decode_pointer(&pointer).unwrap().height, 5);
+        db.put(cf::META, FINALIZED_POINTER_KEY, &pointer).unwrap();
+        let guard = certified_block(&db).unwrap().map(|c| (c.height, c.hash));
+        assert_eq!(guard, Some((5, hash)));
+        assert_eq!(both(6), expect(not_certified(Some(5))));
+        assert_eq!(both(5), expect(not_certified(Some(5))));
+        assert_eq!(both(3), expect(not_certified(Some(3))));
+
+        // Undecodable: refused with the guard's reason.
+        db.put(cf::META, FINALIZED_POINTER_KEY, b"short").unwrap();
+        let Err(CrossingRefusal::UnreadablePointer(why)) = certified_block(&db) else {
+            panic!("the guard refuses an undecodable pointer");
+        };
+        assert_eq!(why, "pointer is 5 bytes, not 40");
+        let unreadable = G5Error::CertifiedPointer(why);
+        assert_eq!(
+            unreadable.to_string(),
+            "the certified finalized pointer cannot be read (pointer is 5 bytes, not 40); \
+             refusing rather than guessing which transitions are certified"
+        );
+        assert_eq!(both(100), expect(unreadable));
     }
 }
