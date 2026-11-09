@@ -77,10 +77,9 @@ fn model_with_job(seed: u8) -> ComputePoolModel {
 ///
 /// Not a publisher: nothing here reads a candidate. It writes the rows a prior
 /// block would have left behind, which is the starting state these tests need.
-/// The compute-pool gate is `None` and there is no live operation source yet
-/// (#125), so a real block cannot carry a C1 transition — publication
-/// integration stays deferred until it can, and until then a parent is seeded
-/// rather than produced.
+/// These tests are about the store, not the pipeline, and the job they seed
+/// comes from an operation no ComputePool transaction executes, so a parent is
+/// seeded rather than produced.
 fn seed_parent(db: &Database, rows: &std::collections::BTreeMap<Vec<u8>, Vec<u8>>) {
     let mut batch = db.batch();
     for (k, v) in rows {

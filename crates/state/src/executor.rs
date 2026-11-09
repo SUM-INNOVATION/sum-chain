@@ -8459,8 +8459,9 @@ mod tests {
     /// With the gate test-enabled (test-local `ChainParams`, the same idiom other
     /// executor gate tests use — NOT a committed genesis flip), the full
     /// apply→persist→reorg-revert lifecycle runs end-to-end through the gated
-    /// seams. The apply seam is driven with a real operation source standing in
-    /// for #125's not-yet-existing `ComputePool` dispatch.
+    /// seams. The apply seam is driven with a closure over the model's
+    /// operations: job creation, the operation used here, does not execute from
+    /// a ComputePool transaction.
     #[test]
     fn compute_pool_execution_path_full_lifecycle_when_enabled() {
         use crate::compute_pool::{
@@ -8481,7 +8482,7 @@ mod tests {
         let height = 5u64;
 
         // APPLY: drive a real compute-pool transition through the gated apply
-        // seam (the operation source #125's dispatch will eventually supply).
+        // seam, the one the block's replayed steps take.
         let (staged_rows, journal) = apply_into_candidate(
             &executor,
             db.as_ref(),
@@ -8528,10 +8529,11 @@ mod tests {
         );
 
         // NOT PUBLISHED. A C1 transition reaches canonical state only through a
-        // block carrying compute-pool operations, and there is no live operation
-        // source yet (#125). The revert of a published transition is covered by
+        // published block, and no ComputePool transaction creates a job. The
+        // revert of a published transition is covered by
         // `compute_pool_reorg_reverts_account_and_c1_in_one_call`, which seeds a
-        // prior block's output rather than inventing a publisher for one.
+        // prior block's output, and by `tests/compute_pool_routing.rs`, which
+        // publishes and unwinds blocks of the operations that do execute.
         let store = ComputePoolStore::new(&db);
         assert!(store.get_job(&job).unwrap().is_none());
         assert!(store.load_state_map().unwrap().is_empty());
@@ -8607,11 +8609,9 @@ mod tests {
     /// Drive one C1 transition through the executor's apply seam, into a
     /// candidate that is NOT published, and return what it produced.
     ///
-    /// The apply seam stages; it does not commit. Publication of a C1
-    /// transition needs a block carrying compute-pool operations, and there is
-    /// no live operation source yet (#125) — so publication integration stays
-    /// deferred and these tests assert on the candidate and the journal, which
-    /// is what the seam actually produces.
+    /// The apply seam stages; it does not commit. These tests drive it with
+    /// operations no ComputePool transaction executes, so they assert on the
+    /// candidate and the journal, which is what the seam actually produces.
     fn apply_into_candidate<F>(
         executor: &BlockExecutor,
         db: &Database,
@@ -8638,8 +8638,8 @@ mod tests {
     /// SEEDING, not publishing. The reorg tests below are about
     /// `revert_pre_activation_block_state_diffs` unwinding account and C1 state
     /// in one batch,
-    /// and they need a prior block's output to unwind — which, until #125
-    /// supplies an operation source, no block can actually produce.
+    /// and they need a prior block's output to unwind: a job, which no
+    /// ComputePool transaction creates.
     fn seed_c1_job(db: &Database, height: u64, seed: u8) {
         use crate::compute_pool::{
             ComputePoolModel, ExposureInputs, JobId, UnitId, UnitSizing, UnitState, WorkUnit,
@@ -9797,10 +9797,10 @@ mod tests {
     }
 
     /// Even with the gate test-enabled, the LIVE block-apply seam
-    /// (`execute_block`) still writes nothing, because there is no `ComputePool`
-    /// operation source on the live path yet — that is #125's gate-closed
-    /// dispatch. This pins the flagged #125 dependency: the seam is wired, but
-    /// inert until #125 supplies per-block operations.
+    /// (`execute_block`) writes nothing for a block without ComputePool
+    /// transactions: it takes no step, so it stages no row and binds an empty
+    /// record that nothing here publishes. Blocks with ComputePool
+    /// transactions are covered by `tests/compute_pool_routing.rs`.
     #[test]
     fn compute_pool_execute_block_is_noop_without_a_125_operation_source() {
         use crate::compute_pool_store::ComputePoolStore;
@@ -9819,7 +9819,7 @@ mod tests {
         let store = ComputePoolStore::new(&db);
         assert!(
             store.load_state_map().unwrap().is_empty(),
-            "no C1 rows: execute_block has no #125 operation source yet"
+            "no C1 rows: an empty block takes no compute-pool step"
         );
         assert!(
             !store.has_journal(1, &Hash::ZERO).unwrap(),

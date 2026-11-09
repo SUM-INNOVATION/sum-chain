@@ -1481,9 +1481,10 @@ mod tests {
     /// what should be undone rather than an echo of the code under test.
     ///
     /// A real publication would run `execute_block` -> `accept_produced` ->
-    /// `publish`. The compute-pool gate is `None` and there is no live operation
-    /// source yet (#125), so no block can carry a C1 transition; publication
-    /// integration stays deferred until one can.
+    /// `publish`. Most of the records these tests build (jobs, leaves,
+    /// assignments) come from operations that do not execute from a
+    /// transaction, so the store is tested against seeded blocks;
+    /// `tests/compute_pool_routing.rs` publishes real ones.
     fn seed_transition(
         db: &Database,
         before: Option<&ComputePoolModel>,
