@@ -328,9 +328,11 @@ mod tests {
     /// manager and its candidate; the seeding derives from the manager's own
     /// in-memory model, not from the candidate, so nothing is copied out of one.
     /// A real publication would run `execute_block` -> `accept_produced` ->
-    /// `publish`, which needs a block carrying compute-pool operations — there
-    /// is no live operation source yet (#125), so publication integration stays
-    /// deferred and these tests seed the committed side they need to revert.
+    /// `publish` over a block of ComputePool transactions, and the operations
+    /// these tests drive (job creation among them) do not execute from a
+    /// transaction, so these tests seed the committed side they need to
+    /// revert. `tests/compute_pool_routing.rs` publishes and unwinds real
+    /// blocks for the operations that do.
     fn apply_and_seed<F>(
         db: &Database,
         mgr: &mut ComputePoolManager<'_>,

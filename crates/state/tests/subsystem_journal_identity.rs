@@ -9,9 +9,9 @@
 //!
 //! With the gates open every published block carries a sealed record for both
 //! families: the beacon one describes the registration the block applies, and
-//! the compute-pool one is the positive "nothing to undo" (there is no live
-//! compute-pool operation source yet). Non-empty compute-pool undo data is
-//! covered by the store and executor unit tests.
+//! the compute-pool one is the positive "nothing to undo" (these blocks carry
+//! no ComputePool transaction). Non-empty compute-pool undo data is covered by
+//! the store and executor unit tests and by `compute_pool_routing.rs`.
 
 mod common;
 
