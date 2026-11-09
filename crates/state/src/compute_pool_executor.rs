@@ -10,8 +10,16 @@
 //!
 //! ## What executes
 //!
-//! Only operations whose rules are settled. None is yet: every operation
-//! decodes and is refused ([`ComputePoolReject::NotExecutable`]).
+//! Only operations whose rules are settled:
+//!
+//! * `PublishBondedOfferV1`: the offer id is derived from the chain id, the
+//!   sender and `offer_seq` (G1, 2026-10-16); an identity holds at most one
+//!   active offer; the sender pays `B_offer`, the injected
+//!   `compute_pool_params.b_offer`, and the offer row records it as locked.
+//!   With no parameters declared, `B_offer` has no value and the offer is
+//!   refused.
+//!
+//! The rest decode and are refused ([`ComputePoolReject::NotExecutable`]).
 //!
 //! ## Receipts
 //!
@@ -39,7 +47,7 @@ use sumchain_wire::b0::codec::DecodeError;
 use sumchain_wire::compute_pool_wire::ComputePoolOperation;
 use thiserror::Error;
 
-use crate::compute_pool::{ComputePoolModel, PoolError, PoolResult};
+use crate::compute_pool::{BondedOffer, ComputePoolModel, PoolError, PoolResult};
 use crate::compute_pool_store::ComputePoolStore;
 use crate::state::StateManager;
 use crate::{Result, StateError};
@@ -56,6 +64,10 @@ pub enum ComputePoolReject {
     /// does nothing.
     #[error("compute-pool operation {op:#06x} has no execution rules yet")]
     NotExecutable { op: u16 },
+
+    /// `compute_pool_params` is not declared, so `B_offer` has no value.
+    #[error("compute_pool_params is not declared, so B_offer has no value")]
+    ParamsUndeclared,
 
     /// The sender cannot pay the fee and the bond together.
     #[error("balance {available} cannot pay fee {fee} plus bond {bond}")]
@@ -75,37 +87,57 @@ pub enum ComputePoolReject {
 ///
 /// Applying a step is a pure function of the model, which is what lets the
 /// seam replay a block's steps onto the model rebuilt from the candidate's
-/// rows and arrive where the block's transactions did. No operation executes
-/// yet, so there is no step.
+/// rows and arrive where the block's transactions did.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PoolStep {}
+pub enum PoolStep {
+    /// `PublishBondedOfferV1`: lock this offer.
+    PublishOffer(BondedOffer),
+}
 
 impl PoolStep {
     /// The step a decoded operation from `sender` executes, or why it does
     /// not execute at all. Reads no state.
     pub fn resolve(
         op: &ComputePoolOperation,
-        _chain_id: u64,
-        _sender: &Address,
-        _params: &ChainParams,
+        chain_id: u64,
+        sender: &Address,
+        params: &ChainParams,
     ) -> std::result::Result<Self, ComputePoolReject> {
-        Err(ComputePoolReject::NotExecutable { op: op.op() })
+        match op {
+            ComputePoolOperation::PublishOffer(publish) => {
+                let b_offer = params
+                    .compute_pool_params
+                    .as_ref()
+                    .ok_or(ComputePoolReject::ParamsUndeclared)?
+                    .b_offer;
+                Ok(Self::PublishOffer(BondedOffer::from_publish(
+                    chain_id, *sender, publish, b_offer,
+                )))
+            }
+            other => Err(ComputePoolReject::NotExecutable { op: other.op() }),
+        }
     }
 
     /// What the sender pays into a bond when the step succeeds.
     pub fn bond(&self) -> Balance {
-        match *self {}
+        match self {
+            Self::PublishOffer(offer) => offer.bond_locked,
+        }
     }
 
     /// Whether the step applies to `model`. Changes nothing.
-    pub fn check(&self, _model: &ComputePoolModel) -> PoolResult<()> {
-        match *self {}
+    pub fn check(&self, model: &ComputePoolModel) -> PoolResult<()> {
+        match self {
+            Self::PublishOffer(offer) => model.check_publish_offer(offer),
+        }
     }
 
     /// Apply the step. The model operations validate before they mutate, so a
     /// refusal leaves `model` unchanged.
-    pub fn apply(&self, _model: &mut ComputePoolModel) -> PoolResult<()> {
-        match *self {}
+    pub fn apply(&self, model: &mut ComputePoolModel) -> PoolResult<()> {
+        match self {
+            Self::PublishOffer(offer) => model.publish_offer(offer.clone()),
+        }
     }
 
     /// Apply `steps` in order: what the seam hands the manager.
