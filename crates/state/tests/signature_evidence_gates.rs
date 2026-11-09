@@ -713,3 +713,208 @@ mod evidence {
         assert_eq!(pinned_history(both), PINNED_HISTORY, "both gates above the history");
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A signature the two rules judge differently, made with the signer's key.
+//
+// Strict Ed25519 verification accepts only canonical encodings with no
+// small-order components; the legacy verifier is more permissive. A key-holder
+// can produce, WITH their own private key, a non-canonical variant of their
+// own signature whose R is the identity point (a small-order component): the
+// verification equation still holds, so `verify_bytes` accepts it, but
+// `verify_bytes_strict` refuses it. That is the kind of signature the strict
+// gate begins refusing, and a test built from it is the one that proves the
+// gate is not a no-op.
+// ═══════════════════════════════════════════════════════════════════════════
+
+mod key_holder {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use curve25519_dalek::Scalar;
+    use ed25519_dalek::hazmat::ExpandedSecretKey;
+    use sha2::{Digest, Sha512};
+    use sumchain_crypto::{verify_bytes, verify_bytes_strict};
+    use sumchain_primitives::Address;
+    use sumchain_state::mempool::{Mempool, MempoolConfig, TransactionSignatureAdmission};
+    use sumchain_state::StateError;
+    use sumchain_storage::{Database, StateStore};
+
+    /// The strict-signature gate's height in these tests.
+    const H: u64 = 10;
+    /// The compressed identity point (y = 1): a small-order component that
+    /// strict verification rejects as an R value, and the legacy verifier
+    /// accepts.
+    const IDENTITY: [u8; 32] = {
+        let mut b = [0u8; 32];
+        b[0] = 1;
+        b
+    };
+    /// The signing key used throughout: seed 0x71, an ordinary key.
+    const SEED: [u8; 32] = [0x71; 32];
+
+    fn pubkey() -> [u8; 32] {
+        *KeyPair::from_bytes(SEED).public_key().as_bytes()
+    }
+
+    /// k = SHA-512(R ‖ A ‖ M) mod l.
+    fn challenge(r: &[u8; 32], a: &[u8; 32], msg: &[u8]) -> Scalar {
+        let mut h = Sha512::new();
+        h.update(r);
+        h.update(a);
+        h.update(msg);
+        Scalar::from_bytes_mod_order_wide(&h.finalize().into())
+    }
+
+    /// The holder's own signature over `msg`, re-expressed with R = identity
+    /// and s = k·a (k over those R bytes). The equation holds, so the legacy
+    /// verifier accepts it; strict verification refuses it because R is a
+    /// small-order component. Produced with the private key.
+    fn identity_r_sig(msg: &[u8]) -> [u8; 64] {
+        let a = pubkey();
+        let s = challenge(&IDENTITY, &a, msg) * ExpandedSecretKey::from(&SEED).scalar;
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(&IDENTITY);
+        sig[32..].copy_from_slice(s.as_bytes());
+        sig
+    }
+
+    /// A transfer from the holder's address carrying such a signature over its
+    /// own signing hash.
+    fn legacy_only_transfer(to: Address, amount: u128, nonce: u64) -> SignedTransaction {
+        let pk = pubkey();
+        let from = Address::from_public_key(&pk);
+        let tx = TransactionV2::transfer(CHAIN_ID, from, to, amount, FEE, nonce);
+        let sig = identity_r_sig(tx.signing_hash().as_bytes());
+        SignedTransaction::new_v2(tx, sig, pk)
+    }
+
+    fn node(params: ChainParams) -> Node {
+        let n = Node::new(params);
+        seed_balance(&n.db, &Address::from_public_key(&pubkey()), FUNDS);
+        n
+    }
+
+    fn account(db: &Database, addr: &Address) -> (u128, u64) {
+        let a = StateStore::new(db).get_account(addr).unwrap();
+        (a.balance, a.nonce)
+    }
+
+    /// The fixture provably separates the two rules: `verify_bytes` ACCEPTS the
+    /// signature and `verify_bytes_strict` REFUSES it, while an ordinary
+    /// signature is accepted by both.
+    #[test]
+    fn the_legacy_only_signature_separates_the_two_rules() {
+        let msg = b"a message";
+        let pk = pubkey();
+        let sig = identity_r_sig(msg);
+        assert!(verify_bytes(msg, &sig, &pk).is_ok(), "the legacy verifier accepts it");
+        assert!(verify_bytes_strict(msg, &sig, &pk).is_err(), "strict verification refuses it");
+        let honest = sign(msg, KeyPair::from_bytes(SEED).private_key()).to_bytes();
+        assert!(verify_bytes(msg, &honest, &pk).is_ok(), "ordinary: legacy");
+        assert!(verify_bytes_strict(msg, &honest, &pk).is_ok(), "ordinary: strict");
+    }
+
+    /// Through block execution (the `execute_or_screen` path) at H-1, H and
+    /// H+1 with the gate at H: the legacy-only signature is accepted below the
+    /// boundary, exactly as today, and refused at and above it.
+    #[test]
+    fn the_legacy_only_signature_is_accepted_below_the_boundary_and_refused_from_it() {
+        let to = Address::new([0xE1; 20]);
+        let from = Address::from_public_key(&pubkey());
+
+        {
+            let n = node(strict_from(Some(H)));
+            for h in 1..H - 1 {
+                n.publish(h, Vec::new());
+            }
+            let (bal0, nonce0) = account(&n.db, &from);
+            let r = n.publish(H - 1, vec![legacy_only_transfer(to, 7, 0)]);
+            assert_eq!(r[0].status, TxStatus::Success, "H-1 accepts it, as today");
+            let (bal1, nonce1) = account(&n.db, &from);
+            assert_eq!(nonce1, nonce0 + 1, "nonce advanced");
+            assert_eq!(bal1, bal0 - 7 - FEE, "amount and fee left the account");
+            assert_eq!(account(&n.db, &to).0, 7, "recipient credited");
+        }
+
+        for height in [H, H + 1] {
+            let n = node(strict_from(Some(H)));
+            for h in 1..height {
+                n.publish(h, Vec::new());
+            }
+            let before = account(&n.db, &from);
+            let r = n.publish(height, vec![legacy_only_transfer(to, 7, 0)]);
+            assert_eq!(r[0].status, TxStatus::InvalidSignature, "height {height} refuses it");
+            assert_eq!(r[0].fee_paid, 0, "height {height}: fee 0");
+            assert_eq!(account(&n.db, &from), before, "height {height}: balance and nonce unchanged");
+            assert_eq!(account(&n.db, &to).0, 0, "height {height}: nothing credited");
+        }
+    }
+
+    /// Mempool admission at inclusion height H-1 (below the gate: admitted as
+    /// today) and H (at the gate: refused).
+    #[test]
+    fn admission_refuses_the_legacy_only_signature_from_its_inclusion_height() {
+        let to = Address::new([0xE2; 20]);
+        let height = std::sync::Arc::new(AtomicU64::new(H - 2));
+        let m = Mempool::new(MempoolConfig::default()).with_signature_admission(
+            TransactionSignatureAdmission {
+                params: std::sync::Arc::new(strict_from(Some(H))),
+                current_height: height.clone(),
+            },
+        );
+        assert_eq!(m.signature_inclusion_height(), Some(H - 1));
+        assert!(m.add(legacy_only_transfer(to, 1, 0)).is_ok(), "inclusion H-1: admitted as today");
+
+        height.store(H - 1, Ordering::Relaxed);
+        assert_eq!(m.signature_inclusion_height(), Some(H));
+        assert!(matches!(
+            m.add(legacy_only_transfer(to, 1, 1)),
+            Err(StateError::InvalidSignature)
+        ));
+    }
+
+    /// A chain built under legacy rules whose middle block carries the
+    /// legacy-only transfer. Each block's state root and a digest of its
+    /// receipts, and the transfer's status.
+    fn chain(gate: Option<u64>) -> (Vec<(String, String)>, TxStatus) {
+        let n = node(strict_from(gate));
+        let ordinary = key(0x41);
+        let sink = key(0x42);
+        let to = Address::new([0xE4; 20]);
+        let mut snaps = Vec::new();
+        let mut snap = |n: &Node, receipts: &[Receipt]| {
+            let mut h = blake3::Hasher::new();
+            h.update(&bincode::serialize(receipts).unwrap());
+            snaps.push((
+                n.state.state_root().to_string(),
+                hex::encode(h.finalize().as_bytes()),
+            ));
+        };
+        let r1 = n.publish(1, vec![transfer(&ordinary, &sink, 100, 0)]);
+        snap(&n, &r1);
+        let r2 = n.publish(2, vec![legacy_only_transfer(to, 50, 0)]);
+        let status = r2[0].status;
+        snap(&n, &r2);
+        let r3 = n.publish(3, vec![transfer(&ordinary, &sink, 100, 1)]);
+        snap(&n, &r3);
+        (snaps, status)
+    }
+
+    /// Historical replay: built under legacy rules the transfer is accepted at
+    /// height 2; with the gate ABOVE every height the roots and receipts are
+    /// identical; with the gate AT the transfer's height block 1 is identical
+    /// and block 2 diverges exactly there.
+    #[test]
+    fn a_legacy_chain_replays_identically_with_the_gate_above_it() {
+        let (legacy, status) = chain(None);
+        assert_eq!(status, TxStatus::Success, "accepted under the legacy rule");
+        let (above, above_status) = chain(Some(100));
+        assert_eq!(above_status, TxStatus::Success);
+        assert_eq!(above, legacy, "gate above the chain: identical roots and receipts");
+        let (at, at_status) = chain(Some(2));
+        assert_eq!(at_status, TxStatus::InvalidSignature, "gate at height 2 refuses it");
+        assert_eq!(at[0], legacy[0], "block 1 (below the gate) is identical");
+        assert_ne!(at[1], legacy[1], "block 2 diverges exactly at the transaction");
+    }
+}
