@@ -340,6 +340,12 @@ pub enum PoolError {
     #[error("sender is not the assigned worker")]
     NotAssignedWorker,
 
+    /// Entitlements of this kind cannot be registered yet: a `ReassignReimb`
+    /// occurrence is a count that only an undecided counter row would hold
+    /// (D2-7.5).
+    #[error("{kind:?} entitlements cannot be registered yet")]
+    UnregistrableEntitlementKind { kind: EntitlementKind },
+
     /// The retention tracker is already in the reverse index.
     #[error("retention tracker already indexed")]
     RetentionTrackerAlreadyIndexed,
@@ -1285,6 +1291,49 @@ impl ComputePoolModel {
         }
         self.entitlements.insert(record.entitlement_id, record);
         Ok(())
+    }
+
+    /// Register the entitlement for one event of a one-time kind,
+    /// `AcceptReimb` (0) or `ReprovisionReimb` (2), under the id the ratified
+    /// derivation gives that event (G1, 2026-10-16): `work_item` and `kind`,
+    /// with occurrence 0. The id names the event, not the payee, so a second
+    /// registration for the same work item and kind is refused
+    /// ([`PoolError::DuplicateEntitlement`]) whoever it would pay. For
+    /// `ReprovisionReimb` the work item is the new generation the re-provision
+    /// creates.
+    ///
+    /// `ReassignReimb` (1) is refused
+    /// ([`PoolError::UnregistrableEntitlementKind`]): its occurrence counts
+    /// earlier reassignments of the work item, and the stored counter row that
+    /// would hold the count is not decided (D2-7.5).
+    ///
+    /// The beneficiary and the amount are the caller's, like every amount in
+    /// this model. Which address an event pays, and where the
+    /// `ReprovisionReimb` amount comes from, are not settled here.
+    pub fn register_one_time_entitlement(
+        &mut self,
+        work_item: &WorkItemKey,
+        kind: EntitlementKind,
+        beneficiary: Address,
+        amount: u128,
+    ) -> PoolResult<EntitlementId> {
+        if kind.is_repeatable() {
+            return Err(PoolError::UnregistrableEntitlementKind { kind });
+        }
+        let entitlement_id = EntitlementId::derive(
+            &work_item.job_id,
+            &work_item.unit_id,
+            work_item.generation,
+            kind,
+            0,
+        )?;
+        self.register_entitlement(EntitlementRecord {
+            entitlement_id,
+            beneficiary,
+            kind,
+            amount,
+        })?;
+        Ok(entitlement_id)
     }
 
     /// Advance a work unit through its lifecycle, validating the edge BEFORE
@@ -2504,6 +2553,82 @@ mod tests {
         assert_eq!(
             m.register_entitlement(rec),
             Err(PoolError::DuplicateEntitlement)
+        );
+        assert_eq!(m, before);
+    }
+
+    /// The G1 KAT work item (`compute_pool_ids_golden.rs`): the frozen `job_id`
+    /// and `unit_id` vectors, at generation 1.
+    fn kat_work_item() -> WorkItemKey {
+        let mut requester = [0u8; 20];
+        for (i, b) in requester.iter_mut().enumerate() {
+            *b = (i + 1) as u8;
+        }
+        let j =
+            sumchain_wire::compute_pool_graph::job_id(1, &Address::new(requester), 7, &[0xAA; 32]);
+        let u = sumchain_wire::compute_pool_graph::unit_id(&j, 0);
+        WorkItemKey::new(JobId::from_bytes(j), UnitId::from_bytes(u), 1)
+    }
+
+    #[test]
+    fn one_time_entitlements_register_under_the_ratified_ids() {
+        let mut m = ComputePoolModel::new();
+        let item = kat_work_item();
+        let accept = m
+            .register_one_time_entitlement(&item, EntitlementKind::AcceptReimb, addr(7), 50)
+            .unwrap();
+        let reprovision = m
+            .register_one_time_entitlement(&item, EntitlementKind::ReprovisionReimb, addr(8), 60)
+            .unwrap();
+        // The G1 vectors for kinds 0 and 2.
+        assert_eq!(
+            hex::encode(accept.as_bytes()),
+            "7377c94d7668f3347e779acac43a4110951ee9c8423468c3172b6605d302da27"
+        );
+        assert_eq!(
+            hex::encode(reprovision.as_bytes()),
+            "11d1849a4a75b45140cb801fe3d33ffac1d40a2680ebf1d164c1018b23de7b89"
+        );
+        assert_eq!(
+            m.get_entitlement(&accept),
+            Some(&EntitlementRecord {
+                entitlement_id: accept,
+                beneficiary: addr(7),
+                kind: EntitlementKind::AcceptReimb,
+                amount: 50,
+            })
+        );
+        assert_eq!(m.get_entitlement(&reprovision).unwrap().amount, 60);
+
+        // Another generation is another event.
+        let next = WorkItemKey {
+            generation: 2,
+            ..item
+        };
+        let later = m
+            .register_one_time_entitlement(&next, EntitlementKind::AcceptReimb, addr(7), 50)
+            .unwrap();
+        assert_ne!(later, accept);
+    }
+
+    #[test]
+    fn a_one_time_event_registers_once_and_reassign_reimb_not_at_all() {
+        let mut m = ComputePoolModel::new();
+        let item = kat_work_item();
+        m.register_one_time_entitlement(&item, EntitlementKind::AcceptReimb, addr(7), 50)
+            .unwrap();
+        let before = m.clone();
+
+        // The same event again, to another payee for another amount.
+        assert_eq!(
+            m.register_one_time_entitlement(&item, EntitlementKind::AcceptReimb, addr(9), 1),
+            Err(PoolError::DuplicateEntitlement)
+        );
+        assert_eq!(
+            m.register_one_time_entitlement(&item, EntitlementKind::ReassignReimb, addr(7), 50),
+            Err(PoolError::UnregistrableEntitlementKind {
+                kind: EntitlementKind::ReassignReimb
+            })
         );
         assert_eq!(m, before);
     }
