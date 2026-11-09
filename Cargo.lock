@@ -4447,6 +4447,7 @@ dependencies = [
  "sumc-runtime",
  "sumchain-consensus",
  "sumchain-crypto",
+ "sumchain-finality-foundations",
  "sumchain-genesis",
  "sumchain-p2p",
  "sumchain-primitives",

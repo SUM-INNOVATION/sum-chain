@@ -33,6 +33,8 @@ const CONSENSUS_CRATES: &[&str] = &[
     "crypto",
     "p2p",
     "node",
+    // Named by the node's dormant signer wiring (#350, B6).
+    "finality-foundations",
 ];
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {

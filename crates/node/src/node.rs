@@ -2562,6 +2562,15 @@ mod consensus_config_boot_tests;
 #[path = "../tests/unit/certified_audit_boot_tests.rs"]
 mod certified_audit_boot_tests;
 
+/// The durable finality signer over a node's data directory (#350, B6): no
+/// production path opens it, a starting and importing node never touches its
+/// files or mirror, and real processes killed at every persist step never sign
+/// two messages at one position. A unit-test module for the same reason as the
+/// ones above.
+#[cfg(test)]
+#[path = "../tests/unit/signer_wiring_tests.rs"]
+mod signer_wiring_tests;
+
 /// Issue #354: which blocks a node asks for when a gossiped block cannot be
 /// imported.
 #[cfg(test)]

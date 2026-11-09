@@ -23,6 +23,7 @@ mod config;
 mod consensus_wrapper;
 mod docclass_cli;
 mod employment_cli;
+mod finality_signer;
 mod node;
 mod tx_broadcaster;
 
@@ -446,6 +447,11 @@ enum Commands {
         #[arg(short, long, default_value = "data")]
         data_dir: PathBuf,
     },
+
+    /// The durable finality signer (#350, G2-b): `init` once on a stopped
+    /// validator, `status` to inspect it read-only. DORMANT: this binary
+    /// produces no finality votes, and `run` never opens the signer.
+    Signer(finality_signer::SignerArgs),
 }
 
 #[tokio::main]
@@ -1720,6 +1726,14 @@ async fn main() -> Result<()> {
                 // Non-zero exit so a script can branch on the result, as
                 // `inspect-v2-rows` does.
                 std::process::exit(2);
+            }
+        }
+
+        Commands::Signer(args) => {
+            init_logging("warn", false)?;
+            let code = finality_signer::run_cli(args)?;
+            if code != 0 {
+                std::process::exit(code);
             }
         }
     }
