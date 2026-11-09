@@ -10,7 +10,8 @@
 //!   `persist` may return `Ok` only once the record is durable (data and
 //!   directory entry fsynced). The core defines no on-disk encoding;
 //!   `signer_file` implements one (the elements enumerated in the decision
-//!   ledger, adopted by the owner, 2026-10-22 (decision ledger, as enumerated there); dormant, no node wiring; the rest PROPOSED).
+//!   ledger, adopted by the owner, 2026-10-22 (decision ledger, as enumerated there); dormant, no node wiring; the remaining nine elements
+//!   adopted by the owner, 2026-11-09, B6; dormant).
 //! * [`ExclusiveOwnership`]: one owner per key. The guard is held for the
 //!   signer's whole life.
 //! * [`SigningKey`] and [`PolkaVerifier`]: the key, and the check of a
@@ -727,8 +728,9 @@ where
     /// Adopted 2026-10-22: R > H (R ≥ W), floor R + 1, and a verified resume
     /// certificate against the node's chain. RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant: the
     /// conflict archive, its receipt, and the archive durable before the
-    /// recovered record. PROPOSED (not adopted): conflict-evidence
-    /// verification rules and the trimming of the resume certificate.
+    /// recovered record. ADOPTED by the owner, 2026-11-09 (B6); dormant:
+    /// conflict-evidence verification rules and the trimming of the resume
+    /// certificate.
     ///
     /// Order: verify everything (nothing is written on a refusal); archive the
     /// halted record, the evidence and the resume certificate durably, the
