@@ -4376,6 +4376,7 @@ dependencies = [
  "blake3",
  "ed25519-dalek",
  "hex",
+ "rustix",
  "serde_json",
  "thiserror 1.0.69",
 ]

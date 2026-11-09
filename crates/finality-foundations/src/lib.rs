@@ -28,7 +28,7 @@
 //! | Rule | Ratified semantics (2026-10-16) | Implemented here |
 //! |------|----------------------------------|------------------|
 //! | G2-a | A block is published as canonical only together with a verified certificate, its post-state and the finalized pointer, in one durable atomic batch. | Not here: the storage half is the dormant `sumchain-storage` certified-commit seam (#292). |
-//! | G2-b | Signer state is durable before any signature is released; exclusive ownership; explicit initialization; fail-closed recovery. | [`signer`]; the file-backed store and recovery rules in [`signer_file`], proof-gated height advancement, and the prevote-quorum proof in [`proofs`] (the elements enumerated on 2026-10-22 and, with B6, on 2026-11-09 are adopted: see [`signer_file`]) |
+//! | G2-b | Signer state is durable before any signature is released; exclusive ownership; explicit initialization; fail-closed recovery. | [`signer`]; the file-backed store and recovery rules in [`signer_file`], proof-gated height advancement, and the prevote-quorum proof in [`proofs`] (the elements enumerated on 2026-10-22 and, with B6, on 2026-11-09 are adopted: see [`signer_file`]); the exclusive lock of a real signer directory in [`signer_lock`] |
 //! | G2-c | Quorum-signed, sequence-chained bootstrap authorization shipped with the release. Genesis membership authenticates the first bootstrap only; handshake announcements never authorize or halt; conflicting fully verified authorizations halt safely without reverting accepted history; late arrival does not invalidate authentic applied history. | [`bootstrap`] |
 //! | G2-d | No dynamic membership before certified finality. | [`containment`], enforced when an authorization is recorded as applied |
 //!
@@ -94,6 +94,7 @@ pub mod evidence;
 pub mod proofs;
 pub mod signer;
 pub mod signer_file;
+pub mod signer_lock;
 pub mod vote;
 
 /// A 32-byte digest. How it is computed (hash function, domain separation) is

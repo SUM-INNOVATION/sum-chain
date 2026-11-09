@@ -22,6 +22,12 @@ ed25519-dalek = { workspace = true }
 # dormant, no live caller). Already a workspace dependency.
 blake3 = { workspace = true }
 
+# The signer directory's exclusive lock (`signer_lock`): a safe `flock(2)`,
+# which std does not expose on the pinned toolchain (1.88; `File::try_lock` is
+# 1.89). rustix 1.1.2 is already in Cargo.lock; this adds an edge, no crate.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
+
 [dev-dependencies]
 # Test vectors in tests/vectors/finality_vote_v1.json.
 hex = { workspace = true }
