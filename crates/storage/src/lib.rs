@@ -20,6 +20,7 @@ pub mod candidate;
 pub mod certified;
 pub mod certified_guard;
 pub mod certified_meta;
+pub mod evidence_meta;
 pub mod exec_view;
 pub mod overlay;
 pub mod page;
