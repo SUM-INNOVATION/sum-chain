@@ -20,8 +20,10 @@ rules below are tested in `crates/consensus/tests/consensus_config_schema3.rs`,
 `crates/node/tests/acknowledge_consensus_config_guard.rs` and the node's boot
 tests.
 
-The record stays a local, unverified baseline. Nothing here is exchanged with
-peers or authorizes anything on the network.
+The record stays a local, unverified baseline: it is never exchanged with
+peers and authorizes nothing on the network. What peers compare is the
+handshake digest (section 1), which folds in the running configuration, never
+the record.
 
 ## 1. Installing the binary changes no rule
 
@@ -31,9 +33,26 @@ peers or authorizes anything on the network.
   Installing the binary does **not** refuse `UpdateStatus`; only a scheduled
   height that the chain reaches does (section 4).
 - **The upgrade is same-window.** Declaring the gate changes the activation and
-  protocol digests whether or not it is set, and peers compare the protocol
-  digest when they connect. A binary with this field and one without cannot
-  run side by side: stop every validator, install, start them together.
+  protocol digests whether or not it is set. Peers compare the handshake
+  digest when they connect: BLAKE3-256 of `"sumchain/protocol-digest/v2"`,
+  the protocol digest and the running commitment (the commitment of the
+  configuration this binary computes from its genesis, in the schema it
+  writes). A binary with this field and one without cannot run side by side:
+  stop every validator, install, start them together.
+- **A binary that declares the handshake digest refuses one that declares the
+  protocol digest.** The two values never agree, so moving from a release
+  that declared the protocol digest is same-window whatever else changes.
+  Until its declaration has been compared, nothing a peer sends is acted on
+  (`docs/operations/p2p-admission-and-compatibility.md`, section 2).
+- **Non-gate changes are same-window too.** Every value the configuration
+  commits is in the running commitment, so two nodes whose genesis differs in
+  a non-gate value (for example `min_fee` or `finality_depth`), or whose
+  binaries differ in a committed constant, refuse each other at connect. Make
+  such a change on every validator in one window, as for a gate.
+- **The record's schema does not enter it.** A node whose record is still in
+  schema 1 or 2 declares the same handshake digest as a node already moved,
+  because the running commitment is computed in the schema this binary writes.
+  The move in section 2 changes nothing a peer sees.
 - **Fresh data directory:** the node records schema 3 directly.
 - **Data directory recorded in schema 1 or 2:** the node runs it exactly as it
   stands. It is compared in its own schema, never re-encoded at start, and the
