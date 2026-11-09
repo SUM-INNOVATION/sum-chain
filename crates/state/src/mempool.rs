@@ -156,6 +156,22 @@ pub struct EducationAdmission {
     pub current_height: Arc<AtomicU64>,
 }
 
+/// Transaction-signature admission context: the chain params (for
+/// `strict_transaction_signatures_enabled_from_height`) and the shared live
+/// chain-height `Arc<AtomicU64>`, the same handle the other admission
+/// contexts read.
+///
+/// With it, a transaction whose next-block inclusion height is at or above
+/// the strict-signature gate is admitted only if its signature passes the
+/// strict rule, which is the rule that block will apply. Below that height
+/// admission checks no signature, exactly as before; block execution remains
+/// authoritative on both sides. Stored `Option`-ally, like the other contexts.
+#[derive(Clone)]
+pub struct TransactionSignatureAdmission {
+    pub params: Arc<ChainParams>,
+    pub current_height: Arc<AtomicU64>,
+}
+
 /// Node-local inclusion policy: what THIS node admits to its pool and carries
 /// in the blocks it builds, judged against the canonical chain it builds on.
 /// See [`Mempool::with_inclusion_policy`].
@@ -361,6 +377,10 @@ pub struct Mempool {
     /// Optional education admission context (parallels
     /// `inference_admission`).
     education_admission: Option<EducationAdmission>,
+    /// Optional transaction-signature admission context. `None` in tests and
+    /// in any path that builds a mempool without it: admission then checks no
+    /// signature, as before.
+    signature_admission: Option<TransactionSignatureAdmission>,
     /// Node-local policy: refuse `ContractDeploy`/`ContractCall`. Off by
     /// default. See [`Mempool::set_refuse_contract_transactions`].
     refuse_contract_transactions: AtomicBool,
@@ -410,6 +430,7 @@ impl Mempool {
             inference_admission: None,
             education_in_flight: RwLock::new(HashMap::new()),
             education_admission: None,
+            signature_admission: None,
             refuse_contract_transactions: AtomicBool::new(false),
             inclusion_policy: None,
             sponsored_in_flight: RwLock::new(HashMap::new()),
@@ -500,6 +521,50 @@ impl Mempool {
         self
     }
 
+    /// Builder: attach the transaction-signature admission context. Without
+    /// it no signature is checked at admission, at any height.
+    pub fn with_signature_admission(mut self, admission: TransactionSignatureAdmission) -> Self {
+        self.signature_admission = Some(admission);
+        self
+    }
+
+    /// The height a transaction admitted now would be included at: the block
+    /// after the current chain tip. `None` without a signature admission
+    /// context.
+    pub fn signature_inclusion_height(&self) -> Option<u64> {
+        self.signature_admission
+            .as_ref()
+            .map(|ctx| ctx.current_height.load(Ordering::Relaxed).saturating_add(1))
+    }
+
+    /// Transaction-signature admission. From the strict-signature gate's
+    /// height on, judged at the transaction's inclusion height (the next
+    /// block's, see [`Self::signature_inclusion_height`]), the signature must
+    /// pass the strict rule that block will apply; a transaction it refuses
+    /// would only ever be included as an `InvalidSignature` receipt. Below that
+    /// height, and without a context, nothing is checked here, as before.
+    fn check_signature_admission(&self, tx: &SignedTransaction) -> Result<()> {
+        let (Some(ctx), Some(inclusion_height)) =
+            (&self.signature_admission, self.signature_inclusion_height())
+        else {
+            return Ok(());
+        };
+        if !crate::tx_signature::strict_transaction_signatures_gate_open(
+            &ctx.params,
+            inclusion_height,
+        ) {
+            return Ok(());
+        }
+        crate::tx_signature::verify_transaction_signature(
+            &ctx.params,
+            inclusion_height,
+            tx.signing_hash().as_bytes(),
+            &tx.signature,
+            &tx.public_key,
+        )
+        .map_err(|_| StateError::InvalidSignature)
+    }
+
     /// Add a transaction to the mempool
     pub fn add(&self, tx: SignedTransaction) -> Result<Hash> {
         let hash = tx.hash();
@@ -510,6 +575,10 @@ impl Mempool {
         if self.txs.read().contains_key(&hash) {
             return Err(StateError::TxAlreadyExists);
         }
+
+        // The signature rule of the inclusion height, from the strict-signature
+        // gate on. No-op below it and without a context.
+        self.check_signature_admission(&tx)?;
 
         // OmniNode `InferenceAttestation` subprotocol-specific admission.
         // For any other payload variant this is a no-op. The returned

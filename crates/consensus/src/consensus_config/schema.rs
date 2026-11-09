@@ -716,6 +716,19 @@ pub const SCHEMA_4_ADDED: &[AddedField] = &[
         },
         source: Source::Gate,
     },
+    // Transaction signatures are checked with the strict Ed25519 rule
+    // (canonical encodings, no small-order components).
+    AddedField {
+        spec: FieldSpec {
+            id: 0x1046,
+            name: "strict_transaction_signatures_enabled_from_height",
+            ty: Ty::U64,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Gate,
+    },
 ];
 
 /// Schema 4: schema 3 plus [`SCHEMA_4_ADDED`]. DRAFT.

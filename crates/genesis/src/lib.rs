@@ -2999,6 +2999,32 @@ pub struct ChainParams {
     #[serde(default)]
     pub por_attested_targets_enabled_from_height: Option<u64>,
 
+    /// Transaction signatures are checked with the strict Ed25519 rule.
+    ///
+    /// It is the third field of the draft schema 4 (`0x1046`).
+    ///
+    /// Below this height, or while it is unset, a transaction's signature is
+    /// checked with `sumchain_crypto::verify_bytes`, exactly as every existing
+    /// block was checked, so historical blocks execute, import and replay as
+    /// they did. At and above it, the signature of every transaction in a
+    /// block at that height is checked with
+    /// `sumchain_crypto::verify_bytes_strict` (canonical encodings, no
+    /// small-order components), for every transaction. Mempool admission
+    /// applies the rule of
+    /// the height a transaction would be included at, the next block's.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub strict_transaction_signatures_enabled_from_height: Option<u64>,
+
     /// Contract execution is metered (#279).
     ///
     /// Below this height a contract deploy or call runs on the unmetered
@@ -3509,6 +3535,8 @@ impl Default for ChainParams {
             archive_unbonding_own_challenges_enabled_from_height: None,
             // Production-safe default: a storage challenge may target any assigned, Active archive — dormant.
             por_attested_targets_enabled_from_height: None,
+            // Production-safe default: transaction signatures are checked as before — dormant.
+            strict_transaction_signatures_enabled_from_height: None,
             // Production-safe default: contracts run on the unmetered engine — dormant.
             contract_metering_enabled_from_height: None,
             // No block-level contract gas budget (inert while the metering gate is closed).
@@ -4208,6 +4236,10 @@ impl ChainParams {
                 self.por_attested_targets_enabled_from_height,
             ),
             (
+                "strict_transaction_signatures_enabled_from_height",
+                self.strict_transaction_signatures_enabled_from_height,
+            ),
+            (
                 "contract_metering_enabled_from_height",
                 self.contract_metering_enabled_from_height,
             ),
@@ -4251,7 +4283,7 @@ impl ChainParams {
     }
 }
 
-/// The forty-eight remediation gates, by field name.
+/// The forty-nine remediation gates, by field name.
 ///
 /// The count in this sentence has been wrong twice, both times because a wave
 /// added gates and nothing checked the prose. It is checked now:
@@ -4320,6 +4352,7 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "node_registry_update_status_unsupported_enabled_from_height",
     "archive_unbonding_own_challenges_enabled_from_height",
     "por_attested_targets_enabled_from_height",
+    "strict_transaction_signatures_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started

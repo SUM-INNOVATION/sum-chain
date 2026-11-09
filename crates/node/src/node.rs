@@ -28,6 +28,7 @@ use sumchain_state::education_executor::EducationExecutor;
 use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
 use sumchain_state::mempool::{
     EducationAdmission, InclusionPolicy, InferenceAttestationAdmission, MessagingQuotaAdmission,
+    TransactionSignatureAdmission,
 };
 use sumchain_state::{Mempool, MempoolConfig, StateManager};
 use sumchain_storage::{BlockStore, Database};
@@ -606,6 +607,15 @@ impl Node {
             current_height: chain_height.clone(),
         };
 
+        // Transaction-signature admission: from the strict-signature gate on,
+        // judged at the next block's height, a signature must pass the rule
+        // that block applies. Same live `chain_height` Arc as the two above.
+        // Dormant (checks nothing) while the gate is unset.
+        let signature_admission = TransactionSignatureAdmission {
+            params: Arc::new(genesis.params.clone()),
+            current_height: chain_height.clone(),
+        };
+
         // Create mempool with admission wired in.
         let mempool = Arc::new(
             Mempool::new(MempoolConfig {
@@ -620,6 +630,7 @@ impl Node {
             })
             .with_inference_admission(inference_admission)
             .with_education_admission(education_admission)
+            .with_signature_admission(signature_admission)
             // The node-local inclusion policy, judged against this node's own
             // canonical database: no transaction already included, and only
             // authenticated, in-sequence sponsored envelopes. Always wired on

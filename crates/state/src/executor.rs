@@ -520,8 +520,18 @@ impl BlockExecutor {
         self.membership.is_some()
     }
 
-    /// Validate a transaction without executing it
-    pub fn validate_tx(&self, view: &mut ExecutionView<'_, '_>, tx: &SignedTransaction) -> Result<()> {
+    /// Validate a transaction without executing it.
+    ///
+    /// `block_height` is the height of the block the transaction is executed
+    /// in. It selects the signature rule
+    /// (`ChainParams::strict_transaction_signatures_enabled_from_height`), so
+    /// every caller has to say which block it is validating for.
+    pub fn validate_tx(
+        &self,
+        view: &mut ExecutionView<'_, '_>,
+        tx: &SignedTransaction,
+        block_height: u64,
+    ) -> Result<()> {
         // 1. Verify chain ID
         if tx.chain_id() != self.state.chain_id() {
             return Err(StateError::InvalidChainId {
@@ -538,10 +548,18 @@ impl BlockExecutor {
             });
         }
 
-        // 3. Verify signature
+        // 3. Verify signature, under the rule this block's height selects:
+        //    the legacy check below the strict-signature gate (exactly as
+        //    before), the strict one at and above it.
         let signing_hash = tx.signing_hash();
-        verify_bytes(signing_hash.as_bytes(), &tx.signature, &tx.public_key)
-            .map_err(|_| StateError::InvalidSignature)?;
+        crate::tx_signature::verify_transaction_signature(
+            &self.params,
+            block_height,
+            signing_hash.as_bytes(),
+            &tx.signature,
+            &tx.public_key,
+        )
+        .map_err(|_| StateError::InvalidSignature)?;
 
         // 4. Verify nonce
         let expected_nonce = StateManager::v_get_nonce(view, &tx.sender())?;
@@ -627,7 +645,7 @@ impl BlockExecutor {
         );
 
         // Validate first
-        if let Err(e) = self.validate_tx(view, tx) {
+        if let Err(e) = self.validate_tx(view, tx, block_height) {
             debug!("Transaction {} validation failed: {}", tx_hash, e);
 
             let status = match &e {
@@ -2384,8 +2402,17 @@ impl BlockExecutor {
             });
         }
 
-        // 3. Verify signature
-        if verify_bytes(tx_hash.as_bytes(), signature, public_key).is_err() {
+        // 3. Verify signature, under the rule `block_height` selects (the
+        //    same selection as the live arm's `validate_tx`).
+        if crate::tx_signature::verify_transaction_signature(
+            &self.params,
+            block_height,
+            tx_hash.as_bytes(),
+            signature,
+            public_key,
+        )
+        .is_err()
+        {
             return Ok(TxExecutionResult {
                 tx_hash,
                 status: TxStatus::InvalidSignature,
@@ -5118,7 +5145,7 @@ mod tests {
 
         let tx = create_signed_tx(&sender, recipient.address(), 100, 10, 0);
         let mut candidate = CandidateExecution::new(&db2, crate::MAX_BLOCK_WRITE_SET_BYTES);
-        assert!(executor.validate_tx(&mut candidate.view(), &tx).is_ok());
+        assert!(executor.validate_tx(&mut candidate.view(), &tx, 1).is_ok());
     }
 
     #[test]
@@ -5141,7 +5168,7 @@ mod tests {
 
         let tx = create_signed_tx(&sender, recipient.address(), 100, 10, 0); // But tx has nonce 0
         let mut candidate = CandidateExecution::new(&db2, crate::MAX_BLOCK_WRITE_SET_BYTES);
-        let result = executor.validate_tx(&mut candidate.view(), &tx);
+        let result = executor.validate_tx(&mut candidate.view(), &tx, 1);
         assert!(matches!(result, Err(StateError::InvalidNonce { .. })));
     }
 

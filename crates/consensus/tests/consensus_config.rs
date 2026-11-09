@@ -1306,9 +1306,11 @@ const GOLDEN_3_SET_COMMITMENT: &str =
     "0x2553f741bbc7fdeeecd01e1099d5abc8a6c8196702d9c90057de1a3c08331e98";
 
 /// The draft schema-4 gates: 0x1044, under which `BeginUnstake` counts only
-/// the sender's own open challenges (#369; its name is provisional), and
+/// the sender's own open challenges (#369; its name is provisional),
 /// 0x1045, under which a storage challenge targets only an archive that
-/// attested the chunk (its allocation is provisional). Dormant, they leave the
+/// attested the chunk (its allocation is provisional), and 0x1046, under which
+/// transaction signatures are checked with the strict rule (its name and
+/// allocation are proposed). Dormant, they leave the
 /// schema-3 configuration this binary writes byte-identical to the schema-3
 /// golden vector; set, either refuses to build, because this binary writes
 /// schema 3 and a draft field can be declared but never activated.
@@ -1317,7 +1319,7 @@ type SetGate = fn(&mut ChainParams);
 
 #[test]
 fn the_draft_schema_4_gates_are_held_dormant_and_refused_when_set() {
-    let gates: [(&str, u16, SetGate); 2] = [
+    let gates: [(&str, u16, SetGate); 3] = [
         (
             "archive_unbonding_own_challenges_enabled_from_height",
             0x1044,
@@ -1328,6 +1330,11 @@ fn the_draft_schema_4_gates_are_held_dormant_and_refused_when_set() {
             0x1045,
             |p| p.por_attested_targets_enabled_from_height = Some(10),
         ),
+        (
+            "strict_transaction_signatures_enabled_from_height",
+            0x1046,
+            |p| p.strict_transaction_signatures_enabled_from_height = Some(10),
+        ),
     ];
     assert_eq!(ccfg::SCHEMA_4.added.len(), gates.len());
     assert!(std::ptr::eq(ccfg::PRODUCTION.writes, &SCHEMA_3));
@@ -1336,6 +1343,7 @@ fn the_draft_schema_4_gates_are_held_dormant_and_refused_when_set() {
     let base = full_genesis();
     assert_eq!(base.params.archive_unbonding_own_challenges_enabled_from_height, None);
     assert_eq!(base.params.por_attested_targets_enabled_from_height, None);
+    assert_eq!(base.params.strict_transaction_signatures_enabled_from_height, None);
     let c = ccfg::build(&base).unwrap();
     assert_eq!(c.schema().number, 3);
     let bytes = c.encode();
