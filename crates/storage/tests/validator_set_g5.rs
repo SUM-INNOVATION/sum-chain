@@ -1461,8 +1461,10 @@ fn lines_with(sources: &[(String, Vec<String>)], needle: &str) -> Vec<(String, S
 
 /// The G5 module is named, in production code, by exactly the wiring (#351):
 /// the executor's publication-batch write, the engine's membership module and
-/// the chain switch. `lib.rs` only declares it, and the node crate names
-/// nothing of the wiring at all.
+/// the chain switch. `lib.rs` only declares it. The node crate names nothing
+/// of the wiring; its one import is the read-only pre-upgrade row check
+/// (`sumchain check-membership-rows`, #352), which runs `check_stored_rows`
+/// against a schedule given on its command line and builds no configuration.
 #[test]
 fn the_g5_module_is_named_only_by_the_dormant_wiring() {
     let sources = workspace_sources();
@@ -1471,6 +1473,7 @@ fn the_g5_module_is_named_only_by_the_dormant_wiring() {
         [
             "crates/consensus/src/branch_switch.rs",
             "crates/consensus/src/membership.rs",
+            "crates/node/src/main.rs",
             "crates/state/src/executor.rs",
             "crates/storage/src/lib.rs",
         ],
@@ -1486,12 +1489,28 @@ fn the_g5_module_is_named_only_by_the_dormant_wiring() {
         ["pub mod validator_set_g5;"],
         "lib.rs only declares it"
     );
+    let node: Vec<(&str, &str)> = sources
+        .iter()
+        .filter(|(f, _)| f.starts_with("crates/node/"))
+        .flat_map(|(f, code)| {
+            code.iter()
+                .filter(|l| l.contains("validator_set_g5"))
+                .map(move |l| (f.as_str(), l.trim()))
+        })
+        .collect();
+    assert_eq!(
+        node,
+        [(
+            "crates/node/src/main.rs",
+            "use sumchain_storage::validator_set_g5::{check_stored_rows, EpochSchedule, VsetLayout};"
+        )],
+        "the node names only what the read-only row check reads"
+    );
     for (file, code) in &sources {
         if !file.starts_with("crates/node/") {
             continue;
         }
         for needle in [
-            "validator_set_g5",
             "G5Membership",
             "DormantMembershipRules",
             "with_dormant_membership",
