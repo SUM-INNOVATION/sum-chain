@@ -524,8 +524,7 @@ pub enum PorTargets {
 }
 
 /// The height from which a storage challenge targets only an archive that
-/// attested the chunk: `ChainParams::por_attested_targets_enabled_from_height`
-/// (a provisional name).
+/// attested the chunk: `ChainParams::por_attested_targets_enabled_from_height`.
 #[inline]
 fn attested_targets_activation(params: &ChainParams) -> Option<u64> {
     params.por_attested_targets_enabled_from_height

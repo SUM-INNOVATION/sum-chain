@@ -267,8 +267,7 @@ impl NodeRegistryExecutor {
 
     /// The height from which `BeginUnstake` counts only the sender's own open
     /// storage challenges (#369):
-    /// `ChainParams::archive_unbonding_own_challenges_enabled_from_height`
-    /// (a provisional name).
+    /// `ChainParams::archive_unbonding_own_challenges_enabled_from_height`.
     #[inline]
     fn own_challenges_activation(params: &ChainParams) -> Option<u64> {
         params.archive_unbonding_own_challenges_enabled_from_height
