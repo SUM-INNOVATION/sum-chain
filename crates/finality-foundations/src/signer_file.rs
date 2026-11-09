@@ -240,6 +240,22 @@ pub trait StateHasher {
     fn hash(&self, data: &[u8]) -> Digest;
 }
 
+/// The production [`StateHasher`]: H = BLAKE3-256, ratified with the 413-byte
+/// layout and its domains [`D_SIGNER`], [`D_SIGNBYTES`] and [`D_PROOF`] (owner,
+/// 2026-10-22; decision ledger, as enumerated there). The [`RecoveryReceipt`]
+/// checksum, BLAKE3-256 over [`D_RECEIPT`] ‖ bytes, is RATIFIED with the
+/// receipt (owner, 2026-10-23). Each caller builds its domain-separated
+/// preimage; this is the plain 32-byte BLAKE3 hash of it. Dormant: nothing
+/// constructs it yet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Blake3StateHasher;
+
+impl StateHasher for Blake3StateHasher {
+    fn hash(&self, data: &[u8]) -> Digest {
+        *blake3::hash(data).as_bytes()
+    }
+}
+
 /// Who this state belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Identity {
