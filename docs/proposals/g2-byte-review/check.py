@@ -5,7 +5,8 @@ UNRATIFIED BYTE-REVIEW DRAFT. Semantics ratified 2026-10-16 (G2); bytes not
 ratified, except the constants in `RATIFIED_HOME` (FVOTv1/D_VOTE: group V;
 FCRTv1: group C; D_VALSET: VS-1, settled by the owner, 2026-10-21; D_SIGNER,
 D_SIGNBYTES and FSGNv1: group A2, integral to the 413-byte record adopted by
-the owner, 2026-10-22, inferred; decision ledger). Every vector is
+the owner, 2026-10-22, inferred; FEVDv1 and UCEVv1: group A3, the evidence
+records adopted by the owner, 2026-11-09; decision ledger). Every vector is
 SYNTHETIC/UNRATIFIED.
 
 Checks:
@@ -178,6 +179,10 @@ RATIFIED_HOME = {
     "D_SIGNER": "crates/finality-foundations/src/signer_file.rs",
     "D_SIGNBYTES": "crates/finality-foundations/src/signer_file.rs",
     "M_SIGNER": "crates/finality-foundations/src/signer_file.rs",
+    # Group A3 (B3): the evidence records adopted by the owner, 2026-11-09
+    # (decision ledger, "2026-11-09 owner ADOPTION addendum"). Dormant.
+    "M_EVID": "crates/finality-foundations/src/evidence.rs",
+    "M_UCONFLICT": "crates/finality-foundations/src/evidence.rs",
 }
 
 

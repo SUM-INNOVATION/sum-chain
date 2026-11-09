@@ -4,7 +4,8 @@
 //! finality vote format (group V) ratified on 2026-10-17, and the signer-state
 //! elements of group A2 (#340) that the owner adopted on 2026-10-22, as
 //! enumerated in the decision ledger; dormant, no node wiring. The rest of
-//! #340's format remains PROPOSED.
+//! #340's format remains PROPOSED. The evidence records of group A3 (B3) were
+//! adopted on 2026-11-09.
 //!
 //! # This is NOT certified finality
 //!
@@ -14,7 +15,8 @@
 //! integers and rounds are encoded and how a certificate's signer count is
 //! checked. The frozen object layouts are the vote ([`vote`]: decode, verify
 //! under E1, count) and the certificate ([`certificate`]: encode, decode,
-//! verify every reconstructed PRECOMMIT under E1). Nothing calls either.
+//! verify every reconstructed PRECOMMIT under E1), and the evidence records
+//! ([`evidence`]: encode, decode, verify). Nothing calls any of them.
 //! No node, consensus, storage or RPC code calls this crate, and
 //! `tests/dormant.rs` fails if any workspace crate starts depending on it.
 //! The code exists so that the ratified *semantics* are implemented and tested
@@ -43,6 +45,12 @@
 //! |--------|----------------------------------------|------------------|
 //! | `FinalityCertificateV1` | `FCRTv1\0`, schema 1, the field order of [`certificate`], `119 + 66·k` bytes; strictly ascending indices; the validator-set commitment resolved to the authenticated set; `q(n) ≤ k ≤ n`; non-nil `block_id`; every entry a reconstructed PRECOMMIT verified under E1; any invalid entry refuses the whole certificate. Storage is not decided. | [`certificate::FinalityCertificateV1`], [`certificate::verify_certificate`] |
 //!
+//! | Object | Adopted by the owner, 2026-11-09 (decision ledger, "2026-11-09 owner ADOPTION addendum", B3); dormant, no node wiring | Implemented here |
+//! |--------|------|------------------|
+//! | `EquivocationEvidenceV1` (A3) | `FEVDv1\0`, schema 1, 363 bytes: two ratified vote bodies and signatures for one slot, `A.block_id < B.block_id` (nil against non-nil is a conflict; identical bodies are a duplicate, never evidence); both votes checked as a vote is before it counts | [`evidence::EquivocationEvidenceV1`], [`evidence::verify_evidence`] |
+//! | `UpgradeConflictEvidenceV1` (A3) | `UCEVv1\0`, schema 1, `573 + 66·(k_a + k_b)` bytes; the manifests opaque but for their signer count; both verified by an injected A4 verifier (B4 is not adopted), one sequence, `digest(A) < digest(B)` | [`evidence::UpgradeConflictEvidenceV1`], [`evidence::verify_upgrade_conflict`] |
+//! | D5 | The first valid record per slot is kept, under versioned keys in the existing `meta` column family (no new column family). No penalty. | Not here: `sumchain-storage` (`evidence_meta`) |
+//!
 //! | Object | Elements adopted by the owner, 2026-10-22 (decision ledger, as enumerated there); dormant, no node wiring | Implemented here |
 //! |--------|------|------------------|
 //! | Signer state (group A2) | the 413-byte `SignerStateV1` with the halt flag; the full-state mirror and context-bound proof digest; trimmed, re-verified side-file objects with the size bound; R0/R1 only; `PolkaProofV1`; recovery with `R > H`, floor `R + 1` and a verified resume certificate against the node's chain; permanent preservation of completed archives. **RATIFIED by the owner, 2026-10-23 (decision ledger, "2026-10-23 owner decisions (later)"); dormant:** the conflict archive as one unit (the files `conflict-H.{state,evidence,resume,receipt}`, never overwritten or deleted once completed; the 185-byte `RecoveryReceipt` and `SIGNER-RECOVERY/v1`; the resume-certificate evidence context; the archive durable before the recovered record; R1 over a halted mirror only with a verified matching archive). **PROPOSED (not adopted):** the persistence protocol G/P0/P1/P2 and file names. Verified only within the bounds and limits of the ratification packet (§6–§7, summarised in #340). | [`signer_file`], [`proofs`], [`signer`] |
@@ -50,9 +58,9 @@
 //! # Still unratified (deliberately absent)
 //!
 //! * Every other object layout: authorization manifest, handshake hint,
-//!   evidence, the validator-set commitment's preimage, and the
+//!   the validator-set commitment's preimage, and the
 //!   composition of every database key, including how a certificate is
-//!   stored (byte groups A3–A5 and the storage forms). Types here are
+//!   stored (byte groups A4–A5 and the storage forms). Types here are
 //!   plain Rust structs;
 //!   where a digest or signature is needed it is supplied by the caller or an
 //!   injected trait, and the tests use synthetic digests.
@@ -81,6 +89,7 @@ pub mod bootstrap;
 pub mod certificate;
 pub mod containment;
 pub mod encoding;
+pub mod evidence;
 pub mod proofs;
 pub mod signer;
 pub mod signer_file;
