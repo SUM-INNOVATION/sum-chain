@@ -935,6 +935,63 @@ mod key_holder {
     /// height 2; with the gate ABOVE every height the roots and receipts are
     /// identical; with the gate AT the transfer's height block 1 is identical
     /// and block 2 diverges exactly there.
+    // ── production wiring: the node installs signature admission ───────────
+    //
+    // A mirror of `Node::new`'s signature-admission construction, in the style
+    // of `inference_attestation_mempool.rs::production_wiring_*`. It builds the
+    // mempool with the same `MempoolConfig` and the same
+    // `TransactionSignatureAdmission { params, current_height }` the node wires,
+    // so that if `.with_signature_admission(...)` is dropped from `Node::new`
+    // these assertions fail rather than the admission rule silently vanishing
+    // from production.
+    fn production_wiring_mempool(params: ChainParams, initial_height: u64) -> (Mempool, std::sync::Arc<AtomicU64>) {
+        let chain_height = std::sync::Arc::new(AtomicU64::new(initial_height));
+        let signature_admission = TransactionSignatureAdmission {
+            params: std::sync::Arc::new(params.clone()),
+            current_height: chain_height.clone(),
+        };
+        let mempool = Mempool::new(MempoolConfig {
+            min_fee: params.min_fee,
+            max_tx_bytes: params.max_block_bytes,
+            ..Default::default()
+        })
+        .with_signature_admission(signature_admission);
+        (mempool, chain_height)
+    }
+
+    #[test]
+    fn production_wiring_installs_signature_admission() {
+        // Gate absent (mainnet today): the context is installed, so an
+        // inclusion height exists, and a legacy-only signature is admitted as
+        // it is today. `signature_inclusion_height()` is `None` without the
+        // context, so this also fails if the wiring is dropped.
+        let (m, _h) = production_wiring_mempool(strict_from(None), 0);
+        assert_eq!(
+            m.signature_inclusion_height(),
+            Some(1),
+            "Node::new must install the signature admission context; if this is              None, re-wire `.with_signature_admission(...)` before merging"
+        );
+        assert!(m.add(legacy_only_transfer(Address::new([0xE5; 20]), 1, 0)).is_ok());
+    }
+
+    #[test]
+    fn production_wiring_refuses_a_legacy_only_signature_once_inclusion_reaches_the_gate() {
+        // Gate at H. Tip H-2 (inclusion H-1): admitted as today. After the run
+        // loop bumps `chain_height` to H-1 (inclusion H): refused.
+        let (m, chain_height) = production_wiring_mempool(strict_from(Some(H)), H - 2);
+        assert_eq!(m.signature_inclusion_height(), Some(H - 1));
+        assert!(m.add(legacy_only_transfer(Address::new([0xE6; 20]), 1, 0)).is_ok());
+        chain_height.store(H - 1, Ordering::Relaxed);
+        assert_eq!(m.signature_inclusion_height(), Some(H));
+        assert!(
+            matches!(
+                m.add(legacy_only_transfer(Address::new([0xE6; 20]), 1, 1)),
+                Err(StateError::InvalidSignature)
+            ),
+            "the production wiring must refuse a legacy-only signature once its              inclusion height reaches the gate; if this fails, re-wire              `.with_signature_admission(...)` in Node::new before merging"
+        );
+    }
+
     #[test]
     fn a_legacy_chain_replays_identically_with_the_gate_above_it() {
         let (legacy, status) = chain(None);

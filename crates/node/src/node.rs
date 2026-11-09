@@ -2051,20 +2051,24 @@ fn shutdown_both(stop_health: impl FnOnce(), stop_rpc: impl FnOnce() -> Result<(
     stop_rpc()
 }
 
-// Production-wiring contract is enforced by tests in
-// `crates/state/tests/inference_attestation_mempool.rs`:
-//   - `production_wiring_rejects_attestation_pre_activation`
-//   - `production_wiring_height_advance_opens_gate`
-// They mirror the exact admission recipe in `Node::new` above.
-// If you refactor the wiring (the `InferenceAttestationAdmission { ... }`
-// or `EducationAdmission { ... }` literals, the `.with_*_admission(...)`
-// builder chain, the `chain_height.store(...)` calls in the event loop,
-// or the `Arc::new(BlockStore::new(&db).get_latest_height()…)`
-// initialization), update those tests too — they are intentionally a
-// verbatim mirror so that drift produces compile or assertion failures
-// rather than silent security regressions. `EducationAdmission` shares
-// the SAME `chain_height` Arc, so the event-loop `chain_height.store`
-// calls cover both admission gates.
+// Production-wiring contract is enforced by tests that mirror the exact
+// admission recipe in `Node::new` above:
+//   - `crates/state/tests/inference_attestation_mempool.rs`:
+//       - `production_wiring_rejects_attestation_pre_activation`
+//       - `production_wiring_height_advance_opens_gate`
+//   - `crates/state/tests/signature_evidence_gates.rs`, module `key_holder`:
+//       - `production_wiring_installs_signature_admission`
+//       - `production_wiring_refuses_a_legacy_only_signature_once_inclusion_reaches_the_gate`
+// If you refactor the wiring (the `InferenceAttestationAdmission { ... }`,
+// `EducationAdmission { ... }` or `TransactionSignatureAdmission { ... }`
+// literals, the `.with_*_admission(...)` builder chain, the
+// `chain_height.store(...)` calls in the event loop, or the
+// `Arc::new(BlockStore::new(&db).get_latest_height()…)` initialization),
+// update those tests too — they are intentionally a verbatim mirror so that
+// drift produces compile or assertion failures rather than silent
+// regressions. `EducationAdmission` and `TransactionSignatureAdmission` share
+// the SAME `chain_height` Arc, so the event-loop `chain_height.store` calls
+// cover all three admission gates.
 
 /// Build the fully-configured production RPC server.
 ///
