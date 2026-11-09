@@ -421,6 +421,10 @@ enum Name {
 /// rest are literals, which
 /// `every_known_meta_name_is_still_spelled_in_the_source` keeps current.
 /// `PENDING_META_NAMES` are adopted keys whose code is not on this base.
+///
+/// The two `registry/` keys are spelled as `str` literals: the state crate's
+/// `the_record_prefix_is_disjoint_from_every_state_key_family` keeps every
+/// byte-string literal in that namespace to its own module.
 fn known_meta_names() -> Vec<(&'static [u8], Name, &'static str)> {
     use Name::{Key, Prefix};
     vec![
@@ -455,9 +459,13 @@ fn known_meta_names() -> Vec<(&'static [u8], Name, &'static str)> {
             "consensus/src/consensus_config/record.rs",
         ),
         (b"activation/heights", Key, "node/src/node.rs"),
-        (b"registry/freeze/v1", Key, "state/src/registry_ingress.rs"),
         (
-            b"registry/freeze/gate/v1",
+            "registry/freeze/v1".as_bytes(),
+            Key,
+            "state/src/registry_ingress.rs",
+        ),
+        (
+            "registry/freeze/gate/v1".as_bytes(),
             Key,
             "state/src/registry_ingress.rs",
         ),
