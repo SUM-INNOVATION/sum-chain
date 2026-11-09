@@ -228,9 +228,9 @@ pub(crate) fn record_sync_target(
 pub(crate) enum PeerBlockOutcome {
     /// The peer may not take part in consensus at this block's height. The
     /// engine was never called. Carries what this node has PROVEN about the
-    /// peer, so the log can say whether it declared other rules or declared
-    /// nothing at all — above the enforcement height both are refused and only
-    /// one of them is an accusation.
+    /// peer, so the log can say whether it declared other rules, has not
+    /// answered yet, or declared nothing at all — all three can be refused and
+    /// only one of them is an accusation.
     Refused(PeerCompat),
     /// The engine accepted the block.
     Imported,
@@ -288,9 +288,10 @@ pub struct Node {
     /// What each peer has declared, and the height from which declaring
     /// becomes mandatory.
     ///
-    /// Three states, not two. A peer that declared a DIFFERENT digest is
+    /// Four states, not two. A peer that declared a DIFFERENT digest is
     /// refused always; a peer that declared OURS participates always; a peer
-    /// that declared NOTHING participates below
+    /// asked on its current connection and not yet answered is refused until
+    /// it answers; a peer whose request failed participates below
     /// `ChainParams::peer_protocol_declaration_required_from_height` and is
     /// refused at or above it. Silence is never called incompatible — a node
     /// built before the handshake existed answers nothing — it simply stops
@@ -1185,18 +1186,21 @@ impl Node {
         tokio::pin!(shutdown);
         info!("Node running. Stop with SIGINT (Ctrl+C) or SIGTERM.");
 
-        // Peers to ask for their sync status again when they declare our digest.
+        // Peers to ask for their sync status again when they declare our digest,
+        // or when their request fails and they may take part.
         //
         // `PeerConnected` asks a peer for its protocol digest and for its status
-        // at once, and the answers race. At or above the enforcement height a
-        // status, a gossiped block or a synced batch that arrives before the
-        // declaration is refused, as it must be. Nothing else asks the peer
-        // again once it has declared, so without this a node restarted one
-        // block behind never synced: the block it lacked was produced while it
-        // was down, the next height was its peer's turn, and each waited for
-        // the other. So each of those three refusals records the peer, and the
-        // `ProtocolIdResponse` arm asks a recorded peer for its status once
-        // more.
+        // at once, and the answers race. Until the declaration has been
+        // compared the peer is `Pending`, and in either phase a status, a
+        // gossiped block or a synced batch that arrives first is refused, as it
+        // must be; at or above the enforcement height so is anything from a
+        // peer whose request failed. Nothing else asks the peer again once it
+        // is resolved, so without this a node restarted one block behind never
+        // synced: the block it lacked was produced while it was down, the next
+        // height was its peer's turn, and each waited for the other. So each of
+        // those three refusals records the peer, and the `ProtocolIdResponse`
+        // and `ProtocolIdUnanswered` arms ask a recorded peer for its status
+        // once more when it may take part.
         //
         // Only a recorded peer. When the declaration wins the race, the status
         // that follows is taken as it always was; asking again regardless would
@@ -1273,7 +1277,11 @@ impl Node {
                             metrics.p2p.record_peer_connected();
                             metrics.p2p.set_peer_count(network.peer_count());
                             // Ask what rules it enforces before using anything it
-                            // says. A peer too old to answer is left alone.
+                            // says: until its declaration on THIS connection has
+                            // been compared it is `Pending`, and every route into
+                            // consensus refuses it. A peer too old to answer
+                            // fails the request and is `Undeclared`.
+                            self.peer_compat.on_requested(peer);
                             let _ = command_sender.send(NetworkCommand::RequestProtocolId(peer)).await;
                             // Request sync status from new peer to check if we need to sync
                             let _ = command_sender.send(NetworkCommand::RequestSyncStatus(peer)).await;
@@ -1450,6 +1458,32 @@ impl Node {
                                     .ban_peer(&peer, std::time::Duration::from_secs(24 * 60 * 60))
                                     .await;
                                 debug!("Ban on {} took effect: {:?}", peer, ban);
+                            }
+                        }
+                        // The peer's request failed: it predates `GetProtocolId`,
+                        // answered with an error, or did not answer in time. It
+                        // declared nothing on this connection and will not, so it
+                        // leaves `Pending` for `Undeclared`: admitted below the
+                        // enforcement height, refused at or above it, exactly as
+                        // a peer that never declares always was.
+                        NetworkEvent::ProtocolIdUnanswered { peer } => {
+                            if self.peer_compat.on_unanswered(peer) {
+                                info!(
+                                    "Peer {} did not declare a protocol digest; it is undeclared, \
+                                     admitted below height {:?} and refused at or above it",
+                                    peer,
+                                    self.peer_compat.enforcement_height(),
+                                );
+                                // Something it sent while `Pending` was refused;
+                                // ask again if it may now take part. See
+                                // `resync_on_declaration`.
+                                let our_next = consensus.current_height() + 1;
+                                if resync_on_declaration.remove(&peer)
+                                    && self.peer_compat.may_participate_in_consensus(&peer, our_next)
+                                {
+                                    debug!("Asking {} for its sync status again after its request failed", peer);
+                                    let _ = command_sender.send(NetworkCommand::RequestSyncStatus(peer)).await;
+                                }
                             }
                         }
                         // Handle sync status requests from peers
