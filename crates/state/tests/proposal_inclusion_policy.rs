@@ -22,7 +22,7 @@ mod common;
 use std::sync::Arc;
 
 use common::{fund, setup_with_params, CHAIN_ID};
-use sumchain_crypto::{recipient_hash, sign, KeyPair};
+use sumchain_crypto::{recipient_hash, sign, verify_bytes, verify_bytes_strict, KeyPair};
 use sumchain_genesis::{ChainParams, MessagingParams};
 use sumchain_primitives::messaging::{
     ContentType, FundRegistryData, MessageFlags, MessageHeader, MessagingTxData,
@@ -34,7 +34,9 @@ use sumchain_primitives::{
     SponsoredMessage, TransactionV2, TxPayload, TxStatus,
 };
 use sumchain_state::executor::BlockExecutor;
-use sumchain_state::mempool::{InclusionPolicy, Mempool, MempoolConfig};
+use sumchain_state::mempool::{
+    sponsored_envelope_verifies, InclusionPolicy, Mempool, MempoolConfig,
+};
 use sumchain_state::state::StateManager;
 use sumchain_state::StateError;
 use sumchain_storage::{Database, MessagingStore, ReceiptStore, TxStore};
@@ -67,6 +69,10 @@ fn other_relayer() -> KeyPair {
 /// A registered user who is not `sender()`.
 fn someone_else() -> KeyPair {
     KeyPair::from_bytes([0x36; 32])
+}
+/// A key that signs its own envelopes but has registered nothing.
+fn unregistered() -> KeyPair {
+    KeyPair::from_bytes([0x37; 32])
 }
 
 fn base() -> ChainParams {
@@ -739,4 +745,142 @@ fn the_signature_covers_nonce_expiry_recipient_and_message_bytes() {
     c.pool()
         .add(sponsored_tx(&other_relayer(), 0, &amended))
         .expect("the amount is outside the signed string");
+}
+
+// ── the verifier ─────────────────────────────────────────────────────────────
+
+/// Strict and non-strict Ed25519 verification agree on every envelope this
+/// file signs: an ordinary relay signature passes both (in the hex case it was
+/// signed over), and every zero, foreign-key or tampered signature fails both.
+/// The policy's strict verifier therefore changes no verdict for a client that
+/// signs with a standard implementation.
+#[test]
+fn the_strict_and_legacy_verifiers_agree_on_every_envelope_this_file_signs() {
+    let base = envelope(*sender().public_key().as_bytes(), &recipient().address(), 0);
+    let signed = relay_signed(base.clone(), &sender());
+    let mut cases: Vec<(&str, SponsoredMessage)> = vec![
+        ("zero signature", base.clone()),
+        ("relay-signed, lower-case hex", signed.clone()),
+        (
+            "relay-signed, upper-case hex",
+            relay_signed_upper(base.clone(), &sender()),
+        ),
+        (
+            "signed by another key",
+            relay_signed(base.clone(), &someone_else()),
+        ),
+    ];
+    for n in 1..4 {
+        cases.push(("a later nonce", own_envelope(n)));
+    }
+    let mut t = signed.clone();
+    t.nonce = 7;
+    cases.push(("tampered nonce", t));
+    let mut t = signed.clone();
+    t.expiry = 1;
+    cases.push(("tampered expiry", t));
+    let mut t = signed.clone();
+    t.recipient_hash[0] ^= 1;
+    cases.push(("tampered recipient", t));
+    let mut t = signed.clone();
+    let n = t.message_data.len();
+    t.message_data[n - 1] ^= 1;
+    cases.push(("tampered message", t));
+    let mut t = signed.clone();
+    t.koppa_amount = Some(9);
+    cases.push(("amended amount (outside the signed string)", t));
+    let mut t = signed.clone();
+    t.signature[0] ^= 1;
+    cases.push(("flipped signature bit", t));
+    let mut t = signed.clone();
+    t.sender_pubkey = *someone_else().public_key().as_bytes();
+    cases.push(("another named key", t));
+
+    let mut passed = 0;
+    for (what, m) in &cases {
+        let lower = hex::encode(m.recipient_hash);
+        for hex in [lower.clone(), lower.to_uppercase()] {
+            let pre = relay_preimage(m, &hex);
+            let legacy = verify_bytes(&pre, &m.signature, &m.sender_pubkey).is_ok();
+            let strict = verify_bytes_strict(&pre, &m.signature, &m.sender_pubkey).is_ok();
+            assert_eq!(legacy, strict, "{what} ({hex})");
+            if strict {
+                passed += 1;
+            }
+        }
+    }
+    // Lower-case signed over lower, upper over upper, the three later nonces
+    // and the amended amount: six ordinary signatures, each passing strict in
+    // the rendering it was signed over and in no other.
+    assert_eq!(passed, 6);
+    assert!(sponsored_envelope_verifies(&signed));
+}
+
+// ── a failed envelope ────────────────────────────────────────────────────────
+
+/// An envelope carried to a receipt that is not a success leaves its sender's
+/// messaging nonce where it was. The sender's later pending envelopes could
+/// then only follow a fresh envelope at that nonce, which no pool entry
+/// supplies, so selection and revalidation evict them with the failed one. A
+/// client that re-reads the nonce and resends its run (new envelopes: the
+/// failed bytes are now included and refused as such) is admitted again, in
+/// order.
+#[test]
+fn a_failed_envelope_releases_the_senders_later_pending_envelopes() {
+    let mut c = Chain::ready();
+    // `unregistered()` signs its own envelopes but has registered no key, so
+    // its sponsored send executes to a failed receipt.
+    let m = |n: u64| {
+        relay_signed(
+            envelope(
+                *unregistered().public_key().as_bytes(),
+                &recipient().address(),
+                n,
+            ),
+            &unregistered(),
+        )
+    };
+    let e0 = sponsored_tx(&relayer(), 0, &m(0));
+    let e1 = sponsored_tx(&relayer(), 0, &m(1));
+    let e2 = sponsored_tx(&relayer(), 0, &m(2));
+    let by_selection = c.pool();
+    let by_revalidation = c.pool();
+    for pool in [&by_selection, &by_revalidation] {
+        for e in [&e0, &e1, &e2] {
+            pool.add(e.clone()).expect("admitted in sequence");
+        }
+        assert_eq!(
+            hashes(&pool.select_for_block(10)),
+            vec![e0.hash(), e1.hash(), e2.hash()]
+        );
+    }
+
+    // Someone else's block carries e0, which fails; the nonce stays at 0.
+    let r = c.one(e0.clone());
+    assert_ne!(r.status, TxStatus::Success);
+    assert_eq!(c.messaging_nonce(&unregistered().address()), 0);
+
+    assert!(by_selection.select_for_block(10).is_empty());
+    assert!(
+        by_selection.is_empty(),
+        "e0 has a receipt; e1 and e2 are released with it"
+    );
+
+    by_revalidation.revalidate(&c.state, CHAIN_ID);
+    assert!(by_revalidation.is_empty());
+
+    // The failed bytes are included and refused; a fresh run at the same
+    // nonces, under another relayer, is admitted and carried in order.
+    let pool = c.pool();
+    assert!(included(&pool.add(e0)));
+    let f0 = sponsored_tx(&other_relayer(), 0, &m(0));
+    let f1 = sponsored_tx(&other_relayer(), 0, &m(1));
+    let f2 = sponsored_tx(&other_relayer(), 0, &m(2));
+    for f in [&f0, &f1, &f2] {
+        pool.add(f.clone()).expect("the run is admitted again");
+    }
+    assert_eq!(
+        hashes(&pool.select_for_block(10)),
+        vec![f0.hash(), f1.hash(), f2.hash()]
+    );
 }
