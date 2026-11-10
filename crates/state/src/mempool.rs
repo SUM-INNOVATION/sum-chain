@@ -42,17 +42,17 @@
 //! consensus rule: a block built by a proposer that applies none of it is
 //! validated, executed and imported exactly as before.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
-use sumchain_crypto::verify_bytes;
+use sumchain_crypto::verify_bytes_strict;
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::inference_attestation::inference_attestation_key;
 use sumchain_primitives::{
     Address, Balance, Hash, MessagingOperation, Nonce, SignedTransaction, SponsoredMessage,
-    TxInner, TxPayload,
+    TxInner, TxPayload, TxStatus,
 };
 use sumchain_storage::{Database, MessagingStore, ReceiptStore};
 use tracing::{debug, info, warn};
@@ -169,19 +169,25 @@ pub struct EducationAdmission {
 ///    transaction unwound by a chain switch becomes includable again.
 ///
 /// 2. **A sponsored `SendMessage` envelope is authenticated.** Its signature
-///    must verify by the key it names as the sender, under the same verifier
-///    and over the same preimage the relay (`messaging_submitSponsored`)
-///    checks before it relays, so every client the relay accepts today is
-///    accepted here unchanged. No other signing format is recognised.
+///    must verify by the key it names as the sender, over the same preimage
+///    the relay (`messaging_submitSponsored`) checks before it relays, under
+///    strict Ed25519 verification (`verify_bytes_strict`, as every inner
+///    signature this tree verifies). The signed string, the signature and the
+///    key are exactly what the relay already requires, so a client the relay
+///    accepts is accepted here unchanged; no other signing format is
+///    recognised. The preimage covers the nonce, the expiry, the recipient
+///    hash and the message hash, and nothing else.
 ///
 /// 3. **A sponsored envelope carries the sender's expected messaging nonce.**
-///    The executor increments the named sender's messaging nonce on every
-///    successful send and never compares it, so the comparison is made here:
-///    at admission the envelope must continue the sequence that runs from the
-///    committed nonce through this node's pending envelopes for that sender;
-///    at selection, envelopes are carried in nonce order per sender, each
-///    (sender, nonce) at most once per candidate block, and an envelope the
-///    chain has moved past is evicted.
+///    The named sender's messaging nonce is the count of its successful sends
+///    as the canonical chain records it: at admission the envelope must
+///    continue the sequence that runs from that committed nonce through this
+///    node's pending envelopes for the sender; at selection, envelopes are
+///    carried in nonce order per sender, each (sender, nonce) at most once per
+///    candidate block, and an envelope the chain has moved past is evicted.
+///    An envelope carried to a failed receipt leaves the committed nonce where
+///    it was; the sender's later pending envelopes are then evicted too,
+///    since nothing in the pool can bring them into sequence.
 ///
 /// None of this decides what a block MEANS. A block built by a proposer
 /// without this policy is validated, executed and imported as before; the pins
@@ -214,16 +220,22 @@ fn relay_preimage(m: &SponsoredMessage, recipient_hex: &str) -> Vec<u8> {
 }
 
 /// Whether `m.signature` verifies, by `m.sender_pubkey`, over the relay
-/// preimage — under the relay's own (non-strict) verifier, with the recipient
-/// hash in lower-case hex or, failing that, upper-case. Those are the two
-/// renderings a client produces; a mixed-case rendering is not tried.
+/// preimage — under strict Ed25519 verification, with the recipient hash in
+/// lower-case hex or, failing that, upper-case. Those are the two renderings a
+/// client produces; a mixed-case rendering is not tried.
+///
+/// Strict verification accepts every signature a standard Ed25519
+/// implementation produces from a seed-derived key; it differs from the
+/// non-strict rule only on signatures no such implementation emits. It is a
+/// node-local acceptance rule over an unchanged signed string and signature
+/// format, and decides nothing about block validity.
 pub fn sponsored_envelope_verifies(m: &SponsoredMessage) -> bool {
     let lower = hex::encode(m.recipient_hash);
-    if verify_bytes(&relay_preimage(m, &lower), &m.signature, &m.sender_pubkey).is_ok() {
+    if verify_bytes_strict(&relay_preimage(m, &lower), &m.signature, &m.sender_pubkey).is_ok() {
         return true;
     }
     let upper = lower.to_uppercase();
-    verify_bytes(&relay_preimage(m, &upper), &m.signature, &m.sender_pubkey).is_ok()
+    verify_bytes_strict(&relay_preimage(m, &upper), &m.signature, &m.sender_pubkey).is_ok()
 }
 
 /// A sponsored `SendMessage` envelope, as the inclusion policy sees it.
@@ -320,11 +332,13 @@ pub struct Mempool {
     /// [`Mempool::with_inclusion_policy`], and nothing below is enforced
     /// without it.
     inclusion_policy: Option<InclusionPolicy>,
-    /// Pending sponsored envelopes, by the sender each names: the nonces this
-    /// pool holds for that sender. Stamped at admission after every other
-    /// check, unstamped on `remove`, re-derived from the stored transaction so
-    /// the two cannot desync.
-    sponsored_in_flight: RwLock<HashMap<Address, BTreeSet<u64>>>,
+    /// Pending sponsored envelopes, by the sender each names: nonce → the hash
+    /// of the transaction carrying it. Stamped at admission after every other
+    /// check and after insertion (or the insertion is backed out, when two
+    /// copies of one (sender, nonce) were admitted concurrently), unstamped on
+    /// `remove`, re-derived from the stored transaction so the two cannot
+    /// desync.
+    sponsored_in_flight: RwLock<HashMap<Address, BTreeMap<u64, Hash>>>,
 }
 
 /// Whether `tx` is a contract deploy or call.
@@ -523,16 +537,79 @@ impl Mempool {
             self.education_in_flight.write().insert(key, hash);
         }
         if let Some((sender, nonce)) = sponsored_key {
-            self.sponsored_in_flight
-                .write()
-                .entry(sender)
-                .or_default()
-                .insert(nonce);
+            let mut in_flight = self.sponsored_in_flight.write();
+            let raced = in_flight
+                .get(&sender)
+                .and_then(|nonces| nonces.get(&nonce))
+                .is_some_and(|other| *other != hash);
+            if raced {
+                // The admission check and this stamp are not one critical
+                // section, so two copies of one (sender, nonce) admitted
+                // concurrently both reach here. The copy stamped first stays;
+                // this one is backed out, as the check would have refused it.
+                drop(in_flight);
+                self.remove(&hash);
+                return Err(StateError::SponsoredEnvelopeRefused(format!(
+                    "an envelope from this sender with nonce {nonce} is already pending"
+                )));
+            }
+            in_flight.entry(sender).or_default().insert(nonce, hash);
         }
 
         debug!("Added tx {} to mempool (fee: {})", hash, fee);
 
         Ok(hash)
+    }
+
+    /// The pending envelopes of `sender` that nothing in this pool can bring
+    /// into sequence: every one above `committed`, when no pending envelope
+    /// other than `failed` carries `committed` itself.
+    ///
+    /// Read when an envelope is evicted for a receipt that is not a success:
+    /// such a receipt left the sender's committed nonce where it was, so the
+    /// sender's later envelopes wait for a value only a fresh submission can
+    /// supply. Evicting them keeps the pool's sequence equal to what the chain
+    /// expects, and a client that re-reads the sender's nonce and resends its
+    /// run is admitted again in order.
+    fn stranded_envelopes(&self, sender: &Address, committed: u64, failed: &Hash) -> Vec<Hash> {
+        let in_flight = self.sponsored_in_flight.read();
+        let Some(nonces) = in_flight.get(sender) else {
+            return Vec::new();
+        };
+        if nonces
+            .get(&committed)
+            .is_some_and(|carrier| carrier != failed)
+        {
+            return Vec::new();
+        }
+        nonces
+            .range(committed.saturating_add(1)..)
+            .map(|(_, h)| *h)
+            .collect()
+    }
+
+    /// Hashes to evict alongside `hash`, an envelope that has a canonical
+    /// receipt: none when the receipt is a success (the sequence moved on), the
+    /// sender's stranded envelopes when it is not.
+    fn stranded_after_receipt(
+        &self,
+        policy: &InclusionPolicy,
+        tx: &SignedTransaction,
+        hash: &Hash,
+    ) -> Vec<Hash> {
+        let Some((sender, _)) = sponsored_identity(tx) else {
+            return Vec::new();
+        };
+        let Ok(Some(receipt)) = ReceiptStore::new(&policy.db).get(hash) else {
+            return Vec::new();
+        };
+        if receipt.status == TxStatus::Success {
+            return Vec::new();
+        }
+        match MessagingStore::new(&policy.db).get_sender_nonce(&sender) {
+            Ok(committed) => self.stranded_envelopes(&sender, committed, hash),
+            Err(_) => Vec::new(),
+        }
     }
 
     /// The inclusion policy at admission.
@@ -573,7 +650,7 @@ impl Mempool {
                          {committed}"
                     )));
                 }
-                if pending.is_some_and(|p| p.contains(&nonce)) {
+                if pending.is_some_and(|p| p.contains_key(&nonce)) {
                     return Err(StateError::SponsoredEnvelopeRefused(format!(
                         "an envelope from this sender with nonce {nonce} is already pending"
                     )));
@@ -1111,11 +1188,14 @@ impl Mempool {
             }
         }
         // Pending-envelope unlink, re-derived from the stored transaction.
-        // No-op for everything but a sponsored `SendMessage`.
+        // No-op for everything but a sponsored `SendMessage`, and for a copy
+        // that was never the stamped carrier of its (sender, nonce).
         if let Some((sender, nonce)) = sponsored_identity(&entry.tx) {
             let mut in_flight = self.sponsored_in_flight.write();
             if let Some(nonces) = in_flight.get_mut(&sender) {
-                nonces.remove(&nonce);
+                if nonces.get(&nonce) == Some(hash) {
+                    nonces.remove(&nonce);
+                }
                 if nonces.is_empty() {
                     in_flight.remove(&sender);
                 }
@@ -1267,6 +1347,7 @@ impl Mempool {
                 Ok(true) => {
                     debug!(tx = %hash, "inclusion policy: already included on the canonical chain");
                     evict.push(hash);
+                    evict.extend(self.stranded_after_receipt(policy, &tx, &hash));
                     continue;
                 }
                 Err(e) => {
@@ -1326,7 +1407,10 @@ impl Mempool {
         }
         // Deferred envelopes, carried in sequence after everything else. Each
         // round carries every envelope the sequence has reached and stops when
-        // a round carries nothing.
+        // a round carries nothing. Appending them moves them out of fee order,
+        // which decides nothing: a sponsored `SendMessage` advances no account
+        // nonce, so its position in the block has no bearing on any validity
+        // rule.
         let mut progressed = true;
         while progressed && !deferred.is_empty() && carried.len() < max_count {
             progressed = false;
@@ -1419,6 +1503,7 @@ impl Mempool {
                 if let Some(policy) = &self.inclusion_policy {
                     if matches!(ReceiptStore::new(&policy.db).contains(&hash), Ok(true)) {
                         to_remove.push(hash);
+                        to_remove.extend(self.stranded_after_receipt(policy, &tx, &hash));
                         continue;
                     }
                     match sponsored_envelope(&tx) {

@@ -4524,7 +4524,11 @@ impl SumChainApiServer for RpcServer {
             hex::encode(message_data_hash.as_bytes())
         );
 
-        if sumchain_crypto::verify_bytes(sign_message.as_bytes(), &sig_array, &sender_pubkey).is_err() {
+        // Strict Ed25519 verification, the rule the mempool's inclusion policy
+        // applies to the same envelope, so the relay and the pool agree. The
+        // signed string, the signature and the key are unchanged; this is a
+        // node-local preflight and decides nothing about block validity.
+        if sumchain_crypto::verify_bytes_strict(sign_message.as_bytes(), &sig_array, &sender_pubkey).is_err() {
             return Err(RpcError::InvalidParams("Invalid sender signature".to_string()).into());
         }
 
