@@ -1319,6 +1319,12 @@ async fn main() -> Result<()> {
             let state = StateManager::new(db.clone(), 0);
             let report = execute_rollback(&db, &state, &plan, &journals, journals.policy())
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
+            // A tripwire, not a tested branch: no correct rollback can change the
+            // provenance (the unwind touches blocks, journals, indexes, the head
+            // and finality only), so nothing can make this fire. It is here so
+            // that a future unwind that did touch those rows would be reported,
+            // and its presence is pinned by a source tripwire in
+            // `tests/acknowledge_consensus_config_guard.rs`.
             let after = ccfg::migration_provenance(&db).map_err(|e| {
                 anyhow::anyhow!("the rollback left the migration provenance unreadable ({e})")
             })?;

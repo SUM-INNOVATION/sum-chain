@@ -145,6 +145,59 @@ fn the_baseline_runs_after_the_gate_check_and_before_consensus_exists() {
     );
 }
 
+/// The start marker is the first logical write of a normal start: in the
+/// constructor's source it follows the database open immediately and precedes
+/// every later check or write — the journal format gate, the messaging
+/// backfill, the activation record, the configuration baseline, the network
+/// service (which creates the node key) — and everything `run` does (the chain
+/// load and genesis init). The order is the guarantee the pre-start revert
+/// rests on, so it is pinned here as well as behaved
+/// (`a_failed_marker_write_on_a_never_backfilled_directory_writes_nothing`).
+#[test]
+fn the_start_marker_is_the_first_logical_write_after_the_open() {
+    let src = include_str!("../../src/node.rs");
+    let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+    let at = |needle: &str| {
+        production
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle} not found in node.rs"))
+    };
+    let open = at("let db = Arc::new(Database::open_default(&data_dir)?);");
+    let marker = at("sumchain_consensus::consensus_config::record_start(&db)");
+    assert!(open < marker, "the marker follows the open");
+    // Nothing but comments and the marker's own refusal between the two.
+    let between = &production[open..marker];
+    assert_eq!(
+        between.matches("(&db)").count(),
+        0,
+        "no call takes the database before the marker:\n{between}"
+    );
+    for (what, needle) in [
+        (
+            "the journal format gate",
+            "sumchain_storage::journal::validate_startup(&db)",
+        ),
+        ("the messaging backfill", ".backfill_indexes()"),
+        (
+            "the activation record",
+            "Self::check_activation_parameters(&db, &genesis, initial_height)?;",
+        ),
+        (
+            "the configuration baseline",
+            "Self::check_consensus_config(&db, &genesis, initial_height)?;",
+        ),
+        (
+            "the network service (node key)",
+            "NetworkService::new(network_config)",
+        ),
+        ("the chain load and genesis init", "self.init_chain()?;"),
+    ] {
+        assert!(marker < at(needle), "the marker precedes {what}");
+    }
+    // That `record_start` commits durably before it returns is pinned by the
+    // consensus crate's tripwire (`consensus_config_schema4.rs`).
+}
+
 /// The release that recorded schema 1: it read and wrote schema 1 and knew
 /// schema 2 only as a draft. Used to create the database it would have left.
 /// It knows schema 3 only because this binary's genesis carries the schema-3
@@ -956,6 +1009,48 @@ async fn a_failed_marker_write_refuses_the_start_and_writes_nothing_else() {
     assert_eq!(all_rows(dir.path()), rows, "exactly the moved database");
     let done = revert(dir.path(), &moved).unwrap();
     assert_eq!(done.at_height, 5);
+}
+
+/// On a directory that was never booted — no backfill marker, no activation
+/// record — a failed marker write refuses the start and writes nothing at all:
+/// no row of any column family changes. This is the test that catches a write
+/// slipped in before the marker (the backfill, say), which the booted fixtures
+/// above cannot see because those writes are no-ops there.
+#[tokio::test]
+async fn a_failed_marker_write_on_a_never_backfilled_directory_writes_nothing() {
+    use sumchain_consensus::branch_switch::failpoints::{arm, Failpoint};
+    let g = genesis();
+    let dir = schema_3_directory(&g);
+    let before = all_rows(dir.path());
+    let backfill = (
+        cf::MESSAGING_CONFIG.to_string(),
+        sumchain_storage::messaging_store::config_keys::INDEX_BACKFILL_V1.to_vec(),
+    );
+    assert!(
+        !before
+            .iter()
+            .any(|(c, k, _)| (c, k) == (&backfill.0, &backfill.1)),
+        "never backfilled"
+    );
+    assert!(
+        !before
+            .iter()
+            .any(|(c, k, _)| c == cf::META && k == b"activation/heights"),
+        "never booted"
+    );
+    arm(Some(Failpoint::StartMarkerCommitFails));
+    let err = boot(dir.path(), &g).unwrap_err();
+    arm(None);
+    assert!(err.contains("the start marker was not recorded"), "{err}");
+    assert_eq!(all_rows(dir.path()), before, "not one row written");
+    assert_eq!(marker_of(dir.path()), None);
+    // Without the failpoint the same boot writes the marker, then the rest.
+    boot(dir.path(), &g).unwrap();
+    assert_eq!(marker_of(dir.path()).unwrap().attempt, 1);
+    let after = all_rows(dir.path());
+    assert!(after
+        .iter()
+        .any(|(c, k, _)| (c, k) == (&backfill.0, &backfill.1)));
 }
 
 /// An ambiguous outcome — the marker's commit was reported as failed but the

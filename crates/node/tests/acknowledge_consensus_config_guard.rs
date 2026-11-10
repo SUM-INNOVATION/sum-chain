@@ -1029,3 +1029,74 @@ fn restore_refuses_to_clear_the_start_marker_or_change_the_record_history() {
     assert!(text(&out).contains("start marker none"), "{}", text(&out));
     assert_eq!(all_rows(&fresh), all_rows(&pre_move));
 }
+
+/// A rollback refuses, writing nothing, when the configuration record itself
+/// cannot be read: the provenance cannot be established.
+#[test]
+fn rollback_refuses_when_the_configuration_record_is_unreadable() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let data = dir.path().join("data");
+    let g = genesis();
+    deployed_release_shaped(&data, &g, 8);
+    {
+        let db = Database::open_default(&data).unwrap();
+        let mut raw = db
+            .get(sumchain_storage::cf::META, ccfg::record::RECORD_KEY)
+            .unwrap()
+            .unwrap();
+        *raw.last_mut().unwrap() ^= 1;
+        db.put(sumchain_storage::cf::META, ccfg::record::RECORD_KEY, &raw)
+            .unwrap();
+        assert!(
+            ccfg::read_record(&db).is_err(),
+            "the record is now unreadable"
+        );
+    }
+    let rows = all_rows(&data);
+    let out = rollback_cmd(&data, 5);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("migration provenance cannot be established"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(all_rows(&data), rows, "nothing written");
+}
+
+/// The rollback command's provenance checks, pinned in its source: the
+/// provenance is read before the plan is made, the command refuses while a
+/// pre-start revert is pending, and after the unwind's batch the provenance is
+/// read again and compared. The last is a tripwire no correct rollback can
+/// fire, so its presence is what this test checks.
+#[test]
+fn the_rollback_command_reads_the_provenance_before_and_after_its_batch() {
+    let src = include_str!("../src/main.rs");
+    let start = src
+        .find("Commands::Rollback {")
+        .expect("the rollback handler");
+    let end = src[start..]
+        .find("Commands::SetDiskBudget")
+        .map(|i| start + i)
+        .unwrap_or(src.len());
+    let handler = &src[start..end];
+    let at = |needle: &str| {
+        handler
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle} not found in the rollback handler"))
+    };
+    let before = at("let provenance = ccfg::migration_provenance(&db)");
+    let pending = at("ccfg::pending_schema_revert(&db).is_ok()");
+    let plan = at("plan_rollback(&block_store, to_height, max_blocks");
+    let execute = at("execute_rollback(&db, &state, &plan, &journals, journals.policy())");
+    let after = at("let after = ccfg::migration_provenance(&db)");
+    let compare = at("if after != provenance {");
+    assert!(
+        before < pending && pending < plan,
+        "provenance and pending revert before the plan"
+    );
+    assert!(
+        plan < execute && execute < after && after < compare,
+        "re-read and compared after the batch"
+    );
+    assert!(handler[compare..].contains("the rollback changed the migration provenance"));
+}
