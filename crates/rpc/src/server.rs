@@ -4515,35 +4515,6 @@ impl SumChainApiServer for RpcServer {
         let mut recipient_hash: [u8; 32] = [0u8; 32];
         recipient_hash.copy_from_slice(&recipient_hash_bytes);
 
-        // Verify the sender's signature over the sponsored message request
-        // Format: "SUMCHAIN_SPONSORED_MSG:{nonce}:{expiry}:{recipient_hash}:{message_data_hash}"
-        let message_data_hash = blake3::hash(&message_data);
-        let sign_message = format!(
-            "SUMCHAIN_SPONSORED_MSG:{}:{}:{}:{}",
-            request.nonce,
-            request.expiry,
-            recipient_hash_hex,
-            hex::encode(message_data_hash.as_bytes())
-        );
-
-        // Strict Ed25519 verification, the rule the mempool's inclusion policy
-        // applies to the same envelope, so the relay and the pool agree. The
-        // signed string, the signature and the key are unchanged; this is a
-        // node-local preflight and decides nothing about block validity.
-        if sumchain_crypto::verify_bytes_strict(sign_message.as_bytes(), &sig_array, &sender_pubkey).is_err() {
-            return Err(RpcError::InvalidParams("Invalid sender signature".to_string()).into());
-        }
-
-        // Check expiry
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        if request.expiry < now {
-            return Err(RpcError::InvalidParams("Sponsored message request has expired".to_string()).into());
-        }
-
         // Parse optional koppa amount
         let koppa_amount = if let Some(ref amount_str) = request.koppa_amount {
             let amount: u128 = amount_str.parse()
@@ -4564,6 +4535,95 @@ impl SumChainApiServer for RpcServer {
             koppa_amount,
         };
 
+        // Which envelope form the block this transaction would land in applies:
+        // the version-2 envelope from
+        // `messaging_sponsored_envelope_verification_enabled_from_height` on,
+        // judged at the next block's height, the string form below it. An
+        // advisory preflight either way (consensus re-checks at execution), but
+        // the two forms are different signing bytes, so relaying one where the
+        // other applies would only land as a failed operation. A store read
+        // error is not treated as a tip of 0: it is surfaced.
+        let chain_id = self.state.chain_id();
+        let tip_height = match BlockStore::new(&self.db).get_latest() {
+            Ok(Some(block)) => block.header.height,
+            Ok(None) => 0,
+            Err(e) => {
+                return Err(RpcError::Internal(format!(
+                    "Failed to read chain tip during sponsored-message preflight: {e}"
+                ))
+                .into());
+            }
+        };
+        let inclusion_height = tip_height.saturating_add(1);
+        let v2_envelope = sumchain_state::MessagingExecutor::sponsored_envelope_verification_gate_open(
+            &self.chain_params,
+            inclusion_height,
+        );
+
+        if v2_envelope {
+            // The version-2 rule, as the executor applies it: no amount, a strict
+            // signature by the named sender over the version-2 preimage, and
+            // the sender's current messaging nonce as the canonical chain
+            // records it.
+            if sponsored_msg.koppa_amount.is_some() {
+                return Err(RpcError::InvalidParams(
+                    "A sponsored message cannot carry a koppa_amount from the envelope \
+                     verification height on; send the payment as SendMessageWithPayment"
+                        .to_string(),
+                )
+                .into());
+            }
+            if sumchain_primitives::verify_sponsored_send_v2(&sponsored_msg, chain_id).is_err() {
+                return Err(RpcError::InvalidParams(
+                    "Invalid sender signature: from the envelope verification height on the \
+                     signature is over the version-2 envelope preimage \
+                     (SPONSORED_SEND_V2_TAG || chain_id || sender_pubkey || recipient_hash || \
+                     blake3(message_data) || nonce || expiry || amount, big-endian)"
+                        .to_string(),
+                )
+                .into());
+            }
+            let expected_nonce = store.get_sender_nonce(&sender_address).map_err(|e| {
+                RpcError::Internal(format!("Failed to read the sender's messaging nonce: {e}"))
+            })?;
+            if sponsored_msg.nonce != expected_nonce {
+                return Err(RpcError::InvalidParams(format!(
+                    "Envelope nonce {} is not the sender's current messaging nonce {} \
+                     (messaging_getSenderNonce)",
+                    sponsored_msg.nonce, expected_nonce
+                ))
+                .into());
+            }
+        } else {
+            // Verify the sender's signature over the sponsored message request
+            // Format: "SUMCHAIN_SPONSORED_MSG:{nonce}:{expiry}:{recipient_hash}:{message_data_hash}"
+            let message_data_hash = blake3::hash(&sponsored_msg.message_data);
+            let sign_message = format!(
+                "SUMCHAIN_SPONSORED_MSG:{}:{}:{}:{}",
+                request.nonce,
+                request.expiry,
+                recipient_hash_hex,
+                hex::encode(message_data_hash.as_bytes())
+            );
+
+            // Strict Ed25519 verification, the rule the mempool's inclusion
+            // policy applies to the same envelope, so the relay and the pool
+            // agree.
+            if sumchain_crypto::verify_bytes_strict(sign_message.as_bytes(), &sig_array, &sender_pubkey).is_err() {
+                return Err(RpcError::InvalidParams("Invalid sender signature".to_string()).into());
+            }
+        }
+
+        // Check expiry
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        if request.expiry < now {
+            return Err(RpcError::InvalidParams("Sponsored message request has expired".to_string()).into());
+        }
+
         let messaging_data = MessagingTxData {
             operation: MessagingOperation::SendMessage, // Use sponsored message operation
             data: bincode::serialize(&sponsored_msg)
@@ -4578,7 +4638,6 @@ impl SumChainApiServer for RpcServer {
         // Create the messaging transaction
         // tx.from = sponsor_address (matches the signer)
         // The real message sender is in the SponsoredMessage.sender_pubkey
-        let chain_id = self.state.chain_id();
         let fee = 1_000_000u128; // 0.001 Koppa fee
 
         let tx = TransactionV2::messaging(

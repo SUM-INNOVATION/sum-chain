@@ -1146,7 +1146,9 @@ pub trait SumChainApi {
 
     /// The sender's committed messaging nonce: how many messages this address
     /// has sent (sponsored or direct), and therefore the `nonce` the next
-    /// sponsored `SendMessage` envelope from it must carry. Read-only.
+    /// sponsored `SendMessage` envelope from it must carry: in either envelope
+    /// form under this node's inclusion policy, and in consensus from the
+    /// envelope verification gate on. Read-only.
     #[method(name = "messaging_getSenderNonce")]
     async fn messaging_get_sender_nonce(
         &self,

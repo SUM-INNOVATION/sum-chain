@@ -1889,7 +1889,8 @@ pub struct MessagingSenderNonceInfo {
     pub address: String,
     /// How many messages this address has sent (sponsored or direct), as the
     /// canonical chain records it; the `nonce` the next sponsored envelope
-    /// from this sender must carry.
+    /// from this sender must carry (in consensus from the envelope
+    /// verification gate on).
     pub nonce: u64,
 }
 
