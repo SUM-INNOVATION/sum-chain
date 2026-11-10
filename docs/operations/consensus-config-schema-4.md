@@ -183,11 +183,15 @@ sumchain revert-consensus-config-schema --data-dir <dir> --old <moved> --new <re
   in the database they describe. `restore` compares a backup with the database
   at the target path; a restore into a **missing** target path (a directory
   moved aside, a new machine) has nothing to compare with, and a backup that
-  holds no start marker then produces a pre-move database with no marker,
-  which the binary cannot tell from a node that was never moved. The controls
-  for that case are operational and are part of this procedure: the
-  post-move digest of each database, the masked unit, and the pair-wide check
-  (a reverted-by-restore node fails the digest check, and the pair goes
+  holds no start marker would produce a pre-move database with no marker,
+  which the binary cannot tell from a node that was never moved. Such a restore
+  therefore refuses unless the operator passes `--new-node`, the explicit word
+  that the path is a new node's data directory (the backup's head, record
+  schema and marker are printed first); an existing target keeps the
+  provenance comparison whatever the flag says. The controls that remain
+  operational are part of this procedure: the post-move digest of
+  each database, the masked unit, and the pair-wide check (a
+  reverted-by-restore node fails the digest check, and the pair goes
   forward).
 - **Binaries that write no marker are invisible to it.** The deployed release
   and earlier builds write no marker, so a mistaken start of either leaves

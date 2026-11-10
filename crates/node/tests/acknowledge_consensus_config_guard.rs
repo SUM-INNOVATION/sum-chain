@@ -778,6 +778,10 @@ fn rollback_cmd(data: &Path, to: u64) -> Output {
 }
 
 fn restore_cmd(backup: &Path, data: &Path, force: bool) -> Output {
+    restore_cmd_with(backup, data, force, false)
+}
+
+fn restore_cmd_with(backup: &Path, data: &Path, force: bool, new_node: bool) -> Output {
     let mut args = vec![
         "restore",
         "--backup",
@@ -787,6 +791,9 @@ fn restore_cmd(backup: &Path, data: &Path, force: bool) -> Output {
     ];
     if force {
         args.push("--force");
+    }
+    if new_node {
+        args.push("--new-node");
     }
     run_cmd(&args)
 }
@@ -924,7 +931,8 @@ fn rollback_refuses_when_the_provenance_is_uncertain_or_a_revert_is_pending() {
 /// the move but before the start (it would clear the marker); the revert then
 /// still refuses. A backup taken after the start restores, and a restore into
 /// a missing directory restores. A backup whose provenance cannot be read is
-/// refused. `--force` overwrites, it does not bypass.
+/// refused. `--force` overwrites, it does not bypass. Into a missing target,
+/// a backup without a start marker needs `--new-node`.
 #[test]
 fn restore_refuses_to_clear_the_start_marker_or_change_the_record_history() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -1022,12 +1030,42 @@ fn restore_refuses_to_clear_the_start_marker_or_change_the_record_history() {
     let out = revert_schema(&data, &new, &old);
     assert!(!out.status.success(), "{}", text(&out));
 
-    // A missing target: restores, provenance read from the backup.
+    // A missing target and a backup that holds no start marker: refused
+    // without --new-node, naming the flag, and nothing is created; with it,
+    // restored. A backup that holds a marker restores without the flag. The
+    // flag bypasses nothing on an existing target.
     let fresh = dir.path().join("fresh-target");
     let out = restore_cmd(&pre_move, &fresh, false);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("pass --new-node"), "{}", text(&out));
+    assert!(
+        text(&out).contains("Backup start marker:           none"),
+        "{}",
+        text(&out)
+    );
+    assert!(!fresh.exists(), "nothing created");
+    let out = restore_cmd_with(&pre_move, &fresh, false, true);
     assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("Backup configuration schema:   3"),
+        "{}",
+        text(&out)
+    );
     assert!(text(&out).contains("start marker none"), "{}", text(&out));
     assert_eq!(all_rows(&fresh), all_rows(&pre_move));
+    let fresh2 = dir.path().join("fresh-target-2");
+    let out = restore_cmd(&post_start, &fresh2, false);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(all_rows(&fresh2), all_rows(&post_start));
+    let rows = all_rows(&data);
+    let out = restore_cmd_with(&pre_move, &data, true, true);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("no force bypass"), "{}", text(&out));
+    assert_eq!(
+        all_rows(&data),
+        rows,
+        "--new-node bypasses nothing on an existing target"
+    );
 }
 
 /// A rollback refuses, writing nothing, when the configuration record itself

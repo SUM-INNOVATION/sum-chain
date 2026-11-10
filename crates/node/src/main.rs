@@ -195,6 +195,15 @@ enum Commands {
         /// above.
         #[arg(long)]
         force: bool,
+
+        /// Acknowledge that a MISSING target path is a new node's data
+        /// directory. Required when the backup holds no start marker: such a
+        /// backup predates every normal start of this binary on that database,
+        /// and restoring it into an empty path yields a database the binary
+        /// cannot tell from one that was never moved. Not a bypass: an existing
+        /// target keeps the provenance comparison whatever this flag says.
+        #[arg(long)]
+        new_node: bool,
     },
 
     /// List available backups
@@ -793,6 +802,7 @@ async fn main() -> Result<()> {
             backup,
             data_dir,
             force,
+            new_node,
         } => {
             use sumchain_consensus::consensus_config as ccfg;
 
@@ -823,9 +833,52 @@ async fn main() -> Result<()> {
                     )
                 })?
             };
+            // A missing target has nothing to compare with. A backup that holds
+            // no start marker predates every normal start of this binary on
+            // that database; restored into an empty path it comes back as a
+            // database the binary cannot tell from one that was never moved,
+            // which is how a validator's directory moved aside and a pre-move
+            // copy restored in its place would look. So that restore needs the
+            // operator's explicit word that the path is a new node's. The
+            // backup's head and record schema are printed first.
+            if !data_dir.exists() {
+                let b = Database::open_read_only(&backup).with_context(|| {
+                    format!("refusing to restore: cannot open the backup {backup:?} read-only")
+                })?;
+                let blocks = sumchain_storage::schema::BlockStore::new(&b);
+                let head = match (blocks.get_latest_height()?, blocks.get_latest_hash()?) {
+                    (Some(h), Some(hash)) => format!("{h} {hash}"),
+                    _ => "none".to_string(),
+                };
+                let schema = ccfg::read_record(&b)
+                    .ok()
+                    .flatten()
+                    .map_or("none".to_string(), |r| r.config.schema().number.to_string());
+                drop(b);
+                println!("The target {data_dir:?} does not exist.");
+                println!("  Backup head:                   {head}");
+                println!("  Backup configuration schema:   {schema}");
+                println!(
+                    "  Backup start marker:           {}",
+                    match &backup_provenance.marker {
+                        Some(m) => format!("attempt {} at {:?}", m.attempt, m.record),
+                        None => "none".to_string(),
+                    }
+                );
+                if backup_provenance.marker.is_none() && !new_node {
+                    anyhow::bail!(
+                        "refusing to restore into the missing target {data_dir:?}: the backup \
+                         holds no start marker, so the result would be a database this binary \
+                         cannot tell from one that was never moved (the way a validator's \
+                         directory moved aside and a pre-move copy restored in its place would \
+                         look). If this path is a new node's data directory, pass --new-node. \
+                         Nothing was created"
+                    );
+                }
+            }
             // An existing database keeps its protection: the record history
             // and the start marker's record state must survive the restore.
-            // There is no flag that bypasses this.
+            // There is no flag that bypasses this, --new-node included.
             if data_dir.exists() {
                 let current = {
                     let t = Database::open_read_only(&data_dir).with_context(|| {
