@@ -306,6 +306,11 @@ const WIRING: &[(&str, &str, &str)] = &[
         "sponsored_envelope_verification_activation",
         "messaging_sponsored_envelope_verification_enabled_from_height",
     ),
+    (
+        "messaging_executor.rs",
+        "fee_nonce_accounting_activation",
+        "messaging_fee_nonce_accounting_enabled_from_height",
+    ),
 ];
 
 fn source(file: &str) -> String {
@@ -440,18 +445,20 @@ fn every_remediation_gate_reads_the_field_it_names() {
 /// `storage_metadata.rs`. The forty-ninth, `strict_signatures_activation`, is
 /// the only accessor in `tx_signature.rs`. The fiftieth,
 /// `submit_evidence_unsupported_activation`, is the first accessor in
-/// `staking_executor.rs`. The fifty-first,
-/// `sponsored_envelope_verification_activation`, is the second accessor in
-/// `messaging_executor.rs`, beside `timestamp_units_activation`.
+/// `staking_executor.rs`. The fifty-first and fifty-second,
+/// `sponsored_envelope_verification_activation` and
+/// `fee_nonce_accounting_activation`, are the second and third accessors in
+/// `messaging_executor.rs`, beside `timestamp_units_activation`: three
+/// `messaging_` fields in one file, and the pairing is what keeps them apart.
 #[test]
-fn the_fifty_one_gates_are_fifty_one_distinct_fields() {
+fn the_fifty_two_gates_are_fifty_two_distinct_fields() {
     let fields: BTreeSet<&str> = WIRING.iter().map(|(_, _, f)| *f).collect();
     assert_eq!(
         fields.len(),
-        51,
-        "expected fifty-one distinct fields: {fields:?}"
+        52,
+        "expected fifty-two distinct fields: {fields:?}"
     );
-    assert_eq!(WIRING.len(), 51, "expected fifty-one accessors");
+    assert_eq!(WIRING.len(), 52, "expected fifty-two accessors");
 }
 
 /// Wiring a gate is not opening it: the release configuration is unchanged.
@@ -669,6 +676,10 @@ fn every_remediation_gate_is_dormant_by_default() {
             "messaging_sponsored_envelope_verification_enabled_from_height",
             p.messaging_sponsored_envelope_verification_enabled_from_height,
         ),
+        (
+            "messaging_fee_nonce_accounting_enabled_from_height",
+            p.messaging_fee_nonce_accounting_enabled_from_height,
+        ),
     ];
     assert_eq!(dormant.len(), WIRING.len());
     for (name, value) in dormant {
@@ -721,6 +732,7 @@ fn a_genesis_written_before_these_fields_still_parses_dormant() {
         back.messaging_sponsored_envelope_verification_enabled_from_height,
         None
     );
+    assert_eq!(back.messaging_fee_nonce_accounting_enabled_from_height, None);
     assert_eq!(back.tax_authorization_enabled_from_height, None);
     assert_eq!(back.subsystem_tx_index_enabled_from_height, None);
     assert_eq!(back.subsystem_allocation_bound_enabled_from_height, None);
@@ -789,5 +801,5 @@ fn the_genesis_gate_list_matches_the_accessor_table() {
     // such branches lost three attributes, three doc blocks and two
     // activation_heights entries, and left this list at 20 against a table of
     // 28, all of which compiled.
-    assert_eq!(in_genesis.len(), 51);
+    assert_eq!(in_genesis.len(), 52);
 }

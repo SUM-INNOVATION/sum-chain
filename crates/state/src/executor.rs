@@ -967,10 +967,22 @@ impl BlockExecutor {
                                 result.error.as_deref().unwrap_or("Unknown error")
                             );
 
+                            // From the fee-accounting gate on, a refused
+                            // messaging operation was charged its fee before
+                            // dispatch, and the receipt says so. Below it,
+                            // nothing was charged, as before.
+                            let fee_paid = if MessagingExecutor::fee_nonce_accounting_gate_open(
+                                &self.params,
+                                block_height,
+                            ) {
+                                v2_tx.fee
+                            } else {
+                                0
+                            };
                             Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::Failed(7), // Messaging operation failed
-                                fee_paid: 0,
+                                fee_paid,
                             })
                         }
                     }
@@ -2780,10 +2792,19 @@ impl BlockExecutor {
                         result.error.as_deref().unwrap_or("Unknown error")
                     );
 
+                    // The same fee report as the live arm's.
+                    let fee_paid = if MessagingExecutor::fee_nonce_accounting_gate_open(
+                        &self.params,
+                        block_height,
+                    ) {
+                        tx.fee
+                    } else {
+                        0
+                    };
                     Ok(TxExecutionResult {
                         tx_hash,
                         status: TxStatus::Failed(7), // Messaging operation failed
-                        fee_paid: 0,
+                        fee_paid,
                     })
                 }
             }

@@ -448,6 +448,7 @@ fn run_local(output_dir: Option<PathBuf>, opts: &DevnetOptions) -> Result<()> {
             strict_transaction_signatures_enabled_from_height: None,
             staking_submit_evidence_unsupported_enabled_from_height: None,
             messaging_sponsored_envelope_verification_enabled_from_height: None,
+            messaging_fee_nonce_accounting_enabled_from_height: None,
             contract_metering_enabled_from_height: None,
             max_block_contract_gas: None,
             max_contract_deploy_gas: None,

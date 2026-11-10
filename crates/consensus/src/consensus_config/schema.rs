@@ -791,6 +791,20 @@ pub const SCHEMA_5_ADDED: &[AddedField] = &[
         },
         source: Source::Gate,
     },
+    // Every messaging operation is charged its fee and advances the sender's
+    // account nonce, once, succeeding or refused. The name and the allocation
+    // are proposed.
+    AddedField {
+        spec: FieldSpec {
+            id: 0x1049,
+            name: "messaging_fee_nonce_accounting_enabled_from_height",
+            ty: Ty::U64,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Gate,
+    },
     // The compiled domain tag the version-2 envelope preimage begins with,
     // committed only while that gate is set: below it nothing reads the tag,
     // so absent is the pre-existing behaviour, and a record carried into

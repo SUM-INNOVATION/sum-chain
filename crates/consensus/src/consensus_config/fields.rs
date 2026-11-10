@@ -1808,9 +1808,11 @@ pub(crate) fn compute(genesis: &Genesis, policy: &SchemaPolicy) -> Result<Vec<Fi
         por_attested_targets_enabled_from_height: _,
         strict_transaction_signatures_enabled_from_height: _,
         staking_submit_evidence_unsupported_enabled_from_height: _,
-        // Schema 5 (draft), 0x1048 (gate) and 0x252b (param): `schema::SCHEMA_5_ADDED`,
-        // the gate via `activation_heights()`, the envelope tag as a `Source::Param`.
+        // Schema 5 (draft), 0x1048 and 0x1049 (gates) and 0x252b (param):
+        // `schema::SCHEMA_5_ADDED`, the gates via `activation_heights()`, the
+        // envelope tag as a `Source::Param`.
         messaging_sponsored_envelope_verification_enabled_from_height: _,
+        messaging_fee_nonce_accounting_enabled_from_height: _,
         // Schema 2 (draft), 0x1041 (gate) and 0x0115 (param): `schema::SCHEMA_2_ADDED`,
         // the gate via `activation_heights()`, the budget as a `Source::Param`.
         contract_metering_enabled_from_height: _,

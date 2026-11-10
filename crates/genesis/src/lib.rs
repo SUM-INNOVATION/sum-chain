@@ -3093,6 +3093,34 @@ pub struct ChainParams {
     #[serde(default)]
     pub messaging_sponsored_envelope_verification_enabled_from_height: Option<u64>,
 
+    /// Every messaging operation is charged its fee and advances the sender's
+    /// account nonce, once, whether it succeeds or is refused.
+    ///
+    /// PROPOSED NAME, for review; it is the second gate of the draft schema 5
+    /// (`0x1049`, proposed).
+    ///
+    /// Below this height, or while it is unset, the messaging operations
+    /// charge as before. At and above it, the
+    /// messaging executor charges every operation before dispatching it, as
+    /// the other V2 arms charge: the fee leaves the sender, the proposer is
+    /// credited and the sender's account nonce advances, exactly once, on
+    /// success and on refusal alike; the two operations that charged for
+    /// themselves charge nothing more, and end with the balances and nonces
+    /// they ended with before. A refused operation's receipt reports the fee
+    /// it was charged.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub messaging_fee_nonce_accounting_enabled_from_height: Option<u64>,
+
     /// Contract execution is metered (#279).
     ///
     /// Below this height a contract deploy or call runs on the unmetered
@@ -3609,6 +3637,8 @@ impl Default for ChainParams {
             staking_submit_evidence_unsupported_enabled_from_height: None,
             // Production-safe default: a sponsored envelope executes as before — dormant.
             messaging_sponsored_envelope_verification_enabled_from_height: None,
+            // Production-safe default: messaging operations charge as before — dormant.
+            messaging_fee_nonce_accounting_enabled_from_height: None,
             // Production-safe default: contracts run on the unmetered engine — dormant.
             contract_metering_enabled_from_height: None,
             // No block-level contract gas budget (inert while the metering gate is closed).
@@ -4320,6 +4350,10 @@ impl ChainParams {
                 self.messaging_sponsored_envelope_verification_enabled_from_height,
             ),
             (
+                "messaging_fee_nonce_accounting_enabled_from_height",
+                self.messaging_fee_nonce_accounting_enabled_from_height,
+            ),
+            (
                 "contract_metering_enabled_from_height",
                 self.contract_metering_enabled_from_height,
             ),
@@ -4363,7 +4397,7 @@ impl ChainParams {
     }
 }
 
-/// The fifty-one remediation gates, by field name.
+/// The fifty-two remediation gates, by field name.
 ///
 /// The count in this sentence has been wrong twice, both times because a wave
 /// added gates and nothing checked the prose. It is checked now:
@@ -4435,6 +4469,7 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "strict_transaction_signatures_enabled_from_height",
     "staking_submit_evidence_unsupported_enabled_from_height",
     "messaging_sponsored_envelope_verification_enabled_from_height",
+    "messaging_fee_nonce_accounting_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started

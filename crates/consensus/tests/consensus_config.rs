@@ -1615,20 +1615,24 @@ static WRITES_SCHEMA_5: SchemaPolicy = SchemaPolicy {
 };
 
 /// The draft schema-5 fields: 0x1048, under which a sponsored `SendMessage`
-/// carries a version-2 sender envelope verified in consensus, and 0x252b, the
-/// envelope's compiled domain tag, committed only while that gate is set.
-/// Schema 4 stays closed at its four gates. Dormant, the two leave the
-/// schema-4 configuration this binary writes byte-identical to the schema-4
-/// golden vector; set, the gate refuses to build, because this binary writes
-/// schema 4 and a draft field can be declared but never activated. A binary
-/// that wrote schema 5 would record the gate and, with it, the tag.
+/// carries a version-2 sender envelope verified in consensus, 0x1049, under
+/// which every messaging operation is charged its fee and advances the nonce
+/// once, and 0x252b, the envelope's compiled domain tag, committed only while
+/// the envelope gate is set. Schema 4 stays closed at its four gates. Dormant,
+/// the three leave the schema-4 configuration this binary writes
+/// byte-identical to the schema-4 golden vector; set, either gate refuses to
+/// build, because this binary writes schema 4 and a draft field can be
+/// declared but never activated. A binary that wrote schema 5 would record
+/// the gates and, with the envelope gate, the tag.
 #[test]
 fn the_draft_schema_5_fields_are_held_dormant_and_refused_when_set() {
     use ccfg::schema::SPONSORED_SEND_V2_TAG_ID;
     const GATE: u16 = 0x1048;
+    const ACCOUNTING_GATE: u16 = 0x1049;
     let name = "messaging_sponsored_envelope_verification_enabled_from_height";
+    let accounting = "messaging_fee_nonce_accounting_enabled_from_height";
 
-    assert_eq!(ccfg::SCHEMA_5.added.len(), 2);
+    assert_eq!(ccfg::SCHEMA_5.added.len(), 3);
     assert_eq!(
         ccfg::SCHEMA_4.added.len(),
         4,
@@ -1646,6 +1650,12 @@ fn the_draft_schema_5_fields_are_held_dormant_and_refused_when_set() {
         .iter()
         .any(|a| a.spec.id == GATE && a.spec.name == name));
     assert!(!ccfg::SCHEMA_4.added.iter().any(|a| a.spec.name == name));
+    assert_eq!(ccfg::fields::gate_id(accounting), Some(ACCOUNTING_GATE));
+    assert!(ccfg::SCHEMA_5
+        .added
+        .iter()
+        .any(|a| a.spec.id == ACCOUNTING_GATE && a.spec.name == accounting));
+    assert!(!ccfg::SCHEMA_4.added.iter().any(|a| a.spec.name == accounting));
     assert_eq!(SPONSORED_SEND_V2_TAG_ID, 0x252b);
     let tag = ccfg::fields::spec_for(SPONSORED_SEND_V2_TAG_ID).expect("registered");
     assert_eq!(tag.name, "sumchain_wire::messaging::SPONSORED_SEND_V2_TAG");
@@ -1656,6 +1666,10 @@ fn the_draft_schema_5_fields_are_held_dormant_and_refused_when_set() {
     assert_eq!(
         base.params
             .messaging_sponsored_envelope_verification_enabled_from_height,
+        None
+    );
+    assert_eq!(
+        base.params.messaging_fee_nonce_accounting_enabled_from_height,
         None
     );
     let c = ccfg::build(&base).unwrap();
@@ -1677,6 +1691,7 @@ fn the_draft_schema_5_fields_are_held_dormant_and_refused_when_set() {
     let five = ccfg::build_with(&base, &WRITES_SCHEMA_5).unwrap();
     assert_eq!(five.schema().number, 5);
     assert_eq!(five.get(GATE), Some(&Value::Absent));
+    assert_eq!(five.get(ACCOUNTING_GATE), Some(&Value::Absent));
     assert_eq!(five.get(SPONSORED_SEND_V2_TAG_ID), Some(&Value::Absent));
     assert_eq!(
         five.fields().len(),
@@ -1699,4 +1714,16 @@ fn the_draft_schema_5_fields_are_held_dormant_and_refused_when_set() {
         ))
     );
     assert_ne!(five.commitment(), c.commitment());
+
+    // The accounting gate: refused by this binary; recorded by that one, and
+    // it moves no tag.
+    let mut set = full_genesis();
+    set.params.messaging_fee_nonce_accounting_enabled_from_height = Some(10);
+    let err = ccfg::build(&set).expect_err("a draft field is never activated");
+    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
+    assert!(err.to_string().contains(accounting), "{err}");
+    let five = ccfg::build_with(&set, &WRITES_SCHEMA_5).unwrap();
+    assert_eq!(five.get(ACCOUNTING_GATE), Some(&Value::U64(10)));
+    assert_eq!(five.get(GATE), Some(&Value::Absent));
+    assert_eq!(five.get(SPONSORED_SEND_V2_TAG_ID), Some(&Value::Absent));
 }

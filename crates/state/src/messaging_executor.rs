@@ -139,11 +139,39 @@ impl MessagingExecutor {
         )
     }
 
+    /// `ChainParams::messaging_fee_nonce_accounting_enabled_from_height`.
+    ///
+    /// Reads `params.messaging_fee_nonce_accounting_enabled_from_height`.
+    fn fee_nonce_accounting_activation(params: &ChainParams) -> Option<u64> {
+        params.messaging_fee_nonce_accounting_enabled_from_height
+    }
+
+    /// Whether every messaging operation in a block at `block_height` is
+    /// charged its fee and advances the sender's account nonce, once, before
+    /// it is dispatched, succeeding or refused. Below the gate, or while it is
+    /// unset, the operations charge as before.
+    pub fn fee_nonce_accounting_gate_open(params: &ChainParams, block_height: u64) -> bool {
+        matches!(
+            Self::fee_nonce_accounting_activation(params),
+            Some(h) if block_height >= h
+        )
+    }
+
     /// Execute a messaging transaction
     ///
     /// `chain_id` is the chain the block belongs to, which `validate_tx` has
     /// already required the outer transaction to name; a sponsored envelope's
     /// version-2 preimage binds it.
+    ///
+    /// From `messaging_fee_nonce_accounting_enabled_from_height` on, the fee is
+    /// charged here, once, before the operation is dispatched: `fee` leaves
+    /// `sender`, `proposer` is credited and `sender`'s account nonce advances,
+    /// whether the operation then succeeds or is refused, as the other V2 arms
+    /// charge. The dispatch arm reports that fee on a refused operation's
+    /// receipt. The two operations that charged for themselves before the gate
+    /// (`SendMessageDirect`, `SendMessageWithPayment`) are told the fee is
+    /// charged and charge nothing more. `validate_tx` has already required the
+    /// sender's balance to cover `fee`.
     ///
     /// `block_timestamp` arrives real from both dispatch arms and is reduced to
     /// the literal `0` they used to pass while
@@ -184,6 +212,14 @@ impl MessagingExecutor {
         // rows that RECORD a time (`MessageEvent::timestamp`,
         // `RegisteredPublicKey::registered_at`) keep `block_timestamp`.
         let clock = Self::rule_clock(params, block_height, block_timestamp);
+        // Exactly once, on every path from here: a refusal below leaves the
+        // charge in place, and nothing below charges again.
+        let fee_charged = Self::fee_nonce_accounting_gate_open(params, block_height);
+        if fee_charged {
+            StateManager::v_deduct(view, sender, fee)?;
+            StateManager::v_credit(view, proposer, fee)?;
+            StateManager::v_increment_nonce(view, sender)?;
+        }
         match data.operation {
             MessagingOperation::SendMessage => Self::send_message_sponsored(
                 view,
@@ -205,6 +241,7 @@ impl MessagingExecutor {
                 &data.data,
                 proposer,
                 fee,
+                fee_charged,
                 block_height,
                 block_timestamp,
                 clock,
@@ -218,6 +255,7 @@ impl MessagingExecutor {
                 &data.data,
                 proposer,
                 fee,
+                fee_charged,
                 block_height,
                 block_timestamp,
                 clock,
@@ -560,6 +598,11 @@ impl MessagingExecutor {
     }
 
     /// Send message directly (user pays gas)
+    ///
+    /// `fee_charged`: the fee, the proposer's credit and the nonce were
+    /// already accounted by [`Self::execute`] (from the fee-accounting gate
+    /// on), so this operation charges nothing more. Below the gate it is
+    /// `false` and the operation charges on success, as before.
     #[allow(clippy::too_many_arguments)]
     fn send_message_direct(
         view: &mut ExecutionView<'_, '_>,
@@ -568,6 +611,7 @@ impl MessagingExecutor {
         data: &[u8],
         proposer: &Address,
         fee: Balance,
+        fee_charged: bool,
         block_height: u64,
         block_timestamp: u64,
         clock: u64,
@@ -598,12 +642,14 @@ impl MessagingExecutor {
         // Check recipient filter
         Self::check_recipient_filter(view, sender, &msg_data.recipient_hash)?;
 
-        // Deduct fee and pay proposer
-        StateManager::v_deduct(view, sender, fee)?;
-        StateManager::v_credit(view, proposer, fee)?;
+        if !fee_charged {
+            // Deduct fee and pay proposer
+            StateManager::v_deduct(view, sender, fee)?;
+            StateManager::v_credit(view, proposer, fee)?;
 
-        // Increment nonce
-        StateManager::v_increment_nonce(view, sender)?;
+            // Increment nonce
+            StateManager::v_increment_nonce(view, sender)?;
+        }
 
         // Increment sender's message nonce and daily count
         Self::v_increment_sender_nonce(view, sender)?;
@@ -628,6 +674,15 @@ impl MessagingExecutor {
     }
 
     /// Send message with attached Koppa payment
+    ///
+    /// `fee_charged` as in [`Self::send_message_direct`]: with the fee already
+    /// accounted, only the payment is taken here, and the balance check is
+    /// against the payment alone. The fee has already left the balance, so
+    /// this is the earlier `fee + amount` condition, with one exception: when
+    /// the sender is the block's proposer the fee comes straight back, so the
+    /// check is `amount` alone, and such a sender holding less than
+    /// `fee + amount` (but at least `amount`, and the fee validation requires)
+    /// now succeeds, paying the fee to itself.
     #[allow(clippy::too_many_arguments)]
     fn send_message_with_payment(
         view: &mut ExecutionView<'_, '_>,
@@ -636,6 +691,7 @@ impl MessagingExecutor {
         data: &[u8],
         proposer: &Address,
         fee: Balance,
+        fee_charged: bool,
         block_height: u64,
         block_timestamp: u64,
         clock: u64,
@@ -667,7 +723,11 @@ impl MessagingExecutor {
         Self::check_recipient_filter(view, sender, &msg_data.recipient_hash)?;
 
         // Calculate total cost
-        let total_cost = fee.saturating_add(msg_data.koppa_amount);
+        let total_cost = if fee_charged {
+            msg_data.koppa_amount
+        } else {
+            fee.saturating_add(msg_data.koppa_amount)
+        };
         let balance = StateManager::v_get_balance(view, sender)?;
         if balance < total_cost {
             return Ok(MessagingExecutionResult::failure("Insufficient balance"));
@@ -675,7 +735,9 @@ impl MessagingExecutor {
 
         // Deduct fee and payment
         StateManager::v_deduct(view, sender, total_cost)?;
-        StateManager::v_credit(view, proposer, fee)?;
+        if !fee_charged {
+            StateManager::v_credit(view, proposer, fee)?;
+        }
 
         // Escrow the payment (store as pending)
         let expiry = clock + PENDING_PAYMENT_EXPIRY; // 7 days expiry
@@ -688,7 +750,9 @@ impl MessagingExecutor {
         Self::v_set_pending_payment(view, &tx_hash, &pending)?;
 
         // Increment nonce
-        StateManager::v_increment_nonce(view, sender)?;
+        if !fee_charged {
+            StateManager::v_increment_nonce(view, sender)?;
+        }
 
         // Increment sender's message nonce and daily count
         Self::v_increment_sender_nonce(view, sender)?;

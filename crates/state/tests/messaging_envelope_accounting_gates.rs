@@ -1370,3 +1370,720 @@ fn a_restart_keeps_the_accepted_envelope_nonce() {
     );
     assert_eq!(c.msg_nonce(&carol_addr), 2);
 }
+
+// ── the fee and nonce accounting gate ───────────────────────────────────────
+
+/// `base()` with the accounting gate at `h`.
+fn with_accounting_gate(h: Option<u64>) -> ChainParams {
+    let mut p = base();
+    p.messaging_fee_nonce_accounting_enabled_from_height = h;
+    p
+}
+
+/// `base()` with both gates at `h`.
+fn with_both_gates(h: Option<u64>) -> ChainParams {
+    let mut p = with_envelope_gate(h);
+    p.messaging_fee_nonce_accounting_enabled_from_height = h;
+    p
+}
+
+/// `kp` signs a V2 messaging transaction carrying `data` at `nonce` with `fee`.
+fn signed_fee(kp: &KeyPair, nonce: u64, fee: u128, data: MessagingTxData) -> SignedTransaction {
+    let tx = TransactionV2 {
+        chain_id: CHAIN_ID,
+        from: kp.address(),
+        fee,
+        nonce,
+        payload: TxPayload::Messaging(data),
+    };
+    let sig = sign(tx.signing_hash().as_bytes(), kp.private_key());
+    SignedTransaction::new_v2(tx, *sig.as_bytes(), *kp.public_key().as_bytes())
+}
+
+fn proposer_address() -> Address {
+    Address::from_public_key(&PROPOSER_PK)
+}
+
+/// The pinned history again, with the accounting gate, and then both gates,
+/// set ABOVE it: unchanged, block for block.
+#[test]
+fn with_the_accounting_gate_above_the_history_it_is_pinned() {
+    for h in [BLOCKS + 1, 1_000_000, u64::MAX] {
+        assert_eq!(
+            digests(&history(with_accounting_gate(Some(h)))),
+            PINNED,
+            "accounting gate at {h}"
+        );
+        assert_eq!(
+            digests(&history(with_both_gates(Some(h)))),
+            PINNED,
+            "both gates at {h}"
+        );
+    }
+}
+
+/// The accounting gate inside the history, at block 5 (a claim, a refused
+/// claim, a stake and a refused stake): blocks 1 to 4 are the pinned ones to
+/// the byte, and block 5 differs, its two refusals now charged and reported.
+#[test]
+fn with_the_accounting_gate_inside_the_history_only_blocks_from_it_change() {
+    use sumchain_primitives::TxStatus;
+    let outcomes = history(with_accounting_gate(Some(5)));
+    let d = digests(&outcomes);
+    assert_eq!(d[..4], PINNED[..4], "below the gate: history");
+    assert_ne!(d[4], PINNED[4], "at the gate: the accounting rule");
+    let (_, receipts) = outcomes[4].published.as_ref().expect("published");
+    assert_eq!(
+        receipts
+            .iter()
+            .map(|r| (r.status.clone(), r.fee_paid))
+            .collect::<Vec<_>>(),
+        vec![
+            (TxStatus::Success, FEE),
+            (TxStatus::Failed(7), FEE),
+            (TxStatus::Success, FEE),
+            (TxStatus::Failed(7), FEE),
+        ]
+    );
+}
+
+/// The gate is closed below its height and open from it, and closed at every
+/// height while absent.
+#[test]
+fn the_accounting_gate_opens_exactly_at_its_height() {
+    use sumchain_state::MessagingExecutor;
+    const H: u64 = 1_000;
+    let set = with_accounting_gate(Some(H));
+    assert!(!MessagingExecutor::fee_nonce_accounting_gate_open(&set, 0));
+    assert!(!MessagingExecutor::fee_nonce_accounting_gate_open(
+        &set,
+        H - 1
+    ));
+    assert!(MessagingExecutor::fee_nonce_accounting_gate_open(&set, H));
+    assert!(MessagingExecutor::fee_nonce_accounting_gate_open(
+        &set,
+        H + 1
+    ));
+    assert!(MessagingExecutor::fee_nonce_accounting_gate_open(
+        &set,
+        u64::MAX
+    ));
+    let absent = with_accounting_gate(None);
+    for h in [0, 1, H - 1, H, H + 1, u64::MAX] {
+        assert!(!MessagingExecutor::fee_nonce_accounting_gate_open(
+            &absent, h
+        ));
+    }
+}
+
+/// One step of the accounting matrix: who signs what, whether it succeeds, and
+/// how much the operation itself moves out of (positive) or into (negative)
+/// the signer's balance besides the fee.
+struct Step {
+    label: &'static str,
+    signer: KeyPair,
+    data: MessagingTxData,
+    ok: bool,
+    moved: i128,
+}
+
+/// At the gate, every one of the eighteen generic messaging operations,
+/// succeeding and (where it has a refusing path) refused, is charged the fee
+/// exactly once, credits the proposer exactly once and advances the signer's
+/// account nonce exactly once, and its receipt reports that fee. Thirty-two
+/// steps on one chain, one block each.
+#[test]
+fn at_the_gate_every_operation_is_charged_once_whether_it_succeeds_or_is_refused() {
+    use sumchain_primitives::TxStatus;
+    let mut c = Chain::new(with_accounting_gate(Some(2)));
+    c.setup();
+    let frank_addr = frank().address();
+    let proposer = proposer_address();
+
+    let stake: u128 = 200_000_000_000;
+    let unstake: u128 = 100_000_000_000;
+    let payment: u128 = 500;
+    let mut payment_id = Hash::ZERO;
+
+    let steps: Vec<Step> = vec![
+        Step {
+            label: "SetDailyQuota by the admin",
+            signer: admin(),
+            data: op(
+                MessagingOperation::SetDailyQuota,
+                &SetDailyQuotaData { quota: 50 },
+            ),
+            ok: true,
+            moved: 0,
+        },
+        Step {
+            label: "SetDailyQuota by a non-admin",
+            signer: dave(),
+            data: op(
+                MessagingOperation::SetDailyQuota,
+                &SetDailyQuotaData { quota: 1 },
+            ),
+            ok: false,
+            moved: 0,
+        },
+        Step {
+            label: "SendMessageDirect",
+            signer: carol(),
+            data: direct_to(&frank_addr),
+            ok: true,
+            moved: 0,
+        },
+        Step {
+            label: "SendMessageDirect, malformed",
+            signer: dave(),
+            data: direct_malformed(&frank_addr),
+            ok: false,
+            moved: 0,
+        },
+        Step {
+            label: "SendMessageWithPayment",
+            signer: alice(),
+            data: payment_to(&frank_addr, payment),
+            ok: true,
+            moved: payment as i128,
+        },
+        Step {
+            label: "SendMessageWithPayment, unaffordable",
+            signer: dave(),
+            data: payment_to(&frank_addr, FUNDS * 2),
+            ok: false,
+            moved: 0,
+        },
+        Step {
+            label: "ClaimPayment",
+            signer: frank(),
+            data: MessagingTxData {
+                operation: MessagingOperation::ClaimPayment,
+                data: Vec::new(), // filled in below, once the payment's id is known
+            },
+            ok: true,
+            moved: -(payment as i128),
+        },
+        Step {
+            label: "ClaimPayment of nothing",
+            signer: dave(),
+            data: op(
+                MessagingOperation::ClaimPayment,
+                &ClaimPaymentData {
+                    message_id: Hash::hash(b"no such payment"),
+                    recipient_address: dave().address(),
+                },
+            ),
+            ok: false,
+            moved: 0,
+        },
+        Step {
+            label: "StakeForTrust",
+            signer: alice(),
+            data: op(
+                MessagingOperation::StakeForTrust,
+                &StakeForTrustData { amount: stake },
+            ),
+            ok: true,
+            moved: stake as i128,
+        },
+        Step {
+            label: "StakeForTrust of zero",
+            signer: carol(),
+            data: op(
+                MessagingOperation::StakeForTrust,
+                &StakeForTrustData { amount: 0 },
+            ),
+            ok: false,
+            moved: 0,
+        },
+        Step {
+            label: "Unstake",
+            signer: alice(),
+            data: op(
+                MessagingOperation::Unstake,
+                &MessagingUnstakeData { amount: unstake },
+            ),
+            ok: true,
+            moved: -(unstake as i128),
+        },
+        Step {
+            label: "Unstake with no stake",
+            signer: dave(),
+            data: op(
+                MessagingOperation::Unstake,
+                &MessagingUnstakeData { amount: 1 },
+            ),
+            ok: false,
+            moved: 0,
+        },
+        Step {
+            label: "SetInboxFilter",
+            signer: bob(),
+            data: op(
+                MessagingOperation::SetInboxFilter,
+                &SetInboxFilterData {
+                    mode: InboxFilter::ContactsOnly,
+                },
+            ),
+            ok: true,
+            moved: 0,
+        },
+        Step {
+            label: "AddContact",
+            signer: bob(),
+            data: contact(MessagingOperation::AddContact, &alice()),
+            ok: true,
+            moved: 0,
+        },
+        Step {
+            label: "RemoveContact",
+            signer: bob(),
+            data: contact(MessagingOperation::RemoveContact, &alice()),
+            ok: true,
+            moved: 0,
+        },
+        Step {
+            label: "BlockSender",
+            signer: bob(),
+            data: op(
+                MessagingOperation::BlockSender,
+                &BlockSenderData {
+                    sender: dave().address(),
+                },
+            ),
+            ok: true,
+            moved: 0,
+        },
+        Step {
+            label: "ReportSpam by a staked reporter",
+            signer: alice(),
+            data: op(
+                MessagingOperation::ReportSpam,
+                &ReportSpamData {
+                    message_id: Hash::hash(b"a message"),
+                    spammer: dave().address(),
+                },
+            ),
+            ok: true,
+            moved: 0,
+        },
+        Step {
+            label: "ReportSpam by an unstaked reporter",
+            signer: dave(),
+            data: op(
+                MessagingOperation::ReportSpam,
+                &ReportSpamData {
+                    message_id: Hash::hash(b"another message"),
+                    spammer: alice().address(),
+                },
+            ),
+            ok: false,
+            moved: 0,
+        },
+        Step {
+            label: "RegisterPublicKey",
+            signer: frank(),
+            data: register(&frank()),
+            ok: true,
+            moved: 0,
+        },
+        Step {
+            label: "RegisterPublicKey, already registered",
+            signer: bob(),
+            data: register(&bob()),
+            ok: false,
+            moved: 0,
+        },
+        Step {
+            label: "UpdatePublicKey",
+            signer: alice(),
+            data: op(
+                MessagingOperation::UpdatePublicKey,
+                &UpdatePublicKeyData {
+                    new_public_key: *alice().public_key().as_bytes(),
+                },
+            ),
+            ok: true,
+            moved: 0,
+        },
+        Step {
+            label: "UpdatePublicKey with no key registered",
+            signer: dave(),
+            data: op(
+                MessagingOperation::UpdatePublicKey,
+                &UpdatePublicKeyData {
+                    new_public_key: *dave().public_key().as_bytes(),
+                },
+            ),
+            ok: false,
+            moved: 0,
+        },
+        Step {
+            label: "SetMaxMessageSize by the admin",
+            signer: admin(),
+            data: op(
+                MessagingOperation::SetMaxMessageSize,
+                &SetMaxMessageSizeData { size: 60_000 },
+            ),
+            ok: true,
+            moved: 0,
+        },
+        Step {
+            label: "SetMaxMessageSize by a non-admin",
+            signer: dave(),
+            data: op(
+                MessagingOperation::SetMaxMessageSize,
+                &SetMaxMessageSizeData { size: 1 },
+            ),
+            ok: false,
+            moved: 0,
+        },
+        Step {
+            label: "SetMinTrustStake by the admin",
+            signer: admin(),
+            data: op(
+                MessagingOperation::SetMinTrustStake,
+                &SetMinTrustStakeData {
+                    amount: 50_000_000_000,
+                },
+            ),
+            ok: true,
+            moved: 0,
+        },
+        Step {
+            label: "SetMinTrustStake by a non-admin",
+            signer: dave(),
+            data: op(
+                MessagingOperation::SetMinTrustStake,
+                &SetMinTrustStakeData { amount: 1 },
+            ),
+            ok: false,
+            moved: 0,
+        },
+        Step {
+            label: "SetSponsorshipEnabled by the admin",
+            signer: admin(),
+            data: op(
+                MessagingOperation::SetSponsorshipEnabled,
+                &SetSponsorshipEnabledData { enabled: true },
+            ),
+            ok: true,
+            moved: 0,
+        },
+        Step {
+            label: "SetSponsorshipEnabled by a non-admin",
+            signer: frank(),
+            data: op(
+                MessagingOperation::SetSponsorshipEnabled,
+                &SetSponsorshipEnabledData { enabled: false },
+            ),
+            ok: false,
+            moved: 0,
+        },
+        Step {
+            label: "FundRegistry",
+            signer: alice(),
+            data: op(
+                MessagingOperation::FundRegistry,
+                &FundRegistryData { amount: 1_000 },
+            ),
+            ok: true,
+            moved: 1_000,
+        },
+        Step {
+            label: "FundRegistry of zero",
+            signer: carol(),
+            data: op(
+                MessagingOperation::FundRegistry,
+                &FundRegistryData { amount: 0 },
+            ),
+            ok: false,
+            moved: 0,
+        },
+        // To frank, whose inbox accepts everyone: bob's is contacts-only by
+        // now, and a refused recipient filter is an error that abandons the
+        // block, not a refusal.
+        Step {
+            label: "SendMessage, relayed (the envelope gate absent: as before)",
+            signer: sponsor(),
+            data: sponsored(&envelope(&carol(), &frank_addr, 0, NEVER, None, [0u8; 64])),
+            ok: true,
+            moved: 0,
+        },
+        Step {
+            label: "SendMessage, relayed, naming an unregistered sender",
+            signer: erin(),
+            data: sponsored(&envelope(&dave(), &frank_addr, 0, NEVER, None, [0u8; 64])),
+            ok: false,
+            moved: 0,
+        },
+    ];
+
+    let mut covered: std::collections::BTreeSet<(u8, bool)> = Default::default();
+    for step in steps {
+        let data = if step.label == "ClaimPayment" {
+            op(
+                MessagingOperation::ClaimPayment,
+                &ClaimPaymentData {
+                    message_id: payment_id,
+                    recipient_address: frank_addr,
+                },
+            )
+        } else {
+            step.data
+        };
+        let signer_addr = step.signer.address();
+        let balance = c.balance(&signer_addr);
+        let nonce = c.nonce(&step.signer);
+        let pool = c.balance(&proposer);
+
+        let tx = c.tx(&step.signer, data.clone());
+        if step.label == "SendMessageWithPayment" {
+            payment_id = tx.hash();
+        }
+        let r = c.one(tx);
+        let want = if step.ok {
+            TxStatus::Success
+        } else {
+            TxStatus::Failed(7)
+        };
+        assert_eq!(r.status, want, "{}", step.label);
+        assert_eq!(
+            r.fee_paid, FEE,
+            "{}: the receipt reports the fee",
+            step.label
+        );
+        assert_eq!(
+            balance as i128 - c.balance(&signer_addr) as i128,
+            FEE as i128 + step.moved,
+            "{}: the fee once, plus what the operation itself moves",
+            step.label
+        );
+        assert_eq!(
+            c.nonce(&step.signer),
+            nonce + 1,
+            "{}: nonce once",
+            step.label
+        );
+        assert_eq!(
+            c.balance(&proposer),
+            pool + FEE,
+            "{}: the proposer is credited once",
+            step.label
+        );
+        covered.insert((data.operation as u8, step.ok));
+    }
+
+    // Every generic operation succeeded once; every one with a refusing path
+    // was refused once. SetInboxFilter, AddContact, RemoveContact and
+    // BlockSender have no refusing path short of an undecodable payload,
+    // which refuses the whole block, as before.
+    let all: Vec<MessagingOperation> = vec![
+        MessagingOperation::SendMessage,
+        MessagingOperation::SendMessageDirect,
+        MessagingOperation::SendMessageWithPayment,
+        MessagingOperation::ClaimPayment,
+        MessagingOperation::StakeForTrust,
+        MessagingOperation::Unstake,
+        MessagingOperation::SetInboxFilter,
+        MessagingOperation::AddContact,
+        MessagingOperation::RemoveContact,
+        MessagingOperation::BlockSender,
+        MessagingOperation::ReportSpam,
+        MessagingOperation::RegisterPublicKey,
+        MessagingOperation::UpdatePublicKey,
+        MessagingOperation::SetDailyQuota,
+        MessagingOperation::SetMaxMessageSize,
+        MessagingOperation::SetMinTrustStake,
+        MessagingOperation::SetSponsorshipEnabled,
+        MessagingOperation::FundRegistry,
+    ];
+    assert_eq!(all.len(), 18);
+    let no_refusing_path = [
+        MessagingOperation::SetInboxFilter,
+        MessagingOperation::AddContact,
+        MessagingOperation::RemoveContact,
+        MessagingOperation::BlockSender,
+    ];
+    for o in &all {
+        assert!(covered.contains(&(*o as u8, true)), "{o:?} succeeding");
+        if !no_refusing_path.contains(o) {
+            assert!(covered.contains(&(*o as u8, false)), "{o:?} refused");
+        }
+    }
+    assert_eq!(covered.len(), 18 + 14);
+}
+
+/// Below the gate and at it, a direct send and a paid send that succeed end
+/// with the same balances and nonces: the fee is charged once either way.
+/// The ones that are refused differ by exactly the fee and the nonce, which is
+/// the whole of the change for these two operations.
+#[test]
+fn direct_and_paid_sends_end_as_before_on_success_and_pay_on_refusal() {
+    use sumchain_primitives::TxStatus;
+    let frank_addr = frank().address();
+    let proposer = proposer_address();
+    let run = |params: ChainParams| -> (Vec<(TxStatus, u128)>, Vec<(u128, u64)>, u128) {
+        let mut c = Chain::new(params);
+        c.setup();
+        let mut receipts = Vec::new();
+        for (signer, data) in [
+            (alice(), direct_to(&frank_addr)),
+            (alice(), payment_to(&frank_addr, 500)),
+            (carol(), direct_malformed(&frank_addr)),
+            (carol(), payment_to(&frank_addr, FUNDS * 2)),
+        ] {
+            let r = c.one(c.tx(&signer, data));
+            receipts.push((r.status, r.fee_paid));
+        }
+        let accounts = [alice(), carol()]
+            .iter()
+            .map(|k| (c.balance(&k.address()), c.nonce(k)))
+            .collect();
+        (receipts, accounts, c.balance(&proposer))
+    };
+    let (before_receipts, before, before_pool) = run(with_accounting_gate(None));
+    let (at_receipts, at, at_pool) = run(with_accounting_gate(Some(2)));
+
+    assert_eq!(
+        before_receipts,
+        vec![
+            (TxStatus::Success, FEE),
+            (TxStatus::Success, FEE),
+            (TxStatus::Failed(7), 0),
+            (TxStatus::Failed(7), 0),
+        ]
+    );
+    assert_eq!(
+        at_receipts,
+        vec![
+            (TxStatus::Success, FEE),
+            (TxStatus::Success, FEE),
+            (TxStatus::Failed(7), FEE),
+            (TxStatus::Failed(7), FEE),
+        ]
+    );
+    // Alice's two successes: identical balances and nonce.
+    assert_eq!(before[0], at[0]);
+    assert_eq!(before[0], (FUNDS - 2 * FEE - 500, 2));
+    // Carol's two refusals: before, nothing; at the gate, the fee twice and
+    // the nonce twice.
+    assert_eq!(before[1], (FUNDS, 0));
+    assert_eq!(at[1], (FUNDS - 2 * FEE, 2));
+    assert_eq!(at_pool, before_pool + 2 * FEE);
+}
+
+/// From the gate on, an included transaction spends its nonce: the identical
+/// signed bytes take an `InvalidNonce` receipt that charges nothing and
+/// changes nothing.
+#[test]
+fn an_included_operation_is_refused_at_its_nonce_when_included_again() {
+    use sumchain_primitives::TxStatus;
+    let quota = |c: &Chain| c.store().get_daily_quota().unwrap();
+    let pool = |c: &Chain| c.store().get_sponsorship_balance().unwrap();
+
+    // At the gate: once.
+    let mut c = Chain::new(with_accounting_gate(Some(2)));
+    c.setup();
+    let set_quota = c.tx(
+        &admin(),
+        op(
+            MessagingOperation::SetDailyQuota,
+            &SetDailyQuotaData { quota: 7 },
+        ),
+    );
+    let fund = c.tx(
+        &alice(),
+        op(
+            MessagingOperation::FundRegistry,
+            &FundRegistryData { amount: 1_000 },
+        ),
+    );
+    assert_eq!(c.one(set_quota.clone()).status, TxStatus::Success);
+    assert_eq!(c.one(fund.clone()).status, TxStatus::Success);
+    let admin_balance = c.balance(&admin().address());
+    let alice_balance = c.balance(&alice().address());
+    let r = c.one(set_quota);
+    assert_eq!((r.status, r.fee_paid), (TxStatus::InvalidNonce, 0));
+    let r = c.one(fund);
+    assert_eq!((r.status, r.fee_paid), (TxStatus::InvalidNonce, 0));
+    assert_eq!(quota(&c), 7);
+    assert_eq!(pool(&c), 1_000);
+    assert_eq!(c.balance(&admin().address()), admin_balance);
+    assert_eq!(c.balance(&alice().address()), alice_balance);
+    assert_eq!(c.balance(&alice().address()), FUNDS - FEE - 1_000);
+    assert_eq!((c.nonce(&admin()), c.nonce(&alice())), (1, 1));
+}
+
+/// With both gates open, a refused envelope costs its relayer the fee and a
+/// nonce, as every refused messaging operation does, and the named sender's
+/// counters do not move; an accepted one costs the same fee.
+#[test]
+fn with_both_gates_a_refused_envelope_costs_the_relayer() {
+    use sumchain_primitives::TxStatus;
+    let mut c = Chain::new(with_both_gates(Some(2)));
+    c.setup();
+    let carol_addr = carol().address();
+    let sponsor_addr = sponsor().address();
+    let proposer = proposer_address();
+
+    let r = c.one(c.tx(&sponsor(), sponsored(&carol_to_bob(0))));
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Failed(7), FEE));
+    assert_eq!(c.balance(&sponsor_addr), FUNDS - FEE);
+    assert_eq!(c.nonce(&sponsor()), 1);
+    assert_eq!(c.balance(&proposer), FEE);
+    assert_eq!(c.msg_nonce(&carol_addr), 0);
+    assert!(c.sent_by(&carol_addr).is_empty());
+
+    let r = c.one(c.tx(
+        &sponsor(),
+        sponsored(&signed_v2(carol_to_bob(0), &carol(), CHAIN_ID)),
+    ));
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Success, FEE));
+    assert_eq!(c.balance(&sponsor_addr), FUNDS - 2 * FEE);
+    assert_eq!(c.nonce(&sponsor()), 2);
+    assert_eq!(c.balance(&proposer), 2 * FEE);
+    assert_eq!(c.msg_nonce(&carol_addr), 1);
+    assert_eq!(c.sent_by(&carol_addr).len(), 1);
+}
+
+/// Where the minimum fee is zero, a zero-fee operation moves no balance and
+/// still advances the nonce, succeeding or refused: the nonce is what makes
+/// the operation single use.
+#[test]
+fn at_the_gate_a_zero_fee_operation_still_advances_the_nonce() {
+    use sumchain_primitives::TxStatus;
+    let mut p = with_accounting_gate(Some(2));
+    p.min_fee = 0;
+    let mut c = Chain::new(p);
+    c.setup();
+    let proposer = proposer_address();
+    let pool = c.balance(&proposer);
+    let refused = signed_fee(
+        &dave(),
+        c.nonce(&dave()),
+        0,
+        op(
+            MessagingOperation::SetDailyQuota,
+            &SetDailyQuotaData { quota: 1 },
+        ),
+    );
+    let r = c.one(refused.clone());
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Failed(7), 0));
+    assert_eq!(c.balance(&dave().address()), FUNDS);
+    assert_eq!(c.nonce(&dave()), 1);
+    assert_eq!(c.balance(&proposer), pool);
+    let r = c.one(refused);
+    assert_eq!((r.status, r.fee_paid), (TxStatus::InvalidNonce, 0));
+    let accepted = signed_fee(
+        &bob(),
+        c.nonce(&bob()),
+        0,
+        contact(MessagingOperation::AddContact, &alice()),
+    );
+    let r = c.one(accepted);
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Success, 0));
+    assert_eq!(c.balance(&bob().address()), FUNDS);
+    assert_eq!(c.nonce(&bob()), 1);
+}
