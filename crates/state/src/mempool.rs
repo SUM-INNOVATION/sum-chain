@@ -190,8 +190,9 @@ pub struct EducationAdmission {
 ///    since nothing in the pool can bring them into sequence.
 ///
 /// None of this decides what a block MEANS. A block built by a proposer
-/// without this policy is validated, executed and imported as before; the pins
-/// in `tests/proposal_policy_consensus_pins.rs` hold that fixed.
+/// without this policy is validated, executed and imported as before. The
+/// digest, census and closure guards, and the chain-switch and producer tests
+/// (`consensus/tests/proposal_policy_{reorg,producer}.rs`), hold that fixed.
 #[derive(Clone)]
 pub struct InclusionPolicy {
     /// The canonical database this node builds on.
