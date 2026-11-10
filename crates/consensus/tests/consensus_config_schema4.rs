@@ -1565,3 +1565,200 @@ fn the_move_the_revert_and_the_start_marker_commit_durably() {
     // And `write_initial`, the fresh baseline, as before.
     assert!(body_of(record_src, "fn write_initial(").contains(".commit_durable()"));
 }
+
+// ── the handshake digest of #350 B2, and the move ───────────────────────────
+
+/// The handshake digest that public PR #384 (B2, `consensus_config/handshake.rs`)
+/// declares at connect, computed
+/// here exactly as that source defines it:
+///
+/// ```text
+/// BLAKE3( "sumchain/protocol-digest/v2" ‖ protocol_digest(genesis) ‖ build(genesis).commitment() )
+/// ```
+///
+/// 27 + 32 + 32 = 91 bytes; `build(genesis)` is the RUNNING configuration, in
+/// the schema the binary writes, never the recorded one.
+fn b2_handshake_digest(g: &Genesis, policy: &SchemaPolicy) -> ([u8; 91], Hash) {
+    let pd = sumchain_state::protocol_digest::protocol_digest(g).unwrap();
+    let running = ccfg::build_with(g, policy).unwrap();
+    let mut preimage = [0u8; 91];
+    preimage[..27].copy_from_slice(b"sumchain/protocol-digest/v2");
+    preimage[27..59].copy_from_slice(pd.as_bytes());
+    preimage[59..].copy_from_slice(running.commitment().as_bytes());
+    (preimage, Hash::hash(&preimage))
+}
+
+/// How the three digests relate to this change, as B2 defines them:
+///
+/// * the activation digest folds the gate names and heights; the protocol
+///   digest folds it with the compiled limits; neither reads the stored
+///   record, so the move changes neither;
+/// * B2's handshake digest folds the protocol digest and the RUNNING
+///   commitment (`build(genesis)` in `PRODUCTION.writes`). Changing the
+///   binary's written-schema policy (3 → 4) changes that commitment and so the
+///   handshake digest; moving the stored record alone does not;
+/// * the same binary and genesis declare the same handshake digest whatever
+///   the recorded-schema history: a fresh schema-4 record, a schema-3 record
+///   moved, a schema-3 record left as it stands.
+#[test]
+fn the_move_changes_the_recorded_commitment_but_not_what_b2_would_declare() {
+    let g = g_ph();
+    // The digests the move does not touch, measured before and after it.
+    let (_d, db) = production_shaped_database();
+    set_head(&db, HEAD);
+    let activation_before = g.activation_digest().unwrap();
+    let protocol_before = sumchain_state::protocol_digest::protocol_digest(&g).unwrap();
+    let (preimage_before, handshake_before) = b2_handshake_digest(&g, &PRODUCTION);
+    let recorded_before = ccfg::read_record(&db).unwrap().unwrap().commitment;
+    let moved = move_to_schema_4(&db, HEAD);
+    let recorded_after = ccfg::read_record(&db).unwrap().unwrap().commitment;
+    assert_ne!(
+        recorded_before, recorded_after,
+        "the move changes the RECORDED commitment"
+    );
+    assert_eq!(recorded_after, moved.to);
+    assert_eq!(g.activation_digest().unwrap(), activation_before);
+    assert_eq!(
+        sumchain_state::protocol_digest::protocol_digest(&g).unwrap(),
+        protocol_before
+    );
+    let (preimage_after, handshake_after) = b2_handshake_digest(&g, &PRODUCTION);
+    assert_eq!(
+        preimage_after, preimage_before,
+        "the preimage reads no record"
+    );
+    assert_eq!(handshake_after, handshake_before);
+
+    // Three nodes, one binary, one genesis, three recorded histories: one
+    // declaration. The RUNNING commitment is the schema-4 configuration of the
+    // genesis on each; the recorded commitments differ.
+    let fresh_dir = TempDir::new().unwrap();
+    let fresh = Database::open_default(fresh_dir.path()).unwrap();
+    assert!(matches!(
+        ccfg::check_at_startup(&fresh, &g, HEAD).unwrap(),
+        StartupOutcome::Initialized { .. }
+    ));
+    let (_d3, unmoved) = production_shaped_database();
+    assert!(matches!(
+        ccfg::check_at_startup(&unmoved, &g, HEAD).unwrap(),
+        StartupOutcome::Unchanged { .. }
+    ));
+    assert!(matches!(
+        ccfg::check_at_startup(&db, &g, HEAD).unwrap(),
+        StartupOutcome::Unchanged { .. }
+    ));
+    let records: Vec<ccfg::BaselineRecord> = [&fresh, &db, &unmoved]
+        .iter()
+        .map(|d| ccfg::read_record(d).unwrap().unwrap())
+        .collect();
+    assert_eq!(
+        records
+            .iter()
+            .map(|r| r.config.schema().number)
+            .collect::<Vec<_>>(),
+        [4, 4, 3]
+    );
+    assert_ne!(records[0].commitment, records[2].commitment);
+    assert_eq!(
+        records[0].commitment, records[1].commitment,
+        "the same rules in schema 4"
+    );
+    let running = ccfg::build(&g).unwrap();
+    for (i, r) in records.iter().enumerate() {
+        // What `Node::new` would declare after each start: `build(genesis)`,
+        // which equals the record carried into the written schema.
+        assert_eq!(
+            b2_handshake_digest(&g, &PRODUCTION).1,
+            handshake_before,
+            "node {i}"
+        );
+        let carried = if std::ptr::eq(r.config.schema(), running.schema()) {
+            r.config.clone()
+        } else {
+            r.config.extend_to(running.schema()).unwrap()
+        };
+        assert_eq!(carried, running, "node {i} records the running rules");
+    }
+
+    // Changing the written-schema policy changes the running commitment and
+    // therefore the handshake digest, with the protocol digest unchanged: the
+    // schema-4 writer declares a different value from a schema-3 writer of the
+    // same binary and genesis. That is the one cause B2's vectors move by.
+    let (preimage_3, handshake_3) = b2_handshake_digest(&g, &SCHEMA_3_RELEASE);
+    assert_eq!(
+        preimage_3[..59],
+        preimage_before[..59],
+        "domain and protocol digest equal"
+    );
+    assert_ne!(
+        preimage_3[59..],
+        preimage_before[59..],
+        "the running commitment differs"
+    );
+    assert_ne!(handshake_3, handshake_before);
+    let three = ccfg::build_with(&g, &SCHEMA_3_RELEASE).unwrap();
+    assert_eq!(three.extend_to(&SCHEMA_4).unwrap(), running);
+    assert_eq!(preimage_before[59..], *running.commitment().as_bytes());
+    assert_eq!(preimage_3[59..], *three.commitment().as_bytes());
+}
+
+/// B2's golden genesis (`handshake_digest.rs`, `golden_genesis`: chain 1,
+/// one validator from key `[31; 32]`, `ChainParams::default()`), and what this
+/// binary would declare for it. B2 pins its protocol digest, running
+/// commitment and handshake digest; against B2's base all three move here, and
+/// each for one stated cause:
+///
+/// * the protocol digest, because the signature and evidence gates declare
+///   two more gate names (`0x1046`, `0x1047`), which the activation digest folds;
+/// * the running commitment, because this binary writes schema 4: the
+///   schema-3 encoding with schema number 4, field count + 4, and the four
+///   gates' absent entries (28 bytes) after `0x1043`'s;
+/// * the handshake digest, because both of its inputs moved.
+///
+/// The values are printed; the derivation is asserted.
+#[test]
+fn what_this_binary_would_declare_for_b2s_golden_genesis() {
+    let v = KeyPair::from_bytes([31u8; 32]);
+    let g = Genesis::new(
+        1,
+        1_734_624_000_000,
+        vec![v.public_key().to_base58()],
+        std::collections::HashMap::from([(v.address().to_base58(), 1_000_000u128)]),
+        ChainParams::default(),
+    );
+    let pd = sumchain_state::protocol_digest::protocol_digest(&g).unwrap();
+    let four = ccfg::build(&g).unwrap();
+    let three = ccfg::build_with(&g, &SCHEMA_3_RELEASE).unwrap();
+    let (preimage, handshake) = b2_handshake_digest(&g, &PRODUCTION);
+    // The running commitment's preimage: the schema-3 bytes with the header
+    // and the four absent entries.
+    let b3 = three.encode();
+    let b4 = four.encode();
+    assert_eq!(b4.len(), b3.len() + 28);
+    assert_eq!(&b4[..7], &b3[..7]);
+    assert_eq!(u16::from_le_bytes([b4[7], b4[8]]), 4);
+    assert_eq!(
+        u16::from_le_bytes([b4[9], b4[10]]),
+        u16::from_le_bytes([b3[9], b3[10]]) + 4
+    );
+    let at = b3
+        .windows(7)
+        .position(|w| w == [0x43, 0x10, 0, 0, 0, 0, 0])
+        .unwrap()
+        + 7;
+    assert_eq!(&b4[11..at], &b3[11..at]);
+    assert_eq!(
+        &b4[at..at + 28],
+        &[
+            0x44, 0x10, 0, 0, 0, 0, 0, 0x45, 0x10, 0, 0, 0, 0, 0, 0x46, 0x10, 0, 0, 0, 0, 0, 0x47,
+            0x10, 0, 0, 0, 0, 0
+        ]
+    );
+    assert_eq!(&b4[at + 28..], &b3[at..]);
+    assert_eq!(&preimage[59..], four.commitment().as_bytes());
+    eprintln!(
+        "B2-GOLDEN\tprotocol_digest={pd}\trunning_commitment_schema4={}\trunning_commitment_schema3={}\thandshake_digest={handshake}",
+        four.commitment(),
+        three.commitment()
+    );
+}

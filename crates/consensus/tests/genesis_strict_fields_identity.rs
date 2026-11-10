@@ -248,6 +248,31 @@ fn identity(file: &str) -> [String; 10] {
         four,
         "{file}: schema 4 is schema 3 plus its four fields, absent"
     );
+    // The schema-4 pin's preimage, byte for byte: the frozen schema-3 encoding
+    // with schema number 4, field count + 4, and the four gates' absent entries
+    // (`id ‖ tag 0 ‖ len 0`, 7 bytes each) right after 0x1043's entry.
+    let b3 = three.encode();
+    let mut derived = b3.clone();
+    derived[7..9].copy_from_slice(&4u16.to_le_bytes());
+    let n = u16::from_le_bytes([b3[9], b3[10]]) + 4;
+    derived[9..11].copy_from_slice(&n.to_le_bytes());
+    let at = b3
+        .windows(7)
+        .position(|w| w == [0x43, 0x10, 0, 0, 0, 0, 0])
+        .unwrap_or_else(|| panic!("{file}: 0x1043 absent in the schema-3 encoding"))
+        + 7;
+    derived.splice(
+        at..at,
+        [
+            0x44u8, 0x10, 0, 0, 0, 0, 0, 0x45, 0x10, 0, 0, 0, 0, 0, 0x46, 0x10, 0, 0, 0, 0, 0,
+            0x47, 0x10, 0, 0, 0, 0, 0,
+        ],
+    );
+    assert_eq!(
+        four.encode(),
+        derived,
+        "{file}: the schema-4 encoding derives from the schema-3 one"
+    );
     [
         blake3(canonical_json(&g).as_bytes()),
         g.create_genesis_block().unwrap().hash().to_string(),
