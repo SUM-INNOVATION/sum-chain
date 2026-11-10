@@ -427,6 +427,30 @@ impl Node {
         // Open database
         let db = Arc::new(Database::open_default(&data_dir)?);
 
+        // ── the start marker: the first logical write of a normal start ──────
+        //
+        // Immediately after the open, before any check that may write or
+        // refuse: the journal format gate, the messaging backfill, the
+        // activation-height record, the configuration baseline, genesis
+        // initialization and the node key. It records that THIS database saw a
+        // normal start attempt, at which configuration record and head. The
+        // pre-start revert of a consensus-configuration schema move refuses once
+        // a marker written at or after the move exists, whatever the start then
+        // did: ran, imported nothing, or was refused below. If the marker cannot
+        // be written the start refuses here, with nothing else written
+        // (`sumchain_consensus::consensus_config::start_marker`).
+        let start_marker =
+            sumchain_consensus::consensus_config::record_start(&db).map_err(|e| {
+                anyhow::anyhow!(
+                    "refusing to start: the start marker was not recorded ({e}); nothing else \
+                     was written"
+                )
+            })?;
+        info!(
+            "Start marker recorded: attempt {}, configuration record {:?}, head {:?}",
+            start_marker.attempt, start_marker.record, start_marker.head
+        );
+
         // ── the application-journal downgrade gate, before anything else ─────
         //
         // First thing after the open, and before state, consensus, RPC or the

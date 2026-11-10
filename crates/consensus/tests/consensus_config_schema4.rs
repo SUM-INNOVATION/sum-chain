@@ -1252,3 +1252,316 @@ fn a_lost_revert_leaves_the_moved_record_and_half_a_revert_is_refused() {
         assert_eq!(all_rows(&db), before, "{what}: nothing written");
     }
 }
+
+// ── the start marker ────────────────────────────────────────────────────────
+
+use sumchain_consensus::consensus_config::{
+    read_start_marker, record_start, RecordState, StartMarker, START_MARKER_KEY,
+};
+
+fn marker_key() -> (String, Vec<u8>) {
+    (cf::META.to_string(), START_MARKER_KEY.to_vec())
+}
+
+/// A normal start writes the marker as its one row: the attempt count, the
+/// configuration record's state and the head as they are at that start. The
+/// move writes no marker, and the revert neither writes nor deletes one.
+#[test]
+fn a_start_writes_exactly_the_marker_and_the_move_and_revert_leave_it_alone() {
+    let dir = TempDir::new().unwrap();
+    let db = Database::open_default(dir.path()).unwrap();
+    assert_eq!(read_start_marker(&db).unwrap(), None);
+    let before = all_rows(&db);
+    let m = record_start(&db).unwrap();
+    assert_eq!(
+        m,
+        StartMarker {
+            attempt: 1,
+            record: RecordState::Absent,
+            head: None
+        }
+    );
+    let after = all_rows(&db);
+    let changed: Vec<_> = after
+        .keys()
+        .chain(before.keys())
+        .filter(|k| before.get(*k) != after.get(*k))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert_eq!(changed, vec![&marker_key()], "exactly the marker row");
+    assert_eq!(read_start_marker(&db).unwrap(), Some(m));
+
+    // With a record and a head, both are recorded; the attempt counts.
+    ccfg::check_at_startup(&db, &g2(), 0).unwrap();
+    let r = ccfg::read_record(&db).unwrap().unwrap();
+    set_head(&db, 7);
+    sumchain_storage::schema::BlockStore::new(&db)
+        .set_latest_hash(&h(C2))
+        .unwrap();
+    let m = record_start(&db).unwrap();
+    assert_eq!(
+        m,
+        StartMarker {
+            attempt: 2,
+            record: RecordState::Present {
+                transition_count: 0,
+                commitment: r.commitment
+            },
+            head: Some((7, h(C2)))
+        }
+    );
+
+    // The move writes no marker; the revert leaves a pre-move marker as it is.
+    let (_d, db) = production_shaped_database();
+    set_head(&db, HEAD);
+    assert_eq!(read_start_marker(&db).unwrap(), None);
+    let pre = record_start(&db).unwrap();
+    let before = all_rows(&db);
+    let moved = move_to_schema_4(&db, HEAD);
+    assert_eq!(
+        read_start_marker(&db).unwrap(),
+        Some(pre.clone()),
+        "the move wrote none"
+    );
+    let p = ccfg::pending_schema_revert(&db).unwrap();
+    assert_eq!(p.start_marker, Some(pre.clone()));
+    assert_eq!(
+        p.head_hash,
+        sumchain_storage::schema::BlockStore::new(&db)
+            .get_latest_hash()
+            .unwrap()
+    );
+    ccfg::revert_schema_transition(&db, moved.to, moved.from).unwrap();
+    assert_eq!(all_rows(&db), before, "every row, the marker included");
+    assert_eq!(read_start_marker(&db).unwrap(), Some(pre));
+}
+
+/// A marker written at the move's own transition count means a node started
+/// on the moved record: the revert refuses, whatever else the start did or did
+/// not write, and writes nothing. A marker written before the move (at a
+/// lower count that the history accounts for) does not.
+#[test]
+fn a_start_marker_at_the_move_refuses_the_revert() {
+    let (_d, db) = production_shaped_database();
+    set_head(&db, HEAD);
+    let moved = move_to_schema_4(&db, HEAD);
+    assert!(ccfg::pending_schema_revert(&db).is_ok());
+    // What a normal start leaves first, before anything else, whether it then
+    // runs, imports nothing, or is refused.
+    let m = record_start(&db).unwrap();
+    assert_eq!(
+        m.record,
+        RecordState::Present {
+            transition_count: moved.seq,
+            commitment: moved.to
+        }
+    );
+    let before = all_rows(&db);
+    for attempt in 0..2 {
+        let err = ccfg::revert_schema_transition(&db, moved.to, moved.from).unwrap_err();
+        assert!(matches!(err, ConfigError::Refused(_)), "{attempt}: {err}");
+        let text = err.to_string();
+        assert!(
+            text.contains("a normal start was attempted on the moved record"),
+            "{text}"
+        );
+        assert!(text.contains("forward only"), "{text}");
+        assert!(text.contains(&format!("attempt {}", m.attempt)), "{text}");
+        let err = ccfg::pending_schema_revert(&db).unwrap_err();
+        assert!(
+            err.to_string().contains("a normal start was attempted"),
+            "{err}"
+        );
+    }
+    assert_eq!(all_rows(&db), before, "nothing written");
+    // The chain position alone would have allowed it: the marker is the reason.
+    assert_eq!(
+        sumchain_storage::schema::BlockStore::new(&db)
+            .get_latest_height()
+            .unwrap(),
+        Some(HEAD)
+    );
+}
+
+/// A marker this history cannot account for — a count above the record's, a
+/// commitment the history does not hold at its count, a start made while the
+/// record was absent or unreadable, or bytes this binary cannot read — is an
+/// uncertain state: the revert refuses and writes nothing.
+#[test]
+fn an_inconsistent_or_unreadable_start_marker_refuses_the_revert_as_uncertain() {
+    fn put_marker(db: &Database, m: &StartMarker) {
+        // Written as `record_start` writes it, through the one encoder, by
+        // recording a start and then rewriting the row with the wanted content.
+        record_start(db).unwrap();
+        let raw = db.get(cf::META, START_MARKER_KEY).unwrap().unwrap();
+        let mut out = raw.clone();
+        out[2..10].copy_from_slice(&m.attempt.to_le_bytes());
+        let (state, count, commitment) = match m.record {
+            RecordState::Absent => (0u8, 0u64, Hash::default()),
+            RecordState::Present {
+                transition_count,
+                commitment,
+            } => (1, transition_count, commitment),
+            RecordState::Unreadable => (2, 0, Hash::default()),
+        };
+        out[10] = state;
+        out[11..19].copy_from_slice(&count.to_le_bytes());
+        out[19..51].copy_from_slice(commitment.as_bytes());
+        db.put(cf::META, START_MARKER_KEY, &out).unwrap();
+        assert_eq!(read_start_marker(db).unwrap().unwrap().record, m.record);
+    }
+    let (_d, db) = production_shaped_database();
+    set_head(&db, HEAD);
+    let moved = move_to_schema_4(&db, HEAD);
+    let r = ccfg::read_record(&db).unwrap().unwrap();
+    let zero = Hash::default();
+    let cases: Vec<(&str, StartMarker)> = vec![
+        (
+            "count above the record's",
+            StartMarker {
+                attempt: 1,
+                record: RecordState::Present {
+                    transition_count: r.transition_count + 1,
+                    commitment: moved.to,
+                },
+                head: None,
+            },
+        ),
+        (
+            "wrong commitment at the previous count",
+            StartMarker {
+                attempt: 1,
+                record: RecordState::Present {
+                    transition_count: moved.seq - 1,
+                    commitment: zero,
+                },
+                head: None,
+            },
+        ),
+        (
+            "wrong commitment at the move's count",
+            StartMarker {
+                attempt: 1,
+                record: RecordState::Present {
+                    transition_count: moved.seq,
+                    commitment: zero,
+                },
+                head: None,
+            },
+        ),
+        (
+            "started while the record was absent",
+            StartMarker {
+                attempt: 1,
+                record: RecordState::Absent,
+                head: None,
+            },
+        ),
+        (
+            "started while the record was unreadable",
+            StartMarker {
+                attempt: 1,
+                record: RecordState::Unreadable,
+                head: None,
+            },
+        ),
+    ];
+    for (what, m) in cases {
+        put_marker(&db, &m);
+        let before = all_rows(&db);
+        let err = ccfg::revert_schema_transition(&db, moved.to, moved.from).unwrap_err();
+        assert!(matches!(err, ConfigError::Refused(_)), "{what}: {err}");
+        assert!(
+            err.to_string().contains("uncertain migration state"),
+            "{what}: {err}"
+        );
+        assert!(ccfg::pending_schema_revert(&db).is_err(), "{what}");
+        assert_eq!(all_rows(&db), before, "{what}: nothing written");
+    }
+    // Bytes this binary cannot read: a newer version, and garbage.
+    for (what, raw) in [
+        ("a newer marker version", {
+            let mut raw = db.get(cf::META, START_MARKER_KEY).unwrap().unwrap();
+            raw[0] = 2;
+            raw
+        }),
+        ("garbage", b"not a marker".to_vec()),
+    ] {
+        db.put(cf::META, START_MARKER_KEY, &raw).unwrap();
+        let before = all_rows(&db);
+        assert!(read_start_marker(&db).is_err(), "{what}");
+        let err = ccfg::revert_schema_transition(&db, moved.to, moved.from).unwrap_err();
+        assert!(matches!(err, ConfigError::Refused(_)), "{what}: {err}");
+        assert!(
+            err.to_string().contains("uncertain migration state"),
+            "{what}: {err}"
+        );
+        assert!(err.to_string().contains("unreadable"), "{what}: {err}");
+        // A start refuses too, rather than overwrite what it cannot read.
+        let err = record_start(&db).unwrap_err();
+        assert!(err.to_string().contains("unreadable"), "{what}: {err}");
+        assert_eq!(all_rows(&db), before, "{what}: nothing written");
+    }
+}
+
+/// A marker that predates the move by more than one transition is accounted
+/// for through the history, so the revert of a later move is allowed: a node
+/// that ran on an earlier record, was moved, and was never started since.
+#[test]
+fn a_start_marker_from_before_the_move_is_accounted_for_through_the_history() {
+    // Started at transition count 0 (the fixture's first record).
+    let (_d, db) = schema_1_database();
+    set_head(&db, HEAD);
+    // The fixture holds three transitions; a marker at count 0 is checked
+    // against the initial commitment.
+    let r = ccfg::read_record(&db).unwrap().unwrap();
+    record_start(&db).unwrap();
+    let raw = db.get(cf::META, START_MARKER_KEY).unwrap().unwrap();
+    let mut early = raw.clone();
+    early[11..19].copy_from_slice(&0u64.to_le_bytes());
+    early[19..51].copy_from_slice(r.initial_commitment.as_bytes());
+    db.put(cf::META, START_MARKER_KEY, &early).unwrap();
+    let before = all_rows(&db);
+    let moved = move_to_schema_4(&db, HEAD);
+    let p = ccfg::pending_schema_revert(&db).unwrap();
+    assert_eq!(p.seq, moved.seq);
+    ccfg::revert_schema_transition(&db, moved.to, moved.from).unwrap();
+    assert_eq!(all_rows(&db), before);
+}
+
+/// The source tripwire for durability: the move, the revert and the start
+/// marker commit with the write-ahead log synced (`commit_durable`), never with
+/// the plain commit. A killed process cannot tell the two apart, so the text
+/// is checked.
+#[test]
+fn the_move_the_revert_and_the_start_marker_commit_durably() {
+    let record_src = include_str!("../src/consensus_config/record.rs");
+    let marker_src = include_str!("../src/consensus_config/start_marker.rs");
+    let body_of = |src: &str, head: &str| -> String {
+        let start = src.find(head).unwrap_or_else(|| panic!("{head} not found"));
+        let rest = &src[start..];
+        // Up to the next top-level item.
+        let end = rest[1..]
+            .find("\n}\n")
+            .map(|i| i + 1 + 3)
+            .unwrap_or(rest.len());
+        rest[..end].to_string()
+    };
+    for (src, head) in [
+        (record_src, "fn write_transition("),
+        (record_src, "pub fn revert_schema_transition_with("),
+        (marker_src, "pub fn record_start("),
+    ] {
+        let body = body_of(src, head);
+        assert!(body.contains(".commit_durable()"), "{head}: not durable");
+        assert!(!body.contains(".commit()"), "{head}: a plain commit");
+        assert_eq!(
+            body.matches("commit_durable").count(),
+            1,
+            "{head}: one commit"
+        );
+    }
+    // And `write_initial`, the fresh baseline, as before.
+    assert!(body_of(record_src, "fn write_initial(").contains(".commit_durable()"));
+}

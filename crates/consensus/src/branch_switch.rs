@@ -463,6 +463,14 @@ pub mod failpoints {
         /// The pre-start schema revert: its batch is committed, and the
         /// command has not yet reported (a crash barrier only).
         SchemaRevertAfterCommit,
+        /// The node's start marker: its batch is staged and not yet committed
+        /// (a crash barrier only).
+        StartMarkerBeforeCommit,
+        /// The node's start marker: its batch is committed, and the start has
+        /// done nothing else yet (a crash barrier only).
+        StartMarkerAfterCommit,
+        /// The node's start marker: its commit fails (an armed failpoint).
+        StartMarkerCommitFails,
     }
 
     impl Failpoint {
@@ -483,6 +491,9 @@ pub mod failpoints {
                 Failpoint::SchemaTransitionAfterCommit => "schema-transition-after-commit".into(),
                 Failpoint::SchemaRevertBeforeCommit => "schema-revert-before-commit".into(),
                 Failpoint::SchemaRevertAfterCommit => "schema-revert-after-commit".into(),
+                Failpoint::StartMarkerBeforeCommit => "start-marker-before-commit".into(),
+                Failpoint::StartMarkerAfterCommit => "start-marker-after-commit".into(),
+                Failpoint::StartMarkerCommitFails => "start-marker-commit-fails".into(),
             }
         }
     }

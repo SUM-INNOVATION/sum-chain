@@ -118,12 +118,24 @@ async fn a_damaged_record_refuses_the_start_and_is_left_as_it_was() {
                 Some(bytes) => db.put(cf::META, meta_keys::FINALIZED_HASH, &bytes).unwrap(),
             }
         }
-        let before = rows(dir.path());
+        // Every row but the start marker, which every normal start writes
+        // first, before this check runs.
+        let marker = (
+            cf::META.to_string(),
+            sumchain_consensus::consensus_config::START_MARKER_KEY.to_vec(),
+        );
+        let mut before = rows(dir.path());
+        before.remove(&marker);
         let err = start(dir.path()).expect_err("a damaged record must refuse the start");
         assert!(
             err.contains("refusing to start") && err.contains(needle),
             "{needle}: {err}"
         );
-        assert_eq!(rows(dir.path()), before, "a refused start wrote");
+        let mut after = rows(dir.path());
+        assert!(
+            after.remove(&marker).is_some(),
+            "the refused start wrote its marker first"
+        );
+        assert_eq!(after, before, "a refused start wrote");
     }
 }

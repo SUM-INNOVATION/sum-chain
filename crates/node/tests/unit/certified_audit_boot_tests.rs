@@ -98,9 +98,14 @@ fn rows(dir: &Path) -> Rows {
 }
 
 /// Boot, expect the audit's refusal naming `needle`, and prove the boot changed
-/// nothing and is refused again.
+/// nothing but the start marker (the one row every normal start writes first,
+/// before this audit runs) and is refused again.
 fn refused_unchanged(dir: &Path, g: &Genesis, needle: &str) {
-    let before = rows(dir);
+    let marker = (
+        cf::META.to_string(),
+        sumchain_consensus::consensus_config::START_MARKER_KEY.to_vec(),
+    );
+    let mut before = rows(dir);
     let err = boot(dir, g).expect_err("the start-up audit must refuse");
     assert!(
         err.contains("refusing to start")
@@ -108,7 +113,13 @@ fn refused_unchanged(dir: &Path, g: &Genesis, needle: &str) {
             && err.contains(needle),
         "the refusal must say why: {err}"
     );
-    assert_eq!(rows(dir), before, "a refused boot changed the database");
+    let mut after = rows(dir);
+    assert!(
+        after.remove(&marker).is_some(),
+        "the refused boot wrote its start marker first"
+    );
+    before.remove(&marker);
+    assert_eq!(after, before, "a refused boot changed the database");
     assert!(boot(dir, g).is_err(), "and it stays refused");
 }
 

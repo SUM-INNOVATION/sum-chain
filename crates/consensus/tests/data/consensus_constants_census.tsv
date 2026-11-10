@@ -56,6 +56,9 @@ crates/consensus/src/consensus_config/record.rs	RECORD_KEY	EXCLUDE	consensus-con
 crates/consensus/src/consensus_config/record.rs	RECORD_VERSION	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/record.rs	TRANSITION_PREFIX	EXCLUDE	consensus-config-self	the configuration format itself
 crates/consensus/src/consensus_config/record.rs	TRANSITION_VERSION	EXCLUDE	consensus-config-self	the configuration format itself
+crates/consensus/src/consensus_config/start_marker.rs	MARKER_LEN	EXCLUDE	node-local-record	the start marker's framing (start_marker.rs); node-local bookkeeping that closes the pre-start schema revert; never hashed into a block, never exchanged
+crates/consensus/src/consensus_config/start_marker.rs	MARKER_VERSION	EXCLUDE	node-local-record	the start marker's framing (start_marker.rs); node-local, never hashed into a block, never exchanged
+crates/consensus/src/consensus_config/start_marker.rs	START_MARKER_KEY	EXCLUDE	node-local-record	the start marker's META key (start_marker.rs); node-local, never hashed into a block, never exchanged
 crates/consensus/src/consensus_config/schema.rs	COMPUTE_POOL_PARAMS_ID	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 field id)
 crates/consensus/src/consensus_config/schema.rs	CONTRACT_METERING_GATE_ID	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 field id)
 crates/consensus/src/consensus_config/schema.rs	MAX_BLOCK_CONTRACT_GAS_ID	EXCLUDE	consensus-config-self	the configuration format itself (schema-2 field id)

@@ -77,18 +77,22 @@ pub mod codec;
 pub mod fields;
 pub mod record;
 pub mod schema;
+pub mod start_marker;
 
 pub use codec::{commitment_of, ConsensusConfig, Field, FieldChange, Value, SCHEMA_V1};
 pub use fields::{build, build_with, FieldSpec, SCHEMA_V1_FIELDS};
 pub use record::{
-    acknowledge, acknowledge_schema_transition, check_at_startup, pending_schema_revert,
-    pending_schema_transition, pending_schema_transition_for, read_record, read_transitions,
-    revert_schema_transition, Acknowledged, BaselineRecord, BaselineStatus, PendingSchemaRevert,
-    PendingSchemaTransition, SchemaReverted, SchemaTransitioned, StartupOutcome, Transition,
-    TransitionKind,
+    acknowledge, acknowledge_schema_transition, check_at_startup, migration_provenance,
+    pending_schema_revert, pending_schema_transition, pending_schema_transition_for, read_record,
+    read_transitions, restore_preserves_provenance, revert_schema_transition, Acknowledged,
+    BaselineRecord, BaselineStatus, PendingSchemaRevert, PendingSchemaTransition, Provenance,
+    SchemaReverted, SchemaTransitioned, StartupOutcome, Transition, TransitionKind,
 };
 pub use schema::{
     AddedField, Schema, SchemaPolicy, Source, PRODUCTION, SCHEMA_1, SCHEMA_2, SCHEMA_3, SCHEMA_4,
+};
+pub use start_marker::{
+    read_start_marker, record_start, RecordState, StartMarker, START_MARKER_KEY,
 };
 
 /// Why a configuration could not be built, decoded, compared or recorded.

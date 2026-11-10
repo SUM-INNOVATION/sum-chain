@@ -235,6 +235,9 @@ fn chains() -> Chains {
 
 type Rows = BTreeMap<(String, Vec<u8>), Vec<u8>>;
 
+/// Every row of every column family, except the node's start marker: every
+/// boot rewrites it (its attempt count and head), and it is node-local
+/// bookkeeping that no block, state or journal depends on.
 fn rows(db: &Database) -> Rows {
     let mut out = BTreeMap::new();
     for cf_name in ALL_CFS {
@@ -243,6 +246,10 @@ fn rows(db: &Database) -> Rows {
             out.insert((cf_name.to_string(), k.into_vec()), v.into_vec());
         }
     }
+    out.remove(&(
+        cf::META.to_string(),
+        sumchain_consensus::consensus_config::START_MARKER_KEY.to_vec(),
+    ));
     out
 }
 

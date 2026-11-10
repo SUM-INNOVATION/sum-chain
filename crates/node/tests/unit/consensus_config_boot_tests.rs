@@ -30,6 +30,12 @@ fn genesis() -> Genesis {
 }
 
 fn boot(dir: &Path, genesis: &Genesis) -> Result<(), String> {
+    boot_node(dir, genesis).map(drop)
+}
+
+/// The real boot sequence, keeping the node: for tests that then drive its
+/// consensus engine as a running node would.
+fn boot_node(dir: &Path, genesis: &Genesis) -> Result<Node, String> {
     let rpc: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let health: SocketAddr = "127.0.0.1:0".parse().unwrap();
     Node::with_rpc_config(
@@ -43,7 +49,6 @@ fn boot(dir: &Path, genesis: &Genesis) -> Result<(), String> {
         sumchain_rpc::RateLimitConfig::disabled(),
         crate::config::ConsensusSettings::default(),
     )
-    .map(drop)
     .map_err(|e| format!("{e:#}"))
 }
 
@@ -698,84 +703,523 @@ fn the_schema_4_gates_through_the_boot_sequence() {
     }
 }
 
-/// The pre-start revert against a real chain. A directory the schema-3
-/// release recorded holds real blocks to height 5 and is moved at its head.
-/// Until a block above the move exists — a boot of this binary that imports
-/// nothing included — the revert is available; it restores every row it
-/// changed and the schema-3 release then starts on the directory at the same
-/// head. Once one more real block is accepted, the revert is refused, says
-/// recovery is forward only, and writes nothing; this binary still boots.
-#[tokio::test]
-async fn the_pre_start_revert_is_refused_once_a_real_block_is_accepted() {
-    let g = genesis();
-    let rows = |dir: &Path| {
-        let db = Database::open_default(dir).unwrap();
-        let mut out = Vec::new();
-        for name in sumchain_storage::db::ALL_CFS {
-            for (k, v) in db.iter(name).unwrap() {
-                out.push((name.to_string(), k.to_vec(), v.to_vec()));
-            }
-        }
-        out
-    };
-    let head = |dir: &Path| {
-        let db = Database::open_default(dir).unwrap();
-        let b = sumchain_storage::schema::BlockStore::new(&db);
-        (
-            b.get_latest_height().unwrap().unwrap(),
-            b.get_latest_hash().unwrap().unwrap(),
-        )
-    };
-    let move_at_head = |dir: &Path| {
-        let db = Database::open_default(dir).unwrap();
-        let p = ccfg::pending_schema_transition(&db).unwrap().unwrap();
-        let h = sumchain_storage::schema::BlockStore::new(&db)
-            .get_latest_height()
-            .unwrap()
-            .unwrap();
-        ccfg::acknowledge_schema_transition(&db, h, p.old, p.new).unwrap()
-    };
+type Rows = Vec<(String, Vec<u8>, Vec<u8>)>;
 
-    // Abort after the move, before the first start: reverted.
-    let dir = schema_3_directory(&g);
-    extend_to(dir.path(), &g, 5).await;
-    let at = head(dir.path());
-    let before = rows(dir.path());
-    let moved = move_at_head(dir.path());
+/// Every row of every column family.
+fn all_rows(dir: &Path) -> Rows {
+    let db = Database::open_default(dir).unwrap();
+    let mut out = Vec::new();
+    for name in sumchain_storage::db::ALL_CFS {
+        for (k, v) in db.iter(name).unwrap() {
+            out.push((name.to_string(), k.to_vec(), v.to_vec()));
+        }
+    }
+    out
+}
+
+/// The rows that differ between two row sets, by key.
+fn changed_keys(a: &Rows, b: &Rows) -> Vec<(String, Vec<u8>)> {
+    let index = |r: &Rows| -> std::collections::BTreeMap<(String, Vec<u8>), Vec<u8>> {
+        r.iter()
+            .map(|(c, k, v)| ((c.clone(), k.clone()), v.clone()))
+            .collect()
+    };
+    let (a, b) = (index(a), index(b));
+    a.keys()
+        .chain(b.keys())
+        .filter(|k| a.get(*k) != b.get(*k))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn head_of(dir: &Path) -> (u64, sumchain_primitives::Hash) {
+    let db = Database::open_default(dir).unwrap();
+    let b = sumchain_storage::schema::BlockStore::new(&db);
+    (
+        b.get_latest_height().unwrap().unwrap(),
+        b.get_latest_hash().unwrap().unwrap(),
+    )
+}
+
+/// The move, at the directory's head.
+fn move_at_head(dir: &Path) -> ccfg::SchemaTransitioned {
+    let db = Database::open_default(dir).unwrap();
+    let p = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+    let h = sumchain_storage::schema::BlockStore::new(&db)
+        .get_latest_height()
+        .unwrap()
+        .unwrap();
+    ccfg::acknowledge_schema_transition(&db, h, p.old, p.new).unwrap()
+}
+
+fn revert(
+    dir: &Path,
+    moved: &ccfg::SchemaTransitioned,
+) -> Result<ccfg::SchemaReverted, ccfg::ConfigError> {
+    let db = Database::open_default(dir).unwrap();
+    ccfg::revert_schema_transition(&db, moved.to, moved.from)
+}
+
+fn marker_of(dir: &Path) -> Option<ccfg::StartMarker> {
+    let db = Database::open_default(dir).unwrap();
+    ccfg::read_start_marker(&db).unwrap()
+}
+
+/// The activation record exactly as the deployed schema-3 release writes it:
+/// this binary's names minus the two it does not declare.
+fn as_the_schema_3_release_records(dir: &Path) {
+    let mut heights = activation_heights(dir);
+    heights.retain(|(n, _)| !NAMES_THE_SCHEMA_3_RELEASE_LACKS.contains(&n.as_str()));
+    write_activation_heights(dir, &heights);
+}
+
+/// A production-shaped directory the deployed release ran: a schema-3 record,
+/// the activation record as that release writes it, the messaging backfill
+/// done, real blocks to `height` with their journals and finality record. No
+/// start marker: the deployed release writes none.
+async fn deployed_release_directory(g: &Genesis, height: u64) -> tempfile::TempDir {
+    let dir = schema_3_directory(g);
+    // This binary's boot writes the activation record and runs the backfill;
+    // trim the record to the deployed release's names and remove the marker,
+    // which that release does not write.
+    boot(dir.path(), g).unwrap();
+    as_the_schema_3_release_records(dir.path());
     {
         let db = Database::open_default(dir.path()).unwrap();
-        let p = ccfg::revert_schema_transition(&db, moved.to, moved.from).unwrap();
-        assert_eq!(p.at_height, 5);
-        assert!(matches!(
-            ccfg::record::check_at_startup_with(&db, &g, 5, &SCHEMA_3_RELEASE).unwrap(),
-            ccfg::StartupOutcome::Unchanged { .. }
-        ));
+        db.delete(cf::META, ccfg::START_MARKER_KEY).unwrap();
     }
-    assert_eq!(rows(dir.path()), before, "every row as before the move");
-    assert_eq!(head(dir.path()), at, "the same agreed height and head");
+    extend_to(dir.path(), g, height).await;
+    assert_eq!(marker_of(dir.path()), None);
+    dir
+}
 
-    // A boot that imports nothing leaves the revert available.
-    let dir = schema_3_directory(&g);
-    extend_to(dir.path(), &g, 5).await;
+/// The abort-3 state: a deployed-release directory moved at its head, with no
+/// start since. Returns the directory, the move, and the rows before the move.
+async fn moved_directory(
+    g: &Genesis,
+    height: u64,
+) -> (tempfile::TempDir, ccfg::SchemaTransitioned, Rows) {
+    let dir = deployed_release_directory(g, height).await;
+    let before = all_rows(dir.path());
     let moved = move_at_head(dir.path());
+    assert_eq!(head_of(dir.path()).0, height);
+    (dir, moved, before)
+}
+
+/// Before any start, the revert restores every row of a production-shaped
+/// directory: the activation record as the deployed release wrote it, the
+/// messaging backfill, real blocks to 5 with journals and the finality record.
+/// Byte equality over every column family, so a revert that touched any other
+/// row (the activation record, say) would fail here. The schema-3 release then
+/// starts on it at the same head.
+#[tokio::test]
+async fn before_any_start_the_revert_restores_every_row_of_a_deployed_release_directory() {
+    let g = genesis();
+    let (dir, moved, before) = moved_directory(&g, 5).await;
+    let at = head_of(dir.path());
+    assert!(before
+        .iter()
+        .any(|(c, k, _)| c == cf::META && k == b"activation/heights"));
+    assert!(before.iter().any(|(c, _, _)| c == cf::APPLICATION_JOURNAL));
+    {
+        let db = Database::open_default(dir.path()).unwrap();
+        let p = ccfg::pending_schema_revert(&db).unwrap();
+        assert_eq!((p.at_height, p.start_marker), (5, None));
+        assert_eq!(p.head_hash, Some(at.1));
+    }
+    let done = revert(dir.path(), &moved).unwrap();
+    assert_eq!(done.at_height, 5);
+    assert_eq!(all_rows(dir.path()), before, "every row as before the move");
+    assert_eq!(head_of(dir.path()), at, "the same agreed height and head");
+    let db = Database::open_default(dir.path()).unwrap();
+    assert!(matches!(
+        ccfg::record::check_at_startup_with(&db, &g, 5, &SCHEMA_3_RELEASE).unwrap(),
+        ccfg::StartupOutcome::Unchanged { .. }
+    ));
+}
+
+/// A normal start that imports no block closes the abort window: the revert
+/// is refused and writes nothing. The start did rewrite local rows (the
+/// activation record now carries this binary's names), so a revert here would
+/// not have been byte-exact: that is why the marker, not the chain position,
+/// decides.
+#[tokio::test]
+async fn a_zero_block_start_closes_the_abort_window() {
+    let g = genesis();
+    let (dir, moved, before) = moved_directory(&g, 5).await;
     boot(dir.path(), &g).unwrap();
+    let m = marker_of(dir.path()).expect("the start wrote its marker");
+    assert_eq!(m.attempt, 1);
+    assert_eq!(
+        m.record,
+        ccfg::RecordState::Present {
+            transition_count: moved.seq,
+            commitment: moved.to
+        }
+    );
+    assert_eq!(m.head, Some(head_of(dir.path())));
+    let after_start = all_rows(dir.path());
+    let changed = changed_keys(&before, &after_start);
+    assert!(changed.contains(&(cf::META.to_string(), b"activation/heights".to_vec())));
+    assert_eq!(head_of(dir.path()).0, 5, "no block was imported");
+
+    let err = revert(dir.path(), &moved).unwrap_err();
+    assert!(matches!(err, ccfg::ConfigError::Refused(_)), "{err}");
+    assert!(
+        err.to_string()
+            .contains("a normal start was attempted on the moved record"),
+        "{err}"
+    );
+    assert!(err.to_string().contains("forward only"), "{err}");
+    assert_eq!(
+        all_rows(dir.path()),
+        after_start,
+        "the refusal wrote nothing"
+    );
+    // This binary still boots on it.
+    boot(dir.path(), &g).unwrap();
+    assert_eq!(marker_of(dir.path()).unwrap().attempt, 2);
+}
+
+/// A start refused by a later check still closes the abort window, because
+/// the marker is written first. A start refused before the database is opened
+/// writes nothing and leaves the revert available.
+#[tokio::test]
+async fn a_failed_start_closes_the_abort_window_unless_it_failed_before_the_open() {
+    let g = genesis();
+
+    // Refused by the configuration check: a genesis that changes a rule.
+    let (dir, moved, _before) = moved_directory(&g, 5).await;
+    let mut other = g.clone();
+    other.params.max_contract_gas += 1;
+    let err = boot(dir.path(), &other).unwrap_err();
+    assert!(err.contains("acknowledge-consensus-config"), "{err}");
+    let m = marker_of(dir.path()).expect("the refused start wrote its marker first");
+    assert_eq!(m.attempt, 1);
+    let rows = all_rows(dir.path());
+    let err = revert(dir.path(), &moved).unwrap_err();
+    assert!(
+        err.to_string().contains("a normal start was attempted"),
+        "{err}"
+    );
+    assert_eq!(all_rows(dir.path()), rows, "nothing written");
+
+    // Refused by the activation-height check, which rewrites the activation
+    // record before it refuses: still closed, and the marker says so.
+    let (dir, moved, _before) = moved_directory(&g, 5).await;
+    let mut passed = g.clone();
+    passed.params.peer_protocol_declaration_required_from_height = Some(1);
+    passed
+        .params
+        .strict_transaction_signatures_enabled_from_height = Some(2);
+    let err = boot(dir.path(), &passed).unwrap_err();
+    assert!(err.contains("already passed"), "{err}");
+    assert!(marker_of(dir.path()).is_some());
+    let err = revert(dir.path(), &moved).unwrap_err();
+    assert!(
+        err.to_string().contains("a normal start was attempted"),
+        "{err}"
+    );
+
+    // Refused before the open (an empty validator set is refused by
+    // `check_protocol_v1`, before the data directory or database is touched):
+    // no marker, no row changed, the revert still available.
+    let (dir, moved, _before) = moved_directory(&g, 5).await;
+    let rows = all_rows(dir.path());
+    let mut empty = g.clone();
+    empty.validators.clear();
+    let err = boot(dir.path(), &empty).unwrap_err();
+    assert!(!err.contains("start marker"), "{err}");
+    assert_eq!(marker_of(dir.path()), None);
+    assert_eq!(all_rows(dir.path()), rows, "nothing written");
+    revert(dir.path(), &moved).unwrap();
+}
+
+/// If the marker cannot be committed, the start refuses at once and nothing
+/// else is written: the database is exactly the moved database, and the
+/// revert stays available (the pair-wide rule still goes forward, because
+/// a start was issued).
+#[tokio::test]
+async fn a_failed_marker_write_refuses_the_start_and_writes_nothing_else() {
+    use sumchain_consensus::branch_switch::failpoints::{arm, Failpoint};
+    let g = genesis();
+    let (dir, moved, _before) = moved_directory(&g, 5).await;
+    let rows = all_rows(dir.path());
+    arm(Some(Failpoint::StartMarkerCommitFails));
+    let err = boot(dir.path(), &g).unwrap_err();
+    arm(None);
+    assert!(err.contains("the start marker was not recorded"), "{err}");
+    assert!(err.contains("nothing else was written"), "{err}");
+    assert_eq!(marker_of(dir.path()), None);
+    assert_eq!(all_rows(dir.path()), rows, "exactly the moved database");
+    let done = revert(dir.path(), &moved).unwrap();
+    assert_eq!(done.at_height, 5);
+}
+
+/// An ambiguous outcome — the marker's commit was reported as failed but the
+/// row was persisted — reads as a start: the marker's presence alone decides,
+/// and the revert refuses.
+#[tokio::test]
+async fn a_persisted_marker_whose_commit_was_reported_failed_still_closes_the_window() {
+    let g = genesis();
+    let (dir, moved, _before) = moved_directory(&g, 5).await;
+    {
+        // Exactly what such a start leaves behind: the marker, and nothing else.
+        let db = Database::open_default(dir.path()).unwrap();
+        ccfg::record_start(&db).unwrap();
+    }
+    let rows = all_rows(dir.path());
+    let err = revert(dir.path(), &moved).unwrap_err();
+    assert!(
+        err.to_string().contains("a normal start was attempted"),
+        "{err}"
+    );
+    assert_eq!(all_rows(dir.path()), rows);
+}
+
+/// A rewind does not reopen the revert. A started node accepts blocks above
+/// the move; the revert refuses. `sumchain rollback` to the move's height, run
+/// exactly as the command runs it, unwinds those blocks and leaves the marker:
+/// the revert still refuses, now naming the start, and writes nothing.
+#[tokio::test]
+async fn a_rollback_to_the_move_height_after_a_start_does_not_reopen_the_revert() {
+    use sumchain_consensus::reorg::{
+        execute_rollback, plan_rollback, refuse_rollback_across_certified,
+    };
+    use sumchain_state::reorg_undo::ActivatedJournal;
+    use sumchain_state::StateManager;
+    use sumchain_storage::journal::ActivationSource;
+    use sumchain_storage::schema::BlockStore;
+    use sumchain_storage::subsystem_journal::SubsystemGates;
+
+    let g = genesis();
+    let (dir, moved, _before) = moved_directory(&g, 5).await;
+    boot(dir.path(), &g).unwrap();
+    extend_to(dir.path(), &g, 8).await;
+    // Refused already, and by the marker: it is read before the chain position.
+    let err = revert(dir.path(), &moved).unwrap_err();
+    assert!(
+        err.to_string().contains("a normal start was attempted"),
+        "{err}"
+    );
+
+    {
+        let db = std::sync::Arc::new(Database::open_default(dir.path()).unwrap());
+        let journals = ActivatedJournal::resolve(
+            &db,
+            ActivationSource::from_configured_height(
+                g.params.application_journal_enabled_from_height,
+            ),
+            SubsystemGates {
+                compute_pool: g.params.compute_pool_enabled_from_height,
+                beacon: g.params.beacon_enabled_from_height,
+            },
+        )
+        .unwrap();
+        let store = BlockStore::new(&db);
+        let plan = plan_rollback(&store, 5, 10, &journals.activation()).unwrap();
+        refuse_rollback_across_certified(&db, &plan).unwrap();
+        let state = StateManager::new(db.clone(), 0);
+        let report = execute_rollback(&db, &state, &plan, &journals, journals.policy()).unwrap();
+        assert_eq!(report.blocks, 3, "unwound 3 blocks");
+    }
+    assert_eq!(head_of(dir.path()).0, 5);
+    {
+        let db = Database::open_default(dir.path()).unwrap();
+        let above = db
+            .iter_checked_from(cf::BLOCK_HEIGHT, Some(&6u64.to_be_bytes()))
+            .unwrap()
+            .count();
+        assert_eq!(above, 0, "nothing indexed above the move's height");
+    }
+    let m = marker_of(dir.path()).expect("the marker survives the rollback");
+    assert_eq!(m.attempt, 1);
+    let rows = all_rows(dir.path());
+    let err = revert(dir.path(), &moved).unwrap_err();
+    assert!(matches!(err, ccfg::ConfigError::Refused(_)), "{err}");
+    assert!(
+        err.to_string().contains("a normal start was attempted"),
+        "{err}"
+    );
+    assert!(!err.to_string().contains("now at height"), "{err}");
+    assert_eq!(all_rows(dir.path()), rows, "nothing written");
+}
+
+/// A same-height switch does not reopen the revert either. A started node that
+/// switches to a sibling of the block at the move's height (lower hash, the
+/// fork-choice tiebreak) keeps the head at that height with nothing indexed
+/// above it, which the height check alone cannot see; the marker refuses.
+#[tokio::test]
+async fn a_same_height_switch_after_a_start_does_not_reopen_the_revert() {
+    use sumchain_storage::schema::BlockStore;
+    let g = genesis();
+    // Two directories with the same chain to 4, then one block each at 5 with
+    // different timestamps: siblings.
+    let a = deployed_release_directory(&g, 4).await;
+    let b = tempfile::TempDir::new().unwrap();
+    let copied = std::process::Command::new("cp")
+        .args([
+            "-R",
+            &format!("{}/.", a.path().display()),
+            &b.path().display().to_string(),
+        ])
+        .status()
+        .unwrap();
+    assert!(copied.success());
+    extend_to(a.path(), &g, 5).await;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    extend_to(b.path(), &g, 5).await;
+    let block_at_5 = |dir: &Path| {
+        let db = Database::open_default(dir).unwrap();
+        BlockStore::new(&db).get_by_height(5).unwrap().unwrap()
+    };
+    let (ba, bb) = (block_at_5(a.path()), block_at_5(b.path()));
+    assert_ne!(ba.hash(), bb.hash(), "siblings");
+    assert_eq!(ba.header.parent_hash, bb.header.parent_hash);
+    // The victim holds the higher hash; the sibling with the lower hash wins
+    // the same-height tiebreak when imported.
+    let (victim, sibling) = if ba.hash() < bb.hash() {
+        (b, ba)
+    } else {
+        (a, bb)
+    };
+    let moved = move_at_head(victim.path());
+    let head_before = head_of(victim.path());
+
+    let node = boot_node(victim.path(), &g).unwrap();
+    node.init_chain().unwrap();
+    node.consensus.import_block(sibling.clone()).await.unwrap();
+    assert_eq!(node.consensus.best_block_hash(), sibling.hash(), "switched");
+    drop(node);
+    let head_after = head_of(victim.path());
+    assert_eq!(head_after.0, 5, "the head stays at the move's height");
+    assert_ne!(head_after.1, head_before.1, "to the sibling");
+    assert_eq!(head_after.1, sibling.hash());
+    {
+        let db = Database::open_default(victim.path()).unwrap();
+        let above = db
+            .iter_checked_from(cf::BLOCK_HEIGHT, Some(&6u64.to_be_bytes()))
+            .unwrap()
+            .count();
+        assert_eq!(above, 0, "nothing indexed above the move's height");
+    }
+    let err = revert(victim.path(), &moved).unwrap_err();
+    assert!(
+        err.to_string().contains("a normal start was attempted"),
+        "{err}"
+    );
+
+    // Without the marker, the chain position alone would have allowed it.
+    {
+        let db = Database::open_default(victim.path()).unwrap();
+        db.delete(cf::META, ccfg::START_MARKER_KEY).unwrap();
+        assert!(
+            ccfg::pending_schema_revert(&db).is_ok(),
+            "the marker is what refuses"
+        );
+    }
+}
+
+// ── the marker killed with SIGKILL ──────────────────────────────────────────
+
+const MARKER_CHILD_DIR_ENV: &str = "SUMCHAIN_START_MARKER_CHILD_DIR";
+
+/// The child half: boots the directory the parent names, with a crash barrier
+/// armed through the environment. Inert in an ordinary test run.
+#[test]
+fn start_marker_crash_child() {
+    let Ok(dir) = std::env::var(MARKER_CHILD_DIR_ENV) else {
+        return;
+    };
+    let result = boot(Path::new(&dir), &genesis());
+    panic!("the child finished its boot without reaching its barrier: {result:?}");
+}
+
+fn boot_killed_at(dir: &Path, fp: sumchain_consensus::branch_switch::failpoints::Failpoint) {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    use sumchain_consensus::branch_switch::failpoints::{BARRIER_AT_ENV, BARRIER_FILE_ENV};
+    let marker = dir.join("at-barrier");
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "node::consensus_config_boot_tests::start_marker_crash_child",
+            "--nocapture",
+            "--test-threads",
+            "1",
+        ])
+        .env(MARKER_CHILD_DIR_ENV, dir)
+        .env(BARRIER_AT_ENV, fp.name())
+        .env(BARRIER_FILE_ENV, &marker)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the child");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !marker.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "the child exited ({status}) before reaching barrier {}:\n{}\n{}",
+                fp.name(),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the child never reached {}",
+            fp.name()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child.kill().expect("SIGKILL the child"); // SIGKILL on unix
+    assert!(!child.wait().unwrap().success());
+    std::fs::remove_file(&marker).unwrap();
+}
+
+/// A start killed immediately before the marker's commit leaves exactly the
+/// moved database, and the revert available; killed immediately after it, the
+/// marker is the one row added, and the revert refuses.
+#[tokio::test]
+async fn a_start_killed_around_the_marker_commit_leaves_a_definite_state() {
+    use sumchain_consensus::branch_switch::failpoints::Failpoint;
+    let g = genesis();
+    let (dir, moved, _before) = moved_directory(&g, 5).await;
+    let data = dir.path().join("data-moved");
+    std::fs::rename(dir.path().join("CURRENT"), dir.path().join("CURRENT")).unwrap();
+    let _ = data;
+    let rows = all_rows(dir.path());
+
+    boot_killed_at(dir.path(), Failpoint::StartMarkerBeforeCommit);
+    assert_eq!(
+        all_rows(dir.path()),
+        rows,
+        "killed before the commit: exactly the moved database"
+    );
+    assert_eq!(marker_of(dir.path()), None);
     {
         let db = Database::open_default(dir.path()).unwrap();
         assert_eq!(ccfg::pending_schema_revert(&db).unwrap().at_height, 5);
     }
 
-    // One real block above the move: forward only.
-    extend_to(dir.path(), &g, 6).await;
-    let after = rows(dir.path());
-    {
-        let db = Database::open_default(dir.path()).unwrap();
-        let err = ccfg::revert_schema_transition(&db, moved.to, moved.from).unwrap_err();
-        assert!(err.to_string().contains("forward only"), "{err}");
-        assert!(err.to_string().contains("now at height 6"), "{err}");
-        assert!(ccfg::record::read_record_with(&db, &SCHEMA_3_RELEASE).is_err());
-    }
-    assert_eq!(rows(dir.path()), after, "nothing written");
-    boot(dir.path(), &g).unwrap();
+    boot_killed_at(dir.path(), Failpoint::StartMarkerAfterCommit);
+    let after = all_rows(dir.path());
+    assert_eq!(
+        changed_keys(&rows, &after),
+        vec![(cf::META.to_string(), ccfg::START_MARKER_KEY.to_vec())],
+        "killed after the commit: the marker and nothing else"
+    );
+    let m = marker_of(dir.path()).unwrap();
+    assert_eq!(m.attempt, 1);
+    let err = revert(dir.path(), &moved).unwrap_err();
+    assert!(
+        err.to_string().contains("a normal start was attempted"),
+        "{err}"
+    );
+    assert_eq!(all_rows(dir.path()), after, "nothing written");
 }
 
 /// The deployed schema-3 release, started by mistake on a moved node, drops
