@@ -1394,9 +1394,8 @@ pub enum StateError {
 
     /// This node's inclusion policy: the transaction already has a receipt on
     /// the canonical chain, so it has been included and this node does not
-    /// hold or carry it again. Node-local, not a consensus rule: a block
-    /// carrying it a second time is still valid. See
-    /// `mempool::InclusionPolicy`.
+    /// hold or carry it again. Node-local, not a consensus rule: what a block
+    /// means is unchanged. See `mempool::InclusionPolicy`.
     #[error("transaction is already included in the canonical chain")]
     TransactionAlreadyIncluded,
 

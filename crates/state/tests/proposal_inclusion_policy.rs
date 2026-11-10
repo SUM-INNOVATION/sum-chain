@@ -732,8 +732,8 @@ fn the_signature_covers_nonce_expiry_recipient_and_message_bytes() {
             "{what}"
         );
     }
-    // The amount is NOT covered by the relay preimage: a relayer may change
-    // it and the envelope still verifies. Documented, not fixed here.
+    // The signed string does not cover `koppa_amount`, so two envelopes that
+    // differ only in the amount verify alike, and the policy admits either.
     let mut amended = m.clone();
     amended.koppa_amount = Some(6);
     c.pool()
