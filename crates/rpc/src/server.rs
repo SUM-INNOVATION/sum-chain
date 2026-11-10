@@ -4072,6 +4072,25 @@ impl SumChainApiServer for RpcServer {
         })
     }
 
+    async fn messaging_get_sender_nonce(
+        &self,
+        address: String,
+    ) -> std::result::Result<MessagingSenderNonceInfo, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = parse_address_arg(&address)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
+        // Committed state only: what the next sponsored envelope must carry as
+        // judged against the canonical chain. Envelopes this node already
+        // holds for the sender extend the sequence from here, one per pending
+        // envelope.
+        let nonce = MessagingStore::new(&self.db)
+            .get_sender_nonce(&addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(MessagingSenderNonceInfo {
+            address: addr.to_base58(),
+            nonce,
+        })
+    }
+
     async fn messaging_get_inbox_filter(
         &self,
         address: String,

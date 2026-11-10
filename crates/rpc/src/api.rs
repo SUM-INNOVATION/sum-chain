@@ -35,6 +35,7 @@ use crate::types::{
     ArchiveUnbondingInfo, AssignmentCoverageV2, ChainParamsInfo, EpochInfo, FinalityInfo, GasEstimateResult, HealthResponse, IncomeAttestationInfo, NodeRecordInfo, PushableFileInfoV2, StorageBuildReassignChunksV2Request, StorageBuildResponse, StorageFileInfoV2, TxStatusV2,
     InboxFilterInfo, IssueAcademicCredentialRequest, IssueAcademicCredentialResponse,
     MessageDataInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
+    MessagingSenderNonceInfo,
     NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
     PublicKeyInfo, ReceiptInfo, RegisterAcademicIssuerRequest, RegisterAcademicIssuerResponse,
     RegisterEmploymentIssuerRequest, RegisterEmploymentIssuerResponse,
@@ -1142,6 +1143,15 @@ pub trait SumChainApi {
         &self,
         address: String,
     ) -> Result<MessagingQuotaInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// The sender's committed messaging nonce: how many messages this address
+    /// has sent (sponsored or direct), and therefore the `nonce` the next
+    /// sponsored `SendMessage` envelope from it must carry. Read-only.
+    #[method(name = "messaging_getSenderNonce")]
+    async fn messaging_get_sender_nonce(
+        &self,
+        address: String,
+    ) -> Result<MessagingSenderNonceInfo, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get recipient's inbox filter
     #[method(name = "messaging_getInboxFilter")]

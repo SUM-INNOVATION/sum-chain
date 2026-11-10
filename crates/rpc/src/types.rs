@@ -1879,6 +1879,17 @@ pub struct MessagingQuotaInfo {
     pub trust_stake: Option<String>,
 }
 
+/// A sender's committed messaging nonce, for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessagingSenderNonceInfo {
+    /// Sender address
+    pub address: String,
+    /// How many messages this address has sent (sponsored or direct), as the
+    /// canonical chain records it; the `nonce` the next sponsored envelope
+    /// from this sender must carry.
+    pub nonce: u64,
+}
+
 /// Registered public key info for RPC responses
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicKeyInfo {
