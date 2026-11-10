@@ -655,6 +655,64 @@ impl SponsoredMessage {
 }
 
 // ============================================================================
+// Sponsored send: the versioned sender envelope (v2)
+// ============================================================================
+
+/// Canonical ASCII domain-separation tag of the version-2 sender envelope of a
+/// sponsored `SendMessage`. The version is part of the tag, as it is in
+/// [`SPONSORED_REGISTER_V1_TAG`].
+///
+/// Exact bytes (34): `SUMCHAIN/SRC-201/SEND-SPONSORED/v2`
+///
+/// A compile-time constant of FIXED length prefixed to fixed-width fields, so
+/// the preimage is an unambiguous byte string: a raw ASCII tag, never JSON,
+/// `format!`, a platform string or a bincode framing. See
+/// [`sponsored_send_v2_signing_preimage`] and the tests that pin its bytes.
+pub const SPONSORED_SEND_V2_TAG: &[u8] = b"SUMCHAIN/SRC-201/SEND-SPONSORED/v2";
+
+/// Total length in bytes of the version-2 sender-envelope preimage:
+/// `TAG(34) || chain_id_be(8) || sender_pubkey(32) || recipient_hash(32) ||
+/// blake3(message_data)(32) || nonce_be(8) || expiry_be(8) || amount_be(16)`.
+pub const SPONSORED_SEND_V2_PREIMAGE_LEN: usize =
+    34 /* SPONSORED_SEND_V2_TAG.len() */ + 8 + 32 + 32 + 32 + 8 + 8 + 16;
+
+/// Build the exact version-2 sender-envelope preimage of a sponsored
+/// `SendMessage`:
+///
+/// ```text
+/// SPONSORED_SEND_V2_TAG
+///   || chain_id.to_be_bytes()
+///   || sender_pubkey[32]
+///   || recipient_hash[32]
+///   || blake3(message_data)[32]
+///   || nonce.to_be_bytes()
+///   || expiry.to_be_bytes()
+///   || amount.to_be_bytes()      (u128; 0 when `koppa_amount` is absent)
+/// ```
+///
+/// Fixed-width and unambiguous, [`SPONSORED_SEND_V2_PREIMAGE_LEN`] bytes. The
+/// binding covers the chain, the sender key, the recipient, the message bytes,
+/// the sender's messaging nonce, the expiry and the amount, so a signature is
+/// valid for exactly one envelope on one chain. The relaying sponsor is NOT
+/// bound: any sponsor may carry the envelope, and the nonce makes it single
+/// use. This crate is deliberately ed25519-free: the sender signs this preimage
+/// and the signature is verified strictly above the leaf
+/// (`sumchain_primitives::messaging_sponsored::verify_sponsored_send_v2`).
+pub fn sponsored_send_v2_signing_preimage(chain_id: u64, m: &SponsoredMessage) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(SPONSORED_SEND_V2_PREIMAGE_LEN);
+    buf.extend_from_slice(SPONSORED_SEND_V2_TAG);
+    buf.extend_from_slice(&chain_id.to_be_bytes());
+    buf.extend_from_slice(&m.sender_pubkey);
+    buf.extend_from_slice(&m.recipient_hash);
+    buf.extend_from_slice(blake3::hash(&m.message_data).as_bytes());
+    buf.extend_from_slice(&m.nonce.to_be_bytes());
+    buf.extend_from_slice(&m.expiry.to_be_bytes());
+    buf.extend_from_slice(&m.koppa_amount.unwrap_or(0).to_be_bytes());
+    debug_assert_eq!(buf.len(), SPONSORED_SEND_V2_PREIMAGE_LEN);
+    buf
+}
+
+// ============================================================================
 // Message header structure (for parsing)
 // ============================================================================
 
@@ -834,6 +892,106 @@ mod tests {
         // followed by an 8-byte little-endian length prefix for the empty vec.
         assert_eq!(&b[4..12], &0u64.to_le_bytes());
         assert_eq!(b.len(), 12);
+    }
+
+    /// GOLDEN: the version-2 sender-envelope tag's exact bytes and length.
+    #[test]
+    fn sponsored_send_v2_tag_is_frozen() {
+        assert_eq!(SPONSORED_SEND_V2_TAG, b"SUMCHAIN/SRC-201/SEND-SPONSORED/v2");
+        assert_eq!(SPONSORED_SEND_V2_TAG.len(), 34);
+        assert_eq!(
+            SPONSORED_SEND_V2_PREIMAGE_LEN,
+            34 + 8 + 32 + 32 + 32 + 8 + 8 + 16
+        );
+        assert_eq!(SPONSORED_SEND_V2_PREIMAGE_LEN, 170);
+    }
+
+    /// The fixed envelope the version-2 golden vector is taken over.
+    fn golden_envelope() -> SponsoredMessage {
+        SponsoredMessage {
+            message_data: b"golden message bytes".to_vec(),
+            recipient_hash: [0x33; 32],
+            signature: [0x44; 64],
+            sender_pubkey: [0x22; 32],
+            nonce: 0x0a0b_0c0d_0e0f_1011,
+            expiry: 0x2021_2223_2425_2627,
+            koppa_amount: None,
+        }
+    }
+
+    /// GOLDEN: the exact version-2 preimage bytes for a fixed envelope, field
+    /// by field, big-endian throughout; the amount field is zero while the
+    /// envelope carries no amount.
+    #[test]
+    fn sponsored_send_v2_preimage_is_frozen() {
+        let chain_id: u64 = 0x0102_0304_0506_0708;
+        let m = golden_envelope();
+        let pre = sponsored_send_v2_signing_preimage(chain_id, &m);
+        assert_eq!(pre.len(), SPONSORED_SEND_V2_PREIMAGE_LEN);
+        let content_hash = hex::encode(blake3::hash(b"golden message bytes").as_bytes());
+        let mut want = Vec::new();
+        want.extend_from_slice(b"SUMCHAIN/SRC-201/SEND-SPONSORED/v2");
+        want.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]); // BE
+        want.extend_from_slice(&[0x22; 32]);
+        want.extend_from_slice(&[0x33; 32]);
+        want.extend_from_slice(blake3::hash(b"golden message bytes").as_bytes());
+        want.extend_from_slice(&[0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11]); // BE
+        want.extend_from_slice(&[0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27]); // BE
+        want.extend_from_slice(&[0u8; 16]);
+        assert_eq!(pre, want);
+        assert_eq!(
+            hex::encode(&pre),
+            format!(
+                "53554d434841494e2f5352432d3230312f53454e442d53504f4e534f5245442f7632\
+                 0102030405060708\
+                 2222222222222222222222222222222222222222222222222222222222222222\
+                 3333333333333333333333333333333333333333333333333333333333333333\
+                 {content_hash}\
+                 0a0b0c0d0e0f1011\
+                 2021222324252627\
+                 00000000000000000000000000000000"
+            )
+        );
+        // The envelope's own signature field is not part of what it signs.
+        let mut other_signature = golden_envelope();
+        other_signature.signature = [0x55; 64];
+        assert_eq!(
+            sponsored_send_v2_signing_preimage(chain_id, &other_signature),
+            pre
+        );
+    }
+
+    /// Every bound field moves the preimage: the chain, the sender key, the
+    /// recipient, the message bytes, the nonce, the expiry and the amount.
+    #[test]
+    fn sponsored_send_v2_preimage_binds_every_field() {
+        let chain_id: u64 = 7;
+        let base = sponsored_send_v2_signing_preimage(chain_id, &golden_envelope());
+        assert_ne!(
+            sponsored_send_v2_signing_preimage(8, &golden_envelope()),
+            base
+        );
+        let variants: [fn(&mut SponsoredMessage); 6] = [
+            |m| m.sender_pubkey[0] ^= 1,
+            |m| m.recipient_hash[31] ^= 1,
+            |m| m.message_data.push(0),
+            |m| m.nonce += 1,
+            |m| m.expiry += 1,
+            |m| m.koppa_amount = Some(1),
+        ];
+        for (i, change) in variants.iter().enumerate() {
+            let mut m = golden_envelope();
+            change(&mut m);
+            let pre = sponsored_send_v2_signing_preimage(chain_id, &m);
+            assert_eq!(pre.len(), SPONSORED_SEND_V2_PREIMAGE_LEN, "variant {i}");
+            assert_ne!(pre, base, "variant {i} must move the preimage");
+        }
+        // An amount of zero encodes as absence does: the rule that consumes
+        // this preimage refuses any envelope that carries an amount, so the two
+        // never both verify.
+        let mut zero = golden_envelope();
+        zero.koppa_amount = Some(0);
+        assert_eq!(sponsored_send_v2_signing_preimage(chain_id, &zero), base);
     }
 
     /// GOLDEN: the domain tag's exact bytes and length.

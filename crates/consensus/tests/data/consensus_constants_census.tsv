@@ -876,6 +876,8 @@ crates/sumchain-wire/src/messaging.rs	IS_READ_RECEIPT	EXCLUDE	unused	only read b
 crates/sumchain-wire/src/messaging.rs	REQUIRES_STAKE	EXCLUDE	unused	only read by MessageFlags getters (messaging.rs:196-208) that have no non-test caller
 crates/sumchain-wire/src/messaging.rs	SPONSORED_REGISTER_V1_PREIMAGE_LEN	EXCLUDE	local	only Vec capacity + debug_assert (messaging.rs:581/586); does not change preimage bytes
 crates/sumchain-wire/src/messaging.rs	SPONSORED_REGISTER_V1_TAG	COMMITTED	registry	0x223e
+crates/sumchain-wire/src/messaging.rs	SPONSORED_SEND_V2_PREIMAGE_LEN	EXCLUDE	local	only Vec capacity + debug_assert (sponsored_send_v2_signing_preimage); does not change preimage bytes
+crates/sumchain-wire/src/messaging.rs	SPONSORED_SEND_V2_TAG	COMMITTED	schema-5	0x252b (schema-5 field; absent while messaging_sponsored_envelope_verification_enabled_from_height (0x1048) is unset, the only state in which nothing reads it)
 crates/sumchain-wire/src/messaging.rs	SRC201_ATTACHMENT_KDF_CONTEXT	EXCLUDE	unused	no reader anywhere in crates/
 crates/sumchain-wire/src/messaging.rs	SRC201_HEADER_SIZE	COMMITTED	registry	0x2238
 crates/sumchain-wire/src/messaging.rs	SRC201_KDF_CONTEXT	EXCLUDE	client-only	ECDH key derivation only in client encryption helper crates/crypto/src/messaging.rs:222/357

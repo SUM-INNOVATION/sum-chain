@@ -42,19 +42,23 @@ pub use staking::{
     ValidatorSigningInfo, ValidatorStatus, WithdrawUnbondedData,
 };
 pub use messaging::{
-    sponsored_register_v1_signing_preimage, validate_message_format, AttachmentType,
-    BlockSenderData, ClaimPaymentData, ContactData, ContentType, ExternalProtocol, FundRegistryData,
-    InboxFilter, MessageEvent, MessageFlags, MessageHeader, MessagingOperation, MessagingTxData,
-    PendingPayment, QuotaInfo, RegisterPublicKeySponsoredV1Data, RegisteredPublicKey,
-    RegisterPublicKeyData, ReportSpamData, SendMessageData, SendMessageWithPaymentData,
-    SetDailyQuotaData, SetInboxFilterData, SetMaxMessageSizeData, SetMinTrustStakeData,
-    SetSponsorshipEnabledData, SpamReport, SponsoredMessage, StakeForTrustData,
-    UnstakeData as MessagingUnstakeData, UpdatePublicKeyData, DEFAULT_DAILY_QUOTA,
-    DEFAULT_MAX_MESSAGE_SIZE, DEFAULT_MIN_TRUST_STAKE, SPONSORED_REGISTER_V1_PREIMAGE_LEN,
-    SPONSORED_REGISTER_V1_TAG, SRC201_HEADER_SIZE, SRC201_KDF_CONTEXT, SRC201_MAGIC,
+    sponsored_register_v1_signing_preimage, sponsored_send_v2_signing_preimage,
+    validate_message_format, AttachmentType, BlockSenderData, ClaimPaymentData, ContactData,
+    ContentType, ExternalProtocol, FundRegistryData, InboxFilter, MessageEvent, MessageFlags,
+    MessageHeader, MessagingOperation, MessagingTxData, PendingPayment, QuotaInfo,
+    RegisterPublicKeySponsoredV1Data, RegisteredPublicKey, RegisterPublicKeyData, ReportSpamData,
+    SendMessageData, SendMessageWithPaymentData, SetDailyQuotaData, SetInboxFilterData,
+    SetMaxMessageSizeData, SetMinTrustStakeData, SetSponsorshipEnabledData, SpamReport,
+    SponsoredMessage, StakeForTrustData, UnstakeData as MessagingUnstakeData, UpdatePublicKeyData,
+    DEFAULT_DAILY_QUOTA, DEFAULT_MAX_MESSAGE_SIZE, DEFAULT_MIN_TRUST_STAKE,
+    SPONSORED_REGISTER_V1_PREIMAGE_LEN, SPONSORED_REGISTER_V1_TAG, SPONSORED_SEND_V2_PREIMAGE_LEN,
+    SPONSORED_SEND_V2_TAG, SRC201_HEADER_SIZE, SRC201_KDF_CONTEXT, SRC201_MAGIC,
     SRC201_NONCE_SIZE, SRC201_TAG_SIZE, SRC201_VERSION,
 };
-pub use messaging_sponsored::{verify_sponsored_registration_v1, SponsoredRegisterError};
+pub use messaging_sponsored::{
+    verify_sponsored_registration_v1, verify_sponsored_send_v2, SponsoredEnvelopeError,
+    SponsoredRegisterError,
+};
 pub use transaction::{
     BeaconTxData, NftOperation, NftTxData, SignedTransaction, TokenOperation, TokenTxData,
     Transaction, TransactionV2, TxInner, TxPayload, TxType,
