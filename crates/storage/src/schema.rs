@@ -1053,6 +1053,17 @@ impl<'a> ReceiptStore<'a> {
             None => Ok(None),
         }
     }
+
+    /// Whether a receipt is stored for `tx_hash`, without decoding it.
+    ///
+    /// A receipt is written only when a block is published to the canonical
+    /// chain, is removed by `stage_deindex` when that block is unwound, and is
+    /// never written for a block archived off the canonical chain. So this is
+    /// exactly "this transaction is included on the canonical chain as this
+    /// database records it".
+    pub fn contains(&self, tx_hash: &Hash) -> Result<bool> {
+        self.db.contains(cf::RECEIPTS, tx_hash.as_bytes())
+    }
 }
 
 /// Helper to get chain ID from storage

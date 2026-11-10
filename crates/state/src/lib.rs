@@ -1392,6 +1392,22 @@ pub enum StateError {
     #[error("contract transactions are not accepted by this node")]
     ContractTransactionsRefused,
 
+    /// This node's inclusion policy: the transaction already has a receipt on
+    /// the canonical chain, so it has been included and this node does not
+    /// hold or carry it again. Node-local, not a consensus rule: a block
+    /// carrying it a second time is still valid. See
+    /// `mempool::InclusionPolicy`.
+    #[error("transaction is already included in the canonical chain")]
+    TransactionAlreadyIncluded,
+
+    /// This node's inclusion policy did not accept a sponsored `SendMessage`
+    /// envelope: it does not decode, its signature does not verify over the
+    /// relay preimage, or its nonce is not the sender's expected messaging
+    /// nonce. Node-local, not a consensus rule. See
+    /// `mempool::InclusionPolicy`.
+    #[error("sponsored message envelope not accepted by this node: {0}")]
+    SponsoredEnvelopeRefused(String),
+
     /// An education record with the same identity is already in-flight
     /// in the mempool, OR already committed in a Phase 2 education CF.
     /// Rejected at admission; no receipt (admission only).

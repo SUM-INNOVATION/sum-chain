@@ -23,18 +23,39 @@
 //! intentionally subprotocol-agnostic by default
 //! (`InferenceAttestationAdmission` is `Option`-al); production
 //! deployments opt in via the builder.
+//!
+//! ## The node-local inclusion policy
+//!
+//! When wired with an [`InclusionPolicy`] (see
+//! [`Mempool::with_inclusion_policy`]), the mempool judges every transaction
+//! it admits, and every transaction it offers for a block, against the
+//! canonical chain this node proposes on top of:
+//!
+//! 1. a transaction that already has a canonical receipt is not admitted and
+//!    not carried again;
+//! 2. a sponsored `SendMessage` envelope must carry a signature that verifies
+//!    over the relay's preimage, by the key it names as the sender;
+//! 3. that envelope must carry the sender's expected messaging nonce, and a
+//!    candidate block carries each (sender, nonce) at most once, in order.
+//!
+//! Admission and selection are this node's own choices. Nothing here is a
+//! consensus rule: a block built by a proposer that applies none of it is
+//! validated, executed and imported exactly as before.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
+use sumchain_crypto::verify_bytes;
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::inference_attestation::inference_attestation_key;
 use sumchain_primitives::{
-    Address, Balance, Hash, Nonce, SignedTransaction, TxInner, TxPayload,
+    Address, Balance, Hash, MessagingOperation, Nonce, SignedTransaction, SponsoredMessage,
+    TxInner, TxPayload,
 };
-use tracing::{debug, info};
+use sumchain_storage::{Database, MessagingStore, ReceiptStore};
+use tracing::{debug, info, warn};
 
 use crate::education_executor::{
     education_in_flight_key, parse_education, EducationExecutor, EduParsed,
@@ -132,6 +153,137 @@ pub struct EducationAdmission {
     pub current_height: Arc<AtomicU64>,
 }
 
+/// Node-local inclusion policy: what THIS node admits to its pool and carries
+/// in the blocks it builds, judged against the canonical chain it builds on.
+/// See [`Mempool::with_inclusion_policy`].
+///
+/// Three rules, every one of them about this node's own choices:
+///
+/// 1. **Canonical inclusion is final.** A transaction whose hash already has
+///    a receipt on the canonical chain is not admitted and not carried again.
+///    `RECEIPTS[tx_hash]` is written only by canonical publication, removed by
+///    `stage_deindex` when its block is unwound, and never written for a block
+///    archived off the canonical chain — so "has a receipt" is exactly
+///    "included on the canonical chain as this node records it", a transaction
+///    seen only on an abandoned branch is NOT counted as included, and a
+///    transaction unwound by a chain switch becomes includable again.
+///
+/// 2. **A sponsored `SendMessage` envelope is authenticated.** Its signature
+///    must verify by the key it names as the sender, under the same verifier
+///    and over the same preimage the relay (`messaging_submitSponsored`)
+///    checks before it relays, so every client the relay accepts today is
+///    accepted here unchanged. No other signing format is recognised.
+///
+/// 3. **A sponsored envelope carries the sender's expected messaging nonce.**
+///    The executor increments the named sender's messaging nonce on every
+///    successful send and never compares it, so the comparison is made here:
+///    at admission the envelope must continue the sequence that runs from the
+///    committed nonce through this node's pending envelopes for that sender;
+///    at selection, envelopes are carried in nonce order per sender, each
+///    (sender, nonce) at most once per candidate block, and an envelope the
+///    chain has moved past is evicted.
+///
+/// None of this decides what a block MEANS. A block built by a proposer
+/// without this policy is validated, executed and imported as before; the pins
+/// in `tests/proposal_policy_consensus_pins.rs` hold that fixed.
+#[derive(Clone)]
+pub struct InclusionPolicy {
+    /// The canonical database this node builds on.
+    pub db: Arc<Database>,
+}
+
+/// The relay's envelope preimage, with the recipient hash rendered as
+/// `recipient_hex`:
+///
+/// ```text
+/// SUMCHAIN_SPONSORED_MSG:{nonce}:{expiry}:{recipient hash hex}:{blake3(message_data) hex}
+/// ```
+///
+/// The relay embeds the recipient hash as the client typed it (minus any
+/// `0x`), so that one field's hex case is the client's; the data hash is
+/// always lower-case.
+fn relay_preimage(m: &SponsoredMessage, recipient_hex: &str) -> Vec<u8> {
+    format!(
+        "SUMCHAIN_SPONSORED_MSG:{}:{}:{}:{}",
+        m.nonce,
+        m.expiry,
+        recipient_hex,
+        hex::encode(blake3::hash(&m.message_data).as_bytes())
+    )
+    .into_bytes()
+}
+
+/// Whether `m.signature` verifies, by `m.sender_pubkey`, over the relay
+/// preimage — under the relay's own (non-strict) verifier, with the recipient
+/// hash in lower-case hex or, failing that, upper-case. Those are the two
+/// renderings a client produces; a mixed-case rendering is not tried.
+pub fn sponsored_envelope_verifies(m: &SponsoredMessage) -> bool {
+    let lower = hex::encode(m.recipient_hash);
+    if verify_bytes(&relay_preimage(m, &lower), &m.signature, &m.sender_pubkey).is_ok() {
+        return true;
+    }
+    let upper = lower.to_uppercase();
+    verify_bytes(&relay_preimage(m, &upper), &m.signature, &m.sender_pubkey).is_ok()
+}
+
+/// A sponsored `SendMessage` envelope, as the inclusion policy sees it.
+enum Envelope {
+    /// Decodes, and its signature verifies: the sender it names and its nonce.
+    Verified { sender: Address, nonce: u64 },
+    /// Does not decode, or its signature does not verify. No block this node
+    /// builds carries it.
+    Unverified(String),
+}
+
+/// The decoded envelope of a sponsored `SendMessage`; `None` for every other
+/// transaction.
+fn sponsored_message(
+    tx: &SignedTransaction,
+) -> Option<std::result::Result<SponsoredMessage, String>> {
+    let TxInner::V2(v2) = &tx.inner else {
+        return None;
+    };
+    let TxPayload::Messaging(data) = &v2.payload else {
+        return None;
+    };
+    if data.operation != MessagingOperation::SendMessage {
+        return None;
+    }
+    Some(
+        bincode::deserialize::<SponsoredMessage>(&data.data)
+            .map_err(|e| format!("the envelope does not decode: {e}")),
+    )
+}
+
+/// The envelope of a sponsored `SendMessage`, judged; `None` for every other
+/// transaction.
+fn sponsored_envelope(tx: &SignedTransaction) -> Option<Envelope> {
+    let m = match sponsored_message(tx)? {
+        Ok(m) => m,
+        Err(why) => return Some(Envelope::Unverified(why)),
+    };
+    if !sponsored_envelope_verifies(&m) {
+        return Some(Envelope::Unverified(
+            "the envelope signature does not verify, by the named sender's key, over the relay \
+             preimage"
+                .to_string(),
+        ));
+    }
+    Some(Envelope::Verified {
+        sender: Address::from_public_key(&m.sender_pubkey),
+        nonce: m.nonce,
+    })
+}
+
+/// The (sender, nonce) a sponsored `SendMessage` envelope names, decoded only
+/// — the key the pending-envelope index is kept under. `None` for every other
+/// transaction and for an envelope that does not decode (which was never
+/// admitted).
+fn sponsored_identity(tx: &SignedTransaction) -> Option<(Address, u64)> {
+    let m = sponsored_message(tx)?.ok()?;
+    Some((Address::from_public_key(&m.sender_pubkey), m.nonce))
+}
+
 /// Transaction mempool
 pub struct Mempool {
     /// All transactions by hash
@@ -163,6 +315,16 @@ pub struct Mempool {
     /// Node-local policy: refuse `ContractDeploy`/`ContractCall`. Off by
     /// default. See [`Mempool::set_refuse_contract_transactions`].
     refuse_contract_transactions: AtomicBool,
+    /// Optional inclusion policy context. `None` in tests and in paths that
+    /// construct a bare pool; a production node wires it via
+    /// [`Mempool::with_inclusion_policy`], and nothing below is enforced
+    /// without it.
+    inclusion_policy: Option<InclusionPolicy>,
+    /// Pending sponsored envelopes, by the sender each names: the nonces this
+    /// pool holds for that sender. Stamped at admission after every other
+    /// check, unstamped on `remove`, re-derived from the stored transaction so
+    /// the two cannot desync.
+    sponsored_in_flight: RwLock<HashMap<Address, BTreeSet<u64>>>,
 }
 
 /// Whether `tx` is a contract deploy or call.
@@ -189,7 +351,23 @@ impl Mempool {
             education_in_flight: RwLock::new(HashMap::new()),
             education_admission: None,
             refuse_contract_transactions: AtomicBool::new(false),
+            inclusion_policy: None,
+            sponsored_in_flight: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Builder: attach the node-local [`InclusionPolicy`]. Without it, no
+    /// transaction is checked against the canonical chain and sponsored
+    /// envelopes are admitted as before (tests, bare pools); a production node
+    /// always attaches it.
+    pub fn with_inclusion_policy(mut self, policy: InclusionPolicy) -> Self {
+        self.inclusion_policy = Some(policy);
+        self
+    }
+
+    /// Whether an [`InclusionPolicy`] is attached.
+    pub fn has_inclusion_policy(&self) -> bool {
+        self.inclusion_policy.is_some()
     }
 
     /// Node-local policy: refuse contract deploys and calls.
@@ -281,6 +459,12 @@ impl Mempool {
         if self.refuses_contract_transactions() && is_contract_transaction(&tx) {
             return Err(StateError::ContractTransactionsRefused);
         }
+        // The node-local inclusion policy: nothing already included on the
+        // canonical chain, and only authenticated, in-sequence sponsored
+        // envelopes. No-op without a wired policy. Before the size check, so a
+        // refused transaction never evicts a held one. The returned key (if
+        // any) is stamped into `sponsored_in_flight` AFTER insertion.
+        let sponsored_key = self.check_inclusion_admission(&tx, &hash)?;
 
         // Check mempool size
         if self.txs.read().len() >= self.config.max_size {
@@ -338,10 +522,72 @@ impl Mempool {
         if let Some(key) = education_key {
             self.education_in_flight.write().insert(key, hash);
         }
+        if let Some((sender, nonce)) = sponsored_key {
+            self.sponsored_in_flight
+                .write()
+                .entry(sender)
+                .or_default()
+                .insert(nonce);
+        }
 
         debug!("Added tx {} to mempool (fee: {})", hash, fee);
 
         Ok(hash)
+    }
+
+    /// The inclusion policy at admission.
+    ///
+    /// `Ok(None)` when no policy is wired, and for any transaction that is not
+    /// a sponsored `SendMessage` and passes the canonical-receipt check.
+    /// `Ok(Some((sender, nonce)))` for a sponsored envelope that passes every
+    /// check, to be stamped as pending after insertion.
+    ///
+    /// The expected nonce runs from the committed messaging nonce through the
+    /// envelopes this pool already holds for the sender: with `k` pending, the
+    /// next admissible nonce is `committed + k`, and any nonce in
+    /// `committed..=committed + k` not already pending is accepted, so a gap
+    /// left by an evicted envelope can be filled. A nonce below the committed
+    /// value has been used; a nonce beyond `committed + k` skips a value no
+    /// pending envelope carries.
+    fn check_inclusion_admission(
+        &self,
+        tx: &SignedTransaction,
+        hash: &Hash,
+    ) -> Result<Option<(Address, u64)>> {
+        let Some(policy) = &self.inclusion_policy else {
+            return Ok(None);
+        };
+        if ReceiptStore::new(&policy.db).contains(hash)? {
+            return Err(StateError::TransactionAlreadyIncluded);
+        }
+        match sponsored_envelope(tx) {
+            None => Ok(None),
+            Some(Envelope::Unverified(why)) => Err(StateError::SponsoredEnvelopeRefused(why)),
+            Some(Envelope::Verified { sender, nonce }) => {
+                let committed = MessagingStore::new(&policy.db).get_sender_nonce(&sender)?;
+                let in_flight = self.sponsored_in_flight.read();
+                let pending = in_flight.get(&sender);
+                if nonce < committed {
+                    return Err(StateError::SponsoredEnvelopeRefused(format!(
+                        "envelope nonce {nonce} is below the sender's current messaging nonce \
+                         {committed}"
+                    )));
+                }
+                if pending.is_some_and(|p| p.contains(&nonce)) {
+                    return Err(StateError::SponsoredEnvelopeRefused(format!(
+                        "an envelope from this sender with nonce {nonce} is already pending"
+                    )));
+                }
+                let expected = committed.saturating_add(pending.map_or(0, |p| p.len() as u64));
+                if nonce > expected {
+                    return Err(StateError::SponsoredEnvelopeRefused(format!(
+                        "envelope nonce {nonce} is ahead of the expected {expected} (the \
+                         sender's current messaging nonce is {committed})"
+                    )));
+                }
+                Ok(Some((sender, nonce)))
+            }
+        }
     }
 
     /// Run the three OmniNode `InferenceAttestation` admission checks.
@@ -864,6 +1110,17 @@ impl Mempool {
                 }
             }
         }
+        // Pending-envelope unlink, re-derived from the stored transaction.
+        // No-op for everything but a sponsored `SendMessage`.
+        if let Some((sender, nonce)) = sponsored_identity(&entry.tx) {
+            let mut in_flight = self.sponsored_in_flight.write();
+            if let Some(nonces) = in_flight.get_mut(&sender) {
+                nonces.remove(&nonce);
+                if nonces.is_empty() {
+                    in_flight.remove(&sender);
+                }
+            }
+        }
 
         debug!("Removed tx {} from mempool", hash);
 
@@ -910,26 +1167,188 @@ impl Mempool {
         }
     }
 
-    /// Select transactions for a new block (sorted by fee, highest first)
+    /// Select transactions for a new block (sorted by fee, highest first).
+    ///
+    /// Every candidate passes the inclusion policy again here, against the
+    /// canonical chain as it stands NOW rather than as it stood at admission:
+    /// a held transaction that another block has since included, and a held
+    /// envelope whose sender's nonce has since moved past it, are evicted
+    /// rather than offered. See [`Self::apply_inclusion_policy`].
     pub fn select_for_block(&self, max_count: usize) -> Vec<SignedTransaction> {
-        let by_fee = self.by_fee.read();
-        let txs = self.txs.read();
-
-        if self.refuses_contract_transactions() {
-            // Nothing held can be a contract transaction (see
-            // `set_refuse_contract_transactions`); this filter is a second line.
-            return by_fee
+        let (carried, evict) = {
+            let by_fee = self.by_fee.read();
+            let txs = self.txs.read();
+            let refuse_contracts = self.refuses_contract_transactions();
+            // Nothing held can be a contract transaction while the refusal is
+            // on (see `set_refuse_contract_transactions`); the filter is a
+            // second line.
+            let candidates = by_fee
                 .values()
                 .filter_map(|hash| txs.get(hash).map(|e| e.tx.clone()))
-                .filter(|tx| !is_contract_transaction(tx))
-                .take(max_count)
-                .collect();
+                .filter(move |tx| !(refuse_contracts && is_contract_transaction(tx)));
+            self.screen_for_inclusion(candidates, max_count)
+        };
+        if !evict.is_empty() {
+            info!(
+                "Inclusion policy: evicting {} held transaction(s) the canonical chain has \
+                 moved past",
+                evict.len()
+            );
+            self.remove_batch(&evict);
         }
-        by_fee
-            .values()
-            .take(max_count)
-            .filter_map(|hash| txs.get(hash).map(|e| e.tx.clone()))
-            .collect()
+        carried
+    }
+
+    /// The transactions among `transactions`, in the order given, that this
+    /// node carries in ONE block under its inclusion policy; the rest are left
+    /// out, and those the canonical chain has moved past are evicted from the
+    /// pool if held.
+    ///
+    /// The same screening [`Self::select_for_block`] applies, offered for a
+    /// list that did not come from this pool (`PoAEngine::create_block` applies
+    /// it to whatever it is handed). Without a wired policy only the in-block
+    /// duplicate-hash rule applies.
+    pub fn apply_inclusion_policy(
+        &self,
+        transactions: Vec<SignedTransaction>,
+    ) -> Vec<SignedTransaction> {
+        let max_count = transactions.len();
+        let (carried, evict) = self.screen_for_inclusion(transactions.into_iter(), max_count);
+        if !evict.is_empty() {
+            self.remove_batch(&evict);
+        }
+        carried
+    }
+
+    /// Which of `candidates`, taken in order, go into one candidate block, and
+    /// which the pool should evict as no longer includable.
+    ///
+    /// Per candidate, in order: a hash already carried in this block is
+    /// skipped; a transaction with a canonical receipt is evicted; a sponsored
+    /// envelope that does not verify is evicted; a verified envelope is
+    /// carried only if its nonce is the next in its sender's sequence — the
+    /// committed messaging nonce, plus one per envelope from that sender
+    /// carried earlier in this block — so each (sender, nonce) is carried at
+    /// most once and in order. An envelope below the committed nonce is
+    /// evicted. One ahead of the sequence when first seen is deferred and
+    /// carried after the pass if the sequence has reached it by then, so a
+    /// sender's run of envelopes goes into one block whatever the fee order
+    /// put them in; otherwise it waits for a later block. A storage read that
+    /// fails leaves the transaction out of this block and in the pool.
+    ///
+    /// Stops once `max_count` transactions are carried.
+    fn screen_for_inclusion(
+        &self,
+        candidates: impl Iterator<Item = SignedTransaction>,
+        max_count: usize,
+    ) -> (Vec<SignedTransaction>, Vec<Hash>) {
+        let mut carried: Vec<SignedTransaction> = Vec::new();
+        let mut evict: Vec<Hash> = Vec::new();
+        let mut seen: HashSet<Hash> = HashSet::new();
+        // Per named sender: (committed messaging nonce, next nonce this block
+        // expects).
+        let mut sequence: HashMap<Address, (u64, u64)> = HashMap::new();
+        // Verified envelopes ahead of their sender's sequence when first seen.
+        let mut deferred: Vec<(SignedTransaction, Address, u64)> = Vec::new();
+        for tx in candidates {
+            if carried.len() >= max_count {
+                break;
+            }
+            let hash = tx.hash();
+            if !seen.insert(hash) {
+                continue;
+            }
+            let Some(policy) = &self.inclusion_policy else {
+                carried.push(tx);
+                continue;
+            };
+            match ReceiptStore::new(&policy.db).contains(&hash) {
+                Ok(false) => {}
+                Ok(true) => {
+                    debug!(tx = %hash, "inclusion policy: already included on the canonical chain");
+                    evict.push(hash);
+                    continue;
+                }
+                Err(e) => {
+                    warn!(
+                        tx = %hash,
+                        "inclusion policy: cannot read the receipt store; leaving this \
+                         transaction out of this block: {e}"
+                    );
+                    continue;
+                }
+            }
+            match sponsored_envelope(&tx) {
+                None => carried.push(tx),
+                Some(Envelope::Unverified(why)) => {
+                    debug!(tx = %hash, "inclusion policy: {why}");
+                    evict.push(hash);
+                }
+                Some(Envelope::Verified { sender, nonce }) => {
+                    let (committed, next) = match sequence.get(&sender) {
+                        Some(known) => *known,
+                        None => match MessagingStore::new(&policy.db).get_sender_nonce(&sender) {
+                            Ok(committed) => {
+                                sequence.insert(sender, (committed, committed));
+                                (committed, committed)
+                            }
+                            Err(e) => {
+                                warn!(
+                                    tx = %hash,
+                                    "inclusion policy: cannot read the sender's messaging \
+                                     nonce; leaving this envelope out of this block: {e}"
+                                );
+                                continue;
+                            }
+                        },
+                    };
+                    if nonce < committed {
+                        debug!(
+                            tx = %hash,
+                            "inclusion policy: envelope nonce {nonce} is below the sender's \
+                             messaging nonce {committed}"
+                        );
+                        evict.push(hash);
+                        continue;
+                    }
+                    if nonce < next {
+                        // This block already carries that nonce.
+                        continue;
+                    }
+                    if nonce > next {
+                        deferred.push((tx, sender, nonce));
+                        continue;
+                    }
+                    sequence.insert(sender, (committed, next + 1));
+                    carried.push(tx);
+                }
+            }
+        }
+        // Deferred envelopes, carried in sequence after everything else. Each
+        // round carries every envelope the sequence has reached and stops when
+        // a round carries nothing.
+        let mut progressed = true;
+        while progressed && !deferred.is_empty() && carried.len() < max_count {
+            progressed = false;
+            let mut i = 0;
+            while i < deferred.len() && carried.len() < max_count {
+                let (_, sender, nonce) = &deferred[i];
+                let Some(&(committed, next)) = sequence.get(sender) else {
+                    i += 1;
+                    continue;
+                };
+                if *nonce == next {
+                    let sender = *sender;
+                    let (tx, _, _) = deferred.remove(i);
+                    sequence.insert(sender, (committed, next + 1));
+                    carried.push(tx);
+                    progressed = true;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        (carried, evict)
     }
 
     /// Get mempool size
@@ -954,6 +1373,7 @@ impl Mempool {
         self.by_fee.write().clear();
         self.inference_in_flight.write().clear();
         self.education_in_flight.write().clear();
+        self.sponsored_in_flight.write().clear();
         info!("Mempool cleared");
     }
 
@@ -977,7 +1397,13 @@ impl Mempool {
         false
     }
 
-    /// Revalidate all transactions against current state
+    /// Revalidate all transactions against current state.
+    ///
+    /// With an inclusion policy wired, also drops what the canonical chain has
+    /// moved past: a held transaction that now has a receipt, a sponsored
+    /// envelope that does not verify, and one whose nonce is below its sender's
+    /// committed messaging nonce. Called after a chain switch, when the
+    /// canonical chain this pool was admitted against has changed.
     pub fn revalidate(&self, state: &StateManager, chain_id: u64) {
         let hashes: Vec<Hash> = self.txs.read().keys().cloned().collect();
         let mut to_remove = Vec::new();
@@ -988,6 +1414,30 @@ impl Mempool {
                 if tx.chain_id() != chain_id {
                     to_remove.push(hash);
                     continue;
+                }
+
+                if let Some(policy) = &self.inclusion_policy {
+                    if matches!(ReceiptStore::new(&policy.db).contains(&hash), Ok(true)) {
+                        to_remove.push(hash);
+                        continue;
+                    }
+                    match sponsored_envelope(&tx) {
+                        Some(Envelope::Unverified(_)) => {
+                            to_remove.push(hash);
+                            continue;
+                        }
+                        Some(Envelope::Verified { sender, nonce }) => {
+                            if let Ok(committed) =
+                                MessagingStore::new(&policy.db).get_sender_nonce(&sender)
+                            {
+                                if nonce < committed {
+                                    to_remove.push(hash);
+                                    continue;
+                                }
+                            }
+                        }
+                        None => {}
+                    }
                 }
 
                 // Check nonce
