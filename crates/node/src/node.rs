@@ -26,7 +26,7 @@ use sumchain_rpc::{
 };
 use sumchain_state::education_executor::EducationExecutor;
 use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
-use sumchain_state::mempool::{EducationAdmission, InferenceAttestationAdmission};
+use sumchain_state::mempool::{EducationAdmission, InclusionPolicy, InferenceAttestationAdmission};
 use sumchain_state::{Mempool, MempoolConfig, StateManager};
 use sumchain_storage::{BlockStore, Database};
 use tokio::sync::mpsc;
@@ -617,7 +617,13 @@ impl Node {
                 ..Default::default()
             })
             .with_inference_admission(inference_admission)
-            .with_education_admission(education_admission),
+            .with_education_admission(education_admission)
+            // The node-local inclusion policy, judged against this node's own
+            // canonical database: no transaction already included, and only
+            // authenticated, in-sequence sponsored envelopes. Always wired on
+            // a production node; it decides what this node holds and
+            // proposes, never what a block means.
+            .with_inclusion_policy(InclusionPolicy { db: db.clone() }),
         );
 
         // Create the consensus engine. `ProductionEngine` names only the

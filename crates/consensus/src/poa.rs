@@ -925,6 +925,16 @@ impl PoAEngine {
     fn create_block(&self, transactions: Vec<SignedTransaction>) -> Result<Block> {
         self.check_not_halted()?;
         let _exec = self.exec_lock.lock();
+        // ── this node's inclusion policy, on whatever was offered ───────────
+        //
+        // `run_block_producer` offers `select_for_block`'s output, which has
+        // already passed it; `propose_block` offers a caller's list, which has
+        // not. Applied here as well, so a block this node PRODUCES carries only
+        // what its policy admits, whichever way the transactions arrived. Like
+        // everything else in this function it is proposer policy: an importer
+        // never sees it, and a block built without it is validated and
+        // executed exactly as before. See `Mempool::with_inclusion_policy`.
+        let transactions = self.mempool.apply_inclusion_policy(transactions);
         // ── block contract gas budget (#279), BEFORE anything executes ──────
         //
         // Unlike the fitting below, this one is a validity rule: an importer
