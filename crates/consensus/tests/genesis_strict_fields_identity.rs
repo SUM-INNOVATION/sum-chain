@@ -50,15 +50,16 @@ struct Pin {
 static SCHEMA_2_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
     reads: &[&ccfg::SCHEMA_1, &ccfg::SCHEMA_2],
     writes: &ccfg::SCHEMA_2,
-    knows: &ccfg::SCHEMA_4,
+    knows: &ccfg::SCHEMA_5,
 };
 
 /// The releases that wrote schema 3: read schemas 1, 2 and 3, write 3, and
-/// know schema 4 only as a draft.
+/// know schema 4 only as a draft. (Every stand-in here knows the draft schema
+/// 5 too: this test binary's genesis declares its gates, unset.)
 static SCHEMA_3_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
     reads: &[&ccfg::SCHEMA_1, &ccfg::SCHEMA_2, &ccfg::SCHEMA_3],
     writes: &ccfg::SCHEMA_3,
-    knows: &ccfg::SCHEMA_4,
+    knows: &ccfg::SCHEMA_5,
 };
 
 struct Template {
@@ -86,6 +87,13 @@ struct Template {
 // gate (0x1047), for the same reason and with the same result:
 // canonical JSON and the two digests moved, nothing else did.
 //
+// Re-pinned again when the sponsored-envelope verification gate was declared
+// as the first field of the draft schema 5 (0x1048, proposed), for the same
+// reason and with the same result: canonical JSON and the two digests moved,
+// nothing else did. The schema-5 envelope-tag field (0x252b) is absent while
+// that gate is unset, so the schema-2 and schema-3 encodings and commitments
+// are unchanged.
+//
 // When this binary began writing schema 3, the schema-3 pins were added beside
 // the frozen schema-2 ones, which did not move: `identity` checks that each
 // schema-3 configuration is its schema-2 one plus 0x1043 absent.
@@ -98,10 +106,10 @@ struct Template {
 const PINS: &[Pin] = &[
     Pin {
         file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-1v.json",
-        json: "0xcc5a514a657b54952cbd02d2d2ca302e7c1b77f33d5b2b22ad746187e5881364",
+        json: "0x308cfdd7751ea75b7c752f69ed644e0acfd745ff4b74cdae762138dd9c9380f4",
         block: "0x9c22b13ee6c753f288538165afac3dd48ea79a5581341fa2d08e23035726e28e",
-        activation: "0x610bc2a344c832edb8c274755c2d6270d0837ca37700cbbb2f0fb5aef01ede82",
-        protocol: "0xe77c2d7674eb4aedd5105a75020e97df0a0fbd44a10336080fea48ffbc551486",
+        activation: "0xb23319254201f5685a2bfa8878656162a25d207ca52d43ef575325eb52025835",
+        protocol: "0x127a96f1d2660b85ad99a1eb6547b09e3e858f0f3071752291fcc51e97b9459a",
         ccfg_encoding: "0xc9bb4182295ac07b0bf71136259679caa1639cb6ab96a627ca409616e3d76c32",
         ccfg_commitment: "0x66ef2cb66e07cb457a998c4361226ee114877f92666addd599caa89d07d53b79",
         ccfg3_encoding: "0xb288184ea98d1c7203d55133138c8cfcfb21c0a6083530ad9ec1dffa65d30f4a",
@@ -111,10 +119,10 @@ const PINS: &[Pin] = &[
     },
     Pin {
         file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-2v.json",
-        json: "0xe52b7d1f7f2b84f445584bd2816e7a2aa3d3d3f27dbfd40c75dc98ce48b7e9ef",
+        json: "0xd43a0589ac74da4f31f8c9e48cdf02650b4882456e299d1033e44db0ff123ac7",
         block: "0xf92241d3986ae1c5a30ef34e61dbec5e851ee289404e3276792dd0a27cf3083c",
-        activation: "0x371335c39ea55447b2c177c4fc53d16272df793a06078adad0b5f8e4d5e14ad0",
-        protocol: "0x24d7973cba2070fa1845c759fdab486545c79be0bee8ce991b8cb0f002f120f7",
+        activation: "0x63785565cf473e5481384d1636e148ae481785681e476c46ed58f47528f51b15",
+        protocol: "0x79a68f19881a15eecef2b2d6579f5e6335513b5ee6fefc2dd547964434f79735",
         ccfg_encoding: "0xa518ff0db6253e80545b24b5d20aadee593cb7a8692671aabc5f7710ebf22d7c",
         ccfg_commitment: "0x075b28ec3521f49c6ca7fb12ae5297c79f74bada8649899771bd1cdb1fdce564",
         ccfg3_encoding: "0xf91dbc6a2fd1661cfbc2fb074e5edad6d80725ab3776d67c0635cc3c64a73ee9",
@@ -124,10 +132,10 @@ const PINS: &[Pin] = &[
     },
     Pin {
         file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-A.json",
-        json: "0x19d56554669d8a51e43aa0ea863cc63c567b2de0c24401f0d8d2ca0eef7874c5",
+        json: "0x5a62820d44808d582e96145320cb67645a0b92a1f6a27a582176f2bbd620bc9c",
         block: "0x9c22b13ee6c753f288538165afac3dd48ea79a5581341fa2d08e23035726e28e",
-        activation: "0xe7ea0fa4d550bb88edfa1d1d687e0fb8ebedc2a4cb48ef736dae165f68f4d9f7",
-        protocol: "0xb5c716feae5d44a20bdad39c9b1a598133b6479f9c48e9371a2d288bd6e4fc9f",
+        activation: "0xf7d062b772e5e0a6718b374c9de67448ae517cb90b829a685304dd36c0b9b26d",
+        protocol: "0xf4856a2a01952af8941d21217b19db59b397f75a1202b9e203ef806290daaaa1",
         ccfg_encoding: "0x62cc58e670135f46769fae95eb7a41ee7aff3a6de2fe5e783b726ed9281b0aa4",
         ccfg_commitment: "0xfb73f20bec922b4c256098ea2a4f78f230271a42fe961ac913a97a511c217eb0",
         ccfg3_encoding: "0x9d8dc2b7f8bbfd4e3adb635568e8316c6f4d5a220d88c20b98df62570270f52b",
@@ -137,10 +145,10 @@ const PINS: &[Pin] = &[
     },
     Pin {
         file: "docs/operations/evidence/stage1-local-2026-09-24/genesis-B.json",
-        json: "0xd7068da19a345dbbb684e30d0ab5510179784cf4800f16582f50cb9ed60c6978",
+        json: "0xe629108519b6c341ea56743d630850f26e3e28119c99fc2f228b348fe503e436",
         block: "0x9c22b13ee6c753f288538165afac3dd48ea79a5581341fa2d08e23035726e28e",
-        activation: "0x5eac12707180460d39255c23475a6d28ff22e75c73f8fc3472104e32d56495c9",
-        protocol: "0x242c0d699eedfee02a375f339716194ab8a79ffe2adb041bf04566d6e156ebc5",
+        activation: "0x484a3cd5849b25ce049841fecb3d0658a4ae59e5ade38ad201e8cbdc953d3583",
+        protocol: "0x1fdec55fa305d681738bd72dc71a8bc03f2588b636462b46f6fa6d5a17874623",
         ccfg_encoding: "0x67b53cfd13cb2ac5eca5150f1e0dd163fb41134afe74d7fce86534c77d471efc",
         ccfg_commitment: "0x2f3026bc8d54499c35c0cf657e431c8cf7b5731e3acc1ca3735e8bf7d3a309d9",
         ccfg3_encoding: "0x6140a1bb966583aacde73103f6783fbdd5c10597e3cb8d9a5b1cb981d9df8005",
@@ -150,10 +158,10 @@ const PINS: &[Pin] = &[
     },
     Pin {
         file: "genesis.json",
-        json: "0xbdac8651d20fe2cdf16a58b886668bada8a1d73a6a16a18715e13a749ae2d223",
+        json: "0x090eec6fe05b3f1865acb7736d97e58bfc3996107a56921db6747461706cb6f2",
         block: "0x1156d350e7d0ac45cb96bfca25d57c71675ceea5949ea44d81432d08baed68e6",
-        activation: "0x0a8552ee5202a3fd902b32584f9f817d58f255e1c59c2ef7cfd8da3fa9843dac",
-        protocol: "0x45dfd6d87a229278d62a0d561b8c26036b7103fc4a21bb9b938b8fd0cfdb6e1b",
+        activation: "0x88dc5837130c9950f57bbffe95247532eb8ba2320e668b33f77a3ce06ad34465",
+        protocol: "0x9d662a94dd99ceccf69e99aeb7cb7107d881834cd91dbc166fda7b3a56d0dc37",
         ccfg_encoding: "0xd3d4f1ccf5cde71083d000b87d9425d08b9e6817d30614ed312747968f0af3e3",
         ccfg_commitment: "0x2afc2d46fbad85cdeac914d3c6ccb5e4457f596f36d3265997710a42268f979b",
         ccfg3_encoding: "0x1b3979f0684772f2c49c1f1d16103126645873f666981869545520a759f98001",
@@ -163,10 +171,10 @@ const PINS: &[Pin] = &[
     },
     Pin {
         file: "genesis/local_genesis.json",
-        json: "0xd7698b53c9e63945047b3c1fd83e6e833d252dc901f773770d566114ebd24b72",
+        json: "0x0ba574aa968f63e91e0fe9c773d09fa60e0ab6c707c8bc53ab229cb9cc95ea72",
         block: "0xe5e3fccc545ef9b0f29fb4204d4e79da04d47661e89eaebe23352abba269e1b4",
-        activation: "0x49253578c49a7831ae0f1e5b6fe83584a4f2b6c91d98cdd968cfeaf3e0c84964",
-        protocol: "0x76a049968cc6652459ea455750f22857275c14ba44ce4803536627241b176a28",
+        activation: "0xe64366296808458ea1bc8a1b6989816ee48d1844bdab37f4084ba0c643968291",
+        protocol: "0x4561606ca62db3d77e8cc17c26dcb754c2bb1e0465c8f8f00af97c9fb5cbae01",
         ccfg_encoding: "0x708b1cc7fe7aa9ac8e823d6ecb9ec2eccf495e7a79b6f9da41bc3703416b574a",
         ccfg_commitment: "0x1d61e756ad20cd078dbde4d89ad38fa28ef6b04b98f6eb3b7a18a7653fcdf591",
         ccfg3_encoding: "0x97c1a0e8c53813ae5bc3539291bb412b5484531f4464a2fe39a6d62ec7d17bc8",
@@ -179,7 +187,7 @@ const PINS: &[Pin] = &[
 const TEMPLATES: &[Template] = &[
     Template {
         file: "genesis/mainnet_genesis.json",
-        json: "0x604f9498e14ffa3db9ffbfc69260db845b4cd968f2b999f2bc788a2b74a3dfc2",
+        json: "0xdc6062ac226d20571e4e4fe603c7c4a37d0dc14201bb45b57feb6eff780c3066",
         error: "Invalid validator public key: validator[0]: VALIDATOR1_PUBKEY_PLACEHOLDER",
     },
     // Added by #118 (not on 1f017f55): the synthetic topology template,
@@ -188,12 +196,12 @@ const TEMPLATES: &[Template] = &[
     // line is new in what serde reads.
     Template {
         file: "genesis/snip-mirror-genesis.template.json",
-        json: "0xb42f53b84f5075d3be5241cff6574bcae2b990bb69f62c9937fae7cbd345aed4",
+        json: "0xcca081ffdb2d64412df7c90e77080edfe720054e6f2fb17f6a4d07258d1950d9",
         error: "Invalid validator public key: validator[0]: DEVNET_VALIDATOR1_PUBKEY",
     },
     Template {
         file: "genesis/testnet_genesis.json",
-        json: "0x0f7f64b9ad4b2ab0df95afb7275a369320febad6aab0255241ca0020025226e8",
+        json: "0x9369fd06d58693a4782c5e730e49df102b45e10e26905d5998551e5b613cac47",
         error: "Invalid validator public key: validator[0]: TESTNET_VALIDATOR1_PUBKEY",
     },
 ];
@@ -394,5 +402,21 @@ fn templates_parse_as_before_and_are_refused_as_before() {
         let [json, error] = template(t.file);
         assert_eq!(json, t.json, "{}: what serde reads", t.file);
         assert_eq!(error, t.error, "{}: the refusal", t.file);
+    }
+}
+
+/// Prints every value the pins above hold, for re-pinning after a change that
+/// legitimately moves them (declaring a gate moves the canonical JSON and both
+/// digests of every genesis). Never a substitute for explaining the move.
+#[test]
+#[ignore = "reporting aid: prints every pinned value of the tracked genesis files"]
+fn print_pins() {
+    for pin in PINS {
+        let v = identity(pin.file);
+        println!("PIN {} {}", pin.file, v.join(" "));
+    }
+    for t in TEMPLATES {
+        let v = template(t.file);
+        println!("TEMPLATE {} {}", t.file, v[0]);
     }
 }

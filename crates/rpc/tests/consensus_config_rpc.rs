@@ -159,23 +159,23 @@ async fn the_rpc_reports_the_recorded_baseline_and_its_history() {
 /// difference in rules still does not match.
 #[tokio::test]
 async fn the_rpc_reports_an_older_schema_baseline_as_recorded() {
-    // Know schema 4 only because this binary's genesis carries the schema-3
-    // gate and the schema-4 gates; unset, they add nothing to the record
-    // written.
+    // Know the draft schema 5 only because this binary's genesis carries the
+    // schema-3 gate, the schema-4 gates and the draft schema-5 gates; unset,
+    // they add nothing to the record written.
     static SCHEMA_1_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
         reads: &[&ccfg::SCHEMA_1],
         writes: &ccfg::SCHEMA_1,
-        knows: &ccfg::SCHEMA_4,
+        knows: &ccfg::SCHEMA_5,
     };
     static SCHEMA_2_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
         reads: &[&ccfg::SCHEMA_1, &ccfg::SCHEMA_2],
         writes: &ccfg::SCHEMA_2,
-        knows: &ccfg::SCHEMA_4,
+        knows: &ccfg::SCHEMA_5,
     };
     static SCHEMA_3_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
         reads: &[&ccfg::SCHEMA_1, &ccfg::SCHEMA_2, &ccfg::SCHEMA_3],
         writes: &ccfg::SCHEMA_3,
-        knows: &ccfg::SCHEMA_4,
+        knows: &ccfg::SCHEMA_5,
     };
     for (policy, schema, fields) in [
         (

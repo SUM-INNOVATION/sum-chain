@@ -17,6 +17,7 @@ use sumchain_primitives::{
     SetSponsorshipEnabledData, StakeForTrustData, MessagingUnstakeData, FundRegistryData,
     UpdatePublicKeyData, SponsoredMessage, validate_message_format, DEFAULT_DAILY_QUOTA, DEFAULT_MAX_MESSAGE_SIZE,
 };
+use sumchain_primitives::{verify_sponsored_send_v2, SponsoredEnvelopeError};
 use sumchain_crypto::recipient_hash;
 use tracing::{debug, warn};
 
@@ -115,7 +116,34 @@ impl MessagingExecutor {
         }
     }
 
+    /// `ChainParams::messaging_sponsored_envelope_verification_enabled_from_height`.
+    ///
+    /// Reads `params.messaging_sponsored_envelope_verification_enabled_from_height`.
+    fn sponsored_envelope_verification_activation(params: &ChainParams) -> Option<u64> {
+        params.messaging_sponsored_envelope_verification_enabled_from_height
+    }
+
+    /// Whether a sponsored `SendMessage` in a block at `block_height` is
+    /// accepted only with a version-2 sender envelope that verifies: no amount,
+    /// a strict signature by the named sender over
+    /// [`sumchain_primitives::sponsored_send_v2_signing_preimage`], and the
+    /// sender's current messaging nonce. Below the gate, or while it is unset,
+    /// the envelope is executed under the earlier rule, as before.
+    pub fn sponsored_envelope_verification_gate_open(
+        params: &ChainParams,
+        block_height: u64,
+    ) -> bool {
+        matches!(
+            Self::sponsored_envelope_verification_activation(params),
+            Some(h) if block_height >= h
+        )
+    }
+
     /// Execute a messaging transaction
+    ///
+    /// `chain_id` is the chain the block belongs to, which `validate_tx` has
+    /// already required the outer transaction to name; a sponsored envelope's
+    /// version-2 preimage binds it.
     ///
     /// `block_timestamp` arrives real from both dispatch arms and is reduced to
     /// the literal `0` they used to pass while
@@ -138,6 +166,7 @@ impl MessagingExecutor {
     pub fn execute(
         view: &mut ExecutionView<'_, '_>,
         params: &ChainParams,
+        chain_id: u64,
         sender: &Address,
         data: &MessagingTxData,
         proposer: &Address,
@@ -159,6 +188,7 @@ impl MessagingExecutor {
             MessagingOperation::SendMessage => Self::send_message_sponsored(
                 view,
                 params,
+                chain_id,
                 sender,
                 &data.data,
                 proposer,
@@ -381,10 +411,18 @@ impl MessagingExecutor {
     /// Send message with gas sponsorship
     /// The tx.from is the sponsor address, but the real sender is derived from
     /// SponsoredMessage.sender_pubkey
+    ///
+    /// From `messaging_sponsored_envelope_verification_enabled_from_height` on,
+    /// the envelope is accepted only when it carries no amount, its signature
+    /// verifies strictly, by the key it names, over the version-2 preimage for
+    /// `chain_id`, and its nonce is the named sender's current messaging nonce.
+    /// Below the gate the envelope is executed under the earlier rule, as
+    /// before.
     #[allow(clippy::too_many_arguments)]
     fn send_message_sponsored(
         view: &mut ExecutionView<'_, '_>,
         params: &ChainParams,
+        chain_id: u64,
         _sponsor: &Address, // tx.from is the sponsor, not the message sender
         data: &[u8],
         proposer: &Address,
@@ -406,6 +444,37 @@ impl MessagingExecutor {
         // Derive the real sender address from the sender's public key
         let real_sender = Address::from_public_key(&sponsored_msg.sender_pubkey);
 
+        // The version-2 envelope rule, from its gate on. Each refusal is an
+        // ordinary failed messaging operation: nothing below runs, so no
+        // counter moves and no event is stored.
+        let envelope_rule = Self::sponsored_envelope_verification_gate_open(params, block_height);
+        if envelope_rule {
+            // No payment travels with a sponsored envelope: the relayer is not
+            // the sender, so there is no account to move an amount from, and
+            // an event must never report a payment that did not occur.
+            if sponsored_msg.koppa_amount.is_some() {
+                return Ok(MessagingExecutionResult::failure(
+                    "Sponsored message carries an amount",
+                ));
+            }
+            // The named sender's strict signature over the version-2 preimage,
+            // which binds this chain, the sender key, the recipient, the
+            // message bytes, the nonce, the expiry and the amount.
+            match verify_sponsored_send_v2(&sponsored_msg, chain_id) {
+                Ok(()) => {}
+                Err(SponsoredEnvelopeError::InvalidPublicKey) => {
+                    return Ok(MessagingExecutionResult::failure(
+                        "Invalid sponsored message sender key",
+                    ));
+                }
+                Err(SponsoredEnvelopeError::InvalidSignature) => {
+                    return Ok(MessagingExecutionResult::failure(
+                        "Invalid sponsored message signature",
+                    ));
+                }
+            }
+        }
+
         // Verify the real sender has registered their public key.
         //
         // issue #145: this predicate is a CONSENSUS branch — every validator must
@@ -417,6 +486,21 @@ impl MessagingExecutor {
         // recovered) instead of committing a divergent block.
         if !Self::v_has_public_key(view, &real_sender)? {
             return Ok(MessagingExecutionResult::failure("Sender must register public key first"));
+        }
+
+        // From the envelope gate on, the envelope's nonce must be the named
+        // sender's current messaging nonce, read from the candidate so that a
+        // second envelope from the same sender in this block sees the first.
+        // The increment below then spends it, so the same envelope cannot be
+        // accepted twice.
+        if envelope_rule {
+            let expected = Self::v_get_sender_nonce(view, &real_sender)?;
+            if sponsored_msg.nonce != expected {
+                return Ok(MessagingExecutionResult::failure(format!(
+                    "Sponsored message nonce {} is not the sender's current nonce {}",
+                    sponsored_msg.nonce, expected
+                )));
+            }
         }
 
         // Validate message format
@@ -1069,6 +1153,7 @@ mod tests {
         let result = MessagingExecutor::execute(
             view,
             &params,
+            1,
             &sender,
             &tx_data,
             &proposer,
@@ -1115,6 +1200,7 @@ mod tests {
         let result = MessagingExecutor::execute(
             view,
             &params,
+            1,
             &not_the_sender,
             &tx_data,
             &proposer,

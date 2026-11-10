@@ -37,7 +37,7 @@ use sumchain_storage::Database;
 static SCHEMA_3_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
     reads: &[&ccfg::SCHEMA_1, &ccfg::SCHEMA_2, &ccfg::SCHEMA_3],
     writes: &ccfg::SCHEMA_3,
-    knows: &ccfg::SCHEMA_4,
+    knows: &ccfg::SCHEMA_5,
 };
 
 fn genesis() -> Genesis {

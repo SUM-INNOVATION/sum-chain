@@ -149,7 +149,7 @@ fn open(dir: &TempDir) -> Database {
 static SCHEMA_2_DRAFT: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1],
     writes: &SCHEMA_1,
-    knows: &ccfg::SCHEMA_4,
+    knows: &ccfg::SCHEMA_5,
 };
 
 /// The release that wrote schema 2: it read schemas 1 and 2, wrote schema 2 and
@@ -158,17 +158,19 @@ static SCHEMA_2_DRAFT: SchemaPolicy = SchemaPolicy {
 static SCHEMA_2_RELEASE: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &SCHEMA_2],
     writes: &SCHEMA_2,
-    knows: &ccfg::SCHEMA_4,
+    knows: &ccfg::SCHEMA_5,
 };
 
 /// The releases that wrote schema 3: they
 /// read schemas 1, 2 and 3, wrote schema 3 and knew schema 4 only as a draft
 /// whose fields must stay absent. It is how the frozen schema-3 encoding is
-/// pinned now that this binary writes schema 4.
+/// pinned now that this binary writes schema 4. Like the other stand-ins it
+/// knows the draft schema 5 as well, since this test binary's genesis declares
+/// its gates (unset).
 static SCHEMA_3_RELEASE: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &SCHEMA_2, &SCHEMA_3],
     writes: &SCHEMA_3,
-    knows: &ccfg::SCHEMA_4,
+    knows: &ccfg::SCHEMA_5,
 };
 
 /// TEST_ONLY compute-pool parameters (no proposed value): every cap 1,
@@ -266,10 +268,18 @@ static METERED_STAND_IN_SCHEMA_4: Schema = Schema {
     added: ccfg::schema::SCHEMA_4_ADDED,
 };
 
+/// [`METERED_STAND_IN_SCHEMA_4`] plus the draft schema 5, as
+/// [`ccfg::PRODUCTION`] knows it.
+static METERED_STAND_IN_SCHEMA_5: Schema = Schema {
+    number: 5,
+    previous: Some(&METERED_STAND_IN_SCHEMA_4),
+    added: ccfg::schema::SCHEMA_5_ADDED,
+};
+
 static METERED_STAND_IN: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &METERED_STAND_IN_SCHEMA_2],
     writes: &METERED_STAND_IN_SCHEMA_2,
-    knows: &METERED_STAND_IN_SCHEMA_4,
+    knows: &METERED_STAND_IN_SCHEMA_5,
 };
 
 /// [`full_schema_2_genesis`]'s configuration: every schema-2 field set.
@@ -1383,7 +1393,9 @@ fn the_schema_4_gates_are_the_schema_4_fields() {
     }
     assert_eq!(SCHEMA_4.specs().len(), SCHEMA_3.specs().len() + 4);
     assert!(std::ptr::eq(ccfg::PRODUCTION.writes, &SCHEMA_4));
-    assert!(std::ptr::eq(ccfg::PRODUCTION.knows, &SCHEMA_4));
+    // It knows the draft schema 5, which extends schema 4.
+    assert!(std::ptr::eq(ccfg::PRODUCTION.knows, &ccfg::SCHEMA_5));
+    assert!(std::ptr::eq(ccfg::SCHEMA_5.previous.unwrap(), &SCHEMA_4));
     assert_eq!(
         ccfg::PRODUCTION
             .reads
@@ -1591,4 +1603,100 @@ fn the_schema_4_encoding_is_the_schema_3_encoding_plus_the_four_gates() {
     let set = ccfg::build(&all).unwrap().encode();
     assert_eq!(set, expect([Some(10), Some(11), Some(12), Some(13)]));
     assert_eq!(set.len(), GOLDEN_3_LEN + 4 * 15);
+}
+
+/// A binary that would WRITE schema 5, standing in for a future release: it
+/// reads every schema up to 5. Used to show what the draft schema-5 fields
+/// encode to once a binary records them; this binary never does.
+static WRITES_SCHEMA_5: SchemaPolicy = SchemaPolicy {
+    reads: &[&SCHEMA_1, &SCHEMA_2, &SCHEMA_3, &ccfg::SCHEMA_4, &ccfg::SCHEMA_5],
+    writes: &ccfg::SCHEMA_5,
+    knows: &ccfg::SCHEMA_5,
+};
+
+/// The draft schema-5 fields: 0x1048, under which a sponsored `SendMessage`
+/// carries a version-2 sender envelope verified in consensus, and 0x252b, the
+/// envelope's compiled domain tag, committed only while that gate is set.
+/// Schema 4 stays closed at its four gates. Dormant, the two leave the
+/// schema-4 configuration this binary writes byte-identical to the schema-4
+/// golden vector; set, the gate refuses to build, because this binary writes
+/// schema 4 and a draft field can be declared but never activated. A binary
+/// that wrote schema 5 would record the gate and, with it, the tag.
+#[test]
+fn the_draft_schema_5_fields_are_held_dormant_and_refused_when_set() {
+    use ccfg::schema::SPONSORED_SEND_V2_TAG_ID;
+    const GATE: u16 = 0x1048;
+    let name = "messaging_sponsored_envelope_verification_enabled_from_height";
+
+    assert_eq!(ccfg::SCHEMA_5.added.len(), 2);
+    assert_eq!(
+        ccfg::SCHEMA_4.added.len(),
+        4,
+        "schema 4 is closed at exactly its four gates"
+    );
+    assert!(std::ptr::eq(ccfg::PRODUCTION.writes, &SCHEMA_4));
+    assert!(std::ptr::eq(ccfg::PRODUCTION.knows, &ccfg::SCHEMA_5));
+    assert!(std::ptr::eq(ccfg::SCHEMA_5.previous.unwrap(), &ccfg::SCHEMA_4));
+    ccfg::PRODUCTION.check().unwrap();
+    WRITES_SCHEMA_5.check().unwrap();
+
+    assert_eq!(ccfg::fields::gate_id(name), Some(GATE));
+    assert!(ccfg::SCHEMA_5
+        .added
+        .iter()
+        .any(|a| a.spec.id == GATE && a.spec.name == name));
+    assert!(!ccfg::SCHEMA_4.added.iter().any(|a| a.spec.name == name));
+    assert_eq!(SPONSORED_SEND_V2_TAG_ID, 0x252b);
+    let tag = ccfg::fields::spec_for(SPONSORED_SEND_V2_TAG_ID).expect("registered");
+    assert_eq!(tag.name, "sumchain_wire::messaging::SPONSORED_SEND_V2_TAG");
+    assert!(ccfg::fields::spec_for(SPONSORED_SEND_V2_TAG_ID - 1).is_some());
+    assert!(ccfg::SCHEMA_4.spec(SPONSORED_SEND_V2_TAG_ID).is_none());
+
+    let base = full_genesis();
+    assert_eq!(
+        base.params
+            .messaging_sponsored_envelope_verification_enabled_from_height,
+        None
+    );
+    let c = ccfg::build(&base).unwrap();
+    assert_eq!(c.schema().number, 4);
+    let bytes = c.encode();
+    let (_, len, digest, commitment) = GOLDEN_4[0];
+    assert_eq!(
+        (
+            bytes.len(),
+            Hash::hash(&bytes).to_string(),
+            c.commitment().to_string()
+        ),
+        (len, digest.to_string(), commitment.to_string()),
+        "dormant, the draft fields change nothing the binary writes"
+    );
+
+    // Recorded by a binary that writes schema 5: unset, both fields are absent
+    // and the configuration is schema 4's plus every draft field absent.
+    let five = ccfg::build_with(&base, &WRITES_SCHEMA_5).unwrap();
+    assert_eq!(five.schema().number, 5);
+    assert_eq!(five.get(GATE), Some(&Value::Absent));
+    assert_eq!(five.get(SPONSORED_SEND_V2_TAG_ID), Some(&Value::Absent));
+    assert_eq!(
+        five.fields().len(),
+        c.fields().len() + ccfg::SCHEMA_5.added.len()
+    );
+
+    let mut set = full_genesis();
+    set.params
+        .messaging_sponsored_envelope_verification_enabled_from_height = Some(10);
+    let err = ccfg::build(&set).expect_err("a draft field is never activated");
+    assert!(matches!(err, ConfigError::Refused(_)), "{err}");
+    assert!(err.to_string().contains(name), "{err}");
+    // That binary records the gate, and with it the tag the rule reads.
+    let five = ccfg::build_with(&set, &WRITES_SCHEMA_5).unwrap();
+    assert_eq!(five.get(GATE), Some(&Value::U64(10)));
+    assert_eq!(
+        five.get(SPONSORED_SEND_V2_TAG_ID),
+        Some(&Value::Bytes(
+            sumchain_primitives::SPONSORED_SEND_V2_TAG.to_vec()
+        ))
+    );
+    assert_ne!(five.commitment(), c.commitment());
 }

@@ -37,7 +37,7 @@ use sumchain_consensus::consensus_config::{
     },
     schema::{SCHEMA_2_ADDED, SCHEMA_3_ADDED},
     ConfigError, ConsensusConfig, SchemaPolicy, Source, StartupOutcome, TransitionKind, Value,
-    PRODUCTION, SCHEMA_1, SCHEMA_2, SCHEMA_3, SCHEMA_4,
+    PRODUCTION, SCHEMA_1, SCHEMA_2, SCHEMA_3, SCHEMA_4, SCHEMA_5,
 };
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::{ChainParams, Genesis, GenesisError};
@@ -52,13 +52,13 @@ const GATE_NAME: &str = "node_registry_update_status_unsupported_enabled_from_he
 const PEER: u16 = 0x1029;
 
 /// The release before schema 2: it read and wrote schema 1. (It knew schema 2
-/// only as a draft; it is given the draft schema 4 to know because a policy
+/// only as a draft; it is given the draft schema 5 to know because a policy
 /// must name every gate `ChainParams` declares to build at all, and with those
 /// gates unset that adds nothing to the schema-1 record it writes.)
 static PREVIOUS: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1],
     writes: &SCHEMA_1,
-    knows: &SCHEMA_4,
+    knows: &SCHEMA_5,
 };
 
 /// The release that wrote schema 2: it read schemas 1 and 2, wrote 2, and knew
@@ -66,16 +66,17 @@ static PREVIOUS: SchemaPolicy = SchemaPolicy {
 static SCHEMA_2_RELEASE: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &SCHEMA_2],
     writes: &SCHEMA_2,
-    knows: &SCHEMA_4,
+    knows: &SCHEMA_5,
 };
 
 /// The releases that wrote schema 3: they
 /// read schemas 1, 2 and 3, wrote 3, and knew schema 4 only as a draft whose
-/// fields must stay absent.
+/// fields must stay absent. The stand-in knows the draft schema 5 as well:
+/// this test binary's genesis declares its gates, unset.
 static SCHEMA_3_RELEASE: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &SCHEMA_2, &SCHEMA_3],
     writes: &SCHEMA_3,
-    knows: &SCHEMA_4,
+    knows: &SCHEMA_5,
 };
 
 // ── the schema-3 release's operations, this file's subject ──────────────────
@@ -259,10 +260,13 @@ fn schema_3_is_schema_2_plus_the_remediation_gate_and_was_written() {
         SCHEMA_2_ADDED.len() + 1
     );
 
-    // The releases that wrote it read schemas 1, 2 and 3, and knew the draft
-    // schema 4, which extends schema 3.
+    // The releases that wrote it read schemas 1, 2 and 3. They knew the draft
+    // schema 4; this stand-in knows the draft schema 5, which extends schema 4,
+    // because this test binary's genesis declares the schema-5 gates too (unset,
+    // they add nothing to any record).
     assert!(std::ptr::eq(SCHEMA_3_RELEASE.writes, &SCHEMA_3));
-    assert!(std::ptr::eq(SCHEMA_3_RELEASE.knows, &SCHEMA_4));
+    assert!(std::ptr::eq(SCHEMA_3_RELEASE.knows, &SCHEMA_5));
+    assert!(std::ptr::eq(SCHEMA_5.previous.unwrap(), &SCHEMA_4));
     assert!(std::ptr::eq(SCHEMA_4.previous.unwrap(), &SCHEMA_3));
     assert_eq!(
         SCHEMA_3_RELEASE

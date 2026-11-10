@@ -938,6 +938,7 @@ impl BlockExecutor {
                         let result = MessagingExecutor::execute(
                             view,
                             &self.params,
+                            self.state.chain_id(),
                             &v2_tx.from,
                             &messaging_data,
                             proposer,
@@ -2750,6 +2751,7 @@ impl BlockExecutor {
                 let result = MessagingExecutor::execute(
                     view,
                     &self.params,
+                    self.state.chain_id(),
                     &tx.from,
                     messaging_data,
                     proposer,

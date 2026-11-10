@@ -3059,6 +3059,40 @@ pub struct ChainParams {
     #[serde(default)]
     pub staking_submit_evidence_unsupported_enabled_from_height: Option<u64>,
 
+    /// A sponsored `SendMessage` carries a version-2 sender envelope, verified
+    /// in consensus.
+    ///
+    /// PROPOSED NAME, for review; it is the first field of a draft schema 5
+    /// (`0x1048`, proposed).
+    ///
+    /// Below this height, or while it is unset, a sponsored `SendMessage`
+    /// executes exactly as before, under the earlier envelope rule, so
+    /// historical blocks execute, import and replay as they did.
+    /// At and above it, the envelope is accepted only when it carries no
+    /// amount, its `signature` verifies strictly, by the key it names as the
+    /// sender, over the version-2 preimage
+    /// (`sumchain_wire::messaging::sponsored_send_v2_signing_preimage`, which
+    /// binds the chain, the sender key, the recipient, the message bytes, the
+    /// nonce, the expiry and the amount), the sender is registered, and its
+    /// `nonce` equals the sender's current messaging nonce; then the nonce is
+    /// advanced and the message stored, as before. An envelope that fails any
+    /// check is an ordinary failed messaging operation and stores nothing.
+    /// A stored event therefore never reports a payment, because no sponsored
+    /// envelope carrying one is accepted.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Clients must sign the version-2
+    /// preimage from this height on. Never `Some(_)` in a committed genesis in
+    /// this branch.
+    #[serde(default)]
+    pub messaging_sponsored_envelope_verification_enabled_from_height: Option<u64>,
+
     /// Contract execution is metered (#279).
     ///
     /// Below this height a contract deploy or call runs on the unmetered
@@ -3573,6 +3607,8 @@ impl Default for ChainParams {
             strict_transaction_signatures_enabled_from_height: None,
             // Production-safe default: SubmitEvidence executes as before — dormant.
             staking_submit_evidence_unsupported_enabled_from_height: None,
+            // Production-safe default: a sponsored envelope executes as before — dormant.
+            messaging_sponsored_envelope_verification_enabled_from_height: None,
             // Production-safe default: contracts run on the unmetered engine — dormant.
             contract_metering_enabled_from_height: None,
             // No block-level contract gas budget (inert while the metering gate is closed).
@@ -4280,6 +4316,10 @@ impl ChainParams {
                 self.staking_submit_evidence_unsupported_enabled_from_height,
             ),
             (
+                "messaging_sponsored_envelope_verification_enabled_from_height",
+                self.messaging_sponsored_envelope_verification_enabled_from_height,
+            ),
+            (
                 "contract_metering_enabled_from_height",
                 self.contract_metering_enabled_from_height,
             ),
@@ -4323,7 +4363,7 @@ impl ChainParams {
     }
 }
 
-/// The fifty remediation gates, by field name.
+/// The fifty-one remediation gates, by field name.
 ///
 /// The count in this sentence has been wrong twice, both times because a wave
 /// added gates and nothing checked the prose. It is checked now:
@@ -4394,6 +4434,7 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "por_attested_targets_enabled_from_height",
     "strict_transaction_signatures_enabled_from_height",
     "staking_submit_evidence_unsupported_enabled_from_height",
+    "messaging_sponsored_envelope_verification_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started

@@ -90,6 +90,7 @@ pub use record::{
 };
 pub use schema::{
     AddedField, Schema, SchemaPolicy, Source, PRODUCTION, SCHEMA_1, SCHEMA_2, SCHEMA_3, SCHEMA_4,
+    SCHEMA_5,
 };
 pub use start_marker::{
     read_start_marker, record_start, RecordState, StartMarker, START_MARKER_KEY,

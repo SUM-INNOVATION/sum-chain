@@ -206,7 +206,7 @@ fn the_start_marker_is_the_first_logical_write_after_the_open() {
 static PREVIOUS: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
     reads: &[&ccfg::SCHEMA_1],
     writes: &ccfg::SCHEMA_1,
-    knows: &ccfg::SCHEMA_4,
+    knows: &ccfg::SCHEMA_5,
 };
 
 /// #277's gate (schema-2 field 0x103f) through the real boot sequence:
@@ -626,7 +626,7 @@ async fn a_dropped_gate_name_is_not_restored_from_an_unverifiable_record() {
 static SCHEMA_3_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
     reads: &[&ccfg::SCHEMA_1, &ccfg::SCHEMA_2, &ccfg::SCHEMA_3],
     writes: &ccfg::SCHEMA_3,
-    knows: &ccfg::SCHEMA_4,
+    knows: &ccfg::SCHEMA_5,
 };
 
 /// The four schema-4 gates, with a setter for each.

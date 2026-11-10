@@ -301,6 +301,11 @@ const WIRING: &[(&str, &str, &str)] = &[
         "submit_evidence_unsupported_activation",
         "staking_submit_evidence_unsupported_enabled_from_height",
     ),
+    (
+        "messaging_executor.rs",
+        "sponsored_envelope_verification_activation",
+        "messaging_sponsored_envelope_verification_enabled_from_height",
+    ),
 ];
 
 fn source(file: &str) -> String {
@@ -435,16 +440,18 @@ fn every_remediation_gate_reads_the_field_it_names() {
 /// `storage_metadata.rs`. The forty-ninth, `strict_signatures_activation`, is
 /// the only accessor in `tx_signature.rs`. The fiftieth,
 /// `submit_evidence_unsupported_activation`, is the first accessor in
-/// `staking_executor.rs`.
+/// `staking_executor.rs`. The fifty-first,
+/// `sponsored_envelope_verification_activation`, is the second accessor in
+/// `messaging_executor.rs`, beside `timestamp_units_activation`.
 #[test]
-fn the_fifty_gates_are_fifty_distinct_fields() {
+fn the_fifty_one_gates_are_fifty_one_distinct_fields() {
     let fields: BTreeSet<&str> = WIRING.iter().map(|(_, _, f)| *f).collect();
     assert_eq!(
         fields.len(),
-        50,
-        "expected fifty distinct fields: {fields:?}"
+        51,
+        "expected fifty-one distinct fields: {fields:?}"
     );
-    assert_eq!(WIRING.len(), 50, "expected fifty accessors");
+    assert_eq!(WIRING.len(), 51, "expected fifty-one accessors");
 }
 
 /// Wiring a gate is not opening it: the release configuration is unchanged.
@@ -658,6 +665,10 @@ fn every_remediation_gate_is_dormant_by_default() {
             "staking_submit_evidence_unsupported_enabled_from_height",
             p.staking_submit_evidence_unsupported_enabled_from_height,
         ),
+        (
+            "messaging_sponsored_envelope_verification_enabled_from_height",
+            p.messaging_sponsored_envelope_verification_enabled_from_height,
+        ),
     ];
     assert_eq!(dormant.len(), WIRING.len());
     for (name, value) in dormant {
@@ -704,6 +715,10 @@ fn a_genesis_written_before_these_fields_still_parses_dormant() {
     assert_eq!(back.strict_transaction_signatures_enabled_from_height, None);
     assert_eq!(
         back.staking_submit_evidence_unsupported_enabled_from_height,
+        None
+    );
+    assert_eq!(
+        back.messaging_sponsored_envelope_verification_enabled_from_height,
         None
     );
     assert_eq!(back.tax_authorization_enabled_from_height, None);
@@ -774,5 +789,5 @@ fn the_genesis_gate_list_matches_the_accessor_table() {
     // such branches lost three attributes, three doc blocks and two
     // activation_heights entries, and left this list at 20 against a table of
     // 28, all of which compiled.
-    assert_eq!(in_genesis.len(), 50);
+    assert_eq!(in_genesis.len(), 51);
 }

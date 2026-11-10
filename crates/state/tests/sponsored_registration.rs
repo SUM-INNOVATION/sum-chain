@@ -671,6 +671,7 @@ fn defensive_generic_executor_arm_fails_closed() {
     let res = MessagingExecutor::execute(
         &mut candidate.view(),
         &params,
+        CHAIN_ID,
         &sponsor.address(),
         &data,
         &Address::ZERO,

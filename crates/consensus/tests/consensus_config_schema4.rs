@@ -45,7 +45,7 @@ use sumchain_consensus::consensus_config::{
     },
     schema::{SCHEMA_2_ADDED, SCHEMA_3_ADDED, SCHEMA_4_ADDED},
     ConfigError, ConsensusConfig, SchemaPolicy, Source, StartupOutcome, TransitionKind, Value,
-    PRODUCTION, SCHEMA_1, SCHEMA_2, SCHEMA_3, SCHEMA_4,
+    PRODUCTION, SCHEMA_1, SCHEMA_2, SCHEMA_3, SCHEMA_4, SCHEMA_5,
 };
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::{ChainParams, Genesis};
@@ -84,29 +84,30 @@ const PEER: u16 = 0x1029;
 const NODE_REGISTRY: u16 = 0x1043;
 
 /// The release before schema 2 (reads and writes schema 1). It is given
-/// schema 4 to know because a policy must name every gate `ChainParams`
+/// schema 5 to know because a policy must name every gate `ChainParams`
 /// declares to build at all; with those gates unset that adds nothing to the
 /// schema-1 record it writes.
 static SCHEMA_1_RELEASE: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1],
     writes: &SCHEMA_1,
-    knows: &SCHEMA_4,
+    knows: &SCHEMA_5,
 };
 
 /// The release that wrote schema 2.
 static SCHEMA_2_RELEASE: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &SCHEMA_2],
     writes: &SCHEMA_2,
-    knows: &SCHEMA_4,
+    knows: &SCHEMA_5,
 };
 
 /// The releases that wrote schema 3: they
 /// read schemas 1, 2 and 3, write 3, and know schema 4 only as a draft whose
-/// fields must stay absent.
+/// fields must stay absent. (Every stand-in here knows the draft schema 5 too:
+/// this test binary's genesis declares its gates, unset.)
 static SCHEMA_3_RELEASE: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &SCHEMA_2, &SCHEMA_3],
     writes: &SCHEMA_3,
-    knows: &SCHEMA_4,
+    knows: &SCHEMA_5,
 };
 
 // ── the fixtures ────────────────────────────────────────────────────────────
@@ -304,7 +305,9 @@ fn schema_4_is_schema_3_plus_the_four_gates_and_this_binary_writes_it() {
     );
 
     assert!(std::ptr::eq(PRODUCTION.writes, &SCHEMA_4));
-    assert!(std::ptr::eq(PRODUCTION.knows, &SCHEMA_4), "no draft schema");
+    // It knows the draft schema 5, which extends schema 4.
+    assert!(std::ptr::eq(PRODUCTION.knows, &SCHEMA_5));
+    assert!(std::ptr::eq(SCHEMA_5.previous.unwrap(), &SCHEMA_4));
     assert_eq!(
         PRODUCTION
             .reads

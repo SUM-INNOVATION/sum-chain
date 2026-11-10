@@ -43,11 +43,11 @@
 //!
 //! # Registering a field after schema 4
 //!
-//! A field registered from now on belongs to a new schema 5: a `SCHEMA_5`
-//! extending [`SCHEMA_4`] with its own append-only list, known by
-//! [`PRODUCTION`] as a draft until a later reviewed change writes it. Use the
-//! next unused id in the field's range (an activation gate: the `0x1000–0x1fff`
-//! range, `source: Source::Gate`, `ty: U64`, named exactly as
+//! A field registered after schema 4 froze belongs to the draft schema 5
+//! ([`SCHEMA_5`]), extending [`SCHEMA_4`] with its own append-only list, known
+//! by [`PRODUCTION`] as a draft until a later reviewed change writes it. Use
+//! the next unused id in the field's range (an activation gate: the
+//! `0x1000–0x1fff` range, `source: Source::Gate`, `ty: U64`, named exactly as
 //! `ChainParams::activation_heights` names it).
 //! `crates/consensus/tests/consensus_config_census.rs` checks that every gate
 //! has exactly one id in the newest schema and that no id repeats.
@@ -57,6 +57,7 @@ use sumchain_genesis::Genesis;
 use super::codec::{Field, Value, SCHEMA_V1};
 use super::ConfigError;
 use sumchain_primitives::compute_pool_params::ComputePoolParamsV1;
+use sumchain_primitives::SPONSORED_SEND_V2_TAG;
 use sumchain_state::messaging_executor::MESSAGING_TIMESTAMP_MS_PER_SECOND;
 
 use super::fields::{is_gate, FieldSpec, ListOrder, Ty, SCHEMA_V1_FIELDS};
@@ -754,6 +755,69 @@ pub static SCHEMA_4: Schema = Schema {
     added: SCHEMA_4_ADDED,
 };
 
+/// Field id of [`sponsored_send_v2_tag_value`]: after the schema-2 constant
+/// `0x252a`, the last compiled constant any schema registered.
+pub const SPONSORED_SEND_V2_TAG_ID: u16 = 0x252b;
+
+/// [`SPONSORED_SEND_V2_TAG`] while the sponsored-envelope verification gate is
+/// set, [`Value::Absent`] otherwise: below the gate nothing reads the tag, so
+/// absent is the pre-existing behaviour.
+fn sponsored_send_v2_tag_value(genesis: &Genesis) -> Value {
+    match genesis
+        .params
+        .messaging_sponsored_envelope_verification_enabled_from_height
+    {
+        None => Value::Absent,
+        Some(_) => Value::Bytes(SPONSORED_SEND_V2_TAG.to_vec()),
+    }
+}
+
+/// Fields schema 5 adds to schema 4. DRAFT: [`PRODUCTION`] knows these fields
+/// but neither writes nor reads schema-5 records, and refuses to start if any
+/// of them is non-absent, so a gate registered here can be declared but never
+/// activated by this binary. Append-only, like every later schema. The
+/// allocation is proposed.
+pub const SCHEMA_5_ADDED: &[AddedField] = &[
+    // A sponsored SendMessage carries a version-2 sender envelope, verified
+    // in consensus. The name and the allocation are proposed.
+    AddedField {
+        spec: FieldSpec {
+            id: 0x1048,
+            name: "messaging_sponsored_envelope_verification_enabled_from_height",
+            ty: Ty::U64,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Gate,
+    },
+    // The compiled domain tag the version-2 envelope preimage begins with,
+    // committed only while that gate is set: below it nothing reads the tag,
+    // so absent is the pre-existing behaviour, and a record carried into
+    // schema 5 stays exact. Setting the gate on an existing chain therefore
+    // also moves this field, which is not a gate, so that start asks for
+    // `acknowledge-consensus-config` rather than recording a reschedule on its
+    // own (as the schema-2 `MESSAGING_TIMESTAMP_MS_PER_SECOND` field does).
+    AddedField {
+        spec: FieldSpec {
+            id: SPONSORED_SEND_V2_TAG_ID,
+            name: "sumchain_wire::messaging::SPONSORED_SEND_V2_TAG",
+            ty: Ty::Bytes,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Param(sponsored_send_v2_tag_value),
+    },
+];
+
+/// Schema 5: schema 4 plus [`SCHEMA_5_ADDED`]. DRAFT.
+pub static SCHEMA_5: Schema = Schema {
+    number: 5,
+    previous: Some(&SCHEMA_4),
+    added: SCHEMA_5_ADDED,
+};
+
 /// What this binary does.
 ///
 /// It writes schema 4: a fresh database records schema 4 directly. It reads
@@ -764,9 +828,10 @@ pub static SCHEMA_4: Schema = Schema {
 /// `acknowledge-consensus-config-schema`, one step from any of them, which
 /// changes no rule. Until a node has moved, a field set in its genesis that
 /// its record's schema cannot express refuses start and names that command.
-/// No field is a draft. Nothing here sets any gate.
+/// It knows the draft schema 5, whose fields must all be absent. Nothing here
+/// sets any gate.
 pub static PRODUCTION: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &SCHEMA_2, &SCHEMA_3, &SCHEMA_4],
     writes: &SCHEMA_4,
-    knows: &SCHEMA_4,
+    knows: &SCHEMA_5,
 };
