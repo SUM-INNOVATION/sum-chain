@@ -179,6 +179,22 @@ sumchain revert-consensus-config-schema --data-dir <dir> --old <moved> --new <re
   refuses while a move awaits its first start or its revert); `sumchain
   restore` refuses a backup that would clear the marker or change the record's
   history. Neither has a bypass flag.
+- **The protection is per database.** The marker and the record history live
+  in the database they describe. `restore` compares a backup with the database
+  at the target path; a restore into a **missing** target path (a directory
+  moved aside, a new machine) has nothing to compare with, and a backup that
+  holds no start marker then produces a pre-move database with no marker,
+  which the binary cannot tell from a node that was never moved. The controls
+  for that case are operational and are part of this procedure: the
+  post-move digest of each database, the masked unit, and the pair-wide check
+  (a reverted-by-restore node fails the digest check, and the pair goes
+  forward).
+- **Binaries that write no marker are invisible to it.** The deployed release
+  and earlier builds write no marker, so a mistaken start of either leaves
+  none; the deployed release rewrites the activation record with the bytes the
+  pre-window record had (same genesis), an earlier build adds two names. The
+  marker protects against this binary and its successors; the post-move digest
+  is the control for every other binary and every other command.
 
 **`rollback` and `restore` are not part of this procedure**, before, during or
 after the window. The window's data copy is for forensics only. The older
@@ -237,6 +253,13 @@ Not part of this stage. For reference:
   same-window upgrade with its own window: its running commitment differs, so
   under B2 (below) it declares a different handshake digest and is refused by
   schema-4 peers.
+- **For that future window:** a fresh database's first start records the
+  marker before the first baseline is written, so its marker says "no
+  configuration record". A node started exactly once since its database was
+  created would have the schema-5 pre-start revert refused as an uncertain
+  state until it has restarted once more before the move (every start rewrites
+  the marker). Restart once before that move, or re-stamp the marker after the
+  initial baseline, as that procedure decides.
 - **Not compatible:** any release that reads only schemas up to 3, the
   deployed one included. It refuses the moved record ("written by a newer
   binary") and rewrites nothing in it, but its activation-height check runs
