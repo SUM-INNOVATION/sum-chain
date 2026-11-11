@@ -1,16 +1,19 @@
 //! `messaging_submitSponsored` applies the envelope form of the block the
 //! relayed transaction would land in: the string form below
 //! `messaging_sponsored_envelope_verification_enabled_from_height`, the
-//! version-2 envelope (strict signature, no amount, the sender's current
-//! messaging nonce) from it on, judged at the next block's height. And
-//! `messaging_getSenderNonce` reports the committed messaging nonce a client
-//! must put in that envelope.
+//! version-2 envelope (strict signature, no amount, the sender's next
+//! messaging nonce) from it on, judged at the next block's height. It signs
+//! each relayed transaction at the sponsor's next free account nonce, so
+//! several relayed messages land in one block. And `messaging_getSenderNonce`
+//! reports the committed messaging nonce a client must put in that envelope.
 //!
-//! One test function: the relay reads its sponsor key from the
-//! `SUMAIL_SPONSOR_KEY` environment variable, which is process-wide.
+//! The relay reads its sponsor key from the `SUMAIL_SPONSOR_KEY` environment
+//! variable, which is process-wide: every test here goes through
+//! [`sponsor_key_configured`], which writes one key file and sets the variable
+//! once for the whole binary.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, OnceLock};
 
 use sumchain_consensus::{ConsensusQuery, PoAEngine};
 use sumchain_crypto::{recipient_hash, sign, KeyPair};
@@ -19,20 +22,26 @@ use sumchain_primitives::messaging::{
     ContentType, MessageFlags, MessageHeader, RegisteredPublicKey, SRC201_MAGIC, SRC201_NONCE_SIZE,
     SRC201_TAG_SIZE, SRC201_VERSION,
 };
-use sumchain_primitives::{sponsored_send_v2_signing_preimage, SponsoredMessage};
+use sumchain_primitives::{
+    sponsored_send_v2_signing_preimage, Block, BlockHeader, Hash, Receipt, SignedTransaction,
+    SponsoredMessage, TxInner, TxPayload, TxStatus,
+};
 use sumchain_rpc::api::SumChainApiServer;
 use sumchain_rpc::auth::RpcAuthConfig;
 use sumchain_rpc::metrics::Metrics;
 use sumchain_rpc::rate_limit::RateLimitConfig;
 use sumchain_rpc::server::RpcServer;
 use sumchain_rpc::types::SubmitSponsoredMessageRequest;
-use sumchain_state::{Mempool, MempoolConfig, StateManager};
+use sumchain_state::{BlockExecutor, Mempool, MempoolConfig, StateManager};
 use sumchain_storage::{Database, MessagingStore};
 use tokio::sync::mpsc;
 
 const CHAIN_ID: u64 = 1;
 /// Far in the future, in Unix seconds.
 const EXPIRY: u64 = 4_000_000_000;
+/// The relay's fixed outer fee (`messaging_submitSponsored`).
+const RELAY_FEE: u128 = 1_000_000;
+const SPONSOR_FUNDS: u128 = 1_000_000_000;
 
 fn validator() -> KeyPair {
     KeyPair::from_bytes([7u8; 32])
@@ -40,9 +49,15 @@ fn validator() -> KeyPair {
 fn admin() -> KeyPair {
     KeyPair::from_bytes([0x61; 32])
 }
-/// The registered sender whose envelopes are relayed.
+/// Registered senders whose envelopes are relayed.
+fn alice() -> KeyPair {
+    KeyPair::from_bytes([0x62; 32])
+}
 fn carol() -> KeyPair {
     KeyPair::from_bytes([0x64; 32])
+}
+fn dave() -> KeyPair {
+    KeyPair::from_bytes([0x66; 32])
 }
 fn bob() -> KeyPair {
     KeyPair::from_bytes([0x63; 32])
@@ -52,38 +67,62 @@ fn sponsor() -> KeyPair {
     KeyPair::from_bytes([0x65; 32])
 }
 
-fn params(envelope_gate: Option<u64>) -> ChainParams {
+/// Writes the sponsor key file and points `SUMAIL_SPONSOR_KEY` at it, once
+/// for the whole test binary.
+fn sponsor_key_configured() {
+    static KEY_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+    KEY_DIR.get_or_init(|| {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("sumail.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string(sponsor().private_key().as_bytes()).unwrap(),
+        )
+        .unwrap();
+        std::env::set_var("SUMAIL_SPONSOR_KEY", &path);
+        dir
+    });
+}
+
+fn params(envelope_gate: Option<u64>, accounting_gate: Option<u64>) -> ChainParams {
     let mut p = ChainParams::with_v2_enabled();
     p.messaging = Some(MessagingParams {
         registry_admin: Some(admin().address().to_base58()),
         ..MessagingParams::default()
     });
     p.messaging_sponsored_envelope_verification_enabled_from_height = envelope_gate;
+    p.messaging_fee_nonce_accounting_enabled_from_height = accounting_gate;
     p
 }
 
-fn genesis(envelope_gate: Option<u64>) -> Genesis {
+fn genesis_on(chain_id: u64, envelope_gate: Option<u64>, accounting_gate: Option<u64>) -> Genesis {
     Genesis::new(
-        CHAIN_ID,
+        chain_id,
         1_734_624_000_000,
         vec![validator().public_key().to_base58()],
-        HashMap::from([
-            (validator().address().to_base58(), 1_000_000u128),
-            (sponsor().address().to_base58(), 1_000_000_000u128),
-        ]),
-        params(envelope_gate),
+        HashMap::from([(validator().address().to_base58(), 1_000_000u128)]),
+        params(envelope_gate, accounting_gate),
     )
+}
+
+fn genesis(envelope_gate: Option<u64>) -> Genesis {
+    genesis_on(CHAIN_ID, envelope_gate, None)
 }
 
 struct Served {
     _dir: tempfile::TempDir,
     db: Arc<Database>,
+    state: Arc<StateManager>,
     mempool: Arc<Mempool>,
+    params: ChainParams,
     server: RpcServer,
 }
 
 /// A server over a fresh database with no block: the next block is height 1.
+/// The sponsor is funded, alice, carol and dave are registered, and
+/// sponsorship is enabled, all in committed state.
 fn serve(genesis: &Genesis) -> Served {
+    sponsor_key_configured();
     let dir = tempfile::TempDir::new().unwrap();
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
     let state = Arc::new(StateManager::new(db.clone(), genesis.chain_id));
@@ -98,13 +137,13 @@ fn serve(genesis: &Genesis) -> Served {
         )
         .unwrap(),
     );
-    let (tx_sender, rx) = mpsc::channel(64);
+    let (tx_sender, rx) = mpsc::channel(256);
     // Keep the receiver alive for the server's lifetime, so a broadcast is
     // never refused for want of a listener.
     std::mem::forget(rx);
     let server = RpcServer::with_full_config(
         db.clone(),
-        state,
+        state.clone(),
         mempool.clone(),
         engine,
         tx_sender,
@@ -117,24 +156,103 @@ fn serve(genesis: &Genesis) -> Served {
     )
     .with_chain_params(genesis.params.clone())
     .with_genesis(genesis);
-    // Carol is registered, as every relayed sender must be.
-    MessagingStore::new(&db)
-        .set_public_key(
-            &carol().address(),
-            &RegisteredPublicKey {
-                public_key: *carol().public_key().as_bytes(),
-                address: carol().address(),
-                registered_at_block: 0,
-                registered_at: 0,
-                updated_at_block: 0,
+    let store = MessagingStore::new(&db);
+    for kp in [alice(), carol(), dave()] {
+        store
+            .set_public_key(
+                &kp.address(),
+                &RegisteredPublicKey {
+                    public_key: *kp.public_key().as_bytes(),
+                    address: kp.address(),
+                    registered_at_block: 0,
+                    registered_at: 0,
+                    updated_at_block: 0,
+                },
+            )
+            .unwrap();
+    }
+    store.set_sponsorship_enabled(true).unwrap();
+    sumchain_storage::StateStore::new(&db)
+        .put_account(
+            &sponsor().address(),
+            &sumchain_storage::schema::AccountState {
+                balance: SPONSOR_FUNDS,
+                nonce: 0,
             },
         )
         .unwrap();
     Served {
         _dir: dir,
         db,
+        state,
         mempool,
+        params: genesis.params.clone(),
         server,
+    }
+}
+
+impl Served {
+    /// What the producer would carry next, executed and published as the
+    /// block at `height` through the real block path; the carried
+    /// transactions leave the pool, as the node removes them.
+    fn publish_pool(&self, height: u64) -> (Vec<SignedTransaction>, Vec<Receipt>) {
+        let txs = self.mempool.select_for_block(1_000);
+        let header = BlockHeader::new(
+            Hash::ZERO,
+            height,
+            1_000 + height,
+            Hash::ZERO,
+            Hash::ZERO,
+            *validator().public_key().as_bytes(),
+        );
+        let mut block = Block::new(header, txs.clone());
+        let executor = BlockExecutor::new(self.state.clone(), self.db.clone(), self.params.clone());
+        let exec = executor
+            .execute_block(&block, self.state.state_root(), &[])
+            .expect("execute_block");
+        block.header.state_root = exec.computed_root();
+        let (executed, _, _) = exec.into_parts();
+        let receipts = executed.receipts().to_vec();
+        let accepted = executed.accept_produced(&block).expect("accept_produced");
+        let accumulator = accepted.accumulator();
+        accepted.publish().expect("publish");
+        self.state.set_state_root(accumulator);
+        for tx in &txs {
+            self.mempool.remove(&tx.hash());
+        }
+        (txs, receipts)
+    }
+
+    fn sponsor_nonce(&self) -> u64 {
+        self.state.get_nonce(&sponsor().address()).unwrap()
+    }
+
+    fn messaging_nonce(&self, kp: &KeyPair) -> u64 {
+        MessagingStore::new(&self.db)
+            .get_sender_nonce(&kp.address())
+            .unwrap()
+    }
+
+    /// The sponsor nonces of the relayed transactions this node holds.
+    fn pending_sponsor_nonces(&self) -> Vec<u64> {
+        let mut n: Vec<u64> = self
+            .mempool
+            .get_by_sender(&sponsor().address())
+            .iter()
+            .map(|tx| tx.nonce())
+            .collect();
+        n.sort_unstable();
+        n
+    }
+
+    async fn relay(
+        &self,
+        m: &SponsoredMessage,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned> {
+        self.server
+            .messaging_submit_sponsored(request(m))
+            .await
+            .map(|r| r.tx_hash)
     }
 }
 
@@ -155,9 +273,9 @@ fn valid_message(rh: [u8; 32]) -> Vec<u8> {
     v
 }
 
-/// Carol's envelope to bob at `nonce`, unsigned; `salt` varies the message so
-/// two envelopes at one nonce are different transactions.
-fn envelope(nonce: u64, salt: u8, amount: Option<u128>) -> SponsoredMessage {
+/// `sender`'s envelope to bob at `nonce`, unsigned; `salt` varies the message
+/// so two envelopes at one nonce are different transactions.
+fn envelope_from(sender: &KeyPair, nonce: u64, salt: u8, amount: Option<u128>) -> SponsoredMessage {
     let rh = recipient_hash(&bob().address());
     let mut message_data = valid_message(rh);
     message_data.push(salt);
@@ -165,21 +283,31 @@ fn envelope(nonce: u64, salt: u8, amount: Option<u128>) -> SponsoredMessage {
         message_data,
         recipient_hash: rh,
         signature: [0u8; 64],
-        sender_pubkey: *carol().public_key().as_bytes(),
+        sender_pubkey: *sender.public_key().as_bytes(),
         nonce,
         expiry: EXPIRY,
         koppa_amount: amount,
     }
 }
 
-/// Signed over the version-2 preimage.
-fn v2(mut m: SponsoredMessage) -> SponsoredMessage {
-    let preimage = sponsored_send_v2_signing_preimage(CHAIN_ID, &m);
-    m.signature = *sign(&preimage, carol().private_key()).as_bytes();
+/// Carol's envelope to bob at `nonce`, unsigned.
+fn envelope(nonce: u64, salt: u8, amount: Option<u128>) -> SponsoredMessage {
+    envelope_from(&carol(), nonce, salt, amount)
+}
+
+/// Signed by `signer` over the version-2 preimage for `chain_id`.
+fn v2_by(mut m: SponsoredMessage, signer: &KeyPair, chain_id: u64) -> SponsoredMessage {
+    let preimage = sponsored_send_v2_signing_preimage(chain_id, &m);
+    m.signature = *sign(&preimage, signer.private_key()).as_bytes();
     m
 }
 
-/// Signed over the string form the relay checked before the gate.
+/// Signed by carol over the version-2 preimage for this chain.
+fn v2(m: SponsoredMessage) -> SponsoredMessage {
+    v2_by(m, &carol(), CHAIN_ID)
+}
+
+/// Signed by carol over the string form the relay checked before the gate.
 fn v1(mut m: SponsoredMessage) -> SponsoredMessage {
     let preimage = format!(
         "SUMCHAIN_SPONSORED_MSG:{}:{}:{}:{}",
@@ -205,9 +333,8 @@ fn request(m: &SponsoredMessage) -> SubmitSponsoredMessageRequest {
     }
 }
 
-/// The relayed transaction's envelope, decoded from the pool.
+/// The relayed transactions' envelopes, decoded from the pool.
 fn relayed_envelopes(s: &Served) -> Vec<SponsoredMessage> {
-    use sumchain_primitives::{TxInner, TxPayload};
     s.mempool
         .select_for_block(100)
         .iter()
@@ -221,45 +348,29 @@ fn relayed_envelopes(s: &Served) -> Vec<SponsoredMessage> {
         .collect()
 }
 
+fn statuses(receipts: &[Receipt]) -> Vec<(TxStatus, u128)> {
+    receipts.iter().map(|r| (r.status, r.fee_paid)).collect()
+}
+
 #[tokio::test]
 async fn the_relay_applies_the_envelope_form_of_the_next_block() {
-    // The relay's sponsor key, as `SUMAIL_SPONSOR_KEY` names it.
-    let key_dir = tempfile::TempDir::new().unwrap();
-    let key_path = key_dir.path().join("sumail.json");
-    std::fs::write(
-        &key_path,
-        serde_json::to_string(sponsor().private_key().as_bytes()).unwrap(),
-    )
-    .unwrap();
-    std::env::set_var("SUMAIL_SPONSOR_KEY", &key_path);
-
     // ── the gate absent: the string form, as before ─────────────────────────
     {
         let s = serve(&genesis(None));
-        let ok = s
-            .server
-            .messaging_submit_sponsored(request(&v1(envelope(0, 1, None))))
-            .await;
+        let ok = s.relay(&v1(envelope(0, 1, None))).await;
         assert!(ok.is_ok(), "{ok:?}");
         let err = s
-            .server
-            .messaging_submit_sponsored(request(&v2(envelope(0, 2, None))))
+            .relay(&v2(envelope(0, 2, None)))
             .await
             .expect_err("a version-2 signature is not the string form");
         assert!(err.message().contains("Invalid sender signature"), "{err}");
         // The nonce is not read: any value relays.
-        let ok = s
-            .server
-            .messaging_submit_sponsored(request(&v1(envelope(42, 3, None))))
-            .await;
+        let ok = s.relay(&v1(envelope(42, 3, None))).await;
         assert!(ok.is_ok(), "{ok:?}");
         let relayed = relayed_envelopes(&s);
         assert_eq!(relayed.len(), 2);
         assert_eq!(
-            relayed
-                .iter()
-                .map(|m| m.nonce)
-                .collect::<std::collections::BTreeSet<_>>(),
+            relayed.iter().map(|m| m.nonce).collect::<BTreeSet<_>>(),
             [0, 42].into_iter().collect()
         );
         let nonce = s
@@ -277,39 +388,29 @@ async fn the_relay_applies_the_envelope_form_of_the_next_block() {
     {
         let s = serve(&genesis(Some(1)));
         let err = s
-            .server
-            .messaging_submit_sponsored(request(&v1(envelope(0, 1, None))))
+            .relay(&v1(envelope(0, 1, None)))
             .await
             .expect_err("the string form is not a version-2 signature");
         assert!(err.message().contains("version-2"), "{err}");
         let err = s
-            .server
-            .messaging_submit_sponsored(request(&v2(envelope(1, 2, None))))
+            .relay(&v2(envelope(1, 2, None)))
             .await
-            .expect_err("not the sender's current nonce");
+            .expect_err("not the sender's next nonce");
         assert!(
             err.message()
-                .contains("is not the sender's current messaging nonce 0"),
+                .contains("is not the sender's next messaging nonce 0"),
             "{err}"
         );
         let err = s
-            .server
-            .messaging_submit_sponsored(request(&v2(envelope(0, 3, Some(5)))))
+            .relay(&v2(envelope(0, 3, Some(5))))
             .await
             .expect_err("an amount is refused");
         assert!(err.message().contains("koppa_amount"), "{err}");
-        let err = s
-            .server
-            .messaging_submit_sponsored(request(&envelope(0, 4, None)))
-            .await
-            .expect_err("unsigned");
+        let err = s.relay(&envelope(0, 4, None)).await.expect_err("unsigned");
         assert!(err.message().contains("Invalid sender signature"), "{err}");
         assert!(relayed_envelopes(&s).is_empty(), "nothing relayed so far");
 
-        let ok = s
-            .server
-            .messaging_submit_sponsored(request(&v2(envelope(0, 5, None))))
-            .await;
+        let ok = s.relay(&v2(envelope(0, 5, None))).await;
         assert!(ok.is_ok(), "{ok:?}");
         let relayed = relayed_envelopes(&s);
         assert_eq!(relayed.len(), 1);
@@ -328,19 +429,15 @@ async fn the_relay_applies_the_envelope_form_of_the_next_block() {
             .unwrap();
         assert_eq!(nonce.nonce, 1);
         let err = s
-            .server
-            .messaging_submit_sponsored(request(&v2(envelope(0, 6, None))))
+            .relay(&v2(envelope(0, 6, None)))
             .await
             .expect_err("nonce 0 is spent");
         assert!(
             err.message()
-                .contains("is not the sender's current messaging nonce 1"),
+                .contains("Envelope nonce 0 is already used: the sender's messaging nonce is 1"),
             "{err}"
         );
-        let ok = s
-            .server
-            .messaging_submit_sponsored(request(&v2(envelope(1, 7, None))))
-            .await;
+        let ok = s.relay(&v2(envelope(1, 7, None))).await;
         assert!(ok.is_ok(), "{ok:?}");
         assert_eq!(relayed_envelopes(&s).len(), 2);
     }
@@ -348,16 +445,112 @@ async fn the_relay_applies_the_envelope_form_of_the_next_block() {
     // ── the gate above the next block: still the string form ────────────────
     {
         let s = serve(&genesis(Some(2)));
-        let ok = s
-            .server
-            .messaging_submit_sponsored(request(&v1(envelope(0, 1, None))))
-            .await;
+        let ok = s.relay(&v1(envelope(0, 1, None))).await;
         assert!(ok.is_ok(), "{ok:?}");
         let err = s
-            .server
-            .messaging_submit_sponsored(request(&v2(envelope(0, 2, None))))
+            .relay(&v2(envelope(0, 2, None)))
             .await
             .expect_err("not yet the version-2 form");
         assert!(err.message().contains("Invalid sender signature"), "{err}");
     }
+}
+
+/// With both gates open at the next block, five relayed messages (three
+/// senders, two of them sending twice) are signed at five consecutive sponsor
+/// nonces, carried in nonce order and all succeed in one block. A second
+/// envelope at a (sender, nonce) the relay already holds, and one that skips a
+/// nonce, are refused. The next block continues from the sponsor's new nonce.
+#[tokio::test]
+async fn several_relayed_messages_land_in_one_block_with_the_accounting_gate_open() {
+    let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
+    let sends = [
+        v2(envelope(0, 1, None)),
+        v2_by(envelope_from(&alice(), 0, 2, None), &alice(), CHAIN_ID),
+        v2_by(envelope_from(&dave(), 0, 3, None), &dave(), CHAIN_ID),
+        v2(envelope(1, 4, None)),
+        v2_by(envelope_from(&alice(), 1, 5, None), &alice(), CHAIN_ID),
+    ];
+    for m in &sends {
+        let ok = s.relay(m).await;
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+    assert_eq!(s.pending_sponsor_nonces(), vec![0, 1, 2, 3, 4]);
+
+    let err = s
+        .relay(&v2(envelope(1, 6, None)))
+        .await
+        .expect_err("carol's nonce 1 is already pending");
+    assert!(
+        err.message()
+            .contains("An envelope from this sender at nonce 1 is already pending"),
+        "{err}"
+    );
+    let err = s
+        .relay(&v2(envelope(3, 7, None)))
+        .await
+        .expect_err("carol's next is 2");
+    assert!(
+        err.message()
+            .contains("is not the sender's next messaging nonce 2"),
+        "{err}"
+    );
+    assert_eq!(s.pending_sponsor_nonces(), vec![0, 1, 2, 3, 4]);
+
+    let (carried, receipts) = s.publish_pool(1);
+    assert_eq!(
+        carried.iter().map(|t| t.nonce()).collect::<Vec<_>>(),
+        vec![0, 1, 2, 3, 4],
+        "carried in nonce order"
+    );
+    assert_eq!(statuses(&receipts), vec![(TxStatus::Success, RELAY_FEE); 5]);
+    assert_eq!(s.sponsor_nonce(), 5);
+    assert_eq!(
+        s.state.get_balance(&sponsor().address()).unwrap(),
+        SPONSOR_FUNDS - 5 * RELAY_FEE
+    );
+    assert_eq!(
+        (
+            s.messaging_nonce(&carol()),
+            s.messaging_nonce(&alice()),
+            s.messaging_nonce(&dave())
+        ),
+        (2, 2, 1)
+    );
+
+    // The next block continues from the sponsor's new nonce.
+    let ok = s.relay(&v2(envelope(2, 8, None))).await;
+    assert!(ok.is_ok(), "{ok:?}");
+    assert_eq!(s.pending_sponsor_nonces(), vec![5]);
+    let (_, receipts) = s.publish_pool(2);
+    assert_eq!(statuses(&receipts), vec![(TxStatus::Success, RELAY_FEE)]);
+    assert_eq!((s.sponsor_nonce(), s.messaging_nonce(&carol())), (6, 3));
+}
+
+/// Below the accounting gate a relayed message does not advance the sponsor's
+/// nonce, so every relay is signed at the committed nonce, exactly as before,
+/// and all of them succeed in one block; the sponsor's nonce stays where it
+/// was and nothing is charged.
+#[tokio::test]
+async fn below_the_accounting_gate_relays_share_the_committed_sponsor_nonce() {
+    let s = serve(&genesis_on(CHAIN_ID, Some(1), None));
+    for m in [
+        v2(envelope(0, 1, None)),
+        v2_by(envelope_from(&alice(), 0, 2, None), &alice(), CHAIN_ID),
+        v2(envelope(1, 3, None)),
+    ] {
+        let ok = s.relay(&m).await;
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+    assert_eq!(s.pending_sponsor_nonces(), vec![0, 0, 0]);
+    let (_, receipts) = s.publish_pool(1);
+    assert_eq!(statuses(&receipts), vec![(TxStatus::Success, RELAY_FEE); 3]);
+    assert_eq!(s.sponsor_nonce(), 0);
+    assert_eq!(
+        s.state.get_balance(&sponsor().address()).unwrap(),
+        SPONSOR_FUNDS
+    );
+    assert_eq!(
+        (s.messaging_nonce(&carol()), s.messaging_nonce(&alice())),
+        (2, 1)
+    );
 }

@@ -1,5 +1,6 @@
 //! RPC server implementation.
 
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -489,6 +490,11 @@ pub struct RpcServer {
     /// key) this node serves. Both off unless the operator opts in; see
     /// `crate::custodial`.
     custodial: CustodialSigningMethods,
+    /// Held by a relay request (`messaging_submitSponsored`,
+    /// `messaging_registerSponsored`) from choosing the nonces it signs at
+    /// until its transaction is in the pool, so two requests read the pool
+    /// one after the other and are never given the same nonce.
+    relay_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// The consensus handle this server holds is the READ view, and nothing wider.
@@ -644,6 +650,7 @@ impl RpcServer {
             genesis_identity: None,
             running_consensus_config: None,
             custodial: CustodialSigningMethods::default(),
+            relay_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -1412,6 +1419,106 @@ impl RpcServer {
         arr.copy_from_slice(&key[..20]);
         Address::new(arr)
     }
+
+    /// The account nonce a relay signs its next transaction at, for the
+    /// sponsor key `sponsor`, when that transaction would land in a block at
+    /// `inclusion_height`.
+    ///
+    /// The first nonce at or above the committed one that no transaction this
+    /// node holds from `sponsor` takes. A held transaction takes its nonce when
+    /// executing it advances the account nonce. Below
+    /// `messaging_fee_nonce_accounting_enabled_from_height` a relayed
+    /// `SendMessage` does not, so relays share the committed nonce there, as
+    /// they always have; from that gate on every messaging operation does, so
+    /// each relay takes the next nonce, and the producer carries one sender's
+    /// transactions in nonce order (`Mempool::select_for_block`). The caller
+    /// holds `relay_lock` from here until its transaction is in the pool.
+    fn relay_sponsor_nonce(
+        &self,
+        sponsor: &Address,
+        inclusion_height: u64,
+    ) -> std::result::Result<u64, RpcError> {
+        let committed = self
+            .state
+            .get_nonce(sponsor)
+            .map_err(|e| RpcError::Internal(format!("Failed to get sponsor nonce: {e}")))?;
+        let accounting = sumchain_state::MessagingExecutor::fee_nonce_accounting_gate_open(
+            &self.chain_params,
+            inclusion_height,
+        );
+        let held: BTreeSet<u64> = self
+            .mempool
+            .get_by_sender(sponsor)
+            .iter()
+            .filter(|tx| accounting || advances_nonce_below_accounting_gate(tx))
+            .map(|tx| tx.nonce())
+            .filter(|n| *n >= committed)
+            .collect();
+        Ok(first_free_from(committed, &held))
+    }
+
+    /// The height the next block will have: the chain tip plus one. A store
+    /// read error is surfaced, never read as a tip of 0.
+    fn relay_inclusion_height(&self) -> std::result::Result<u64, RpcError> {
+        match BlockStore::new(&self.db).get_latest() {
+            Ok(Some(block)) => Ok(block.header.height.saturating_add(1)),
+            Ok(None) => Ok(1),
+            Err(e) => Err(RpcError::Internal(format!(
+                "Failed to read chain tip during sponsored-message preflight: {e}"
+            ))),
+        }
+    }
+}
+
+/// Whether executing `tx` advances its sender's account nonce below
+/// `messaging_fee_nonce_accounting_enabled_from_height`.
+///
+/// Below that gate a messaging operation advances it only when it charges for
+/// itself: a direct send, a paid send, and a sponsored registration. Every
+/// other transaction family advances it. (A transaction that is refused may
+/// leave it where it was; the relay cannot know that in advance and counts it
+/// as advancing.)
+fn advances_nonce_below_accounting_gate(tx: &SignedTransaction) -> bool {
+    use sumchain_primitives::TxInner;
+    match &tx.inner {
+        TxInner::V2(v2) => match &v2.payload {
+            TxPayload::Messaging(d) => matches!(
+                d.operation,
+                MessagingOperation::SendMessageDirect
+                    | MessagingOperation::SendMessageWithPayment
+                    | MessagingOperation::RegisterPublicKeySponsoredV1
+            ),
+            _ => true,
+        },
+        _ => true,
+    }
+}
+
+/// The first value at or above `from` that `held` does not contain.
+fn first_free_from(from: u64, held: &BTreeSet<u64>) -> u64 {
+    let mut n = from;
+    while held.contains(&n) {
+        n += 1;
+    }
+    n
+}
+
+/// The sender a relayed `SendMessage` envelope names, and the envelope's
+/// nonce. `None` for any other transaction, and for an envelope that does not
+/// decode.
+fn relayed_envelope_identity(tx: &SignedTransaction) -> Option<(Address, u64)> {
+    use sumchain_primitives::TxInner;
+    let TxInner::V2(v2) = &tx.inner else {
+        return None;
+    };
+    let TxPayload::Messaging(d) = &v2.payload else {
+        return None;
+    };
+    if d.operation != MessagingOperation::SendMessage {
+        return None;
+    }
+    let m: SponsoredMessage = bincode::deserialize(&d.data).ok()?;
+    Some((Address::from_public_key(&m.sender_pubkey), m.nonce))
 }
 
 #[async_trait::async_trait]
@@ -4544,17 +4651,7 @@ impl SumChainApiServer for RpcServer {
         // other applies would only land as a failed operation. A store read
         // error is not treated as a tip of 0: it is surfaced.
         let chain_id = self.state.chain_id();
-        let tip_height = match BlockStore::new(&self.db).get_latest() {
-            Ok(Some(block)) => block.header.height,
-            Ok(None) => 0,
-            Err(e) => {
-                return Err(RpcError::Internal(format!(
-                    "Failed to read chain tip during sponsored-message preflight: {e}"
-                ))
-                .into());
-            }
-        };
-        let inclusion_height = tip_height.saturating_add(1);
+        let inclusion_height = self.relay_inclusion_height()?;
         let v2_envelope = sumchain_state::MessagingExecutor::sponsored_envelope_verification_gate_open(
             &self.chain_params,
             inclusion_height,
@@ -4581,17 +4678,6 @@ impl SumChainApiServer for RpcServer {
                      blake3(message_data) || nonce || expiry || amount, big-endian)"
                         .to_string(),
                 )
-                .into());
-            }
-            let expected_nonce = store.get_sender_nonce(&sender_address).map_err(|e| {
-                RpcError::Internal(format!("Failed to read the sender's messaging nonce: {e}"))
-            })?;
-            if sponsored_msg.nonce != expected_nonce {
-                return Err(RpcError::InvalidParams(format!(
-                    "Envelope nonce {} is not the sender's current messaging nonce {} \
-                     (messaging_getSenderNonce)",
-                    sponsored_msg.nonce, expected_nonce
-                ))
                 .into());
             }
         } else {
@@ -4630,10 +4716,57 @@ impl SumChainApiServer for RpcServer {
                 .map_err(|e| RpcError::Internal(format!("Failed to serialize sponsored message: {}", e)))?,
         };
 
-        // Get sponsor's current nonce
+        // From here until the transaction is in the pool, one relay request at
+        // a time: the envelope sequence and the sponsor nonce are both read from
+        // what this node already holds, and two requests must not be given the
+        // same one.
+        let relay_guard = self.relay_lock.lock().await;
         let sponsor_address = sponsor_keypair.address();
-        let sponsor_nonce = self.state.get_nonce(&sponsor_address)
-            .map_err(|e| RpcError::Internal(format!("Failed to get sponsor nonce: {}", e)))?;
+
+        if v2_envelope {
+            // The envelope nonce must be the sender's next messaging nonce: the
+            // committed one, extended by each envelope from this sender the
+            // relay already holds. One envelope per (sender, nonce): a second
+            // could only be refused in the block, at the sponsor's expense.
+            let committed = store.get_sender_nonce(&sender_address).map_err(|e| {
+                RpcError::Internal(format!("Failed to read the sender's messaging nonce: {e}"))
+            })?;
+            let held: BTreeSet<u64> = self
+                .mempool
+                .get_by_sender(&sponsor_address)
+                .iter()
+                .filter_map(relayed_envelope_identity)
+                .filter(|(sender, n)| *sender == sender_address && *n >= committed)
+                .map(|(_, n)| n)
+                .collect();
+            let next = first_free_from(committed, &held);
+            if sponsored_msg.nonce < committed {
+                return Err(RpcError::InvalidParams(format!(
+                    "Envelope nonce {} is already used: the sender's messaging nonce is {committed} \
+                     (messaging_getSenderNonce)",
+                    sponsored_msg.nonce
+                ))
+                .into());
+            }
+            if held.contains(&sponsored_msg.nonce) {
+                return Err(RpcError::InvalidParams(format!(
+                    "An envelope from this sender at nonce {} is already pending at this relay",
+                    sponsored_msg.nonce
+                ))
+                .into());
+            }
+            if sponsored_msg.nonce != next {
+                return Err(RpcError::InvalidParams(format!(
+                    "Envelope nonce {} is not the sender's next messaging nonce {next} \
+                     (messaging_getSenderNonce reports {committed}; each envelope from this \
+                     sender pending at this relay adds one)",
+                    sponsored_msg.nonce
+                ))
+                .into());
+            }
+        }
+
+        let sponsor_nonce = self.relay_sponsor_nonce(&sponsor_address, inclusion_height)?;
 
         // Create the messaging transaction
         // tx.from = sponsor_address (matches the signer)
@@ -4659,10 +4792,12 @@ impl SumChainApiServer for RpcServer {
 
         let tx_hash = signed_tx.hash();
 
-        // Add to mempool
+        // Add to mempool. A refusal here (a full pool, or the sponsor's
+        // per-sender limit) is reported, and nothing is broadcast.
         self.mempool
             .add(signed_tx.clone())
             .map_err(|e| RpcError::TxRejected(format!("Mempool rejected: {}", e)))?;
+        drop(relay_guard);
 
         // Broadcast to network
         self.tx_sender
@@ -4814,10 +4949,12 @@ impl SumChainApiServer for RpcServer {
             operation: MessagingOperation::RegisterPublicKeySponsoredV1,
             data: reg.to_bytes(),
         };
-        let sponsor_nonce = self
-            .state
-            .get_nonce(&sponsor_address)
-            .map_err(|e| RpcError::Internal(format!("Failed to get sponsor nonce: {}", e)))?;
+        // The same sponsor key as `messaging_submitSponsored`, so the same
+        // nonce allocation, under the same lock, until the transaction is in
+        // the pool.
+        let inclusion_height = self.relay_inclusion_height()?;
+        let relay_guard = self.relay_lock.lock().await;
+        let sponsor_nonce = self.relay_sponsor_nonce(&sponsor_address, inclusion_height)?;
         let fee = 1_000_000u128; // 0.001 Koppa fee, same as messaging_submitSponsored.
         let tx = TransactionV2::messaging(chain_id, sponsor_address, fee, sponsor_nonce, messaging_data);
         let signing_hash = tx.signing_hash();
@@ -4838,6 +4975,7 @@ impl SumChainApiServer for RpcServer {
                 error: Some(format!("Mempool rejected: {}", e)),
             });
         }
+        drop(relay_guard);
         if let Err(e) = self.tx_sender.send(signed_tx).await {
             // Broadcast failed after mempool admission. Roll back the local
             // admission so the tx is not left pending on this node alone —

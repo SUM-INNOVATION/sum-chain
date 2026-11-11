@@ -2087,3 +2087,52 @@ fn at_the_gate_a_zero_fee_operation_still_advances_the_nonce() {
     assert_eq!(c.balance(&bob().address()), FUNDS);
     assert_eq!(c.nonce(&bob()), 1);
 }
+
+/// Two relayed transactions
+/// signed at one committed sponsor nonce. Below the accounting gate both
+/// succeed (a relayed message never moves the sponsor's nonce); at the gate
+/// the second takes `InvalidNonce` and nothing is charged for it. This is
+/// why the relay signs each relayed transaction at the sponsor's next free
+/// nonce from the gate on (`crates/rpc/tests/sponsored_relay_envelope_form.rs`).
+#[test]
+fn two_relays_at_one_committed_sponsor_nonce() {
+    use sumchain_primitives::TxStatus;
+    let alice_to_bob = |nonce: u64| {
+        signed_v2(
+            envelope(&alice(), &bob().address(), nonce, NEVER, None, [0u8; 64]),
+            &alice(),
+            CHAIN_ID,
+        )
+    };
+    for (accounting, want) in [
+        (
+            None,
+            vec![(TxStatus::Success, FEE), (TxStatus::Success, FEE)],
+        ),
+        (
+            Some(2),
+            vec![(TxStatus::Success, FEE), (TxStatus::InvalidNonce, 0)],
+        ),
+    ] {
+        let mut p = with_envelope_gate(Some(2));
+        p.messaging_fee_nonce_accounting_enabled_from_height = accounting;
+        let mut c = Chain::new(p);
+        c.setup();
+        let n = c.nonce(&sponsor());
+        let first = signed_at(
+            &sponsor(),
+            n,
+            sponsored(&signed_v2(carol_to_bob(0), &carol(), CHAIN_ID)),
+        );
+        let second = signed_at(&sponsor(), n, sponsored(&alice_to_bob(0)));
+        let receipts = c.block(vec![first, second]).unwrap();
+        assert_eq!(
+            receipts
+                .iter()
+                .map(|r| (r.status, r.fee_paid))
+                .collect::<Vec<_>>(),
+            want,
+            "accounting gate {accounting:?}"
+        );
+    }
+}
