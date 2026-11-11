@@ -446,6 +446,11 @@ fn v1_keys_are_disjoint_from_every_meta_key_in_the_repository() {
     // (Literals such as the state value `b"final"` are not keys.)
     let signer_mirror: &[u8] = b"finality/signer-mirror/v1";
     for name in v1 {
+        // B6 includes the mirror among the owned names. Its comparisons
+        // with the other owned names are already covered above.
+        if name == signer_mirror {
+            continue;
+        }
         assert!(!name.starts_with(signer_mirror) && !signer_mirror.starts_with(name));
     }
     let reserved: Vec<String> = literals
