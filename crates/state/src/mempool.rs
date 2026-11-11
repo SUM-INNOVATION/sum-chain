@@ -297,6 +297,19 @@ fn sponsored_identity(tx: &SignedTransaction) -> Option<(Address, u64)> {
     Some((Address::from_public_key(&m.sender_pubkey), m.nonce))
 }
 
+/// The sender a sponsored `SendMessage` envelope NAMES, decoded only (the
+/// signature is not checked); `None` for every other transaction and for an
+/// envelope that does not decode.
+///
+/// A relayed envelope is a transaction FROM the relaying account, at that
+/// account's committed nonce, but executing it advances no account nonce: the
+/// sequence it belongs to is the named sender's messaging nonce, which the
+/// inclusion policy orders. A proposer that has to leave one out of a block
+/// reads this to know which of the block's other transactions depend on it.
+pub fn sponsored_envelope_sender(tx: &SignedTransaction) -> Option<Address> {
+    sponsored_identity(tx).map(|(sender, _)| sender)
+}
+
 /// Transaction mempool
 pub struct Mempool {
     /// All transactions by hash

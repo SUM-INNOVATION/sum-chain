@@ -58,6 +58,47 @@ enum Admission {
     Reorg,
 }
 
+/// The run of LATER transactions a proposal cannot carry once one transaction
+/// is dropped from it.
+///
+/// Proposer policy only: it decides which of this proposer's own selected
+/// transactions to offer, never what a block means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Run {
+    /// Every later transaction FROM this account. An account's transactions
+    /// take consecutive account nonces, so the ones behind a dropped
+    /// transaction are out of sequence without it.
+    Account(sumchain_primitives::Address),
+    /// Every later sponsored envelope NAMING this sender.
+    ///
+    /// A relayed `SendMessage` is a transaction from the relaying account, but
+    /// executing it advances no account nonce — the relay signs every envelope
+    /// at the account's committed nonce — so leaving one out changes nothing
+    /// for the relaying account's other transactions, which validate against
+    /// the same nonce with it or without it. What it does belong to is the
+    /// named sender's messaging-nonce sequence, which the inclusion policy
+    /// carries in order: a later envelope of the same named sender carried
+    /// without it would move the sender's committed messaging nonce past it.
+    Envelope(sumchain_primitives::Address),
+}
+
+impl Run {
+    /// The run `tx` takes with it when it is dropped.
+    fn of_dropped(tx: &SignedTransaction) -> Self {
+        match sumchain_state::mempool::sponsored_envelope_sender(tx) {
+            Some(named) => Run::Envelope(named),
+            None => Run::Account(tx.sender()),
+        }
+    }
+
+    /// Every run `tx` belongs to: its account's and, for a sponsored envelope,
+    /// its named sender's.
+    fn memberships(tx: &SignedTransaction) -> impl Iterator<Item = Run> {
+        std::iter::once(Run::Account(tx.sender()))
+            .chain(sumchain_state::mempool::sponsored_envelope_sender(tx).map(Run::Envelope))
+    }
+}
+
 /// Upper bound on how far the ancestor walk may travel.
 ///
 /// An allocation bound, not a consensus rule: `crate::reorg::plan_reorg` walks both branches
@@ -905,12 +946,13 @@ impl PoAEngine {
     ///     of the fee order.
     ///
     /// Dropping a transaction mid-proposal also drops every LATER transaction
-    /// from the SAME SENDER — see [`Self::drop_with_sender_tail`]. Nonces are
+    /// of the same RUN — see [`Self::drop_with_sender_tail`]. Nonces are
     /// contiguous, and splicing one out of the middle of a sender's run would
     /// hand the rest of that run `InvalidNonce` receipts inside this very
     /// block, and `remove_batch` would then delete them. That would destroy
     /// transactions nothing accused, in the name of a repair whose whole point
-    /// is not doing that.
+    /// is not doing that. A relayed sponsored envelope's run is the sender it
+    /// NAMES, not the relaying account: see [`Run`].
     ///
     /// # This is proposer policy, not a consensus rule
     ///
@@ -1360,11 +1402,11 @@ impl PoAEngine {
     }
 
     /// The proposal with every transaction named by `drop_indices` removed,
-    /// every LATER transaction from each of those SENDERS removed with it, and
+    /// every LATER transaction of each of their RUNS removed with it, and
     /// nothing at or beyond `keep_prefix` offered at all.
     ///
     /// The same rule as [`Self::drop_with_sender_tail`] — read that one for why
-    /// a sender's tail has to go — applied to every offender at once. At once
+    /// a run's tail has to go — applied to every offender at once. At once
     /// because a screening pass names them all together, and re-splicing the
     /// vector once per offender is quadratic in the size of the very flood this
     /// pass exists to answer cheaply.
@@ -1378,21 +1420,20 @@ impl PoAEngine {
         keep_prefix: usize,
     ) -> Vec<SignedTransaction> {
         let mut dropped = vec![false; txs.len()];
-        // The EARLIEST dropped index per sender. Everything after it from that
-        // sender goes too: nonces are contiguous, so a kept transaction behind
-        // a dropped one from the same sender takes an `InvalidNonce` receipt in
+        // The EARLIEST dropped index per run. Everything after it in that run
+        // goes too: nonces are contiguous, so a kept transaction behind a
+        // dropped one from the same sender takes an `InvalidNonce` receipt in
         // this very block and is then deleted from the mempool by
         // `remove_batch` — a transaction nothing accused, destroyed by the
         // repair meant to stop exactly that.
-        let mut earliest: std::collections::HashMap<sumchain_primitives::Address, usize> =
-            std::collections::HashMap::new();
+        let mut earliest: std::collections::HashMap<Run, usize> = std::collections::HashMap::new();
         for &index in drop_indices {
             if index >= txs.len() {
                 continue;
             }
             dropped[index] = true;
             earliest
-                .entry(txs[index].sender())
+                .entry(Run::of_dropped(&txs[index]))
                 .and_modify(|first| *first = (*first).min(index))
                 .or_insert(index);
         }
@@ -1401,18 +1442,17 @@ impl PoAEngine {
             .filter(|(index, tx)| {
                 *index < keep_prefix
                     && !dropped[*index]
-                    && earliest
-                        .get(&tx.sender())
-                        .is_none_or(|first| *index < *first)
+                    && Run::memberships(tx)
+                        .all(|run| earliest.get(&run).is_none_or(|first| *index < *first))
             })
             .map(|(_, tx)| tx.clone())
             .collect()
     }
 
     /// The proposal without the transaction at `index`, and without every LATER
-    /// transaction from that transaction's SENDER.
+    /// transaction of that transaction's RUN ([`Run`]).
     ///
-    /// The offender goes because it is what refused. The sender's tail goes
+    /// The offender goes because it is what refused. The run's tail goes
     /// because nonces are contiguous: splice one transaction out of the middle
     /// of a sender's run and every transaction after it in that run fails
     /// `validate_tx` with `InvalidNonce` — which is a RECEIPT, so the block is
@@ -1420,16 +1460,16 @@ impl PoAEngine {
     /// from the mempool. Transactions nothing accused, destroyed by the repair
     /// meant to stop exactly that.
     ///
-    /// Every OTHER sender's transactions are kept, which is what makes this a
+    /// Every OTHER run's transactions are kept, which is what makes this a
     /// splice rather than a truncation: the honest traffic behind a poisoned
     /// transaction is carried by THIS block rather than waiting for the next
     /// one. The dropped tail is untouched in the mempool and is selected again
     /// on the next tick.
     fn drop_with_sender_tail(txs: &[SignedTransaction], index: usize) -> Vec<SignedTransaction> {
-        let sender = txs[index].sender();
+        let run = Run::of_dropped(&txs[index]);
         txs.iter()
             .enumerate()
-            .filter(|(i, tx)| *i < index || (*i > index && tx.sender() != sender))
+            .filter(|(i, tx)| *i < index || (*i > index && !Run::memberships(tx).any(|r| r == run)))
             .map(|(_, tx)| tx.clone())
             .collect()
     }
@@ -2445,5 +2485,162 @@ mod tests {
 
         assert_eq!(block.height(), 1);
         assert!(block.transactions.is_empty());
+    }
+
+    // ── which later transactions leave a proposal with a dropped one ─────────
+
+    /// A sponsored `SendMessage` relayed by `relay`, naming `named`. Only the
+    /// shape matters here: nothing is executed or verified.
+    fn envelope(relay: &KeyPair, named: &KeyPair, nonce: u64) -> SignedTransaction {
+        let m = sumchain_primitives::SponsoredMessage {
+            message_data: vec![nonce as u8],
+            recipient_hash: [7u8; 32],
+            signature: [0u8; 64],
+            sender_pubkey: *named.public_key().as_bytes(),
+            nonce,
+            expiry: u64::MAX,
+            koppa_amount: None,
+        };
+        let tx = sumchain_primitives::TransactionV2 {
+            chain_id: 1,
+            from: relay.address(),
+            fee: 1_000_000,
+            // The relay signs every envelope at its committed account nonce.
+            nonce: 0,
+            payload: sumchain_primitives::TxPayload::Messaging(
+                sumchain_primitives::MessagingTxData {
+                    operation: sumchain_primitives::MessagingOperation::SendMessage,
+                    data: bincode::serialize(&m).unwrap(),
+                },
+            ),
+        };
+        let sig = sign(tx.signing_hash().as_bytes(), relay.private_key());
+        SignedTransaction::new_v2(tx, *sig.as_bytes(), *relay.public_key().as_bytes())
+    }
+
+    fn transfer(from: &KeyPair, nonce: u64) -> SignedTransaction {
+        let to = KeyPair::from_bytes([9u8; 32]).address();
+        let tx = sumchain_primitives::Transaction::new(1, from.address(), to, 1, 10, nonce);
+        let sig = sign(tx.signing_hash().as_bytes(), from.private_key());
+        SignedTransaction::new(tx, *sig.as_bytes(), *from.public_key().as_bytes())
+    }
+
+    fn ids(txs: &[SignedTransaction]) -> Vec<Hash> {
+        txs.iter().map(|t| t.hash()).collect()
+    }
+
+    /// Both drop paths, the fitting loop's and the screening pass's, on one
+    /// offender.
+    fn both(txs: &[SignedTransaction], index: usize) -> Vec<Hash> {
+        let one = ids(&PoAEngine::drop_with_sender_tail(txs, index));
+        let all = ids(&PoAEngine::drop_all_with_sender_tails(
+            txs,
+            &[index],
+            txs.len(),
+        ));
+        assert_eq!(one, all, "the two drop paths agree");
+        one
+    }
+
+    /// A dropped envelope takes the later envelopes naming the SAME sender and
+    /// nothing else: not the other senders' envelopes through the same relay,
+    /// and not the relay's own transactions.
+    #[test]
+    fn a_dropped_envelope_takes_only_its_named_senders_later_envelopes() {
+        let (relay, a, b) = (
+            KeyPair::from_bytes([1u8; 32]),
+            KeyPair::from_bytes([2u8; 32]),
+            KeyPair::from_bytes([3u8; 32]),
+        );
+        let txs = vec![
+            envelope(&relay, &a, 0),
+            envelope(&relay, &b, 0),
+            envelope(&relay, &a, 1),
+            envelope(&relay, &b, 1),
+            transfer(&relay, 0),
+        ];
+        assert_eq!(
+            both(&txs, 0),
+            ids(&[txs[1].clone(), txs[3].clone(), txs[4].clone()])
+        );
+        // What precedes the dropped envelope is never touched.
+        assert_eq!(
+            both(&txs, 1),
+            ids(&[txs[0].clone(), txs[2].clone(), txs[4].clone()])
+        );
+    }
+
+    /// A dropped transaction that is NOT an envelope keeps the account rule:
+    /// every later transaction from its sender goes, envelopes it relays
+    /// included.
+    #[test]
+    fn a_dropped_relay_transaction_still_takes_the_relays_later_transactions() {
+        let (relay, a, other) = (
+            KeyPair::from_bytes([1u8; 32]),
+            KeyPair::from_bytes([2u8; 32]),
+            KeyPair::from_bytes([4u8; 32]),
+        );
+        let txs = vec![
+            transfer(&relay, 0),
+            envelope(&relay, &a, 0),
+            transfer(&other, 0),
+            transfer(&relay, 1),
+        ];
+        assert_eq!(both(&txs, 0), ids(&[txs[2].clone()]));
+    }
+
+    /// An ordinary sender's run is unchanged: its later nonces go with it, the
+    /// other sender's stay, and `keep_prefix` still cuts.
+    #[test]
+    fn an_ordinary_senders_run_is_unchanged() {
+        let (x, y) = (
+            KeyPair::from_bytes([5u8; 32]),
+            KeyPair::from_bytes([6u8; 32]),
+        );
+        let txs = vec![
+            transfer(&x, 0),
+            transfer(&y, 0),
+            transfer(&x, 1),
+            transfer(&x, 2),
+            transfer(&y, 1),
+        ];
+        assert_eq!(both(&txs, 0), ids(&[txs[1].clone(), txs[4].clone()]));
+        assert_eq!(
+            both(&txs, 2),
+            ids(&[txs[0].clone(), txs[1].clone(), txs[4].clone()])
+        );
+        assert_eq!(
+            ids(&PoAEngine::drop_all_with_sender_tails(&txs, &[2], 2)),
+            ids(&[txs[0].clone(), txs[1].clone()])
+        );
+    }
+
+    /// Several offenders at once, of both kinds: each takes its own run.
+    #[test]
+    fn several_offenders_each_take_their_own_run() {
+        let (relay, a, b, c, x) = (
+            KeyPair::from_bytes([1u8; 32]),
+            KeyPair::from_bytes([2u8; 32]),
+            KeyPair::from_bytes([3u8; 32]),
+            KeyPair::from_bytes([8u8; 32]),
+            KeyPair::from_bytes([5u8; 32]),
+        );
+        let txs = vec![
+            envelope(&relay, &a, 0),
+            transfer(&x, 0),
+            envelope(&relay, &b, 0),
+            envelope(&relay, &a, 1),
+            transfer(&x, 1),
+            envelope(&relay, &c, 0),
+            envelope(&relay, &b, 1),
+        ];
+        assert_eq!(
+            ids(&PoAEngine::drop_all_with_sender_tails(
+                &txs,
+                &[0, 1],
+                txs.len()
+            )),
+            ids(&[txs[2].clone(), txs[5].clone(), txs[6].clone()])
+        );
     }
 }
