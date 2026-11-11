@@ -867,6 +867,330 @@ fn by_hash(
         .collect()
 }
 
+/// The pool's copies of the transactions `hashes` names, in that order.
+fn pooled(s: &Served, hashes: &[&String]) -> Vec<SignedTransaction> {
+    hashes
+        .iter()
+        .map(|h| s.mempool.get(&Hash::from_hex(h).unwrap()).expect("pending"))
+        .collect()
+}
+
+/// Relay requests arriving at once, from interleaved senders, on separate
+/// threads, each take a distinct sponsor nonce; a request the relay refuses
+/// takes none, so the nonces stay contiguous. All of them are carried in
+/// nonce order and succeed in one block with the accounting gate open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_relays_each_take_a_distinct_sponsor_nonce() {
+    let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
+    let senders = [carol(), alice(), dave(), grace(), heidi()];
+    for wave in 0..2u64 {
+        let mut accepted = Vec::new();
+        for (i, kp) in senders.iter().enumerate() {
+            let m = v2_by(
+                envelope_from(kp, wave, (10 * wave) as u8 + i as u8, None),
+                kp,
+                CHAIN_ID,
+            );
+            let server = s.server.clone();
+            accepted.push(tokio::spawn(async move {
+                server.messaging_submit_sponsored(request(&m)).await
+            }));
+        }
+        // Among them, a request without a version-2 signature.
+        let unsigned = envelope_from(&heidi(), 9, 99, None);
+        let server = s.server.clone();
+        let refused =
+            tokio::spawn(
+                async move { server.messaging_submit_sponsored(request(&unsigned)).await },
+            );
+        for task in accepted {
+            let r = task.await.unwrap();
+            assert!(r.is_ok(), "{r:?}");
+        }
+        assert!(refused.await.unwrap().is_err());
+        assert_eq!(
+            s.pending_sponsor_nonces(),
+            (0..5 * (wave + 1)).collect::<Vec<_>>(),
+            "wave {wave}: distinct and contiguous"
+        );
+    }
+    let (carried, receipts) = s.publish_pool(1);
+    assert_eq!(
+        carried.iter().map(|t| t.nonce()).collect::<Vec<_>>(),
+        (0..10).collect::<Vec<_>>(),
+        "carried in nonce order"
+    );
+    assert_eq!(
+        statuses(&receipts),
+        vec![(TxStatus::Success, RELAY_FEE); 10]
+    );
+    assert_eq!(s.sponsor_nonce(), 10);
+    for kp in &senders {
+        assert_eq!(s.messaging_nonce(kp), 2);
+    }
+}
+
+/// A failure does not strand the relays after it:
+/// - a relayed transaction that leaves the pool without being carried (as an
+///   eviction would) leaves a gap, and the next relay fills it;
+/// - an envelope refused in the block (its sender's own direct message,
+///   carried first, moved her messaging nonce) is charged and spends its
+///   sponsor nonce, so the relayed transactions after it still execute.
+#[tokio::test]
+async fn a_failure_does_not_strand_the_relays_after_it() {
+    use sumchain_primitives::messaging::SendMessageData;
+    use sumchain_primitives::{MessagingOperation, MessagingTxData};
+    let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
+    let carol_env = s.relay(&v2(envelope(0, 1, None))).await.unwrap();
+    let alice_env = s
+        .relay(&v2_by(
+            envelope_from(&alice(), 0, 2, None),
+            &alice(),
+            CHAIN_ID,
+        ))
+        .await
+        .unwrap();
+    let dave_env = s
+        .relay(&v2_by(
+            envelope_from(&dave(), 0, 3, None),
+            &dave(),
+            CHAIN_ID,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(s.pending_sponsor_nonces(), vec![0, 1, 2]);
+
+    assert!(s
+        .mempool
+        .remove(&Hash::from_hex(&alice_env).unwrap())
+        .is_some());
+    let heidi_env = s
+        .relay(&v2_by(
+            envelope_from(&heidi(), 0, 4, None),
+            &heidi(),
+            CHAIN_ID,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        s.pending_sponsor_nonces(),
+        vec![0, 1, 2],
+        "the gap is filled"
+    );
+
+    let rh = recipient_hash(&bob().address());
+    let direct = s.outer(
+        &carol(),
+        0,
+        2 * RELAY_FEE,
+        MessagingTxData {
+            operation: MessagingOperation::SendMessageDirect,
+            data: bincode::serialize(&SendMessageData {
+                message_data: valid_message(rh),
+                recipient_hash: rh,
+            })
+            .unwrap(),
+        },
+    );
+    s.mempool.add(direct.clone()).unwrap();
+    let (carried, receipts) = s.publish_pool(1);
+    assert_eq!(
+        carried[0].hash(),
+        direct.hash(),
+        "the higher fee is carried first"
+    );
+    let by = by_hash(&carried, &receipts);
+    assert_eq!(
+        by[&direct.hash().to_hex()],
+        (TxStatus::Success, 2 * RELAY_FEE)
+    );
+    assert_eq!(by[&carol_env], (TxStatus::Failed(7), RELAY_FEE));
+    assert_eq!(by[&heidi_env], (TxStatus::Success, RELAY_FEE));
+    assert_eq!(by[&dave_env], (TxStatus::Success, RELAY_FEE));
+    assert_eq!(s.sponsor_nonce(), 3);
+    assert_eq!(s.balance(&sponsor()), SPONSOR_FUNDS - 3 * RELAY_FEE);
+    assert_eq!(
+        (
+            s.messaging_nonce(&carol()),
+            s.messaging_nonce(&heidi()),
+            s.messaging_nonce(&dave()),
+            s.messaging_nonce(&alice())
+        ),
+        (1, 1, 1, 0)
+    );
+}
+
+/// The envelope gate at H = 3, the accounting gate absent. At each height the
+/// relay accepts what the next block will execute: at H-1 both forms, at H
+/// and H+1 only the version-2 envelope; every envelope it accepted and that is
+/// carried at the height it judged succeeds. Two envelopes relayed at H-1 are
+/// left pending across H: carried at H, the string-form one is refused
+/// (`Failed(7)`, no fee with this gate absent) and the version-2 one
+/// succeeds.
+#[tokio::test]
+async fn the_envelope_boundary_at_h_minus_1_h_and_h_plus_1() {
+    const H: u64 = 3;
+    let s = serve(&genesis_on(CHAIN_ID, Some(H), None));
+    s.publish(1, Vec::new());
+
+    // The next block is H-1.
+    let s_a = s.relay(&v1(envelope(0, 1, None))).await.unwrap();
+    let v_a = s
+        .relay(&v2_by(
+            envelope_from(&alice(), 0, 2, None),
+            &alice(),
+            CHAIN_ID,
+        ))
+        .await
+        .unwrap();
+    let s_x = s.relay(&v1(envelope(0, 3, None))).await.unwrap();
+    let v_x = s
+        .relay(&v2_by(
+            envelope_from(&dave(), 0, 4, None),
+            &dave(),
+            CHAIN_ID,
+        ))
+        .await
+        .unwrap();
+    let r = s.publish(H - 1, pooled(&s, &[&s_a, &v_a]));
+    assert_eq!(
+        statuses(&r),
+        vec![(TxStatus::Success, RELAY_FEE); 2],
+        "at H-1"
+    );
+
+    // The next block is H.
+    let err = s
+        .relay(&v1(envelope(0, 5, None)))
+        .await
+        .expect_err("the string form is refused from H");
+    assert!(err.message().contains("version-2"), "{err}");
+    let v_b = s
+        .relay(&v2_by(
+            envelope_from(&alice(), 1, 6, None),
+            &alice(),
+            CHAIN_ID,
+        ))
+        .await
+        .unwrap();
+    let r = s.publish(H, pooled(&s, &[&s_x, &v_x, &v_b]));
+    assert_eq!(
+        statuses(&r),
+        vec![
+            (TxStatus::Failed(7), 0),
+            (TxStatus::Success, RELAY_FEE),
+            (TxStatus::Success, RELAY_FEE)
+        ],
+        "at H: the string-form envelope relayed at H-1 is refused, the version-2 ones succeed"
+    );
+
+    // The next block is H+1.
+    let err = s
+        .relay(&v1(envelope(1, 7, None)))
+        .await
+        .expect_err("the string form is refused after H");
+    assert!(err.message().contains("version-2"), "{err}");
+    let v_c = s
+        .relay(&v2_by(
+            envelope_from(&dave(), 1, 8, None),
+            &dave(),
+            CHAIN_ID,
+        ))
+        .await
+        .unwrap();
+    let r = s.publish(H + 1, pooled(&s, &[&v_c]));
+    assert_eq!(statuses(&r), vec![(TxStatus::Success, RELAY_FEE)], "at H+1");
+
+    assert_eq!(
+        (
+            s.messaging_nonce(&carol()),
+            s.messaging_nonce(&alice()),
+            s.messaging_nonce(&dave())
+        ),
+        (1, 2, 2)
+    );
+}
+
+/// Both gates at H = 3. Relayed at H-1, below the accounting gate, relayed
+/// messages share the committed sponsor nonce, as they always have; two of
+/// them carried at H-1 succeed. Three more relayed at H-1 are left pending
+/// across H, all at sponsor nonce 0. From H a messaging transaction advances
+/// the sponsor's nonce, so in the block at H only the first of the three
+/// carried executes (the string-form one would be refused and charged); the
+/// other two take `InvalidNonce`, uncharged, and their messages are not
+/// delivered. A message relayed at H takes sponsor nonce 1 and succeeds.
+/// This is the boundary cost of the accounting gate for relays in flight.
+#[tokio::test]
+async fn relays_in_flight_across_both_gates() {
+    const H: u64 = 3;
+    let s = serve(&genesis_on(CHAIN_ID, Some(H), Some(H)));
+    s.publish(1, Vec::new());
+
+    // The next block is H-1.
+    let on_time_string = s.relay(&v1(envelope(0, 1, None))).await.unwrap();
+    let on_time_v2 = s
+        .relay(&v2_by(
+            envelope_from(&grace(), 0, 2, None),
+            &grace(),
+            CHAIN_ID,
+        ))
+        .await
+        .unwrap();
+    let crossing = [
+        s.relay(&v1(envelope(0, 3, None))).await.unwrap(),
+        s.relay(&v2_by(
+            envelope_from(&dave(), 0, 4, None),
+            &dave(),
+            CHAIN_ID,
+        ))
+        .await
+        .unwrap(),
+        s.relay(&v2_by(
+            envelope_from(&alice(), 0, 5, None),
+            &alice(),
+            CHAIN_ID,
+        ))
+        .await
+        .unwrap(),
+    ];
+    assert_eq!(s.pending_sponsor_nonces(), vec![0; 5]);
+    let r = s.publish(H - 1, pooled(&s, &[&on_time_string, &on_time_v2]));
+    assert_eq!(statuses(&r), vec![(TxStatus::Success, RELAY_FEE); 2]);
+    assert_eq!(s.sponsor_nonce(), 0);
+    assert_eq!(s.balance(&sponsor()), SPONSOR_FUNDS);
+
+    // The next block is H.
+    assert!(s.relay(&v1(envelope(1, 6, None))).await.is_err());
+    let at_h = s
+        .relay(&v2_by(
+            envelope_from(&heidi(), 0, 7, None),
+            &heidi(),
+            CHAIN_ID,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(s.pending_sponsor_nonces(), vec![0, 0, 0, 1]);
+    let (carried, receipts) = s.publish_pool(H);
+    let by = by_hash(&carried, &receipts);
+    let executed: Vec<&String> = crossing
+        .iter()
+        .filter(|h| by[*h].0 != TxStatus::InvalidNonce)
+        .collect();
+    assert_eq!(executed.len(), 1, "one of the three spends sponsor nonce 0");
+    let expected = if *executed[0] == crossing[0] {
+        (TxStatus::Failed(7), RELAY_FEE)
+    } else {
+        (TxStatus::Success, RELAY_FEE)
+    };
+    assert_eq!(by[executed[0]], expected);
+    for h in crossing.iter().filter(|h| *h != executed[0]) {
+        assert_eq!(by[h], (TxStatus::InvalidNonce, 0));
+    }
+    assert_eq!(by[&at_h], (TxStatus::Success, RELAY_FEE));
+    assert_eq!(s.sponsor_nonce(), 2);
+    assert_eq!(s.balance(&sponsor()), SPONSOR_FUNDS - 2 * RELAY_FEE);
+}
+
 /// Every messaging RPC that shows a payment agrees with the executed outcome
 /// (the receipt and the escrow rows), case by case: an accepted relayed
 /// message; relayed envelopes refused in the block for an amount, for a
