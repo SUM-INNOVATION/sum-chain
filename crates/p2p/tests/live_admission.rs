@@ -72,18 +72,12 @@ struct Live {
 /// collide, and nothing here knows which ports are free. That is only usable
 /// because the bind is reported — see [`NetworkEvent::Listening`].
 async fn start(label: &str) -> Live {
-    start_with(label, sumchain_p2p::sync::SYNC_REQUEST_TIMEOUT).await
-}
-
-/// [`start`], with outbound sync requests timing out after `request_timeout`.
-async fn start_with(label: &str, request_timeout: Duration) -> Live {
     let config = NetworkConfig {
         listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
         bootnodes: Vec::new(),
         enable_mdns: false,
         // A fresh random key per node, because `node_key_file` is `None`.
         node_key_file: None,
-        sync_request_timeout: request_timeout,
         ..Default::default()
     };
     let (service, command_rx) = NetworkService::with_limits(config, ConnectionLimits::default());
@@ -362,111 +356,4 @@ async fn a_ban_closes_the_live_session_and_refuses_every_redial_until_it_is_lift
         "once the ban is lifted the very same peer connects on the very same \
          address, so the refusal above was the ban and not the harness"
     );
-}
-
-/// A `GetProtocolId` that fails is reported as `ProtocolIdUnanswered`, which
-/// is what moves the asking node's view of the peer from `Pending` to
-/// `Undeclared`. Two ways to fail are driven: an error answer, and no answer
-/// before the request timeout. Neither is reported as a declaration or as a
-/// generic sync failure.
-///
-/// The control is the same request answered: a declaration, not a failure.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_failed_protocol_id_request_is_reported_as_unanswered() {
-    let mut a = start_with("A", Duration::from_secs(2)).await;
-    let mut b = start("B").await;
-    let (aid, bid) = (a.peer_id, b.peer_id);
-
-    b.commands
-        .send(NetworkCommand::Dial(a.addr.clone()))
-        .await
-        .expect("dial queued");
-    for (rx, label, other) in [(&mut a.events, "A", bid), (&mut b.events, "B", aid)] {
-        await_event(
-            rx,
-            label,
-            "PeerConnected",
-            |e| matches!(e, NetworkEvent::PeerConnected(p) if *p == other),
-        )
-        .await;
-    }
-
-    // Each failure must arrive as `ProtocolIdUnanswered` and as nothing else.
-    let unanswered = |e: &NetworkEvent| {
-        assert!(
-            !matches!(
-                e,
-                NetworkEvent::ProtocolIdResponse { .. }
-                    | NetworkEvent::SyncRequestFailed {
-                        request: sumchain_p2p::SyncRequestKind::ProtocolId,
-                        ..
-                    }
-            ),
-            "a failed digest request must be reported as unanswered: {e:?}"
-        );
-        matches!(e, NetworkEvent::ProtocolIdUnanswered { peer } if *peer == bid)
-    };
-    let request_from_a = |e: &NetworkEvent| match e {
-        NetworkEvent::ProtocolIdRequest { request_id, peer } if *peer == aid => Some(*request_id),
-        _ => None,
-    };
-
-    // 1. An error answer.
-    a.commands
-        .send(NetworkCommand::RequestProtocolId(bid))
-        .await
-        .expect("request queued");
-    let mut id = None;
-    await_event(&mut b.events, "B", "ProtocolIdRequest(A)", |e| {
-        id = request_from_a(e);
-        id.is_some()
-    })
-    .await;
-    b.commands
-        .send(NetworkCommand::SendSyncErrorResponse {
-            request_id: id.unwrap(),
-            error: "refused".to_string(),
-        })
-        .await
-        .expect("answer queued");
-    await_event(&mut a.events, "A", "ProtocolIdUnanswered(B)", unanswered).await;
-
-    // 2. No answer before the request timeout.
-    a.commands
-        .send(NetworkCommand::RequestProtocolId(bid))
-        .await
-        .expect("request queued");
-    await_event(&mut b.events, "B", "ProtocolIdRequest(A)", |e| {
-        request_from_a(e).is_some()
-    })
-    .await;
-    await_event(&mut a.events, "A", "ProtocolIdUnanswered(B)", unanswered).await;
-
-    // The control: answered, it is a declaration.
-    a.commands
-        .send(NetworkCommand::RequestProtocolId(bid))
-        .await
-        .expect("request queued");
-    let mut id = None;
-    await_event(&mut b.events, "B", "ProtocolIdRequest(A)", |e| {
-        id = request_from_a(e);
-        id.is_some()
-    })
-    .await;
-    let digest = sumchain_primitives::Hash::hash(b"B's digest");
-    b.commands
-        .send(NetworkCommand::SendProtocolIdResponse {
-            request_id: id.unwrap(),
-            digest,
-        })
-        .await
-        .expect("answer queued");
-    await_event(&mut a.events, "A", "ProtocolIdResponse(B)", |e| {
-        assert!(
-            !matches!(e, NetworkEvent::ProtocolIdUnanswered { .. }),
-            "an answered request is not unanswered: {e:?}"
-        );
-        matches!(e, NetworkEvent::ProtocolIdResponse { peer, digest: d } if *peer == bid && *d == digest)
-    })
-    .await;
 }

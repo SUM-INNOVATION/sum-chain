@@ -121,10 +121,9 @@ enum Route {
     /// blocks to a peer cannot move this node's head, and refusing above the
     /// enforcement height would cut off every node still catching up.
     ServesReads,
-    /// The compatibility handshake itself — an arm that decides what this node
-    /// has PROVEN about a peer: the connection that asks, the answer, and the
-    /// failed request. It must make its `PeerCompatRegistry` transition, and it
-    /// must not touch consensus.
+    /// The compatibility handshake itself — the arm that decides what this node
+    /// has PROVEN about a peer. It must reach `PeerCompatRegistry`, and it must
+    /// not touch consensus.
     DecidesCompat,
     /// Reaches the mempool, which is a different surface with a different gate
     /// (`Mempool::add` plus the activation-aware admission gate the node keeps
@@ -171,17 +170,13 @@ fn classify(event: &NetworkEvent) -> (&'static str, Route) {
         // Serving the peer, not hearing it.
         NetworkEvent::SyncStatusRequest { .. } => ("SyncStatusRequest", Route::ServesReads),
         NetworkEvent::SyncBlocksRequest { .. } => ("SyncBlocksRequest", Route::ServesReads),
-        // The handshake: the answer, and the request that failed. Each resolves
-        // a `Pending` peer.
+        // The handshake.
         NetworkEvent::ProtocolIdResponse { .. } => ("ProtocolIdResponse", Route::DecidesCompat),
-        NetworkEvent::ProtocolIdUnanswered { .. } => ("ProtocolIdUnanswered", Route::DecidesCompat),
         // Answering "which rules does this binary enforce" reads a digest fixed
         // at boot and reaches no engine.
         NetworkEvent::ProtocolIdRequest { .. } => ("ProtocolIdRequest", Route::Inert),
         NetworkEvent::TransactionReceived(_) => ("TransactionReceived", Route::IntoMempool),
-        // Asks the peer for its declaration and makes it `Pending`: until the
-        // answer is compared, every route above refuses it.
-        NetworkEvent::PeerConnected(_) => ("PeerConnected", Route::DecidesCompat),
+        NetworkEvent::PeerConnected(_) => ("PeerConnected", Route::Inert),
         NetworkEvent::PeerDisconnected(_) => ("PeerDisconnected", Route::Inert),
         NetworkEvent::SyncRequestFailed { .. } => ("SyncRequestFailed", Route::Inert),
         // The swarm bound an address. Carries no peer at all.
@@ -734,19 +729,10 @@ fn every_route_is_held_to_its_classification() {
                     first_sink.unwrap().1
                 );
                 if route == Route::DecidesCompat {
-                    let transition = match variant.as_str() {
-                        "ProtocolIdResponse" => "peer_compat.on_declaration(",
-                        "ProtocolIdUnanswered" => "peer_compat.on_unanswered(",
-                        "PeerConnected" => "peer_compat.on_requested(",
-                        other => panic!(
-                            "`{other}` is classified `DecidesCompat` and this guard \
-                             does not know which registry transition it must make"
-                        ),
-                    };
                     assert!(
-                        body.contains(transition),
-                        "the `{variant}` arm is part of the compatibility handshake \
-                         and does not call `{transition}`; every refusal in this \
+                        body.contains("peer_compat.on_declaration("),
+                        "the `{variant}` arm is the compatibility handshake and \
+                         does not record the declaration; every refusal in this \
                          mechanism reads the state this arm writes"
                     );
                 }

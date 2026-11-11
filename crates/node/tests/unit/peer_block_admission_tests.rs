@@ -1207,7 +1207,7 @@ async fn a_status_that_beat_the_declaration_is_asked_for_again_and_the_node_sync
             matches!(e, NetworkEvent::SyncBlocksRequest { .. })
         })
         .await;
-        assert_eq!(compat.status(&peer_id), PeerCompat::Pending);
+        assert_eq!(compat.status(&peer_id), PeerCompat::Undeclared);
         assert_eq!(consensus.current_height(), behind);
 
         // The declaration, a moment later.
@@ -1238,132 +1238,17 @@ async fn a_status_that_beat_the_declaration_is_asked_for_again_and_the_node_sync
     assert!(BlockStore::new(&node.db).contains(&tip.hash()).unwrap());
 }
 
-/// The same gap below the boundary, where it is new: a status from a peer
-/// whose declaration is still in flight is not acted on in phase one either.
+/// The same gap on the sync route: a batch cut at the enforcement height
+/// before the peer declared.
 ///
-/// A fresh node below the boundary used to take an undeclared peer's status,
-/// and its blocks, as soon as they arrived. Now the peer is `Pending` until its
-/// declaration is compared: the status is ignored and nothing is requested.
-/// The declaration asks for the status again, and the node then syncs across
-/// the boundary in one stream.
+/// A fresh node below the boundary takes an undeclared peer's status and its
+/// blocks, as it should. The batch crosses the boundary and is cut there, the
+/// request for the rest is cut again, and the sync loop stops. The declaration
+/// that arrives afterwards must start it again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_status_from_a_pending_peer_below_the_boundary_is_asked_for_again_on_resolution() {
+async fn a_batch_cut_at_the_boundary_before_the_declaration_is_fetched_again() {
     let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
     let tip = blocks.last().expect("a chain").clone();
-    let dir = tempfile::TempDir::new().expect("temp dir");
-
-    let mut peer = ScriptedPeer::start().await;
-    let peer_id = peer.id();
-    let mut node = full_node(dir.path(), &genesis, Some(peer.dial.as_str()));
-    let (compat, consensus, digest) = (
-        node.peer_compat.clone(),
-        node.consensus.clone(),
-        node.protocol_digest,
-    );
-
-    drive(&mut node, async {
-        let (node_id, digest_req, status_req) = peer.connected().await;
-
-        // Below the boundary, and still ignored: the peer is pending.
-        peer.answer_status(status_req, &tip).await;
-        assert_eq!(peer.node_height(node_id).await, 0);
-        peer.quiet("a block request before the peer declared", |e| {
-            matches!(e, NetworkEvent::SyncBlocksRequest { .. })
-        })
-        .await;
-        assert_eq!(compat.status(&peer_id), PeerCompat::Pending);
-        assert!(!compat.may_participate_in_consensus(&peer_id, 1));
-        assert_eq!(consensus.current_height(), 0);
-
-        // The declaration asks again, and the node syncs to the tip.
-        peer.declare(digest_req, digest).await;
-        let again = peer
-            .status_request(node_id, "second status request after the peer declared")
-            .await;
-        assert_eq!(compat.status(&peer_id), PeerCompat::Verified);
-        peer.answer_status(again, &tip).await;
-        assert_eq!(peer.serve_blocks(node_id, &blocks).await, (1, tip.height()));
-        assert!(
-            eventually(|| consensus.current_height() == tip.height()).await,
-            "the node never synced; it is at {}",
-            consensus.current_height()
-        );
-        assert_eq!(peer.status_requests, 2);
-    })
-    .await;
-}
-
-/// A peer whose request fails is `Undeclared`: the status it gave while
-/// `Pending` is asked for again, its blocks below the boundary are imported,
-/// and its batch is cut at the boundary.
-///
-/// The scripted peer never answers the digest request, so it times out on the
-/// node's side, as it does for a peer whose binary cannot decode it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unanswered_request_admits_below_the_boundary_and_cuts_the_batch_at_it() {
-    let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
-    let tip = blocks.last().expect("a chain").clone();
-    let dir = tempfile::TempDir::new().expect("temp dir");
-
-    let mut peer = ScriptedPeer::start().await;
-    let peer_id = peer.id();
-    let mut node = full_node_with_request_timeout(
-        dir.path(),
-        &genesis,
-        Some(peer.dial.as_str()),
-        Duration::from_secs(2),
-    );
-    let (compat, consensus, metrics) = (
-        node.peer_compat.clone(),
-        node.consensus.clone(),
-        node.metrics.clone(),
-    );
-
-    drive(&mut node, async {
-        let (node_id, _digest_req, status_req) = peer.connected().await;
-        peer.answer_status(status_req, &tip).await;
-        assert_eq!(compat.status(&peer_id), PeerCompat::Pending);
-
-        // The digest request times out; the status is asked for again.
-        let again = peer
-            .status_request(node_id, "a status request after the digest request failed")
-            .await;
-        assert_eq!(compat.status(&peer_id), PeerCompat::Undeclared);
-        peer.answer_status(again, &tip).await;
-
-        // Below the boundary its blocks are imported, and both block requests
-        // are cut at the boundary.
-        assert_eq!(peer.serve_blocks(node_id, &blocks).await, (1, tip.height()));
-        assert_eq!(
-            peer.serve_blocks(node_id, &blocks).await,
-            (ENFORCE_FROM, tip.height())
-        );
-        assert!(
-            eventually(|| metrics.blocks.block_errors.load(Ordering::Relaxed) == 2).await,
-            "both batches must have been cut at height {ENFORCE_FROM}"
-        );
-        assert_eq!(consensus.current_height(), ENFORCE_FROM - 1);
-        peer.quiet("another request after the batch was cut", |e| {
-            matches!(
-                e,
-                NetworkEvent::SyncBlocksRequest { .. } | NetworkEvent::SyncStatusRequest { .. }
-            )
-        })
-        .await;
-        assert_eq!(compat.status(&peer_id), PeerCompat::Undeclared);
-        assert_eq!(peer.status_requests, 2);
-    })
-    .await;
-}
-
-/// A block gossiped by a peer whose declaration is still in flight is not
-/// imported, below the boundary as above it; it arrives by sync once the peer
-/// declares.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_block_gossiped_by_a_pending_peer_below_the_boundary_is_fetched_after_it_declares() {
-    let (_v, _f, genesis, blocks, _producer_dir) = a_chain().await;
-    let one = blocks[0].clone();
-    assert!(one.height() < ENFORCE_FROM);
     let dir = tempfile::TempDir::new().expect("temp dir");
 
     let mut peer = ScriptedPeer::start().await;
@@ -1375,51 +1260,50 @@ async fn a_block_gossiped_by_a_pending_peer_below_the_boundary_is_fetched_after_
         node.metrics.clone(),
         node.protocol_digest,
     );
-    let genesis_hash = one.header.parent_hash;
 
     drive(&mut node, async {
         let (node_id, digest_req, status_req) = peer.connected().await;
 
-        // Published until the node has refused it, as in the test below.
-        let deadline = Instant::now() + WAIT;
-        while metrics.blocks.block_errors.load(Ordering::Relaxed) == 0 {
-            assert!(
-                Instant::now() < deadline,
-                "the gossiped block never reached the node"
-            );
-            peer.send(NetworkCommand::BroadcastBlock(one.clone())).await;
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        assert_eq!(compat.status(&peer_id), PeerCompat::Pending);
-        assert_eq!(consensus.current_height(), 0);
-
-        // The declaration, then the status the peer gave before it produced
-        // the block: taken now, and level with the node. The refused block is
-        // fetched by the status asked for again.
-        peer.declare(digest_req, digest).await;
-        assert!(eventually(|| compat.status(&peer_id) == PeerCompat::Verified).await);
-        peer.send(NetworkCommand::SendSyncStatusResponse {
-            request_id: status_req,
-            height: 0,
-            best_hash: genesis_hash,
-            chain_id: CHAIN_ID,
+        // Below the boundary the undeclared peer's status is taken, and both
+        // block requests it leads to are cut at the boundary.
+        peer.answer_status(status_req, &tip).await;
+        assert_eq!(peer.serve_blocks(node_id, &blocks).await, (1, tip.height()));
+        assert_eq!(
+            peer.serve_blocks(node_id, &blocks).await,
+            (ENFORCE_FROM, tip.height())
+        );
+        assert!(
+            eventually(|| metrics.blocks.block_errors.load(Ordering::Relaxed) == 2).await,
+            "both batches must have been cut at height {ENFORCE_FROM}"
+        );
+        assert_eq!(consensus.current_height(), ENFORCE_FROM - 1);
+        peer.quiet("another request before the peer declared", |e| {
+            matches!(
+                e,
+                NetworkEvent::SyncBlocksRequest { .. } | NetworkEvent::SyncStatusRequest { .. }
+            )
         })
         .await;
+        assert_eq!(compat.status(&peer_id), PeerCompat::Undeclared);
+
+        // The declaration restarts the sync.
+        peer.declare(digest_req, digest).await;
         let again = peer
             .status_request(node_id, "second status request after the peer declared")
             .await;
-        peer.answer_status(again, &one).await;
-        assert_eq!(peer.serve_blocks(node_id, &blocks).await, (1, 1));
+        peer.answer_status(again, &tip).await;
+        assert_eq!(
+            peer.serve_blocks(node_id, &blocks).await,
+            (ENFORCE_FROM, tip.height())
+        );
         assert!(
-            eventually(|| consensus.current_height() == 1).await,
-            "the node never fetched the block it refused; it is at {}",
+            eventually(|| consensus.current_height() == tip.height()).await,
+            "the node never synced past the boundary; it is at {}",
             consensus.current_height()
         );
         assert_eq!(peer.status_requests, 2);
     })
     .await;
-
-    assert!(BlockStore::new(&node.db).contains(&one.hash()).unwrap());
 }
 
 /// And the third route: a gossiped block refused before the peer declared.
@@ -1463,7 +1347,7 @@ async fn a_gossiped_block_refused_before_the_declaration_is_fetched_again() {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         assert_eq!(consensus.current_height(), behind);
-        assert_eq!(compat.status(&peer_id), PeerCompat::Pending);
+        assert_eq!(compat.status(&peer_id), PeerCompat::Undeclared);
 
         // The declaration, then the status the peer gave before it produced
         // the block: taken now, and level with the node.
@@ -1594,7 +1478,7 @@ async fn a_missed_block_whose_peer_declares_late_is_fetched_once() {
             matches!(e, NetworkEvent::SyncBlocksRequest { .. })
         })
         .await;
-        assert_eq!(compat.status(&peer_id), PeerCompat::Pending);
+        assert_eq!(compat.status(&peer_id), PeerCompat::Undeclared);
         assert_eq!(consensus.current_height(), head);
 
         // The declaration, then the status given before the peer produced

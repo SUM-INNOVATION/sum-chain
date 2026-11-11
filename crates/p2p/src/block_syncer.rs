@@ -12,7 +12,7 @@ use sumchain_primitives::{Block, BlockHeight, Hash};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn, error};
 
-use crate::peer_compat::{PeerCompat, PeerCompatRegistry};
+use crate::peer_compat::PeerCompatRegistry;
 use crate::{NetworkCommand, SyncState, MAX_BLOCKS_PER_REQUEST};
 
 /// Configuration for block syncer
@@ -105,11 +105,10 @@ pub struct BlockSyncer {
     /// stops being admitted, and what every peer has declared so far.
     ///
     /// One object rather than a digest plus a `HashSet<PeerId>`, because the
-    /// peer states are not two: "declared a different digest", "not answered
-    /// yet", "will not answer" and "declared ours" are distinguished; the
-    /// second is refused in both phases, and above the enforcement height the
-    /// third is refused without ever being called incompatible. See
-    /// [`crate::peer_compat`].
+    /// three peer states are not two: "declared a different digest", "declared
+    /// nothing yet" and "declared ours" are distinguished, and above the
+    /// enforcement height the middle one is refused without ever being called
+    /// incompatible. See [`crate::peer_compat`].
     compat: PeerCompatRegistry,
     /// Current local height
     local_height: RwLock<BlockHeight>,
@@ -213,10 +212,9 @@ impl BlockSyncer {
         debug!("Block syncer: new peer connected {}", peer_id);
 
         // Ask what rules it enforces BEFORE anything it says is used. The two
-        // requests are independent and may answer in either order, so the peer
-        // is `Pending` until its declaration is compared: a status that wins
-        // the race is ignored, and asked for again once the peer is resolved.
-        self.compat.on_requested(peer_id);
+        // requests are independent and may answer in either order, which is why
+        // the refusal is recorded in `incompatible` rather than applied only at
+        // the moment a digest arrives.
         if let Err(e) = self
             .command_tx
             .send(NetworkCommand::RequestProtocolId(peer_id))
@@ -293,12 +291,7 @@ impl BlockSyncer {
     ///   enforces different rules.
     /// * The peer declares NOTHING — a node built before `GetProtocolId`
     ///   existed cannot decode the request and answers with an inbound failure.
-    ///   It is NOT refused: the failure leaves it `Undeclared`
-    ///   ([`Self::on_protocol_id_unanswered`]), as usable below the enforcement
-    ///   height as it is today.
-    ///
-    /// Until one of the three has happened on the current connection the peer
-    /// is `Pending`, and nothing it says is used.
+    ///   It is NOT refused. It stays exactly as usable as it is today.
     ///
     /// Only the second case is new behaviour, and no node that predates this
     /// change can ever fall into it: producing a mismatching digest requires
@@ -306,13 +299,8 @@ impl BlockSyncer {
     /// today's validators would be worse than the defect it closes, so the
     /// absence of an answer is deliberately not evidence of anything.
     pub fn on_protocol_id_response(&self, peer_id: PeerId, digest: Hash) -> bool {
-        let was_pending = self.compat.status(&peer_id) == PeerCompat::Pending;
         if self.compat.on_declaration(peer_id, digest) {
             debug!("Peer {} declared a matching protocol digest", peer_id);
-            // A status it gave while `Pending` was ignored: ask again.
-            if was_pending {
-                self.request_status_after_resolution(peer_id);
-            }
             return true;
         }
 
@@ -340,36 +328,6 @@ impl BlockSyncer {
             );
         }
         false
-    }
-
-    /// Handle the failure of this node's `GetProtocolId` to a peer: it cannot
-    /// decode the request, answered with an error, or did not answer in time.
-    ///
-    /// The peer leaves `Pending` for `Undeclared`, which the two-phase rule
-    /// admits below the enforcement height and refuses at or above it. If it
-    /// is admitted, the status it gave while `Pending` was ignored, so it is
-    /// asked again.
-    pub fn on_protocol_id_unanswered(&self, peer_id: PeerId) {
-        if !self.compat.on_unanswered(peer_id) {
-            return;
-        }
-        debug!("Peer {} did not declare a protocol digest", peer_id);
-        let next = *self.local_height.read() + 1;
-        if self.may_supply_blocks(&peer_id, next) {
-            self.request_status_after_resolution(peer_id);
-        }
-    }
-
-    /// Ask a peer whose declaration was just resolved for its status again.
-    /// `try_send` for the same reason as the disconnect in
-    /// [`Self::on_protocol_id_response`].
-    fn request_status_after_resolution(&self, peer_id: PeerId) {
-        if let Err(e) = self
-            .command_tx
-            .try_send(NetworkCommand::RequestSyncStatus(peer_id))
-        {
-            warn!("Failed to request sync status from {}: {}", peer_id, e);
-        }
     }
 
     /// Handle sync status response from peer

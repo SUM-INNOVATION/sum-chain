@@ -215,8 +215,7 @@ pub enum NetworkEvent {
         tag: Option<SyncRequestTag>,
     },
     /// Sync request failed: an error answer, a timeout, or the connection
-    /// closing before the answer. A failed `GetProtocolId` is reported as
-    /// [`NetworkEvent::ProtocolIdUnanswered`] instead.
+    /// closing before the answer.
     SyncRequestFailed {
         peer: PeerId,
         error: String,
@@ -233,21 +232,12 @@ pub enum NetworkEvent {
     ///
     /// Only peers new enough to understand `SyncRequest::GetProtocolId` ever
     /// produce this. An older peer produces an inbound failure instead, which
-    /// arrives as [`NetworkEvent::ProtocolIdUnanswered`] and leaves the peer
-    /// UNDECLARED rather than refused — see `BlockSyncer::on_protocol_id_response`.
+    /// arrives as `SyncRequestFailed` and leaves the peer UNVERIFIED rather than
+    /// refused — see `BlockSyncer::on_protocol_id_response`.
     ProtocolIdResponse {
         peer: PeerId,
         digest: sumchain_primitives::Hash,
     },
-    /// This node's `GetProtocolId` to `peer` failed: the peer could not decode
-    /// it (it predates the request), answered with an error, or did not answer
-    /// before the request timeout, or the connection closed first.
-    ///
-    /// The peer has declared nothing on this connection and will not:
-    /// `PeerCompatRegistry::on_unanswered` moves it from `Pending` to
-    /// `Undeclared`, which the two-phase rule admits below the enforcement
-    /// height and refuses at or above it. A local Rust enum, not a wire type.
-    ProtocolIdUnanswered { peer: PeerId },
     /// The swarm bound a listen address, and this is the address it bound.
     ///
     /// # Why this exists
@@ -1114,7 +1104,11 @@ impl NetworkService {
                         }
                         SyncResponse::Error(error) => {
                             warn!("Sync error from {}: {}", peer, error);
-                            let _ = self.event_tx.send(Self::failure_event(peer, error, kind));
+                            let _ = self.event_tx.send(NetworkEvent::SyncRequestFailed {
+                                peer,
+                                error,
+                                request: kind,
+                            });
                         }
                     }
                 }
@@ -1126,8 +1120,11 @@ impl NetworkService {
                     .write()
                     .remove(&request_id)
                     .unwrap_or(SyncRequestKind::Unknown);
-                let event = Self::failure_event(peer, format!("{error:?}"), request);
-                let _ = self.event_tx.send(event);
+                let _ = self.event_tx.send(NetworkEvent::SyncRequestFailed {
+                    peer,
+                    error: format!("{:?}", error),
+                    request,
+                });
             }
             Event::InboundFailure { peer, error, .. } => {
                 warn!("Inbound sync request from {} failed: {:?}", peer, error);
@@ -1135,21 +1132,6 @@ impl NetworkService {
             Event::ResponseSent { peer, .. } => {
                 debug!("Sync response sent to {}", peer);
             }
-        }
-    }
-
-    /// The event reporting that `request` to `peer` failed with `error`.
-    ///
-    /// A failed `GetProtocolId` is its own event: the peer will not declare on
-    /// this connection, which is a compatibility fact rather than a sync one.
-    fn failure_event(peer: PeerId, error: String, request: SyncRequestKind) -> NetworkEvent {
-        match request {
-            SyncRequestKind::ProtocolId => NetworkEvent::ProtocolIdUnanswered { peer },
-            _ => NetworkEvent::SyncRequestFailed {
-                peer,
-                error,
-                request,
-            },
         }
     }
 
