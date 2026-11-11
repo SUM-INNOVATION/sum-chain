@@ -1441,6 +1441,18 @@ impl RpcServer {
     /// the other way round, the committed nonce could predate the block and
     /// the pool no longer hold its transactions, and the relay would sign at a
     /// nonce the block already used.
+    ///
+    /// A chain switch is the exception: the engine offers the abandoned
+    /// branch's transactions back to the pool only after the switch has
+    /// committed, so for that moment the committed nonce has gone back while
+    /// the returned wrappers are not yet held. A request in that window can be
+    /// given a nonce a returned wrapper holds; one of the two then takes
+    /// `InvalidNonce`, uncharged, and its client asks for a fresh wrapper (the
+    /// protocol in the `messaging_submitSponsored` API doc).
+    ///
+    /// The allocation assumes one relay process per sponsor key: a second
+    /// process holding the same key allocates from its own pool and lock, and
+    /// the two collide. Operate one relay per sponsor key.
     fn relay_sponsor_nonce(
         &self,
         sponsor: &Address,
