@@ -2,14 +2,17 @@
 //! gate across a chain switch, on a real engine.
 //!
 //! Two off-node builders, each on its own database over the same genesis,
-//! share a two-block prefix below the gates and then produce competing
-//! branches at and above them: relayed envelopes accepted under the version-2
-//! rule, one refused and charged, each branch moving the named sender's
-//! messaging nonce and the relayers' accounts differently. The node under test
-//! only imports. After each switch its messaging and account state must be,
-//! row for row, the state of the builder whose branch it adopted, with the
-//! abandoned branch's receipts gone and the adopted branch's receipts, fees
-//! included, present. Same shape as `branch_state_reorg.rs`.
+//! produce competing branches. In the first test they share a two-block
+//! prefix below the gates and fork at and above them: relayed envelopes
+//! accepted under the version-2 rule, one refused and charged, each branch
+//! moving the named sender's messaging nonce and the relayers' accounts
+//! differently. In the second they fork below the gates and each branch
+//! crosses them, so a switch unwinds and re-executes blocks on both sides of
+//! the gate height together. The node under test only imports. After each
+//! switch its messaging and account state must be, row for row, the state of
+//! the builder whose branch it adopted, with the abandoned branch's receipts
+//! gone and the adopted branch's receipts, fees included, present. Same shape
+//! as `branch_state_reorg.rs`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -459,4 +462,110 @@ async fn the_envelope_and_accounting_rules_follow_a_chain_switch() {
     assert_eq!(node.receipt(&b_first), None);
     assert_eq!(node.receipt(&b_refused), None);
     assert_eq!(node.receipt(&b_second), None);
+}
+
+/// The fork point (height 1) is below the gates (`GATE` = 3), and each branch
+/// crosses them: a block below the gates (height 2, an envelope without a
+/// version-2 signature executed under the earlier rule, uncharged) and blocks
+/// at and above them (a version-2 envelope accepted; on branch A also one
+/// without a version-2 signature, refused and charged). Switching from A to B
+/// and back unwinds a block below the gates and a block at them together, and
+/// re-executes the other branch's. After each switch the node's state is the
+/// adopted builder's, row for row, its receipts are the adopted branch's, and
+/// carol's messaging nonce is the adopted branch's.
+#[tokio::test]
+async fn a_chain_switch_whose_branches_cross_the_gates() {
+    let validators = [key(1), key(2)];
+    let funded = [admin(), carol(), sponsor(), erin(), frank()];
+    let g = genesis(&validators, &funded.iter().collect::<Vec<_>>());
+    let node = Node::new(&g);
+    let mut a = Builder::new(&g, &validators);
+    let mut b = Builder::new(&g, &validators);
+    let block_1 = vec![
+        messaging_tx(
+            &admin(),
+            0,
+            op(
+                MessagingOperation::SetSponsorshipEnabled,
+                &SetSponsorshipEnabledData { enabled: true },
+            ),
+        ),
+        messaging_tx(
+            &carol(),
+            0,
+            op(
+                MessagingOperation::RegisterPublicKey,
+                &RegisterPublicKeyData {
+                    public_key: pk(&carol()),
+                },
+            ),
+        ),
+    ];
+    let a1 = a.produce(0, block_1.clone());
+    let b1 = b.produce(0, block_1);
+    assert_eq!(a1.hash(), b1.hash(), "the same block from the same bytes");
+    node.import(&a1).await;
+
+    // Branch A: height 2 below the gates, height 3 at them.
+    let a2_below = relayed(&sponsor(), 0, &carol_to_bob(9));
+    let a3_accepted = relayed(&erin(), 0, &v2(carol_to_bob(1)));
+    let a3_refused = relayed(&frank(), 0, &carol_to_bob(1));
+    let a2 = a.produce(1, vec![a2_below.clone()]);
+    let a3 = a.produce(1, vec![a3_accepted.clone(), a3_refused.clone()]);
+    // Branch B: height 2 below the gates (another envelope, by another
+    // relayer), heights 3 and 4 at and above them.
+    let b2_below = relayed(&erin(), 0, &carol_to_bob(7));
+    let b3_accepted = relayed(&frank(), 0, &v2(carol_to_bob(1)));
+    let b4_accepted = relayed(&sponsor(), 0, &v2(carol_to_bob(2)));
+    let b2 = b.produce(2, vec![b2_below.clone()]);
+    let b3 = b.produce(2, vec![b3_accepted.clone()]);
+    let b4 = b.produce(2, vec![b4_accepted.clone()]);
+
+    // ── A is canonical ──────────────────────────────────────────────────────
+    node.import(&a2).await;
+    node.import(&a3).await;
+    assert_eq!(node.engine.best_block_hash(), a3.hash());
+    assert_eq!(rows(&node.db), rows(&a.db), "the node holds A's state");
+    assert_eq!(node.receipt(&a2_below), Some((TxStatus::Success, FEE)));
+    assert_eq!(node.receipt(&a3_accepted), Some((TxStatus::Success, FEE)));
+    assert_eq!(node.receipt(&a3_refused), Some((TxStatus::Failed(7), FEE)));
+    assert_eq!(
+        a.account_nonce(&sponsor()),
+        0,
+        "below the gates: not charged"
+    );
+    assert_eq!(msg_nonce(&node.db), 2);
+
+    // ── the switch to B ─────────────────────────────────────────────────────
+    for block in [&b2, &b3, &b4] {
+        node.import(block).await;
+    }
+    assert_eq!(node.engine.best_block_hash(), b4.hash(), "switched");
+    assert_eq!(rows(&node.db), rows(&b.db), "the node holds B's state");
+    for tx in [&a2_below, &a3_accepted, &a3_refused] {
+        assert_eq!(node.receipt(tx), None, "unwound");
+    }
+    assert_eq!(node.receipt(&b2_below), Some((TxStatus::Success, FEE)));
+    assert_eq!(node.receipt(&b3_accepted), Some((TxStatus::Success, FEE)));
+    assert_eq!(node.receipt(&b4_accepted), Some((TxStatus::Success, FEE)));
+    assert_eq!(msg_nonce(&node.db), 3);
+
+    // ── and back: A grows past B ────────────────────────────────────────────
+    // Height 4 on A carries the very transaction B carried at height 4.
+    let a4_accepted = relayed(&sponsor(), 0, &v2(carol_to_bob(2)));
+    assert_eq!(a4_accepted.hash(), b4_accepted.hash());
+    let a4 = a.produce(1, vec![a4_accepted.clone()]);
+    let a5 = a.produce(1, Vec::new());
+    let a6 = a.produce(1, Vec::new());
+    for block in [&a4, &a5, &a6] {
+        node.import(block).await;
+    }
+    assert_eq!(node.engine.best_block_hash(), a6.hash(), "switched back");
+    assert_eq!(rows(&node.db), rows(&a.db), "the node holds A's state again");
+    assert_eq!(node.receipt(&b2_below), None);
+    assert_eq!(node.receipt(&b3_accepted), None);
+    assert_eq!(node.receipt(&a2_below), Some((TxStatus::Success, FEE)));
+    assert_eq!(node.receipt(&a3_refused), Some((TxStatus::Failed(7), FEE)));
+    assert_eq!(node.receipt(&a4_accepted), Some((TxStatus::Success, FEE)));
+    assert_eq!(msg_nonce(&node.db), 3);
 }
