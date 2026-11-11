@@ -407,6 +407,26 @@ pub struct Mempool {
     relayed_envelopes: RwLock<HashMap<Address, usize>>,
 }
 
+/// `picked`, with each sender's transactions in ascending nonce order.
+///
+/// Every transaction keeps its sender's set of positions: only which of that
+/// sender's transactions sits in which of its positions changes. The sort is
+/// stable, so transactions at one nonce keep their relative order.
+fn in_nonce_order_per_sender(mut picked: Vec<SignedTransaction>) -> Vec<SignedTransaction> {
+    let mut positions: HashMap<Address, Vec<usize>> = HashMap::new();
+    for (i, tx) in picked.iter().enumerate() {
+        positions.entry(tx.sender()).or_default().push(i);
+    }
+    for slots in positions.values().filter(|slots| slots.len() > 1) {
+        let mut own: Vec<SignedTransaction> = slots.iter().map(|&i| picked[i].clone()).collect();
+        own.sort_by_key(|tx| tx.nonce());
+        for (&i, tx) in slots.iter().zip(own) {
+            picked[i] = tx;
+        }
+    }
+    picked
+}
+
 /// Whether `tx` is a contract deploy or call.
 fn is_contract_transaction(tx: &SignedTransaction) -> bool {
     matches!(
@@ -1479,6 +1499,12 @@ impl Mempool {
     /// a held transaction that another block has since included, and a held
     /// envelope whose sender's nonce has since moved past it, are evicted
     /// rather than offered. See [`Self::apply_inclusion_policy`].
+    ///
+    /// Within the set carried, one sender's transactions are carried in
+    /// ascending nonce order, in the positions the fee order gave that sender:
+    /// fee then hash alone would put a sender's `N+1` before its `N` whenever
+    /// their fees tie or invert, and the `N+1` would then take an
+    /// `InvalidNonce` receipt in a block that could have carried both.
     pub fn select_for_block(&self, max_count: usize) -> Vec<SignedTransaction> {
         let (carried, evict) = {
             let by_fee = self.by_fee.read();
@@ -1501,7 +1527,7 @@ impl Mempool {
             );
             self.remove_batch(&evict);
         }
-        carried
+        in_nonce_order_per_sender(carried)
     }
 
     /// The transactions among `transactions`, in the order given, that this
@@ -1980,6 +2006,43 @@ mod tests {
         let selected = mempool.select_for_block(1);
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].fee(), 20); // Highest fee first
+    }
+
+    /// One sender's transactions are carried in nonce order, whatever their
+    /// fees; the set selected is still the highest-fee one, and another
+    /// sender's transactions keep their fee positions.
+    #[test]
+    fn one_senders_transactions_are_selected_in_nonce_order() {
+        let mempool = Mempool::new(MempoolConfig::default());
+        let sender = KeyPair::generate();
+        let other = KeyPair::generate();
+        let recipient = KeyPair::generate();
+
+        // Fees invert the sender's nonce order: 2 pays most, 0 least.
+        let n0 = create_signed_tx(&sender, recipient.address(), 1, 10, 0);
+        let n1 = create_signed_tx(&sender, recipient.address(), 1, 20, 1);
+        let n2 = create_signed_tx(&sender, recipient.address(), 1, 30, 2);
+        // Another sender between them in the fee order.
+        let o0 = create_signed_tx(&other, recipient.address(), 1, 25, 0);
+        for tx in [&n0, &n1, &n2, &o0] {
+            mempool.add(tx.clone()).unwrap();
+        }
+
+        let picked = mempool.select_for_block(10);
+        // Fee order is n2 (30), o0 (25), n1 (20), n0 (10): the sender holds
+        // positions 0, 2 and 3, the other sender position 1.
+        assert_eq!(
+            picked.iter().map(|t| t.hash()).collect::<Vec<_>>(),
+            vec![n0.hash(), o0.hash(), n1.hash(), n2.hash()]
+        );
+
+        // A cut keeps the highest-fee set and orders it: n2 and o0 are the top
+        // two, and n2 is alone for its sender.
+        let top = mempool.select_for_block(2);
+        assert_eq!(
+            top.iter().map(|t| t.hash()).collect::<Vec<_>>(),
+            vec![n2.hash(), o0.hash()]
+        );
     }
 
     #[test]
