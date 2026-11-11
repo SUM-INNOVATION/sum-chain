@@ -67,6 +67,19 @@ fn bob() -> KeyPair {
 fn sponsor() -> KeyPair {
     KeyPair::from_bytes([0x65; 32])
 }
+/// Another sponsor, which submits outer transactions directly.
+fn erin() -> KeyPair {
+    KeyPair::from_bytes([0x67; 32])
+}
+/// Two more registered senders.
+fn grace() -> KeyPair {
+    KeyPair::from_bytes([0x69; 32])
+}
+fn heidi() -> KeyPair {
+    KeyPair::from_bytes([0x6A; 32])
+}
+/// What alice, carol and erin hold, for the transactions they sign themselves.
+const ACCOUNT_FUNDS: u128 = 1_000_000_000;
 
 /// Writes the sponsor key file and points `SUMAIL_SPONSOR_KEY` at it, once
 /// for the whole test binary.
@@ -116,12 +129,13 @@ struct Served {
     state: Arc<StateManager>,
     mempool: Arc<Mempool>,
     params: ChainParams,
-    server: RpcServer,
+    server: Arc<RpcServer>,
 }
 
 /// A server over a fresh database with no block: the next block is height 1.
-/// The sponsor is funded, alice, carol and dave are registered, and
-/// sponsorship is enabled, all in committed state.
+/// The sponsor, alice, carol and erin are funded, alice, carol, dave, grace
+/// and heidi are registered, and sponsorship is enabled, all in committed
+/// state.
 fn serve(genesis: &Genesis) -> Served {
     sponsor_key_configured();
     let dir = tempfile::TempDir::new().unwrap();
@@ -158,7 +172,7 @@ fn serve(genesis: &Genesis) -> Served {
     .with_chain_params(genesis.params.clone())
     .with_genesis(genesis);
     let store = MessagingStore::new(&db);
-    for kp in [alice(), carol(), dave()] {
+    for kp in [alice(), carol(), dave(), grace(), heidi()] {
         store
             .set_public_key(
                 &kp.address(),
@@ -173,22 +187,26 @@ fn serve(genesis: &Genesis) -> Served {
             .unwrap();
     }
     store.set_sponsorship_enabled(true).unwrap();
-    sumchain_storage::StateStore::new(&db)
-        .put_account(
-            &sponsor().address(),
-            &sumchain_storage::schema::AccountState {
-                balance: SPONSOR_FUNDS,
-                nonce: 0,
-            },
-        )
-        .unwrap();
+    for (kp, balance) in [
+        (sponsor(), SPONSOR_FUNDS),
+        (alice(), ACCOUNT_FUNDS),
+        (carol(), ACCOUNT_FUNDS),
+        (erin(), ACCOUNT_FUNDS),
+    ] {
+        sumchain_storage::StateStore::new(&db)
+            .put_account(
+                &kp.address(),
+                &sumchain_storage::schema::AccountState { balance, nonce: 0 },
+            )
+            .unwrap();
+    }
     Served {
         _dir: dir,
         db,
         state,
         mempool,
         params: genesis.params.clone(),
-        server,
+        server: Arc::new(server),
     }
 }
 
@@ -198,6 +216,14 @@ impl Served {
     /// transactions leave the pool, as the node removes them.
     fn publish_pool(&self, height: u64) -> (Vec<SignedTransaction>, Vec<Receipt>) {
         let txs = self.mempool.select_for_block(1_000);
+        let receipts = self.publish(height, txs.clone());
+        (txs, receipts)
+    }
+
+    /// `txs`, in this order, executed and published as the block at `height`,
+    /// and stored as the chain's latest block, so the relay judges the next
+    /// block to be `height + 1`. The carried transactions leave the pool.
+    fn publish(&self, height: u64, txs: Vec<SignedTransaction>) -> Vec<Receipt> {
         let header = BlockHeader::new(
             Hash::ZERO,
             height,
@@ -218,10 +244,45 @@ impl Served {
         let accumulator = accepted.accumulator();
         accepted.publish().expect("publish");
         self.state.set_state_root(accumulator);
+        sumchain_storage::BlockStore::new(&self.db)
+            .put(&block)
+            .expect("store the block");
         for tx in &txs {
             self.mempool.remove(&tx.hash());
         }
-        (txs, receipts)
+        receipts
+    }
+
+    /// `kp`'s outer messaging transaction at `nonce`, outside the relay.
+    fn outer(
+        &self,
+        kp: &KeyPair,
+        nonce: u64,
+        fee: u128,
+        data: sumchain_primitives::MessagingTxData,
+    ) -> SignedTransaction {
+        let tx = sumchain_primitives::TransactionV2::messaging(
+            self.state.chain_id(),
+            kp.address(),
+            fee,
+            nonce,
+            data,
+        );
+        let sig = sign(tx.signing_hash().as_bytes(), kp.private_key());
+        SignedTransaction::new_v2(tx, *sig.as_bytes(), *kp.public_key().as_bytes())
+    }
+
+    /// `m` relayed by `kp` directly, at `kp`'s account nonce `nonce`.
+    fn relayed_by(&self, kp: &KeyPair, nonce: u64, m: &SponsoredMessage) -> SignedTransaction {
+        self.outer(
+            kp,
+            nonce,
+            RELAY_FEE,
+            sumchain_primitives::MessagingTxData {
+                operation: sumchain_primitives::MessagingOperation::SendMessage,
+                data: bincode::serialize(m).unwrap(),
+            },
+        )
     }
 
     fn sponsor_nonce(&self) -> u64 {
@@ -776,4 +837,227 @@ async fn the_relay_binds_the_envelope_to_its_own_chain() {
     let (_, receipts) = s.publish_pool(1);
     assert_eq!(statuses(&receipts), vec![(TxStatus::Success, RELAY_FEE)]);
     assert_eq!(s.messaging_nonce(&carol()), 1);
+}
+
+/// Each carried transaction's (status, fee), by its hash as the relay
+/// reports it.
+fn by_hash(
+    carried: &[SignedTransaction],
+    receipts: &[Receipt],
+) -> HashMap<String, (TxStatus, u128)> {
+    carried
+        .iter()
+        .zip(receipts)
+        .map(|(t, r)| (t.hash().to_hex(), (r.status, r.fee_paid)))
+        .collect()
+}
+
+/// Every messaging RPC that shows a payment agrees with the executed outcome
+/// (the receipt and the escrow rows), case by case: an accepted relayed
+/// message; relayed envelopes refused in the block for an amount, for a
+/// signature by another key and for a nonce out of sequence; a paid send,
+/// which escrows its amount; and, below the envelope gate, an executed
+/// relayed message whose envelope claimed an amount.
+#[tokio::test]
+async fn payment_display_agrees_with_the_executed_outcome() {
+    use sumchain_primitives::messaging::SendMessageWithPaymentData;
+    use sumchain_primitives::{MessagingOperation, MessagingTxData};
+    // The transaction-index gate open from genesis, so each message in one
+    // block keeps its own event row (below that gate every row in a block is
+    // keyed by index 0, and the last message to a recipient replaces the
+    // earlier ones).
+    let indexed = |envelope_gate: Option<u64>, accounting_gate: Option<u64>| {
+        let mut g = genesis_on(CHAIN_ID, envelope_gate, accounting_gate);
+        g.params.subsystem_tx_index_enabled_from_height = Some(0);
+        g
+    };
+    let s = serve(&indexed(Some(1), Some(1)));
+    let accepted = s.relay(&v2(envelope(0, 1, None))).await.unwrap();
+    let with_amount = s.relayed_by(
+        &erin(),
+        0,
+        &v2_by(envelope_from(&dave(), 0, 2, Some(5_000)), &dave(), CHAIN_ID),
+    );
+    let wrong_signer = s.relayed_by(
+        &erin(),
+        1,
+        &v2_by(envelope_from(&grace(), 0, 3, None), &heidi(), CHAIN_ID),
+    );
+    let wrong_nonce = s.relayed_by(
+        &erin(),
+        2,
+        &v2_by(envelope_from(&heidi(), 7, 4, None), &heidi(), CHAIN_ID),
+    );
+    let rh = recipient_hash(&bob().address());
+    let paid = s.outer(
+        &alice(),
+        0,
+        RELAY_FEE,
+        MessagingTxData {
+            operation: MessagingOperation::SendMessageWithPayment,
+            data: bincode::serialize(&SendMessageWithPaymentData {
+                message_data: valid_message(rh),
+                recipient_hash: rh,
+                koppa_amount: 500,
+            })
+            .unwrap(),
+        },
+    );
+    for tx in [&with_amount, &wrong_signer, &wrong_nonce, &paid] {
+        s.mempool.add(tx.clone()).unwrap();
+    }
+    let (carried, receipts) = s.publish_pool(1);
+    let by = by_hash(&carried, &receipts);
+    let refused = [
+        with_amount.hash().to_hex(),
+        wrong_signer.hash().to_hex(),
+        wrong_nonce.hash().to_hex(),
+    ];
+    let paid_hash = paid.hash().to_hex();
+    assert_eq!(by[&accepted], (TxStatus::Success, RELAY_FEE));
+    for h in &refused {
+        assert_eq!(by[h], (TxStatus::Failed(7), RELAY_FEE), "{h}");
+    }
+    assert_eq!(by[&paid_hash], (TxStatus::Success, RELAY_FEE));
+    let srv = &s.server;
+
+    // messaging_getMessageData: relayed messages only; never a payment.
+    let d = srv
+        .messaging_get_message_data(accepted.clone())
+        .await
+        .unwrap()
+        .expect("executed");
+    assert!(!d.has_payment && d.payment_amount.is_none());
+    for h in &refused {
+        assert!(srv
+            .messaging_get_message_data(h.clone())
+            .await
+            .unwrap()
+            .is_none());
+    }
+    assert!(srv
+        .messaging_get_message_data(paid_hash.clone())
+        .await
+        .is_err());
+
+    // messaging_getMessageByTxHash.
+    let e = srv
+        .messaging_get_message_by_tx_hash(accepted.clone())
+        .await
+        .unwrap()
+        .expect("an event");
+    assert!(!e.has_payment);
+    for h in &refused {
+        assert!(srv
+            .messaging_get_message_by_tx_hash(h.clone())
+            .await
+            .unwrap()
+            .is_none());
+    }
+    let e = srv
+        .messaging_get_message_by_tx_hash(paid_hash.clone())
+        .await
+        .unwrap()
+        .expect("an event");
+    assert!(e.has_payment);
+
+    // messaging_getPendingPayment and messaging_getPendingPayments: the
+    // escrow rows.
+    for h in refused.iter().chain([&accepted]) {
+        assert!(srv
+            .messaging_get_pending_payment(h.clone())
+            .await
+            .unwrap()
+            .is_none());
+    }
+    let p = srv
+        .messaging_get_pending_payment(paid_hash.clone())
+        .await
+        .unwrap()
+        .expect("escrowed");
+    assert_eq!(
+        (p.amount.as_str(), p.sender),
+        ("500", alice().address().to_base58())
+    );
+    let all = srv
+        .messaging_get_pending_payments(bob().address().to_base58())
+        .await
+        .unwrap();
+    assert_eq!(
+        all.iter().map(|p| p.message_id.clone()).collect::<Vec<_>>(),
+        vec![paid_hash.clone()]
+    );
+
+    // The listings: the accepted relayed message without a payment, the
+    // paid send with one, nothing for the refused envelopes.
+    let listed = |events: Vec<sumchain_rpc::types::MessageEventInfo>| -> HashMap<String, bool> {
+        events
+            .into_iter()
+            .map(|e| (e.tx_hash, e.has_payment))
+            .collect()
+    };
+    let to_bob = listed(
+        srv.messaging_get_messages(format!("0x{}", hex::encode(rh)), None, None)
+            .await
+            .unwrap(),
+    );
+    let in_block = listed(srv.messaging_get_messages_in_block(1, None).await.unwrap());
+    for view in [&to_bob, &in_block] {
+        assert_eq!(view.len(), 2, "{view:?}");
+        assert_eq!(view[&accepted], false);
+        assert_eq!(view[&paid_hash], true);
+    }
+    let from_carol = listed(
+        srv.messaging_get_sent_messages(carol().address().to_base58(), None, None)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(from_carol, HashMap::from([(accepted.clone(), false)]));
+    let from_alice = listed(
+        srv.messaging_get_sent_messages(alice().address().to_base58(), None, None)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(from_alice, HashMap::from([(paid_hash.clone(), true)]));
+
+    // Below the envelope gate: an executed relayed message whose envelope
+    // names an amount. The stored row is kept as before; no amount moved,
+    // and no RPC reports a payment.
+    let s = serve(&indexed(None, None));
+    let claimed = s.relay(&v1(envelope(0, 5, Some(5_000)))).await.unwrap();
+    let (_, r) = s.publish_pool(1);
+    assert_eq!(statuses(&r), vec![(TxStatus::Success, RELAY_FEE)]);
+    let stored = MessagingStore::new(&s.db)
+        .get_message_by_tx_hash(Hash::from_hex(&claimed).unwrap().as_bytes())
+        .unwrap()
+        .expect("stored");
+    assert!(stored.has_payment, "the stored row is kept as before");
+    let srv = &s.server;
+    assert!(
+        !srv.messaging_get_message_by_tx_hash(claimed.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .has_payment
+    );
+    assert!(
+        !srv.messaging_get_message_data(claimed.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .has_payment
+    );
+    assert_eq!(
+        listed(
+            srv.messaging_get_sent_messages(carol().address().to_base58(), None, None)
+                .await
+                .unwrap()
+        ),
+        HashMap::from([(claimed.clone(), false)])
+    );
+    assert!(srv
+        .messaging_get_pending_payment(claimed)
+        .await
+        .unwrap()
+        .is_none());
 }

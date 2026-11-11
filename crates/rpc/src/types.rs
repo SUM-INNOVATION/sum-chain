@@ -1944,7 +1944,8 @@ pub struct MessageEventInfo {
     pub content_type: u8,
     /// Message flags
     pub flags: u16,
-    /// Whether message has payment attached
+    /// Whether the message moved a payment into escrow: true only for a paid
+    /// send; a relayed message never moves one.
     pub has_payment: bool,
     /// Payment amount (if has_payment)
     pub payment_amount: Option<String>,

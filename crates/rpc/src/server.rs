@@ -1468,6 +1468,46 @@ impl RpcServer {
             ))),
         }
     }
+
+    /// The RPC view of a stored message event.
+    ///
+    /// `has_payment` is the executed outcome, not the stored flag alone: it is
+    /// true only for a paid send (`SendMessageWithPayment`), the one operation
+    /// that moves an amount, into escrow. A relayed message never moves one;
+    /// below the envelope gate its stored flag follows the amount the
+    /// envelope claimed, so that flag is not reported. A message whose
+    /// transaction this node does not hold reports no payment.
+    fn message_event_info(
+        &self,
+        e: sumchain_primitives::MessageEvent,
+    ) -> std::result::Result<MessageEventInfo, RpcError> {
+        let has_payment = e.has_payment && self.is_paid_send(&e.message_id)?;
+        Ok(MessageEventInfo {
+            tx_hash: format!("0x{}", hex::encode(e.message_id.as_bytes())),
+            block_height: e.block_height,
+            sender: e.sender.to_base58(),
+            recipient_hash: format!("0x{}", hex::encode(e.recipient_hash)),
+            content_type: 0, // Not stored in MessageEvent
+            flags: 0,        // Not stored in MessageEvent
+            has_payment,
+            payment_amount: None, // Amount not stored in MessageEvent
+        })
+    }
+
+    /// Whether the transaction `tx_hash` is a paid send.
+    fn is_paid_send(&self, tx_hash: &Hash) -> std::result::Result<bool, RpcError> {
+        use sumchain_primitives::TxInner;
+        let tx = TxStore::new(&self.db)
+            .get(tx_hash)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(match tx.as_ref().map(|t| &t.inner) {
+            Some(TxInner::V2(v2)) => matches!(
+                &v2.payload,
+                TxPayload::Messaging(d) if d.operation == MessagingOperation::SendMessageWithPayment
+            ),
+            _ => false,
+        })
+    }
 }
 
 /// Whether executing `tx` advances its sender's account nonce below
@@ -4250,19 +4290,10 @@ impl SumChainApiServer for RpcServer {
             .get_messages_by_recipient(&hash_arr, 0, u64::MAX, limit.unwrap_or(100) as usize)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
-        let results: Vec<MessageEventInfo> = events
+        let results = events
             .into_iter()
-            .map(|e| MessageEventInfo {
-                tx_hash: format!("0x{}", hex::encode(e.message_id.as_bytes())),
-                block_height: e.block_height,
-                sender: e.sender.to_base58(),
-                recipient_hash: format!("0x{}", hex::encode(e.recipient_hash)),
-                content_type: 0, // Not stored in MessageEvent
-                flags: 0, // Not stored in MessageEvent
-                has_payment: e.has_payment,
-                payment_amount: None, // Amount not stored in MessageEvent
-            })
-            .collect();
+            .map(|e| self.message_event_info(e))
+            .collect::<std::result::Result<Vec<MessageEventInfo>, RpcError>>()?;
 
         Ok(results)
     }
@@ -4283,19 +4314,10 @@ impl SumChainApiServer for RpcServer {
             .get_messages_by_sender(&addr, limit, offset)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
-        let results: Vec<MessageEventInfo> = events
+        let results = events
             .into_iter()
-            .map(|e| MessageEventInfo {
-                tx_hash: format!("0x{}", hex::encode(e.message_id.as_bytes())),
-                block_height: e.block_height,
-                sender: e.sender.to_base58(),
-                recipient_hash: format!("0x{}", hex::encode(e.recipient_hash)),
-                content_type: 0, // Not stored in MessageEvent
-                flags: 0,        // Not stored in MessageEvent
-                has_payment: e.has_payment,
-                payment_amount: None, // Amount not stored in MessageEvent
-            })
-            .collect();
+            .map(|e| self.message_event_info(e))
+            .collect::<std::result::Result<Vec<MessageEventInfo>, RpcError>>()?;
 
         Ok(results)
     }
@@ -4316,16 +4338,7 @@ impl SumChainApiServer for RpcServer {
 
         let store = MessagingStore::new(&self.db);
         match store.get_message_by_tx_hash(&hash_arr) {
-            Ok(Some(event)) => Ok(Some(MessageEventInfo {
-                tx_hash: format!("0x{}", hex::encode(event.message_id.as_bytes())),
-                block_height: event.block_height,
-                sender: event.sender.to_base58(),
-                recipient_hash: format!("0x{}", hex::encode(event.recipient_hash)),
-                content_type: 0,
-                flags: 0,
-                has_payment: event.has_payment,
-                payment_amount: None,
-            })),
+            Ok(Some(event)) => Ok(Some(self.message_event_info(event)?)),
             Ok(None) => Ok(None),
             Err(e) => Err(RpcError::Internal(e.to_string()).into()),
         }
@@ -4347,19 +4360,10 @@ impl SumChainApiServer for RpcServer {
             self.refuse_below_history_floor(block_height)?;
         }
 
-        let results: Vec<MessageEventInfo> = events
+        let results = events
             .into_iter()
-            .map(|e| MessageEventInfo {
-                tx_hash: format!("0x{}", hex::encode(e.message_id.as_bytes())),
-                block_height: e.block_height,
-                sender: e.sender.to_base58(),
-                recipient_hash: format!("0x{}", hex::encode(e.recipient_hash)),
-                content_type: 0,
-                flags: 0,
-                has_payment: e.has_payment,
-                payment_amount: None,
-            })
-            .collect();
+            .map(|e| self.message_event_info(e))
+            .collect::<std::result::Result<Vec<MessageEventInfo>, RpcError>>()?;
 
         Ok(results)
     }
