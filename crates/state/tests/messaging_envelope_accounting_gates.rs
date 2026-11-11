@@ -2136,3 +2136,134 @@ fn two_relays_at_one_committed_sponsor_nonce() {
         );
     }
 }
+
+/// A paid send is checked against the balance left after the fee. At the
+/// accounting gate the fee is charged before the send runs, so a sender
+/// holding exactly amount + fee - 1 is refused (`Failed(7)`) and pays the
+/// fee, and one holding exactly amount + fee succeeds and ends at zero.
+/// Below the gate the same short sender is refused and pays nothing, as
+/// before. A charge made after the send, instead of before, would accept the
+/// short sender and then fail the charge, refusing the whole block.
+#[test]
+fn a_paid_send_at_the_edge_of_the_balance() {
+    use sumchain_primitives::TxStatus;
+    let amount: u128 = 1_000;
+    let frank_addr = frank().address();
+    let short = key(0x69);
+    let exact = key(0x6A);
+    for (accounting, short_receipt, short_after) in [
+        (None, (TxStatus::Failed(7), 0), amount + FEE - 1),
+        (Some(2), (TxStatus::Failed(7), FEE), amount - 1),
+    ] {
+        let mut c = Chain::new(with_accounting_gate(accounting));
+        c.setup();
+        fund(&c.db, &short, amount + FEE - 1);
+        fund(&c.db, &exact, amount + FEE);
+
+        let r = c.one(c.tx(&short, payment_to(&frank_addr, amount)));
+        assert_eq!(
+            (r.status, r.fee_paid),
+            short_receipt,
+            "short, accounting gate {accounting:?}"
+        );
+        assert_eq!(c.balance(&short.address()), short_after);
+        assert_eq!(
+            c.nonce(&short),
+            u64::from(accounting.is_some()),
+            "the refusal advances the nonce only at the gate"
+        );
+
+        let pay = c.tx(&exact, payment_to(&frank_addr, amount));
+        let r = c.one(pay.clone());
+        assert_eq!(
+            (r.status, r.fee_paid),
+            (TxStatus::Success, FEE),
+            "exact, accounting gate {accounting:?}"
+        );
+        assert_eq!(c.balance(&exact.address()), 0);
+        assert_eq!(c.nonce(&exact), 1);
+        assert!(
+            c.store()
+                .get_pending_payment(&pay.hash())
+                .unwrap()
+                .is_some(),
+            "the payment is escrowed"
+        );
+    }
+}
+
+/// On a chain whose id is not 1: the executor binds the envelope to the
+/// chain the block belongs to. An envelope signed for chain 7 succeeds on
+/// chain 7, and the same sender's next envelope signed for chain 1 is
+/// refused there.
+#[test]
+fn the_envelope_is_bound_to_the_chain_the_block_belongs_to() {
+    use sumchain_primitives::TxStatus;
+    const CHAIN_7: u64 = 7;
+    let on_7 = |kp: &KeyPair, nonce: u64, data: MessagingTxData| {
+        let tx = TransactionV2 {
+            chain_id: CHAIN_7,
+            from: kp.address(),
+            fee: FEE,
+            nonce,
+            payload: TxPayload::Messaging(data),
+        };
+        let sig = sign(tx.signing_hash().as_bytes(), kp.private_key());
+        SignedTransaction::new_v2(tx, *sig.as_bytes(), *kp.public_key().as_bytes())
+    };
+    let params = with_both_gates(Some(2));
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = Arc::new(sumchain_storage::Database::open_default(dir.path()).unwrap());
+    let state = Arc::new(StateManager::new(db.clone(), CHAIN_7));
+    let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+    for kp in everyone() {
+        fund(&db, &kp, FUNDS);
+    }
+
+    let setup = execute(
+        &state,
+        &executor,
+        1,
+        T_MS + MINUTE_MS,
+        vec![
+            on_7(
+                &admin(),
+                0,
+                op(
+                    MessagingOperation::SetSponsorshipEnabled,
+                    &SetSponsorshipEnabledData { enabled: true },
+                ),
+            ),
+            on_7(&carol(), 0, register(&carol())),
+        ],
+    );
+    let (_, receipts) = setup.published.expect("block 1");
+    assert!(receipts.iter().all(|r| r.status == TxStatus::Success));
+
+    let for_7 = signed_v2(carol_to_bob(0), &carol(), CHAIN_7);
+    let for_1 = signed_v2(carol_to_bob(1), &carol(), CHAIN_ID);
+    let block = execute(
+        &state,
+        &executor,
+        2,
+        T_MS + 2 * MINUTE_MS,
+        vec![
+            on_7(&sponsor(), 0, sponsored(&for_7)),
+            on_7(&sponsor(), 1, sponsored(&for_1)),
+        ],
+    );
+    let (_, receipts) = block.published.expect("block 2");
+    assert_eq!(
+        receipts
+            .iter()
+            .map(|r| (r.status, r.fee_paid))
+            .collect::<Vec<_>>(),
+        vec![(TxStatus::Success, FEE), (TxStatus::Failed(7), FEE)]
+    );
+    assert_eq!(
+        sumchain_storage::MessagingStore::new(&db)
+            .get_sender_nonce(&carol().address())
+            .unwrap(),
+        1
+    );
+}

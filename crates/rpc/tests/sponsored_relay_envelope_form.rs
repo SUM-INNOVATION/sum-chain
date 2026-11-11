@@ -756,3 +756,24 @@ async fn message_data_reports_only_an_executed_message_and_no_payment() {
     assert!(!data.has_payment, "no amount moved");
     assert_eq!(data.payment_amount, None);
 }
+
+/// On a chain whose id is not 1, the relay checks the envelope against that
+/// chain: an envelope signed for chain 7 relays and succeeds there, one
+/// signed for chain 1 is refused.
+#[tokio::test]
+async fn the_relay_binds_the_envelope_to_its_own_chain() {
+    const CHAIN_7: u64 = 7;
+    let s = serve(&genesis_on(CHAIN_7, Some(1), Some(1)));
+    let err = s
+        .relay(&v2_by(envelope(0, 1, None), &carol(), CHAIN_ID))
+        .await
+        .expect_err("signed for chain 1");
+    assert!(err.message().contains("Invalid sender signature"), "{err}");
+    let ok = s
+        .relay(&v2_by(envelope(0, 2, None), &carol(), CHAIN_7))
+        .await;
+    assert!(ok.is_ok(), "{ok:?}");
+    let (_, receipts) = s.publish_pool(1);
+    assert_eq!(statuses(&receipts), vec![(TxStatus::Success, RELAY_FEE)]);
+    assert_eq!(s.messaging_nonce(&carol()), 1);
+}
