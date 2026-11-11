@@ -777,23 +777,12 @@ pub struct ActivationStatusInfo {
     /// (`sumchain_state::protocol_digest`).
     ///
     /// `digest` above answers "do our genesis files agree". This answers "do our
-    /// binaries enforce the same activation heights and compiled limits". Two
-    /// binaries built from different commits can report the same `digest` and
-    /// different `protocol_digest`. It is folded into `handshake_digest`, which
-    /// is the value peers compare.
+    /// nodes enforce the same rules", which is the question that decides whether
+    /// two validators compute the same state root. Two binaries built from
+    /// different commits can report the same `digest` and different
+    /// `protocol_digest`. It is also the value peers compare at the sync
+    /// handshake, so a monitor scraping it sees exactly what the nodes see.
     pub protocol_digest: String,
-    /// The value this node declares to its peers at the sync handshake, and
-    /// compares theirs against: BLAKE3-256 of `"sumchain/protocol-digest/v2"`,
-    /// `protocol_digest` and the running consensus-configuration commitment
-    /// (`chain_getConsensusConfig.running_commitment`)
-    /// (`sumchain_consensus::consensus_config::handshake`).
-    ///
-    /// It answers "do our nodes run the same consensus configuration": two
-    /// nodes that differ only in a non-gate genesis value such as `min_fee`
-    /// report the same `protocol_digest` and different `handshake_digest`, and
-    /// refuse each other. A monitor scraping it sees exactly what the nodes
-    /// compare. Not a consensus value: nothing in a block holds it.
-    pub handshake_digest: String,
     pub chain_id: u64,
     /// Chain height this status was read at, so a scrape carries its own
     /// context.
