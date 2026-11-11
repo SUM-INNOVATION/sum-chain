@@ -1503,10 +1503,13 @@ fn first_free_from(from: u64, held: &BTreeSet<u64>) -> u64 {
     n
 }
 
-/// The sender a relayed `SendMessage` envelope names, and the envelope's
-/// nonce. `None` for any other transaction, and for an envelope that does not
-/// decode.
-fn relayed_envelope_identity(tx: &SignedTransaction) -> Option<(Address, u64)> {
+/// The sender a relayed version-2 `SendMessage` envelope names, and the
+/// envelope's nonce, for an envelope whose signature verifies in the version-2
+/// form for `chain_id`. `None` for any other transaction, an envelope that
+/// does not decode, and a string-form envelope: below the envelope gate the
+/// string form's nonce is never read, so it claims no place in the sender's
+/// sequence.
+fn relayed_v2_envelope_identity(tx: &SignedTransaction, chain_id: u64) -> Option<(Address, u64)> {
     use sumchain_primitives::TxInner;
     let TxInner::V2(v2) = &tx.inner else {
         return None;
@@ -1518,6 +1521,7 @@ fn relayed_envelope_identity(tx: &SignedTransaction) -> Option<(Address, u64)> {
         return None;
     }
     let m: SponsoredMessage = bincode::deserialize(&d.data).ok()?;
+    sumchain_primitives::verify_sponsored_send_v2(&m, chain_id).ok()?;
     Some((Address::from_public_key(&m.sender_pubkey), m.nonce))
 }
 
@@ -4642,35 +4646,39 @@ impl SumChainApiServer for RpcServer {
             koppa_amount,
         };
 
-        // Which envelope form the block this transaction would land in applies:
-        // the version-2 envelope from
+        // Which envelope forms the block this transaction would land in
+        // accepts, judged at the next block's height: from
         // `messaging_sponsored_envelope_verification_enabled_from_height` on,
-        // judged at the next block's height, the string form below it. An
-        // advisory preflight either way (consensus re-checks at execution), but
-        // the two forms are different signing bytes, so relaying one where the
-        // other applies would only land as a failed operation. A store read
-        // error is not treated as a tip of 0: it is surfaced.
+        // the version-2 envelope only; below it, either the string form, as
+        // before, or the version-2 envelope, which the executor below the gate
+        // also executes. Accepting version 2 early lets a client switch as soon
+        // as this relay is deployed, so an envelope relayed before the gate is
+        // still valid if it lands at or above it. An advisory preflight either
+        // way (consensus re-checks at execution). A store read error is not
+        // treated as a tip of 0: it is surfaced.
         let chain_id = self.state.chain_id();
         let inclusion_height = self.relay_inclusion_height()?;
-        let v2_envelope = sumchain_state::MessagingExecutor::sponsored_envelope_verification_gate_open(
+        let v2_only = sumchain_state::MessagingExecutor::sponsored_envelope_verification_gate_open(
             &self.chain_params,
             inclusion_height,
         );
+        let v2_signed = sumchain_primitives::verify_sponsored_send_v2(&sponsored_msg, chain_id).is_ok();
+        let v2_envelope = v2_only || v2_signed;
 
         if v2_envelope {
-            // The version-2 rule, as the executor applies it: no amount, a strict
-            // signature by the named sender over the version-2 preimage, and
-            // the sender's current messaging nonce as the canonical chain
-            // records it.
+            // The version-2 rule, as the executor applies it from the gate: no
+            // amount, a strict signature by the named sender over the version-2
+            // preimage, and (checked below, with the pool) the sender's next
+            // messaging nonce.
             if sponsored_msg.koppa_amount.is_some() {
                 return Err(RpcError::InvalidParams(
-                    "A sponsored message cannot carry a koppa_amount from the envelope \
-                     verification height on; send the payment as SendMessageWithPayment"
+                    "A sponsored message in the version-2 envelope cannot carry a \
+                     koppa_amount; send the payment as SendMessageWithPayment"
                         .to_string(),
                 )
                 .into());
             }
-            if sumchain_primitives::verify_sponsored_send_v2(&sponsored_msg, chain_id).is_err() {
+            if !v2_signed {
                 return Err(RpcError::InvalidParams(
                     "Invalid sender signature: from the envelope verification height on the \
                      signature is over the version-2 envelope preimage \
@@ -4681,8 +4689,11 @@ impl SumChainApiServer for RpcServer {
                 .into());
             }
         } else {
-            // Verify the sender's signature over the sponsored message request
-            // Format: "SUMCHAIN_SPONSORED_MSG:{nonce}:{expiry}:{recipient_hash}:{message_data_hash}"
+            // Below the gate, and not the version-2 form: the sender's
+            // signature over the string form
+            // "SUMCHAIN_SPONSORED_MSG:{nonce}:{expiry}:{recipient_hash}:{message_data_hash}",
+            // under the strict rule, the rule the mempool's inclusion policy
+            // applies to the same envelope, so the relay and the pool agree.
             let message_data_hash = blake3::hash(&sponsored_msg.message_data);
             let sign_message = format!(
                 "SUMCHAIN_SPONSORED_MSG:{}:{}:{}:{}",
@@ -4692,11 +4703,15 @@ impl SumChainApiServer for RpcServer {
                 hex::encode(message_data_hash.as_bytes())
             );
 
-            // Strict Ed25519 verification, the rule the mempool's inclusion
-            // policy applies to the same envelope, so the relay and the pool
-            // agree.
-            if sumchain_crypto::verify_bytes_strict(sign_message.as_bytes(), &sig_array, &sender_pubkey).is_err() {
-                return Err(RpcError::InvalidParams("Invalid sender signature".to_string()).into());
+            if sumchain_crypto::verify_bytes_strict(sign_message.as_bytes(), &sig_array, &sender_pubkey)
+                .is_err()
+            {
+                return Err(RpcError::InvalidParams(
+                    "Invalid sender signature: neither the version-2 envelope preimage nor the \
+                     string form verifies"
+                        .to_string(),
+                )
+                .into());
             }
         }
 
@@ -4735,7 +4750,7 @@ impl SumChainApiServer for RpcServer {
                 .mempool
                 .get_by_sender(&sponsor_address)
                 .iter()
-                .filter_map(relayed_envelope_identity)
+                .filter_map(|tx| relayed_v2_envelope_identity(tx, chain_id))
                 .filter(|(sender, n)| *sender == sender_address && *n >= committed)
                 .map(|(_, n)| n)
                 .collect();

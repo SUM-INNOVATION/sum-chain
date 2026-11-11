@@ -1,8 +1,9 @@
-//! `messaging_submitSponsored` applies the envelope form of the block the
-//! relayed transaction would land in: the string form below
-//! `messaging_sponsored_envelope_verification_enabled_from_height`, the
-//! version-2 envelope (strict signature, no amount, the sender's next
-//! messaging nonce) from it on, judged at the next block's height. It signs
+//! `messaging_submitSponsored` applies the envelope forms of the block the
+//! relayed transaction would land in, judged at the next block's height: below
+//! `messaging_sponsored_envelope_verification_enabled_from_height`, either the
+//! string form or the version-2 envelope; from it on, the version-2 envelope
+//! only (strict signature, no amount, the sender's next messaging nonce). It
+//! signs
 //! each relayed transaction at the sponsor's next free account nonce, so
 //! several relayed messages land in one block. And `messaging_getSenderNonce`
 //! reports the committed messaging nonce a client must put in that envelope.
@@ -354,21 +355,41 @@ fn statuses(receipts: &[Receipt]) -> Vec<(TxStatus, u128)> {
 
 #[tokio::test]
 async fn the_relay_applies_the_envelope_form_of_the_next_block() {
-    // ── the gate absent: the string form, as before ─────────────────────────
+    // ── the gate absent: the string form as before, or version 2 ───────────
     {
         let s = serve(&genesis(None));
         let ok = s.relay(&v1(envelope(0, 1, None))).await;
         assert!(ok.is_ok(), "{ok:?}");
-        let err = s
-            .relay(&v2(envelope(0, 2, None)))
-            .await
-            .expect_err("a version-2 signature is not the string form");
-        assert!(err.message().contains("Invalid sender signature"), "{err}");
-        // The nonce is not read: any value relays.
-        let ok = s.relay(&v1(envelope(42, 3, None))).await;
+        // The version-2 form is accepted too, at the sender's next nonce; a
+        // string-form envelope claims no place in that sequence.
+        let ok = s.relay(&v2(envelope(0, 2, None))).await;
         assert!(ok.is_ok(), "{ok:?}");
+        let err = s
+            .relay(&v2(envelope(5, 3, None)))
+            .await
+            .expect_err("a version-2 envelope follows the sequence below the gate too");
+        assert!(
+            err.message()
+                .contains("is not the sender's next messaging nonce 1"),
+            "{err}"
+        );
+        let err = s
+            .relay(&v2(envelope(1, 4, Some(5))))
+            .await
+            .expect_err("a version-2 envelope carries no amount below the gate too");
+        assert!(err.message().contains("koppa_amount"), "{err}");
+        // The string form has no nonce rule at the relay: any value relays.
+        let ok = s.relay(&v1(envelope(42, 5, None))).await;
+        assert!(ok.is_ok(), "{ok:?}");
+        // Neither form.
+        let err = s.relay(&envelope(0, 6, None)).await.expect_err("unsigned");
+        assert!(
+            err.message()
+                .contains("neither the version-2 envelope preimage nor the string form"),
+            "{err}"
+        );
         let relayed = relayed_envelopes(&s);
-        assert_eq!(relayed.len(), 2);
+        assert_eq!(relayed.len(), 3);
         assert_eq!(
             relayed.iter().map(|m| m.nonce).collect::<BTreeSet<_>>(),
             [0, 42].into_iter().collect()
@@ -442,16 +463,86 @@ async fn the_relay_applies_the_envelope_form_of_the_next_block() {
         assert_eq!(relayed_envelopes(&s).len(), 2);
     }
 
-    // ── the gate above the next block: still the string form ────────────────
+    // ── the gate above the next block: either form ──────────────────────────
     {
         let s = serve(&genesis(Some(2)));
         let ok = s.relay(&v1(envelope(0, 1, None))).await;
         assert!(ok.is_ok(), "{ok:?}");
-        let err = s
-            .relay(&v2(envelope(0, 2, None)))
+        let ok = s.relay(&v2(envelope(0, 2, None))).await;
+        assert!(ok.is_ok(), "{ok:?}");
+        assert_eq!(relayed_envelopes(&s).len(), 2);
+    }
+}
+
+/// Across the envelope gate H (= 2 here): relayed while the next block is
+/// H-1 (the tip at H-2), a string-form envelope and a version-2 envelope are
+/// both accepted by the relay. Carried at H-1 both succeed. Carried late, at
+/// H, the string-form envelope is refused (`Failed(7)`) and the version-2
+/// envelope succeeds: the version-2 form is the one that is valid on both
+/// sides. With the accounting gate also at H, the late string-form envelope
+/// costs the sponsor its fee and a nonce.
+#[tokio::test]
+async fn an_envelope_relayed_before_the_gate_and_carried_at_or_after_it() {
+    // Carried on time, at H-1.
+    {
+        let s = serve(&genesis_on(CHAIN_ID, Some(2), None));
+        let string_form = s.relay(&v1(envelope(0, 1, None))).await.unwrap();
+        let alice_v2 = s
+            .relay(&v2_by(
+                envelope_from(&alice(), 0, 2, None),
+                &alice(),
+                CHAIN_ID,
+            ))
             .await
-            .expect_err("not yet the version-2 form");
-        assert!(err.message().contains("Invalid sender signature"), "{err}");
+            .unwrap();
+        let (carried, receipts) = s.publish_pool(1);
+        let by_hash: HashMap<String, (TxStatus, u128)> = carried
+            .iter()
+            .zip(&receipts)
+            .map(|(t, r)| (t.hash().to_hex(), (r.status, r.fee_paid)))
+            .collect();
+        assert_eq!(by_hash[&string_form].0, TxStatus::Success);
+        assert_eq!(by_hash[&alice_v2].0, TxStatus::Success);
+    }
+    // Carried late, at H, with the accounting gate absent: nothing charged
+    // for the refusal.
+    {
+        let s = serve(&genesis_on(CHAIN_ID, Some(2), None));
+        let string_form = s.relay(&v1(envelope(0, 1, None))).await.unwrap();
+        let alice_v2 = s
+            .relay(&v2_by(
+                envelope_from(&alice(), 0, 2, None),
+                &alice(),
+                CHAIN_ID,
+            ))
+            .await
+            .unwrap();
+        let (carried, receipts) = s.publish_pool(2);
+        let by_hash: HashMap<String, (TxStatus, u128)> = carried
+            .iter()
+            .zip(&receipts)
+            .map(|(t, r)| (t.hash().to_hex(), (r.status, r.fee_paid)))
+            .collect();
+        assert_eq!(by_hash[&string_form], (TxStatus::Failed(7), 0));
+        assert_eq!(by_hash[&alice_v2], (TxStatus::Success, RELAY_FEE));
+        assert_eq!(
+            (s.messaging_nonce(&carol()), s.messaging_nonce(&alice())),
+            (0, 1)
+        );
+    }
+    // Carried late, at H, with the accounting gate at H as well: the refusal
+    // costs the sponsor the fee and a nonce.
+    {
+        let s = serve(&genesis_on(CHAIN_ID, Some(2), Some(2)));
+        s.relay(&v1(envelope(0, 1, None))).await.unwrap();
+        let (_, receipts) = s.publish_pool(2);
+        assert_eq!(statuses(&receipts), vec![(TxStatus::Failed(7), RELAY_FEE)]);
+        assert_eq!(s.sponsor_nonce(), 1);
+        assert_eq!(
+            s.state.get_balance(&sponsor().address()).unwrap(),
+            SPONSOR_FUNDS - RELAY_FEE
+        );
+        assert_eq!(s.messaging_nonce(&carol()), 0);
     }
 }
 
