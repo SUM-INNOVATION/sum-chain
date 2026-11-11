@@ -1479,3 +1479,54 @@ async fn duplicates_front_running_and_who_pays() {
         assert_eq!(s.sent_by(&carol()), 1, "delivered once");
     }
 }
+
+/// Many relay requests released at once, from as many senders, on eight
+/// threads: each takes its own sponsor nonce. The relay reads the pool to
+/// choose a nonce and adds its transaction afterwards; `relay_lock` keeps
+/// that read and that add together, so two requests never read the same
+/// pending set and are never given the same nonce.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn simultaneous_relays_never_share_a_sponsor_nonce() {
+    const N: usize = 48;
+    let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
+    let senders: Vec<KeyPair> = (0..N)
+        .map(|i| KeyPair::from_bytes([0x80 + i as u8; 32]))
+        .collect();
+    let store = MessagingStore::new(&s.db);
+    for kp in &senders {
+        store
+            .set_public_key(
+                &kp.address(),
+                &RegisteredPublicKey {
+                    public_key: *kp.public_key().as_bytes(),
+                    address: kp.address(),
+                    registered_at_block: 0,
+                    registered_at: 0,
+                    updated_at_block: 0,
+                },
+            )
+            .unwrap();
+    }
+    let barrier = Arc::new(tokio::sync::Barrier::new(N));
+    let mut tasks = Vec::new();
+    for (i, kp) in senders.iter().enumerate() {
+        let m = v2_by(envelope_from(kp, 0, i as u8, None), kp, CHAIN_ID);
+        let server = s.server.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            server.messaging_submit_sponsored(request(&m)).await
+        }));
+    }
+    for task in tasks {
+        let r = task.await.unwrap();
+        assert!(r.is_ok(), "{r:?}");
+    }
+    assert_eq!(
+        s.pending_sponsor_nonces(),
+        (0..N as u64).collect::<Vec<_>>(),
+        "every request its own nonce"
+    );
+    let (_, receipts) = s.publish_pool(1);
+    assert_eq!(statuses(&receipts), vec![(TxStatus::Success, RELAY_FEE); N]);
+}
