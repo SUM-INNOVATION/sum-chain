@@ -561,7 +561,11 @@ async fn a_chain_switch_whose_branches_cross_the_gates() {
         node.import(block).await;
     }
     assert_eq!(node.engine.best_block_hash(), a6.hash(), "switched back");
-    assert_eq!(rows(&node.db), rows(&a.db), "the node holds A's state again");
+    assert_eq!(
+        rows(&node.db),
+        rows(&a.db),
+        "the node holds A's state again"
+    );
     assert_eq!(node.receipt(&b2_below), None);
     assert_eq!(node.receipt(&b3_accepted), None);
     assert_eq!(node.receipt(&a2_below), Some((TxStatus::Success, FEE)));

@@ -1475,7 +1475,9 @@ impl RpcServer {
     /// The pool is read in place; only a registration naming this key has its
     /// signature checked.
     fn sponsored_registration_pending(&self, registrant_key: &[u8; 32], chain_id: u64) -> bool {
-        use sumchain_primitives::{verify_sponsored_registration_v1, RegisterPublicKeySponsoredV1Data};
+        use sumchain_primitives::{
+            verify_sponsored_registration_v1, RegisterPublicKeySponsoredV1Data,
+        };
         self.mempool
             .filter_map_held(|tx| {
                 let d = messaging_data(tx)?;
@@ -1585,7 +1587,10 @@ fn first_free_from(from: u64, held: &BTreeSet<u64>) -> u64 {
 /// verifies the version-2 form, so that a string-form envelope, whose nonce
 /// below the envelope gate is never read, claims no place in the sender's
 /// sequence.
-fn relayed_envelope_from(tx: &SignedTransaction, sender_key: &[u8; 32]) -> Option<SponsoredMessage> {
+fn relayed_envelope_from(
+    tx: &SignedTransaction,
+    sender_key: &[u8; 32],
+) -> Option<SponsoredMessage> {
     let d = messaging_data(tx)?;
     if d.operation != MessagingOperation::SendMessage {
         return None;
@@ -5043,7 +5048,9 @@ impl SumChainApiServer for RpcServer {
         let registered = MessagingStore::new(&self.db)
             .has_public_key(&registrant_address)
             .map_err(|e| {
-                RpcError::Internal(format!("Failed to read the registrant's registration state: {e}"))
+                RpcError::Internal(format!(
+                    "Failed to read the registrant's registration state: {e}"
+                ))
             })?;
         if registered {
             return Ok(SponsoredRegistrationResponse {

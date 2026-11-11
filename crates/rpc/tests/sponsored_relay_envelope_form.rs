@@ -351,7 +351,8 @@ impl Served {
 
 /// `g` with sponsored registration open from genesis.
 fn with_registration(mut g: Genesis) -> Genesis {
-    g.params.messaging_sponsored_registration_enabled_from_height = Some(0);
+    g.params
+        .messaging_sponsored_registration_enabled_from_height = Some(0);
     g
 }
 
@@ -1619,7 +1620,10 @@ async fn a_registration_already_made_or_pending_is_refused_before_it_takes_a_non
         let r = s.register(&newcomer).await;
         assert!(r.success, "{label}: {r:?}");
         let again = s.register(&newcomer).await;
-        assert!(!again.success && again.tx_hash.is_none(), "{label}: {again:?}");
+        assert!(
+            !again.success && again.tx_hash.is_none(),
+            "{label}: {again:?}"
+        );
         assert!(
             again.error.as_deref().unwrap().contains("already pending"),
             "{label}: {again:?}"
@@ -1628,14 +1632,23 @@ async fn a_registration_already_made_or_pending_is_refused_before_it_takes_a_non
         s.relay(&carol_message(1)).await.unwrap();
         assert_eq!(s.pending_sponsor_nonces(), vec![next, next + 1], "{label}");
         let (_, receipts) = s.publish_pool(2);
-        assert_eq!(status_only(&receipts), vec![TxStatus::Success; 2], "{label}");
+        assert_eq!(
+            status_only(&receipts),
+            vec![TxStatus::Success; 2],
+            "{label}"
+        );
         assert!(s.is_registered(&newcomer), "{label}");
         assert_eq!(s.sent_by(&carol()), 2, "{label}");
 
         // Once it has executed, the same request is refused as registered.
         let late = s.register(&newcomer).await;
         assert!(
-            !late.success && late.error.as_deref().unwrap().contains("already registered"),
+            !late.success
+                && late
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("already registered"),
             "{label}: {late:?}"
         );
         s.relay(&carol_message(2)).await.unwrap();
@@ -1668,11 +1681,18 @@ async fn a_relayed_message_and_a_registration_at_one_sponsor_nonce() {
 
         let (carried, receipts) = s.publish_pool(1);
         assert_eq!(
-            carried.iter().map(|t| t.hash().to_hex()).collect::<Vec<_>>(),
+            carried
+                .iter()
+                .map(|t| t.hash().to_hex())
+                .collect::<Vec<_>>(),
             vec![relayed, registration],
             "salt {salt}: the relayed message first"
         );
-        assert_eq!(status_only(&receipts), vec![TxStatus::Success; 2], "salt {salt}");
+        assert_eq!(
+            status_only(&receipts),
+            vec![TxStatus::Success; 2],
+            "salt {salt}"
+        );
         assert_eq!(s.sent_by(&carol()), 1, "salt {salt}");
         assert!(s.is_registered(&newcomer), "salt {salt}");
         assert_eq!(s.sponsor_nonce(), 1, "salt {salt}");

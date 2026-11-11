@@ -1740,7 +1740,11 @@ impl Mempool {
         &self,
         mut pick: impl FnMut(&SignedTransaction) -> Option<T>,
     ) -> Vec<T> {
-        self.txs.read().values().filter_map(|e| pick(&e.tx)).collect()
+        self.txs
+            .read()
+            .values()
+            .filter_map(|e| pick(&e.tx))
+            .collect()
     }
 
     /// Clear all transactions
@@ -2135,7 +2139,13 @@ mod tests {
         let recipient = KeyPair::generate();
         for (fee, nonce) in [(10, 0), (20, 1), (30, 2)] {
             mempool
-                .add(create_signed_tx(&sender, recipient.address(), 1, fee, nonce))
+                .add(create_signed_tx(
+                    &sender,
+                    recipient.address(),
+                    1,
+                    fee,
+                    nonce,
+                ))
                 .unwrap();
         }
         let mut seen = 0;
