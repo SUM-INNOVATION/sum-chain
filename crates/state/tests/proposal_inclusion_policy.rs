@@ -884,3 +884,399 @@ fn a_failed_envelope_releases_the_senders_later_pending_envelopes() {
         vec![f0.hash(), f1.hash(), f2.hash()]
     );
 }
+
+// ── capacity ─────────────────────────────────────────────────────────────────
+
+/// A pool of this chain's, with the policy and a per-sender allowance of
+/// `max_per_sender`.
+fn capped_pool(c: &Chain, max_per_sender: usize, policy: bool) -> Mempool {
+    let pool = Mempool::new(MempoolConfig {
+        max_per_sender,
+        ..MempoolConfig::default()
+    });
+    if !policy {
+        return pool;
+    }
+    pool.with_inclusion_policy(InclusionPolicy { db: c.db.clone() })
+}
+
+/// An admitted envelope is held against the sender it NAMES. Through one
+/// relayer, each named sender has its own allowance, and the relayer's own
+/// transactions have theirs, which no envelope uses.
+#[test]
+fn an_envelope_is_held_against_the_sender_it_names() {
+    let c = Chain::ready();
+    let pool = capped_pool(&c, 2, true);
+    let mine = |n| sponsored_tx(&relayer(), 0, &own_envelope(n));
+    let theirs = |n| {
+        sponsored_tx(
+            &relayer(),
+            0,
+            &relay_signed(
+                envelope(
+                    *someone_else().public_key().as_bytes(),
+                    &recipient().address(),
+                    n,
+                ),
+                &someone_else(),
+            ),
+        )
+    };
+    pool.add(mine(0)).expect("sender's first");
+    pool.add(mine(1)).expect("sender's second");
+    assert!(matches!(pool.add(mine(2)), Err(StateError::MempoolFull)));
+    pool.add(theirs(0)).expect("another sender's own allowance");
+    pool.add(theirs(1)).expect("another sender's own allowance");
+    assert!(matches!(pool.add(theirs(2)), Err(StateError::MempoolFull)));
+    pool.add(transfer(&relayer(), 0, &recipient().address()))
+        .expect("the relayer's own allowance");
+    pool.add(transfer(&relayer(), 1, &recipient().address()))
+        .expect("the relayer's own allowance");
+    assert!(matches!(
+        pool.add(transfer(&relayer(), 2, &recipient().address())),
+        Err(StateError::MempoolFull)
+    ));
+    assert_eq!(pool.len(), 6);
+}
+
+/// An envelope that leaves the pool returns its place to the sender it named,
+/// and only that sender; the relayer's own allowance is untouched by it.
+#[test]
+fn a_removed_envelope_returns_its_place_to_its_named_sender() {
+    let mut c = Chain::ready();
+    let pool = capped_pool(&c, 2, true);
+    let e0 = sponsored_tx(&relayer(), 0, &own_envelope(0));
+    let e1 = sponsored_tx(&relayer(), 0, &own_envelope(1));
+    pool.add(e0.clone()).unwrap();
+    pool.add(e1.clone()).unwrap();
+    assert!(matches!(
+        pool.add(sponsored_tx(&relayer(), 0, &own_envelope(2))),
+        Err(StateError::MempoolFull)
+    ));
+    assert_eq!(c.one(e0.clone()).status, TxStatus::Success);
+    pool.remove_batch(&[e0.hash()]);
+    pool.add(sponsored_tx(&relayer(), 0, &own_envelope(2)))
+        .expect("a place came back");
+    pool.add(transfer(&relayer(), 0, &recipient().address()))
+        .expect("the relayer's own allowance");
+    pool.add(transfer(&relayer(), 1, &recipient().address()))
+        .expect("the relayer's own allowance");
+    pool.clear();
+    pool.add(transfer(&relayer(), 0, &recipient().address()))
+        .expect("nothing is counted after a clear");
+}
+
+/// Without a wired policy nothing is stamped as an envelope, and envelopes
+/// count against the relaying account, as before.
+#[test]
+fn without_a_wired_policy_envelopes_count_against_the_relayer() {
+    let c = Chain::ready();
+    let pool = capped_pool(&c, 2, false);
+    pool.add(sponsored_tx(&relayer(), 0, &own_envelope(0)))
+        .unwrap();
+    pool.add(sponsored_tx(&relayer(), 0, &own_envelope(1)))
+        .unwrap();
+    assert!(matches!(
+        pool.add(transfer(&relayer(), 0, &recipient().address())),
+        Err(StateError::MempoolFull)
+    ));
+}
+
+/// The per-relay count of envelopes goes back down when they leave, so the
+/// relayer's own transactions are held to the limit again. Two leave by two
+/// different paths: one is evicted at selection once another block has carried
+/// it, the other is removed by hash, as a block this node imports removes it.
+/// If the count stayed up, it would be subtracted from transactions that are
+/// not envelopes, and the relayer's own would escape the limit.
+#[test]
+fn the_relayers_own_transactions_are_held_to_the_limit_again_after_its_envelopes_leave() {
+    let mut c = Chain::ready();
+    let pool = capped_pool(&c, 2, true);
+    let e0 = sponsored_tx(&relayer(), 0, &own_envelope(0));
+    let e1 = sponsored_tx(&relayer(), 0, &own_envelope(1));
+    pool.add(e0.clone()).unwrap();
+    pool.add(e1.clone()).unwrap();
+    let own = |n| transfer(&relayer(), n, &recipient().address());
+    pool.add(own(0)).expect("the relayer's own allowance");
+    pool.add(own(1)).expect("the relayer's own allowance");
+    assert!(matches!(pool.add(own(2)), Err(StateError::MempoolFull)));
+
+    // Both envelopes leave the pool.
+    let receipts = c.block(vec![e0.clone(), e1.clone()]);
+    assert!(receipts.iter().all(|r| r.status == TxStatus::Success));
+    let selected = pool.select_for_block(10);
+    assert!(!pool.contains(&e0.hash()) && !pool.contains(&e1.hash()));
+    assert!(hashes(&selected)
+        .iter()
+        .all(|h| *h != e0.hash() && *h != e1.hash()));
+    // (Selection evicts both as included; removing one again by hash is a
+    // no-op, as it must be.)
+    pool.remove_batch(&[e1.hash()]);
+    assert_eq!(pool.len(), 2, "only the relayer's own two are left");
+
+    assert!(
+        matches!(pool.add(own(2)), Err(StateError::MempoolFull)),
+        "with no envelope left, the relayer's own two fill its allowance"
+    );
+    pool.remove_batch(&[own(0).hash()]);
+    pool.add(own(2)).expect("a place came back");
+}
+
+/// The same, with the envelopes removed by hash only: each removal returns
+/// exactly one place to the relayer's count.
+#[test]
+fn removing_relayed_envelopes_by_hash_brings_the_relayers_count_back_down() {
+    let c = Chain::ready();
+    let pool = capped_pool(&c, 2, true);
+    let e0 = sponsored_tx(&relayer(), 0, &own_envelope(0));
+    let e1 = sponsored_tx(&relayer(), 0, &own_envelope(1));
+    pool.add(e0.clone()).unwrap();
+    pool.add(e1.clone()).unwrap();
+    let own = |n| transfer(&relayer(), n, &recipient().address());
+    pool.add(own(0)).unwrap();
+    pool.remove_batch(&[e0.hash()]);
+    pool.add(own(1))
+        .expect("one own pending, one envelope pending");
+    assert!(matches!(pool.add(own(2)), Err(StateError::MempoolFull)));
+    pool.remove_batch(&[e1.hash()]);
+    assert!(
+        matches!(pool.add(own(2)), Err(StateError::MempoolFull)),
+        "two own pending and no envelope: the allowance is full"
+    );
+}
+
+/// `n` more registered users, funded, keys `0x60..`.
+fn register_users(c: &mut Chain, n: u8) -> Vec<KeyPair> {
+    let users: Vec<KeyPair> = (0..n)
+        .map(|i| KeyPair::from_bytes([0x60 + i; 32]))
+        .collect();
+    for u in &users {
+        fund(&c.db, u, FUNDS);
+    }
+    let regs = users
+        .iter()
+        .map(|u| {
+            messaging_tx(
+                u,
+                0,
+                op(
+                    MessagingOperation::RegisterPublicKey,
+                    &RegisterPublicKeyData {
+                        public_key: *u.public_key().as_bytes(),
+                    },
+                ),
+            )
+        })
+        .collect();
+    assert!(c.block(regs).iter().all(|r| r.status == TxStatus::Success));
+    users
+}
+
+/// `user`'s envelope at `nonce` to `recipient()`, relay-signed by `user`.
+fn envelope_of(user: &KeyPair, nonce: u64) -> SponsoredMessage {
+    relay_signed(
+        envelope(*user.public_key().as_bytes(), &recipient().address(), nonce),
+        user,
+    )
+}
+
+/// An envelope NAMING a sender is counted against that sender only once its
+/// signature has verified by that sender's key over the relay preimage. One
+/// that names the sender and does not verify — all zeros, or signed by
+/// another key — is refused before it is counted, so it neither takes nor
+/// frees any of the named sender's places; nor does a second copy of a
+/// pending envelope wrapped by another relayer, refused as already pending.
+#[test]
+fn an_envelope_that_does_not_verify_takes_no_place_from_the_sender_it_names() {
+    let c = Chain::ready();
+    let pool = capped_pool(&c, 2, true);
+    let named = *sender().public_key().as_bytes();
+    for n in 0..4 {
+        let zero = sponsored_tx(
+            &other_relayer(),
+            0,
+            &envelope(named, &recipient().address(), n),
+        );
+        let other_key = sponsored_tx(
+            &other_relayer(),
+            0,
+            &relay_signed(envelope(named, &recipient().address(), n), &someone_else()),
+        );
+        assert!(refused(&pool.add(zero)));
+        assert!(refused(&pool.add(other_key)));
+    }
+    assert!(pool.is_empty());
+
+    let e0 = sponsored_tx(&relayer(), 0, &own_envelope(0));
+    pool.add(e0.clone()).expect("the sender's own first");
+    let copy = sponsored_tx(&other_relayer(), 0, &own_envelope(0));
+    assert!(refused(&pool.add(copy.clone())), "already pending");
+    pool.remove_batch(&[copy.hash()]);
+    pool.add(sponsored_tx(&relayer(), 0, &own_envelope(1)))
+        .expect("the sender's own second");
+    assert!(
+        matches!(
+            pool.add(sponsored_tx(&relayer(), 0, &own_envelope(2))),
+            Err(StateError::MempoolFull)
+        ),
+        "exactly two places used: the refused envelopes took none and freed none"
+    );
+}
+
+/// Many senders through ONE relayer, up to the pool's global bound.
+///
+/// Each named sender holds at most `max_per_sender`; the relayer itself is
+/// bounded only by the pool's size, which is unchanged. Once the pool is full,
+/// a new sender's envelope and an ordinary transaction at the same or a lower
+/// fee are refused; a transaction with a higher fee evicts the lowest-fee,
+/// last-sorting entry, as before. The evicted envelope's place goes back to
+/// the sender it named: the same envelope, wrapped again at a higher fee, is
+/// admitted (it is not "already pending").
+#[test]
+fn many_senders_through_one_relayer_fill_the_pool_to_its_global_bound_and_no_further() {
+    let mut c = Chain::ready();
+    let users = register_users(&mut c, 8);
+    let pool = Mempool::new(MempoolConfig {
+        max_size: 20,
+        max_per_sender: 3,
+        ..MempoolConfig::default()
+    })
+    .with_inclusion_policy(InclusionPolicy { db: c.db.clone() });
+
+    let mut admitted = Vec::new();
+    'fill: for u in &users[..7] {
+        for n in 0..3 {
+            let t = sponsored_tx(&relayer(), 0, &envelope_of(u, n));
+            match pool.add(t.clone()) {
+                Ok(_) => admitted.push(t),
+                Err(StateError::MempoolFull) => break 'fill,
+                Err(e) => panic!("unexpected refusal: {e}"),
+            }
+        }
+    }
+    assert_eq!(
+        pool.len(),
+        20,
+        "the global bound, reached through one relayer"
+    );
+    assert_eq!(admitted.len(), 20);
+
+    let newcomer = sponsored_tx(&relayer(), 0, &envelope_of(&users[7], 0));
+    assert!(matches!(pool.add(newcomer), Err(StateError::MempoolFull)));
+    assert!(matches!(
+        pool.add(transfer(&someone_else(), 0, &recipient().address())),
+        Err(StateError::MempoolFull)
+    ));
+
+    let urgent = signed_payload(
+        &someone_else(),
+        0,
+        FEE + 1,
+        TxPayload::Transfer {
+            to: recipient().address(),
+            amount: 1,
+        },
+    );
+    pool.add(urgent.clone())
+        .expect("a higher fee evicts one entry");
+    assert_eq!(pool.len(), 20);
+    let gone: Vec<&SignedTransaction> = admitted
+        .iter()
+        .filter(|t| !pool.contains(&t.hash()))
+        .collect();
+    assert_eq!(gone.len(), 1, "exactly one envelope was evicted");
+
+    // Its place went back to its named sender: the same envelope, wrapped
+    // again at a higher fee, is admitted, evicting another.
+    let sumchain_primitives::TxInner::V2(v2) = &gone[0].inner else {
+        unreachable!()
+    };
+    let TxPayload::Messaging(data) = &v2.payload else {
+        unreachable!()
+    };
+    let m: SponsoredMessage = bincode::deserialize(&data.data).unwrap();
+    pool.add(sponsored_tx_with_fee(&relayer(), 0, FEE + 2, &m))
+        .expect("the evicted envelope's (sender, nonce) is free again");
+    assert_eq!(pool.len(), 20);
+}
+
+/// The same pressure from direct sends — one funded account per sender,
+/// each with its own allowance — fills the pool the same way: the capacity
+/// any one actor reaches is the pool's global bound in both cases.
+#[test]
+fn the_same_pressure_from_direct_sends_fills_the_pool_the_same_way() {
+    let mut c = Chain::ready();
+    let users = register_users(&mut c, 8);
+    let pool = Mempool::new(MempoolConfig {
+        max_size: 20,
+        max_per_sender: 3,
+        ..MempoolConfig::default()
+    })
+    .with_inclusion_policy(InclusionPolicy { db: c.db.clone() });
+    let mut admitted = 0;
+    'fill: for u in &users[..7] {
+        for n in 0..3 {
+            match pool.add(direct(u, n, &recipient().address())) {
+                Ok(_) => admitted += 1,
+                Err(StateError::MempoolFull) => break 'fill,
+                Err(e) => panic!("unexpected refusal: {e}"),
+            }
+        }
+    }
+    assert_eq!((pool.len(), admitted), (20, 20));
+    assert!(matches!(
+        pool.add(direct(&users[7], 0, &recipient().address())),
+        Err(StateError::MempoolFull)
+    ));
+}
+
+/// Revalidation (run after a chain switch) and selection both release the
+/// places of the envelopes they evict: one the chain has carried, and one the
+/// chain has moved past (the sender's direct send took its messaging nonce).
+#[test]
+fn eviction_by_revalidation_and_by_selection_returns_places() {
+    let mut c = Chain::ready();
+    let by_revalidation = capped_pool(&c, 2, true);
+    let by_selection = capped_pool(&c, 2, true);
+    let e0 = sponsored_tx(&relayer(), 0, &own_envelope(0));
+    let e1 = sponsored_tx(&relayer(), 0, &own_envelope(1));
+    for pool in [&by_revalidation, &by_selection] {
+        pool.add(e0.clone()).unwrap();
+        pool.add(e1.clone()).unwrap();
+        assert!(matches!(
+            pool.add(sponsored_tx(&relayer(), 0, &own_envelope(2))),
+            Err(StateError::MempoolFull)
+        ));
+    }
+    // Another block carries e0; then the sender's direct send takes nonce 1,
+    // so e1 is stale.
+    assert_eq!(c.one(e0.clone()).status, TxStatus::Success);
+    assert_eq!(
+        c.one(direct(
+            &sender(),
+            c.state.get_nonce(&sender().address()).unwrap(),
+            &recipient().address()
+        ))
+        .status,
+        TxStatus::Success
+    );
+    assert_eq!(c.messaging_nonce(&sender().address()), 2);
+
+    by_revalidation.revalidate(&c.state, CHAIN_ID);
+    let _ = by_selection.select_for_block(10);
+    for pool in [&by_revalidation, &by_selection] {
+        assert!(pool.is_empty(), "both evicted");
+        pool.add(sponsored_tx(&relayer(), 0, &own_envelope(2)))
+            .expect("both places came back");
+        pool.add(sponsored_tx(&relayer(), 0, &own_envelope(3)))
+            .expect("both places came back");
+        pool.add(transfer(&relayer(), 0, &recipient().address()))
+            .expect("the relayer's own allowance");
+        pool.add(transfer(&relayer(), 1, &recipient().address()))
+            .expect("the relayer's own allowance");
+        assert!(matches!(
+            pool.add(transfer(&relayer(), 2, &recipient().address())),
+            Err(StateError::MempoolFull)
+        ));
+    }
+}

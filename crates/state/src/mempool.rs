@@ -380,6 +380,11 @@ pub struct Mempool {
     /// 4). Read against the inclusion policy's database, so it does nothing
     /// without one.
     messaging_quota_admission: Option<MessagingQuotaAdmission>,
+    /// How many of each relaying account's pending transactions are stamped
+    /// sponsored envelopes (counted against the sender they name instead).
+    /// Kept with the stamp: incremented when an envelope is stamped, decremented
+    /// when the stamped carrier is removed.
+    relayed_envelopes: RwLock<HashMap<Address, usize>>,
 }
 
 /// Whether `tx` is a contract deploy or call.
@@ -409,6 +414,7 @@ impl Mempool {
             inclusion_policy: None,
             sponsored_in_flight: RwLock::new(HashMap::new()),
             messaging_quota_admission: None,
+            relayed_envelopes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -544,13 +550,40 @@ impl Mempool {
             }
         }
 
-        // Check per-sender limit
+        // Check per-sender limit.
+        //
+        // A sponsored envelope this node's policy admitted — its signature
+        // verified, strictly, by the key of the sender it names — is held
+        // against that NAMED sender, not the account that relays it: a relay
+        // serves many senders, and each has its own allowance. Every other
+        // transaction is held against its own account, not counting the
+        // envelopes that account relays. Without a wired policy nothing is
+        // stamped as an envelope, and every transaction counts against its own
+        // account, as before. The pool-wide bound (`max_size`) is unchanged.
         {
-            let by_sender = self.by_sender.read();
-            if let Some(sender_txs) = by_sender.get(&sender) {
-                if sender_txs.len() >= self.config.max_per_sender {
-                    return Err(StateError::MempoolFull);
+            let held = match &sponsored_key {
+                Some((named, _)) => self
+                    .sponsored_in_flight
+                    .read()
+                    .get(named)
+                    .map_or(0, |nonces| nonces.len()),
+                None => {
+                    let all = self
+                        .by_sender
+                        .read()
+                        .get(&sender)
+                        .map_or(0, |txs| txs.len());
+                    let relayed = self
+                        .relayed_envelopes
+                        .read()
+                        .get(&sender)
+                        .copied()
+                        .unwrap_or(0);
+                    all.saturating_sub(relayed)
                 }
+            };
+            if held >= self.config.max_per_sender {
+                return Err(StateError::MempoolFull);
             }
         }
 
@@ -592,10 +625,10 @@ impl Mempool {
         if let Some(key) = education_key {
             self.education_in_flight.write().insert(key, hash);
         }
-        if let Some((sender, nonce)) = sponsored_key {
+        if let Some((named, nonce)) = sponsored_key {
             let mut in_flight = self.sponsored_in_flight.write();
             let raced = in_flight
-                .get(&sender)
+                .get(&named)
                 .and_then(|nonces| nonces.get(&nonce))
                 .is_some_and(|other| *other != hash);
             if raced {
@@ -609,7 +642,10 @@ impl Mempool {
                     "an envelope from this sender with nonce {nonce} is already pending"
                 )));
             }
-            in_flight.entry(sender).or_default().insert(nonce, hash);
+            in_flight.entry(named).or_default().insert(nonce, hash);
+            // Lock order: `sponsored_in_flight`, then `relayed_envelopes`, as
+            // in `remove`.
+            *self.relayed_envelopes.write().entry(sender).or_default() += 1;
         }
 
         debug!("Added tx {} to mempool (fee: {})", hash, fee);
@@ -1307,6 +1343,14 @@ impl Mempool {
             if let Some(nonces) = in_flight.get_mut(&sender) {
                 if nonces.get(&nonce) == Some(hash) {
                     nonces.remove(&nonce);
+                    let relay = entry.tx.sender();
+                    let mut relayed = self.relayed_envelopes.write();
+                    if let Some(n) = relayed.get_mut(&relay) {
+                        *n = n.saturating_sub(1);
+                        if *n == 0 {
+                            relayed.remove(&relay);
+                        }
+                    }
                 }
                 if nonces.is_empty() {
                     in_flight.remove(&sender);
@@ -1570,6 +1614,7 @@ impl Mempool {
         self.inference_in_flight.write().clear();
         self.education_in_flight.write().clear();
         self.sponsored_in_flight.write().clear();
+        self.relayed_envelopes.write().clear();
         info!("Mempool cleared");
     }
 

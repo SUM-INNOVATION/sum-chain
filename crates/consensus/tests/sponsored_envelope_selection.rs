@@ -727,3 +727,48 @@ async fn wired_as_the_node_wires_it_the_over_quota_envelope_is_refused_at_admiss
     assert_eq!(node.status(&over), None);
     assert_eq!(node.messaging_nonce(&alice()), QUOTA as u64);
 }
+
+// ── 6. per-sender allowance ────────────────────────────────────────────────
+
+/// The pool caps pending transactions per sender (`max_per_sender`, 100). An
+/// envelope the policy admitted counts against the sender it NAMES. D's first
+/// envelope cannot be executed for a reason the quota rule does not see — its
+/// recipient has blocked D — so it is held, and D's later envelopes are
+/// admitted behind it in sequence, up to D's own allowance. Another sender's
+/// envelope through the same relay is admitted and carried, and so is a
+/// transaction of the sponsor's own.
+#[tokio::test]
+async fn a_held_run_uses_its_own_senders_allowance() {
+    let net = Net::wired(vec![validator_p()]);
+    net.ready().await;
+    let node = &net.nodes[0];
+    // The production quota, and D blocked by the recipient of its first send.
+    net.produce(vec![set_quota(node.account_nonce(&admin()), 100)])
+        .await;
+    net.produce(vec![block_sender(
+        &recipient(),
+        node.account_nonce(&recipient()),
+        &dave(),
+    )])
+    .await;
+
+    let mut run = vec![relayed_to(&dave(), &recipient().address(), 0, EXPIRY)];
+    run.extend((1..100).map(|n| relayed_to(&dave(), &bob().address(), n, EXPIRY)));
+    node.submit(&run);
+    assert!(
+        matches!(
+            node.try_submit(&relayed_to(&dave(), &bob().address(), 100, EXPIRY)),
+            Err(StateError::SponsoredEnvelopeRefused(_)) | Err(StateError::MempoolFull)
+        ),
+        "D has no room left of its own"
+    );
+
+    let b0 = relayed(&bob(), 0, EXPIRY);
+    node.submit(&[b0.clone()]);
+    let own = register(&sponsor());
+    node.submit(&[own.clone()]);
+    let (_, b) = net.tick().await;
+    assert_eq!(hashes(&b.transactions), hashes(&[b0.clone(), own.clone()]));
+    assert_eq!(node.status(&b0), Some(TxStatus::Success));
+    assert_eq!(node.pending(&run), 100, "D's run is held");
+}
