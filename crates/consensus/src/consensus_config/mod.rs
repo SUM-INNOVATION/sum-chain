@@ -16,21 +16,15 @@
 //! It is not network agreement. The stored baseline is an
 //! [`record::BaselineStatus::UnverifiedLocalBaseline`]: what THIS node
 //! computed from its own `genesis.json` and its own binary. Nothing here is
-//! signed, placed in a block or bound into a state root, and nothing here
-//! activates, schedules or authorizes a change. Binding the commitment to an
-//! authenticated upgrade is later work (#268) and will be a separate, reviewed
-//! change.
-//!
-//! What peers compare at handshake is the commitment of the RUNNING
-//! configuration, [`build`] of the node's genesis in the schema this binary
-//! writes, folded with the protocol digest into the [`handshake`] digest. The
-//! recorded commitment is never exchanged: its schema and its history are each
-//! node's own. A mismatch refuses the peer at the network boundary; that
-//! detects and excludes, and authenticates nothing.
+//! signed, exchanged with peers, placed in a block or compared at handshake,
+//! and nothing here activates, schedules or authorizes a change. Binding the
+//! commitment to an authenticated upgrade is later work (#268) and will be a
+//! separate, reviewed change.
 //!
 //! It is also not [`sumchain_state::protocol_digest`], which it leaves
-//! untouched. That digest covers what it covered before, and the handshake
-//! digest folds it whole.
+//! untouched. That digest is what peers declare at handshake today; changing
+//! what it covers would change the value every running node compares, which
+//! is a network change this release does not make.
 //!
 //! # The rules encoded are the rules that run
 //!

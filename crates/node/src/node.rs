@@ -279,13 +279,12 @@ pub struct Node {
     /// BlockImported event so admission decisions track the chain. On
     /// cold start, initialized from `BlockStore::get_latest_height()`.
     chain_height: Arc<AtomicU64>,
-    /// The handshake digest THIS node declares: the protocol digest (every
-    /// activation height and every compiled consensus limit) folded with the
-    /// commitment of the consensus configuration this binary runs for its
-    /// genesis (`sumchain_consensus::consensus_config::handshake`). Computed
-    /// once at construction, declared to every peer that asks, and compared
-    /// against every peer that declares one.
-    handshake_digest: Hash,
+    /// The protocol digest THIS binary enforces: every activation height plus
+    /// every consensus-relevant compiled-in constant
+    /// (`sumchain_state::protocol_digest`). Computed once at construction,
+    /// declared to every peer that asks, and compared against every peer that
+    /// declares one.
+    protocol_digest: Hash,
     /// What each peer has declared, and the height from which declaring
     /// becomes mandatory.
     ///
@@ -652,33 +651,14 @@ impl Node {
         // Create transaction channel
         let (tx_sender, tx_receiver) = mpsc::channel(1000);
 
-        // The value this node declares on the wire. Computed here, once, before
-        // the network runs, so it is a property of the binary and its genesis
-        // rather than of anything the chain has done. The consensus
-        // configuration folded in is the one this binary computes from its
-        // genesis, in the schema it writes; never the record in this database,
-        // whose schema and history are this node's own. The check above has
-        // just established that the record describes the same rules.
+        // The value this node declares on the wire. Computed here, before
+        // consensus or RPC exist, so it is a property of the binary and its
+        // genesis rather than of anything the chain has done.
         let protocol_digest = sumchain_state::protocol_digest::protocol_digest(&genesis)
             .map_err(|e| anyhow::anyhow!("computing this binary's protocol digest: {}", e))?;
-        let running = sumchain_consensus::consensus_config::build(&genesis).map_err(|e| {
-            anyhow::anyhow!("computing this binary's consensus configuration: {e}")
-        })?;
-        let handshake_digest =
-            sumchain_consensus::consensus_config::handshake_digest(protocol_digest, &running);
         info!(
             "Protocol digest (activation heights + consensus constants): {}",
             protocol_digest
-        );
-        info!(
-            "Running consensus configuration commitment: {} (schema {})",
-            running.commitment(),
-            running.schema().number
-        );
-        info!(
-            "Handshake digest declared to peers (protocol digest + running consensus \
-             configuration): {}",
-            handshake_digest
         );
 
         // Phase one until this height; `None` is phase one forever, and is what
@@ -688,14 +668,14 @@ impl Node {
             .peer_protocol_declaration_required_from_height;
         match enforce_from {
             Some(h) => info!(
-                "From height {}, a peer must declare a MATCHING handshake digest before it \
+                "From height {}, a peer must declare a MATCHING protocol digest before it \
                  may propose blocks, vote, or move this node's fork choice. Below it, a \
                  peer that declares nothing participates exactly as it does today.",
                 h
             ),
             None => info!(
                 "peer_protocol_declaration_required_from_height is unset: a peer that \
-                 declares no digest is admitted at every height, exactly as \
+                 declares no protocol digest is admitted at every height, exactly as \
                  before this mechanism existed. A peer that declares a DIFFERENT one is \
                  still refused."
             ),
@@ -719,8 +699,8 @@ impl Node {
             tx_receiver,
             shutdown: Arc::new(AtomicBool::new(false)),
             chain_height,
-            handshake_digest,
-            peer_compat: Arc::new(PeerCompatRegistry::new(handshake_digest, enforce_from)),
+            protocol_digest,
+            peer_compat: Arc::new(PeerCompatRegistry::new(protocol_digest, enforce_from)),
             rpc_contract_exec: (sumc_runtime::LocalExecutionLimits::DEFAULT, 1),
             rpc_custodial_signing: sumchain_rpc::custodial::CustodialSigningMethods::default(),
             sync_stall_check: SYNC_STALL_CHECK,
@@ -1209,7 +1189,7 @@ impl Node {
         // Peers to ask for their sync status again when they declare our digest,
         // or when their request fails and they may take part.
         //
-        // `PeerConnected` asks a peer for its handshake digest and for its status
+        // `PeerConnected` asks a peer for its protocol digest and for its status
         // at once, and the answers race. Until the declaration has been
         // compared the peer is `Pending`, and in either phase a status, a
         // gossiped block or a synced batch that arrives first is refused, as it
@@ -1348,7 +1328,7 @@ impl Node {
                                     warn!(
                                         "Refusing gossiped block {} at height {} from {}: {:?}, and \
                                          from height {:?} a peer must have declared a matching \
-                                         handshake digest before it may propose a block this node \
+                                         protocol digest before it may propose a block this node \
                                          acts on",
                                         hash,
                                         height,
@@ -1396,14 +1376,12 @@ impl Node {
                                 }
                             }
                         }
-                        // Declare the rules this binary enforces: the handshake
-                        // digest, in the reply that carried the protocol digest
-                        // before it. Same message, same 32 bytes on the wire.
+                        // Declare the rules this binary enforces.
                         NetworkEvent::ProtocolIdRequest { request_id, peer } => {
                             debug!("Protocol digest request from {} (id={})", peer, request_id);
                             let _ = command_sender.send(NetworkCommand::SendProtocolIdResponse {
                                 request_id,
-                                digest: self.handshake_digest,
+                                digest: self.protocol_digest,
                             }).await;
                         }
                         // Compare a peer's declared rules against ours.
@@ -1433,7 +1411,7 @@ impl Node {
                                 info!(
                                     peer = %peer,
                                     digest = %digest,
-                                    "compatibility handshake accepted: peer declares our handshake digest"
+                                    "compatibility handshake accepted: peer enforces our protocol digest"
                                 );
                                 // Something it sent before this was refused;
                                 // ask again now that it may take part. See
@@ -1444,18 +1422,13 @@ impl Node {
                                 }
                             } else {
                                 warn!(
-                                    "REFUSING peer {}: it declares handshake digest {} but this \
-                                     node declares {}. The two disagree about an activation \
-                                     height, a consensus constant or a value of the consensus \
-                                     configuration (a genesis parameter such as min_fee, a rule \
-                                     code or a compiled constant), so blocks one produces the \
-                                     other cannot reproduce. Banning it for 24h; it is \
-                                     permanently `Incompatible` from here whatever it declares \
-                                     later, so every route into consensus refuses it. A peer \
-                                     on a release that declares the protocol digest is refused \
-                                     the same way: every validator moves to this release in one \
-                                     window.",
-                                    peer, digest, self.handshake_digest
+                                    "REFUSING peer {}: it enforces protocol digest {} but this \
+                                     node enforces {}. The two binaries disagree about an \
+                                     activation height or a consensus constant, so blocks one \
+                                     produces the other cannot reproduce. Banning it for 24h; \
+                                     it is permanently `Incompatible` from here whatever it \
+                                     declares later, so every route into consensus refuses it.",
+                                    peer, digest, self.protocol_digest
                                 );
                                 metrics.p2p.record_message_received();
                                 // Three refusals, because no one of them is
@@ -1496,7 +1469,7 @@ impl Node {
                         NetworkEvent::ProtocolIdUnanswered { peer } => {
                             if self.peer_compat.on_unanswered(peer) {
                                 info!(
-                                    "Peer {} did not declare a handshake digest; it is undeclared, \
+                                    "Peer {} did not declare a protocol digest; it is undeclared, \
                                      admitted below height {:?} and refused at or above it",
                                     peer,
                                     self.peer_compat.enforcement_height(),

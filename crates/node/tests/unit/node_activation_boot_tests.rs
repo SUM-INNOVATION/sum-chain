@@ -905,9 +905,8 @@ async fn a_database_holding_a_newer_record_format_refuses_to_start() {
 /// a boot-time refusal derived from a database's own history can never see a
 /// disagreement between two nodes. The refusal moved to the first moment a
 /// second node is actually present — the peer handshake — where
-/// `Node::run` compares the peer's declared handshake digest, which folds the
-/// protocol digest, against its own and bans a mismatch
-/// (`crates/p2p/tests/protocol_compat.rs`).
+/// `Node::run` compares the peer's declared `protocol_digest` against its own
+/// and bans a mismatch (`crates/p2p/tests/protocol_compat.rs`).
 ///
 /// So the verdict this test records is unchanged and still correct: boot accepts
 /// both. What it now also records is that each node computes a DIFFERENT
@@ -957,11 +956,10 @@ fn two_validators_with_different_activation_heights_both_start() {
          one-digit difference would be invisible to every operator surface"
     );
 
-    // The value the peer handshake compares folds this one, so it is the same
-    // difference in a form a NODE can act on rather than an operator.
-    // `Node::with_rpc_config` folds exactly this into the handshake digest it
-    // declares to every peer that asks; a peer declaring the other one is
-    // banned before it can offer a block.
+    // The value the peer handshake compares, which is the same difference in a
+    // form a NODE can act on rather than an operator. `Node::with_rpc_config`
+    // computes exactly this and declares it to every peer that asks; a peer
+    // declaring the other one is banned before it can offer a block.
     assert_ne!(
         sumchain_state::protocol_digest::protocol_digest(&a).expect("digest"),
         sumchain_state::protocol_digest::protocol_digest(&b).expect("digest"),

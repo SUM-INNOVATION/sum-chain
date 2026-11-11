@@ -235,10 +235,10 @@ impl PeerCompatRegistry {
             true
         } else {
             warn!(
-                "Peer {} declared digest {} but this binary declares {}; marking it \
-                 incompatible. The two disagree about an activation height, a \
-                 consensus constant or a consensus-configuration value, so blocks \
-                 one produces the other cannot reproduce.",
+                "Peer {} declared protocol digest {} but this binary enforces {}; \
+                 marking it incompatible. The two disagree about an activation \
+                 height or a consensus constant, so blocks one produces the other \
+                 cannot reproduce.",
                 peer, digest, self.ours
             );
             declared.insert(peer, PeerCompat::Incompatible);

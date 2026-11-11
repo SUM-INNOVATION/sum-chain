@@ -229,8 +229,7 @@ pub enum NetworkEvent {
         request_id: SyncRequestId,
         peer: PeerId,
     },
-    /// A peer declared its digest: the handshake digest of ITS binary and
-    /// genesis.
+    /// A peer declared the protocol digest ITS binary enforces.
     ///
     /// Only peers new enough to understand `SyncRequest::GetProtocolId` ever
     /// produce this. An older peer produces an inbound failure instead, which
