@@ -24,15 +24,17 @@ use sumchain_primitives::messaging::{
     SRC201_TAG_SIZE, SRC201_VERSION,
 };
 use sumchain_primitives::{
-    sponsored_send_v2_signing_preimage, Block, BlockHeader, Hash, Receipt, SignedTransaction,
-    SponsoredMessage, TxInner, TxPayload, TxStatus,
+    sponsored_register_v1_signing_preimage, sponsored_send_v2_signing_preimage, Block, BlockHeader,
+    Hash, Receipt, SignedTransaction, SponsoredMessage, TxInner, TxPayload, TxStatus,
 };
 use sumchain_rpc::api::SumChainApiServer;
 use sumchain_rpc::auth::RpcAuthConfig;
 use sumchain_rpc::metrics::Metrics;
 use sumchain_rpc::rate_limit::RateLimitConfig;
 use sumchain_rpc::server::RpcServer;
-use sumchain_rpc::types::SubmitSponsoredMessageRequest;
+use sumchain_rpc::types::{
+    SponsoredRegistrationRequest, SponsoredRegistrationResponse, SubmitSponsoredMessageRequest,
+};
 use sumchain_state::{BlockExecutor, Mempool, MempoolConfig, StateManager};
 use sumchain_storage::{Database, MessagingStore};
 use tokio::sync::mpsc;
@@ -331,6 +333,48 @@ impl Served {
             .await
             .map(|r| r.tx_hash)
     }
+
+    /// `kp`'s sponsored registration, requested of this relay.
+    async fn register(&self, kp: &KeyPair) -> SponsoredRegistrationResponse {
+        self.server
+            .messaging_register_sponsored(registration_request(kp))
+            .await
+            .unwrap()
+    }
+
+    fn is_registered(&self, kp: &KeyPair) -> bool {
+        MessagingStore::new(&self.db)
+            .has_public_key(&kp.address())
+            .unwrap()
+    }
+}
+
+/// `g` with sponsored registration open from genesis.
+fn with_registration(mut g: Genesis) -> Genesis {
+    g.params.messaging_sponsored_registration_enabled_from_height = Some(0);
+    g
+}
+
+/// The request a client sends to register `kp`'s key through this relay: its
+/// signature over the registration preimage for this chain and the relay's
+/// sponsor.
+fn registration_request(kp: &KeyPair) -> SponsoredRegistrationRequest {
+    let preimage = sponsored_register_v1_signing_preimage(
+        CHAIN_ID,
+        &sponsor().address(),
+        kp.public_key().as_bytes(),
+    );
+    SponsoredRegistrationRequest {
+        public_key: format!("0x{}", hex::encode(kp.public_key().as_bytes())),
+        signature: format!(
+            "0x{}",
+            hex::encode(sign(&preimage, kp.private_key()).as_bytes())
+        ),
+    }
+}
+
+fn status_only(receipts: &[Receipt]) -> Vec<TxStatus> {
+    receipts.iter().map(|r| r.status).collect()
 }
 
 fn valid_message(rh: [u8; 32]) -> Vec<u8> {
@@ -1529,4 +1573,199 @@ async fn simultaneous_relays_never_share_a_sponsor_nonce() {
     );
     let (_, receipts) = s.publish_pool(1);
     assert_eq!(statuses(&receipts), vec![(TxStatus::Success, RELAY_FEE); N]);
+}
+
+/// A sponsored registration of an address that is already registered, or
+/// whose sponsored registration is already pending in this node's pool, is
+/// refused before it takes a sponsor nonce. Such a registration would be
+/// refused in the block, free and advancing nothing, and the message relayed
+/// after it, at the next sponsor nonce, would take `InvalidNonce`. With both
+/// gates absent and with both open, the relayed messages are delivered.
+#[tokio::test]
+async fn a_registration_already_made_or_pending_is_refused_before_it_takes_a_nonce() {
+    for (envelope_gate, accounting_gate) in [(None, None), (Some(1), Some(1))] {
+        let label = format!("envelope gate {envelope_gate:?}, accounting gate {accounting_gate:?}");
+        let s = serve(&with_registration(genesis_on(
+            CHAIN_ID,
+            envelope_gate,
+            accounting_gate,
+        )));
+        let carol_message = |nonce: u64| {
+            let m = envelope(nonce, nonce as u8, None);
+            if envelope_gate.is_some() {
+                v2(m)
+            } else {
+                v1(m)
+            }
+        };
+
+        // alice is registered: the request carrying her registration is refused.
+        let r = s.register(&alice()).await;
+        assert!(!r.success && r.tx_hash.is_none(), "{label}: {r:?}");
+        assert!(
+            r.error.as_deref().unwrap().contains("already registered"),
+            "{label}: {r:?}"
+        );
+        assert!(s.mempool.is_empty(), "{label}");
+        s.relay(&carol_message(0)).await.unwrap();
+        assert_eq!(s.pending_sponsor_nonces(), vec![0], "{label}");
+        let (_, receipts) = s.publish_pool(1);
+        assert_eq!(status_only(&receipts), vec![TxStatus::Success], "{label}");
+        assert_eq!(s.sent_by(&carol()), 1, "{label}");
+
+        // A new address: its registration is taken once; the same request
+        // again, while the first is pending, is refused.
+        let newcomer = KeyPair::from_bytes([0xB0; 32]);
+        let r = s.register(&newcomer).await;
+        assert!(r.success, "{label}: {r:?}");
+        let again = s.register(&newcomer).await;
+        assert!(!again.success && again.tx_hash.is_none(), "{label}: {again:?}");
+        assert!(
+            again.error.as_deref().unwrap().contains("already pending"),
+            "{label}: {again:?}"
+        );
+        let next = s.sponsor_nonce();
+        s.relay(&carol_message(1)).await.unwrap();
+        assert_eq!(s.pending_sponsor_nonces(), vec![next, next + 1], "{label}");
+        let (_, receipts) = s.publish_pool(2);
+        assert_eq!(status_only(&receipts), vec![TxStatus::Success; 2], "{label}");
+        assert!(s.is_registered(&newcomer), "{label}");
+        assert_eq!(s.sent_by(&carol()), 2, "{label}");
+
+        // Once it has executed, the same request is refused as registered.
+        let late = s.register(&newcomer).await;
+        assert!(
+            !late.success && late.error.as_deref().unwrap().contains("already registered"),
+            "{label}: {late:?}"
+        );
+        s.relay(&carol_message(2)).await.unwrap();
+        let (_, receipts) = s.publish_pool(3);
+        assert_eq!(status_only(&receipts), vec![TxStatus::Success], "{label}");
+        assert_eq!(s.sent_by(&carol()), 3, "{label}");
+    }
+}
+
+/// Below the accounting gate a relayed message and a sponsored registration
+/// relayed after it share the sponsor's committed nonce: the relayed message
+/// leaves that nonce where it is, the registration advances it. The producer
+/// carries the relayed message first at that nonce, so both execute, in every
+/// one of sixteen cases, among them cases where the fee-then-hash order puts
+/// the registration first.
+#[tokio::test]
+async fn a_relayed_message_and_a_registration_at_one_sponsor_nonce() {
+    let mut registration_first_by_hash = 0;
+    for salt in 0..16u8 {
+        let s = serve(&with_registration(genesis_on(CHAIN_ID, None, None)));
+        let newcomer = KeyPair::from_bytes([0xC0 + salt; 32]);
+        let relayed = s.relay(&v1(envelope(0, salt, None))).await.unwrap();
+        let r = s.register(&newcomer).await;
+        assert!(r.success, "{r:?}");
+        let registration = r.tx_hash.unwrap();
+        assert_eq!(s.pending_sponsor_nonces(), vec![0, 0]);
+        if Hash::from_hex(&registration).unwrap() < Hash::from_hex(&relayed).unwrap() {
+            registration_first_by_hash += 1;
+        }
+
+        let (carried, receipts) = s.publish_pool(1);
+        assert_eq!(
+            carried.iter().map(|t| t.hash().to_hex()).collect::<Vec<_>>(),
+            vec![relayed, registration],
+            "salt {salt}: the relayed message first"
+        );
+        assert_eq!(status_only(&receipts), vec![TxStatus::Success; 2], "salt {salt}");
+        assert_eq!(s.sent_by(&carol()), 1, "salt {salt}");
+        assert!(s.is_registered(&newcomer), "salt {salt}");
+        assert_eq!(s.sponsor_nonce(), 1, "salt {salt}");
+    }
+    assert!(
+        registration_first_by_hash > 0,
+        "the cases include ones the fee-then-hash order alone would carry the other way"
+    );
+}
+
+/// Relayed messages and sponsored registrations released at once, on eight
+/// threads, with one registration requested twice: every message and every
+/// registration takes its own sponsor nonce, the second request for the same
+/// registration is refused, and all of them execute in one block with both
+/// gates open. The registration path chooses its nonce, checks what is
+/// pending and adds its transaction under the same `relay_lock` as the
+/// message relay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn simultaneous_relays_and_registrations_never_share_a_sponsor_nonce() {
+    const MESSAGES: usize = 24;
+    const REGISTRATIONS: usize = 24;
+    let s = serve(&with_registration(genesis_on(CHAIN_ID, Some(1), Some(1))));
+    let senders: Vec<KeyPair> = (0..MESSAGES)
+        .map(|i| KeyPair::from_bytes([0x80 + i as u8; 32]))
+        .collect();
+    let newcomers: Vec<KeyPair> = (0..REGISTRATIONS)
+        .map(|i| KeyPair::from_bytes([0xD0 + i as u8; 32]))
+        .collect();
+    let store = MessagingStore::new(&s.db);
+    for kp in &senders {
+        store
+            .set_public_key(
+                &kp.address(),
+                &RegisteredPublicKey {
+                    public_key: *kp.public_key().as_bytes(),
+                    address: kp.address(),
+                    registered_at_block: 0,
+                    registered_at: 0,
+                    updated_at_block: 0,
+                },
+            )
+            .unwrap();
+    }
+    let barrier = Arc::new(tokio::sync::Barrier::new(MESSAGES + REGISTRATIONS + 1));
+    let mut messages = Vec::new();
+    for (i, kp) in senders.iter().enumerate() {
+        let m = v2_by(envelope_from(kp, 0, i as u8, None), kp, CHAIN_ID);
+        let server = s.server.clone();
+        let barrier = barrier.clone();
+        messages.push(tokio::spawn(async move {
+            barrier.wait().await;
+            server.messaging_submit_sponsored(request(&m)).await
+        }));
+    }
+    let mut registrations = Vec::new();
+    for kp in newcomers.iter().chain(std::iter::once(&newcomers[0])) {
+        let req = registration_request(kp);
+        let server = s.server.clone();
+        let barrier = barrier.clone();
+        registrations.push(tokio::spawn(async move {
+            barrier.wait().await;
+            server.messaging_register_sponsored(req).await.unwrap()
+        }));
+    }
+    for task in messages {
+        let r = task.await.unwrap();
+        assert!(r.is_ok(), "{r:?}");
+    }
+    let mut taken = 0;
+    for task in registrations {
+        let r = task.await.unwrap();
+        if r.success {
+            taken += 1;
+        } else {
+            assert!(
+                r.error.as_deref().unwrap().contains("already pending"),
+                "{r:?}"
+            );
+        }
+    }
+    assert_eq!(taken, REGISTRATIONS, "the repeated request is refused");
+    assert_eq!(
+        s.pending_sponsor_nonces(),
+        (0..(MESSAGES + REGISTRATIONS) as u64).collect::<Vec<_>>(),
+        "every message and every registration its own nonce"
+    );
+    let (_, receipts) = s.publish_pool(1);
+    assert_eq!(
+        statuses(&receipts),
+        vec![(TxStatus::Success, RELAY_FEE); MESSAGES + REGISTRATIONS]
+    );
+    assert_eq!(s.sponsor_nonce(), (MESSAGES + REGISTRATIONS) as u64);
+    for kp in &newcomers {
+        assert!(s.is_registered(kp));
+    }
 }

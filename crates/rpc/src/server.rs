@@ -1459,6 +1459,29 @@ impl RpcServer {
         Ok(first_free_from(committed, &held))
     }
 
+    /// Whether this node's pool holds a sponsored registration of the key
+    /// `registrant_key`, from any sponsor, whose registrant signature verifies
+    /// for the sponsor that relays it. Such a registration would execute
+    /// before, or instead of, one requested now, and the later of the two is
+    /// refused in the block.
+    ///
+    /// The pool is read in place; only a registration naming this key has its
+    /// signature checked.
+    fn sponsored_registration_pending(&self, registrant_key: &[u8; 32], chain_id: u64) -> bool {
+        use sumchain_primitives::{verify_sponsored_registration_v1, RegisterPublicKeySponsoredV1Data};
+        self.mempool
+            .filter_map_held(|tx| {
+                let d = messaging_data(tx)?;
+                if d.operation != MessagingOperation::RegisterPublicKeySponsoredV1 {
+                    return None;
+                }
+                let reg = RegisterPublicKeySponsoredV1Data::from_bytes(&d.data).ok()?;
+                (reg.registrant_public_key == *registrant_key).then(|| (tx.sender(), reg))
+            })
+            .iter()
+            .any(|(sponsor, reg)| verify_sponsored_registration_v1(reg, chain_id, sponsor).is_ok())
+    }
+
     /// The height the next block will have: the chain tip plus one. A store
     /// read error is surfaced, never read as a tip of 0.
     fn relay_inclusion_height(&self) -> std::result::Result<u64, RpcError> {
@@ -1509,6 +1532,17 @@ impl RpcServer {
             ),
             _ => false,
         })
+    }
+}
+
+/// The messaging payload `tx` carries, if it is a messaging transaction.
+fn messaging_data(tx: &SignedTransaction) -> Option<&MessagingTxData> {
+    match &tx.inner {
+        sumchain_primitives::TxInner::V2(v2) => match &v2.payload {
+            TxPayload::Messaging(d) => Some(d),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -4969,9 +5003,45 @@ impl SumChainApiServer for RpcServer {
         };
         // The same sponsor key as `messaging_submitSponsored`, so the same
         // nonce allocation, under the same lock, until the transaction is in
-        // the pool.
+        // the pool. A message relayed after this registration takes the next
+        // sponsor nonce, which is valid only if the registration executes: a
+        // registration refused in the block (an address already registered,
+        // 394) is free and advances nothing. So a registration is taken only
+        // for an address that is not registered and has no sponsored
+        // registration pending in this node's pool. Both are checked under
+        // the lock, the pool before the committed state: a block committed
+        // between the two reads is seen in one of them (the node commits a
+        // block before it removes the block's transactions from the pool).
         let inclusion_height = self.relay_inclusion_height()?;
         let relay_guard = self.relay_lock.lock().await;
+        if self.sponsored_registration_pending(&registrant_public_key, chain_id) {
+            return Ok(SponsoredRegistrationResponse {
+                address: registrant_address.to_base58(),
+                success: false,
+                tx_hash: None,
+                error: Some(
+                    "A sponsored registration of this public key is already pending; the \
+                     address is registered once that transaction executes."
+                        .to_string(),
+                ),
+            });
+        }
+        let registered = MessagingStore::new(&self.db)
+            .has_public_key(&registrant_address)
+            .map_err(|e| {
+                RpcError::Internal(format!("Failed to read the registrant's registration state: {e}"))
+            })?;
+        if registered {
+            return Ok(SponsoredRegistrationResponse {
+                address: registrant_address.to_base58(),
+                success: false,
+                tx_hash: None,
+                error: Some(
+                    "This address is already registered; use UpdatePublicKey to change its key."
+                        .to_string(),
+                ),
+            });
+        }
         let sponsor_nonce = self.relay_sponsor_nonce(&sponsor_address, inclusion_height)?;
         let fee = 1_000_000u128; // 0.001 Koppa fee, same as messaging_submitSponsored.
         let tx = TransactionV2::messaging(chain_id, sponsor_address, fee, sponsor_nonce, messaging_data);
