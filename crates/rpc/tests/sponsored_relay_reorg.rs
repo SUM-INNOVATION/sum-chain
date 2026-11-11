@@ -33,6 +33,9 @@ use sumchain_storage::{Database, MessagingStore, ReceiptStore};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
+mod relay_retry_client;
+use relay_retry_client::{Form, Intent, Outcome, Step, Tracker, MAX_WRAPPERS};
+
 const CHAIN_ID: u64 = 1;
 const FEE: u128 = 1_000_000;
 const FUNDS: u128 = 1_000_000_000;
@@ -468,5 +471,212 @@ async fn a_chain_switch_returns_relayed_transactions_and_the_relay_continues() {
             node.messaging_nonce(&alice())
         ),
         (2, 1)
+    );
+}
+
+/// How many message records of the node's canonical chain carry `m`'s
+/// content in a transaction that succeeded.
+fn deliveries(node: &Node, m: &SponsoredMessage) -> usize {
+    MessagingStore::new(&node.db)
+        .get_messages_by_sender(
+            &sumchain_primitives::Address::from_public_key(&m.sender_pubkey),
+            1_000,
+            0,
+        )
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            let carried: Option<SponsoredMessage> = sumchain_storage::TxStore::new(&node.db)
+                .get(&e.message_id)
+                .unwrap()
+                .and_then(|tx| match &tx.inner {
+                    sumchain_primitives::TxInner::V2(v2) => match &v2.payload {
+                        TxPayload::Messaging(d) => bincode::deserialize(&d.data).ok(),
+                        _ => None,
+                    },
+                    _ => None,
+                });
+            node.receipt(&e.message_id).map(|r| r.0) == Some(TxStatus::Success)
+                && carried.is_some_and(|c| {
+                    c.sender_pubkey == m.sender_pubkey
+                        && c.recipient_hash == m.recipient_hash
+                        && c.message_data == m.message_data
+                })
+        })
+        .count()
+}
+
+/// The client retry protocol across a chain switch. Branch A carries, at
+/// sponsor nonce 0, alice's message in a wrapper from another relay with the
+/// same key, and then carol's wrapper, which takes `InvalidNonce`. carol's
+/// client asks for a fresh wrapper of the same envelope (sponsor nonce 1);
+/// alice's client finds her message delivered. Branch B, longer, carries
+/// carol's original wrapper alone, and the node switches: alice's wrapper is
+/// abandoned and, its sponsor nonce spent on B, dropped from the pool. carol's
+/// client finds her message delivered by the original and stops; her fresh
+/// wrapper is still pending and is refused in the next block, at one fee.
+/// alice's client, checking again, no longer finds her message, finds no
+/// wrapper pending and her messaging nonce still at the envelope's, and asks
+/// for a fresh wrapper, which delivers it. Each message is on the adopted
+/// chain once; no delivery is read from a nonce; the sponsor paid one fee per
+/// executed wrapper.
+#[tokio::test]
+async fn the_client_retry_protocol_across_a_chain_switch() {
+    let validators = [key(1), key(2)];
+    let g = genesis(&validators);
+    let node = Node::new(&g);
+    let mut a = Builder::new(&g, &validators);
+    let mut b = Builder::new(&g, &validators);
+    let block_1 = || {
+        vec![
+            messaging_tx(
+                &admin(),
+                0,
+                op(
+                    MessagingOperation::SetSponsorshipEnabled,
+                    &SetSponsorshipEnabledData { enabled: true },
+                ),
+            ),
+            messaging_tx(
+                &carol(),
+                0,
+                op(
+                    MessagingOperation::RegisterPublicKey,
+                    &RegisterPublicKeyData {
+                        public_key: pk(&carol()),
+                    },
+                ),
+            ),
+            messaging_tx(
+                &alice(),
+                0,
+                op(
+                    MessagingOperation::RegisterPublicKey,
+                    &RegisterPublicKeyData {
+                        public_key: pk(&alice()),
+                    },
+                ),
+            ),
+        ]
+    };
+    let a1 = a.produce(0, block_1());
+    let b1 = b.produce(0, block_1());
+    assert_eq!(a1.hash(), b1.hash());
+    node.import(&a1).await;
+
+    let mut carol_client = Tracker::new(Intent {
+        envelope: envelope(&carol(), 0, 1),
+        form: Form::Version2,
+    });
+    let Step::Resubmitted(original) = carol_client.submit(&node.server).await else {
+        panic!("relayed");
+    };
+    let original_tx = node
+        .mempool
+        .get(&Hash::from_hex(&original).unwrap())
+        .unwrap();
+    // alice's message, wrapped at sponsor nonce 0 by another relay holding
+    // the sponsor key; her client holds that wrapper's hash.
+    let alice_envelope = envelope(&alice(), 0, 2);
+    let alice_wrapper = messaging_tx(
+        &sponsor(),
+        0,
+        op(MessagingOperation::SendMessage, &alice_envelope),
+    );
+    let mut alice_client = Tracker::new(Intent {
+        envelope: alice_envelope.clone(),
+        form: Form::Version2,
+    });
+    alice_client.wrappers.push(alice_wrapper.hash().to_hex());
+
+    // Branch A: alice's wrapper first at sponsor nonce 0, then carol's.
+    let a2 = a.produce(1, vec![alice_wrapper.clone(), original_tx.clone()]);
+    node.import(&a2).await;
+    assert_eq!(
+        node.receipt(&alice_wrapper.hash()),
+        Some((TxStatus::Success, FEE))
+    );
+    assert_eq!(
+        node.receipt(&original_tx.hash()),
+        Some((TxStatus::InvalidNonce, 0))
+    );
+    let fresh = match carol_client.step(&node.server).await {
+        Step::Resubmitted(h) => h,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(node.pending_sponsor_nonces(), vec![1]);
+    assert!(matches!(
+        alice_client.step(&node.server).await,
+        Step::Done(Outcome::Delivered { .. })
+    ));
+
+    // Branch B, longer, carries carol's original alone: the node switches.
+    let b2 = b.produce(2, vec![original_tx.clone()]);
+    let b3 = b.produce(2, Vec::new());
+    node.import(&b2).await;
+    node.import(&b3).await;
+    assert_eq!(node.engine.best_block_hash(), b3.hash(), "switched");
+    assert_eq!(
+        node.receipt(&original_tx.hash()),
+        Some((TxStatus::Success, FEE))
+    );
+    assert_eq!(node.receipt(&alice_wrapper.hash()), None, "unwound");
+    assert!(
+        !node.mempool.contains(&alice_wrapper.hash()),
+        "its sponsor nonce is spent on B"
+    );
+    assert_eq!(
+        node.pending_sponsor_nonces(),
+        vec![1],
+        "carol's fresh wrapper"
+    );
+
+    // carol's client: delivered by the original; it stops.
+    assert_eq!(
+        carol_client.step(&node.server).await,
+        Step::Done(Outcome::Delivered {
+            tx_hash: original_tx.hash().to_hex()
+        })
+    );
+    // alice's client: not delivered on B, nothing pending, nonce unspent.
+    let alice_fresh = match alice_client.step(&node.server).await {
+        Step::Resubmitted(h) => h,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(node.pending_sponsor_nonces(), vec![1, 2]);
+
+    let b4 = b.produce(2, node.mempool.select_for_block(100));
+    node.import(&b4).await;
+    let refused = node.receipt(&Hash::from_hex(&fresh).unwrap()).unwrap();
+    assert_ne!(refused.0, TxStatus::Success, "the envelope executes once");
+    assert_eq!(refused.1, FEE, "the extra wrapper costs one fee");
+    assert_eq!(
+        node.receipt(&Hash::from_hex(&alice_fresh).unwrap()),
+        Some((TxStatus::Success, FEE))
+    );
+    assert_eq!(
+        alice_client.step(&node.server).await,
+        Step::Done(Outcome::Delivered {
+            tx_hash: alice_fresh.clone()
+        })
+    );
+    assert!(matches!(
+        carol_client.step(&node.server).await,
+        Step::Done(Outcome::Delivered { .. })
+    ));
+    assert_eq!(deliveries(&node, &carol_client.intent.envelope), 1);
+    assert_eq!(deliveries(&node, &alice_envelope), 1);
+    assert_eq!(
+        (
+            node.messaging_nonce(&carol()),
+            node.messaging_nonce(&alice())
+        ),
+        (1, 1)
+    );
+    assert!(carol_client.wrappers.len() <= MAX_WRAPPERS);
+    assert!(alice_client.wrappers.len() <= MAX_WRAPPERS);
+    assert_eq!(
+        node.state.get_balance(&sponsor().address()).unwrap(),
+        FUNDS - 3 * FEE
     );
 }
