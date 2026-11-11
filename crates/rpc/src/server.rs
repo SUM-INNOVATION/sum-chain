@@ -4756,15 +4756,16 @@ impl SumChainApiServer for RpcServer {
 
         if v2_envelope {
             // The envelope nonce must be the sender's next messaging nonce: the
-            // committed one, extended by each envelope from this sender the
-            // relay already holds. One envelope per (sender, nonce): a second
-            // could only be refused in the block, at the sponsor's expense.
+            // committed one, extended by each version-2 envelope from this
+            // sender this node's pool holds, relayed by this sponsor or any
+            // other. One envelope per (sender, nonce): a second could only be
+            // refused in the block, at its sponsor's expense.
             let committed = store.get_sender_nonce(&sender_address).map_err(|e| {
                 RpcError::Internal(format!("Failed to read the sender's messaging nonce: {e}"))
             })?;
             let held: BTreeSet<u64> = self
                 .mempool
-                .get_by_sender(&sponsor_address)
+                .get_all()
                 .iter()
                 .filter_map(|tx| relayed_v2_envelope_identity(tx, chain_id))
                 .filter(|(sender, n)| *sender == sender_address && *n >= committed)
@@ -4781,7 +4782,7 @@ impl SumChainApiServer for RpcServer {
             }
             if held.contains(&sponsored_msg.nonce) {
                 return Err(RpcError::InvalidParams(format!(
-                    "An envelope from this sender at nonce {} is already pending at this relay",
+                    "An envelope from this sender at nonce {} is already pending in this node's pool",
                     sponsored_msg.nonce
                 ))
                 .into());
@@ -4790,7 +4791,7 @@ impl SumChainApiServer for RpcServer {
                 return Err(RpcError::InvalidParams(format!(
                     "Envelope nonce {} is not the sender's next messaging nonce {next} \
                      (messaging_getSenderNonce reports {committed}; each envelope from this \
-                     sender pending at this relay adds one)",
+                     sender pending in this node's pool adds one)",
                     sponsored_msg.nonce
                 ))
                 .into());

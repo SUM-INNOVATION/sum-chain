@@ -285,6 +285,21 @@ impl Served {
         )
     }
 
+    fn balance(&self, kp: &KeyPair) -> u128 {
+        self.state.get_balance(&kp.address()).unwrap()
+    }
+
+    fn account_nonce(&self, kp: &KeyPair) -> u64 {
+        self.state.get_nonce(&kp.address()).unwrap()
+    }
+
+    fn sent_by(&self, kp: &KeyPair) -> usize {
+        MessagingStore::new(&self.db)
+            .get_messages_by_sender(&kp.address(), 1_000, 0)
+            .unwrap()
+            .len()
+    }
+
     fn sponsor_nonce(&self) -> u64 {
         self.state.get_nonce(&sponsor().address()).unwrap()
     }
@@ -1060,4 +1075,83 @@ async fn payment_display_agrees_with_the_executed_outcome() {
         .await
         .unwrap()
         .is_none());
+}
+
+/// Duplicates, front-running and who pays (the sponsor is not bound into the
+/// envelope):
+/// - the same envelope relayed twice through this relay: the second request
+///   is refused while the first is pending, and refused again once it is
+///   carried; one fee in all;
+/// - another sponsor's copy already in this node's pool: the relay refuses
+///   its own copy; the other sponsor's is carried and it pays;
+/// - front-running in a block this node did not build: the other sponsor's
+///   copy is carried first and it pays; this relay's copy is then refused in
+///   the block and, with the accounting gate open, this sponsor pays its fee;
+///   the message is delivered once, and the client pays nothing;
+/// - the same below the accounting gate: the refused copy costs nothing.
+#[tokio::test]
+async fn duplicates_front_running_and_who_pays() {
+    // The same envelope twice through this relay.
+    {
+        let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
+        let m = v2(envelope(0, 1, None));
+        s.relay(&m).await.unwrap();
+        let err = s.relay(&m).await.expect_err("already pending");
+        assert!(
+            err.message()
+                .contains("already pending in this node's pool"),
+            "{err}"
+        );
+        let (_, r) = s.publish_pool(1);
+        assert_eq!(statuses(&r), vec![(TxStatus::Success, RELAY_FEE)]);
+        let err = s.relay(&m).await.expect_err("already used");
+        assert!(err.message().contains("already used"), "{err}");
+        assert_eq!(s.balance(&sponsor()), SPONSOR_FUNDS - RELAY_FEE);
+        assert_eq!(s.sent_by(&carol()), 1);
+    }
+    // Another sponsor's copy already in the pool.
+    {
+        let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
+        let m = v2(envelope(0, 2, None));
+        s.mempool.add(s.relayed_by(&erin(), 0, &m)).unwrap();
+        let err = s.relay(&m).await.expect_err("pending from another sponsor");
+        assert!(
+            err.message()
+                .contains("already pending in this node's pool"),
+            "{err}"
+        );
+        let (_, r) = s.publish_pool(1);
+        assert_eq!(statuses(&r), vec![(TxStatus::Success, RELAY_FEE)]);
+        assert_eq!(s.balance(&erin()), ACCOUNT_FUNDS - RELAY_FEE);
+        assert_eq!(s.balance(&sponsor()), SPONSOR_FUNDS);
+        assert_eq!(s.sent_by(&carol()), 1);
+    }
+    // Front-running in a block this node did not build, with the accounting
+    // gate open and absent.
+    for (accounting, our_receipt, our_cost, their_cost) in [
+        (
+            Some(1),
+            (TxStatus::Failed(7), RELAY_FEE),
+            RELAY_FEE,
+            RELAY_FEE,
+        ),
+        (None, (TxStatus::Failed(7), 0), 0, 0),
+    ] {
+        let s = serve(&genesis_on(CHAIN_ID, Some(1), accounting));
+        let m = v2(envelope(0, 3, None));
+        s.relay(&m).await.unwrap();
+        let r = s.publish(1, vec![s.relayed_by(&erin(), 0, &m)]);
+        assert_eq!(statuses(&r), vec![(TxStatus::Success, RELAY_FEE)]);
+        assert_eq!(
+            s.pending_sponsor_nonces(),
+            vec![0],
+            "this relay's copy is still pending"
+        );
+        let (_, r) = s.publish_pool(2);
+        assert_eq!(statuses(&r), vec![our_receipt], "accounting {accounting:?}");
+        assert_eq!(s.balance(&sponsor()), SPONSOR_FUNDS - our_cost);
+        assert_eq!(s.balance(&erin()), ACCOUNT_FUNDS - their_cost);
+        assert_eq!(s.account_nonce(&sponsor()), u64::from(accounting.is_some()));
+        assert_eq!(s.sent_by(&carol()), 1, "delivered once");
+    }
 }
