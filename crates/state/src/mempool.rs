@@ -1732,6 +1732,17 @@ impl Mempool {
         self.txs.read().values().map(|e| e.tx.clone()).collect()
     }
 
+    /// What `pick` returns for each held transaction, where it returns
+    /// something. The transactions are read in place, none is cloned, and the
+    /// pool's read lock is held only while `pick` runs over them: `pick` should
+    /// be cheap, and leave any expensive check of what it returns to the caller.
+    pub fn filter_map_held<T>(
+        &self,
+        mut pick: impl FnMut(&SignedTransaction) -> Option<T>,
+    ) -> Vec<T> {
+        self.txs.read().values().filter_map(|e| pick(&e.tx)).collect()
+    }
+
     /// Clear all transactions
     pub fn clear(&self) {
         self.txs.write().clear();
@@ -2113,6 +2124,28 @@ mod tests {
             picked.iter().map(|t| t.hash()).collect::<Vec<_>>(),
             vec![relayed.hash(), registration.hash(), next.hash()]
         );
+    }
+
+    /// `filter_map_held` sees each held transaction once and returns what the
+    /// closure picks.
+    #[test]
+    fn filter_map_held_returns_what_is_picked_from_each_held_transaction() {
+        let mempool = Mempool::new(MempoolConfig::default());
+        let sender = KeyPair::generate();
+        let recipient = KeyPair::generate();
+        for (fee, nonce) in [(10, 0), (20, 1), (30, 2)] {
+            mempool
+                .add(create_signed_tx(&sender, recipient.address(), 1, fee, nonce))
+                .unwrap();
+        }
+        let mut seen = 0;
+        let mut picked = mempool.filter_map_held(|tx| {
+            seen += 1;
+            (tx.fee() >= 20).then(|| tx.nonce())
+        });
+        picked.sort_unstable();
+        assert_eq!(seen, 3);
+        assert_eq!(picked, vec![1, 2]);
     }
 
     #[test]
