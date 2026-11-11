@@ -1254,6 +1254,26 @@ pub trait SumChainApi {
     ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Submit a sponsored message (meta-transaction)
+    ///
+    /// The relay wraps the signed envelope in a transaction from its sponsor
+    /// key (a wrapper) and returns the wrapper's hash. A wrapper the chain
+    /// refuses with `InvalidNonce` never executed: it charged no fee and moved
+    /// no messaging nonce. On such a receipt a client reads the canonical
+    /// receipts of its wrappers, the sender's message records
+    /// (`messaging_getSentMessages`, `messaging_getMessageData`) for the
+    /// intended message, and `messaging_getSenderNonce`:
+    /// - the message is on the chain: it is delivered, and never sent again;
+    /// - not delivered, and the envelope's nonce is the committed nonce: the
+    ///   client asks for a fresh wrapper of the same signed envelope;
+    /// - not delivered, and the committed nonce moved past the envelope's: the
+    ///   user signs a new envelope at the committed nonce; the relay cannot;
+    /// - a string-form envelope the relay no longer takes: the user signs a
+    ///   version-2 envelope; the relay cannot convert it.
+    ///
+    /// A moved nonce is never read as a delivery. The client bounds its
+    /// retries (the reference client in the RPC tests asks for at most three
+    /// wrappers per message); the sponsor pays for each wrapper that executes,
+    /// and nothing for one refused with `InvalidNonce`.
     #[method(name = "messaging_submitSponsored")]
     async fn messaging_submit_sponsored(
         &self,

@@ -39,6 +39,9 @@ use sumchain_state::{BlockExecutor, Mempool, MempoolConfig, StateManager};
 use sumchain_storage::{Database, MessagingStore};
 use tokio::sync::mpsc;
 
+mod relay_retry_client;
+use relay_retry_client::{Form, Intent, Outcome, Step, Tracker, MAX_WRAPPERS};
+
 const CHAIN_ID: u64 = 1;
 /// Far in the future, in Unix seconds.
 const EXPIRY: u64 = 4_000_000_000;
@@ -430,7 +433,12 @@ fn v2(m: SponsoredMessage) -> SponsoredMessage {
 }
 
 /// Signed by carol over the string form the relay checked before the gate.
-fn v1(mut m: SponsoredMessage) -> SponsoredMessage {
+fn v1(m: SponsoredMessage) -> SponsoredMessage {
+    v1_by(m, &carol())
+}
+
+/// Signed by `signer` over the string form the relay checked before the gate.
+fn v1_by(mut m: SponsoredMessage, signer: &KeyPair) -> SponsoredMessage {
     let preimage = format!(
         "SUMCHAIN_SPONSORED_MSG:{}:{}:{}:{}",
         m.nonce,
@@ -438,7 +446,7 @@ fn v1(mut m: SponsoredMessage) -> SponsoredMessage {
         hex::encode(m.recipient_hash),
         hex::encode(blake3::hash(&m.message_data).as_bytes())
     );
-    m.signature = *sign(preimage.as_bytes(), carol().private_key()).as_bytes();
+    m.signature = *sign(preimage.as_bytes(), signer.private_key()).as_bytes();
     m
 }
 
@@ -1788,4 +1796,384 @@ async fn simultaneous_relays_and_registrations_never_share_a_sponsor_nonce() {
     for kp in &newcomers {
         assert!(s.is_registered(kp));
     }
+}
+
+// ── The client retry protocol (`relay_retry_client`) ─────────────────────────
+
+/// `kp`'s version-2 envelope to bob at `nonce`, as an intent.
+fn v2_intent(kp: &KeyPair, nonce: u64, salt: u8) -> Intent {
+    Intent {
+        envelope: v2_by(envelope_from(kp, nonce, salt, None), kp, CHAIN_ID),
+        form: Form::Version2,
+    }
+}
+
+/// `kp`'s string-form envelope to bob, as an intent.
+fn legacy_intent(kp: &KeyPair, nonce: u64, salt: u8) -> Intent {
+    Intent {
+        envelope: v1_by(envelope_from(kp, nonce, salt, None), kp),
+        form: Form::Legacy,
+    }
+}
+
+/// Registered senders beyond the five `serve` registers.
+fn registered(s: &Served, first: u8, count: u8) -> Vec<KeyPair> {
+    let store = MessagingStore::new(&s.db);
+    (0..count)
+        .map(|i| {
+            let kp = KeyPair::from_bytes([first + i; 32]);
+            store
+                .set_public_key(
+                    &kp.address(),
+                    &RegisteredPublicKey {
+                        public_key: *kp.public_key().as_bytes(),
+                        address: kp.address(),
+                        registered_at_block: 0,
+                        registered_at: 0,
+                        updated_at_block: 0,
+                    },
+                )
+                .unwrap();
+            kp
+        })
+        .collect()
+}
+
+/// How many message records of the canonical chain carry `intent`'s content
+/// (read from the store, not through the client).
+fn deliveries(s: &Served, intent: &Intent) -> usize {
+    let m = &intent.envelope;
+    let store = MessagingStore::new(&s.db);
+    store
+        .get_messages_by_sender(&intent.sender(), 1_000, 0)
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            let tx = sumchain_storage::TxStore::new(&s.db)
+                .get(&e.message_id)
+                .unwrap()
+                .expect("the carrying transaction");
+            let ok = sumchain_storage::ReceiptStore::new(&s.db)
+                .get(&e.message_id)
+                .unwrap()
+                .is_some_and(|r| r.status == TxStatus::Success);
+            let carried: Option<SponsoredMessage> = match &tx.inner {
+                TxInner::V2(v2) => match &v2.payload {
+                    TxPayload::Messaging(d) => bincode::deserialize(&d.data).ok(),
+                    _ => None,
+                },
+                _ => None,
+            };
+            ok && carried.is_some_and(|c| {
+                c.sender_pubkey == m.sender_pubkey
+                    && c.recipient_hash == m.recipient_hash
+                    && c.message_data == m.message_data
+            })
+        })
+        .count()
+}
+
+/// The receipts of every wrapper the trackers obtained: (executed and
+/// charged, refused with `InvalidNonce`).
+fn wrapper_receipts(s: &Served, trackers: &[Tracker]) -> (Vec<TxStatus>, usize) {
+    let mut executed = Vec::new();
+    let mut invalid_nonce = 0;
+    for t in trackers {
+        for h in &t.wrappers {
+            match sumchain_storage::ReceiptStore::new(&s.db)
+                .get(&Hash::from_hex(h).unwrap())
+                .unwrap()
+            {
+                Some(r) if r.status == TxStatus::InvalidNonce => {
+                    assert_eq!(r.fee_paid, 0, "InvalidNonce costs nothing");
+                    invalid_nonce += 1;
+                }
+                Some(r) => executed.push(r.status),
+                None => {}
+            }
+        }
+    }
+    (executed, invalid_nonce)
+}
+
+/// Steps every tracker without an outcome, then publishes what the pool
+/// holds as the next block; until every tracker has an outcome, at most
+/// `rounds` times. Returns the next block height.
+async fn drive(s: &Served, trackers: &mut [Tracker], mut height: u64, rounds: usize) -> u64 {
+    for _ in 0..rounds {
+        let mut open = false;
+        for t in trackers.iter_mut() {
+            if !matches!(t.step(&s.server).await, Step::Done(_)) {
+                open = true;
+            }
+        }
+        if !open {
+            break;
+        }
+        s.publish_pool(height);
+        height += 1;
+    }
+    height
+}
+
+/// Both gates at H = 4, transaction indexes on. Eight intents relayed for
+/// H-2 are left uncarried until H (a backlog across the accounting gate):
+/// six version-2 envelopes, carol's version-2 envelope (her own direct
+/// message, carried at H-1, then spends her messaging nonce 0), and dave's
+/// string-form envelope. At H all eight wrappers hold sponsor nonce 0: one
+/// executes, the others take `InvalidNonce`. Each client then follows the
+/// protocol: the six are delivered once each, by a fresh wrapper of the same
+/// envelope; carol's and dave's end as needing the user's signature (the
+/// nonce moved past; the string form), never as delivered and never resent
+/// without a new signature. Signed anew, both are delivered. Every intent
+/// ends with an outcome; each delivered message is on the chain once; the
+/// sponsor pays one fee per executed wrapper, at most `MAX_WRAPPERS` per
+/// intent, and nothing for a wrapper refused with `InvalidNonce`.
+#[tokio::test]
+async fn a_burst_pending_across_the_accounting_gate_ends_delivered_or_reported() {
+    use sumchain_primitives::messaging::SendMessageData;
+    use sumchain_primitives::{MessagingOperation, MessagingTxData};
+    const H: u64 = 4;
+    let mut g = genesis_on(CHAIN_ID, Some(H), Some(H));
+    g.params.subsystem_tx_index_enabled_from_height = Some(0);
+    let s = serve(&g);
+    let others = registered(&s, 0x90, 3);
+    s.publish(1, Vec::new());
+
+    // The next block is H-2: the burst.
+    let mut trackers: Vec<Tracker> = [alice(), grace(), heidi()]
+        .iter()
+        .chain(others.iter())
+        .enumerate()
+        .map(|(i, kp)| Tracker::new(v2_intent(kp, 0, i as u8)))
+        .collect();
+    trackers.push(Tracker::new(v2_intent(&carol(), 0, 20)));
+    trackers.push(Tracker::new(legacy_intent(&dave(), 0, 21)));
+    for t in trackers.iter_mut() {
+        assert!(matches!(t.submit(&s.server).await, Step::Resubmitted(_)));
+    }
+    assert_eq!(s.pending_sponsor_nonces(), vec![0; 8]);
+    s.publish(H - 2, Vec::new());
+
+    // H-1 carries only carol's own direct message.
+    let rh = recipient_hash(&bob().address());
+    let direct = s.outer(
+        &carol(),
+        0,
+        RELAY_FEE,
+        MessagingTxData {
+            operation: MessagingOperation::SendMessageDirect,
+            data: bincode::serialize(&SendMessageData {
+                message_data: valid_message(rh),
+                recipient_hash: rh,
+            })
+            .unwrap(),
+        },
+    );
+    assert_eq!(
+        status_only(&s.publish(H - 1, vec![direct])),
+        vec![TxStatus::Success]
+    );
+    assert_eq!(s.messaging_nonce(&carol()), 1);
+
+    // H carries the backlog: one executes, seven take InvalidNonce.
+    let (_, receipts) = s.publish_pool(H);
+    assert_eq!(
+        receipts
+            .iter()
+            .filter(|r| r.status == TxStatus::InvalidNonce)
+            .count(),
+        7
+    );
+
+    let next = drive(&s, &mut trackers, H + 1, 6).await;
+    for t in &trackers[..6] {
+        assert!(
+            matches!(t.outcome, Some(Outcome::Delivered { .. })),
+            "{:?}",
+            t.outcome
+        );
+        assert_eq!(deliveries(&s, &t.intent), 1);
+        assert!(t.wrappers.len() <= MAX_WRAPPERS);
+    }
+    for t in &trackers[6..] {
+        assert!(
+            matches!(t.outcome, Some(Outcome::NeedsUserSignature(_))),
+            "{:?}",
+            t.outcome
+        );
+        assert_eq!(deliveries(&s, &t.intent), 0);
+    }
+    let (executed, _) = wrapper_receipts(&s, &trackers);
+    assert_eq!(
+        executed
+            .iter()
+            .filter(|st| **st == TxStatus::Success)
+            .count(),
+        6,
+        "one execution per delivered intent"
+    );
+    assert!(
+        executed.len() <= 7,
+        "at most the H block's first is refused"
+    );
+    let spent = SPONSOR_FUNDS - s.balance(&sponsor());
+    assert_eq!(spent, RELAY_FEE * executed.len() as u128);
+
+    // The users sign anew: carol at her committed nonce, dave in version 2.
+    let mut resigned = vec![
+        Tracker::new(v2_intent(&carol(), 1, 22)),
+        Tracker::new(v2_intent(&dave(), 0, 23)),
+    ];
+    for t in resigned.iter_mut() {
+        assert!(matches!(t.submit(&s.server).await, Step::Resubmitted(_)));
+    }
+    drive(&s, &mut resigned, next, 4).await;
+    for t in &resigned {
+        assert!(
+            matches!(t.outcome, Some(Outcome::Delivered { .. })),
+            "{:?}",
+            t.outcome
+        );
+        assert_eq!(deliveries(&s, &t.intent), 1);
+    }
+    assert_eq!(
+        (s.messaging_nonce(&carol()), s.messaging_nonce(&dave())),
+        (2, 1)
+    );
+}
+
+/// The accounting gate at H = 3 (the envelope gate open from 1, transaction
+/// indexes on). Twelve intents relayed for H-2 are carried only at H, where
+/// one executes and eleven take `InvalidNonce`. All twelve clients then step
+/// at once on eight threads, and two of them run a second instance of their
+/// client at the same time (the same envelope, the same wrappers): the
+/// eleven stranded envelopes each get exactly one fresh wrapper, at distinct
+/// sponsor nonces; a second instance's request for an envelope already
+/// pending is refused, and that instance waits. The next block delivers all
+/// eleven; every instance ends delivered; each message is on the chain once;
+/// the sponsor paid twelve fees.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_retries_deliver_each_message_once() {
+    const H: u64 = 3;
+    let mut g = genesis_on(CHAIN_ID, Some(1), Some(H));
+    g.params.subsystem_tx_index_enabled_from_height = Some(0);
+    let s = serve(&g);
+    let senders = registered(&s, 0xA0, 12);
+    let mut trackers: Vec<Tracker> = senders
+        .iter()
+        .enumerate()
+        .map(|(i, kp)| Tracker::new(v2_intent(kp, 0, i as u8)))
+        .collect();
+    for t in trackers.iter_mut() {
+        assert!(matches!(t.submit(&s.server).await, Step::Resubmitted(_)));
+    }
+    assert_eq!(s.pending_sponsor_nonces(), vec![0; 12]);
+    s.publish(1, Vec::new());
+    s.publish(2, Vec::new());
+    s.publish_pool(H);
+
+    // Every client, and two second instances, at once.
+    let mut instances: Vec<Tracker> = trackers.clone();
+    instances.push(trackers[0].clone());
+    instances.push(trackers[1].clone());
+    let barrier = Arc::new(tokio::sync::Barrier::new(instances.len()));
+    let mut tasks = Vec::new();
+    for mut t in instances {
+        let server = s.server.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let step = t.step(&server).await;
+            (t, step)
+        }));
+    }
+    let mut instances = Vec::new();
+    let mut fresh = 0;
+    for task in tasks {
+        let (t, step) = task.await.unwrap();
+        match &step {
+            Step::Resubmitted(_) => fresh += 1,
+            Step::Done(Outcome::Delivered { .. }) | Step::Wait => {}
+            other => panic!("{other:?}"),
+        }
+        instances.push(t);
+    }
+    assert_eq!(fresh, 11, "one fresh wrapper per stranded envelope");
+    assert_eq!(s.pending_sponsor_nonces(), (1..=11).collect::<Vec<_>>());
+
+    drive(&s, &mut instances, H + 1, 3).await;
+    for t in &instances {
+        assert!(
+            matches!(t.outcome, Some(Outcome::Delivered { .. })),
+            "{:?}",
+            t.outcome
+        );
+        assert_eq!(deliveries(&s, &t.intent), 1);
+    }
+    for kp in &senders {
+        assert_eq!(s.messaging_nonce(kp), 1);
+    }
+    assert_eq!(s.balance(&sponsor()), SPONSOR_FUNDS - 12 * RELAY_FEE);
+}
+
+/// With both gates open, each block carries first another transaction of the
+/// sponsor at the nonce of alice's wrapper (as a second relay with the same
+/// key would), so each wrapper takes `InvalidNonce`. The client asks for a
+/// fresh wrapper each time, and after `MAX_WRAPPERS` it stops and reports the
+/// message undeliverable: it is not resent without bound, it is not reported
+/// delivered, and its wrappers cost the sponsor nothing.
+#[tokio::test]
+async fn the_retries_of_one_message_are_bounded() {
+    let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
+    let mut t = Tracker::new(v2_intent(&alice(), 0, 1));
+    assert!(matches!(t.submit(&s.server).await, Step::Resubmitted(_)));
+    let mut height = 1;
+    let mut step = Step::Wait;
+    for k in 0..(MAX_WRAPPERS as u64 + 1) {
+        if let Step::Done(_) = step {
+            break;
+        }
+        let other = s.relayed_by(
+            &sponsor(),
+            k,
+            &v2_by(
+                envelope_from(&dave(), k, 50 + k as u8, None),
+                &dave(),
+                CHAIN_ID,
+            ),
+        );
+        let mut first = other.clone();
+        // A higher fee, so it is carried first at that nonce.
+        if let TxInner::V2(v2) = &mut first.inner {
+            v2.fee = 2 * RELAY_FEE;
+        }
+        let first = {
+            let TxInner::V2(v2) = &first.inner else {
+                unreachable!()
+            };
+            let sig = sign(v2.signing_hash().as_bytes(), sponsor().private_key());
+            SignedTransaction::new_v2(
+                v2.clone(),
+                *sig.as_bytes(),
+                *sponsor().public_key().as_bytes(),
+            )
+        };
+        s.mempool.add(first).unwrap();
+        s.publish_pool(height);
+        height += 1;
+        step = t.step(&s.server).await;
+    }
+    assert_eq!(
+        step,
+        Step::Done(Outcome::Undeliverable(format!(
+            "the retry bound ({MAX_WRAPPERS} wrappers) is reached"
+        )))
+    );
+    assert_eq!(t.wrappers.len(), MAX_WRAPPERS);
+    let (executed, invalid_nonce) = wrapper_receipts(&s, std::slice::from_ref(&t));
+    assert!(executed.is_empty());
+    assert_eq!(invalid_nonce, MAX_WRAPPERS);
+    assert_eq!(deliveries(&s, &t.intent), 0);
+    assert_eq!(s.messaging_nonce(&alice()), 0);
 }
