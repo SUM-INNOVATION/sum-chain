@@ -4678,7 +4678,8 @@ impl SumChainApiServer for RpcServer {
             &self.chain_params,
             inclusion_height,
         );
-        let v2_signed = sumchain_primitives::verify_sponsored_send_v2(&sponsored_msg, chain_id).is_ok();
+        let v2_signed =
+            sumchain_primitives::verify_sponsored_send_v2(&sponsored_msg, chain_id).is_ok();
         let v2_envelope = v2_only || v2_signed;
 
         if v2_envelope {
@@ -4719,8 +4720,12 @@ impl SumChainApiServer for RpcServer {
                 hex::encode(message_data_hash.as_bytes())
             );
 
-            if sumchain_crypto::verify_bytes_strict(sign_message.as_bytes(), &sig_array, &sender_pubkey)
-                .is_err()
+            if sumchain_crypto::verify_bytes_strict(
+                sign_message.as_bytes(),
+                &sig_array,
+                &sender_pubkey,
+            )
+            .is_err()
             {
                 return Err(RpcError::InvalidParams(
                     "Invalid sender signature: neither the version-2 envelope preimage nor the \
@@ -4738,7 +4743,10 @@ impl SumChainApiServer for RpcServer {
             .as_secs();
 
         if request.expiry < now {
-            return Err(RpcError::InvalidParams("Sponsored message request has expired".to_string()).into());
+            return Err(RpcError::InvalidParams(
+                "Sponsored message request has expired".to_string(),
+            )
+            .into());
         }
 
         let messaging_data = MessagingTxData {

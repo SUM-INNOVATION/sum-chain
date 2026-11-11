@@ -732,7 +732,10 @@ fn a_genesis_written_before_these_fields_still_parses_dormant() {
         back.messaging_sponsored_envelope_verification_enabled_from_height,
         None
     );
-    assert_eq!(back.messaging_fee_nonce_accounting_enabled_from_height, None);
+    assert_eq!(
+        back.messaging_fee_nonce_accounting_enabled_from_height,
+        None
+    );
     assert_eq!(back.tax_authorization_enabled_from_height, None);
     assert_eq!(back.subsystem_tx_index_enabled_from_height, None);
     assert_eq!(back.subsystem_allocation_bound_enabled_from_height, None);

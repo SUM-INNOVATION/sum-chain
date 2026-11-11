@@ -260,7 +260,8 @@ mod tests {
             Err(SponsoredEnvelopeError::InvalidSignature),
             "another chain"
         );
-        let variants: [(&str, fn(&mut SponsoredMessage)); 6] = [
+        type Change = fn(&mut SponsoredMessage);
+        let variants: [(&str, Change); 6] = [
             ("recipient", |m| m.recipient_hash[0] ^= 1),
             ("content", |m| m.message_data[0] ^= 1),
             ("nonce", |m| m.nonce += 1),

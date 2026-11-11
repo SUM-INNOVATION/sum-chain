@@ -1609,7 +1609,13 @@ fn the_schema_4_encoding_is_the_schema_3_encoding_plus_the_four_gates() {
 /// reads every schema up to 5. Used to show what the draft schema-5 fields
 /// encode to once a binary records them; this binary never does.
 static WRITES_SCHEMA_5: SchemaPolicy = SchemaPolicy {
-    reads: &[&SCHEMA_1, &SCHEMA_2, &SCHEMA_3, &ccfg::SCHEMA_4, &ccfg::SCHEMA_5],
+    reads: &[
+        &SCHEMA_1,
+        &SCHEMA_2,
+        &SCHEMA_3,
+        &ccfg::SCHEMA_4,
+        &ccfg::SCHEMA_5,
+    ],
     writes: &ccfg::SCHEMA_5,
     knows: &ccfg::SCHEMA_5,
 };
@@ -1640,7 +1646,10 @@ fn the_draft_schema_5_fields_are_held_dormant_and_refused_when_set() {
     );
     assert!(std::ptr::eq(ccfg::PRODUCTION.writes, &SCHEMA_4));
     assert!(std::ptr::eq(ccfg::PRODUCTION.knows, &ccfg::SCHEMA_5));
-    assert!(std::ptr::eq(ccfg::SCHEMA_5.previous.unwrap(), &ccfg::SCHEMA_4));
+    assert!(std::ptr::eq(
+        ccfg::SCHEMA_5.previous.unwrap(),
+        &ccfg::SCHEMA_4
+    ));
     ccfg::PRODUCTION.check().unwrap();
     WRITES_SCHEMA_5.check().unwrap();
 
@@ -1655,7 +1664,10 @@ fn the_draft_schema_5_fields_are_held_dormant_and_refused_when_set() {
         .added
         .iter()
         .any(|a| a.spec.id == ACCOUNTING_GATE && a.spec.name == accounting));
-    assert!(!ccfg::SCHEMA_4.added.iter().any(|a| a.spec.name == accounting));
+    assert!(!ccfg::SCHEMA_4
+        .added
+        .iter()
+        .any(|a| a.spec.name == accounting));
     assert_eq!(SPONSORED_SEND_V2_TAG_ID, 0x252b);
     let tag = ccfg::fields::spec_for(SPONSORED_SEND_V2_TAG_ID).expect("registered");
     assert_eq!(tag.name, "sumchain_wire::messaging::SPONSORED_SEND_V2_TAG");
@@ -1669,7 +1681,8 @@ fn the_draft_schema_5_fields_are_held_dormant_and_refused_when_set() {
         None
     );
     assert_eq!(
-        base.params.messaging_fee_nonce_accounting_enabled_from_height,
+        base.params
+            .messaging_fee_nonce_accounting_enabled_from_height,
         None
     );
     let c = ccfg::build(&base).unwrap();
@@ -1718,7 +1731,8 @@ fn the_draft_schema_5_fields_are_held_dormant_and_refused_when_set() {
     // The accounting gate: refused by this binary; recorded by that one, and
     // it moves no tag.
     let mut set = full_genesis();
-    set.params.messaging_fee_nonce_accounting_enabled_from_height = Some(10);
+    set.params
+        .messaging_fee_nonce_accounting_enabled_from_height = Some(10);
     let err = ccfg::build(&set).expect_err("a draft field is never activated");
     assert!(matches!(err, ConfigError::Refused(_)), "{err}");
     assert!(err.to_string().contains(accounting), "{err}");

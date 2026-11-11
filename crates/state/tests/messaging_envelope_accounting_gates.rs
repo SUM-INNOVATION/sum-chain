@@ -725,24 +725,24 @@ fn the_history_covers_every_operation_both_ways() {
     let statuses: Vec<Vec<TxStatus>> = outcomes
         .iter()
         .filter_map(|o| o.published.as_ref())
-        .map(|(_, r)| r.iter().map(|r| r.status.clone()).collect())
+        .map(|(_, r)| r.iter().map(|r| r.status).collect())
         .collect();
     let ok = TxStatus::Success;
     let no = TxStatus::Failed(7);
     assert_eq!(
         statuses,
         vec![
-            vec![ok.clone(), ok.clone(), ok.clone(), no.clone(), ok.clone()],
-            vec![ok.clone(), ok.clone(), no.clone(), ok.clone(), no.clone()],
-            vec![ok.clone(), ok.clone(), no.clone()],
-            vec![ok.clone(), no.clone(), no.clone()],
-            vec![ok.clone(), no.clone(), ok.clone(), no.clone()],
-            vec![ok.clone(), no.clone(), ok.clone(), ok.clone()],
-            vec![ok.clone(), ok.clone(), ok.clone(), no.clone(), ok.clone()],
-            vec![ok.clone(), no.clone(), ok.clone(), ok.clone()],
-            vec![ok.clone(), no.clone(), ok.clone(), no.clone(), ok.clone()],
-            vec![no.clone(), no.clone(), ok.clone()],
-            vec![no.clone(), ok.clone()],
+            vec![ok, ok, ok, no, ok],
+            vec![ok, ok, no, ok, no],
+            vec![ok, ok, no],
+            vec![ok, no, no],
+            vec![ok, no, ok, no],
+            vec![ok, no, ok, ok],
+            vec![ok, ok, ok, no, ok],
+            vec![ok, no, ok, ok],
+            vec![ok, no, ok, no, ok],
+            vec![no, no, ok],
+            vec![no, ok],
         ],
     );
 }
@@ -950,10 +950,7 @@ fn with_the_envelope_gate_inside_the_history_only_blocks_from_it_change() {
     assert_ne!(d[2], PINNED[2], "at the gate: the envelope rule");
     let (_, receipts) = outcomes[2].published.as_ref().expect("published");
     assert_eq!(
-        receipts
-            .iter()
-            .map(|r| r.status.clone())
-            .collect::<Vec<_>>(),
+        receipts.iter().map(|r| r.status).collect::<Vec<_>>(),
         vec![
             TxStatus::Failed(7),
             TxStatus::Failed(7),
@@ -1258,10 +1255,7 @@ fn below_the_gate_the_envelope_executes_as_before_and_from_it_the_rule_applies()
         .unwrap();
     assert_eq!(c.height, H);
     assert_eq!(
-        receipts
-            .iter()
-            .map(|r| r.status.clone())
-            .collect::<Vec<_>>(),
+        receipts.iter().map(|r| r.status).collect::<Vec<_>>(),
         vec![TxStatus::Failed(7), TxStatus::Failed(7), TxStatus::Success]
     );
     assert_eq!(c.msg_nonce(&carol_addr), 3);
@@ -1280,10 +1274,7 @@ fn below_the_gate_the_envelope_executes_as_before_and_from_it_the_rule_applies()
         .unwrap();
     assert_eq!(c.height, H + 1);
     assert_eq!(
-        receipts
-            .iter()
-            .map(|r| r.status.clone())
-            .collect::<Vec<_>>(),
+        receipts.iter().map(|r| r.status).collect::<Vec<_>>(),
         vec![TxStatus::Success, TxStatus::Failed(7)]
     );
     assert_eq!(c.msg_nonce(&carol_addr), 4);
@@ -1310,10 +1301,7 @@ fn two_envelopes_from_one_sender_in_one_block_follow_the_nonce_order() {
         ])
         .unwrap();
     assert_eq!(
-        receipts
-            .iter()
-            .map(|r| r.status.clone())
-            .collect::<Vec<_>>(),
+        receipts.iter().map(|r| r.status).collect::<Vec<_>>(),
         vec![TxStatus::Success, TxStatus::Success]
     );
     assert_eq!(c.msg_nonce(&carol_addr), 2);
@@ -1332,10 +1320,7 @@ fn two_envelopes_from_one_sender_in_one_block_follow_the_nonce_order() {
         ])
         .unwrap();
     assert_eq!(
-        receipts
-            .iter()
-            .map(|r| r.status.clone())
-            .collect::<Vec<_>>(),
+        receipts.iter().map(|r| r.status).collect::<Vec<_>>(),
         vec![TxStatus::Failed(7), TxStatus::Success]
     );
     assert_eq!(c.msg_nonce(&carol_addr), 1);
@@ -1436,7 +1421,7 @@ fn with_the_accounting_gate_inside_the_history_only_blocks_from_it_change() {
     assert_eq!(
         receipts
             .iter()
-            .map(|r| (r.status.clone(), r.fee_paid))
+            .map(|r| (r.status, r.fee_paid))
             .collect::<Vec<_>>(),
         vec![
             (TxStatus::Success, FEE),
@@ -1915,6 +1900,15 @@ fn at_the_gate_every_operation_is_charged_once_whether_it_succeeds_or_is_refused
     assert_eq!(covered.len(), 18 + 14);
 }
 
+/// What `direct_and_paid_sends_end_as_before_on_success_and_pay_on_refusal`
+/// compares: the receipts, each account's (balance, nonce), and the
+/// proposer's balance.
+type Ended = (
+    Vec<(sumchain_primitives::TxStatus, u128)>,
+    Vec<(u128, u64)>,
+    u128,
+);
+
 /// Below the gate and at it, a direct send and a paid send that succeed end
 /// with the same balances and nonces: the fee is charged once either way.
 /// The ones that are refused differ by exactly the fee and the nonce, which is
@@ -1924,7 +1918,7 @@ fn direct_and_paid_sends_end_as_before_on_success_and_pay_on_refusal() {
     use sumchain_primitives::TxStatus;
     let frank_addr = frank().address();
     let proposer = proposer_address();
-    let run = |params: ChainParams| -> (Vec<(TxStatus, u128)>, Vec<(u128, u64)>, u128) {
+    let run = |params: ChainParams| -> Ended {
         let mut c = Chain::new(params);
         c.setup();
         let mut receipts = Vec::new();

@@ -1343,8 +1343,8 @@ async fn payment_display_agrees_with_the_executed_outcome() {
     let in_block = listed(srv.messaging_get_messages_in_block(1, None).await.unwrap());
     for view in [&to_bob, &in_block] {
         assert_eq!(view.len(), 2, "{view:?}");
-        assert_eq!(view[&accepted], false);
-        assert_eq!(view[&paid_hash], true);
+        assert!(!view[&accepted]);
+        assert!(view[&paid_hash]);
     }
     let from_carol = listed(
         srv.messaging_get_sent_messages(carol().address().to_base58(), None, None)
