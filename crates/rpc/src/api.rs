@@ -1199,6 +1199,10 @@ pub trait SumChainApi {
     ) -> Result<Vec<MessageEventInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get the encrypted message data for a specific message by transaction hash
+    ///
+    /// Only for a relayed (sponsored) message the canonical chain executed:
+    /// `None` for a transaction with no canonical receipt or a refused one.
+    /// A relayed message never carries a payment, so `has_payment` is false.
     #[method(name = "messaging_getMessageData")]
     async fn messaging_get_message_data(
         &self,

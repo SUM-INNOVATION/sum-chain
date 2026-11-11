@@ -645,3 +645,114 @@ async fn below_the_accounting_gate_relays_share_the_committed_sponsor_nonce() {
         (2, 1)
     );
 }
+
+/// `messaging_getMessageData` reports only a message the canonical chain
+/// executed, and never a payment for a relayed message:
+/// - an accepted version-2 envelope: its sender and content, no payment;
+/// - an envelope naming a sender who did not sign it and carrying an
+///   amount, refused in the block: nothing (no sender, no payment);
+/// - a transaction stored with no canonical receipt (as a block that lost
+///   fork choice leaves it): nothing;
+/// - below the envelope gate, an executed string-form envelope carrying an
+///   amount: its sender and content, and no payment, because none moved.
+#[tokio::test]
+async fn message_data_reports_only_an_executed_message_and_no_payment() {
+    use sumchain_primitives::{MessagingOperation, MessagingTxData, TransactionV2};
+
+    // Both gates at the next block.
+    let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
+    let accepted = s
+        .relay(&v2_by(
+            envelope_from(&alice(), 0, 1, None),
+            &alice(),
+            CHAIN_ID,
+        ))
+        .await
+        .unwrap();
+    // An outer transaction by the sponsor key, carrying an envelope that
+    // names carol, carries an amount and is signed by someone else.
+    let refused_envelope = v2_by(envelope(0, 2, Some(5_000)), &dave(), CHAIN_ID);
+    let refused_tx = {
+        let tx = TransactionV2::messaging(
+            CHAIN_ID,
+            sponsor().address(),
+            RELAY_FEE,
+            1,
+            MessagingTxData {
+                operation: MessagingOperation::SendMessage,
+                data: bincode::serialize(&refused_envelope).unwrap(),
+            },
+        );
+        let sig = sign(tx.signing_hash().as_bytes(), sponsor().private_key());
+        SignedTransaction::new_v2(tx, *sig.as_bytes(), *sponsor().public_key().as_bytes())
+    };
+    s.mempool.add(refused_tx.clone()).unwrap();
+    let (carried, receipts) = s.publish_pool(1);
+    let by_hash: HashMap<String, (TxStatus, u128)> = carried
+        .iter()
+        .zip(&receipts)
+        .map(|(t, r)| (t.hash().to_hex(), (r.status, r.fee_paid)))
+        .collect();
+    assert_eq!(by_hash[&accepted], (TxStatus::Success, RELAY_FEE));
+    assert_eq!(
+        by_hash[&refused_tx.hash().to_hex()],
+        (TxStatus::Failed(7), RELAY_FEE)
+    );
+
+    let data = s
+        .server
+        .messaging_get_message_data(accepted.clone())
+        .await
+        .unwrap()
+        .expect("an executed message");
+    assert_eq!(data.sender, alice().address().to_base58());
+    assert_eq!(data.block_height, 1);
+    assert!(!data.has_payment);
+    assert_eq!(data.payment_amount, None);
+
+    let none = s
+        .server
+        .messaging_get_message_data(refused_tx.hash().to_hex())
+        .await
+        .unwrap();
+    assert!(none.is_none(), "a refused envelope is no message: {none:?}");
+
+    // Stored, but no canonical receipt.
+    let unreceipted = v2_by(envelope_from(&alice(), 1, 3, None), &alice(), CHAIN_ID);
+    let side_tx = {
+        let tx = TransactionV2::messaging(
+            CHAIN_ID,
+            sponsor().address(),
+            RELAY_FEE,
+            9,
+            MessagingTxData {
+                operation: MessagingOperation::SendMessage,
+                data: bincode::serialize(&unreceipted).unwrap(),
+            },
+        );
+        let sig = sign(tx.signing_hash().as_bytes(), sponsor().private_key());
+        SignedTransaction::new_v2(tx, *sig.as_bytes(), *sponsor().public_key().as_bytes())
+    };
+    sumchain_storage::TxStore::new(&s.db).put(&side_tx).unwrap();
+    let none = s
+        .server
+        .messaging_get_message_data(side_tx.hash().to_hex())
+        .await
+        .unwrap();
+    assert!(none.is_none(), "no canonical receipt, no message: {none:?}");
+
+    // Below the envelope gate: an executed envelope that carried an amount.
+    let s = serve(&genesis_on(CHAIN_ID, None, None));
+    let with_amount = s.relay(&v1(envelope(0, 4, Some(5_000)))).await.unwrap();
+    let (_, receipts) = s.publish_pool(1);
+    assert_eq!(statuses(&receipts), vec![(TxStatus::Success, RELAY_FEE)]);
+    let data = s
+        .server
+        .messaging_get_message_data(with_amount)
+        .await
+        .unwrap()
+        .expect("an executed message");
+    assert_eq!(data.sender, carol().address().to_base58());
+    assert!(!data.has_payment, "no amount moved");
+    assert_eq!(data.payment_amount, None);
+}

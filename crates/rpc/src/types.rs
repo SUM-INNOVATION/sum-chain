@@ -1965,7 +1965,8 @@ pub struct MessageDataInfo {
     pub message_data: String,
     /// Sender's public key (hex with 0x prefix)
     pub sender_pubkey: String,
-    /// Whether message has payment attached
+    /// Whether message has payment attached. Always false for a relayed
+    /// message: a relayed message never moves an amount.
     pub has_payment: bool,
     /// Payment amount (if has_payment)
     pub payment_amount: Option<String>,

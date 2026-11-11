@@ -4379,14 +4379,6 @@ impl SumChainApiServer for RpcServer {
             Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
         };
 
-        // Get the receipt to find block height
-        let receipt_store = ReceiptStore::new(&self.db);
-        let block_height = match receipt_store.get(&hash) {
-            Ok(Some(receipt)) => receipt.block_height,
-            Ok(None) => 0,
-            Err(_) => 0,
-        };
-
         // Extract the payload from the transaction
         let payload = match &tx.inner {
             sumchain_primitives::TxInner::V2(tx_v2) => &tx_v2.payload,
@@ -4404,22 +4396,42 @@ impl SumChainApiServer for RpcServer {
             return Err(RpcError::InvalidParams("Not a sponsored message transaction".to_string()).into());
         }
 
+        // A message exists only where the canonical chain executed it. A
+        // transaction with no canonical receipt (never carried, or carried
+        // only by a block that lost fork choice) or with a refused receipt
+        // stored no message, so there is nothing to report: no sender, no
+        // content, no payment. What is reported is the executed outcome, never
+        // the raw payload alone.
+        let receipt = match ReceiptStore::new(&self.db).get(&hash) {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
+        };
+        if !receipt.status.is_success() {
+            return Ok(None);
+        }
+
         // Deserialize the SponsoredMessage from the data
         let sponsored_msg: SponsoredMessage = bincode::deserialize(&messaging_data.data)
             .map_err(|e| RpcError::Internal(format!("Failed to deserialize message: {}", e)))?;
 
-        // Derive sender address from public key
+        // The sender the executed message was stored under: the address of
+        // the key the envelope names.
         let sender = Address::from_public_key(&sponsored_msg.sender_pubkey);
 
+        // A sponsored send never moves an amount. Below the envelope gate an
+        // envelope's `koppa_amount` is carried but no balance moves and no
+        // pending payment is created; from the gate an envelope carrying one
+        // is refused. So no payment is reported, whatever the payload says.
         Ok(Some(MessageDataInfo {
             tx_hash: format!("0x{}", hex::encode(hash.as_bytes())),
-            block_height,
+            block_height: receipt.block_height,
             sender: sender.to_base58(),
             recipient_hash: format!("0x{}", hex::encode(sponsored_msg.recipient_hash)),
             message_data: format!("0x{}", hex::encode(&sponsored_msg.message_data)),
             sender_pubkey: format!("0x{}", hex::encode(sponsored_msg.sender_pubkey)),
-            has_payment: sponsored_msg.koppa_amount.is_some(),
-            payment_amount: sponsored_msg.koppa_amount.map(|a| a.to_string()),
+            has_payment: false,
+            payment_amount: None,
         }))
     }
 
