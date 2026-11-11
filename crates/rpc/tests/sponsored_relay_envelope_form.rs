@@ -1666,6 +1666,83 @@ async fn a_registration_already_made_or_pending_is_refused_before_it_takes_a_non
     }
 }
 
+/// A sponsored registration is refused while the registrant's own
+/// `RegisterPublicKey` is pending in this node's pool: that one would execute
+/// first, the sponsored one would be refused in the block (free, advancing
+/// nothing), and the message relayed after it would take `InvalidNonce`. With
+/// both gates absent and with both open, the relayed message is delivered and
+/// the address registered once, by its own transaction.
+#[tokio::test]
+async fn a_registration_is_refused_while_the_registrants_own_is_pending() {
+    use sumchain_primitives::messaging::RegisterPublicKeyData;
+    use sumchain_primitives::{MessagingOperation, MessagingTxData};
+    for (envelope_gate, accounting_gate) in [(None, None), (Some(1), Some(1))] {
+        let label = format!("envelope gate {envelope_gate:?}, accounting gate {accounting_gate:?}");
+        let s = serve(&with_registration(genesis_on(
+            CHAIN_ID,
+            envelope_gate,
+            accounting_gate,
+        )));
+        let newcomer = KeyPair::from_bytes([0xB2; 32]);
+        sumchain_storage::StateStore::new(&s.db)
+            .put_account(
+                &newcomer.address(),
+                &sumchain_storage::schema::AccountState {
+                    balance: ACCOUNT_FUNDS,
+                    nonce: 0,
+                },
+            )
+            .unwrap();
+        let own = s.outer(
+            &newcomer,
+            0,
+            2 * RELAY_FEE,
+            MessagingTxData {
+                operation: MessagingOperation::RegisterPublicKey,
+                data: bincode::serialize(&RegisterPublicKeyData {
+                    public_key: *newcomer.public_key().as_bytes(),
+                })
+                .unwrap(),
+            },
+        );
+        s.mempool.add(own).unwrap();
+
+        let r = s.register(&newcomer).await;
+        assert!(!r.success && r.tx_hash.is_none(), "{label}: {r:?}");
+        assert!(
+            r.error.as_deref().unwrap().contains("own registration"),
+            "{label}: {r:?}"
+        );
+        let m = envelope(0, 1, None);
+        s.relay(&if envelope_gate.is_some() {
+            v2(m)
+        } else {
+            v1(m)
+        })
+        .await
+        .unwrap();
+        assert_eq!(s.pending_sponsor_nonces(), vec![0], "{label}");
+        let (_, receipts) = s.publish_pool(1);
+        assert_eq!(
+            status_only(&receipts),
+            vec![TxStatus::Success; 2],
+            "{label}"
+        );
+        assert!(s.is_registered(&newcomer), "{label}");
+        assert_eq!(s.sent_by(&carol()), 1, "{label}");
+        let late = s.register(&newcomer).await;
+        assert!(
+            !late.success
+                && late
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("already registered"),
+            "{label}: {late:?}"
+        );
+    }
+}
+
 /// Below the accounting gate a relayed message and a sponsored registration
 /// relayed after it share the sponsor's committed nonce: the relayed message
 /// leaves that nonce where it is, the registration advances it. The producer

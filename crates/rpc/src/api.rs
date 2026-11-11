@@ -1292,8 +1292,9 @@ pub trait SumChainApi {
     /// `SponsoredRegistrationRequest`).
     ///
     /// Also refuses, before it takes a sponsor nonce, a public key whose
-    /// sponsored registration is already pending in this node's pool and an
-    /// address already registered: the block would refuse either, and this
+    /// sponsored registration is already pending in this node's pool, an
+    /// address whose own `RegisterPublicKey` is pending there, and an address
+    /// already registered: the block would refuse either, and this
     /// relay signs registrations and `messaging_submitSponsored` messages in
     /// one sponsor nonce sequence.
     #[method(name = "messaging_registerSponsored")]

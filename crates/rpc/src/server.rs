@@ -1509,6 +1509,28 @@ impl RpcServer {
             .collect()
     }
 
+    /// Whether this node's pool holds the registrant's own `RegisterPublicKey`:
+    /// from `registrant`, signed by the key that address derives from. It
+    /// would execute before, or instead of, a sponsored registration of the
+    /// same address, which the block would then refuse.
+    fn direct_registration_pending(&self, registrant: &Address) -> bool {
+        self.mempool.get_by_sender(registrant).iter().any(|tx| {
+            let sumchain_primitives::TxInner::V2(v2) = &tx.inner else {
+                return false;
+            };
+            matches!(
+                messaging_data(tx),
+                Some(d) if d.operation == MessagingOperation::RegisterPublicKey
+            ) && Address::from_public_key(&tx.public_key) == *registrant
+                && sumchain_crypto::verify_bytes_strict(
+                    v2.signing_hash().as_bytes(),
+                    &tx.signature,
+                    &tx.public_key,
+                )
+                .is_ok()
+        })
+    }
+
     /// The height the next block will have: the chain tip plus one. A store
     /// read error is surfaced, never read as a tip of 0.
     fn relay_inclusion_height(&self) -> std::result::Result<u64, RpcError> {
@@ -5026,9 +5048,9 @@ impl SumChainApiServer for RpcServer {
         // sponsor nonce, which is valid only if the registration executes: a
         // registration refused in the block (an address already registered,
         // 394) is free and advances nothing. So a registration is taken only
-        // for an address that is not registered and has no sponsored
-        // registration pending in this node's pool. Both are checked under
-        // the lock, the pool before the committed state: a block committed
+        // for an address that is not registered and has no registration
+        // pending in this node's pool, sponsored or its own. These are checked
+        // under the lock, the pool before the committed state: a block committed
         // between the two reads is seen in one of them (the node commits a
         // block before it removes the block's transactions from the pool).
         let inclusion_height = self.relay_inclusion_height()?;
@@ -5041,6 +5063,18 @@ impl SumChainApiServer for RpcServer {
                 error: Some(
                     "A sponsored registration of this public key is already pending; the \
                      address is registered once that transaction executes."
+                        .to_string(),
+                ),
+            });
+        }
+        if self.direct_registration_pending(&registrant_address) {
+            return Ok(SponsoredRegistrationResponse {
+                address: registrant_address.to_base58(),
+                success: false,
+                tx_hash: None,
+                error: Some(
+                    "This address's own registration (RegisterPublicKey) is already pending; \
+                     it is registered once that transaction executes."
                         .to_string(),
                 ),
             });
