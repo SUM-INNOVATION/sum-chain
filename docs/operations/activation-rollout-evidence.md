@@ -27,7 +27,7 @@ Let `$V` be the validator's RPC base URL and `$POD` its pod name.
 | # | record | how |
 |---|---|---|
 | 1 | **binary sha256** | `kubectl -n sumchain exec $POD -- sha256sum /usr/local/bin/sumchain` — the path the `Dockerfile` installs the node at (`COPY --from=builder /build/target/release/sumchain /usr/local/bin/`, `ENTRYPOINT ["sumchain"]`); `tools/lane-b/rollout-check-test.py` derives it from the Dockerfile and fails if this document hashes anything else — **and** the image digest, `kubectl -n sumchain get pod $POD -o jsonpath='{.status.containerStatuses[0].imageID}'`. The image digest is what Kubernetes actually pulled; the file hash is what is running. Record both, because a mutable tag makes them able to disagree. **Three identities, all compared:** the file hash against the sha256 of the release binary; the image digest against the release image's registry digest; and `sumchain --version` against `sumchain <release commit>`. Since PR #259 the release Dockerfile refuses to build without a full 40-hex `GIT_HASH` and the binary reports it; 0.2.0 has no `--version` and cannot be recorded. The self-report is never the only identity: the file hash and the digest do not depend on anything the node says. |
-| 2 | **activation digest** | `chain_getActivationStatus` → `digest`, `protocol_digest` **and**, from the release that declares the handshake digest on, `handshake_digest`. `digest` answers "do our genesis files agree"; `protocol_digest` answers "do our binaries enforce the same activation heights and compiled limits"; `handshake_digest` folds `protocol_digest` with the running consensus-configuration commitment and answers "do our nodes run the same consensus configuration". The value peers compare at the handshake is `handshake_digest` on a release that reports it, and `protocol_digest` on an earlier release, which reports no `handshake_digest`. Two binaries from different commits can share a `digest` and differ in `protocol_digest`; two nodes whose genesis differs only in a non-gate value such as `min_fee` share `protocol_digest` and differ in `handshake_digest`. |
+| 2 | **activation digest** | `chain_getActivationStatus` → `digest` **and** `protocol_digest`. `digest` answers "do our genesis files agree"; `protocol_digest` answers "do our binaries enforce the same rules", and it is the one peers compare at the handshake. Two binaries from different commits can share a `digest` and differ in `protocol_digest`. |
 | 3 | **chain id** | `chain_getActivationStatus` → `chain_id`. |
 | 4 | **current height** | `chain_getActivationStatus` → `current_height`. Carried in the same response as 2 and 3 deliberately: a digest recorded without the height it was read at cannot be placed in time. |
 | 5 | **peer compatibility handshake** | See §1.2. Not "the peer is connected" — a peer that declares nothing is admitted at every height below the enforcement gate, so connectivity is not evidence of compatibility. |
@@ -83,11 +83,6 @@ field() { jq -er ".result.$1 // empty" <<<"$status" 2>/dev/null \
             || fail "chain_getActivationStatus returned no $1"; }
 act=$(field digest)
 proto=$(field protocol_digest)
-# The value peers compare at the handshake, on a release that reports it. An
-# earlier release reports none; its record says "absent", and the checker then
-# pairs the handshake lines with protocol_digest instead.
-hs=$(jq -r '.result.handshake_digest // "absent"' <<<"$status" 2>/dev/null) \
-  || fail "chain_getActivationStatus could not be read for handshake_digest"
 chain=$(field chain_id)
 height=$(field current_height)
 # Every gate with a height, as name=height, not a count: a count of 0 is wrong
@@ -130,7 +125,6 @@ echo "binary_version: $ver"
 echo "image_id:       $img"
 echo "activation_digest: $act"
 echo "protocol_digest:   $proto"
-echo "handshake_digest:  $hs"
 echo "chain_id:          $chain"
 echo "current_height:    $height"
 echo "gates_set:         $gates"
@@ -164,9 +158,6 @@ It exits 0 only when:
 - `binary_version` is `sumchain <release commit>`;
 - `image_id` is pinned at the release digest;
 - `activation_digest` and `protocol_digest` are the same on every validator;
-- `handshake_digest`, where the release reports it, is reported by every
-  validator, is not `unavailable`, and is the same on every validator
-  (reported by some and `absent` on others fails);
 - `chain_id` is the expected one, and `current_height` is above 0;
 - `gates_set` is exactly the four production predecessor gates at their live
   heights;
@@ -174,9 +165,7 @@ It exits 0 only when:
 - `genesis_sha256` is identical on every validator and equal to the
   production hash;
 - `telemetry` is `OK`;
-- the N·(N−1) handshakes of §1.2 are present, each carrying the common
-  `handshake_digest` (or, for a release that does not report one, the common
-  `protocol_digest`), with zero refusals in either release's wording.
+- the N·(N−1) handshakes of §1.2 are present, with zero refusals.
 
 Without the production genesis hash, the release commit or the image digest,
 it prints `STOP` and exits 1. **A missing record, field, log
@@ -203,33 +192,21 @@ To look at them by hand:
 
 ```bash
 kubectl -n sumchain logs "$POD" \
-  | grep -E 'compatibility handshake accepted|REFUSING peer|declared (protocol )?digest'
+  | grep -E 'compatibility handshake accepted|REFUSING peer|declared protocol digest'
 ```
 
-The wording depends on what the release declares. A release that reports
-`handshake_digest` (§1, record 2) declares the handshake digest; an earlier
-one declares the protocol digest.
-
-* **Success** (`crates/node/src/node.rs`, the `ProtocolIdResponse` arm):
-  `compatibility handshake accepted: peer declares our handshake digest`
-  (earlier releases: `… peer enforces our protocol digest`), carrying `peer`
-  and `digest` as fields — emitted at **`info`**, so this evidence exists under
-  the default log level and does not depend on anyone having raised it for the
-  rollout window. It was `debug!` until this procedure was written: at that
-  level a correct rollout and an unobserved one leave identical logs
-  afterwards, which is exactly the distinction this section exists to make.
-* **Failure** (the same arm, and `PeerCompatRegistry::on_declaration` in
-  `crates/p2p/src/peer_compat.rs`):
-  `REFUSING peer <id>: it declares handshake digest X but this node declares Y`
-  and `Peer <id> declared digest X but this binary declares Y`; earlier
-  releases: `REFUSING peer <id>: it enforces protocol digest X but this node
-  enforces Y` and `Peer <id> declared protocol digest X but this binary
-  enforces Y`. **Any occurrence, in either wording, stops the rollout.** The
-  peer is banned for 24h and is permanently `Incompatible` from that point
-  whatever it declares later, so this is not self-healing. A validator on a
-  release that declares the handshake digest and one on a release that
-  declares the protocol digest always refuse each other: moving between them
-  is a same-window upgrade.
+* **Success** (`crates/node/src/node.rs:916`): `compatibility handshake
+  accepted: peer enforces our protocol digest`, carrying `peer` and `digest` as
+  fields — emitted at **`info`**, so this evidence exists under the default log
+  level and does not depend on anyone having raised it for the rollout window.
+  It was `debug!` until this procedure was written: at that level a correct
+  rollout and an unobserved one leave identical logs afterwards, which is
+  exactly the distinction this section exists to make.
+* **Failure** (`crates/node/src/node.rs:920`, `crates/p2p/src/peer_compat.rs:196`):
+  `REFUSING peer <id>: it enforces protocol digest X but this node enforces Y`.
+  **Any occurrence stops the rollout.** The peer is banned for 24h and is
+  permanently `Incompatible` from that point whatever it declares later, so
+  this is not self-healing.
 
 **The record is complete when every validator has logged a success line for
 every OTHER validator.** N validators means N·(N−1) success lines and zero
@@ -237,9 +214,8 @@ refusals. Silence is not success: a peer that declares nothing is admitted
 below the enforcement height, so an absent line means the exchange did not
 happen, not that it passed. `rollout-check.py` enforces exactly this: for every
 ordered pair of validators it requires a success line in the first one's log
-naming the second one's `local_peer_id` and the common `handshake_digest` (the
-common `protocol_digest` on a release that reports no `handshake_digest`), and
-it fails on any refusal line, in either wording, in any log.
+naming the second one's `local_peer_id` and the common `protocol_digest`, and it
+fails on any refusal line in any log.
 
 ---
 
@@ -374,14 +350,11 @@ height, **halt** if any of these is true:
 1. Any validator's `sha256sum` of `genesis.json` differs from the committed
    one (§3).
 2. Any validator's `chain_getActivationStatus.digest` differs from any other's.
-3. Any validator's `protocol_digest`, or `handshake_digest` on a release that
-   reports it, differs from any other's.
+3. Any validator's `protocol_digest` differs from any other's.
 4. Any validator is not running, is CrashLoopBackOff, or exited with
    `chain activation parameters are unsound`.
-5. Any log line matching `REFUSING peer .*: it declares handshake digest`
-   (releases that report `handshake_digest`) or
-   `REFUSING peer .*: it enforces protocol digest` (earlier releases) appears
-   on any validator.
+5. Any log line matching `REFUSING peer .*: it enforces protocol digest`
+   appears on any validator.
 6. `tools/lane-b/wave1-monitor.sh agree <every validator's baseline>` reports
    `DISAGREE` (exit 1): the same blocks, no restart on any node, different
    refusals.

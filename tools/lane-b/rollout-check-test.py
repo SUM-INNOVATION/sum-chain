@@ -26,13 +26,6 @@ What it proves:
    the checker exits NON-ZERO and names that rule. The `complete` case asserts
    exit 0, so a checker hard-wired to fail cannot pass this battery.
 
-4. **Both releases' handshakes.** A release that declares the handshake digest
-   reports `handshake_digest` and logs its handshake in its own wording; an
-   earlier release reports none and logs the protocol-digest wording. Both
-   complete; a refusal in either wording fails. The handshake-digest wording is
-   read from the node and registry sources, not copied, so a change to it
-   breaks this battery until the checker matches it.
-
 Nothing under the real tree is written to; every case works in a temp dir.
 """
 from __future__ import annotations
@@ -65,62 +58,10 @@ PRODUCTION_PREDECESSORS = {"v2_enabled_from_height": 5200000, "omninode_enabled_
                            "education_enabled_from_height": 8900000,
                            "governance_enabled_from_height": 8900000}
 STRAY_GATE = "subsystem_proof_unsupported_enabled_from_height"  # a remediation gate
-HS = "4" * 64  # NONPRODUCTION handshake digest
-HS_OTHER = "5" * 64
 COMMIT = "c" * 40  # NONPRODUCTION release commit
 OTHER_COMMIT = "d" * 40
 IMAGE_DIGEST = "sha256:" + "0" * 64  # NONPRODUCTION registry digest
 OTHER_DIGEST = "sha256:" + "1" * 64
-
-
-def rust_literal(path: Path, start: str) -> str:
-    """The one Rust string literal in `path` that begins with `start`, as the
-    compiled binary holds it: escapes decoded, and each line continuation (a
-    backslash ending the line) dropped with the whitespace that follows it."""
-    src = path.read_text()
-    assert src.count('"' + start) == 1, f"{path}: expected one literal starting {start!r}"
-    j = src.index('"' + start) + 1
-    out: list[str] = []
-    while src[j] != '"':
-        if src[j] == "\\":
-            nxt = src[j + 1]
-            j += 2
-            if nxt == "\n":
-                while src[j] in " \t\n":
-                    j += 1
-            else:
-                out.append({"n": "\n", "t": "\t"}.get(nxt, nxt))
-            continue
-        out.append(src[j])
-        j += 1
-    return "".join(out)
-
-
-def fill(fmt: str, *args: str) -> str:
-    """`fmt` with each `{}` replaced by the next of `args`, as `format!` would."""
-    assert fmt.count("{}") == len(args), f"{fmt!r} takes {fmt.count('{}')} arguments"
-    for a in args:
-        fmt = fmt.replace("{}", a, 1)
-    return fmt
-
-
-# The handshake log lines of a release that declares the handshake digest, read
-# from the sources that emit them: the `ProtocolIdResponse` arm of
-# crates/node/src/node.rs and `PeerCompatRegistry::on_declaration` in
-# crates/p2p/src/peer_compat.rs.
-NODE_SRC = ROOT / "crates/node/src/node.rs"
-COMPAT_SRC = ROOT / "crates/p2p/src/peer_compat.rs"
-NEW_ACCEPTED = rust_literal(NODE_SRC, "compatibility handshake accepted")
-NEW_REFUSING = rust_literal(NODE_SRC, "REFUSING peer {}")
-NEW_DECLARED = rust_literal(COMPAT_SRC, "Peer {} declared ")
-# The same lines, up to their first sentence's end, as a release that declares
-# the protocol digest wrote them (crates/node/src/node.rs and
-# crates/p2p/src/peer_compat.rs before the handshake digest, e.g. at dd875167).
-# PINNED, because those releases are fixed: they never change, and the checker
-# must keep reading them.
-OLD_ACCEPTED = "compatibility handshake accepted: peer enforces our protocol digest"
-OLD_REFUSING = "REFUSING peer {}: it enforces protocol digest {} but this node enforces {}."
-OLD_DECLARED = "Peer {} declared protocol digest {} but this binary enforces {}; marking it incompatible."
 
 
 def ident(i: int) -> str:
@@ -221,31 +162,11 @@ def make_pods(fx: Path, n: int, *, drop_handshake=None, refusal_on=None,
               digest_off=None, empty_log=None, no_image_digest=None,
               status_without_digest=None, metrics_missing=None, dup_ident=None,
               genesis_off=None, no_produced=None, gates=None, no_version=None,
-              bad_version=None, silent=None, handshake=False, hs_absent=None,
-              hs_unavailable=None, registry_refusal_on=None,
-              accept_with_protocol=False) -> None:
-    """`handshake=True` makes the pods a release that declares the handshake
-    digest: they report `handshake_digest` and log in that release's wording,
-    and `digest_off` moves the handshake digest alone (a node whose genesis
-    differs in a non-gate value). Otherwise they are an earlier release."""
+              bad_version=None, silent=None) -> None:
     gates = PRODUCTION_PREDECESSORS if gates is None else gates
-    accepted_msg, refusing_fmt, declared_fmt = (
-        (NEW_ACCEPTED, NEW_REFUSING, NEW_DECLARED) if handshake
-        else (OLD_ACCEPTED, OLD_REFUSING, OLD_DECLARED))
-
-    def declared(k: int) -> str:
-        """The digest pod `k` declares at the handshake."""
-        if handshake:
-            return HS_OTHER if digest_off == k else HS
-        return PROTO_OTHER if digest_off == k else PROTO
-
     for i in range(n):
         pod = f"sumchain-validator-{i + 1}-0"
-        proto = PROTO_OTHER if digest_off == i and not handshake else PROTO
-        hs_field = {}
-        if handshake and hs_absent != i:
-            hs_field = {"handshake_digest": "unavailable: fixture" if hs_unavailable == i
-                        else declared(i)}
+        proto = PROTO_OTHER if digest_off == i else PROTO
         (fx / f"{pod}.sha").write_text(FIXTURE_SHA + "\n")
         if no_version != i:  # 0.2.0 has no --version at all
             (fx / f"{pod}.ver").write_text(
@@ -260,7 +181,7 @@ def make_pods(fx: Path, n: int, *, drop_handshake=None, refusal_on=None,
             if metrics_missing == i else METRICS)
         (fx / f"{pod}.status").write_text(json.dumps({"jsonrpc": "2.0", "id": 1, "result": {
             **({} if status_without_digest == i else {"digest": ACT}),
-            "protocol_digest": proto, **hs_field, "chain_id": int(CHAIN),
+            "protocol_digest": proto, "chain_id": int(CHAIN),
             "current_height": 1000 + i,  # NONPRODUCTION
             "gates": [{"gate": g, "height": h, "active": True} for g, h in gates.items()]
                      + [{"gate": "x", "height": None, "active": False}]}}))
@@ -269,25 +190,22 @@ def make_pods(fx: Path, n: int, *, drop_handshake=None, refusal_on=None,
         if no_produced != i:
             lines.append(log_line("INFO", "sumchain::node",
                                   f"Produced block 0x{'ab' * 32} at height {1000 + i}", i == 0))
-        ours = declared(i)
         for j in range(n):
             if j == i or drop_handshake == (i, j) or silent == i:
                 continue
-            theirs = declared(j)
-            if theirs == ours:
-                logged = PROTO if accept_with_protocol else theirs
+            peer_proto = PROTO_OTHER if digest_off == j else PROTO
+            if peer_proto == proto:
                 lines.append(log_line("INFO", "sumchain_node::node",
-                                      f"{accepted_msg} peer={peer(j)} digest={logged}", i == 0))
+                                      "compatibility handshake accepted: peer enforces our "
+                                      f"protocol digest peer={peer(j)} digest={proto}", i == 0))
             else:
                 lines.append(log_line("WARN", "sumchain_node::node",
-                                      fill(refusing_fmt, peer(j), theirs, ours), False))
-        stranger = HS_OTHER if handshake else PROTO_OTHER
+                                      f"REFUSING peer {peer(j)}: it enforces protocol digest "
+                                      f"{peer_proto} but this node enforces {proto}.", False))
         if refusal_on == i:
             lines.append(log_line("WARN", "sumchain_node::node",
-                                  fill(refusing_fmt, "12D3KooWStranger", stranger, ours), False))
-        if registry_refusal_on == i:
-            lines.append(log_line("WARN", "sumchain_p2p::peer_compat",
-                                  fill(declared_fmt, "12D3KooWStranger", stranger, ours), False))
+                                  f"REFUSING peer 12D3KooWStranger: it enforces protocol digest "
+                                  f"{PROTO_OTHER} but this node enforces {proto}.", False))
         (fx / f"{pod}.log").write_text("" if empty_log == i else "\n".join(lines) + "\n")
 
 
@@ -401,37 +319,6 @@ CASES = [
     ("expected identity not recorded", 2, {}, "wrong_expected_ident", 1, "VALIDATOR SET MISMATCH"),
     ("wrong chain id", 2, {}, "chain", 1, "CHAIN ID MISMATCH"),
     ("empty evidence directory", 2, {}, "empty_dir", 1, "MISSING RECORD"),
-    # An earlier release (no handshake_digest) keeps passing, including from a
-    # record written before the recorder had the field, and its registry
-    # refusal wording is still caught.
-    ("earlier release, record without the field", 2, {}, "drop_hs_lines", 0,
-     "2/2 directed handshakes, 0 refusals"),
-    ("earlier release: registry refusal", 2, {"registry_refusal_on": 1}, None, 1,
-     "INCOMPATIBILITY REFUSAL"),
-    # A release that declares the handshake digest.
-    ("handshake-digest release N=2", 2, {"handshake": True}, None, 0,
-     "2/2 directed handshakes, 0 refusals"),
-    ("handshake-digest release N=3", 3, {"handshake": True}, None, 0,
-     "6/6 directed handshakes, 0 refusals"),
-    ("handshake-digest release: node refusal", 2, {"handshake": True, "refusal_on": 0}, None, 1,
-     "INCOMPATIBILITY REFUSAL"),
-    ("handshake-digest release: registry refusal", 2,
-     {"handshake": True, "registry_refusal_on": 1}, None, 1, "INCOMPATIBILITY REFUSAL"),
-    ("handshake digest differs, protocol digest equal", 2, {"handshake": True, "digest_off": 1}, None, 1,
-     "DIGEST DISAGREEMENT on handshake_digest"),
-    ("handshake digest reported by one validator only", 2, {"handshake": True, "hs_absent": 1}, None, 1,
-     "HANDSHAKE DIGEST REPORTED BY SOME VALIDATORS ONLY"),
-    ("handshake digest unavailable", 2, {"handshake": True, "hs_unavailable": 0}, None, 1,
-     "handshake_digest is unavailable"),
-    ("handshake digest blank in the record", 2, {"handshake": True}, "blank_hs", 1,
-     "handshake_digest is blank"),
-    ("handshake lines carry the protocol digest", 2,
-     {"handshake": True, "accept_with_protocol": True}, None, 1, "MISSING HANDSHAKE"),
-    # A record from a recorder without the field, on the new release: the
-    # checker falls back to protocol_digest, and the handshake lines (which
-    # carry the handshake digest) no longer pair -- it fails, never passes.
-    ("handshake-digest release, records without the field", 2, {"handshake": True}, "drop_hs_lines", 1,
-     "MISSING HANDSHAKE"),
 ]
 
 
@@ -486,41 +373,12 @@ def mutate(out: Path, how: str | None) -> None:
     elif how == "empty_dir":
         for f in out.iterdir():
             f.unlink()
-    elif how == "drop_hs_lines":
-        for r in out.glob("*.record"):
-            r.write_text(re.sub(r"(?m)^handshake_digest:.*\n", "", r.read_text()))
-    elif how == "blank_hs":
-        rec.write_text(re.sub(r"(?m)^handshake_digest:.*$", "handshake_digest: ", rec.read_text()))
-
-
-def check_wording() -> list[str]:
-    """The handshake-digest wording read from the sources is what the checker
-    reads, and the earlier release's pinned wording still is too."""
-    import importlib.util
-    # No __pycache__ beside the checker: the workflow requires a clean tree.
-    sys.dont_write_bytecode = True
-    spec = importlib.util.spec_from_file_location("rollout_check", CHECKER)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    fails: list[str] = []
-    for fmt in (NEW_REFUSING, NEW_DECLARED, OLD_REFUSING, OLD_DECLARED):
-        line = fill(fmt, "12D3KooWX", HS, HS_OTHER)
-        if not mod.REFUSAL.search(line):
-            fails.append(f"the checker misses the refusal line {line!r}")
-    for msg in (NEW_ACCEPTED, OLD_ACCEPTED):
-        if mod.ACCEPTED not in msg:
-            fails.append(f"the checker misses the success line {msg!r}")
-    print(f"  handshake-digest wording from source: {NEW_ACCEPTED!r}; "
-          f"{NEW_REFUSING.split('.')[0]!r}; {NEW_DECLARED.split(';')[0]!r}")
-    return fails
 
 
 def main() -> int:
     failures: list[str] = []
     print("binary path:")
     failures += check_binary_path()
-    print("handshake log wording:")
-    failures += check_wording()
 
     print("cases (NONPRODUCTION fixtures):")
     for name, n, kw, how, want_exit, want_text in CASES:
@@ -579,8 +437,7 @@ def main() -> int:
     if failures:
         return 1
     print(f"ROLLOUT CHECK BATTERY OK: {len(CASES)} checker cases + {len(RECORDER_REFUSALS)} "
-          f"recorder refusals, binary path matches the Dockerfile, both releases' handshake "
-          f"wording is read.")
+          f"recorder refusals, binary path matches the Dockerfile.")
     return 0
 
 
