@@ -1,4 +1,3 @@
-
 //! A reference client for a relayed message: what a client does when the
 //! relay's outer transaction for its message does not deliver it.
 //!
@@ -7,11 +6,20 @@
 //! it charged nothing and moved no messaging nonce. The client then decides
 //! from the chain, never from what it remembers:
 //!
-//! 1. It reads the canonical receipts of the wrappers it obtained and the
-//!    message records of the sender, and looks for its intended message by
-//!    content (sender key, recipient, message bytes). A message carried by a
-//!    wrapper the client did not request counts too. Found: delivered, stop;
-//!    the intent is never sent again.
+//! 1. It looks for its intended message by content (sender key, recipient,
+//!    message bytes) among the transactions the canonical chain carried since
+//!    the user signed the envelope: every block from then to the tip, each
+//!    transaction read through `messaging_getMessageData`, which answers from
+//!    the stored transaction and its receipt and only for one that executed.
+//!    A message carried by a wrapper the client did not request (another
+//!    relay, another device, another sponsor's copy) counts too. Found:
+//!    delivered, stop; the intent is never sent again. The sender's message
+//!    listing (`messaging_getSentMessages`) is not used: it returns the oldest
+//!    1,000 records only, and below the transaction-index gate it keeps one
+//!    row per sender per block, so a delivery can be missing from it. (The
+//!    reference client scans from the signing height at every step; a real
+//!    client keeps the height it has scanned to, and after a chain switch
+//!    scans again from the fork point.)
 //! 2. It reads the sender's committed messaging nonce
 //!    (`messaging_getSenderNonce`). A nonce that moved is never taken as a
 //!    delivery: only a message record is.
@@ -34,6 +42,11 @@
 //! status other than `success` and `invalid nonce`) ends the intent as
 //! undeliverable with that status, unless step 4 or 5 applies.
 //!
+//! The whole tracker (the envelope, the height it was signed at, the wrappers
+//! obtained, the bound, the outcome) is what a client persists with the
+//! intent: a client that forgot its wrappers after a restart would count its
+//! retries from zero again. `Tracker` serializes for that.
+//!
 //! Retries are bounded: at most `max_wrappers` wrappers per intent. Who pays:
 //! the sponsor pays the outer fee for each wrapper that executes, succeeding
 //! or refused in the block (from the accounting height; below it a relayed
@@ -48,13 +61,14 @@
 
 #![allow(dead_code)]
 
+use serde::{Deserialize, Serialize};
 use sumchain_primitives::{Address, SponsoredMessage};
 use sumchain_rpc::api::SumChainApiServer;
 use sumchain_rpc::server::RpcServer;
 use sumchain_rpc::types::SubmitSponsoredMessageRequest;
 
 /// The two envelope forms a user can have signed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Form {
     /// The version-2 envelope: bound to the chain, the sender's messaging
     /// nonce, the expiry and the content.
@@ -64,11 +78,14 @@ pub enum Form {
     Legacy,
 }
 
-/// One message a user wants delivered: the envelope as the user signed it.
-#[derive(Clone, Debug)]
+/// One message a user wants delivered: the envelope as the user signed it,
+/// and the chain tip's height when it was signed. No block at or below that
+/// height can carry it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Intent {
     pub envelope: SponsoredMessage,
     pub form: Form,
+    pub signed_at: u64,
 }
 
 impl Intent {
@@ -78,7 +95,7 @@ impl Intent {
 }
 
 /// How an intent ended.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Outcome {
     /// The canonical chain holds a message record with this content, carried
     /// by the wrapper `tx_hash`.
@@ -99,8 +116,9 @@ pub enum Step {
     Done(Outcome),
 }
 
-/// One intent and the wrappers the client obtained for it.
-#[derive(Clone, Debug)]
+/// One intent and the wrappers the client obtained for it: what a client
+/// persists.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Tracker {
     pub intent: Intent,
     /// The wrappers' transaction hashes, in the order obtained.
@@ -143,34 +161,40 @@ impl Tracker {
         self.ask_for_wrapper(server).await
     }
 
-    /// A message record of the canonical chain whose content is this intent's:
-    /// the wrapper that carried it.
+    /// The wrapper whose execution delivered this intent's content on the
+    /// canonical chain, if any: first among the wrappers this client
+    /// obtained, then among every transaction carried since the envelope was
+    /// signed. `messaging_getMessageData` answers from the stored transaction
+    /// and its receipt, and only for a relayed message that executed; any
+    /// other transaction is refused or answered with nothing, and is not this
+    /// intent.
     async fn delivered_by(&self, server: &RpcServer) -> Option<String> {
         let m = &self.intent.envelope;
-        let matches = |d: &sumchain_rpc::types::MessageDataInfo| {
+        let delivers = |d: &sumchain_rpc::types::MessageDataInfo| {
             strip(&d.sender_pubkey) == hex::encode(m.sender_pubkey)
                 && strip(&d.recipient_hash) == hex::encode(m.recipient_hash)
                 && strip(&d.message_data) == hex::encode(&m.message_data)
         };
-        // The wrappers this client obtained, by hash.
         for h in &self.wrappers {
             if let Ok(Some(d)) = server.messaging_get_message_data(h.clone()).await {
-                if matches(&d) {
+                if delivers(&d) {
                     return Some(h.clone());
                 }
             }
         }
-        // Any wrapper: the sender's message records. A record that is not a
-        // relayed message (the sender's own direct send) has no envelope and
-        // is refused by `messaging_getMessageData`; it is not this intent.
-        let sent = server
-            .messaging_get_sent_messages(self.intent.sender().to_base58(), Some(1_000), None)
-            .await
-            .unwrap();
-        for e in sent {
-            if let Ok(Some(d)) = server.messaging_get_message_data(e.tx_hash.clone()).await {
-                if matches(&d) {
-                    return Some(e.tx_hash);
+        let tip = match server.get_latest_block().await {
+            Ok(b) => b.height,
+            Err(_) => return None,
+        };
+        for height in self.intent.signed_at.saturating_add(1)..=tip {
+            let Some(block) = server.get_block_by_height(height).await.unwrap() else {
+                continue;
+            };
+            for h in block.transactions {
+                if let Ok(Some(d)) = server.messaging_get_message_data(h.clone()).await {
+                    if delivers(&d) {
+                        return Some(h);
+                    }
                 }
             }
         }

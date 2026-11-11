@@ -1258,10 +1258,15 @@ pub trait SumChainApi {
     /// The relay wraps the signed envelope in a transaction from its sponsor
     /// key (a wrapper) and returns the wrapper's hash. A wrapper the chain
     /// refuses with `InvalidNonce` never executed: it charged no fee and moved
-    /// no messaging nonce. On such a receipt a client reads the canonical
-    /// receipts of its wrappers, the sender's message records
-    /// (`messaging_getSentMessages`, `messaging_getMessageData`) for the
-    /// intended message, and `messaging_getSenderNonce`:
+    /// no messaging nonce. On such a receipt a client looks for the intended
+    /// message among the transactions of every block since the user signed the
+    /// envelope (`get_block_by_height`, then `messaging_getMessageData` for each
+    /// transaction, which answers from the stored transaction and its receipt,
+    /// and only for a relayed message that executed), matching sender key,
+    /// recipient and content, whichever wrapper carried it; and it reads
+    /// `messaging_getSenderNonce`. `messaging_getSentMessages` is not a
+    /// substitute: it returns the oldest 1,000 records, and below the
+    /// transaction-index gate it keeps one row per sender per block.
     /// - the message is on the chain: it is delivered, and never sent again;
     /// - not delivered, and the envelope's nonce is the committed nonce: the
     ///   client asks for a fresh wrapper of the same signed envelope;
@@ -1271,9 +1276,10 @@ pub trait SumChainApi {
     ///   version-2 envelope; the relay cannot convert it.
     ///
     /// A moved nonce is never read as a delivery. The client bounds its
-    /// retries (the reference client in the RPC tests asks for at most three
-    /// wrappers per message); the sponsor pays for each wrapper that executes,
-    /// and nothing for one refused with `InvalidNonce`.
+    /// retries, and persists the count with the message (the reference client
+    /// in the RPC tests asks for at most three wrappers per message); the
+    /// sponsor pays for each wrapper that executes, and nothing for one
+    /// refused with `InvalidNonce`.
     #[method(name = "messaging_submitSponsored")]
     async fn messaging_submit_sponsored(
         &self,

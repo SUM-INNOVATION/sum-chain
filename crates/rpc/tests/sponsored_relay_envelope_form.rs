@@ -1877,19 +1877,29 @@ async fn simultaneous_relays_and_registrations_never_share_a_sponsor_nonce() {
 
 // ── The client retry protocol (`relay_retry_client`) ─────────────────────────
 
-/// `kp`'s version-2 envelope to bob at `nonce`, as an intent.
-fn v2_intent(kp: &KeyPair, nonce: u64, salt: u8) -> Intent {
+/// The chain tip's height (0 before the first block).
+fn tip(s: &Served) -> u64 {
+    sumchain_storage::BlockStore::new(&s.db)
+        .get_latest_height()
+        .unwrap()
+        .unwrap_or(0)
+}
+
+/// `kp`'s version-2 envelope to bob at `nonce`, as an intent signed now.
+fn v2_intent(s: &Served, kp: &KeyPair, nonce: u64, salt: u8) -> Intent {
     Intent {
         envelope: v2_by(envelope_from(kp, nonce, salt, None), kp, CHAIN_ID),
         form: Form::Version2,
+        signed_at: tip(s),
     }
 }
 
-/// `kp`'s string-form envelope to bob, as an intent.
-fn legacy_intent(kp: &KeyPair, nonce: u64, salt: u8) -> Intent {
+/// `kp`'s string-form envelope to bob, as an intent signed now.
+fn legacy_intent(s: &Served, kp: &KeyPair, nonce: u64, salt: u8) -> Intent {
     Intent {
         envelope: v1_by(envelope_from(kp, nonce, salt, None), kp),
         form: Form::Legacy,
+        signed_at: tip(s),
     }
 }
 
@@ -1916,38 +1926,47 @@ fn registered(s: &Served, first: u8, count: u8) -> Vec<KeyPair> {
         .collect()
 }
 
-/// How many message records of the canonical chain carry `intent`'s content
-/// (read from the store, not through the client).
+/// How many transactions of the canonical chain delivered `intent`'s
+/// content: every block read from the block store, each relayed
+/// `SendMessage` decoded and its receipt read (not through the client, and
+/// not through the message index, which below the transaction-index gate
+/// keeps one row per sender per block).
 fn deliveries(s: &Served, intent: &Intent) -> usize {
+    use sumchain_primitives::MessagingOperation;
     let m = &intent.envelope;
-    let store = MessagingStore::new(&s.db);
-    store
-        .get_messages_by_sender(&intent.sender(), 1_000, 0)
-        .unwrap()
-        .iter()
-        .filter(|e| {
-            let tx = sumchain_storage::TxStore::new(&s.db)
-                .get(&e.message_id)
-                .unwrap()
-                .expect("the carrying transaction");
-            let ok = sumchain_storage::ReceiptStore::new(&s.db)
-                .get(&e.message_id)
-                .unwrap()
-                .is_some_and(|r| r.status == TxStatus::Success);
+    let blocks = sumchain_storage::BlockStore::new(&s.db);
+    let receipts = sumchain_storage::ReceiptStore::new(&s.db);
+    let mut n = 0;
+    for height in 1..=tip(s) {
+        let Some(block) = blocks.get_by_height(height).unwrap() else {
+            continue;
+        };
+        for tx in &block.transactions {
             let carried: Option<SponsoredMessage> = match &tx.inner {
                 TxInner::V2(v2) => match &v2.payload {
-                    TxPayload::Messaging(d) => bincode::deserialize(&d.data).ok(),
+                    TxPayload::Messaging(d) if d.operation == MessagingOperation::SendMessage => {
+                        bincode::deserialize(&d.data).ok()
+                    }
                     _ => None,
                 },
                 _ => None,
             };
-            ok && carried.is_some_and(|c| {
-                c.sender_pubkey == m.sender_pubkey
-                    && c.recipient_hash == m.recipient_hash
-                    && c.message_data == m.message_data
-            })
-        })
-        .count()
+            let executed = receipts
+                .get(&tx.hash())
+                .unwrap()
+                .is_some_and(|r| r.status == TxStatus::Success);
+            if executed
+                && carried.is_some_and(|c| {
+                    c.sender_pubkey == m.sender_pubkey
+                        && c.recipient_hash == m.recipient_hash
+                        && c.message_data == m.message_data
+                })
+            {
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 /// The receipts of every wrapper the trackers obtained: (executed and
@@ -1993,7 +2012,8 @@ async fn drive(s: &Served, trackers: &mut [Tracker], mut height: u64, rounds: us
     height
 }
 
-/// Both gates at H = 4, transaction indexes on. Eight intents relayed for
+/// Both gates at H = 4; run with the transaction-index gate unset, as in
+/// production (one message row per sender per block), and set. Eight intents relayed for
 /// H-2 are left uncarried until H (a backlog across the accounting gate):
 /// six version-2 envelopes, carol's version-2 envelope (her own direct
 /// message, carried at H-1, then spends her messaging nonce 0), and dave's
@@ -2008,11 +2028,17 @@ async fn drive(s: &Served, trackers: &mut [Tracker], mut height: u64, rounds: us
 /// intent, and nothing for a wrapper refused with `InvalidNonce`.
 #[tokio::test]
 async fn a_burst_pending_across_the_accounting_gate_ends_delivered_or_reported() {
+    for tx_index_gate in [None, Some(0)] {
+        burst_across_the_accounting_gate(tx_index_gate).await;
+    }
+}
+
+async fn burst_across_the_accounting_gate(tx_index_gate: Option<u64>) {
     use sumchain_primitives::messaging::SendMessageData;
     use sumchain_primitives::{MessagingOperation, MessagingTxData};
     const H: u64 = 4;
     let mut g = genesis_on(CHAIN_ID, Some(H), Some(H));
-    g.params.subsystem_tx_index_enabled_from_height = Some(0);
+    g.params.subsystem_tx_index_enabled_from_height = tx_index_gate;
     let s = serve(&g);
     let others = registered(&s, 0x90, 3);
     s.publish(1, Vec::new());
@@ -2022,10 +2048,10 @@ async fn a_burst_pending_across_the_accounting_gate_ends_delivered_or_reported()
         .iter()
         .chain(others.iter())
         .enumerate()
-        .map(|(i, kp)| Tracker::new(v2_intent(kp, 0, i as u8)))
+        .map(|(i, kp)| Tracker::new(v2_intent(&s, kp, 0, i as u8)))
         .collect();
-    trackers.push(Tracker::new(v2_intent(&carol(), 0, 20)));
-    trackers.push(Tracker::new(legacy_intent(&dave(), 0, 21)));
+    trackers.push(Tracker::new(v2_intent(&s, &carol(), 0, 20)));
+    trackers.push(Tracker::new(legacy_intent(&s, &dave(), 0, 21)));
     for t in trackers.iter_mut() {
         assert!(matches!(t.submit(&s.server).await, Step::Resubmitted(_)));
     }
@@ -2099,8 +2125,8 @@ async fn a_burst_pending_across_the_accounting_gate_ends_delivered_or_reported()
 
     // The users sign anew: carol at her committed nonce, dave in version 2.
     let mut resigned = vec![
-        Tracker::new(v2_intent(&carol(), 1, 22)),
-        Tracker::new(v2_intent(&dave(), 0, 23)),
+        Tracker::new(v2_intent(&s, &carol(), 1, 22)),
+        Tracker::new(v2_intent(&s, &dave(), 0, 23)),
     ];
     for t in resigned.iter_mut() {
         assert!(matches!(t.submit(&s.server).await, Step::Resubmitted(_)));
@@ -2120,8 +2146,8 @@ async fn a_burst_pending_across_the_accounting_gate_ends_delivered_or_reported()
     );
 }
 
-/// The accounting gate at H = 3 (the envelope gate open from 1, transaction
-/// indexes on). Twelve intents relayed for H-2 are carried only at H, where
+/// The accounting gate at H = 3 (the envelope gate open from 1, the
+/// transaction-index gate unset, as in production). Twelve intents relayed for H-2 are carried only at H, where
 /// one executes and eleven take `InvalidNonce`. All twelve clients then step
 /// at once on eight threads, and two of them run a second instance of their
 /// client at the same time (the same envelope, the same wrappers): the
@@ -2133,14 +2159,12 @@ async fn a_burst_pending_across_the_accounting_gate_ends_delivered_or_reported()
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_retries_deliver_each_message_once() {
     const H: u64 = 3;
-    let mut g = genesis_on(CHAIN_ID, Some(1), Some(H));
-    g.params.subsystem_tx_index_enabled_from_height = Some(0);
-    let s = serve(&g);
+    let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(H)));
     let senders = registered(&s, 0xA0, 12);
     let mut trackers: Vec<Tracker> = senders
         .iter()
         .enumerate()
-        .map(|(i, kp)| Tracker::new(v2_intent(kp, 0, i as u8)))
+        .map(|(i, kp)| Tracker::new(v2_intent(&s, kp, 0, i as u8)))
         .collect();
     for t in trackers.iter_mut() {
         assert!(matches!(t.submit(&s.server).await, Step::Resubmitted(_)));
@@ -2199,11 +2223,13 @@ async fn concurrent_retries_deliver_each_message_once() {
 /// key would), so each wrapper takes `InvalidNonce`. The client asks for a
 /// fresh wrapper each time, and after `MAX_WRAPPERS` it stops and reports the
 /// message undeliverable: it is not resent without bound, it is not reported
-/// delivered, and its wrappers cost the sponsor nothing.
+/// delivered, and its wrappers cost the sponsor nothing. The client is
+/// restarted between steps (its tracker persisted as JSON and read back), and
+/// the bound still holds: it counts the wrappers it persisted.
 #[tokio::test]
 async fn the_retries_of_one_message_are_bounded() {
     let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
-    let mut t = Tracker::new(v2_intent(&alice(), 0, 1));
+    let mut t = Tracker::new(v2_intent(&s, &alice(), 0, 1));
     assert!(matches!(t.submit(&s.server).await, Step::Resubmitted(_)));
     let mut height = 1;
     let mut step = Step::Wait;
@@ -2239,6 +2265,8 @@ async fn the_retries_of_one_message_are_bounded() {
         s.mempool.add(first).unwrap();
         s.publish_pool(height);
         height += 1;
+        // A restart: the client reads back what it persisted.
+        t = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
         step = t.step(&s.server).await;
     }
     assert_eq!(
@@ -2253,4 +2281,111 @@ async fn the_retries_of_one_message_are_bounded() {
     assert_eq!(invalid_nonce, MAX_WRAPPERS);
     assert_eq!(deliveries(&s, &t.intent), 0);
     assert_eq!(s.messaging_nonce(&alice()), 0);
+}
+
+/// A delivery the sender's message listing does not show is still found,
+/// because the client searches the blocks since the envelope was signed.
+/// carol signs an envelope and asks this relay for a wrapper; another
+/// sponsor's copy of the same envelope delivers it first, in a block this
+/// node did not build. The listing misses it in two ways:
+/// - with the transaction-index gate unset (production), carol's own direct
+///   message in the same block replaces the copy's row (one row per sender
+///   per block);
+/// - with 1,000 older rows for carol, the listing's one page (the oldest
+///   1,000) ends before it.
+/// In both, carol's messaging nonce has moved past the envelope's, and this
+/// relay's wrapper is refused in the block. The client reports the message
+/// delivered, by the copy, and never asks the user to sign it again: a
+/// re-signed envelope would deliver it twice.
+#[tokio::test]
+async fn a_delivery_missing_from_the_message_listing_is_still_found() {
+    use sumchain_primitives::messaging::SendMessageData;
+    use sumchain_primitives::{MessagingOperation, MessagingTxData};
+    for older_rows in [false, true] {
+        let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
+        if older_rows {
+            let store = MessagingStore::new(&s.db);
+            for h in 1..=1_000u64 {
+                store
+                    .store_message_event(
+                        &sumchain_primitives::MessageEvent {
+                            sender: carol().address(),
+                            recipient_hash: recipient_hash(&bob().address()),
+                            message_id: Hash::hash(&h.to_be_bytes()),
+                            size: 1,
+                            has_payment: false,
+                            block_height: h,
+                            timestamp: 0,
+                        },
+                        0,
+                    )
+                    .unwrap();
+            }
+        }
+        let height = if older_rows { 2_000 } else { 1 };
+        let intent = v2_intent(&s, &carol(), 0, 7);
+        let mut t = Tracker::new(intent.clone());
+        let Step::Resubmitted(own) = t.submit(&s.server).await else {
+            panic!("relayed");
+        };
+
+        // A block this node did not build: the copy, and (without older
+        // rows) carol's own direct message after it.
+        let copy = s.relayed_by(&erin(), 0, &intent.envelope);
+        let mut block = vec![copy.clone()];
+        if !older_rows {
+            let rh = recipient_hash(&bob().address());
+            block.push(
+                s.outer(
+                    &carol(),
+                    0,
+                    RELAY_FEE,
+                    MessagingTxData {
+                        operation: MessagingOperation::SendMessageDirect,
+                        data: bincode::serialize(&SendMessageData {
+                            message_data: valid_message(rh),
+                            recipient_hash: rh,
+                        })
+                        .unwrap(),
+                    },
+                ),
+            );
+        }
+        let receipts = s.publish(height, block);
+        assert!(receipts.iter().all(|r| r.status == TxStatus::Success));
+        let listed = s
+            .server
+            .messaging_get_sent_messages(carol().address().to_base58(), Some(1_000), None)
+            .await
+            .unwrap();
+        assert!(
+            !listed
+                .iter()
+                .any(|e| strip_0x(&e.tx_hash) == strip_0x(&copy.hash().to_hex())),
+            "the listing does not show the copy (older rows: {older_rows})"
+        );
+
+        // The client finds it; this relay's wrapper, carried next, is refused.
+        let delivered = Step::Done(Outcome::Delivered {
+            tx_hash: copy.hash().to_hex(),
+        });
+        assert_eq!(
+            t.step(&s.server).await,
+            delivered,
+            "older rows: {older_rows}"
+        );
+        let (carried, receipts) = s.publish_pool(height + 1);
+        assert_eq!(strip_0x(&carried[0].hash().to_hex()), strip_0x(&own));
+        assert_ne!(receipts[0].status, TxStatus::Success);
+        assert_eq!(
+            t.step(&s.server).await,
+            delivered,
+            "older rows: {older_rows}"
+        );
+        assert_eq!(deliveries(&s, &intent), 1);
+    }
+}
+
+fn strip_0x(h: &str) -> String {
+    h.strip_prefix("0x").unwrap_or(h).to_string()
 }

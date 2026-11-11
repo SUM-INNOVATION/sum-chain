@@ -474,36 +474,41 @@ async fn a_chain_switch_returns_relayed_transactions_and_the_relay_continues() {
     );
 }
 
-/// How many message records of the node's canonical chain carry `m`'s
-/// content in a transaction that succeeded.
+/// How many transactions of the node's canonical chain delivered `m`'s
+/// content: every block read by height from the block store, each relayed
+/// `SendMessage` decoded and its receipt read (not through the message
+/// index, which below the transaction-index gate keeps one row per sender
+/// per block).
 fn deliveries(node: &Node, m: &SponsoredMessage) -> usize {
-    MessagingStore::new(&node.db)
-        .get_messages_by_sender(
-            &sumchain_primitives::Address::from_public_key(&m.sender_pubkey),
-            1_000,
-            0,
-        )
-        .unwrap()
-        .iter()
-        .filter(|e| {
-            let carried: Option<SponsoredMessage> = sumchain_storage::TxStore::new(&node.db)
-                .get(&e.message_id)
-                .unwrap()
-                .and_then(|tx| match &tx.inner {
-                    sumchain_primitives::TxInner::V2(v2) => match &v2.payload {
-                        TxPayload::Messaging(d) => bincode::deserialize(&d.data).ok(),
-                        _ => None,
-                    },
+    let blocks = sumchain_storage::BlockStore::new(&node.db);
+    let tip = blocks.get_latest_height().unwrap().unwrap_or(0);
+    let mut n = 0;
+    for height in 1..=tip {
+        let Some(block) = blocks.get_by_height(height).unwrap() else {
+            continue;
+        };
+        for tx in &block.transactions {
+            let carried: Option<SponsoredMessage> = match &tx.inner {
+                sumchain_primitives::TxInner::V2(v2) => match &v2.payload {
+                    TxPayload::Messaging(d) if d.operation == MessagingOperation::SendMessage => {
+                        bincode::deserialize(&d.data).ok()
+                    }
                     _ => None,
-                });
-            node.receipt(&e.message_id).map(|r| r.0) == Some(TxStatus::Success)
+                },
+                _ => None,
+            };
+            if node.receipt(&tx.hash()).map(|r| r.0) == Some(TxStatus::Success)
                 && carried.is_some_and(|c| {
                     c.sender_pubkey == m.sender_pubkey
                         && c.recipient_hash == m.recipient_hash
                         && c.message_data == m.message_data
                 })
-        })
-        .count()
+            {
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 /// The client retry protocol across a chain switch. Branch A carries, at
@@ -567,6 +572,7 @@ async fn the_client_retry_protocol_across_a_chain_switch() {
     let mut carol_client = Tracker::new(Intent {
         envelope: envelope(&carol(), 0, 1),
         form: Form::Version2,
+        signed_at: node.engine.current_height(),
     });
     let Step::Resubmitted(original) = carol_client.submit(&node.server).await else {
         panic!("relayed");
@@ -586,6 +592,7 @@ async fn the_client_retry_protocol_across_a_chain_switch() {
     let mut alice_client = Tracker::new(Intent {
         envelope: alice_envelope.clone(),
         form: Form::Version2,
+        signed_at: node.engine.current_height(),
     });
     alice_client.wrappers.push(alice_wrapper.hash().to_hex());
 
