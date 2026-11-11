@@ -1270,6 +1270,12 @@ pub trait SumChainApi {
     /// yet active. The registrant must sign the canonical
     /// `RegisterPublicKeySponsoredV1` preimage (see
     /// `SponsoredRegistrationRequest`).
+    ///
+    /// Also refuses, before it takes a sponsor nonce, a public key whose
+    /// sponsored registration is already pending in this node's pool and an
+    /// address already registered: the block would refuse either, and this
+    /// relay signs registrations and `messaging_submitSponsored` messages in
+    /// one sponsor nonce sequence.
     #[method(name = "messaging_registerSponsored")]
     async fn messaging_register_sponsored(
         &self,
