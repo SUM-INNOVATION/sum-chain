@@ -1433,11 +1433,20 @@ impl RpcServer {
     /// each relay takes the next nonce, and the producer carries one sender's
     /// transactions in nonce order (`Mempool::select_for_block`). The caller
     /// holds `relay_lock` from here until its transaction is in the pool.
+    ///
+    /// The pool is read before the committed nonce. The node commits a block
+    /// before it removes the block's transactions from the pool, so a block
+    /// committed between the two reads is seen in one of them: either its
+    /// transactions are still held, or the committed nonce is past them. Read
+    /// the other way round, the committed nonce could predate the block and
+    /// the pool no longer hold its transactions, and the relay would sign at a
+    /// nonce the block already used.
     fn relay_sponsor_nonce(
         &self,
         sponsor: &Address,
         inclusion_height: u64,
     ) -> std::result::Result<u64, RpcError> {
+        let pending = self.mempool.get_by_sender(sponsor);
         let committed = self
             .state
             .get_nonce(sponsor)
@@ -1446,9 +1455,7 @@ impl RpcServer {
             &self.chain_params,
             inclusion_height,
         );
-        let held: BTreeSet<u64> = self
-            .mempool
-            .get_by_sender(sponsor)
+        let held: BTreeSet<u64> = pending
             .iter()
             .filter(|tx| {
                 accounting || sumchain_state::mempool::advances_nonce_below_accounting_gate(tx)
@@ -4789,15 +4796,15 @@ impl SumChainApiServer for RpcServer {
             // committed one, extended by each version-2 envelope from this
             // sender this node's pool holds, relayed by this sponsor or any
             // other. One envelope per (sender, nonce): a second could only be
-            // refused in the block, at its sponsor's expense.
+            // refused in the block, at its sponsor's expense. The pool is read
+            // before the committed nonce: the node commits a block before it
+            // removes the block's transactions from the pool, so a block
+            // committed between the two reads is seen in one of them.
+            let pending = self.pending_v2_envelope_nonces(&sender_pubkey, chain_id);
             let committed = store.get_sender_nonce(&sender_address).map_err(|e| {
                 RpcError::Internal(format!("Failed to read the sender's messaging nonce: {e}"))
             })?;
-            let held: BTreeSet<u64> = self
-                .pending_v2_envelope_nonces(&sender_pubkey, chain_id)
-                .into_iter()
-                .filter(|n| *n >= committed)
-                .collect();
+            let held: BTreeSet<u64> = pending.into_iter().filter(|n| *n >= committed).collect();
             let next = first_free_from(committed, &held);
             if sponsored_msg.nonce < committed {
                 return Err(RpcError::InvalidParams(format!(
