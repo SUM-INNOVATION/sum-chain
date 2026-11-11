@@ -1450,7 +1450,9 @@ impl RpcServer {
             .mempool
             .get_by_sender(sponsor)
             .iter()
-            .filter(|tx| accounting || advances_nonce_below_accounting_gate(tx))
+            .filter(|tx| {
+                accounting || sumchain_state::mempool::advances_nonce_below_accounting_gate(tx)
+            })
             .map(|tx| tx.nonce())
             .filter(|n| *n >= committed)
             .collect();
@@ -1507,30 +1509,6 @@ impl RpcServer {
             ),
             _ => false,
         })
-    }
-}
-
-/// Whether executing `tx` advances its sender's account nonce below
-/// `messaging_fee_nonce_accounting_enabled_from_height`.
-///
-/// Below that gate a messaging operation advances it only when it charges for
-/// itself: a direct send, a paid send, and a sponsored registration. Every
-/// other transaction family advances it. (A transaction that is refused may
-/// leave it where it was; the relay cannot know that in advance and counts it
-/// as advancing.)
-fn advances_nonce_below_accounting_gate(tx: &SignedTransaction) -> bool {
-    use sumchain_primitives::TxInner;
-    match &tx.inner {
-        TxInner::V2(v2) => match &v2.payload {
-            TxPayload::Messaging(d) => matches!(
-                d.operation,
-                MessagingOperation::SendMessageDirect
-                    | MessagingOperation::SendMessageWithPayment
-                    | MessagingOperation::RegisterPublicKeySponsoredV1
-            ),
-            _ => true,
-        },
-        _ => true,
     }
 }
 

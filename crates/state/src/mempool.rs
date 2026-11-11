@@ -407,11 +407,40 @@ pub struct Mempool {
     relayed_envelopes: RwLock<HashMap<Address, usize>>,
 }
 
+/// Whether executing `tx` advances its sender's account nonce below
+/// `messaging_fee_nonce_accounting_enabled_from_height`.
+///
+/// Below that gate a messaging operation advances it only when it charges for
+/// itself: a direct send, a paid send, and a sponsored registration. Every
+/// other transaction family advances it. (A transaction that is refused may
+/// leave it where it was; that cannot be known in advance, and it is counted
+/// as advancing.)
+pub fn advances_nonce_below_accounting_gate(tx: &SignedTransaction) -> bool {
+    match &tx.inner {
+        TxInner::V2(v2) => match &v2.payload {
+            TxPayload::Messaging(d) => matches!(
+                d.operation,
+                MessagingOperation::SendMessageDirect
+                    | MessagingOperation::SendMessageWithPayment
+                    | MessagingOperation::RegisterPublicKeySponsoredV1
+            ),
+            _ => true,
+        },
+        _ => true,
+    }
+}
+
 /// `picked`, with each sender's transactions in ascending nonce order.
 ///
 /// Every transaction keeps its sender's set of positions: only which of that
-/// sender's transactions sits in which of its positions changes. The sort is
-/// stable, so transactions at one nonce keep their relative order.
+/// sender's transactions sits in which of its positions changes. At one
+/// nonce, the transactions that leave the account nonce where it is below the
+/// accounting gate ([`advances_nonce_below_accounting_gate`]) come first:
+/// below that gate a relayed `SendMessage` shares its sponsor's nonce with
+/// whatever else the sponsor sends at it, and executes only while that nonce
+/// is still the account's. From the gate two transactions at one nonce cannot
+/// both execute, whichever comes first. Otherwise the sort is stable, so
+/// transactions at one nonce keep their relative order.
 fn in_nonce_order_per_sender(mut picked: Vec<SignedTransaction>) -> Vec<SignedTransaction> {
     let mut positions: HashMap<Address, Vec<usize>> = HashMap::new();
     for (i, tx) in picked.iter().enumerate() {
@@ -419,7 +448,7 @@ fn in_nonce_order_per_sender(mut picked: Vec<SignedTransaction>) -> Vec<SignedTr
     }
     for slots in positions.values().filter(|slots| slots.len() > 1) {
         let mut own: Vec<SignedTransaction> = slots.iter().map(|&i| picked[i].clone()).collect();
-        own.sort_by_key(|tx| tx.nonce());
+        own.sort_by_key(|tx| (tx.nonce(), advances_nonce_below_accounting_gate(tx)));
         for (&i, tx) in slots.iter().zip(own) {
             picked[i] = tx;
         }
@@ -1504,7 +1533,9 @@ impl Mempool {
     /// ascending nonce order, in the positions the fee order gave that sender:
     /// fee then hash alone would put a sender's `N+1` before its `N` whenever
     /// their fees tie or invert, and the `N+1` would then take an
-    /// `InvalidNonce` receipt in a block that could have carried both.
+    /// `InvalidNonce` receipt in a block that could have carried both. At one
+    /// nonce, a transaction that leaves the nonce where it is below the
+    /// accounting gate comes first (see `in_nonce_order_per_sender`).
     pub fn select_for_block(&self, max_count: usize) -> Vec<SignedTransaction> {
         let (carried, evict) = {
             let by_fee = self.by_fee.read();
@@ -2042,6 +2073,45 @@ mod tests {
         assert_eq!(
             top.iter().map(|t| t.hash()).collect::<Vec<_>>(),
             vec![n2.hash(), o0.hash()]
+        );
+    }
+
+    /// At one nonce, a relayed `SendMessage` (which leaves its sponsor's nonce
+    /// where it is below the accounting gate) is carried before a sponsored
+    /// registration (which advances it), although the registration pays the
+    /// higher fee; the next nonce follows both.
+    #[test]
+    fn at_one_nonce_a_transaction_that_leaves_the_nonce_comes_first() {
+        use sumchain_primitives::{MessagingTxData, TransactionV2};
+        let mempool = Mempool::new(MempoolConfig::default());
+        let sponsor = KeyPair::generate();
+        let messaging = |operation: MessagingOperation, fee: Balance, nonce: u64| {
+            let tx = TransactionV2::messaging(
+                1,
+                sponsor.address(),
+                fee,
+                nonce,
+                MessagingTxData {
+                    operation,
+                    data: vec![nonce as u8, fee as u8],
+                },
+            );
+            let sig = sign(tx.signing_hash().as_bytes(), sponsor.private_key());
+            SignedTransaction::new_v2(tx, *sig.as_bytes(), *sponsor.public_key().as_bytes())
+        };
+        let registration = messaging(MessagingOperation::RegisterPublicKeySponsoredV1, 30, 0);
+        let relayed = messaging(MessagingOperation::SendMessage, 10, 0);
+        let next = messaging(MessagingOperation::SendMessage, 20, 1);
+        for tx in [&registration, &relayed, &next] {
+            mempool.add(tx.clone()).unwrap();
+        }
+        assert!(advances_nonce_below_accounting_gate(&registration));
+        assert!(!advances_nonce_below_accounting_gate(&relayed));
+
+        let picked = mempool.select_for_block(10);
+        assert_eq!(
+            picked.iter().map(|t| t.hash()).collect::<Vec<_>>(),
+            vec![relayed.hash(), registration.hash(), next.hash()]
         );
     }
 
