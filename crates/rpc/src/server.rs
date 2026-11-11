@@ -1482,6 +1482,24 @@ impl RpcServer {
             .any(|(sponsor, reg)| verify_sponsored_registration_v1(reg, chain_id, sponsor).is_ok())
     }
 
+    /// The nonces of the version-2 `SendMessage` envelopes from the sender
+    /// whose key is `sender_key` that this node's pool holds, relayed by any
+    /// sponsor, for `chain_id`.
+    ///
+    /// The pool is read in place. Each pooled `SendMessage` is decoded and its
+    /// sender key compared first; only an envelope from this sender has its
+    /// signature verified, after the pool's lock is released. The signature
+    /// checks one request costs are therefore bounded by the envelopes from
+    /// its own sender that the pool holds, not by the size of the pool.
+    fn pending_v2_envelope_nonces(&self, sender_key: &[u8; 32], chain_id: u64) -> Vec<u64> {
+        self.mempool
+            .filter_map_held(|tx| relayed_envelope_from(tx, sender_key))
+            .into_iter()
+            .filter(|m| sumchain_primitives::verify_sponsored_send_v2(m, chain_id).is_ok())
+            .map(|m| m.nonce)
+            .collect()
+    }
+
     /// The height the next block will have: the chain tip plus one. A store
     /// read error is surfaced, never read as a tip of 0.
     fn relay_inclusion_height(&self) -> std::result::Result<u64, RpcError> {
@@ -1555,26 +1573,18 @@ fn first_free_from(from: u64, held: &BTreeSet<u64>) -> u64 {
     n
 }
 
-/// The sender a relayed version-2 `SendMessage` envelope names, and the
-/// envelope's nonce, for an envelope whose signature verifies in the version-2
-/// form for `chain_id`. `None` for any other transaction, an envelope that
-/// does not decode, and a string-form envelope: below the envelope gate the
-/// string form's nonce is never read, so it claims no place in the sender's
+/// The envelope a relayed `SendMessage` carries, when it decodes and names
+/// `sender_key` as its sender. Its signature is not checked here: the caller
+/// verifies the version-2 form, so that a string-form envelope, whose nonce
+/// below the envelope gate is never read, claims no place in the sender's
 /// sequence.
-fn relayed_v2_envelope_identity(tx: &SignedTransaction, chain_id: u64) -> Option<(Address, u64)> {
-    use sumchain_primitives::TxInner;
-    let TxInner::V2(v2) = &tx.inner else {
-        return None;
-    };
-    let TxPayload::Messaging(d) = &v2.payload else {
-        return None;
-    };
+fn relayed_envelope_from(tx: &SignedTransaction, sender_key: &[u8; 32]) -> Option<SponsoredMessage> {
+    let d = messaging_data(tx)?;
     if d.operation != MessagingOperation::SendMessage {
         return None;
     }
     let m: SponsoredMessage = bincode::deserialize(&d.data).ok()?;
-    sumchain_primitives::verify_sponsored_send_v2(&m, chain_id).ok()?;
-    Some((Address::from_public_key(&m.sender_pubkey), m.nonce))
+    (m.sender_pubkey == *sender_key).then_some(m)
 }
 
 #[async_trait::async_trait]
@@ -4784,12 +4794,9 @@ impl SumChainApiServer for RpcServer {
                 RpcError::Internal(format!("Failed to read the sender's messaging nonce: {e}"))
             })?;
             let held: BTreeSet<u64> = self
-                .mempool
-                .get_all()
-                .iter()
-                .filter_map(|tx| relayed_v2_envelope_identity(tx, chain_id))
-                .filter(|(sender, n)| *sender == sender_address && *n >= committed)
-                .map(|(_, n)| n)
+                .pending_v2_envelope_nonces(&sender_pubkey, chain_id)
+                .into_iter()
+                .filter(|n| *n >= committed)
                 .collect();
             let next = first_free_from(committed, &held);
             if sponsored_msg.nonce < committed {
