@@ -26,7 +26,9 @@ use sumchain_rpc::{
 };
 use sumchain_state::education_executor::EducationExecutor;
 use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
-use sumchain_state::mempool::{EducationAdmission, InclusionPolicy, InferenceAttestationAdmission};
+use sumchain_state::mempool::{
+    EducationAdmission, InclusionPolicy, InferenceAttestationAdmission, MessagingQuotaAdmission,
+};
 use sumchain_state::{Mempool, MempoolConfig, StateManager};
 use sumchain_storage::{BlockStore, Database};
 use tokio::sync::mpsc;
@@ -623,7 +625,14 @@ impl Node {
             // authenticated, in-sequence sponsored envelopes. Always wired on
             // a production node; it decides what this node holds and
             // proposes, never what a block means.
-            .with_inclusion_policy(InclusionPolicy { db: db.clone() }),
+            .with_inclusion_policy(InclusionPolicy { db: db.clone() })
+            // ... and only envelopes whose named sender has quota left for
+            // them, read through the same clock gates the executor reads, at
+            // the SAME live `chain_height` the other admission gates use.
+            .with_messaging_quota_admission(MessagingQuotaAdmission {
+                params: Arc::new(genesis.params.clone()),
+                current_height: chain_height.clone(),
+            }),
         );
 
         // Create the consensus engine. `ProductionEngine` names only the

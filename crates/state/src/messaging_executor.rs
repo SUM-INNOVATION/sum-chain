@@ -280,6 +280,22 @@ impl MessagingExecutor {
         (timestamp / MESSAGING_DAY_SECONDS) as u32
     }
 
+    /// The quota bucket a send in a block at `block_height`, with header
+    /// timestamp `block_timestamp`, counts against: the day `check_rate_limit`
+    /// reads, through the same timestamp gate, the same units gate and the same
+    /// division. Zero for every block while the timestamp gate is closed.
+    ///
+    /// For readers OUTSIDE execution — the pool judges a sponsored envelope
+    /// against its sender's quota at admission. Execution does not call it, and
+    /// it reads and writes no state.
+    pub fn quota_day(params: &ChainParams, block_height: u64, block_timestamp: u64) -> u32 {
+        let block_timestamp = crate::effective_block_timestamp(
+            block_timestamp,
+            crate::subsystem_block_timestamp_gate_open(params, block_height),
+        );
+        Self::current_day(Self::rule_clock(params, block_height, block_timestamp))
+    }
+
     /// Check rate limit for sender
     fn check_rate_limit(
         view: &ExecutionView<'_, '_>,

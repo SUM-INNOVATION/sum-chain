@@ -36,7 +36,9 @@
 //! 2. a sponsored `SendMessage` envelope must carry a signature that verifies
 //!    over the relay's preimage, by the key it names as the sender;
 //! 3. that envelope must carry the sender's expected messaging nonce, and a
-//!    candidate block carries each (sender, nonce) at most once, in order.
+//!    candidate block carries each (sender, nonce) at most once, in order;
+//! 4. with [`MessagingQuotaAdmission`] wired, that envelope's sender must have
+//!    quota left for it, as the canonical chain counts its sends.
 //!
 //! Admission and selection are this node's own choices. Nothing here is a
 //! consensus rule: a block built by a proposer that applies none of it is
@@ -61,6 +63,7 @@ use crate::education_executor::{
     education_in_flight_key, parse_education, EducationExecutor, EduParsed,
 };
 use crate::inference_attestation_executor::InferenceAttestationExecutor;
+use crate::messaging_executor::{MessagingExecutor, STAKED_SENDER_QUOTA_MULTIPLIER};
 use crate::policy_account_executor::policy_account_operation_is_submittable;
 use crate::{Result, StateError, StateManager};
 
@@ -157,7 +160,8 @@ pub struct EducationAdmission {
 /// in the blocks it builds, judged against the canonical chain it builds on.
 /// See [`Mempool::with_inclusion_policy`].
 ///
-/// Three rules, every one of them about this node's own choices:
+/// Three rules, and a fourth with [`MessagingQuotaAdmission`], every one of
+/// them about this node's own choices:
 ///
 /// 1. **Canonical inclusion is final.** A transaction whose hash already has
 ///    a receipt on the canonical chain is not admitted and not carried again.
@@ -189,6 +193,15 @@ pub struct EducationAdmission {
 ///    it was; the sender's later pending envelopes are then evicted too,
 ///    since nothing in the pool can bring them into sequence.
 ///
+/// 4. **A sponsored envelope's sender has quota left for it** (only with
+///    [`Mempool::with_messaging_quota_admission`]). At admission, an envelope
+///    is refused when the sender it names has already used its effective
+///    quota in the bucket the next block counts sends in, counting this
+///    pool's envelopes already pending for that sender. Such an envelope
+///    cannot be executed while the count stands — the executor refuses it
+///    with an error, not a receipt — so the client is told now rather than
+///    left waiting on an envelope no block can carry.
+///
 /// None of this decides what a block MEANS. A block built by a proposer
 /// without this policy is validated, executed and imported as before. The
 /// digest, census and closure guards, and the chain-switch and producer tests
@@ -197,6 +210,16 @@ pub struct EducationAdmission {
 pub struct InclusionPolicy {
     /// The canonical database this node builds on.
     pub db: Arc<Database>,
+}
+
+/// What the pool needs to judge a sponsored envelope against the quota of the
+/// sender it names: the chain parameters, for the clock gates the quota bucket
+/// is read through, and the live chain height. Same shape as
+/// [`EducationAdmission`]. See [`Mempool::with_messaging_quota_admission`].
+#[derive(Clone)]
+pub struct MessagingQuotaAdmission {
+    pub params: Arc<ChainParams>,
+    pub current_height: Arc<AtomicU64>,
 }
 
 /// The relay's envelope preimage, with the recipient hash rendered as
@@ -353,6 +376,10 @@ pub struct Mempool {
     /// `remove`, re-derived from the stored transaction so the two cannot
     /// desync.
     sponsored_in_flight: RwLock<HashMap<Address, BTreeMap<u64, Hash>>>,
+    /// Optional quota context for sponsored envelopes (inclusion policy rule
+    /// 4). Read against the inclusion policy's database, so it does nothing
+    /// without one.
+    messaging_quota_admission: Option<MessagingQuotaAdmission>,
 }
 
 /// Whether `tx` is a contract deploy or call.
@@ -381,6 +408,7 @@ impl Mempool {
             refuse_contract_transactions: AtomicBool::new(false),
             inclusion_policy: None,
             sponsored_in_flight: RwLock::new(HashMap::new()),
+            messaging_quota_admission: None,
         }
     }
 
@@ -396,6 +424,20 @@ impl Mempool {
     /// Whether an [`InclusionPolicy`] is attached.
     pub fn has_inclusion_policy(&self) -> bool {
         self.inclusion_policy.is_some()
+    }
+
+    /// Builder: judge every sponsored `SendMessage` envelope against the quota
+    /// of the sender it names, at admission — the inclusion policy's rule 4.
+    /// It reads the policy's database, so without a wired [`InclusionPolicy`]
+    /// it does nothing.
+    ///
+    /// Node-local, like the rest of the policy. A block that carries an
+    /// over-quota envelope is refused by every node's execution exactly as
+    /// before; what changes is that this node does not hold such an envelope
+    /// and the relay's caller is told why.
+    pub fn with_messaging_quota_admission(mut self, admission: MessagingQuotaAdmission) -> Self {
+        self.messaging_quota_admission = Some(admission);
+        self
     }
 
     /// Node-local policy: refuse contract deploys and calls.
@@ -669,16 +711,72 @@ impl Mempool {
                         "an envelope from this sender with nonce {nonce} is already pending"
                     )));
                 }
-                let expected = committed.saturating_add(pending.map_or(0, |p| p.len() as u64));
+                let pending_count = pending.map_or(0, |p| p.len() as u64);
+                let expected = committed.saturating_add(pending_count);
                 if nonce > expected {
                     return Err(StateError::SponsoredEnvelopeRefused(format!(
                         "envelope nonce {nonce} is ahead of the expected {expected} (the \
                          sender's current messaging nonce is {committed})"
                     )));
                 }
+                if let Some(why) = self.messaging_quota_refusal(policy, &sender, pending_count)? {
+                    return Err(StateError::SponsoredEnvelopeRefused(why));
+                }
                 Ok(Some((sender, nonce)))
             }
         }
+    }
+
+    /// The inclusion policy's rule 4 at admission: `None` when `sender`, named
+    /// by a verified envelope, has quota left for it after its `pending`
+    /// envelopes already in this pool; otherwise why it has not. `None`
+    /// without a [`MessagingQuotaAdmission`].
+    ///
+    /// The comparison is `check_rate_limit`'s — the bucket's committed count
+    /// against the base quota, multiplied for a sender whose trust stake meets
+    /// the minimum — with the pending envelopes added to the count, since each
+    /// of them is carried before this one and counts when it succeeds.
+    fn messaging_quota_refusal(
+        &self,
+        policy: &InclusionPolicy,
+        sender: &Address,
+        pending: u64,
+    ) -> Result<Option<String>> {
+        let Some(admission) = &self.messaging_quota_admission else {
+            return Ok(None);
+        };
+        // The next block, and the bucket it counts sends in. Its timestamp is
+        // not known yet; this node's own proposal stamps the wall clock, so the
+        // wall clock is read. While the block-timestamp gate is closed the
+        // bucket is the same for every block and the reading changes nothing.
+        let height = admission
+            .current_height
+            .load(Ordering::Relaxed)
+            .saturating_add(1);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let day = MessagingExecutor::quota_day(&admission.params, height, now_ms);
+        let store = MessagingStore::new(&policy.db);
+        let used = store.get_daily_message_count(sender, day)?;
+        let base = store.get_daily_quota()?;
+        let quota = if store.get_stake_balance(sender)? >= store.get_min_trust_stake()? {
+            base.saturating_mul(STAKED_SENDER_QUOTA_MULTIPLIER)
+        } else {
+            base
+        };
+        if u64::from(used).saturating_add(pending) < u64::from(quota) {
+            return Ok(None);
+        }
+        let also_pending = if pending > 0 {
+            format!(", and {pending} more of its envelopes are already pending here")
+        } else {
+            String::new()
+        };
+        Ok(Some(format!(
+            "the sender has used {used} of its {quota} messages in the current quota period\
+             {also_pending}; no block can carry this envelope until the sender has quota again"
+        )))
     }
 
     /// Run the three OmniNode `InferenceAttestation` admission checks.

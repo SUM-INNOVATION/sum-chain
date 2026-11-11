@@ -21,6 +21,7 @@
 //! over a real database, in production's shape: V2 open, the inclusion policy
 //! wired, sponsorship enabled by the registry admin, the clock gates closed.
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use sumchain_consensus::{ConsensusEngine, ConsensusQuery, PoAEngine};
@@ -35,8 +36,8 @@ use sumchain_primitives::{
     Address, Block, Hash, MessagingOperation, SignedTransaction, SponsoredMessage, TransactionV2,
     TxPayload, TxStatus,
 };
-use sumchain_state::mempool::InclusionPolicy;
-use sumchain_state::{Mempool, MempoolConfig, StateManager};
+use sumchain_state::mempool::{InclusionPolicy, MessagingQuotaAdmission};
+use sumchain_state::{Mempool, MempoolConfig, StateError, StateManager};
 use sumchain_storage::{Database, MessagingStore, ReceiptStore};
 use tempfile::TempDir;
 
@@ -276,7 +277,10 @@ fn hashes(txs: &[SignedTransaction]) -> HashSet<Hash> {
 // ── the node ────────────────────────────────────────────────────────────────
 
 /// A validator wired as `Node::new` wires one: the inclusion policy over its
-/// own database, the pool's production configuration.
+/// own database, the pool's production configuration — with or without the
+/// policy's quota rule (`with_messaging_quota_admission`). Without it, the
+/// pool is a node that does not have the rule, or a pool that admitted an
+/// envelope before its sender's count moved.
 struct Node {
     _dir: TempDir,
     db: Arc<Database>,
@@ -284,21 +288,29 @@ struct Node {
     mempool: Arc<Mempool>,
     engine: Arc<PoAEngine>,
     key: KeyPair,
+    /// The live height the quota rule reads, as `Node::new` shares it.
+    chain_height: Arc<AtomicU64>,
 }
 
 impl Node {
-    fn new(g: &Genesis, key: KeyPair) -> Self {
+    fn new(g: &Genesis, key: KeyPair, quota_rule: bool) -> Self {
         let dir = TempDir::new().unwrap();
         let db = Arc::new(Database::open_default(dir.path()).unwrap());
         let state = Arc::new(StateManager::new(db.clone(), CHAIN_ID));
-        let mempool = Arc::new(
-            Mempool::new(MempoolConfig {
-                min_fee: g.params.min_fee,
-                max_tx_bytes: g.params.max_block_bytes,
-                ..MempoolConfig::default()
-            })
-            .with_inclusion_policy(InclusionPolicy { db: db.clone() }),
-        );
+        let chain_height = Arc::new(AtomicU64::new(0));
+        let mut pool = Mempool::new(MempoolConfig {
+            min_fee: g.params.min_fee,
+            max_tx_bytes: g.params.max_block_bytes,
+            ..MempoolConfig::default()
+        })
+        .with_inclusion_policy(InclusionPolicy { db: db.clone() });
+        if quota_rule {
+            pool = pool.with_messaging_quota_admission(MessagingQuotaAdmission {
+                params: Arc::new(g.params.clone()),
+                current_height: chain_height.clone(),
+            });
+        }
+        let mempool = Arc::new(pool);
         let engine = Arc::new(
             PoAEngine::new(
                 db.clone(),
@@ -317,6 +329,7 @@ impl Node {
             mempool,
             engine,
             key,
+            chain_height,
         }
     }
 
@@ -334,9 +347,15 @@ impl Node {
         self.engine.import_block(b.clone()).await.unwrap();
     }
 
+    fn try_submit(&self, t: &SignedTransaction) -> Result<Hash, StateError> {
+        self.chain_height
+            .store(self.engine.current_height(), Ordering::Relaxed);
+        self.mempool.add(t.clone())
+    }
+
     fn submit(&self, txs: &[SignedTransaction]) {
         for t in txs {
-            self.mempool.add(t.clone()).expect("admitted");
+            self.try_submit(t).expect("admitted");
         }
     }
 
@@ -375,9 +394,22 @@ struct Net {
 }
 
 impl Net {
+    /// Pools without the quota rule.
     fn new(validators: Vec<KeyPair>) -> Self {
+        Self::build(validators, false)
+    }
+
+    /// Pools wired exactly as `Node::new` wires them, quota rule included.
+    fn wired(validators: Vec<KeyPair>) -> Self {
+        Self::build(validators, true)
+    }
+
+    fn build(validators: Vec<KeyPair>, quota_rule: bool) -> Self {
         let g = genesis(&validators);
-        let nodes = validators.into_iter().map(|k| Node::new(&g, k)).collect();
+        let nodes = validators
+            .into_iter()
+            .map(|k| Node::new(&g, k, quota_rule))
+            .collect();
         Self { nodes }
     }
 
@@ -636,4 +668,62 @@ async fn with_two_producers_the_one_holding_the_envelope_carries_the_others() {
         net.nodes[p].engine.best_block_hash(),
         net.nodes[q].engine.best_block_hash()
     );
+}
+
+// ── 5. the node's full wiring ───────────────────────────────────────────────
+
+/// With the pool wired as the node wires it, A's over-quota envelope is refused
+/// at admission with the count, and the pool never holds it.
+///
+/// An envelope admitted while its sender had quota, whose sender's count then
+/// moved before it was carried — here the registry admin lowers the quota in
+/// between — is still possible. That one is held at selection alone, as
+/// above, and B's and C's are carried.
+#[tokio::test]
+async fn wired_as_the_node_wires_it_the_over_quota_envelope_is_refused_at_admission() {
+    let net = Net::wired(vec![validator_p()]);
+    net.ready().await;
+    let node = &net.nodes[0];
+
+    let (b0, c0) = (relayed(&bob(), 0, EXPIRY), relayed(&carol(), 0, EXPIRY));
+    let (b1, c1) = (relayed(&bob(), 1, EXPIRY), relayed(&carol(), 1, EXPIRY));
+    let over = relayed_first(&alice(), QUOTA as u64, &[b1.clone(), c1.clone()]);
+    match node.try_submit(&over) {
+        Err(StateError::SponsoredEnvelopeRefused(why)) => {
+            assert!(why.contains("used 3 of its 3"), "{why}")
+        }
+        other => panic!("refused for its quota, not {other:?}"),
+    }
+    node.submit(&[b0.clone(), c0.clone()]);
+    let (_, b) = net.tick().await;
+    assert_eq!(hashes(&b.transactions), hashes(&[b0, c0]));
+
+    // Room for one more: A's envelope is admitted, and B's and C's next.
+    net.produce(vec![set_quota(node.account_nonce(&admin()), QUOTA + 1)])
+        .await;
+    node.submit(&[over.clone(), b1.clone(), c1.clone()]);
+    // The quota goes back down before any of them is carried: A is over it
+    // again, B and C are not. (A different fee from the setup's identical
+    // `SetDailyQuota`, which the policy would refuse as already included.)
+    let lower = signed(
+        &admin(),
+        node.account_nonce(&admin()),
+        FEE + 1,
+        op(
+            MessagingOperation::SetDailyQuota,
+            &SetDailyQuotaData { quota: QUOTA },
+        ),
+    );
+    let b = net.produce(vec![lower.clone()]).await;
+    assert_eq!(hashes(&b.transactions), hashes(&[lower]));
+
+    let (_, b) = net.tick().await;
+    assert_eq!(
+        hashes(&b.transactions),
+        hashes(&[b1, c1]),
+        "B and C carried; A's envelope held, alone"
+    );
+    assert!(node.mempool.contains(&over.hash()));
+    assert_eq!(node.status(&over), None);
+    assert_eq!(node.messaging_nonce(&alice()), QUOTA as u64);
 }
