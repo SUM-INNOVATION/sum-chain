@@ -4551,6 +4551,9 @@ impl SumChainApiServer for RpcServer {
             recipient_hash: format!("0x{}", hex::encode(sponsored_msg.recipient_hash)),
             message_data: format!("0x{}", hex::encode(&sponsored_msg.message_data)),
             sender_pubkey: format!("0x{}", hex::encode(sponsored_msg.sender_pubkey)),
+            envelope_signature: format!("0x{}", hex::encode(sponsored_msg.signature)),
+            envelope_nonce: sponsored_msg.nonce,
+            envelope_expiry: sponsored_msg.expiry,
             has_payment: false,
             payment_amount: None,
         }))

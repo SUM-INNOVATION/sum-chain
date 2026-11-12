@@ -1926,8 +1926,8 @@ fn registered(s: &Served, first: u8, count: u8) -> Vec<KeyPair> {
         .collect()
 }
 
-/// How many transactions of the canonical chain delivered `intent`'s
-/// content: every block read from the block store, each relayed
+/// How many transactions of the canonical chain delivered `intent`'s exact
+/// signed envelope: every block read from the block store, each relayed
 /// `SendMessage` decoded and its receipt read (not through the client, and
 /// not through the message index, which below the transaction-index gate
 /// keeps one row per sender per block).
@@ -1957,7 +1957,10 @@ fn deliveries(s: &Served, intent: &Intent) -> usize {
                 .is_some_and(|r| r.status == TxStatus::Success);
             if executed
                 && carried.is_some_and(|c| {
-                    c.sender_pubkey == m.sender_pubkey
+                    c.signature == m.signature
+                        && c.nonce == m.nonce
+                        && c.expiry == m.expiry
+                        && c.sender_pubkey == m.sender_pubkey
                         && c.recipient_hash == m.recipient_hash
                         && c.message_data == m.message_data
                 })
@@ -2224,13 +2227,18 @@ async fn concurrent_retries_deliver_each_message_once() {
 /// fresh wrapper each time, and after `MAX_WRAPPERS` it stops and reports the
 /// message undeliverable: it is not resent without bound, it is not reported
 /// delivered, and its wrappers cost the sponsor nothing. The client is
-/// restarted between steps (its tracker persisted as JSON and read back), and
-/// the bound still holds: it counts the wrappers it persisted.
+/// restarted between steps, reading its tracker back from its store (the
+/// request count, written before each request, the first-submission height
+/// and the wrappers), and the bound still holds across the restarts.
 #[tokio::test]
 async fn the_retries_of_one_message_are_bounded() {
     let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
-    let mut t = Tracker::new(v2_intent(&s, &alice(), 0, 1));
+    let store = tempfile::TempDir::new().unwrap();
+    let path = store.path().join("intent.json");
+    let mut t = Tracker::persisted(v2_intent(&s, &alice(), 0, 1), &path);
     assert!(matches!(t.submit(&s.server).await, Step::Resubmitted(_)));
+    let first_submitted_at = t.first_submitted_at;
+    assert_eq!(first_submitted_at, Some(0));
     let mut height = 1;
     let mut step = Step::Wait;
     for k in 0..(MAX_WRAPPERS as u64 + 1) {
@@ -2266,7 +2274,11 @@ async fn the_retries_of_one_message_are_bounded() {
         s.publish_pool(height);
         height += 1;
         // A restart: the client reads back what it persisted.
-        t = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        let before = (t.requests, t.wrappers.clone());
+        drop(t);
+        t = Tracker::load(&path);
+        assert_eq!((t.requests, t.wrappers.clone()), before);
+        assert_eq!(t.first_submitted_at, first_submitted_at);
         step = t.step(&s.server).await;
     }
     assert_eq!(
@@ -2276,6 +2288,8 @@ async fn the_retries_of_one_message_are_bounded() {
         )))
     );
     assert_eq!(t.wrappers.len(), MAX_WRAPPERS);
+    assert_eq!(Tracker::load(&path).requests, MAX_WRAPPERS);
+    assert_eq!(Tracker::load(&path).outcome, t.outcome);
     let (executed, invalid_nonce) = wrapper_receipts(&s, std::slice::from_ref(&t));
     assert!(executed.is_empty());
     assert_eq!(invalid_nonce, MAX_WRAPPERS);
@@ -2291,7 +2305,7 @@ async fn the_retries_of_one_message_are_bounded() {
 /// - with the transaction-index gate unset (production), carol's own direct
 ///   message in the same block replaces the copy's row (one row per sender
 ///   per block);
-/// - with 1,000 older rows for carol, the listing's one page (the oldest
+/// - with 1,200 older rows for carol, the listing's one page (the oldest
 ///   1,000) ends before it.
 /// In both, carol's messaging nonce has moved past the envelope's, and this
 /// relay's wrapper is refused in the block. The client reports the message
@@ -2305,7 +2319,7 @@ async fn a_delivery_missing_from_the_message_listing_is_still_found() {
         let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
         if older_rows {
             let store = MessagingStore::new(&s.db);
-            for h in 1..=1_000u64 {
+            for h in 1..=1_200u64 {
                 store
                     .store_message_event(
                         &sumchain_primitives::MessageEvent {
@@ -2388,4 +2402,79 @@ async fn a_delivery_missing_from_the_message_listing_is_still_found() {
 
 fn strip_0x(h: &str) -> String {
     h.strip_prefix("0x").unwrap_or(h).to_string()
+}
+
+/// Two intents with the same content: carol sends the same message twice,
+/// signing it at messaging nonces 0 and 1. Both wrappers are relayed; the
+/// first executes, and the second is carried in a block whose first
+/// transaction is another wrapper at the same sponsor nonce, so it takes
+/// `InvalidNonce`. A check on the content alone would report the second
+/// intent delivered by the first one's execution, and the message would be
+/// lost. The client matches the exact signed envelope (nonce and signature
+/// included): the second is not delivered, so it asks for a fresh wrapper of
+/// the same envelope, and it is delivered. Each intent is on the chain once.
+#[tokio::test]
+async fn two_intents_with_the_same_content_are_told_apart() {
+    let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
+    let same = |nonce: u64| {
+        let mut i = v2_intent(&s, &carol(), nonce, 7);
+        i.envelope.message_data = valid_message(recipient_hash(&bob().address()));
+        i.envelope = v2(i.envelope);
+        i
+    };
+    let (first, second) = (same(0), same(1));
+    assert_eq!(first.envelope.message_data, second.envelope.message_data);
+    let mut a = Tracker::new(first.clone());
+    let mut b = Tracker::new(second.clone());
+    assert!(matches!(a.submit(&s.server).await, Step::Resubmitted(_)));
+    assert!(matches!(b.submit(&s.server).await, Step::Resubmitted(_)));
+    assert_eq!(s.pending_sponsor_nonces(), vec![0, 1]);
+
+    // Block 1 carries the first; block 2 carries, ahead of the second, another
+    // transaction of the sponsor at nonce 1 (a higher fee).
+    let first_wrapper = s
+        .mempool
+        .get(&Hash::from_hex(&a.wrappers[0]).unwrap())
+        .unwrap();
+    assert_eq!(
+        status_only(&s.publish(1, vec![first_wrapper])),
+        vec![TxStatus::Success]
+    );
+    let ahead = {
+        let m = v2_by(envelope_from(&dave(), 0, 60, None), &dave(), CHAIN_ID);
+        let mut tx = s.relayed_by(&sponsor(), 1, &m);
+        let TxInner::V2(v2) = &mut tx.inner else {
+            unreachable!()
+        };
+        v2.fee = 2 * RELAY_FEE;
+        let sig = sign(v2.signing_hash().as_bytes(), sponsor().private_key());
+        SignedTransaction::new_v2(
+            v2.clone(),
+            *sig.as_bytes(),
+            *sponsor().public_key().as_bytes(),
+        )
+    };
+    s.mempool.add(ahead).unwrap();
+    let (_, receipts) = s.publish_pool(2);
+    assert_eq!(
+        status_only(&receipts),
+        vec![TxStatus::Success, TxStatus::InvalidNonce]
+    );
+
+    assert!(matches!(
+        a.step(&s.server).await,
+        Step::Done(Outcome::Delivered { .. })
+    ));
+    let fresh = match b.step(&s.server).await {
+        Step::Resubmitted(h) => h,
+        other => panic!("the second intent is not delivered yet: {other:?}"),
+    };
+    let (_, receipts) = s.publish_pool(3);
+    assert_eq!(status_only(&receipts), vec![TxStatus::Success]);
+    assert_eq!(
+        b.step(&s.server).await,
+        Step::Done(Outcome::Delivered { tx_hash: fresh })
+    );
+    assert_eq!((deliveries(&s, &first), deliveries(&s, &second)), (1, 1));
+    assert_eq!(s.messaging_nonce(&carol()), 2);
 }

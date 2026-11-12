@@ -1966,6 +1966,15 @@ pub struct MessageDataInfo {
     pub message_data: String,
     /// Sender's public key (hex with 0x prefix)
     pub sender_pubkey: String,
+    /// The envelope's signature (hex with 0x prefix). With the sender key,
+    /// recipient, content, nonce and expiry it is the exact envelope the
+    /// sender signed: a client looking for its own message matches all of
+    /// them, not the content alone.
+    pub envelope_signature: String,
+    /// The envelope's nonce.
+    pub envelope_nonce: u64,
+    /// The envelope's expiry, in Unix seconds.
+    pub envelope_expiry: u64,
     /// Whether message has payment attached. Always false for a relayed
     /// message: a relayed message never moves an amount.
     pub has_payment: bool,

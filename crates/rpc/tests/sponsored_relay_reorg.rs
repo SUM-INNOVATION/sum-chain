@@ -474,8 +474,8 @@ async fn a_chain_switch_returns_relayed_transactions_and_the_relay_continues() {
     );
 }
 
-/// How many transactions of the node's canonical chain delivered `m`'s
-/// content: every block read by height from the block store, each relayed
+/// How many transactions of the node's canonical chain delivered exactly
+/// the signed envelope `m`: every block read by height from the block store, each relayed
 /// `SendMessage` decoded and its receipt read (not through the message
 /// index, which below the transaction-index gate keeps one row per sender
 /// per block).
@@ -499,7 +499,10 @@ fn deliveries(node: &Node, m: &SponsoredMessage) -> usize {
             };
             if node.receipt(&tx.hash()).map(|r| r.0) == Some(TxStatus::Success)
                 && carried.is_some_and(|c| {
-                    c.sender_pubkey == m.sender_pubkey
+                    c.signature == m.signature
+                        && c.nonce == m.nonce
+                        && c.expiry == m.expiry
+                        && c.sender_pubkey == m.sender_pubkey
                         && c.recipient_hash == m.recipient_hash
                         && c.message_data == m.message_data
                 })

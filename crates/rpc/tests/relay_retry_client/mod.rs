@@ -6,14 +6,18 @@
 //! it charged nothing and moved no messaging nonce. The client then decides
 //! from the chain, never from what it remembers:
 //!
-//! 1. It looks for its intended message by content (sender key, recipient,
-//!    message bytes) among the transactions the canonical chain carried since
-//!    the user signed the envelope: every block from then to the tip, each
-//!    transaction read through `messaging_getMessageData`, which answers from
-//!    the stored transaction and its receipt and only for one that executed.
-//!    A message carried by a wrapper the client did not request (another
-//!    relay, another device, another sponsor's copy) counts too. Found:
-//!    delivered, stop; the intent is never sent again. The sender's message
+//! 1. It looks for the exact envelope the user signed (sender key,
+//!    recipient, message bytes, nonce, expiry and signature; the content
+//!    alone would confuse two messages with the same text) among the
+//!    transactions the canonical chain carried and executed successfully:
+//!    every block from the height at which the user signed it (at or before
+//!    its first submission; a copy relayed by another device can precede
+//!    that) to the tip, each transaction read through
+//!    `messaging_getMessageData`, which answers from the stored transaction
+//!    and its receipt and only for a relayed message that executed. A message
+//!    carried by a wrapper the client did not request (another relay, another
+//!    device, another sponsor's copy) counts too. Found: delivered, stop; the
+//!    intent is never sent again. The sender's message
 //!    listing (`messaging_getSentMessages`) is not used: it returns the oldest
 //!    1,000 records only, and below the transaction-index gate it keeps one
 //!    row per sender per block, so a delivery can be missing from it. (The
@@ -42,12 +46,18 @@
 //! status other than `success` and `invalid nonce`) ends the intent as
 //! undeliverable with that status, unless step 4 or 5 applies.
 //!
-//! The whole tracker (the envelope, the height it was signed at, the wrappers
+//! The whole tracker (the envelope, the height it was signed at, the height
+//! of its first submission, the wrapper requests made and the wrappers
 //! obtained, the bound, the outcome) is what a client persists with the
-//! intent: a client that forgot its wrappers after a restart would count its
-//! retries from zero again. `Tracker` serializes for that.
+//! intent, in its own store: a client that forgot them after a restart would
+//! count its retries from zero again. The reference client writes the
+//! tracker to its store before it asks the relay for a wrapper (the request
+//! is counted first), and again when the wrapper is obtained; a restart
+//! reads it back (`Tracker::load`). A request the relay refuses without a
+//! wrapper is not counted.
 //!
-//! Retries are bounded: at most `max_wrappers` wrappers per intent. Who pays:
+//! Retries are bounded: at most `max_wrappers` wrapper requests per intent.
+//! Who pays:
 //! the sponsor pays the outer fee for each wrapper that executes, succeeding
 //! or refused in the block (from the accounting height; below it a relayed
 //! message is not charged); a wrapper refused with `InvalidNonce` costs
@@ -60,6 +70,8 @@
 //! its own resend.
 
 #![allow(dead_code)]
+
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sumchain_primitives::{Address, SponsoredMessage};
@@ -121,10 +133,17 @@ pub enum Step {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Tracker {
     pub intent: Intent,
+    /// The wrapper requests made, counted before each request is sent.
+    pub requests: usize,
+    /// The chain tip's height when the first wrapper was obtained.
+    pub first_submitted_at: Option<u64>,
     /// The wrappers' transaction hashes, in the order obtained.
     pub wrappers: Vec<String>,
     pub max_wrappers: usize,
     pub outcome: Option<Outcome>,
+    /// Where this tracker is persisted; `None` keeps it in memory only.
+    #[serde(skip)]
+    pub store: Option<PathBuf>,
 }
 
 /// The bound the reference client uses.
@@ -150,9 +169,35 @@ impl Tracker {
     pub fn new(intent: Intent) -> Self {
         Self {
             intent,
+            requests: 0,
+            first_submitted_at: None,
             wrappers: Vec::new(),
             max_wrappers: MAX_WRAPPERS,
             outcome: None,
+            store: None,
+        }
+    }
+
+    /// A tracker persisted at `path` from now on.
+    pub fn persisted(intent: Intent, path: &Path) -> Self {
+        let mut t = Self::new(intent);
+        t.store = Some(path.to_path_buf());
+        t.save();
+        t
+    }
+
+    /// The tracker persisted at `path`, as a restarted client reads it back.
+    pub fn load(path: &Path) -> Self {
+        let mut t: Self = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        t.store = Some(path.to_path_buf());
+        t
+    }
+
+    fn save(&self) {
+        if let Some(path) = &self.store {
+            let tmp = path.with_extension("tmp");
+            std::fs::write(&tmp, serde_json::to_vec(self).unwrap()).unwrap();
+            std::fs::rename(&tmp, path).unwrap();
         }
     }
 
@@ -161,17 +206,20 @@ impl Tracker {
         self.ask_for_wrapper(server).await
     }
 
-    /// The wrapper whose execution delivered this intent's content on the
-    /// canonical chain, if any: first among the wrappers this client
-    /// obtained, then among every transaction carried since the envelope was
-    /// signed. `messaging_getMessageData` answers from the stored transaction
-    /// and its receipt, and only for a relayed message that executed; any
-    /// other transaction is refused or answered with nothing, and is not this
-    /// intent.
+    /// The wrapper whose successful execution on the canonical chain
+    /// delivered exactly this signed envelope, if any: first among the
+    /// wrappers this client obtained, then among every transaction carried
+    /// since the envelope was signed. `messaging_getMessageData` answers from
+    /// the stored transaction and its receipt, and only for a relayed message
+    /// that executed; any other transaction is refused or answered with
+    /// nothing, and is not this intent.
     async fn delivered_by(&self, server: &RpcServer) -> Option<String> {
         let m = &self.intent.envelope;
         let delivers = |d: &sumchain_rpc::types::MessageDataInfo| {
-            strip(&d.sender_pubkey) == hex::encode(m.sender_pubkey)
+            strip(&d.envelope_signature) == hex::encode(m.signature)
+                && d.envelope_nonce == m.nonce
+                && d.envelope_expiry == m.expiry
+                && strip(&d.sender_pubkey) == hex::encode(m.sender_pubkey)
                 && strip(&d.recipient_hash) == hex::encode(m.recipient_hash)
                 && strip(&d.message_data) == hex::encode(&m.message_data)
         };
@@ -211,21 +259,38 @@ impl Tracker {
     }
 
     async fn ask_for_wrapper(&mut self, server: &RpcServer) -> Step {
-        if self.wrappers.len() >= self.max_wrappers {
+        if self.requests >= self.max_wrappers {
             return self.done(Outcome::Undeliverable(format!(
                 "the retry bound ({} wrappers) is reached",
                 self.max_wrappers
             )));
         }
+        // Counted and persisted before the request is sent: a restart after
+        // this point counts it, whether or not a wrapper came back.
+        self.requests += 1;
+        self.save();
         match server
             .messaging_submit_sponsored(request(&self.intent.envelope))
             .await
         {
             Ok(r) => {
+                if self.first_submitted_at.is_none() {
+                    self.first_submitted_at = Some(
+                        server
+                            .get_latest_block()
+                            .await
+                            .map(|b| b.height)
+                            .unwrap_or(0),
+                    );
+                }
                 self.wrappers.push(r.tx_hash.clone());
+                self.save();
                 Step::Resubmitted(r.tx_hash)
             }
             Err(e) => {
+                // No wrapper: nothing to count.
+                self.requests -= 1;
+                self.save();
                 let msg = e.message().to_string();
                 if msg.contains("Retry after the next block") || msg.contains("already pending") {
                     // Later, or another wrapper of this envelope is pending.
@@ -249,6 +314,7 @@ impl Tracker {
 
     fn done(&mut self, o: Outcome) -> Step {
         self.outcome = Some(o.clone());
+        self.save();
         Step::Done(o)
     }
 
@@ -265,7 +331,9 @@ impl Tracker {
         if let Some(tx_hash) = self.delivered_by(server).await {
             return self.done(Outcome::Delivered { tx_hash });
         }
-        self.outcome = None;
+        if self.outcome.take().is_some() {
+            self.save();
+        }
         // A wrapper still pending may yet deliver it.
         for h in &self.wrappers {
             if self.pending(server, h).await {

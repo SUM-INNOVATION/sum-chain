@@ -1203,6 +1203,8 @@ pub trait SumChainApi {
     /// Only for a relayed (sponsored) message the canonical chain executed:
     /// `None` for a transaction with no canonical receipt or a refused one.
     /// A relayed message never carries a payment, so `has_payment` is false.
+    /// The envelope's signature, nonce and expiry are reported, so a client
+    /// can match the exact envelope it signed.
     #[method(name = "messaging_getMessageData")]
     async fn messaging_get_message_data(
         &self,
@@ -1258,13 +1260,16 @@ pub trait SumChainApi {
     /// The relay wraps the signed envelope in a transaction from its sponsor
     /// key (a wrapper) and returns the wrapper's hash. A wrapper the chain
     /// refuses with `InvalidNonce` never executed: it charged no fee and moved
-    /// no messaging nonce. On such a receipt a client looks for the intended
-    /// message among the transactions of every block since the user signed the
-    /// envelope (`get_block_by_height`, then `messaging_getMessageData` for each
-    /// transaction, which answers from the stored transaction and its receipt,
-    /// and only for a relayed message that executed), matching sender key,
-    /// recipient and content, whichever wrapper carried it; and it reads
-    /// `messaging_getSenderNonce`. `messaging_getSentMessages` is not a
+    /// no messaging nonce. On such a receipt a client looks for the exact
+    /// envelope the user signed among the transactions of every block since it
+    /// was signed (at or before its first submission): `get_block_by_height`,
+    /// then `messaging_getMessageData` for each transaction, which answers from
+    /// the stored transaction and its receipt, and only for a relayed message
+    /// that executed successfully. It matches the envelope's signature, nonce
+    /// and expiry as well as sender key, recipient and content (two messages
+    /// with the same text are two intents), whichever wrapper carried it; and
+    /// it reads `messaging_getSenderNonce`. It checks again after a chain
+    /// switch. `messaging_getSentMessages` is not a
     /// substitute: it returns the oldest 1,000 records, and below the
     /// transaction-index gate it keeps one row per sender per block.
     /// - the message is on the chain: it is delivered, and never sent again;
@@ -1276,7 +1281,8 @@ pub trait SumChainApi {
     ///   version-2 envelope; the relay cannot convert it.
     ///
     /// A moved nonce is never read as a delivery. The client bounds its
-    /// retries, and persists the count with the message (the reference client
+    /// retries, and persists the count (written before each request) and the
+    /// first-submission height with the message (the reference client
     /// in the RPC tests asks for at most three wrappers per message); the
     /// sponsor pays for each wrapper that executes, and nothing for one
     /// refused with `InvalidNonce`.
