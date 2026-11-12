@@ -690,3 +690,91 @@ async fn the_client_retry_protocol_across_a_chain_switch() {
         FUNDS - 3 * FEE
     );
 }
+
+/// A chain switch that removes a delivery. Branch A carries carol's wrapper,
+/// and her client finds the message delivered. Branch B, longer, does not
+/// carry it, and the node switches: the wrapper returns to the pool, valid on
+/// B. The client no longer finds the message (not delivered), finds its
+/// wrapper pending, and waits; it does not ask for another. The next block on
+/// B carries the wrapper, and the client finds the message delivered again:
+/// on the adopted chain once, by one wrapper, at one fee. (A switch that adds
+/// a delivery is in `the_client_retry_protocol_across_a_chain_switch`.)
+#[tokio::test]
+async fn a_chain_switch_that_removes_a_delivery() {
+    let validators = [key(1), key(2)];
+    let g = genesis(&validators);
+    let node = Node::new(&g);
+    let mut a = Builder::new(&g, &validators);
+    let mut b = Builder::new(&g, &validators);
+    let block_1 = || {
+        vec![
+            messaging_tx(
+                &admin(),
+                0,
+                op(
+                    MessagingOperation::SetSponsorshipEnabled,
+                    &SetSponsorshipEnabledData { enabled: true },
+                ),
+            ),
+            messaging_tx(
+                &carol(),
+                0,
+                op(
+                    MessagingOperation::RegisterPublicKey,
+                    &RegisterPublicKeyData {
+                        public_key: pk(&carol()),
+                    },
+                ),
+            ),
+        ]
+    };
+    let a1 = a.produce(0, block_1());
+    let b1 = b.produce(0, block_1());
+    assert_eq!(a1.hash(), b1.hash());
+    node.import(&a1).await;
+
+    let message = envelope(&carol(), 0, 1);
+    let mut client = Tracker::new(Intent {
+        envelope: message.clone(),
+        form: Form::Version2,
+        signed_at: node.engine.current_height(),
+    });
+    let Step::Resubmitted(wrapper) = client.submit(&node.server).await else {
+        panic!("relayed");
+    };
+    let wrapper_hash = Hash::from_hex(&wrapper).unwrap();
+
+    // Branch A carries it: delivered.
+    let a2 = a.produce(1, node.mempool.select_for_block(100));
+    node.import(&a2).await;
+    let delivered = Step::Done(Outcome::Delivered {
+        tx_hash: wrapper.clone(),
+    });
+    assert_eq!(client.step(&node.server).await, delivered);
+
+    // Branch B, longer, without it: the node switches, the wrapper returns.
+    let b2 = b.produce(2, Vec::new());
+    let b3 = b.produce(2, Vec::new());
+    node.import(&b2).await;
+    node.import(&b3).await;
+    assert_eq!(node.engine.best_block_hash(), b3.hash(), "switched");
+    assert_eq!(node.receipt(&wrapper_hash), None, "unwound");
+    assert!(node.mempool.contains(&wrapper_hash), "returned to the pool");
+    assert_eq!(deliveries(&node, &message), 0);
+
+    // Not delivered; its wrapper is pending: the client waits.
+    assert_eq!(client.step(&node.server).await, Step::Wait);
+    assert_eq!(client.outcome, None);
+    assert_eq!(client.wrappers.len(), 1, "no second wrapper");
+
+    // B carries it: delivered once.
+    let b4 = b.produce(2, node.mempool.select_for_block(100));
+    node.import(&b4).await;
+    assert_eq!(client.step(&node.server).await, delivered);
+    assert_eq!(deliveries(&node, &message), 1);
+    assert_eq!(node.messaging_nonce(&carol()), 1);
+    assert_eq!(
+        node.state.get_balance(&sponsor().address()).unwrap(),
+        FUNDS - FEE
+    );
+}
