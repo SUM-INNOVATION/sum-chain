@@ -572,11 +572,9 @@ async fn the_client_retry_protocol_across_a_chain_switch() {
     assert_eq!(a1.hash(), b1.hash());
     node.import(&a1).await;
 
-    let mut carol_client = Tracker::new(Intent {
-        envelope: envelope(&carol(), 0, 1),
-        form: Form::Version2,
-        signed_at: node.engine.current_height(),
-    });
+    let mut carol_client = Tracker::new(
+        Intent::signed_now(&node.server, envelope(&carol(), 0, 1), Form::Version2).await,
+    );
     let Step::Resubmitted(original) = carol_client.submit(&node.server).await else {
         panic!("relayed");
     };
@@ -592,11 +590,9 @@ async fn the_client_retry_protocol_across_a_chain_switch() {
         0,
         op(MessagingOperation::SendMessage, &alice_envelope),
     );
-    let mut alice_client = Tracker::new(Intent {
-        envelope: alice_envelope.clone(),
-        form: Form::Version2,
-        signed_at: node.engine.current_height(),
-    });
+    let mut alice_client = Tracker::new(
+        Intent::signed_now(&node.server, alice_envelope.clone(), Form::Version2).await,
+    );
     alice_client.wrappers.push(alice_wrapper.hash().to_hex());
 
     // Branch A: alice's wrapper first at sponsor nonce 0, then carol's.
@@ -734,11 +730,8 @@ async fn a_chain_switch_that_removes_a_delivery() {
     node.import(&a1).await;
 
     let message = envelope(&carol(), 0, 1);
-    let mut client = Tracker::new(Intent {
-        envelope: message.clone(),
-        form: Form::Version2,
-        signed_at: node.engine.current_height(),
-    });
+    let mut client =
+        Tracker::new(Intent::signed_now(&node.server, message.clone(), Form::Version2).await);
     let Step::Resubmitted(wrapper) = client.submit(&node.server).await else {
         panic!("relayed");
     };
@@ -777,4 +770,96 @@ async fn a_chain_switch_that_removes_a_delivery() {
         node.state.get_balance(&sponsor().address()).unwrap(),
         FUNDS - FEE
     );
+}
+
+/// A chain switch whose fork lies below the height at which the envelope was
+/// signed, and whose adopted branch carries the envelope (a copy another
+/// relay held) at a height at or below that one. Blocks are final 2 below
+/// the head. carol signs at tip 3, when block 1 is final; her client asks
+/// this relay for a wrapper. Branch B forks at block 1, carries the copy at
+/// height 2, grows past A, and the node switches. The client searches from
+/// the height final at signing, so it finds the copy at height 2 and reports
+/// the message delivered; it never asks the user to sign again. (Searching
+/// from the signing height, it would miss the copy and, its own wrapper
+/// refused, ask for a new signature: the message would be delivered twice.)
+/// Its own wrapper is refused in the next block, at one fee; the message is
+/// on the adopted chain once.
+#[tokio::test]
+async fn a_delivery_below_the_signing_height_adopted_by_a_chain_switch() {
+    let validators = [key(1), key(2)];
+    let mut g = genesis(&validators);
+    g.params.finality_depth = 2;
+    let node = Node::new(&g);
+    let mut a = Builder::new(&g, &validators);
+    let mut b = Builder::new(&g, &validators);
+    let block_1 = || {
+        vec![
+            messaging_tx(
+                &admin(),
+                0,
+                op(
+                    MessagingOperation::SetSponsorshipEnabled,
+                    &SetSponsorshipEnabledData { enabled: true },
+                ),
+            ),
+            messaging_tx(
+                &carol(),
+                0,
+                op(
+                    MessagingOperation::RegisterPublicKey,
+                    &RegisterPublicKeyData {
+                        public_key: pk(&carol()),
+                    },
+                ),
+            ),
+        ]
+    };
+    let a1 = a.produce(0, block_1());
+    let b1 = b.produce(0, block_1());
+    assert_eq!(a1.hash(), b1.hash());
+    node.import(&a1).await;
+    let a2 = a.produce(1, Vec::new());
+    let a3 = a.produce(1, Vec::new());
+    node.import(&a2).await;
+    node.import(&a3).await;
+
+    let message = envelope(&carol(), 0, 1);
+    let intent = Intent::signed_now(&node.server, message.clone(), Form::Version2).await;
+    assert_eq!((intent.signed_at, intent.final_at_signing), (3, 1));
+    let mut client = Tracker::new(intent);
+    let Step::Resubmitted(wrapper) = client.submit(&node.server).await else {
+        panic!("relayed");
+    };
+
+    // Branch B: the copy at height 2, below the signing height; B grows past A.
+    let copy = messaging_tx(&alice(), 0, op(MessagingOperation::SendMessage, &message));
+    let mut b_blocks = vec![b.produce(2, vec![copy.clone()])];
+    for _ in 0..3 {
+        b_blocks.push(b.produce(2, Vec::new()));
+    }
+    for block in &b_blocks {
+        node.import(block).await;
+    }
+    assert_eq!(
+        node.engine.best_block_hash(),
+        b_blocks.last().unwrap().hash(),
+        "switched to B"
+    );
+    assert_eq!(node.receipt(&copy.hash()), Some((TxStatus::Success, FEE)));
+
+    assert_eq!(
+        client.step(&node.server).await,
+        Step::Done(Outcome::Delivered {
+            tx_hash: copy.hash().to_hex()
+        })
+    );
+    let next = b.produce(2, node.mempool.select_for_block(100));
+    node.import(&next).await;
+    let own = node.receipt(&Hash::from_hex(&wrapper).unwrap()).unwrap();
+    assert_ne!(own.0, TxStatus::Success, "the envelope executes once");
+    assert!(matches!(
+        client.step(&node.server).await,
+        Step::Done(Outcome::Delivered { .. })
+    ));
+    assert_eq!(deliveries(&node, &message), 1);
 }

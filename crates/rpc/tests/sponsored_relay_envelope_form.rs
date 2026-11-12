@@ -135,6 +135,63 @@ struct Served {
     mempool: Arc<Mempool>,
     params: ChainParams,
     server: Arc<RpcServer>,
+    /// The depth below the stored tip at which the server reports blocks
+    /// final (0: every stored block is final).
+    finality_depth: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// The engine's view, except the chain's height and its final height, which
+/// are read from the block store: these tests publish blocks to the store
+/// without driving the engine. A block `depth` or more below the stored tip
+/// is reported final.
+struct StoredChain {
+    engine: Arc<dyn ConsensusQuery>,
+    db: Arc<Database>,
+    depth: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl StoredChain {
+    fn tip(&self) -> u64 {
+        sumchain_storage::BlockStore::new(&self.db)
+            .get_latest_height()
+            .unwrap()
+            .unwrap_or(0)
+    }
+}
+
+impl ConsensusQuery for StoredChain {
+    fn is_validator(&self) -> bool {
+        self.engine.is_validator()
+    }
+    fn current_height(&self) -> u64 {
+        self.tip()
+    }
+    fn validators(&self) -> Vec<[u8; 32]> {
+        self.engine.validators()
+    }
+    fn get_proposer(&self, height: u64) -> [u8; 32] {
+        self.engine.get_proposer(height)
+    }
+    fn finalized_height(&self) -> u64 {
+        self.tip()
+            .saturating_sub(self.depth.load(std::sync::atomic::Ordering::SeqCst))
+    }
+    fn finalized_hash(&self) -> Hash {
+        sumchain_storage::BlockStore::new(&self.db)
+            .get_by_height(self.finalized_height())
+            .unwrap()
+            .map(|b| b.hash())
+            .unwrap_or(Hash::ZERO)
+    }
+    fn is_finalized(&self, height: u64) -> bool {
+        height <= self.finalized_height()
+    }
+    fn finality_depth(&self) -> u64 {
+        self.depth.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn finality_mechanism(&self) -> sumchain_consensus::FinalityMechanism {
+        self.engine.finality_mechanism()
+    }
 }
 
 /// A server over a fresh database with no block: the next block is height 1.
@@ -157,6 +214,12 @@ fn serve(genesis: &Genesis) -> Served {
         )
         .unwrap(),
     );
+    let finality_depth = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let engine: Arc<dyn ConsensusQuery> = Arc::new(StoredChain {
+        engine,
+        db: db.clone(),
+        depth: finality_depth.clone(),
+    });
     let (tx_sender, rx) = mpsc::channel(256);
     // Keep the receiver alive for the server's lifetime, so a broadcast is
     // never refused for want of a listener.
@@ -212,6 +275,7 @@ fn serve(genesis: &Genesis) -> Served {
         mempool,
         params: genesis.params.clone(),
         server: Arc::new(server),
+        finality_depth,
     }
 }
 
@@ -1886,21 +1950,15 @@ fn tip(s: &Served) -> u64 {
 }
 
 /// `kp`'s version-2 envelope to bob at `nonce`, as an intent signed now.
-fn v2_intent(s: &Served, kp: &KeyPair, nonce: u64, salt: u8) -> Intent {
-    Intent {
-        envelope: v2_by(envelope_from(kp, nonce, salt, None), kp, CHAIN_ID),
-        form: Form::Version2,
-        signed_at: tip(s),
-    }
+async fn v2_intent(s: &Served, kp: &KeyPair, nonce: u64, salt: u8) -> Intent {
+    let m = v2_by(envelope_from(kp, nonce, salt, None), kp, CHAIN_ID);
+    Intent::signed_now(&s.server, m, Form::Version2).await
 }
 
 /// `kp`'s string-form envelope to bob, as an intent signed now.
-fn legacy_intent(s: &Served, kp: &KeyPair, nonce: u64, salt: u8) -> Intent {
-    Intent {
-        envelope: v1_by(envelope_from(kp, nonce, salt, None), kp),
-        form: Form::Legacy,
-        signed_at: tip(s),
-    }
+async fn legacy_intent(s: &Served, kp: &KeyPair, nonce: u64, salt: u8) -> Intent {
+    let m = v1_by(envelope_from(kp, nonce, salt, None), kp);
+    Intent::signed_now(&s.server, m, Form::Legacy).await
 }
 
 /// Registered senders beyond the five `serve` registers.
@@ -2047,14 +2105,16 @@ async fn burst_across_the_accounting_gate(tx_index_gate: Option<u64>) {
     s.publish(1, Vec::new());
 
     // The next block is H-2: the burst.
-    let mut trackers: Vec<Tracker> = [alice(), grace(), heidi()]
+    let mut trackers: Vec<Tracker> = Vec::new();
+    for (i, kp) in [alice(), grace(), heidi()]
         .iter()
         .chain(others.iter())
         .enumerate()
-        .map(|(i, kp)| Tracker::new(v2_intent(&s, kp, 0, i as u8)))
-        .collect();
-    trackers.push(Tracker::new(v2_intent(&s, &carol(), 0, 20)));
-    trackers.push(Tracker::new(legacy_intent(&s, &dave(), 0, 21)));
+    {
+        trackers.push(Tracker::new(v2_intent(&s, kp, 0, i as u8).await));
+    }
+    trackers.push(Tracker::new(v2_intent(&s, &carol(), 0, 20).await));
+    trackers.push(Tracker::new(legacy_intent(&s, &dave(), 0, 21).await));
     for t in trackers.iter_mut() {
         assert!(matches!(t.submit(&s.server).await, Step::Resubmitted(_)));
     }
@@ -2128,8 +2188,8 @@ async fn burst_across_the_accounting_gate(tx_index_gate: Option<u64>) {
 
     // The users sign anew: carol at her committed nonce, dave in version 2.
     let mut resigned = vec![
-        Tracker::new(v2_intent(&s, &carol(), 1, 22)),
-        Tracker::new(v2_intent(&s, &dave(), 0, 23)),
+        Tracker::new(v2_intent(&s, &carol(), 1, 22).await),
+        Tracker::new(v2_intent(&s, &dave(), 0, 23).await),
     ];
     for t in resigned.iter_mut() {
         assert!(matches!(t.submit(&s.server).await, Step::Resubmitted(_)));
@@ -2164,11 +2224,10 @@ async fn concurrent_retries_deliver_each_message_once() {
     const H: u64 = 3;
     let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(H)));
     let senders = registered(&s, 0xA0, 12);
-    let mut trackers: Vec<Tracker> = senders
-        .iter()
-        .enumerate()
-        .map(|(i, kp)| Tracker::new(v2_intent(&s, kp, 0, i as u8)))
-        .collect();
+    let mut trackers: Vec<Tracker> = Vec::new();
+    for (i, kp) in senders.iter().enumerate() {
+        trackers.push(Tracker::new(v2_intent(&s, kp, 0, i as u8).await));
+    }
     for t in trackers.iter_mut() {
         assert!(matches!(t.submit(&s.server).await, Step::Resubmitted(_)));
     }
@@ -2235,7 +2294,7 @@ async fn the_retries_of_one_message_are_bounded() {
     let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
     let store = tempfile::TempDir::new().unwrap();
     let path = store.path().join("intent.json");
-    let mut t = Tracker::persisted(v2_intent(&s, &alice(), 0, 1), &path);
+    let mut t = Tracker::persisted(v2_intent(&s, &alice(), 0, 1).await, &path);
     assert!(matches!(t.submit(&s.server).await, Step::Resubmitted(_)));
     let first_submitted_at = t.first_submitted_at;
     assert_eq!(first_submitted_at, Some(0));
@@ -2305,8 +2364,8 @@ async fn the_retries_of_one_message_are_bounded() {
 /// - with the transaction-index gate unset (production), carol's own direct
 ///   message in the same block replaces the copy's row (one row per sender
 ///   per block);
-/// - with 1,200 older rows for carol, the listing's one page (the oldest
-///   1,000) ends before it.
+/// - with 1,200 older rows for carol (recorded below the first block), the
+///   listing's one page (the oldest 1,000) ends before it.
 /// In both, carol's messaging nonce has moved past the envelope's, and this
 /// relay's wrapper is refused in the block. The client reports the message
 /// delivered, by the copy, and never asks the user to sign it again: a
@@ -2319,25 +2378,25 @@ async fn a_delivery_missing_from_the_message_listing_is_still_found() {
         let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
         if older_rows {
             let store = MessagingStore::new(&s.db);
-            for h in 1..=1_200u64 {
+            for i in 0..1_200u32 {
                 store
                     .store_message_event(
                         &sumchain_primitives::MessageEvent {
                             sender: carol().address(),
                             recipient_hash: recipient_hash(&bob().address()),
-                            message_id: Hash::hash(&h.to_be_bytes()),
+                            message_id: Hash::hash(&i.to_be_bytes()),
                             size: 1,
                             has_payment: false,
-                            block_height: h,
+                            block_height: 0,
                             timestamp: 0,
                         },
-                        0,
+                        i,
                     )
                     .unwrap();
             }
         }
-        let height = if older_rows { 2_000 } else { 1 };
-        let intent = v2_intent(&s, &carol(), 0, 7);
+        let height = 1;
+        let intent = v2_intent(&s, &carol(), 0, 7).await;
         let mut t = Tracker::new(intent.clone());
         let Step::Resubmitted(own) = t.submit(&s.server).await else {
             panic!("relayed");
@@ -2417,12 +2476,12 @@ fn strip_0x(h: &str) -> String {
 async fn two_intents_with_the_same_content_are_told_apart() {
     let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
     let same = |nonce: u64| {
-        let mut i = v2_intent(&s, &carol(), nonce, 7);
-        i.envelope.message_data = valid_message(recipient_hash(&bob().address()));
-        i.envelope = v2(i.envelope);
-        i
+        let mut m = envelope_from(&carol(), nonce, 7, None);
+        m.message_data = valid_message(recipient_hash(&bob().address()));
+        v2(m)
     };
-    let (first, second) = (same(0), same(1));
+    let first = Intent::signed_now(&s.server, same(0), Form::Version2).await;
+    let second = Intent::signed_now(&s.server, same(1), Form::Version2).await;
     assert_eq!(first.envelope.message_data, second.envelope.message_data);
     let mut a = Tracker::new(first.clone());
     let mut b = Tracker::new(second.clone());
@@ -2477,4 +2536,256 @@ async fn two_intents_with_the_same_content_are_told_apart() {
     );
     assert_eq!((deliveries(&s, &first), deliveries(&s, &second)), (1, 1));
     assert_eq!(s.messaging_nonce(&carol()), 2);
+}
+
+/// An incomplete search is uncertain, never "not delivered".
+/// - A range not yet final (blocks are final 2 below the tip): carol's own
+///   direct message and then her relayed envelope at nonce 0 are carried in
+///   one block; the envelope is refused there and her nonce has moved past
+///   it. While that block is not final the client reports `Uncertain`, asks
+///   for no signature and reports nothing lost; once it is final, the user is
+///   asked to sign again.
+/// - A block that is not available: a gap in the stored chain inside the
+///   range searched gives `Uncertain`, naming the block, and no outcome.
+#[tokio::test]
+async fn an_incomplete_search_is_uncertain_never_not_delivered() {
+    use sumchain_primitives::messaging::SendMessageData;
+    use sumchain_primitives::{MessagingOperation, MessagingTxData};
+    // A range not yet final.
+    {
+        let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
+        s.finality_depth
+            .store(2, std::sync::atomic::Ordering::SeqCst);
+        let mut t = Tracker::new(v2_intent(&s, &carol(), 0, 1).await);
+        let Step::Resubmitted(wrapper) = t.submit(&s.server).await else {
+            panic!("relayed");
+        };
+        let rh = recipient_hash(&bob().address());
+        let direct = s.outer(
+            &carol(),
+            0,
+            RELAY_FEE,
+            MessagingTxData {
+                operation: MessagingOperation::SendMessageDirect,
+                data: bincode::serialize(&SendMessageData {
+                    message_data: valid_message(rh),
+                    recipient_hash: rh,
+                })
+                .unwrap(),
+            },
+        );
+        let carried = s.mempool.get(&Hash::from_hex(&wrapper).unwrap()).unwrap();
+        let receipts = s.publish(1, vec![direct, carried]);
+        assert_eq!(receipts[0].status, TxStatus::Success);
+        assert_ne!(receipts[1].status, TxStatus::Success);
+        assert_eq!(s.messaging_nonce(&carol()), 1);
+
+        for height in 2..=3 {
+            let step = t.step(&s.server).await;
+            assert!(matches!(step, Step::Uncertain(_)), "{step:?}");
+            assert_eq!(t.outcome, None);
+            s.publish(height, Vec::new());
+        }
+        let step = t.step(&s.server).await;
+        assert!(
+            matches!(step, Step::Done(Outcome::NeedsUserSignature(_))),
+            "once block 1 is final: {step:?}"
+        );
+        assert_eq!(t.requests, 1, "no request while uncertain");
+    }
+    // A block that is not available.
+    {
+        let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
+        let mut t = Tracker::new(v2_intent(&s, &alice(), 0, 2).await);
+        assert!(matches!(t.submit(&s.server).await, Step::Resubmitted(_)));
+        s.publish(2, Vec::new());
+        let step = t.step(&s.server).await;
+        assert_eq!(
+            step,
+            Step::Uncertain("block 1 is not available".to_string())
+        );
+        assert_eq!((t.outcome.clone(), t.requests), (None, 1));
+    }
+}
+
+/// A client that crashes after the relay accepted its request, before it
+/// recorded the wrapper, makes no second wrapper. On restart the request is
+/// counted and in flight; the client waits for a block, then asks again,
+/// and the relay refuses: an envelope already pending (by its nonce for the
+/// version-2 envelope; as the identical signed envelope for the string form
+/// below the envelope gate). The one wrapper is carried and the message is
+/// delivered once; the count is one.
+#[tokio::test]
+async fn a_crash_after_the_relay_accepted_makes_no_second_wrapper() {
+    for form in [Form::Version2, Form::Legacy] {
+        let gates = if form == Form::Version2 {
+            (Some(1), Some(1))
+        } else {
+            (None, None)
+        };
+        let s = serve(&genesis_on(CHAIN_ID, gates.0, gates.1));
+        let intent = if form == Form::Version2 {
+            v2_intent(&s, &carol(), 0, 3).await
+        } else {
+            legacy_intent(&s, &carol(), 0, 3).await
+        };
+        let store = tempfile::TempDir::new().unwrap();
+        let path = store.path().join("intent.json");
+        let mut t = Tracker::persisted(intent.clone(), &path);
+        let made = t.submit_then_crash(&s.server).await.expect("a wrapper");
+        drop(t);
+
+        let mut t = Tracker::load(&path);
+        assert_eq!((t.requests, t.in_flight, t.wrappers.len()), (1, Some(0), 0));
+        assert_eq!(
+            t.step(&s.server).await,
+            Step::Wait,
+            "{form:?}: a block first"
+        );
+        s.publish(1, Vec::new());
+        assert_eq!(
+            t.step(&s.server).await,
+            Step::Wait,
+            "{form:?}: the relay refuses a second wrapper"
+        );
+        assert_eq!(s.pending_sponsor_nonces(), vec![0], "{form:?}: one wrapper");
+        assert_eq!(t.requests, 1, "{form:?}: the refusal is not counted");
+
+        s.publish_pool(2);
+        assert_eq!(
+            t.step(&s.server).await,
+            Step::Done(Outcome::Delivered { tx_hash: made }),
+            "{form:?}"
+        );
+        assert_eq!(deliveries(&s, &intent), 1, "{form:?}");
+    }
+}
+
+/// The three envelope fields `messaging_getMessageData` reports are the
+/// stored transaction's envelope bytes; the fields it reported before keep
+/// their values; a non-sponsored message gets no such object at all; and
+/// clients still parse the response: one that knows only the earlier fields
+/// (and ignores the others, serde's default) and one with a strict schema of
+/// the current fields. A strict client of the earlier shape must be updated:
+/// the one compatibility cost, documented.
+#[tokio::test]
+async fn message_data_fields_are_the_stored_envelope_and_clients_parse_them() {
+    use serde::Deserialize;
+    use sumchain_primitives::messaging::SendMessageData;
+    use sumchain_primitives::{MessagingOperation, MessagingTxData};
+
+    #[allow(dead_code)]
+    #[derive(Deserialize)]
+    struct EarlierShape {
+        tx_hash: String,
+        block_height: u64,
+        sender: String,
+        recipient_hash: String,
+        message_data: String,
+        sender_pubkey: String,
+        has_payment: bool,
+        payment_amount: Option<String>,
+    }
+    #[allow(dead_code)]
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StrictEarlierShape {
+        tx_hash: String,
+        block_height: u64,
+        sender: String,
+        recipient_hash: String,
+        message_data: String,
+        sender_pubkey: String,
+        has_payment: bool,
+        payment_amount: Option<String>,
+    }
+    #[allow(dead_code)]
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StrictCurrentShape {
+        tx_hash: String,
+        block_height: u64,
+        sender: String,
+        recipient_hash: String,
+        message_data: String,
+        sender_pubkey: String,
+        envelope_signature: String,
+        envelope_nonce: u64,
+        envelope_expiry: u64,
+        has_payment: bool,
+        payment_amount: Option<String>,
+    }
+
+    let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
+    let m = v2(envelope(0, 9, None));
+    let relayed = s.relay(&m).await.unwrap();
+    let rh = recipient_hash(&bob().address());
+    let direct = s.outer(
+        &alice(),
+        0,
+        RELAY_FEE,
+        MessagingTxData {
+            operation: MessagingOperation::SendMessageDirect,
+            data: bincode::serialize(&SendMessageData {
+                message_data: valid_message(rh),
+                recipient_hash: rh,
+            })
+            .unwrap(),
+        },
+    );
+    s.mempool.add(direct.clone()).unwrap();
+    let (_, receipts) = s.publish_pool(1);
+    assert!(receipts.iter().all(|r| r.status == TxStatus::Success));
+
+    let info = s
+        .server
+        .messaging_get_message_data(relayed.clone())
+        .await
+        .unwrap()
+        .expect("an executed relayed message");
+    // The new fields: the stored envelope's own bytes.
+    assert_eq!(
+        info.envelope_signature,
+        format!("0x{}", hex::encode(m.signature))
+    );
+    assert_eq!(
+        (info.envelope_nonce, info.envelope_expiry),
+        (m.nonce, m.expiry)
+    );
+    // The earlier fields: their values as before.
+    assert_eq!(strip_0x(&info.tx_hash), strip_0x(&relayed));
+    assert_eq!(info.block_height, 1);
+    assert_eq!(info.sender, carol().address().to_base58());
+    assert_eq!(
+        info.recipient_hash,
+        format!("0x{}", hex::encode(m.recipient_hash))
+    );
+    assert_eq!(
+        info.message_data,
+        format!("0x{}", hex::encode(&m.message_data))
+    );
+    assert_eq!(
+        info.sender_pubkey,
+        format!("0x{}", hex::encode(m.sender_pubkey))
+    );
+    assert!(!info.has_payment);
+    assert_eq!(info.payment_amount, None);
+
+    // Clients.
+    let json = serde_json::to_value(&info).unwrap();
+    assert!(serde_json::from_value::<EarlierShape>(json.clone()).is_ok());
+    assert!(serde_json::from_value::<StrictCurrentShape>(json.clone()).is_ok());
+    assert!(
+        serde_json::from_value::<StrictEarlierShape>(json).is_err(),
+        "a strict client of the earlier shape must be updated"
+    );
+
+    // A non-sponsored message: no message-data object, as before.
+    let err = s
+        .server
+        .messaging_get_message_data(direct.hash().to_hex())
+        .await
+        .expect_err("not a relayed message");
+    assert_eq!(err.code(), -32602);
+    assert_eq!(err.message(), "Not a sponsored message transaction");
 }

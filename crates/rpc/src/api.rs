@@ -1203,8 +1203,13 @@ pub trait SumChainApi {
     /// Only for a relayed (sponsored) message the canonical chain executed:
     /// `None` for a transaction with no canonical receipt or a refused one.
     /// A relayed message never carries a payment, so `has_payment` is false.
-    /// The envelope's signature, nonce and expiry are reported, so a client
-    /// can match the exact envelope it signed.
+    /// The envelope's signature, nonce and expiry are reported
+    /// (`envelope_signature`, `envelope_nonce`, `envelope_expiry`), so a client
+    /// can match the exact envelope it signed. They are the stored
+    /// transaction's own envelope bytes, already on chain; the earlier fields
+    /// keep their values. A client that rejects unknown fields must add these
+    /// three. A transaction that is not a relayed message is refused
+    /// (`-32602`) as before, so it has no such object.
     #[method(name = "messaging_getMessageData")]
     async fn messaging_get_message_data(
         &self,
@@ -1261,15 +1266,20 @@ pub trait SumChainApi {
     /// key (a wrapper) and returns the wrapper's hash. A wrapper the chain
     /// refuses with `InvalidNonce` never executed: it charged no fee and moved
     /// no messaging nonce. On such a receipt a client looks for the exact
-    /// envelope the user signed among the transactions of every block since it
-    /// was signed (at or before its first submission): `get_block_by_height`,
-    /// then `messaging_getMessageData` for each transaction, which answers from
-    /// the stored transaction and its receipt, and only for a relayed message
-    /// that executed successfully. It matches the envelope's signature, nonce
-    /// and expiry as well as sender key, recipient and content (two messages
-    /// with the same text are two intents), whichever wrapper carried it; and
-    /// it reads `messaging_getSenderNonce`. It checks again after a chain
-    /// switch. `messaging_getSentMessages` is not a
+    /// envelope the user signed among the transactions of every block above the
+    /// height that was final when it was signed (`get_finality` at signing; a
+    /// chain switch can replace blocks above it, even below the signing
+    /// height), up to the tip: `get_block_by_height`, then
+    /// `messaging_getMessageData` for each transaction, which answers from the
+    /// stored transaction and its receipt, and only for a relayed message that
+    /// executed successfully. It matches the envelope's signature, nonce and
+    /// expiry as well as sender key, recipient and content (two messages with
+    /// the same text are two intents), whichever wrapper carried it; and it
+    /// reads `messaging_getSenderNonce`. It checks again after a chain switch.
+    /// A search that cannot be completed (a block not available, an RPC
+    /// error) or that covers blocks not yet final does not mean "not
+    /// delivered": the client neither asks for a new signature nor reports the
+    /// message lost until the blocks that show it are final. `messaging_getSentMessages` is not a
     /// substitute: it returns the oldest 1,000 records, and below the
     /// transaction-index gate it keeps one row per sender per block.
     /// - the message is on the chain: it is delivered, and never sent again;
@@ -1280,8 +1290,13 @@ pub trait SumChainApi {
     /// - a string-form envelope the relay no longer takes: the user signs a
     ///   version-2 envelope; the relay cannot convert it.
     ///
+    /// The relay refuses a second wrapper of an envelope already pending in its
+    /// pool: by its nonce for a version-2 envelope, as the identical signed
+    /// envelope for the string form.
+    ///
     /// A moved nonce is never read as a delivery. The client bounds its
-    /// retries, and persists the count (written before each request) and the
+    /// retries, and persists the count (written, and synced, before each
+    /// request, and lowered only on a definite refusal) and the
     /// first-submission height with the message (the reference client
     /// in the RPC tests asks for at most three wrappers per message); the
     /// sponsor pays for each wrapper that executes, and nothing for one
