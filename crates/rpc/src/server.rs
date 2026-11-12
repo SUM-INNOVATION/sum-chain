@@ -1569,6 +1569,23 @@ impl RpcServer {
         ))
     }
 
+    /// Whether this node's pool holds a relayed `SendMessage` carrying the
+    /// same signed string-form envelope as `m`: the same sender key,
+    /// signature, nonce, expiry, recipient and content, from any sponsor.
+    /// The pool is read in place, comparing the sender key first.
+    fn string_form_envelope_pending(&self, m: &SponsoredMessage) -> bool {
+        self.mempool
+            .filter_map_held(|tx| relayed_envelope_from(tx, &m.sender_pubkey))
+            .iter()
+            .any(|p| {
+                p.signature == m.signature
+                    && p.nonce == m.nonce
+                    && p.expiry == m.expiry
+                    && p.recipient_hash == m.recipient_hash
+                    && p.message_data == m.message_data
+            })
+    }
+
     /// The height the next block will have: the chain tip plus one. A store
     /// read error is surfaced, never read as a tip of 0.
     fn relay_inclusion_height(&self) -> std::result::Result<u64, RpcError> {
@@ -4918,6 +4935,15 @@ impl SumChainApiServer for RpcServer {
                 ))
                 .into());
             }
+        } else if self.string_form_envelope_pending(&sponsored_msg) {
+            // The string form carries no envelope nonce, so the sequence above
+            // does not apply; a second wrapper of the same signed envelope is
+            // refused while one is pending in this node's pool (a client
+            // resubmitting after a restart, say).
+            return Err(RpcError::InvalidParams(
+                "This signed envelope is already pending in this node's pool".to_string(),
+            )
+            .into());
         }
 
         let sponsor_nonce = self.relay_sponsor_nonce(&sponsor_address, inclusion_height)?;
