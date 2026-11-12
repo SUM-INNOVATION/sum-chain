@@ -1459,6 +1459,8 @@ impl RpcServer {
         inclusion_height: u64,
     ) -> std::result::Result<u64, RpcError> {
         let pending = self.mempool.get_by_sender(sponsor);
+        #[cfg(test)]
+        relay_read_hook::between_reads();
         let committed = self
             .state
             .get_nonce(sponsor)
@@ -1543,6 +1545,30 @@ impl RpcServer {
         })
     }
 
+    /// The sender's committed messaging nonce, and the nonces at or above it
+    /// of the version-2 envelopes from that sender this node's pool holds.
+    /// The pool is read before the committed nonce (see
+    /// [`Self::relay_sponsor_nonce`]).
+    fn envelope_sequence(
+        &self,
+        sender_key: &[u8; 32],
+        sender: &Address,
+        chain_id: u64,
+    ) -> std::result::Result<(u64, BTreeSet<u64>), RpcError> {
+        let pending = self.pending_v2_envelope_nonces(sender_key, chain_id);
+        #[cfg(test)]
+        relay_read_hook::between_reads();
+        let committed = MessagingStore::new(&self.db)
+            .get_sender_nonce(sender)
+            .map_err(|e| {
+                RpcError::Internal(format!("Failed to read the sender's messaging nonce: {e}"))
+            })?;
+        Ok((
+            committed,
+            pending.into_iter().filter(|n| *n >= committed).collect(),
+        ))
+    }
+
     /// The height the next block will have: the chain tip plus one. A store
     /// read error is surfaced, never read as a tip of 0.
     fn relay_inclusion_height(&self) -> std::result::Result<u64, RpcError> {
@@ -1593,6 +1619,29 @@ impl RpcServer {
             ),
             _ => false,
         })
+    }
+}
+
+/// A hook between the relay's pool read and its committed-nonce read, for
+/// this crate's unit tests only: a test can commit a block exactly there.
+/// Compiled out of every other build.
+#[cfg(test)]
+pub(crate) mod relay_read_hook {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    }
+
+    /// Runs `f` at the next point between the two reads on this thread.
+    pub(crate) fn install(f: impl FnOnce() + 'static) {
+        HOOK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    pub(crate) fn between_reads() {
+        if let Some(f) = HOOK.with(|h| h.borrow_mut().take()) {
+            f();
+        }
     }
 }
 
@@ -4839,11 +4888,8 @@ impl SumChainApiServer for RpcServer {
             // before the committed nonce: the node commits a block before it
             // removes the block's transactions from the pool, so a block
             // committed between the two reads is seen in one of them.
-            let pending = self.pending_v2_envelope_nonces(&sender_pubkey, chain_id);
-            let committed = store.get_sender_nonce(&sender_address).map_err(|e| {
-                RpcError::Internal(format!("Failed to read the sender's messaging nonce: {e}"))
-            })?;
-            let held: BTreeSet<u64> = pending.into_iter().filter(|n| *n >= committed).collect();
+            let (committed, held) =
+                self.envelope_sequence(&sender_pubkey, &sender_address, chain_id)?;
             let next = first_free_from(committed, &held);
             if sponsored_msg.nonce < committed {
                 return Err(RpcError::InvalidParams(format!(
@@ -15715,5 +15761,166 @@ mod registry_dry_run_rpc_tests {
         assert_eq!(tags(&disabled), vec!["not_admissible_status"]);
         assert_eq!(disabled.candidate.as_ref().unwrap().status, "disabled");
         assert_ne!(refused.refusals, disabled.refusals);
+    }
+}
+
+#[cfg(test)]
+mod relay_read_order_tests {
+    //! The relay reads the pool before the committed nonce, both for the
+    //! sponsor nonce and for a sender's envelope sequence. A block committed
+    //! between the two reads (the node writes the block, then removes its
+    //! transactions from the pool) is then seen in one of them. The hook in
+    //! `relay_read_hook` places such a commit exactly between the reads.
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_primitives::{sponsored_send_v2_signing_preimage, TransactionV2};
+    use sumchain_state::MempoolConfig;
+    use sumchain_storage::schema::AccountState;
+    use sumchain_storage::StateStore;
+    use tempfile::TempDir;
+
+    const CHAIN_ID: u64 = 1;
+
+    /// A server whose next block is at or above the accounting gate, so
+    /// every pending messaging transaction of the sponsor holds its nonce.
+    fn server() -> (RpcServer, Arc<Database>, Arc<Mempool>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), CHAIN_ID));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            CHAIN_ID,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1_000_000u128)]),
+            ChainParams::with_v2_enabled(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(
+                db.clone(),
+                state.clone(),
+                mempool.clone(),
+                &genesis,
+                Some(validator),
+            )
+            .unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(64);
+        let mut params = ChainParams::with_v2_enabled();
+        params.messaging_sponsored_envelope_verification_enabled_from_height = Some(1);
+        params.messaging_fee_nonce_accounting_enabled_from_height = Some(1);
+        let srv = RpcServer::new(
+            db.clone(),
+            state,
+            mempool.clone(),
+            engine,
+            tx_sender,
+            Arc::new(|| 0usize),
+        )
+        .with_chain_params(params);
+        (srv, db, mempool, dir)
+    }
+
+    /// `sponsor`'s relayed `SendMessage` of `envelope` at account nonce `nonce`.
+    fn wrapper(sponsor: &KeyPair, nonce: u64, envelope: &SponsoredMessage) -> SignedTransaction {
+        let tx = TransactionV2::messaging(
+            CHAIN_ID,
+            sponsor.address(),
+            1_000_000,
+            nonce,
+            MessagingTxData {
+                operation: MessagingOperation::SendMessage,
+                data: bincode::serialize(envelope).unwrap(),
+            },
+        );
+        let sig = sumchain_crypto::sign(tx.signing_hash().as_bytes(), sponsor.private_key());
+        SignedTransaction::new_v2(tx, *sig.as_bytes(), *sponsor.public_key().as_bytes())
+    }
+
+    /// `sender`'s version-2 envelope at `nonce`.
+    fn envelope(sender: &KeyPair, nonce: u64) -> SponsoredMessage {
+        let mut m = SponsoredMessage {
+            message_data: vec![1, 2, 3],
+            recipient_hash: [9u8; 32],
+            signature: [0u8; 64],
+            sender_pubkey: *sender.public_key().as_bytes(),
+            nonce,
+            expiry: u64::MAX,
+            koppa_amount: None,
+        };
+        let preimage = sponsored_send_v2_signing_preimage(CHAIN_ID, &m);
+        m.signature = *sumchain_crypto::sign(&preimage, sender.private_key()).as_bytes();
+        m
+    }
+
+    /// The sponsor's wrapper at nonce 0 is pending; a block carrying it is
+    /// committed between the relay's two reads (the sponsor's nonce becomes 1,
+    /// then the wrapper leaves the pool). The relay's next sponsor nonce is 1,
+    /// not the nonce the block used.
+    #[test]
+    fn a_block_committed_between_the_reads_is_seen_by_the_sponsor_nonce() {
+        let (srv, db, mempool, _dir) = server();
+        let sponsor = KeyPair::from_bytes([0x65; 32]);
+        let carried = wrapper(&sponsor, 0, &envelope(&KeyPair::from_bytes([0x64; 32]), 0));
+        mempool.add(carried.clone()).unwrap();
+        assert_eq!(srv.relay_sponsor_nonce(&sponsor.address(), 1).unwrap(), 1);
+
+        let (db2, mempool2, address) = (db.clone(), mempool.clone(), sponsor.address());
+        relay_read_hook::install(move || {
+            StateStore::new(&db2)
+                .put_account(
+                    &address,
+                    &AccountState {
+                        balance: 1,
+                        nonce: 1,
+                    },
+                )
+                .unwrap();
+            assert!(mempool2.remove(&carried.hash()).is_some());
+        });
+        assert_eq!(
+            srv.relay_sponsor_nonce(&sponsor.address(), 1).unwrap(),
+            1,
+            "the nonce the committed block used is not given again"
+        );
+        assert!(mempool.is_empty(), "the hook ran");
+    }
+
+    /// carol's envelope at nonce 0 is pending in another sponsor's wrapper; a
+    /// block carrying it is committed between the relay's two reads (carol's
+    /// messaging nonce becomes 1, then the wrapper leaves the pool). Her next
+    /// envelope nonce is 1, not the one the block used.
+    #[test]
+    fn a_block_committed_between_the_reads_is_seen_by_the_envelope_sequence() {
+        let (srv, db, mempool, _dir) = server();
+        let carol = KeyPair::from_bytes([0x64; 32]);
+        let carried = wrapper(&KeyPair::from_bytes([0x67; 32]), 0, &envelope(&carol, 0));
+        mempool.add(carried.clone()).unwrap();
+        let key = *carol.public_key().as_bytes();
+        let (committed, held) = srv
+            .envelope_sequence(&key, &carol.address(), CHAIN_ID)
+            .unwrap();
+        assert_eq!(first_free_from(committed, &held), 1);
+
+        let (db2, mempool2, address) = (db.clone(), mempool.clone(), carol.address());
+        relay_read_hook::install(move || {
+            MessagingStore::new(&db2)
+                .set_sender_nonce(&address, 1)
+                .unwrap();
+            assert!(mempool2.remove(&carried.hash()).is_some());
+        });
+        let (committed, held) = srv
+            .envelope_sequence(&key, &carol.address(), CHAIN_ID)
+            .unwrap();
+        assert_eq!(
+            first_free_from(committed, &held),
+            1,
+            "the envelope nonce the committed block used is not taken again"
+        );
+        assert!(mempool.is_empty(), "the hook ran");
     }
 }
