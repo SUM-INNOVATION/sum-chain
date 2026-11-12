@@ -2661,31 +2661,21 @@ async fn a_crash_after_the_relay_accepted_makes_no_second_wrapper() {
     }
 }
 
-/// The three envelope fields `messaging_getMessageData` reports are the
-/// stored transaction's envelope bytes; the fields it reported before keep
-/// their values; a non-sponsored message gets no such object at all; and
-/// clients still parse the response: one that knows only the earlier fields
-/// (and ignores the others, serde's default) and one with a strict schema of
-/// the current fields. A strict client of the earlier shape must be updated:
-/// the one compatibility cost, documented.
+/// `messaging_getMessageData` keeps its earlier response exactly: the same
+/// fields, in the same order, with the same values, serialized byte for byte
+/// as before (pinned here against the expected JSON), and a strict client of
+/// that shape parses it. The envelope's signature, nonce and expiry come from
+/// a separate read-only method, `messaging_getSponsoredEnvelope`: every field
+/// is the stored transaction's own envelope bytes; it answers only for an
+/// executed relayed message (`None` for one not yet carried, or refused in
+/// the block); any other transaction is refused (`-32602`), as
+/// `messaging_getMessageData` refuses it.
 #[tokio::test]
-async fn message_data_fields_are_the_stored_envelope_and_clients_parse_them() {
+async fn message_data_keeps_its_shape_and_the_envelope_has_its_own_method() {
     use serde::Deserialize;
     use sumchain_primitives::messaging::SendMessageData;
     use sumchain_primitives::{MessagingOperation, MessagingTxData};
 
-    #[allow(dead_code)]
-    #[derive(Deserialize)]
-    struct EarlierShape {
-        tx_hash: String,
-        block_height: u64,
-        sender: String,
-        recipient_hash: String,
-        message_data: String,
-        sender_pubkey: String,
-        has_payment: bool,
-        payment_amount: Option<String>,
-    }
     #[allow(dead_code)]
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -2702,18 +2692,15 @@ async fn message_data_fields_are_the_stored_envelope_and_clients_parse_them() {
     #[allow(dead_code)]
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct StrictCurrentShape {
+    struct StrictEnvelope {
         tx_hash: String,
         block_height: u64,
-        sender: String,
+        sender_pubkey: String,
         recipient_hash: String,
         message_data: String,
-        sender_pubkey: String,
         envelope_signature: String,
         envelope_nonce: u64,
         envelope_expiry: u64,
-        has_payment: bool,
-        payment_amount: Option<String>,
     }
 
     let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
@@ -2734,58 +2721,94 @@ async fn message_data_fields_are_the_stored_envelope_and_clients_parse_them() {
         },
     );
     s.mempool.add(direct.clone()).unwrap();
+    // Not carried yet: neither method has an answer.
+    assert!(s
+        .server
+        .messaging_get_sponsored_envelope(relayed.clone())
+        .await
+        .unwrap()
+        .is_none());
     let (_, receipts) = s.publish_pool(1);
     assert!(receipts.iter().all(|r| r.status == TxStatus::Success));
 
+    // getMessageData: its earlier response, byte for byte.
     let info = s
         .server
         .messaging_get_message_data(relayed.clone())
         .await
         .unwrap()
         .expect("an executed relayed message");
-    // The new fields: the stored envelope's own bytes.
+    let expected = format!(
+        "{{\"tx_hash\":\"0x{}\",\"block_height\":1,\"sender\":\"{}\",\"recipient_hash\":\"0x{}\",\
+         \"message_data\":\"0x{}\",\"sender_pubkey\":\"0x{}\",\"has_payment\":false,\
+         \"payment_amount\":null}}",
+        strip_0x(&relayed),
+        carol().address().to_base58(),
+        hex::encode(m.recipient_hash),
+        hex::encode(&m.message_data),
+        hex::encode(m.sender_pubkey),
+    );
+    assert_eq!(serde_json::to_string(&info).unwrap(), expected);
+    assert!(serde_json::from_str::<StrictEarlierShape>(&expected).is_ok());
+
+    // getSponsoredEnvelope: the stored envelope's bytes.
+    let env = s
+        .server
+        .messaging_get_sponsored_envelope(relayed.clone())
+        .await
+        .unwrap()
+        .expect("an executed relayed message");
+    assert_eq!(strip_0x(&env.tx_hash), strip_0x(&relayed));
+    assert_eq!(env.block_height, 1);
     assert_eq!(
-        info.envelope_signature,
-        format!("0x{}", hex::encode(m.signature))
+        env.sender_pubkey,
+        format!("0x{}", hex::encode(m.sender_pubkey))
     );
     assert_eq!(
-        (info.envelope_nonce, info.envelope_expiry),
-        (m.nonce, m.expiry)
-    );
-    // The earlier fields: their values as before.
-    assert_eq!(strip_0x(&info.tx_hash), strip_0x(&relayed));
-    assert_eq!(info.block_height, 1);
-    assert_eq!(info.sender, carol().address().to_base58());
-    assert_eq!(
-        info.recipient_hash,
+        env.recipient_hash,
         format!("0x{}", hex::encode(m.recipient_hash))
     );
     assert_eq!(
-        info.message_data,
+        env.message_data,
         format!("0x{}", hex::encode(&m.message_data))
     );
     assert_eq!(
-        info.sender_pubkey,
-        format!("0x{}", hex::encode(m.sender_pubkey))
+        env.envelope_signature,
+        format!("0x{}", hex::encode(m.signature))
     );
-    assert!(!info.has_payment);
-    assert_eq!(info.payment_amount, None);
-
-    // Clients.
-    let json = serde_json::to_value(&info).unwrap();
-    assert!(serde_json::from_value::<EarlierShape>(json.clone()).is_ok());
-    assert!(serde_json::from_value::<StrictCurrentShape>(json.clone()).is_ok());
-    assert!(
-        serde_json::from_value::<StrictEarlierShape>(json).is_err(),
-        "a strict client of the earlier shape must be updated"
+    assert_eq!(
+        (env.envelope_nonce, env.envelope_expiry),
+        (m.nonce, m.expiry)
     );
+    assert!(serde_json::from_value::<StrictEnvelope>(serde_json::to_value(&env).unwrap()).is_ok());
 
-    // A non-sponsored message: no message-data object, as before.
-    let err = s
+    // A non-relayed message: refused by both, as before.
+    for err in [
+        s.server
+            .messaging_get_message_data(direct.hash().to_hex())
+            .await
+            .expect_err("not a relayed message"),
+        s.server
+            .messaging_get_sponsored_envelope(direct.hash().to_hex())
+            .await
+            .expect_err("not a relayed message"),
+    ] {
+        assert_eq!(err.code(), -32602);
+        assert_eq!(err.message(), "Not a sponsored message transaction");
+    }
+
+    // A relayed message refused in the block: no answer.
+    let refused = s.relayed_by(
+        &erin(),
+        0,
+        &v2_by(envelope_from(&dave(), 5, 10, None), &dave(), CHAIN_ID),
+    );
+    let r = s.publish(2, vec![refused.clone()]);
+    assert_ne!(r[0].status, TxStatus::Success);
+    assert!(s
         .server
-        .messaging_get_message_data(direct.hash().to_hex())
+        .messaging_get_sponsored_envelope(refused.hash().to_hex())
         .await
-        .expect_err("not a relayed message");
-    assert_eq!(err.code(), -32602);
-    assert_eq!(err.message(), "Not a sponsored message transaction");
+        .unwrap()
+        .is_none());
 }

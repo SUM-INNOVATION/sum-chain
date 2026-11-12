@@ -12,9 +12,9 @@
 //!    transactions the canonical chain carried and executed successfully:
 //!    first its own wrappers, then every block above the height that was
 //!    final when the user signed (`get_finality` at signing), up to the tip,
-//!    each transaction read through `messaging_getMessageData`, which answers
-//!    from the stored transaction and its receipt and only for a relayed
-//!    message that executed. Anchoring at the final height, not the signing
+//!    each transaction read through `messaging_getSponsoredEnvelope`, which
+//!    answers from the stored transaction and its receipt and only for a
+//!    relayed message that executed. Anchoring at the final height, not the signing
 //!    height, matters: a chain switch whose fork lies below the signing height
 //!    can adopt a block below it that carries the envelope (another relay's
 //!    copy). A message carried by a wrapper the client did not request counts
@@ -329,7 +329,7 @@ impl Tracker {
     /// transaction of every block above the height final at signing.
     async fn search(&self, server: &RpcServer) -> Search {
         let m = &self.intent.envelope;
-        let delivers = |d: &sumchain_rpc::types::MessageDataInfo| {
+        let delivers = |d: &sumchain_rpc::types::SponsoredEnvelopeInfo| {
             strip(&d.envelope_signature) == hex::encode(m.signature)
                 && d.envelope_nonce == m.nonce
                 && d.envelope_expiry == m.expiry
@@ -341,7 +341,7 @@ impl Tracker {
         // `InvalidParams`: definitely not this intent. Any other error leaves
         // the search incomplete.
         let read = |h: String| async move {
-            match server.messaging_get_message_data(h.clone()).await {
+            match server.messaging_get_sponsored_envelope(h.clone()).await {
                 Ok(Some(d)) => Ok(delivers(&d).then_some(h)),
                 Ok(None) => Ok(None),
                 Err(e) if e.code() == INVALID_PARAMS => Ok(None),

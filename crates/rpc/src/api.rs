@@ -42,7 +42,8 @@ use crate::types::{
     RevokeAcademicCredentialRequest, RevokeAcademicCredentialResponse,
     RevokeEmploymentCredentialRequest, RevokeEmploymentCredentialResponse,
     RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary, SpamReportInfo,
-    SponsoredRegistrationRequest, SponsoredRegistrationResponse, StakingParamsInfo, StakingSummary,
+    SponsoredEnvelopeInfo, SponsoredRegistrationRequest, SponsoredRegistrationResponse,
+    StakingParamsInfo, StakingSummary,
     StakingValidatorInfo, SubmitSponsoredMessageRequest, TokenHoldings, TokenInfo, TokenMintersInfo,
     TransactionHistoryResponse, TransactionInfo, UnbondingDelegationRpcInfo,
     ValidatorDelegationSummary, ValidatorSetInfo, ValidatorSetRpcInfo, ValidatorSigningRpcInfo,
@@ -1203,18 +1204,26 @@ pub trait SumChainApi {
     /// Only for a relayed (sponsored) message the canonical chain executed:
     /// `None` for a transaction with no canonical receipt or a refused one.
     /// A relayed message never carries a payment, so `has_payment` is false.
-    /// The envelope's signature, nonce and expiry are reported
-    /// (`envelope_signature`, `envelope_nonce`, `envelope_expiry`), so a client
-    /// can match the exact envelope it signed. They are the stored
-    /// transaction's own envelope bytes, already on chain; the earlier fields
-    /// keep their values. A client that rejects unknown fields must add these
-    /// three. A transaction that is not a relayed message is refused
-    /// (`-32602`) as before, so it has no such object.
     #[method(name = "messaging_getMessageData")]
     async fn messaging_get_message_data(
         &self,
         tx_hash: String,
     ) -> Result<Option<MessageDataInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// The signed envelope an executed relayed message carried: the sender's
+    /// key, recipient, content, and the envelope's signature, nonce and expiry,
+    /// read from the stored transaction (nothing derived; all of it already
+    /// on chain). A client matches these against the envelope it signed to
+    /// tell whether its own message was delivered (see
+    /// `messaging_submitSponsored`). Read-only.
+    ///
+    /// `None` for a relayed message with no canonical receipt or a refused
+    /// one. A transaction that is not a relayed message is refused (`-32602`).
+    #[method(name = "messaging_getSponsoredEnvelope")]
+    async fn messaging_get_sponsored_envelope(
+        &self,
+        tx_hash: String,
+    ) -> Result<Option<SponsoredEnvelopeInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get pending payment by message ID
     #[method(name = "messaging_getPendingPayment")]
@@ -1270,12 +1279,12 @@ pub trait SumChainApi {
     /// height that was final when it was signed (`get_finality` at signing; a
     /// chain switch can replace blocks above it, even below the signing
     /// height), up to the tip: `get_block_by_height`, then
-    /// `messaging_getMessageData` for each transaction, which answers from the
-    /// stored transaction and its receipt, and only for a relayed message that
-    /// executed successfully. It matches the envelope's signature, nonce and
-    /// expiry as well as sender key, recipient and content (two messages with
-    /// the same text are two intents), whichever wrapper carried it; and it
-    /// reads `messaging_getSenderNonce`. It checks again after a chain switch.
+    /// `messaging_getSponsoredEnvelope` for each transaction, which answers from
+    /// the stored transaction and its receipt, and only for a relayed message
+    /// that executed successfully. It matches the envelope's signature, nonce
+    /// and expiry as well as sender key, recipient and content (two messages
+    /// with the same text are two intents), whichever wrapper carried it; and
+    /// it reads `messaging_getSenderNonce`. It checks again after a chain switch.
     /// A search that cannot be completed (a block not available, an RPC
     /// error) or that covers blocks not yet final does not mean "not
     /// delivered": the client neither asks for a new signature nor reports the

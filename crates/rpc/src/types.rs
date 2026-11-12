@@ -1966,20 +1966,36 @@ pub struct MessageDataInfo {
     pub message_data: String,
     /// Sender's public key (hex with 0x prefix)
     pub sender_pubkey: String,
-    /// The envelope's signature (hex with 0x prefix). With the sender key,
-    /// recipient, content, nonce and expiry it is the exact envelope the
-    /// sender signed: a client looking for its own message matches all of
-    /// them, not the content alone.
-    pub envelope_signature: String,
-    /// The envelope's nonce.
-    pub envelope_nonce: u64,
-    /// The envelope's expiry, in Unix seconds.
-    pub envelope_expiry: u64,
     /// Whether message has payment attached. Always false for a relayed
     /// message: a relayed message never moves an amount.
     pub has_payment: bool,
     /// Payment amount (if has_payment)
     pub payment_amount: Option<String>,
+}
+
+/// The signed envelope an executed relayed message carried, as the stored
+/// transaction holds it (`messaging_getSponsoredEnvelope`). Every field is
+/// read from the stored transaction; nothing is derived. A client looking
+/// for the exact envelope it signed matches all of them, not the content
+/// alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SponsoredEnvelopeInfo {
+    /// The relayed transaction's hash (hex with 0x prefix)
+    pub tx_hash: String,
+    /// The height of the block that executed it
+    pub block_height: u64,
+    /// The sender's public key the envelope names (hex with 0x prefix)
+    pub sender_pubkey: String,
+    /// Recipient hash (hex with 0x prefix)
+    pub recipient_hash: String,
+    /// Encrypted message data (hex with 0x prefix)
+    pub message_data: String,
+    /// The envelope's signature (hex with 0x prefix)
+    pub envelope_signature: String,
+    /// The envelope's nonce
+    pub envelope_nonce: u64,
+    /// The envelope's expiry, in Unix seconds
+    pub envelope_expiry: u64,
 }
 
 /// Pending payment info for RPC responses

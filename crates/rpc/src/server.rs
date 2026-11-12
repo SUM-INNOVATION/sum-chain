@@ -4568,11 +4568,57 @@ impl SumChainApiServer for RpcServer {
             recipient_hash: format!("0x{}", hex::encode(sponsored_msg.recipient_hash)),
             message_data: format!("0x{}", hex::encode(&sponsored_msg.message_data)),
             sender_pubkey: format!("0x{}", hex::encode(sponsored_msg.sender_pubkey)),
-            envelope_signature: format!("0x{}", hex::encode(sponsored_msg.signature)),
-            envelope_nonce: sponsored_msg.nonce,
-            envelope_expiry: sponsored_msg.expiry,
             has_payment: false,
             payment_amount: None,
+        }))
+    }
+
+    async fn messaging_get_sponsored_envelope(
+        &self,
+        tx_hash: String,
+    ) -> std::result::Result<Option<SponsoredEnvelopeInfo>, jsonrpsee::types::ErrorObjectOwned>
+    {
+        let hash = Hash::from_hex(&tx_hash)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid tx hash: {e}")))?;
+        let tx = match TxStore::new(&self.db).get(&hash) {
+            Ok(Some(tx)) => tx,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
+        };
+        // Only a relayed message: any other transaction is refused, as
+        // `messaging_getMessageData` refuses it.
+        let data = match &tx.inner {
+            sumchain_primitives::TxInner::V2(v2) => match &v2.payload {
+                TxPayload::Messaging(d) if d.operation == MessagingOperation::SendMessage => d,
+                _ => {
+                    return Err(RpcError::InvalidParams(
+                        "Not a sponsored message transaction".to_string(),
+                    )
+                    .into())
+                }
+            },
+            _ => return Err(RpcError::InvalidParams("Not a V2 transaction".to_string()).into()),
+        };
+        // Only one the canonical chain executed.
+        let receipt = match ReceiptStore::new(&self.db).get(&hash) {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
+        };
+        if !receipt.status.is_success() {
+            return Ok(None);
+        }
+        let m: SponsoredMessage = bincode::deserialize(&data.data)
+            .map_err(|e| RpcError::Internal(format!("Failed to deserialize message: {e}")))?;
+        Ok(Some(SponsoredEnvelopeInfo {
+            tx_hash: format!("0x{}", hex::encode(hash.as_bytes())),
+            block_height: receipt.block_height,
+            sender_pubkey: format!("0x{}", hex::encode(m.sender_pubkey)),
+            recipient_hash: format!("0x{}", hex::encode(m.recipient_hash)),
+            message_data: format!("0x{}", hex::encode(&m.message_data)),
+            envelope_signature: format!("0x{}", hex::encode(m.signature)),
+            envelope_nonce: m.nonce,
+            envelope_expiry: m.expiry,
         }))
     }
 
