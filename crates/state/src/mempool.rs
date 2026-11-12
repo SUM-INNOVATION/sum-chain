@@ -39,7 +39,8 @@
 //!    version-2 envelope, which alone is accepted from the envelope
 //!    verification gate on;
 //! 3. that envelope must carry the sender's expected messaging nonce, and a
-//!    candidate block carries each (sender, nonce) at most once, in order;
+//!    candidate block carries each (sender, nonce) at most once, in order,
+//!    in one order that also keeps every outer sender's account nonces;
 //! 4. with [`MessagingQuotaAdmission`] wired, that envelope's sender must have
 //!    quota left for it, as the canonical chain counts its sends.
 //!
@@ -47,7 +48,7 @@
 //! consensus rule: a block built by a proposer that applies none of it is
 //! validated, executed and imported exactly as before.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -218,6 +219,8 @@ pub struct TransactionSignatureAdmission {
 ///    node's pending envelopes for the sender; at selection, envelopes are
 ///    carried in nonce order per sender, each (sender, nonce) at most once per
 ///    candidate block, and an envelope the chain has moved past is evicted.
+///    The block's order keeps that sequence and every outer sender's account
+///    nonces together (`in_combined_order`).
 ///    An envelope carried to a failed receipt leaves the committed nonce where
 ///    it was; the sender's later pending envelopes are then evicted too,
 ///    since nothing in the pool can bring them into sequence.
@@ -254,9 +257,10 @@ pub struct MessagingQuotaAdmission {
 /// What the inclusion policy needs to judge a transaction by the rules of the
 /// block it would land in, the next one: the chain parameters, for the
 /// sponsored-envelope verification gate (which envelope forms that block
-/// accepts), the chain id the version-2 envelope binds, and the live chain
-/// height. Same shape as [`TransactionSignatureAdmission`]. It refines the
-/// inclusion policy's rules, so it does nothing without one. See
+/// accepts) and the messaging fee-and-nonce accounting gate (whether a
+/// relayed `SendMessage` advances its sponsor's account nonce there), the
+/// chain id the version-2 envelope binds, and the live chain height. Same
+/// shape as [`TransactionSignatureAdmission`]. See
 /// [`Mempool::with_inclusion_gates`].
 #[derive(Clone)]
 pub struct InclusionGates {
@@ -283,12 +287,18 @@ enum EnvelopeForms {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NextBlockRules {
     forms: EnvelopeForms,
+    /// From the accounting gate on, executing any transaction advances its
+    /// sender's account nonce; below it, see
+    /// [`advances_nonce_below_accounting_gate`].
+    accounting: bool,
 }
 
 impl NextBlockRules {
-    /// The rules without [`InclusionGates`]: the string form only.
+    /// The rules without [`InclusionGates`]: the string form only, and the
+    /// account-nonce rule below the accounting gate.
     const UNGATED: Self = Self {
         forms: EnvelopeForms::StringForm,
+        accounting: false,
     };
 }
 
@@ -426,10 +436,12 @@ fn sponsored_identity(tx: &SignedTransaction) -> Option<(Address, u64)> {
 /// signature is not checked); `None` for every other transaction and for an
 /// envelope that does not decode.
 ///
-/// A relayed envelope is a transaction FROM the relaying account, at that
-/// account's committed nonce, but executing it advances no account nonce: the
-/// sequence it belongs to is the named sender's messaging nonce, which the
-/// inclusion policy orders. A proposer that has to leave one out of a block
+/// A relayed envelope is a transaction FROM the relaying account. Below the
+/// messaging fee-and-nonce accounting gate it is signed at that account's
+/// committed nonce and executing it advances no account nonce; from that gate
+/// on it advances the relaying account's nonce like any other transaction.
+/// Either way it also belongs to the named sender's messaging-nonce sequence,
+/// which the inclusion policy orders. A proposer that has to leave one out of a block
 /// reads this to know which of the block's other transactions depend on it.
 pub fn sponsored_envelope_sender(tx: &SignedTransaction) -> Option<Address> {
     sponsored_identity(tx).map(|(sender, _)| sender)
@@ -492,7 +504,9 @@ pub struct Mempool {
     /// when the stamped carrier is removed.
     relayed_envelopes: RwLock<HashMap<Address, usize>>,
     /// Optional next-block rules for the inclusion policy: which envelope
-    /// forms it accepts. Without it, the string form only, as before. See
+    /// forms it accepts, and whether a relayed `SendMessage` advances its
+    /// sponsor's account nonce. Without it, the string form only and the
+    /// account-nonce rule below the accounting gate, as before. See
     /// [`Mempool::with_inclusion_gates`].
     inclusion_gates: Option<InclusionGates>,
 }
@@ -520,30 +534,247 @@ pub fn advances_nonce_below_accounting_gate(tx: &SignedTransaction) -> bool {
     }
 }
 
-/// `picked`, with each sender's transactions in ascending nonce order.
-///
-/// Every transaction keeps its sender's set of positions: only which of that
-/// sender's transactions sits in which of its positions changes. At one
-/// nonce, the transactions that leave the account nonce where it is below the
-/// accounting gate ([`advances_nonce_below_accounting_gate`]) come first:
-/// below that gate a relayed `SendMessage` shares its sponsor's nonce with
-/// whatever else the sponsor sends at it, and executes only while that nonce
-/// is still the account's. From the gate two transactions at one nonce cannot
-/// both execute, whichever comes first. Otherwise the sort is stable, so
-/// transactions at one nonce keep their relative order.
-fn in_nonce_order_per_sender(mut picked: Vec<SignedTransaction>) -> Vec<SignedTransaction> {
-    let mut positions: HashMap<Address, Vec<usize>> = HashMap::new();
-    for (i, tx) in picked.iter().enumerate() {
-        positions.entry(tx.sender()).or_default().push(i);
+/// Whether executing `tx` in a block advances its sender's account nonce:
+/// every transaction does from the accounting gate on (`accounting`); below
+/// it, see [`advances_nonce_below_accounting_gate`].
+fn advances_nonce(tx: &SignedTransaction, accounting: bool) -> bool {
+    accounting || advances_nonce_below_accounting_gate(tx)
+}
+
+/// A transaction's place in the two sequences [`in_combined_order`] keeps.
+struct Sequenced {
+    /// The account that signs it.
+    outer: Address,
+    /// Its account nonce, and whether executing it advances that nonce: at
+    /// one nonce, a transaction that leaves the nonce where it is comes first.
+    key: (Nonce, bool),
+    /// For a sponsored envelope, the sender it names and its envelope nonce.
+    envelope: Option<(Address, u64)>,
+}
+
+/// The transactions of [`in_combined_order`] still to be placed, by outer
+/// sender and by named sender, and those ready to be placed.
+struct CombinedOrder<'a> {
+    seq: &'a [Sequenced],
+    /// Per outer sender, the transactions left, by key then position.
+    by_outer: HashMap<Address, BTreeSet<((Nonce, bool), usize)>>,
+    /// Per named sender, the envelopes left, by envelope nonce then position.
+    by_named: HashMap<Address, BTreeSet<(u64, usize)>>,
+    left: Vec<bool>,
+    /// Positions whose key is the lowest left for their outer sender and,
+    /// for an envelope, whose envelope nonce is the lowest left for its
+    /// named sender. A position stays ready until it is placed or left out:
+    /// what is left only shrinks, so the lowest of a set only rises.
+    ready: BTreeSet<usize>,
+}
+
+impl<'a> CombinedOrder<'a> {
+    fn new(seq: &'a [Sequenced]) -> Self {
+        let mut by_outer: HashMap<Address, BTreeSet<((Nonce, bool), usize)>> = HashMap::new();
+        let mut by_named: HashMap<Address, BTreeSet<(u64, usize)>> = HashMap::new();
+        for (i, t) in seq.iter().enumerate() {
+            by_outer.entry(t.outer).or_default().insert((t.key, i));
+            if let Some((named, nonce)) = t.envelope {
+                by_named.entry(named).or_default().insert((nonce, i));
+            }
+        }
+        let mut order = Self {
+            seq,
+            by_outer,
+            by_named,
+            left: vec![true; seq.len()],
+            ready: BTreeSet::new(),
+        };
+        for i in 0..seq.len() {
+            order.mark_if_ready(i);
+        }
+        order
     }
-    for slots in positions.values().filter(|slots| slots.len() > 1) {
-        let mut own: Vec<SignedTransaction> = slots.iter().map(|&i| picked[i].clone()).collect();
-        own.sort_by_key(|tx| (tx.nonce(), advances_nonce_below_accounting_gate(tx)));
-        for (&i, tx) in slots.iter().zip(own) {
-            picked[i] = tx;
+
+    fn is_ready(&self, i: usize) -> bool {
+        let t = &self.seq[i];
+        let outer_head = self
+            .by_outer
+            .get(&t.outer)
+            .and_then(|left| left.first())
+            .is_some_and(|(key, _)| *key == t.key);
+        let named_head = t.envelope.is_none_or(|(named, nonce)| {
+            self.by_named
+                .get(&named)
+                .and_then(|left| left.first())
+                .is_some_and(|(lowest, _)| *lowest == nonce)
+        });
+        outer_head && named_head
+    }
+
+    fn mark_if_ready(&mut self, i: usize) {
+        if self.left[i] && self.is_ready(i) {
+            self.ready.insert(i);
         }
     }
-    picked
+
+    /// Takes `i` out of what is left, and marks what that makes ready: the
+    /// next key of its outer sender, when no transaction is left at its own,
+    /// and the next envelope of its named sender.
+    fn take(&mut self, i: usize) {
+        let seq = self.seq;
+        let t = &seq[i];
+        self.left[i] = false;
+        self.ready.remove(&i);
+        let mut recheck = Vec::new();
+        if let Some(left) = self.by_outer.get_mut(&t.outer) {
+            left.remove(&(t.key, i));
+            if let Some(&(head, _)) = left.first() {
+                if head != t.key {
+                    recheck.extend(
+                        left.iter()
+                            .take_while(|(key, _)| *key == head)
+                            .map(|(_, j)| *j),
+                    );
+                }
+            }
+        }
+        if let Some((named, nonce)) = t.envelope {
+            if let Some(left) = self.by_named.get_mut(&named) {
+                left.remove(&(nonce, i));
+                recheck.extend(left.first().map(|(_, j)| *j));
+            }
+        }
+        for j in recheck {
+            self.mark_if_ready(j);
+        }
+    }
+
+    /// With nothing ready, the transactions left wait on each other in a
+    /// cycle. The latest position at the head of its outer sender's sequence.
+    fn cycle_victim(&self) -> Option<usize> {
+        self.by_outer
+            .values()
+            .filter_map(|left| {
+                let &(head, _) = left.first()?;
+                left.iter()
+                    .take_while(|(key, _)| *key == head)
+                    .map(|(_, j)| *j)
+                    .max()
+            })
+            .max()
+    }
+
+    /// Leaves `victim` out, and every transaction left that depends on it, in
+    /// turn: its outer sender's transactions at higher nonces when it
+    /// advances the nonce, and its named sender's later envelopes.
+    fn leave_out(&mut self, victim: usize) -> Vec<usize> {
+        let seq = self.seq;
+        let mut out = Vec::new();
+        let mut work = vec![victim];
+        while let Some(x) = work.pop() {
+            if !self.left[x] {
+                continue;
+            }
+            let t = &seq[x];
+            if t.key.1 {
+                if let Some(left) = self.by_outer.get(&t.outer) {
+                    work.extend(
+                        left.iter()
+                            .filter(|((nonce, _), _)| *nonce > t.key.0)
+                            .map(|(_, j)| *j),
+                    );
+                }
+            }
+            if let Some((named, nonce)) = t.envelope {
+                if let Some(left) = self.by_named.get(&named) {
+                    work.extend(
+                        left.iter()
+                            .filter(|(later, _)| *later > nonce)
+                            .map(|(_, j)| *j),
+                    );
+                }
+            }
+            self.take(x);
+            out.push(x);
+        }
+        out
+    }
+}
+
+/// What [`in_combined_order`] leaves out of a block.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LeftOut {
+    /// One transaction per cycle, to be evicted: no order can carry it with
+    /// the transactions it waits on, and held it would hold them all back in
+    /// every later block.
+    victims: Vec<Hash>,
+    /// The transactions that depend on a victim. They stay in the pool.
+    dependents: Vec<Hash>,
+}
+
+/// `carried`, in one order that keeps two sequences, and what is left out to
+/// keep them.
+///
+/// - Each outer sender's transactions in ascending account nonce and, at one
+///   nonce, those that leave the nonce where it is first
+///   ([`advances_nonce`]): fee then hash alone would put a sender's `N+1`
+///   before its `N` whenever their fees tie or invert, and the `N+1` would
+///   take an `InvalidNonce` receipt in a block that could carry both; and
+///   below the accounting gate a relayed `SendMessage` shares its sponsor's
+///   nonce with whatever else the sponsor sends at it, and executes only
+///   while that nonce is still the account's.
+/// - Each named sender's envelopes in ascending envelope nonce, the sequence
+///   the inclusion policy's screen carried them in.
+///
+/// Transactions are placed one at a time: of those whose key is the lowest
+/// left for their outer sender and, for an envelope, whose envelope nonce is
+/// the lowest left for its named sender, the one earliest in `carried` (the
+/// fee order) goes next. An order that already keeps both sequences is
+/// returned unchanged.
+///
+/// When one named sender's envelopes are carried by several sponsors the two
+/// sequences can conflict in a cycle that no order keeps. Then the latest
+/// transaction in `carried` at the head of its outer sender's sequence is left
+/// out as the cycle's victim, with every transaction left that depends on it,
+/// in turn: its outer sender's transactions at higher nonces when it advances
+/// the nonce, and its named sender's later envelopes.
+fn in_combined_order(
+    carried: Vec<SignedTransaction>,
+    accounting: bool,
+) -> (Vec<SignedTransaction>, LeftOut) {
+    let seq: Vec<Sequenced> = carried
+        .iter()
+        .map(|tx| Sequenced {
+            outer: tx.sender(),
+            key: (tx.nonce(), advances_nonce(tx, accounting)),
+            envelope: sponsored_identity(tx),
+        })
+        .collect();
+    let mut order = CombinedOrder::new(&seq);
+    let mut placed = Vec::with_capacity(seq.len());
+    let mut left_out = LeftOut::default();
+    let mut remaining = seq.len();
+    while remaining > 0 {
+        if let Some(i) = order.ready.pop_first() {
+            order.take(i);
+            placed.push(i);
+            remaining -= 1;
+            continue;
+        }
+        let Some(victim) = order.cycle_victim() else {
+            break;
+        };
+        let out = order.leave_out(victim);
+        remaining -= out.len();
+        left_out.victims.push(carried[victim].hash());
+        left_out.dependents.extend(
+            out.iter()
+                .filter(|&&x| x != victim)
+                .map(|&x| carried[x].hash()),
+        );
+    }
+    let mut carried: Vec<Option<SignedTransaction>> = carried.into_iter().map(Some).collect();
+    let ordered = placed
+        .into_iter()
+        .filter_map(|i| carried[i].take())
+        .collect();
+    (ordered, left_out)
 }
 
 /// Whether `tx` is a contract deploy or call.
@@ -609,8 +840,9 @@ impl Mempool {
 
     /// Builder: judge sponsored envelopes, at admission, at selection and on
     /// revalidation, by the forms the next block accepts (the inclusion
-    /// policy's rule 2). It refines the policy's rules, so without a wired
-    /// [`InclusionPolicy`] it does nothing.
+    /// policy's rule 2), and order a selection by that block's account-nonce
+    /// rule ([`Self::select_for_block`]). The forms refine the policy's rules,
+    /// so without a wired [`InclusionPolicy`] only the order changes.
     ///
     /// Node-local, like the rest of the policy: it decides which envelopes
     /// this node holds and carries, never what a block means.
@@ -642,7 +874,10 @@ impl Mempool {
                 chain_id: gates.chain_id,
             }
         };
-        NextBlockRules { forms }
+        NextBlockRules {
+            forms,
+            accounting: MessagingExecutor::fee_nonce_accounting_gate_open(&gates.params, height),
+        }
     }
 
     /// Node-local policy: refuse contract deploys and calls.
@@ -1658,13 +1893,11 @@ impl Mempool {
     /// envelope whose sender's nonce has since moved past it, are evicted
     /// rather than offered. See [`Self::apply_inclusion_policy`].
     ///
-    /// Within the set carried, one sender's transactions are carried in
-    /// ascending nonce order, in the positions the fee order gave that sender:
-    /// fee then hash alone would put a sender's `N+1` before its `N` whenever
-    /// their fees tie or invert, and the `N+1` would then take an
-    /// `InvalidNonce` receipt in a block that could have carried both. At one
-    /// nonce, a transaction that leaves the nonce where it is below the
-    /// accounting gate comes first (see `in_nonce_order_per_sender`).
+    /// What is carried is returned in one order that keeps each outer
+    /// sender's account nonces and each named sender's envelope nonces
+    /// ([`in_combined_order`]), judged by the next block's account-nonce rule.
+    /// Where the two conflict in a cycle, one transaction of the cycle is
+    /// evicted and those that depend on it wait in the pool.
     pub fn select_for_block(&self, max_count: usize) -> Vec<SignedTransaction> {
         let rules = self.next_block_rules();
         let (carried, evict) = {
@@ -1688,7 +1921,18 @@ impl Mempool {
             );
             self.remove_batch(&evict);
         }
-        in_nonce_order_per_sender(carried)
+        let (ordered, left_out) = in_combined_order(carried, rules.accounting);
+        if !left_out.victims.is_empty() {
+            info!(
+                "Inclusion policy: {} transaction(s) wait on each other in a cycle of account \
+                 and envelope nonces; evicting {} and leaving {} for a later block",
+                left_out.victims.len() + left_out.dependents.len(),
+                left_out.victims.len(),
+                left_out.dependents.len()
+            );
+            self.remove_batch(&left_out.victims);
+        }
+        ordered
     }
 
     /// The transactions among `transactions`, in the order given, that this
@@ -1699,7 +1943,10 @@ impl Mempool {
     /// The same screening [`Self::select_for_block`] applies, offered for a
     /// list that did not come from this pool (`PoAEngine::create_block` applies
     /// it to whatever it is handed). Without a wired policy only the in-block
-    /// duplicate-hash rule applies.
+    /// duplicate-hash rule applies. The order given is kept, but for an
+    /// envelope the screen defers; `select_for_block`'s own order already
+    /// carries each named sender's envelopes in sequence, so the screen defers
+    /// none of them.
     pub fn apply_inclusion_policy(
         &self,
         transactions: Vec<SignedTransaction>,
@@ -1824,9 +2071,10 @@ impl Mempool {
         // Deferred envelopes, carried in sequence after everything else. Each
         // round carries every envelope the sequence has reached and stops when
         // a round carries nothing. Appending them moves them out of fee order,
-        // which decides nothing: a sponsored `SendMessage` advances no account
-        // nonce, so its position in the block has no bearing on any validity
-        // rule.
+        // and from the accounting gate on, when a relayed `SendMessage`
+        // advances its sponsor's account nonce, behind that sponsor's later
+        // nonces: `select_for_block` then places what is carried in one order
+        // that keeps both sequences (`in_combined_order`).
         let mut progressed = true;
         while progressed && !deferred.is_empty() && carried.len() < max_count {
             progressed = false;
@@ -2190,8 +2438,8 @@ mod tests {
     }
 
     /// One sender's transactions are carried in nonce order, whatever their
-    /// fees; the set selected is still the highest-fee one, and another
-    /// sender's transactions keep their fee positions.
+    /// fees; the set selected is still the highest-fee one. Of the
+    /// transactions whose turn it is, the higher fee goes first.
     #[test]
     fn one_senders_transactions_are_selected_in_nonce_order() {
         let mempool = Mempool::new(MempoolConfig::default());
@@ -2210,11 +2458,11 @@ mod tests {
         }
 
         let picked = mempool.select_for_block(10);
-        // Fee order is n2 (30), o0 (25), n1 (20), n0 (10): the sender holds
-        // positions 0, 2 and 3, the other sender position 1.
+        // Fee order is n2 (30), o0 (25), n1 (20), n0 (10). The turn is o0's
+        // and n0's; o0 pays more, then the sender's run follows.
         assert_eq!(
             picked.iter().map(|t| t.hash()).collect::<Vec<_>>(),
-            vec![n0.hash(), o0.hash(), n1.hash(), n2.hash()]
+            vec![o0.hash(), n0.hash(), n1.hash(), n2.hash()]
         );
 
         // A cut keeps the highest-fee set and orders it: n2 and o0 are the top
@@ -2263,6 +2511,196 @@ mod tests {
             picked.iter().map(|t| t.hash()).collect::<Vec<_>>(),
             vec![relayed.hash(), registration.hash(), next.hash()]
         );
+    }
+
+    /// A relayed `SendMessage` from `relay` at account nonce `nonce`, naming
+    /// `named` at envelope nonce `envelope_nonce`. Only the shape matters to
+    /// the order: nothing is verified.
+    fn relayed(
+        relay: &KeyPair,
+        nonce: u64,
+        named: &KeyPair,
+        envelope_nonce: u64,
+    ) -> SignedTransaction {
+        use sumchain_primitives::{MessagingTxData, TransactionV2};
+        let m = SponsoredMessage {
+            message_data: vec![envelope_nonce as u8],
+            recipient_hash: [7u8; 32],
+            signature: [0u8; 64],
+            sender_pubkey: *named.public_key().as_bytes(),
+            nonce: envelope_nonce,
+            expiry: u64::MAX,
+            koppa_amount: None,
+        };
+        let tx = TransactionV2::messaging(
+            1,
+            relay.address(),
+            1_000,
+            nonce,
+            MessagingTxData {
+                operation: MessagingOperation::SendMessage,
+                data: bincode::serialize(&m).unwrap(),
+            },
+        );
+        let sig = sign(tx.signing_hash().as_bytes(), relay.private_key());
+        SignedTransaction::new_v2(tx, *sig.as_bytes(), *relay.public_key().as_bytes())
+    }
+
+    fn transfer_from(from: &KeyPair, nonce: u64) -> SignedTransaction {
+        create_signed_tx(from, KeyPair::from_bytes([9u8; 32]).address(), 1, 10, nonce)
+    }
+
+    fn ids(txs: &[SignedTransaction]) -> Vec<Hash> {
+        txs.iter().map(|t| t.hash()).collect()
+    }
+
+    fn keys() -> (KeyPair, KeyPair, KeyPair, KeyPair, KeyPair) {
+        (
+            KeyPair::from_bytes([1u8; 32]),
+            KeyPair::from_bytes([2u8; 32]),
+            KeyPair::from_bytes([3u8; 32]),
+            KeyPair::from_bytes([4u8; 32]),
+            KeyPair::from_bytes([5u8; 32]),
+        )
+    }
+
+    /// One named sender's envelopes through two sponsors. Ordered by account
+    /// nonce alone, `r1`'s transfer at nonce 0 would take the first of
+    /// `r1`'s two positions and push `s`'s envelope 0 behind envelope 1;
+    /// the combined order keeps both sequences, and an order that already
+    /// keeps them is returned unchanged.
+    #[test]
+    fn the_combined_order_keeps_account_and_envelope_nonces_across_sponsors() {
+        let (r1, r2, s, _, _) = keys();
+        let r1_s0 = relayed(&r1, 1, &s, 0);
+        let r2_s1 = relayed(&r2, 0, &s, 1);
+        let r1_transfer = transfer_from(&r1, 0);
+        // As the screen carries them: `s`'s envelopes in sequence, the rest in
+        // fee order.
+        let carried = vec![r1_s0.clone(), r2_s1.clone(), r1_transfer.clone()];
+        for accounting in [false, true] {
+            let (ordered, left_out) = in_combined_order(carried.clone(), accounting);
+            assert_eq!(
+                ids(&ordered),
+                ids(&[r1_transfer.clone(), r1_s0.clone(), r2_s1.clone()]),
+                "accounting {accounting}"
+            );
+            assert_eq!(left_out, LeftOut::default());
+            let (again, _) = in_combined_order(ordered.clone(), accounting);
+            assert_eq!(ids(&again), ids(&ordered), "a kept order is unchanged");
+        }
+    }
+
+    /// The screen appends an envelope it deferred after everything else. When
+    /// that envelope is its sponsor's nonce 0, the combined order brings it
+    /// back in front of the sponsor's nonce 1, after the envelope it waits
+    /// on.
+    #[test]
+    fn a_deferred_envelope_returns_in_front_of_its_sponsors_later_nonce() {
+        let (r1, r2, s, _, _) = keys();
+        let r2_s0 = relayed(&r2, 0, &s, 0);
+        let r1_transfer = transfer_from(&r1, 1);
+        let r1_s1 = relayed(&r1, 0, &s, 1);
+        let carried = vec![r2_s0.clone(), r1_transfer.clone(), r1_s1.clone()];
+        for accounting in [false, true] {
+            let (ordered, left_out) = in_combined_order(carried.clone(), accounting);
+            assert_eq!(
+                ids(&ordered),
+                ids(&[r2_s0.clone(), r1_s1.clone(), r1_transfer.clone()]),
+                "accounting {accounting}"
+            );
+            assert_eq!(left_out, LeftOut::default());
+        }
+    }
+
+    /// From the accounting gate on, two sponsors whose envelopes for `s` and
+    /// `t` cross wait on each other in a cycle: `r1`'s nonce 0 is `s`'s
+    /// envelope 1, which waits on `r2`'s nonce 1, which waits on `r2`'s nonce
+    /// 0, `t`'s envelope 1, which waits on `r1`'s nonce 1, which waits on
+    /// `r1`'s nonce 0. No order carries any of them. The latest at the head of
+    /// its sponsor's sequence is the victim, and the three that depend on it
+    /// go with it; a third sponsor's transactions are carried. Below the gate
+    /// the relay signs every envelope at the sponsor's committed nonce, they
+    /// advance no nonce, and the same crossing is no cycle.
+    #[test]
+    fn a_cycle_of_account_and_envelope_nonces_is_left_out() {
+        let (r1, r2, s, t, r3) = keys();
+        let u = KeyPair::from_bytes([6u8; 32]);
+        let r1_s1 = relayed(&r1, 0, &s, 1);
+        let r1_t0 = relayed(&r1, 1, &t, 0);
+        let r2_t1 = relayed(&r2, 0, &t, 1);
+        let r2_s0 = relayed(&r2, 1, &s, 0);
+        let r3_transfer = transfer_from(&r3, 0);
+        let r3_u0 = relayed(&r3, 1, &u, 0);
+        let carried = vec![
+            r1_t0.clone(),
+            r2_t1.clone(),
+            r2_s0.clone(),
+            r3_transfer.clone(),
+            r3_u0.clone(),
+            r1_s1.clone(),
+        ];
+        let (ordered, left_out) = in_combined_order(carried, true);
+        assert_eq!(ids(&ordered), ids(&[r3_transfer.clone(), r3_u0.clone()]));
+        assert_eq!(left_out.victims, vec![r1_s1.hash()]);
+        let mut dependents = left_out.dependents.clone();
+        dependents.sort();
+        let mut expected = ids(&[r1_t0.clone(), r2_t1.clone(), r2_s0.clone()]);
+        expected.sort();
+        assert_eq!(dependents, expected);
+
+        // Below the accounting gate, at the sponsors' shared nonce 0.
+        let r1_s1 = relayed(&r1, 0, &s, 1);
+        let r1_t0 = relayed(&r1, 0, &t, 0);
+        let r2_t1 = relayed(&r2, 0, &t, 1);
+        let r2_s0 = relayed(&r2, 0, &s, 0);
+        let carried = vec![r1_t0.clone(), r2_t1.clone(), r2_s0.clone(), r1_s1.clone()];
+        let (ordered, left_out) = in_combined_order(carried.clone(), false);
+        assert_eq!(ids(&ordered), ids(&carried), "nothing to reorder");
+        assert_eq!(left_out, LeftOut::default());
+    }
+
+    /// `select_for_block` evicts a cycle's victim, so the cycle does not hold
+    /// its sponsors back in every later block, and keeps the transactions
+    /// that depend on it in the pool.
+    #[test]
+    fn select_for_block_evicts_a_cycles_victim_and_keeps_what_depends_on_it() {
+        let (r1, r2, s, t, r3) = keys();
+        let params = ChainParams {
+            messaging_fee_nonce_accounting_enabled_from_height: Some(1),
+            ..ChainParams::default()
+        };
+        let mempool = Mempool::new(MempoolConfig::default()).with_inclusion_gates(InclusionGates {
+            params: Arc::new(params),
+            chain_id: 1,
+            current_height: Arc::new(AtomicU64::new(0)),
+        });
+        let r1_s1 = relayed(&r1, 0, &s, 1);
+        let r1_t0 = relayed(&r1, 1, &t, 0);
+        let r2_t1 = relayed(&r2, 0, &t, 1);
+        let r2_s0 = relayed(&r2, 1, &s, 0);
+        let r3_transfer = transfer_from(&r3, 0);
+        for tx in [&r1_s1, &r1_t0, &r2_t1, &r2_s0, &r3_transfer] {
+            mempool.add(tx.clone()).unwrap();
+        }
+        assert_eq!(ids(&mempool.select_for_block(10)), vec![r3_transfer.hash()]);
+        let cycle = [&r1_s1, &r1_t0, &r2_t1, &r2_s0];
+        let evicted: Vec<Hash> = cycle
+            .iter()
+            .map(|tx| tx.hash())
+            .filter(|h| !mempool.contains(h))
+            .collect();
+        assert_eq!(evicted.len(), 1, "one victim");
+        assert!(
+            evicted[0] == r1_s1.hash() || evicted[0] == r2_t1.hash(),
+            "the victim heads its sponsor's sequence"
+        );
+        assert!(mempool.contains(&r3_transfer.hash()));
+        // The cycle is gone: the three left are carried in an order that
+        // keeps both sequences.
+        let next = mempool.select_for_block(10);
+        assert_eq!(next.len(), 4);
+        assert_eq!(mempool.len(), 4);
     }
 
     /// `filter_map_held` sees each held transaction once and returns what the
