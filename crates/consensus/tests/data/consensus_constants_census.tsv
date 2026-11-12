@@ -209,6 +209,8 @@ crates/state/src/lib.rs	TX_WRITE_SET_BOUND_RECEIPT_CODE	EXCLUDE	receipt-detail	c
 crates/state/src/lib.rs	UNNAMED_POLICY_ID	COMMITTED	registry	0x2518
 crates/state/src/lib.rs	UNPAYABLE_ROYALTY_UNSUPPORTED	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
 crates/state/src/lib.rs	VERIFY_PROOF_UNSUPPORTED	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
+crates/state/src/mempool.rs	STRING_FORM	EXCLUDE	local-proposer	the inclusion policy's refusal text for a string-form envelope (mempool.rs envelope_form_refusal); node-local admission and selection, never hashed into a block
+crates/state/src/mempool.rs	UNGATED	EXCLUDE	local-proposer	the inclusion policy's next-block rules without InclusionGates (mempool.rs NextBlockRules); node-local admission and proposer selection, importers never read it
 crates/state/src/messaging_executor.rs	MESSAGING_DAY_SECONDS	COMMITTED	registry	0x2519
 crates/state/src/messaging_executor.rs	MESSAGING_TIMESTAMP_MS_PER_SECOND	COMMITTED	schema-2	0x252a (schema-2 field; absent while messaging_timestamp_units_enabled_from_height (0x1040) is unset, the only state in which nothing reads it)
 crates/state/src/messaging_executor.rs	PENDING_PAYMENT_EXPIRY	COMMITTED	registry	0x251a

@@ -19,6 +19,7 @@
 
 mod common;
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use common::{fund, setup_with_params, CHAIN_ID};
@@ -30,12 +31,12 @@ use sumchain_primitives::messaging::{
     SRC201_NONCE_SIZE, SRC201_TAG_SIZE, SRC201_VERSION,
 };
 use sumchain_primitives::{
-    Address, Block, BlockHeader, Hash, MessagingOperation, Receipt, SignedTransaction,
-    SponsoredMessage, TransactionV2, TxPayload, TxStatus,
+    sponsored_send_v2_signing_preimage, Address, Block, BlockHeader, Hash, MessagingOperation,
+    Receipt, SignedTransaction, SponsoredMessage, TransactionV2, TxPayload, TxStatus,
 };
 use sumchain_state::executor::BlockExecutor;
 use sumchain_state::mempool::{
-    sponsored_envelope_verifies, InclusionPolicy, Mempool, MempoolConfig,
+    sponsored_envelope_verifies, InclusionGates, InclusionPolicy, Mempool, MempoolConfig,
 };
 use sumchain_state::state::StateManager;
 use sumchain_state::StateError;
@@ -263,7 +264,12 @@ impl Chain {
     /// A chain with sponsorship enabled and `sender()`, `recipient()` and
     /// `someone_else()` registered (block 1).
     fn ready() -> Self {
-        let (state, db, dir, exec) = setup_with_params(base());
+        Self::ready_with(base())
+    }
+
+    /// [`Self::ready`], under `params`.
+    fn ready_with(params: ChainParams) -> Self {
+        let (state, db, dir, exec) = setup_with_params(params);
         for kp in [
             admin(),
             sender(),
@@ -1279,4 +1285,227 @@ fn eviction_by_revalidation_and_by_selection_returns_places() {
             Err(StateError::MempoolFull)
         ));
     }
+}
+
+// ── the envelope forms of the next block (`with_inclusion_gates`) ───────────
+
+/// The envelope verification gate in these tests: block 1 registers, block 2
+/// is below the gate, block 3 is at it.
+const ENVELOPE_GATE: u64 = 3;
+
+/// The production parameters with the envelope verification gate at
+/// `envelope_gate`.
+fn gated(envelope_gate: Option<u64>) -> ChainParams {
+    let mut p = base();
+    p.messaging_sponsored_envelope_verification_enabled_from_height = envelope_gate;
+    p
+}
+
+/// `m` signed by `signer` over the version-2 envelope preimage for this chain.
+fn v2_signed(mut m: SponsoredMessage, signer: &KeyPair) -> SponsoredMessage {
+    m.signature = *sign(
+        &sponsored_send_v2_signing_preimage(CHAIN_ID, &m),
+        signer.private_key(),
+    )
+    .as_bytes();
+    m
+}
+
+/// `user`'s envelope to `recipient()` at `nonce`, in the version-2 form.
+fn v2_envelope(user: &KeyPair, nonce: u64) -> SponsoredMessage {
+    v2_signed(
+        envelope(*user.public_key().as_bytes(), &recipient().address(), nonce),
+        user,
+    )
+}
+
+/// `user`'s envelope to `recipient()` at `nonce`, in the string form.
+fn string_envelope(user: &KeyPair, nonce: u64) -> SponsoredMessage {
+    relay_signed(
+        envelope(*user.public_key().as_bytes(), &recipient().address(), nonce),
+        user,
+    )
+}
+
+fn refusal(r: &Result<Hash, StateError>) -> String {
+    match r {
+        Err(StateError::SponsoredEnvelopeRefused(why)) => why.clone(),
+        other => panic!("expected a refused envelope, got {other:?}"),
+    }
+}
+
+impl Chain {
+    /// A pool with this node's inclusion policy and the next-block rules of
+    /// `params`, its live height at `height`: the next block is `height + 1`.
+    fn gated_pool(&self, params: &ChainParams, height: u64) -> (Mempool, Arc<AtomicU64>) {
+        let live = Arc::new(AtomicU64::new(height));
+        let pool = self.pool().with_inclusion_gates(InclusionGates {
+            params: Arc::new(params.clone()),
+            chain_id: CHAIN_ID,
+            current_height: live.clone(),
+        });
+        (pool, live)
+    }
+}
+
+/// Without the next-block rules the policy accepts the string form only, as
+/// it did before them.
+#[test]
+fn without_the_next_block_rules_only_the_string_form_is_admitted() {
+    let c = Chain::ready();
+    let pool = c.pool();
+    assert!(refused(&pool.add(sponsored_tx(
+        &relayer(),
+        0,
+        &v2_envelope(&sender(), 0)
+    ))));
+    pool.add(sponsored_tx(&relayer(), 0, &string_envelope(&sender(), 0)))
+        .expect("the string form");
+}
+
+/// Below the envelope verification gate, and while it is unset, either form
+/// is admitted, carried and executed. An envelope in neither form is refused,
+/// and so is a version-2 envelope that carries an amount.
+#[test]
+fn below_the_envelope_gate_either_form_is_admitted_carried_and_executed() {
+    for envelope_gate in [None, Some(ENVELOPE_GATE)] {
+        let params = gated(envelope_gate);
+        let mut c = Chain::ready_with(params.clone());
+        let (pool, _) = c.gated_pool(&params, c.height);
+        let string_form = sponsored_tx(&relayer(), 0, &string_envelope(&sender(), 0));
+        let version_2 = sponsored_tx(&other_relayer(), 0, &v2_envelope(&someone_else(), 0));
+        pool.add(string_form.clone()).expect("the string form");
+        pool.add(version_2.clone()).expect("the version-2 envelope");
+
+        let unsigned = envelope(*sender().public_key().as_bytes(), &recipient().address(), 1);
+        let why = refusal(&pool.add(sponsored_tx(&relayer(), 0, &unsigned)));
+        assert!(why.contains("neither envelope form"), "{why}");
+        let mut paid = envelope(
+            *someone_else().public_key().as_bytes(),
+            &recipient().address(),
+            1,
+        );
+        paid.koppa_amount = Some(5);
+        let paid = v2_signed(paid, &someone_else());
+        let why = refusal(&pool.add(sponsored_tx(&other_relayer(), 0, &paid)));
+        assert!(why.contains("no amount"), "{why}");
+
+        let mut selected = hashes(&pool.select_for_block(10));
+        selected.sort();
+        let mut both = vec![string_form.hash(), version_2.hash()];
+        both.sort();
+        assert_eq!(selected, both, "{envelope_gate:?}");
+        let receipts = c.block(pool.select_for_block(10));
+        assert!(
+            receipts.iter().all(|r| r.status == TxStatus::Success),
+            "{envelope_gate:?}: {receipts:?}"
+        );
+        assert_eq!(c.messaging_nonce(&sender().address()), 1);
+        assert_eq!(c.messaging_nonce(&someone_else().address()), 1);
+    }
+}
+
+/// The form is judged at the next block's height, the tip plus one: at
+/// `H - 1` either form is admitted; at `H` and `H + 1` only the version-2
+/// envelope.
+#[test]
+fn the_envelope_form_is_judged_at_the_next_blocks_height() {
+    let params = gated(Some(ENVELOPE_GATE));
+    let c = Chain::ready_with(params.clone());
+    for (tip, string_form_admitted) in [
+        (ENVELOPE_GATE - 2, true),
+        (ENVELOPE_GATE - 1, false),
+        (ENVELOPE_GATE, false),
+    ] {
+        let (pool, _) = c.gated_pool(&params, tip);
+        let r = pool.add(sponsored_tx(&relayer(), 0, &string_envelope(&sender(), 0)));
+        assert_eq!(
+            r.is_ok(),
+            string_form_admitted,
+            "next block {}: {r:?}",
+            tip + 1
+        );
+        if !string_form_admitted {
+            let why = refusal(&r);
+            assert!(why.contains("only the version-2 envelope"), "{why}");
+        }
+        pool.add(sponsored_tx(
+            &other_relayer(),
+            0,
+            &v2_envelope(&someone_else(), 0),
+        ))
+        .expect("the version-2 envelope, at every height");
+    }
+}
+
+/// A string-form envelope admitted below the gate is not carried into the
+/// block at the gate: selection evicts it, and so does revalidation, while
+/// the version-2 envelope beside it is carried and executes.
+#[test]
+fn a_string_form_envelope_held_across_the_gate_is_evicted() {
+    let params = gated(Some(ENVELOPE_GATE));
+    let mut c = Chain::ready_with(params.clone());
+    let string_form = sponsored_tx(&relayer(), 0, &string_envelope(&sender(), 0));
+    let version_2 = sponsored_tx(&other_relayer(), 0, &v2_envelope(&someone_else(), 0));
+    let (by_selection, live_s) = c.gated_pool(&params, c.height);
+    let (by_revalidation, live_r) = c.gated_pool(&params, c.height);
+    for pool in [&by_selection, &by_revalidation] {
+        pool.add(string_form.clone()).expect("below the gate");
+        pool.add(version_2.clone()).expect("below the gate");
+    }
+
+    c.block(vec![]);
+    assert_eq!(c.height, ENVELOPE_GATE - 1);
+    live_s.store(c.height, Ordering::Relaxed);
+    live_r.store(c.height, Ordering::Relaxed);
+
+    by_revalidation.revalidate(&c.state, CHAIN_ID);
+    assert!(!by_revalidation.contains(&string_form.hash()));
+    assert!(by_revalidation.contains(&version_2.hash()));
+
+    let selected = by_selection.select_for_block(10);
+    assert_eq!(hashes(&selected), vec![version_2.hash()]);
+    assert!(!by_selection.contains(&string_form.hash()));
+    let receipts = c.block(selected);
+    assert_eq!(receipts[0].status, TxStatus::Success);
+    assert_eq!(c.height, ENVELOPE_GATE);
+
+    // The sender's next message, at the same nonce, now in the version-2
+    // form.
+    assert!(refused(&by_selection.add(sponsored_tx(
+        &relayer(),
+        0,
+        &string_envelope(&sender(), 0)
+    ))));
+    by_selection
+        .add(sponsored_tx(&relayer(), 0, &v2_envelope(&sender(), 0)))
+        .expect("the version-2 envelope");
+}
+
+/// A mirror of `Node::new`'s pool wiring (the `InclusionPolicy` and
+/// `InclusionGates` literals over the node's `chain_height`), in the style of
+/// `inference_attestation_mempool.rs::production_wiring_*`: below the gate a
+/// version-2 envelope is admitted, and once the next block is at the gate a
+/// string-form envelope is refused. Without the gates the first is refused.
+#[test]
+fn production_wiring_judges_the_envelope_form_of_the_next_block() {
+    let params = gated(Some(ENVELOPE_GATE));
+    let c = Chain::ready_with(params.clone());
+    let chain_height = Arc::new(AtomicU64::new(c.height));
+    let genesis_chain_id = CHAIN_ID;
+    let pool = Mempool::new(MempoolConfig::default())
+        .with_inclusion_policy(InclusionPolicy { db: c.db.clone() })
+        .with_inclusion_gates(InclusionGates {
+            params: Arc::new(params.clone()),
+            chain_id: genesis_chain_id,
+            current_height: chain_height.clone(),
+        });
+    pool.add(sponsored_tx(&relayer(), 0, &v2_envelope(&sender(), 0)))
+        .expect("below the gate, the version-2 envelope");
+    chain_height.store(ENVELOPE_GATE - 1, Ordering::Relaxed);
+    assert!(refused(&pool.add(sponsored_tx(
+        &other_relayer(),
+        0,
+        &string_envelope(&someone_else(), 0)
+    ))));
 }

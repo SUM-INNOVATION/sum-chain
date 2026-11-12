@@ -33,8 +33,11 @@
 //!
 //! 1. a transaction that already has a canonical receipt is not admitted and
 //!    not carried again;
-//! 2. a sponsored `SendMessage` envelope must carry a signature that verifies
-//!    over the relay's preimage, by the key it names as the sender;
+//! 2. a sponsored `SendMessage` envelope must carry a signature that verifies,
+//!    by the key it names as the sender, in a form the next block accepts:
+//!    the relay's string preimage, or (with [`InclusionGates`] wired) the
+//!    version-2 envelope, which alone is accepted from the envelope
+//!    verification gate on;
 //! 3. that envelope must carry the sender's expected messaging nonce, and a
 //!    candidate block carries each (sender, nonce) at most once, in order;
 //! 4. with [`MessagingQuotaAdmission`] wired, that envelope's sender must have
@@ -53,8 +56,8 @@ use sumchain_crypto::verify_bytes_strict;
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::inference_attestation::inference_attestation_key;
 use sumchain_primitives::{
-    Address, Balance, Hash, MessagingOperation, Nonce, SignedTransaction, SponsoredMessage,
-    TxInner, TxPayload, TxStatus,
+    verify_sponsored_send_v2, Address, Balance, Hash, MessagingOperation, Nonce, SignedTransaction,
+    SponsoredMessage, TxInner, TxPayload, TxStatus,
 };
 use sumchain_storage::{Database, MessagingStore, ReceiptStore};
 use tracing::{debug, info, warn};
@@ -198,6 +201,16 @@ pub struct TransactionSignatureAdmission {
 ///    recognised. The preimage covers the nonce, the expiry, the recipient
 ///    hash and the message hash, and nothing else.
 ///
+///    With [`InclusionGates`] wired the form is the one the next block
+///    accepts, judged at its height (the chain tip plus one), as the relay
+///    judges it: below
+///    `messaging_sponsored_envelope_verification_enabled_from_height`, or
+///    while it is unset, the string form above or the version-2 envelope
+///    (a strict signature by the named sender over the version-2 preimage
+///    for this chain, and no amount), which the executor below the gate also
+///    executes; from the gate on, the version-2 envelope only, the one form
+///    that block executes. Without it, the string form only, as before.
+///
 /// 3. **A sponsored envelope carries the sender's expected messaging nonce.**
 ///    The named sender's messaging nonce is the count of its successful sends
 ///    as the canonical chain records it: at admission the envelope must
@@ -236,6 +249,47 @@ pub struct InclusionPolicy {
 pub struct MessagingQuotaAdmission {
     pub params: Arc<ChainParams>,
     pub current_height: Arc<AtomicU64>,
+}
+
+/// What the inclusion policy needs to judge a transaction by the rules of the
+/// block it would land in, the next one: the chain parameters, for the
+/// sponsored-envelope verification gate (which envelope forms that block
+/// accepts), the chain id the version-2 envelope binds, and the live chain
+/// height. Same shape as [`TransactionSignatureAdmission`]. It refines the
+/// inclusion policy's rules, so it does nothing without one. See
+/// [`Mempool::with_inclusion_gates`].
+#[derive(Clone)]
+pub struct InclusionGates {
+    pub params: Arc<ChainParams>,
+    pub chain_id: u64,
+    pub current_height: Arc<AtomicU64>,
+}
+
+/// The sponsored-envelope forms a block accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnvelopeForms {
+    /// No [`InclusionGates`] wired: the string form only, as before.
+    StringForm,
+    /// Below the envelope verification gate: the string form, or the
+    /// version-2 envelope for `chain_id`, which the executor below the gate
+    /// also executes and which stays valid if it lands at or above it.
+    Either { chain_id: u64 },
+    /// From the envelope verification gate on: the version-2 envelope for
+    /// `chain_id` only.
+    Version2 { chain_id: u64 },
+}
+
+/// The rules of the next block that the inclusion policy reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NextBlockRules {
+    forms: EnvelopeForms,
+}
+
+impl NextBlockRules {
+    /// The rules without [`InclusionGates`]: the string form only.
+    const UNGATED: Self = Self {
+        forms: EnvelopeForms::StringForm,
+    };
 }
 
 /// The relay's envelope preimage, with the recipient hash rendered as
@@ -307,19 +361,51 @@ fn sponsored_message(
     )
 }
 
-/// The envelope of a sponsored `SendMessage`, judged; `None` for every other
-/// transaction.
-fn sponsored_envelope(tx: &SignedTransaction) -> Option<Envelope> {
+/// Why `m` is in no form `forms` accepts; `None` when it is in one.
+fn envelope_form_refusal(m: &SponsoredMessage, forms: EnvelopeForms) -> Option<String> {
+    const STRING_FORM: &str =
+        "the envelope signature does not verify, by the named sender's key, over the relay \
+         preimage";
+    let version_2 = |chain_id: u64| -> Option<&'static str> {
+        if verify_sponsored_send_v2(m, chain_id).is_err() {
+            return Some(
+                "the envelope signature does not verify, by the named sender's key, over the \
+                 version-2 envelope preimage",
+            );
+        }
+        if m.koppa_amount.is_some() {
+            return Some("a version-2 envelope carries no amount");
+        }
+        None
+    };
+    match forms {
+        EnvelopeForms::StringForm => {
+            (!sponsored_envelope_verifies(m)).then(|| STRING_FORM.to_string())
+        }
+        EnvelopeForms::Either { chain_id } => {
+            if sponsored_envelope_verifies(m) {
+                return None;
+            }
+            version_2(chain_id).map(|why| format!("neither envelope form is accepted: {why}"))
+        }
+        EnvelopeForms::Version2 { chain_id } => version_2(chain_id).map(|why| {
+            format!(
+                "from the envelope verification gate only the version-2 envelope is accepted: \
+                 {why}"
+            )
+        }),
+    }
+}
+
+/// The envelope of a sponsored `SendMessage`, judged in the forms `forms`
+/// accepts; `None` for every other transaction.
+fn sponsored_envelope(tx: &SignedTransaction, forms: EnvelopeForms) -> Option<Envelope> {
     let m = match sponsored_message(tx)? {
         Ok(m) => m,
         Err(why) => return Some(Envelope::Unverified(why)),
     };
-    if !sponsored_envelope_verifies(&m) {
-        return Some(Envelope::Unverified(
-            "the envelope signature does not verify, by the named sender's key, over the relay \
-             preimage"
-                .to_string(),
-        ));
+    if let Some(why) = envelope_form_refusal(&m, forms) {
+        return Some(Envelope::Unverified(why));
     }
     Some(Envelope::Verified {
         sender: Address::from_public_key(&m.sender_pubkey),
@@ -405,6 +491,10 @@ pub struct Mempool {
     /// Kept with the stamp: incremented when an envelope is stamped, decremented
     /// when the stamped carrier is removed.
     relayed_envelopes: RwLock<HashMap<Address, usize>>,
+    /// Optional next-block rules for the inclusion policy: which envelope
+    /// forms it accepts. Without it, the string form only, as before. See
+    /// [`Mempool::with_inclusion_gates`].
+    inclusion_gates: Option<InclusionGates>,
 }
 
 /// Whether executing `tx` advances its sender's account nonce below
@@ -485,6 +575,7 @@ impl Mempool {
             sponsored_in_flight: RwLock::new(HashMap::new()),
             messaging_quota_admission: None,
             relayed_envelopes: RwLock::new(HashMap::new()),
+            inclusion_gates: None,
         }
     }
 
@@ -514,6 +605,44 @@ impl Mempool {
     pub fn with_messaging_quota_admission(mut self, admission: MessagingQuotaAdmission) -> Self {
         self.messaging_quota_admission = Some(admission);
         self
+    }
+
+    /// Builder: judge sponsored envelopes, at admission, at selection and on
+    /// revalidation, by the forms the next block accepts (the inclusion
+    /// policy's rule 2). It refines the policy's rules, so without a wired
+    /// [`InclusionPolicy`] it does nothing.
+    ///
+    /// Node-local, like the rest of the policy: it decides which envelopes
+    /// this node holds and carries, never what a block means.
+    pub fn with_inclusion_gates(mut self, gates: InclusionGates) -> Self {
+        self.inclusion_gates = Some(gates);
+        self
+    }
+
+    /// The rules of the next block, judged at its height (the live chain
+    /// height plus one); [`NextBlockRules::UNGATED`] without
+    /// [`InclusionGates`].
+    fn next_block_rules(&self) -> NextBlockRules {
+        let Some(gates) = &self.inclusion_gates else {
+            return NextBlockRules::UNGATED;
+        };
+        let height = gates
+            .current_height
+            .load(Ordering::Relaxed)
+            .saturating_add(1);
+        let forms = if MessagingExecutor::sponsored_envelope_verification_gate_open(
+            &gates.params,
+            height,
+        ) {
+            EnvelopeForms::Version2 {
+                chain_id: gates.chain_id,
+            }
+        } else {
+            EnvelopeForms::Either {
+                chain_id: gates.chain_id,
+            }
+        };
+        NextBlockRules { forms }
     }
 
     /// Node-local policy: refuse contract deploys and calls.
@@ -847,7 +976,7 @@ impl Mempool {
         if ReceiptStore::new(&policy.db).contains(hash)? {
             return Err(StateError::TransactionAlreadyIncluded);
         }
-        match sponsored_envelope(tx) {
+        match sponsored_envelope(tx, self.next_block_rules().forms) {
             None => Ok(None),
             Some(Envelope::Unverified(why)) => Err(StateError::SponsoredEnvelopeRefused(why)),
             Some(Envelope::Verified { sender, nonce }) => {
@@ -1537,6 +1666,7 @@ impl Mempool {
     /// nonce, a transaction that leaves the nonce where it is below the
     /// accounting gate comes first (see `in_nonce_order_per_sender`).
     pub fn select_for_block(&self, max_count: usize) -> Vec<SignedTransaction> {
+        let rules = self.next_block_rules();
         let (carried, evict) = {
             let by_fee = self.by_fee.read();
             let txs = self.txs.read();
@@ -1548,7 +1678,7 @@ impl Mempool {
                 .values()
                 .filter_map(|hash| txs.get(hash).map(|e| e.tx.clone()))
                 .filter(move |tx| !(refuse_contracts && is_contract_transaction(tx)));
-            self.screen_for_inclusion(candidates, max_count)
+            self.screen_for_inclusion(candidates, max_count, rules.forms)
         };
         if !evict.is_empty() {
             info!(
@@ -1575,7 +1705,9 @@ impl Mempool {
         transactions: Vec<SignedTransaction>,
     ) -> Vec<SignedTransaction> {
         let max_count = transactions.len();
-        let (carried, evict) = self.screen_for_inclusion(transactions.into_iter(), max_count);
+        let rules = self.next_block_rules();
+        let (carried, evict) =
+            self.screen_for_inclusion(transactions.into_iter(), max_count, rules.forms);
         if !evict.is_empty() {
             self.remove_batch(&evict);
         }
@@ -1587,22 +1719,24 @@ impl Mempool {
     ///
     /// Per candidate, in order: a hash already carried in this block is
     /// skipped; a transaction with a canonical receipt is evicted; a sponsored
-    /// envelope that does not verify is evicted; a verified envelope is
-    /// carried only if its nonce is the next in its sender's sequence — the
-    /// committed messaging nonce, plus one per envelope from that sender
-    /// carried earlier in this block — so each (sender, nonce) is carried at
-    /// most once and in order. An envelope below the committed nonce is
-    /// evicted. One ahead of the sequence when first seen is deferred and
-    /// carried after the pass if the sequence has reached it by then, so a
-    /// sender's run of envelopes goes into one block whatever the fee order
-    /// put them in; otherwise it waits for a later block. A storage read that
-    /// fails leaves the transaction out of this block and in the pool.
+    /// envelope that does not verify in a form `forms` accepts is evicted; a
+    /// verified envelope is carried only if its nonce is the next in its
+    /// sender's sequence — the committed messaging nonce, plus one per
+    /// envelope from that sender carried earlier in this block — so each
+    /// (sender, nonce) is carried at most once and in order. An envelope
+    /// below the committed nonce is evicted. One ahead of the sequence when
+    /// first seen is deferred and carried after the pass if the sequence has
+    /// reached it by then, so a sender's run of envelopes goes into one block
+    /// whatever the fee order put them in; otherwise it waits for a later
+    /// block. A storage read that fails leaves the transaction out of this
+    /// block and in the pool.
     ///
     /// Stops once `max_count` transactions are carried.
     fn screen_for_inclusion(
         &self,
         candidates: impl Iterator<Item = SignedTransaction>,
         max_count: usize,
+        forms: EnvelopeForms,
     ) -> (Vec<SignedTransaction>, Vec<Hash>) {
         let mut carried: Vec<SignedTransaction> = Vec::new();
         let mut evict: Vec<Hash> = Vec::new();
@@ -1641,7 +1775,7 @@ impl Mempool {
                     continue;
                 }
             }
-            match sponsored_envelope(&tx) {
+            match sponsored_envelope(&tx, forms) {
                 None => carried.push(tx),
                 Some(Envelope::Unverified(why)) => {
                     debug!(tx = %hash, "inclusion policy: {why}");
@@ -1788,6 +1922,7 @@ impl Mempool {
     /// canonical chain this pool was admitted against has changed.
     pub fn revalidate(&self, state: &StateManager, chain_id: u64) {
         let hashes: Vec<Hash> = self.txs.read().keys().cloned().collect();
+        let forms = self.next_block_rules().forms;
         let mut to_remove = Vec::new();
 
         for hash in hashes {
@@ -1804,7 +1939,7 @@ impl Mempool {
                         to_remove.extend(self.stranded_after_receipt(policy, &tx, &hash));
                         continue;
                     }
-                    match sponsored_envelope(&tx) {
+                    match sponsored_envelope(&tx, forms) {
                         Some(Envelope::Unverified(_)) => {
                             to_remove.push(hash);
                             continue;

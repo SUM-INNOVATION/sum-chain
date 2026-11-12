@@ -27,8 +27,8 @@ use sumchain_rpc::{
 use sumchain_state::education_executor::EducationExecutor;
 use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
 use sumchain_state::mempool::{
-    EducationAdmission, InclusionPolicy, InferenceAttestationAdmission, MessagingQuotaAdmission,
-    TransactionSignatureAdmission,
+    EducationAdmission, InclusionGates, InclusionPolicy, InferenceAttestationAdmission,
+    MessagingQuotaAdmission, TransactionSignatureAdmission,
 };
 use sumchain_state::{Mempool, MempoolConfig, StateManager};
 use sumchain_storage::{BlockStore, Database};
@@ -666,6 +666,14 @@ impl Node {
             // the SAME live `chain_height` the other admission gates use.
             .with_messaging_quota_admission(MessagingQuotaAdmission {
                 params: Arc::new(genesis.params.clone()),
+                current_height: chain_height.clone(),
+            })
+            // ... in the envelope forms the next block accepts, judged at the
+            // SAME live `chain_height`: the string form or version 2 below the
+            // envelope verification gate, version 2 only from it.
+            .with_inclusion_gates(InclusionGates {
+                params: Arc::new(genesis.params.clone()),
+                chain_id: genesis.chain_id,
                 current_height: chain_height.clone(),
             }),
         );
@@ -2083,16 +2091,19 @@ fn shutdown_both(stop_health: impl FnOnce(), stop_rpc: impl FnOnce() -> Result<(
 //   - `crates/state/tests/signature_evidence_gates.rs`, module `key_holder`:
 //       - `production_wiring_installs_signature_admission`
 //       - `production_wiring_refuses_a_legacy_only_signature_once_inclusion_reaches_the_gate`
+//   - `crates/state/tests/proposal_inclusion_policy.rs`:
+//       - `production_wiring_judges_the_envelope_form_of_the_next_block`
 // If you refactor the wiring (the `InferenceAttestationAdmission { ... }`,
 // `EducationAdmission { ... }` or `TransactionSignatureAdmission { ... }`
-// literals, the `.with_*_admission(...)` builder chain, the
+// literals, the `InclusionPolicy { ... }` and `InclusionGates { ... }`
+// literals, the `.with_*(...)` builder chain, the
 // `chain_height.store(...)` calls in the event loop, or the
 // `Arc::new(BlockStore::new(&db).get_latest_height()…)` initialization),
 // update those tests too — they are intentionally a verbatim mirror so that
 // drift produces compile or assertion failures rather than silent
-// regressions. `EducationAdmission` and `TransactionSignatureAdmission` share
-// the SAME `chain_height` Arc, so the event-loop `chain_height.store` calls
-// cover all three admission gates.
+// regressions. `EducationAdmission`, `TransactionSignatureAdmission` and
+// `InclusionGates` share the SAME `chain_height` Arc, so the event-loop
+// `chain_height.store` calls cover every height-judged admission rule.
 
 /// Build the fully-configured production RPC server.
 ///
