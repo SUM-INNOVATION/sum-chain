@@ -23,8 +23,9 @@ use sumchain_consensus::{ConsensusEngine, ConsensusQuery, PoAEngine};
 use sumchain_crypto::{recipient_hash, sign, KeyPair};
 use sumchain_genesis::{ChainParams, Genesis, MessagingParams};
 use sumchain_primitives::messaging::{
-    ContentType, MessageFlags, MessageHeader, MessagingTxData, RegisterPublicKeyData,
-    SetSponsorshipEnabledData, SRC201_MAGIC, SRC201_NONCE_SIZE, SRC201_TAG_SIZE, SRC201_VERSION,
+    BlockSenderData, ContentType, MessageFlags, MessageHeader, MessagingTxData,
+    RegisterPublicKeyData, SetSponsorshipEnabledData, SRC201_MAGIC, SRC201_NONCE_SIZE,
+    SRC201_TAG_SIZE, SRC201_VERSION,
 };
 use sumchain_primitives::{
     sponsored_send_v2_signing_preimage, Block, Hash, MessagingOperation, SignedTransaction,
@@ -77,6 +78,10 @@ fn recipient() -> KeyPair {
 fn w() -> KeyPair {
     key(0x79)
 }
+/// A sender the recipient blocks.
+fn x() -> KeyPair {
+    key(0x7a)
+}
 
 fn genesis() -> Genesis {
     let params = ChainParams {
@@ -103,6 +108,7 @@ fn genesis() -> Genesis {
         v(),
         recipient(),
         w(),
+        x(),
     ] {
         alloc.insert(k.address().to_base58(), FUNDS);
     }
@@ -381,4 +387,55 @@ async fn a_cycle_between_two_sponsors_is_not_carried_and_the_rest_is() {
     assert_eq!(node.messaging_nonce(&v()), 0);
     assert_eq!(node.account_nonce(&r1()), 0);
     assert_eq!(node.account_nonce(&r2()), 0);
+}
+
+/// From the accounting gate on, a relayed envelope advances its sponsor's
+/// account nonce. When the producer leaves one out of the block (here its
+/// recipient has blocked its sender, which the executor refuses with an
+/// error rather than a receipt), the sponsor's later transaction leaves with
+/// it: carried alone it would take `InvalidNonce` and be deleted from the
+/// pool. Both wait in the pool, and the sponsor's nonce has not moved.
+#[tokio::test]
+async fn a_left_out_envelope_takes_its_sponsors_later_transactions() {
+    let g = genesis();
+    let node = Node::new(&g);
+    node.set_up().await;
+    let register = messaging(
+        &x(),
+        0,
+        1_000,
+        MessagingOperation::RegisterPublicKey,
+        &RegisterPublicKeyData {
+            public_key: pk(&x()),
+        },
+    );
+    let blocks_x = messaging(
+        &recipient(),
+        node.account_nonce(&recipient()),
+        1_000,
+        MessagingOperation::BlockSender,
+        &BlockSenderData {
+            sender: x().address(),
+        },
+    );
+    node.submit(&[&register, &blocks_x]);
+    node.tick().await;
+    assert_eq!(node.status(&register), Some(TxStatus::Success));
+    assert_eq!(node.status(&blocks_x), Some(TxStatus::Success));
+
+    let r1_x0 = relayed(&r1(), 0, 3_000, &x(), 0);
+    let r1_s0 = relayed(&r1(), 1, 2_000, &s(), 0);
+    node.submit(&[&r1_x0, &r1_s0]);
+    let block = node.tick().await;
+    assert!(
+        block.transactions.is_empty(),
+        "{:?}",
+        hashes(&block.transactions)
+    );
+    for t in [&r1_x0, &r1_s0] {
+        assert_eq!(node.status(t), None, "not carried");
+        assert!(node.mempool.contains(&t.hash()), "held");
+    }
+    assert_eq!(node.account_nonce(&r1()), 0);
+    assert_eq!(node.messaging_nonce(&s()), 0);
 }
