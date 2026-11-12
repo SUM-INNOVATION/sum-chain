@@ -863,3 +863,138 @@ async fn a_delivery_below_the_signing_height_adopted_by_a_chain_switch() {
     ));
     assert_eq!(deliveries(&node, &message), 1);
 }
+
+/// A negative outcome's anchor across chain switches (finality 2 below the
+/// head). On branch A carol's own direct message moves her messaging nonce
+/// at height 2 and her wrapper is refused at 3: the client is uncertain,
+/// anchored at block 3. The node switches to B, which forks at 1 and has the
+/// direct message at 4 and the wrapper at 5: block 3 is not A's any more, so
+/// the anchor moves to B's tip, and with block 3 final but block 4 (the
+/// cause on B) not, the client is still uncertain, not asking for a new
+/// signature. The node switches to C, which forks at 3 (above the final
+/// height) and carries a copy of the envelope at 4: the client finds it
+/// delivered. At no step does it ask for a new signature; the message is on
+/// the chain once.
+#[tokio::test]
+async fn a_negative_anchor_follows_chain_switches() {
+    use sumchain_primitives::messaging::SendMessageData;
+    let validators = [key(1), key(2)];
+    let mut g = genesis(&validators);
+    g.params.finality_depth = 2;
+    let node = Node::new(&g);
+    let mut a = Builder::new(&g, &validators);
+    let mut b = Builder::new(&g, &validators);
+    let mut c = Builder::new(&g, &validators);
+    let block_1 = || {
+        vec![
+            messaging_tx(
+                &admin(),
+                0,
+                op(
+                    MessagingOperation::SetSponsorshipEnabled,
+                    &SetSponsorshipEnabledData { enabled: true },
+                ),
+            ),
+            messaging_tx(
+                &carol(),
+                0,
+                op(
+                    MessagingOperation::RegisterPublicKey,
+                    &RegisterPublicKeyData {
+                        public_key: pk(&carol()),
+                    },
+                ),
+            ),
+        ]
+    };
+    let carol_direct = || {
+        let rh = recipient_hash(&bob().address());
+        messaging_tx(
+            &carol(),
+            1,
+            op(
+                MessagingOperation::SendMessageDirect,
+                &SendMessageData {
+                    message_data: valid_message(rh),
+                    recipient_hash: rh,
+                },
+            ),
+        )
+    };
+    let a1 = a.produce(0, block_1());
+    assert_eq!(a1.hash(), b.produce(0, block_1()).hash());
+    assert_eq!(a1.hash(), c.produce(0, block_1()).hash());
+    node.import(&a1).await;
+
+    let message = envelope(&carol(), 0, 1);
+    let mut client =
+        Tracker::new(Intent::signed_now(&node.server, message.clone(), Form::Version2).await);
+    let Step::Resubmitted(w) = client.submit(&node.server).await else {
+        panic!("relayed");
+    };
+    let wrapper = node.mempool.get(&Hash::from_hex(&w).unwrap()).unwrap();
+    let mut steps = Vec::new();
+
+    // A: the direct message at 2, the wrapper refused at 3.
+    let a2 = a.produce(1, vec![carol_direct()]);
+    let a3 = a.produce(1, vec![wrapper.clone()]);
+    node.import(&a2).await;
+    node.import(&a3).await;
+    steps.push(client.step(&node.server).await);
+    assert!(matches!(steps[0], Step::Uncertain(_)), "{steps:?}");
+    assert_eq!(client.negative_since.clone().unwrap().0, 3);
+
+    // B forks at 1: empty 2 and 3, the direct message at 4, the wrapper at 5.
+    let b2 = b.produce(2, Vec::new());
+    let b3 = b.produce(2, Vec::new());
+    let b4 = b.produce(2, vec![carol_direct()]);
+    let b5 = b.produce(2, vec![wrapper.clone()]);
+    for block in [&b2, &b3, &b4, &b5] {
+        node.import(block).await;
+    }
+    assert_eq!(node.engine.best_block_hash(), b5.hash(), "switched to B");
+    assert_eq!(
+        node.server.get_finality().await.unwrap().finalized_height,
+        3
+    );
+    steps.push(client.step(&node.server).await);
+    assert!(matches!(steps[1], Step::Uncertain(_)), "{steps:?}");
+    assert_eq!(
+        client.negative_since.clone().unwrap().0,
+        5,
+        "moved to B's tip"
+    );
+
+    // C forks at 3 and carries a copy of the envelope at 4.
+    let c2 = c.produce(2, Vec::new());
+    let c3 = c.produce(2, Vec::new());
+    assert_eq!((c2.hash(), c3.hash()), (b2.hash(), b3.hash()));
+    let copy = messaging_tx(&alice(), 0, op(MessagingOperation::SendMessage, &message));
+    let c_blocks = [
+        c.produce(3, vec![copy.clone()]),
+        c.produce(3, Vec::new()),
+        c.produce(3, Vec::new()),
+    ];
+    for block in &c_blocks {
+        node.import(block).await;
+    }
+    assert_eq!(
+        node.engine.best_block_hash(),
+        c_blocks[2].hash(),
+        "switched to C"
+    );
+    steps.push(client.step(&node.server).await);
+    assert_eq!(
+        steps[2],
+        Step::Done(Outcome::Delivered {
+            tx_hash: copy.hash().to_hex()
+        })
+    );
+    assert!(
+        !steps
+            .iter()
+            .any(|s| matches!(s, Step::Done(Outcome::NeedsUserSignature(_)))),
+        "{steps:?}"
+    );
+    assert_eq!(deliveries(&node, &message), 1);
+}

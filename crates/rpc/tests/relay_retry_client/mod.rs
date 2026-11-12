@@ -42,7 +42,10 @@
 //! user to sign again nor reports the message undeliverable, and checks again
 //! at the next step. Outcomes 4 and 5, and an undeliverable report, are given
 //! only once the condition behind them has held on a chain final through the
-//! height at which it was first seen (until then: `Step::Uncertain`); asking
+//! height at which it was first seen on the branch now canonical (until then:
+//! `Step::Uncertain`). The client keeps the hash of the block at that height;
+//! a chain switch that replaces it moves the anchor to the new tip, since on
+//! the new branch the condition may rest on later blocks. Asking
 //! the relay for a fresh wrapper of the same signed envelope (3) is not held
 //! back, since the chain executes a version-2 envelope at most once.
 //!
@@ -78,6 +81,11 @@
 //! Each store keeps its own bound: two devices holding the same intent can
 //! together make twice the bound's requests. The relay's refusal of an
 //! envelope already pending limits what the second device's requests cost.
+//! A client uses one relay per intent: that refusal holds within one relay's
+//! pool, and another relay's pool may not hold the first wrapper yet.
+//!
+//! A relay refusing a request because its pool is full (`TxRejected`) is
+//! transient: the client waits and asks again; it is not counted.
 //!
 //! Retries are bounded: at most `max_wrappers` wrapper requests per intent.
 //! Who pays: the sponsor pays the outer fee for each wrapper that executes,
@@ -191,9 +199,15 @@ pub struct Tracker {
     pub wrappers: Vec<String>,
     pub max_wrappers: usize,
     pub outcome: Option<Outcome>,
-    /// The tip's height when a negative outcome's condition was first seen;
-    /// the outcome is given once that height is final.
-    pub negative_since: Option<u64>,
+    /// The tip's height when a negative outcome's condition was first seen on
+    /// the branch now canonical, and that block's hash; the outcome is given
+    /// once that height is final, and the anchor moves to the tip if a chain
+    /// switch replaces that block.
+    pub negative_since: Option<(u64, String)>,
+    /// For a test: the relay's answer to the next request is replaced by an
+    /// ambiguous transport error after the relay has accepted it.
+    #[serde(skip)]
+    pub fail_after_accept: bool,
     /// Where this tracker is persisted; `None` keeps it in memory only.
     #[serde(skip)]
     pub store: Option<PathBuf>,
@@ -268,6 +282,7 @@ impl Tracker {
             max_wrappers: MAX_WRAPPERS,
             outcome: None,
             negative_since: None,
+            fail_after_accept: false,
             store: None,
         }
     }
@@ -393,25 +408,48 @@ impl Tracker {
         Search::NotFound { final_through, tip }
     }
 
-    async fn pending(&self, server: &RpcServer, h: &str) -> bool {
-        server
-            .sum_get_pending_transactions()
-            .await
-            .unwrap()
-            .iter()
-            .any(|t| strip(&t.hash) == strip(h))
+    async fn pending(&self, server: &RpcServer, h: &str) -> Result<bool, String> {
+        match server.sum_get_pending_transactions().await {
+            Ok(pool) => Ok(pool.iter().any(|t| strip(&t.hash) == strip(h))),
+            Err(e) => Err(format!("the pool could not be read: {}", e.message())),
+        }
     }
 
     /// A negative outcome: given once its condition has held on a chain final
     /// through the height at which it was first seen; until then uncertain,
     /// and checked again at the next step.
-    fn negative(&mut self, settled: Settled, o: Outcome) -> Step {
+    async fn negative(&mut self, server: &RpcServer, settled: Settled, o: Outcome) -> Step {
         let (final_through, tip) = match settled {
             Settled::Now => return self.done(o),
             Settled::Through { final_through, tip } => (final_through, tip),
         };
-        let since = *self.negative_since.get_or_insert(tip);
-        self.save();
+        let hash_at = |height: u64| async move {
+            match server.get_block_by_height(height).await {
+                Ok(Some(b)) => Ok(b.hash),
+                Ok(None) => Err(format!("block {height} is not available")),
+                Err(e) => Err(format!("block {height} could not be read: {}", e.message())),
+            }
+        };
+        // The anchor stands only while its block is still on this branch.
+        let anchor = match self.negative_since.clone() {
+            Some((height, hash)) => match hash_at(height).await {
+                Ok(now) if now == hash => Some((height, hash)),
+                Ok(_) => None,
+                Err(why) => return Step::Uncertain(why),
+            },
+            None => None,
+        };
+        let (since, _) = match anchor {
+            Some(a) => a,
+            None => match hash_at(tip).await {
+                Ok(hash) => {
+                    self.negative_since = Some((tip, hash.clone()));
+                    self.save();
+                    (tip, hash)
+                }
+                Err(why) => return Step::Uncertain(why),
+            },
+        };
         if final_through >= since {
             self.done(o)
         } else {
@@ -425,23 +463,35 @@ impl Tracker {
 
     async fn ask_for_wrapper(&mut self, server: &RpcServer, settled: Settled) -> Step {
         if self.requests >= self.max_wrappers {
-            return self.negative(
-                settled,
-                Outcome::Undeliverable(format!(
-                    "the retry bound ({} wrappers) is reached",
-                    self.max_wrappers
-                )),
-            );
+            return self
+                .negative(
+                    server,
+                    settled,
+                    Outcome::Undeliverable(format!(
+                        "the retry bound ({} wrappers) is reached",
+                        self.max_wrappers
+                    )),
+                )
+                .await;
         }
         // Counted and recorded as in flight before the request is sent: a
         // restart after this point counts it, and knows a wrapper may exist.
         self.requests += 1;
         self.in_flight = Some(tip(server).await.unwrap_or(0));
         self.save();
-        match server
+        let mut answer = server
             .messaging_submit_sponsored(request(&self.intent.envelope))
-            .await
-        {
+            .await;
+        if self.fail_after_accept && answer.is_ok() {
+            // As a client sees a connection lost after the relay accepted.
+            self.fail_after_accept = false;
+            answer = Err(jsonrpsee::types::ErrorObject::owned(
+                -32603,
+                "connection reset",
+                None::<()>,
+            ));
+        }
+        match answer {
             Ok(r) => {
                 if self.first_submitted_at.is_none() {
                     self.first_submitted_at = self.in_flight;
@@ -458,11 +508,16 @@ impl Tracker {
                 self.in_flight = None;
                 self.save();
                 let msg = e.message().to_string();
-                if msg.contains("Retry after the next block") || msg.contains("already pending") {
-                    // Later, or another wrapper of this envelope is pending.
+                if e.code() == TX_REJECTED
+                    || msg.contains("Retry after the next block")
+                    || msg.contains("already pending")
+                {
+                    // Later (a full pool, the block before the accounting
+                    // gate), or another wrapper of this envelope is pending.
                     Step::Wait
                 } else if self.intent.form == Form::Legacy && msg.contains("version-2") {
                     self.negative(
+                        server,
                         settled,
                         Outcome::NeedsUserSignature(
                             "the relay takes only the version-2 envelope now; it cannot convert \
@@ -470,15 +525,18 @@ impl Tracker {
                                 .to_string(),
                         ),
                     )
+                    .await
                 } else if msg.contains("already used") {
                     // The nonce was spent since the last read: decide again
                     // from the chain at the next step.
                     Step::Wait
                 } else {
                     self.negative(
+                        server,
                         settled,
                         Outcome::Undeliverable(format!("the relay refused: {msg}")),
                     )
+                    .await
                 }
             }
             // Not a definite refusal: the relay may have made a wrapper. The
@@ -526,8 +584,10 @@ impl Tracker {
         }
         // A wrapper still pending may yet deliver it.
         for h in &self.wrappers {
-            if self.pending(server, h).await {
-                return Step::Wait;
+            match self.pending(server, h).await {
+                Ok(true) => return Step::Wait,
+                Ok(false) => {}
+                Err(why) => return Step::Uncertain(why),
             }
         }
         // The last wrapper: none, `invalid nonce` (never executed), or gone
@@ -564,13 +624,16 @@ impl Tracker {
         let n = self.intent.envelope.nonce;
         if self.intent.form == Form::Version2 && n < committed {
             // 4. Moved past without this message.
-            return self.negative(
-                settled,
-                Outcome::NeedsUserSignature(format!(
-                    "the sender's messaging nonce moved from {n} to {committed} without this \
+            return self
+                .negative(
+                    server,
+                    settled,
+                    Outcome::NeedsUserSignature(format!(
+                        "the sender's messaging nonce moved from {n} to {committed} without this \
                      message; the user must sign a new envelope at {committed}"
-                )),
-            );
+                    )),
+                )
+                .await;
         }
         if let Some(status) = refused {
             let o = if self.intent.form == Form::Legacy {
@@ -581,7 +644,7 @@ impl Tracker {
             } else {
                 Outcome::Undeliverable(format!("refused in the block: {status}"))
             };
-            return self.negative(settled, o);
+            return self.negative(server, settled, o).await;
         }
         if self.intent.form == Form::Version2 && n > committed {
             // An earlier envelope from this sender has not executed yet.

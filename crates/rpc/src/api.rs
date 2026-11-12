@@ -1288,7 +1288,13 @@ pub trait SumChainApi {
     /// A search that cannot be completed (a block not available, an RPC
     /// error) or that covers blocks not yet final does not mean "not
     /// delivered": the client neither asks for a new signature nor reports the
-    /// message lost until the blocks that show it are final. `messaging_getSentMessages` is not a
+    /// message lost until the blocks that show it are final, on the branch it
+    /// is reading: a chain switch that replaces the block at which it first saw
+    /// the condition starts the wait again.
+    ///
+    /// A client uses one relay per intent: the relay refuses a second wrapper
+    /// of an envelope pending in its own pool, which another relay's pool may
+    /// not hold yet. `messaging_getSentMessages` is not a
     /// substitute: it returns the oldest 1,000 records, and below the
     /// transaction-index gate it keeps one row per sender per block.
     /// - the message is on the chain: it is delivered, and never sent again;

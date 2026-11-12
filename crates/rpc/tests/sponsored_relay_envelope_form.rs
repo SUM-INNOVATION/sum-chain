@@ -2812,3 +2812,63 @@ async fn message_data_keeps_its_shape_and_the_envelope_has_its_own_method() {
         .unwrap()
         .is_none());
 }
+
+/// A relay refusing a first request because its pool has no room for the
+/// sponsor (`TxRejected`) is transient: the client waits, counts nothing,
+/// and once a block has made room it obtains a wrapper.
+#[tokio::test]
+async fn a_full_pool_at_the_first_request_is_waited_out() {
+    let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
+    // The sponsor's place in the pool, filled by carol's envelopes.
+    for nonce in 0..100u64 {
+        s.relay(&v2(envelope(nonce, nonce as u8, None)))
+            .await
+            .unwrap();
+    }
+    let mut t = Tracker::new(v2_intent(&s, &alice(), 0, 1).await);
+    assert_eq!(t.submit(&s.server).await, Step::Wait);
+    assert_eq!(
+        (t.requests, t.in_flight, t.outcome.clone()),
+        (0, None, None)
+    );
+    s.publish_pool(1);
+    assert!(matches!(t.step(&s.server).await, Step::Resubmitted(_)));
+    s.publish_pool(2);
+    assert!(matches!(
+        t.step(&s.server).await,
+        Step::Done(Outcome::Delivered { .. })
+    ));
+    assert_eq!(t.requests, 1);
+}
+
+/// A connection lost after the relay accepted a request (an ambiguous
+/// error, not a refusal) leaves the request counted and in flight: the relay
+/// may have made a wrapper, and it did. The client waits for a block, asks
+/// again and is refused (the envelope is pending), and finds the message
+/// delivered by that wrapper once it is carried. One wrapper, one request
+/// counted.
+#[tokio::test]
+async fn an_ambiguous_error_after_acceptance_stays_counted() {
+    let s = serve(&genesis_on(CHAIN_ID, Some(1), Some(1)));
+    let intent = v2_intent(&s, &alice(), 0, 1).await;
+    let mut t = Tracker::new(intent.clone());
+    t.fail_after_accept = true;
+    assert_eq!(t.submit(&s.server).await, Step::Wait);
+    assert_eq!((t.requests, t.in_flight, t.wrappers.len()), (1, Some(0), 0));
+    assert_eq!(
+        s.pending_sponsor_nonces(),
+        vec![0],
+        "the relay made a wrapper"
+    );
+
+    assert_eq!(t.step(&s.server).await, Step::Wait, "a block first");
+    s.publish(1, Vec::new());
+    assert_eq!(t.step(&s.server).await, Step::Wait, "refused: pending");
+    assert_eq!(t.requests, 1);
+    s.publish_pool(2);
+    assert!(matches!(
+        t.step(&s.server).await,
+        Step::Done(Outcome::Delivered { .. })
+    ));
+    assert_eq!((t.requests, deliveries(&s, &intent)), (1, 1));
+}
