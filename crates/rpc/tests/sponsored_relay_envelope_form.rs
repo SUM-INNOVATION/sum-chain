@@ -2613,15 +2613,18 @@ async fn an_incomplete_search_is_uncertain_never_not_delivered() {
 /// counted and in flight; the client waits for a block, then asks again,
 /// and the relay refuses: an envelope already pending (by its nonce for the
 /// version-2 envelope; as the identical signed envelope for the string form
-/// below the envelope gate). The one wrapper is carried and the message is
-/// delivered once; the count is one.
+/// below the envelope gate). The string form runs with the accounting gate
+/// open, where a second wrapper would take the next sponsor nonce and be a
+/// different transaction (below that gate it would be byte-identical, and
+/// the pool would refuse it anyway). The one wrapper is carried and the
+/// message is delivered once; the count is one.
 #[tokio::test]
 async fn a_crash_after_the_relay_accepted_makes_no_second_wrapper() {
     for form in [Form::Version2, Form::Legacy] {
         let gates = if form == Form::Version2 {
             (Some(1), Some(1))
         } else {
-            (None, None)
+            (None, Some(1))
         };
         let s = serve(&genesis_on(CHAIN_ID, gates.0, gates.1));
         let intent = if form == Form::Version2 {
