@@ -645,18 +645,49 @@ impl<'a> CombinedOrder<'a> {
         }
     }
 
-    /// With nothing ready, the transactions left wait on each other in a
-    /// cycle. The latest position at the head of its outer sender's sequence.
-    fn cycle_victim(&self) -> Option<usize> {
+    /// Whether `i`'s key is the lowest left for its outer sender.
+    fn is_outer_head(&self, i: usize) -> bool {
+        let t = &self.seq[i];
         self.by_outer
-            .values()
-            .filter_map(|left| {
-                let &(head, _) = left.first()?;
-                left.iter()
-                    .take_while(|(key, _)| *key == head)
-                    .map(|(_, j)| *j)
-                    .max()
-            })
+            .get(&t.outer)
+            .and_then(|left| left.first())
+            .is_some_and(|(key, _)| *key == t.key)
+    }
+
+    /// The transaction left that `i`, left and not ready, waits on: behind
+    /// the head of its outer sender's sequence, that head (the first of it,
+    /// by position); at the head, its named sender's lowest envelope left.
+    fn waits_on(&self, i: usize) -> Option<usize> {
+        let t = &self.seq[i];
+        let &(head, first) = self.by_outer.get(&t.outer)?.first()?;
+        if head != t.key {
+            return Some(first);
+        }
+        let (named, _) = t.envelope?;
+        self.by_named.get(&named)?.first().map(|&(_, j)| j)
+    }
+
+    /// With nothing ready, every transaction left waits on another one left.
+    /// Following those waits from the first transaction left, a position
+    /// repeats, and the transactions from its first visit on are a cycle.
+    /// The victim is the latest of them in `carried` that heads its outer
+    /// sender's sequence: every cycle has one, since a transaction behind its
+    /// outer sender's head waits on that head. A transaction that only waits
+    /// on a cycle is not on it and is never the victim.
+    fn cycle_victim(&self) -> Option<usize> {
+        let start = self.left.iter().position(|&left| left)?;
+        let mut step_of: HashMap<usize, usize> = HashMap::new();
+        let mut path = Vec::new();
+        let mut at = start;
+        while !step_of.contains_key(&at) {
+            step_of.insert(at, path.len());
+            path.push(at);
+            at = self.waits_on(at)?;
+        }
+        path[step_of[&at]..]
+            .iter()
+            .copied()
+            .filter(|&j| self.is_outer_head(j))
             .max()
     }
 
@@ -729,11 +760,11 @@ struct LeftOut {
 /// returned unchanged.
 ///
 /// When one named sender's envelopes are carried by several sponsors the two
-/// sequences can conflict in a cycle that no order keeps. Then the latest
-/// transaction in `carried` at the head of its outer sender's sequence is left
-/// out as the cycle's victim, with every transaction left that depends on it,
-/// in turn: its outer sender's transactions at higher nonces when it advances
-/// the nonce, and its named sender's later envelopes.
+/// sequences can conflict in a cycle that no order keeps. Then a transaction
+/// on the cycle is left out as its victim ([`CombinedOrder::cycle_victim`]),
+/// with every transaction left that depends on it, in turn: its outer
+/// sender's transactions at higher nonces when it advances the nonce, and its
+/// named sender's later envelopes.
 fn in_combined_order(
     carried: Vec<SignedTransaction>,
     accounting: bool,
@@ -2701,6 +2732,105 @@ mod tests {
         let next = mempool.select_for_block(10);
         assert_eq!(next.len(), 4);
         assert_eq!(mempool.len(), 4);
+    }
+
+    fn key(i: u8) -> KeyPair {
+        KeyPair::from_bytes([i; 32])
+    }
+
+    fn sorted(mut hashes: Vec<Hash>) -> Vec<Hash> {
+        hashes.sort();
+        hashes
+    }
+
+    /// A cycle through `sponsors.len()` sponsors and as many named senders,
+    /// from the accounting gate on: sponsor `k` relays sender `k`'s envelope
+    /// 1 at its nonce 0 and sender `k + 1`'s envelope 0 at its nonce 1, so
+    /// each sponsor's nonce 0 waits on the next sponsor's nonce 1, which waits
+    /// on that sponsor's nonce 0. With one sponsor it is one sender's two
+    /// envelopes relayed in the reverse order. Returns, per sponsor, its
+    /// nonce 0 and nonce 1.
+    fn cycle_through(
+        sponsors: &[KeyPair],
+        senders: &[KeyPair],
+    ) -> Vec<(SignedTransaction, SignedTransaction)> {
+        let n = sponsors.len();
+        (0..n)
+            .map(|k| {
+                (
+                    relayed(&sponsors[k], 0, &senders[k], 1),
+                    relayed(&sponsors[k], 1, &senders[(k + 1) % n], 0),
+                )
+            })
+            .collect()
+    }
+
+    /// `w` relays `u`'s envelope 2, last in the fee order: it waits on
+    /// the cycle of `r1` and `r2` (through `u`'s envelope 1) but is not on
+    /// it. The victim is a transaction of the cycle that heads its sponsor's
+    /// sequence, the latest of those in the fee order; `w`'s envelope and the
+    /// cycle's other three are left for a later block, not evicted.
+    #[test]
+    fn a_transaction_that_only_waits_on_a_cycle_is_not_its_victim() {
+        let (r1, r2, u, v, w) = keys();
+        let r2_u0 = relayed(&r2, 1, &u, 0);
+        let r1_v0 = relayed(&r1, 1, &v, 0);
+        let r1_u1 = relayed(&r1, 0, &u, 1);
+        let r2_v1 = relayed(&r2, 0, &v, 1);
+        let w_u2 = relayed(&w, 0, &u, 2);
+        let carried = vec![
+            r2_u0.clone(),
+            r1_v0.clone(),
+            r1_u1.clone(),
+            r2_v1.clone(),
+            w_u2.clone(),
+        ];
+        let (ordered, left_out) = in_combined_order(carried, true);
+        assert!(ordered.is_empty());
+        assert_eq!(left_out.victims, vec![r2_v1.hash()]);
+        assert_eq!(
+            sorted(left_out.dependents.clone()),
+            sorted(ids(&[r2_u0, r1_v0, r1_u1, w_u2]))
+        );
+    }
+
+    /// Cycles through one, two, three and four sponsors (two, four,
+    /// six and eight transactions; a cycle alternates a sponsor's head and a
+    /// transaction behind one, so it has no odd length): exactly one victim,
+    /// on the cycle and heading its sponsor's sequence, every other
+    /// transaction of the cycle left for a later block, and an unrelated
+    /// sponsor's transfer and relayed envelope carried in order.
+    #[test]
+    fn each_cycle_loses_one_victim_from_the_cycle() {
+        let sponsors: Vec<KeyPair> = (10..14).map(key).collect();
+        let senders: Vec<KeyPair> = (20..24).map(key).collect();
+        let (unrelated, unrelated_user) = (key(30), key(31));
+        for n in 1..=4 {
+            let pairs = cycle_through(&sponsors[..n], &senders[..n]);
+            let unrelated_transfer = transfer_from(&unrelated, 0);
+            let unrelated_envelope = relayed(&unrelated, 1, &unrelated_user, 0);
+            // Fee order: the nonce-1 transactions, then the unrelated pair,
+            // then the nonce-0 heads.
+            let mut carried: Vec<SignedTransaction> =
+                pairs.iter().map(|(_, one)| one.clone()).collect();
+            carried.push(unrelated_transfer.clone());
+            carried.push(unrelated_envelope.clone());
+            carried.extend(pairs.iter().map(|(zero, _)| zero.clone()));
+            let (ordered, left_out) = in_combined_order(carried, true);
+            assert_eq!(
+                ids(&ordered),
+                ids(&[unrelated_transfer.clone(), unrelated_envelope.clone()]),
+                "{n} sponsor(s)"
+            );
+            // The latest head in the fee order is the last sponsor's nonce 0.
+            assert_eq!(left_out.victims, vec![pairs[n - 1].0.hash()], "{n}");
+            let rest: Vec<Hash> = pairs
+                .iter()
+                .flat_map(|(zero, one)| [zero.hash(), one.hash()])
+                .filter(|h| *h != pairs[n - 1].0.hash())
+                .collect();
+            assert_eq!(sorted(left_out.dependents.clone()), sorted(rest), "{n}");
+        }
     }
 
     /// `filter_map_held` sees each held transaction once and returns what the
