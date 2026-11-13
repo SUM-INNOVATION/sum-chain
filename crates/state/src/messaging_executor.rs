@@ -752,8 +752,7 @@ impl MessagingExecutor {
         let expected = Self::v_get_sender_nonce(view, &real_sender)?;
         if nonce != expected {
             return Ok(MessagingExecutionResult::failure(format!(
-                "Sponsored message nonce {} is not the sender's current nonce {}",
-                nonce, expected
+                "Sponsored message nonce {nonce} is not the sender's current nonce {expected}"
             )));
         }
 
@@ -775,7 +774,7 @@ impl MessagingExecutor {
             return refused("Sender must register public key first".to_string());
         }
         if let Err(e) = validate_message_format(&sponsored_msg.message_data) {
-            return refused(format!("Invalid message format: {}", e));
+            return refused(format!("Invalid message format: {e}"));
         }
         let max_size = Self::v_get_max_message_size(view)?;
         if sponsored_msg.message_data.len() > max_size as usize {

@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use sumchain_consensus::{ConsensusEngine, ConsensusQuery, PoAEngine};
+use sumchain_consensus::{ConsensusEngine, PoAEngine};
 use sumchain_crypto::{recipient_hash, sign, KeyPair};
 use sumchain_genesis::{ChainParams, Genesis, MessagingParams};
 use sumchain_primitives::messaging::{

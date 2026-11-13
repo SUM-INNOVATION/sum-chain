@@ -30,7 +30,7 @@ use sumchain_primitives::messaging::{
 use sumchain_primitives::{
     sponsored_register_v1_signing_preimage, sponsored_send_v2_signing_preimage, Block, BlockHeader,
     Hash, MessagingOperation, Receipt, SignedTransaction, SponsoredMessage, TransactionV2,
-    TxPayload, TxStatus,
+    TxStatus,
 };
 use sumchain_rpc::api::SumChainApiServer;
 use sumchain_rpc::auth::RpcAuthConfig;
