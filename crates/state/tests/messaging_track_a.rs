@@ -1843,3 +1843,157 @@ fn the_refund_outcome_starts_exactly_at_the_gate() {
         assert!(escrow_of(&c, pay).is_none(), "{height}");
     }
 }
+
+// ── sponsored registration: refusals charged from the accounting gate ───────
+
+fn with_registration(
+    mut p: sumchain_genesis::ChainParams,
+    h: Option<u64>,
+) -> sumchain_genesis::ChainParams {
+    p.messaging_sponsored_registration_enabled_from_height = h;
+    p
+}
+
+/// `registrant`'s sponsored registration, relayed by `sponsor`, signed for
+/// this chain, with `mutate` applied to it.
+fn registration(
+    c: &Chain,
+    registrant: &sumchain_crypto::KeyPair,
+    mutate: impl FnOnce(&mut sumchain_primitives::RegisterPublicKeySponsoredV1Data),
+) -> MessagingTxData {
+    let registrant_public_key = *registrant.public_key().as_bytes();
+    let preimage = sumchain_primitives::sponsored_register_v1_signing_preimage(
+        c.chain_id,
+        &sponsor().address(),
+        &registrant_public_key,
+    );
+    let mut reg = sumchain_primitives::RegisterPublicKeySponsoredV1Data {
+        registrant_public_key,
+        registrant_signature: *sumchain_crypto::sign(&preimage, registrant.private_key())
+            .as_bytes(),
+    };
+    mutate(&mut reg);
+    raw(
+        MessagingOperation::RegisterPublicKeySponsoredV1,
+        reg.to_bytes(),
+    )
+}
+
+/// The four refusals past the registration gate, as `(label, code, data)`.
+fn registration_refusals(c: &Chain) -> Vec<(&'static str, u32, MessagingTxData)> {
+    vec![
+        (
+            "malformed",
+            392,
+            malformed(MessagingOperation::RegisterPublicKeySponsoredV1),
+        ),
+        (
+            "a key that is not a point",
+            393,
+            registration(c, &frank(), |r| r.registrant_public_key = [0x02; 32]),
+        ),
+        (
+            "a bad signature",
+            391,
+            registration(c, &frank(), |r| r.registrant_signature[0] ^= 1),
+        ),
+        ("already registered", 394, registration(c, &carol(), |_| {})),
+    ]
+}
+
+/// With the registration gate and both messaging gates open, each
+/// refusal past the registration gate keeps its code and is charged to the
+/// sponsor once (debit, proposer credit, account nonce); nothing else moves.
+/// With the registration gate closed the refusal stays free. With the
+/// accounting gate absent every refusal stays free, as before. A success is
+/// charged once either way.
+#[test]
+fn sponsored_registration_refusals_are_charged_only_with_both_gates_open() {
+    for case in 0..4 {
+        for (label, params, charged) in [
+            (
+                "both gates open",
+                with_registration(both(Some(1)), Some(1)),
+                true,
+            ),
+            (
+                "the accounting gate absent",
+                with_registration(both(None), Some(1)),
+                false,
+            ),
+        ] {
+            let mut c = Chain::new(params);
+            c.setup();
+            let (what, code, data) = registration_refusals(&c).remove(case);
+            let before = c.rows();
+            let (balance, nonce) = (c.balance(&sponsor().address()), c.nonce(&sponsor()));
+            let r = c.one(c.tx(&sponsor(), data));
+            let fee = if charged { FEE } else { 0 };
+            assert_eq!(
+                (r.status, r.fee_paid),
+                (TxStatus::Failed(code), fee),
+                "{label}: {what}"
+            );
+            assert_eq!(
+                c.balance(&sponsor().address()),
+                balance - fee,
+                "{label}: {what}"
+            );
+            assert_eq!(
+                c.nonce(&sponsor()),
+                nonce + u64::from(charged),
+                "{label}: {what}"
+            );
+            let mut want = if charged {
+                vec![account_key(&sponsor().address()), account_key(&proposer())]
+            } else {
+                Vec::new()
+            };
+            want.sort();
+            assert_eq!(changed(&before, &c.rows()), want, "{label}: {what}");
+        }
+    }
+
+    // The registration gate closed: free, whatever the accounting gate says.
+    let mut c = Chain::new(with_registration(both(Some(1)), None));
+    c.setup();
+    let before = c.rows();
+    let r = c.one(c.tx(&sponsor(), registration(&c, &frank(), |_| {})));
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Failed(390), 0));
+    assert_eq!(c.rows(), before);
+
+    // A success: charged once, the key written.
+    let mut c = Chain::new(with_registration(both(Some(1)), Some(1)));
+    c.setup();
+    let balance = c.balance(&sponsor().address());
+    let r = c.one(c.tx(&sponsor(), registration(&c, &frank(), |_| {})));
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Success, FEE));
+    assert_eq!(c.balance(&sponsor().address()), balance - FEE);
+    assert!(c
+        .store()
+        .get_public_key(&frank().address())
+        .unwrap()
+        .is_some());
+}
+
+/// The accounting gate at H, with the registration gate open from 1: a
+/// duplicate registration is free at H-1 and charged at H and H+1; screening
+/// records none of them as an offender.
+#[test]
+fn sponsored_registration_charging_starts_exactly_at_the_gate() {
+    const H: u64 = 3;
+    let mut c = Chain::new(with_registration(both(Some(H)), Some(1)));
+    c.setup();
+    for height in [H - 1, H, H + 1] {
+        let tx = c.tx(&sponsor(), registration(&c, &carol(), |_| {}));
+        assert!(c.screen(vec![tx.clone()], 1 << 20).refused().is_empty());
+        let r = c.one(tx);
+        assert_eq!(c.height, height);
+        let fee = if height < H { 0 } else { FEE };
+        assert_eq!(
+            (r.status, r.fee_paid),
+            (TxStatus::Failed(394), fee),
+            "{height}"
+        );
+    }
+}

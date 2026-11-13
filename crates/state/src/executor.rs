@@ -1007,7 +1007,10 @@ impl BlockExecutor {
                         // for a sponsor). Mirrors the sponsored InferenceAttestation
                         // V2 arm (#79/#95): every pre-success failure is free
                         // (fee_paid: 0, no mutation); only a fully valid tx charges
-                        // the sponsor and writes the registrant's key.
+                        // the sponsor and writes the registrant's key. From the
+                        // messaging accounting gate a refusal after the
+                        // registration gate is charged once instead, settled by
+                        // the block loop (`RefusalCharge`).
                         if messaging_data.operation
                             == MessagingOperation::RegisterPublicKeySponsoredV1
                         {
@@ -1019,6 +1022,7 @@ impl BlockExecutor {
                                 block_height,
                                 block_timestamp,
                                 tx_hash,
+                                refusal,
                             );
                         }
                         // Execute messaging operation (SRC-201)
@@ -2349,6 +2353,14 @@ impl BlockExecutor {
     /// and the registrant's key written through the block-ordered messaging
     /// store. Database errors propagate via `?` (deterministic halt) — never
     /// converted into a business branch.
+    ///
+    /// From `messaging_fee_nonce_accounting_enabled_from_height`, with this
+    /// operation's own gate open, a refusal after that gate (decode, key,
+    /// signature, duplicate) is charged to the sponsor once instead: the
+    /// receipt keeps its code and reports the fee, and the refusal is
+    /// reported through `refusal` for the block loop to settle, as every
+    /// refused messaging transaction is. The gate refusal (`390`) stays free.
+    /// Below the accounting gate every refusal is free, as before.
     #[allow(clippy::too_many_arguments)]
     fn execute_sponsored_register_v1(
         &self, view: &mut ExecutionView<'_, '_>,
@@ -2359,6 +2371,7 @@ impl BlockExecutor {
         block_height: u64,
         block_timestamp: u64,
         tx_hash: Hash,
+        refusal: &mut Option<RefusalCharge>,
     ) -> Result<TxExecutionResult> {
         use sumchain_primitives::messaging_sponsored::{
             verify_sponsored_registration_v1, SponsoredRegisterError,
@@ -2374,39 +2387,47 @@ impl BlockExecutor {
             });
         }
 
+        // Past the gate: a refusal is free below the messaging accounting
+        // gate and charged once from it.
+        let accounted =
+            MessagingExecutor::fee_nonce_accounting_gate_open(&self.params, block_height);
+        let mut refused = |status: TxStatus| -> Result<TxExecutionResult> {
+            let fee_paid = if accounted {
+                *refusal = Some(RefusalCharge {
+                    payer: *sponsor,
+                    fee,
+                    consume: None,
+                });
+                fee
+            } else {
+                0
+            };
+            Ok(TxExecutionResult {
+                tx_hash,
+                status,
+                fee_paid,
+            })
+        };
+
         // 2. Strict payload decode (rejects trailing/truncated/wrong-width).
-        //    Malformed → free rejection.
+        //    Malformed → rejection.
         let reg = match RegisterPublicKeySponsoredV1Data::from_bytes(data) {
             Ok(r) => r,
-            Err(_) => {
-                return Ok(TxExecutionResult {
-                    tx_hash,
-                    status: TxStatus::Failed(392),
-                    fee_paid: 0,
-                });
-            }
+            Err(_) => return refused(TxStatus::Failed(392)),
         };
 
         // 3. Strict Ed25519 verification of the registrant's inner authorization
         //    over the canonical preimage bound to (chain_id, sponsor, pubkey).
-        //    Bad key → 393; bad signature → 391. Both free.
+        //    Bad key → 393; bad signature → 391.
         //    `self.state.chain_id()` equals the outer tx chain id (validated in
         //    `validate_tx` before dispatch).
         match verify_sponsored_registration_v1(&reg, self.state.chain_id(), sponsor) {
             Ok(()) => {}
             Err(SponsoredRegisterError::InvalidPublicKey) => {
-                return Ok(TxExecutionResult {
-                    tx_hash,
-                    status: TxStatus::Failed(393),
-                    fee_paid: 0,
-                });
+                return refused(TxStatus::Failed(393));
             }
             Err(SponsoredRegisterError::InvalidSignature) => {
-                return Ok(TxExecutionResult {
-                    tx_hash,
-                    status: TxStatus::Failed(391),
-                    fee_paid: 0,
-                });
+                return refused(TxStatus::Failed(391));
             }
         }
 
@@ -2421,11 +2442,7 @@ impl BlockExecutor {
         // same address both pass their "already registered" check and the
         // second silently overwrites the first.
         if MessagingExecutor::v_has_public_key(view, &registrant)? {
-            return Ok(TxExecutionResult {
-                tx_hash,
-                status: TxStatus::Failed(394),
-                fee_paid: 0,
-            });
+            return refused(TxStatus::Failed(394));
         }
 
         // 6. Sponsor pays. Insufficient balance is a free, pre-success rejection
@@ -2900,7 +2917,9 @@ impl BlockExecutor {
                 // entrypoints behave byte-identically. (Handles its own gate +
                 // sponsor balance/fee/nonce; do not pre-charge here.)
                 if messaging_data.operation == MessagingOperation::RegisterPublicKeySponsoredV1 {
-                    return self.execute_sponsored_register_v1(view,
+                    let mut refusal = None;
+                    let result = self.execute_sponsored_register_v1(
+                        view,
                         &tx.from,
                         &messaging_data.data,
                         proposer,
@@ -2908,7 +2927,19 @@ impl BlockExecutor {
                         block_height,
                         block_timestamp,
                         tx_hash,
-                    );
+                        &mut refusal,
+                    )?;
+                    // No block loop settles a refusal here, and the arm
+                    // staged nothing before refusing: charge it as the loop
+                    // would.
+                    if let Some(charge) = refusal {
+                        let code = match result.status {
+                            TxStatus::Failed(code) => code,
+                            _ => 0,
+                        };
+                        Self::charge_messaging_refusal(view, proposer, &charge, tx_hash, code)?;
+                    }
+                    return Ok(result);
                 }
                 // Check balance for fee
                 let balance = StateManager::v_get_balance(view, &tx.from)?;
