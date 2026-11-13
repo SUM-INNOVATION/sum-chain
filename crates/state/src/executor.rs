@@ -98,7 +98,9 @@ pub struct TxExecutionResult {
 /// scope back, so nothing the operation staged survives, and then, in a scope
 /// of its own, debits `fee` from `payer`, credits the block's proposer and
 /// advances `payer`'s account nonce: the fee is charged exactly once, and no
-/// other effect of a refused operation remains.
+/// other effect of a refused operation remains, except one: a refused
+/// sponsored envelope that was authenticated spends its nonce (`consume`), so
+/// an authorization included once is never valid again.
 ///
 /// A caller that executes one transaction outside a block
 /// ([`BlockExecutor::execute_tx`], [`BlockExecutor::execute_tx_with_validators`])
@@ -109,6 +111,10 @@ pub(crate) struct RefusalCharge {
     pub(crate) payer: Address,
     /// The outer transaction's fee.
     pub(crate) fee: Balance,
+    /// An authenticated sponsored envelope's named sender and nonce, which
+    /// the refusal spends: the sender's messaging nonce goes from `nonce` to
+    /// `nonce + 1`.
+    pub(crate) consume: Option<(Address, u64)>,
 }
 
 /// What one PROPOSER-LOCAL screening pass found: every transaction in a
@@ -1062,6 +1068,7 @@ impl BlockExecutor {
                                 *refusal = Some(RefusalCharge {
                                     payer: v2_tx.from,
                                     fee: v2_tx.fee,
+                                    consume: result.consumes,
                                 });
                                 v2_tx.fee
                             } else {
@@ -2465,8 +2472,12 @@ impl BlockExecutor {
     /// Charge a refused messaging transaction its fee, once, after the block
     /// loop has rolled the transaction back: `fee` leaves `charge.payer`, the
     /// proposer is credited and the payer's account nonce advances, in the
-    /// order the accounting gate charges before dispatch. Any error is an
-    /// invariant or storage failure and makes the block inapplicable.
+    /// order the accounting gate charges before dispatch. Then an
+    /// authenticated envelope's nonce is spent: the named sender's messaging
+    /// nonce, which authentication found equal to it in the state the
+    /// rollback restores, moves to the next. Any error, a nonce that is no
+    /// longer the envelope's included, is an invariant or storage failure and
+    /// makes the block inapplicable.
     fn charge_messaging_refusal(
         view: &mut ExecutionView<'_, '_>,
         proposer: &Address,
@@ -2483,6 +2494,28 @@ impl BlockExecutor {
         StateManager::v_deduct(view, &charge.payer, charge.fee)?;
         StateManager::v_credit(view, proposer, charge.fee)?;
         StateManager::v_increment_nonce(view, &charge.payer)?;
+        if let Some((sender, nonce)) = charge.consume {
+            Self::spend_envelope_nonce(view, &sender, nonce)?;
+        }
+        Ok(())
+    }
+
+    /// Spend a refused, authenticated envelope's nonce: `sender`'s messaging
+    /// nonce, which authentication found equal to `nonce`, moves to the next.
+    /// Any other value is an invariant failure.
+    fn spend_envelope_nonce(
+        view: &mut ExecutionView<'_, '_>,
+        sender: &Address,
+        nonce: u64,
+    ) -> Result<()> {
+        let current = MessagingExecutor::v_get_sender_nonce(view, sender)?;
+        if current != nonce {
+            return Err(StateError::InvalidOperation(format!(
+                "a refused envelope authenticated at messaging nonce {nonce} found \
+                 {current} when its refusal was settled"
+            )));
+        }
+        MessagingExecutor::v_increment_sender_nonce(view, sender)?;
         Ok(())
     }
 
@@ -2904,11 +2937,18 @@ impl BlockExecutor {
                         result.error.as_deref().unwrap_or("Unknown error")
                     );
 
-                    // The same fee report as the live arm's.
+                    // The same fee report as the live arm's. No block loop
+                    // settles a refusal here: by the operations' order a
+                    // refusal stages nothing but the charge made before
+                    // dispatch, which stays, and an authenticated envelope's
+                    // nonce is spent here as the loop spends it.
                     let fee_paid = if MessagingExecutor::fee_nonce_accounting_gate_open(
                         &self.params,
                         block_height,
                     ) {
+                        if let Some((sender, nonce)) = result.consumes {
+                            Self::spend_envelope_nonce(view, &sender, nonce)?;
+                        }
                         tx.fee
                     } else {
                         0

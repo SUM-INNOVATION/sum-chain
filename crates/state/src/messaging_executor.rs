@@ -43,6 +43,13 @@ pub struct MessagingExecutionResult {
     pub success: bool,
     pub message_id: Option<Hash>,
     pub error: Option<String>,
+    /// For a refused sponsored send whose envelope was authenticated (it
+    /// decoded, its version-2 signature verified strictly and its nonce was
+    /// the named sender's current one): that sender and nonce. From
+    /// `messaging_fee_nonce_accounting_enabled_from_height` the block loop
+    /// spends the nonce when it settles the refusal. `None` for every other
+    /// result.
+    pub consumes: Option<(Address, u64)>,
 }
 
 impl MessagingExecutionResult {
@@ -51,6 +58,7 @@ impl MessagingExecutionResult {
             success: true,
             message_id,
             error: None,
+            consumes: None,
         }
     }
 
@@ -59,6 +67,16 @@ impl MessagingExecutionResult {
             success: false,
             message_id: None,
             error: Some(error.into()),
+            consumes: None,
+        }
+    }
+
+    /// A refusal of an authenticated sponsored envelope: `sender`'s envelope
+    /// at `nonce`.
+    pub fn refused_authenticated(error: impl Into<String>, sender: Address, nonce: u64) -> Self {
+        Self {
+            consumes: Some((sender, nonce)),
+            ..Self::failure(error)
         }
     }
 }
@@ -531,11 +549,8 @@ impl MessagingExecutor {
     /// SponsoredMessage.sender_pubkey
     ///
     /// From `messaging_sponsored_envelope_verification_enabled_from_height` on,
-    /// the envelope is accepted only when it carries no amount, its signature
-    /// verifies strictly, by the key it names, over the version-2 preimage for
-    /// `chain_id`, and its nonce is the named sender's current messaging nonce.
-    /// Below the gate the envelope is executed under the earlier rule, as
-    /// before.
+    /// the envelope is executed by [`Self::send_message_enveloped`]. Below the
+    /// gate it is executed under the earlier rule, as before.
     #[allow(clippy::too_many_arguments)]
     fn send_message_sponsored(
         view: &mut ExecutionView<'_, '_>,
@@ -551,6 +566,22 @@ impl MessagingExecutor {
         tx_hash: Hash,
         accounted: bool,
     ) -> Result<MessagingExecutionResult> {
+        if Self::sponsored_envelope_verification_gate_open(params, block_height) {
+            return Self::send_message_enveloped(
+                view,
+                params,
+                chain_id,
+                data,
+                proposer,
+                block_height,
+                block_timestamp,
+                clock,
+                tx_index,
+                tx_hash,
+                accounted,
+            );
+        }
+
         // Check if sponsorship is enabled
         if !Self::v_is_sponsorship_enabled(view)? {
             return Ok(MessagingExecutionResult::failure("Sponsorship disabled"));
@@ -566,37 +597,6 @@ impl MessagingExecutor {
         // Derive the real sender address from the sender's public key
         let real_sender = Address::from_public_key(&sponsored_msg.sender_pubkey);
 
-        // The version-2 envelope rule, from its gate on. Each refusal is an
-        // ordinary failed messaging operation: nothing below runs, so no
-        // counter moves and no event is stored.
-        let envelope_rule = Self::sponsored_envelope_verification_gate_open(params, block_height);
-        if envelope_rule {
-            // No payment travels with a sponsored envelope: the relayer is not
-            // the sender, so there is no account to move an amount from, and
-            // an event must never report a payment that did not occur.
-            if sponsored_msg.koppa_amount.is_some() {
-                return Ok(MessagingExecutionResult::failure(
-                    "Sponsored message carries an amount",
-                ));
-            }
-            // The named sender's strict signature over the version-2 preimage,
-            // which binds this chain, the sender key, the recipient, the
-            // message bytes, the nonce, the expiry and the amount.
-            match verify_sponsored_send_v2(&sponsored_msg, chain_id) {
-                Ok(()) => {}
-                Err(SponsoredEnvelopeError::InvalidPublicKey) => {
-                    return Ok(MessagingExecutionResult::failure(
-                        "Invalid sponsored message sender key",
-                    ));
-                }
-                Err(SponsoredEnvelopeError::InvalidSignature) => {
-                    return Ok(MessagingExecutionResult::failure(
-                        "Invalid sponsored message signature",
-                    ));
-                }
-            }
-        }
-
         // Verify the real sender has registered their public key.
         //
         // issue #145: this predicate is a CONSENSUS branch — every validator must
@@ -608,21 +608,6 @@ impl MessagingExecutor {
         // recovered) instead of committing a divergent block.
         if !Self::v_has_public_key(view, &real_sender)? {
             return Ok(MessagingExecutionResult::failure("Sender must register public key first"));
-        }
-
-        // From the envelope gate on, the envelope's nonce must be the named
-        // sender's current messaging nonce, read from the candidate so that a
-        // second envelope from the same sender in this block sees the first.
-        // The increment below then spends it, so the same envelope cannot be
-        // accepted twice.
-        if envelope_rule {
-            let expected = Self::v_get_sender_nonce(view, &real_sender)?;
-            if sponsored_msg.nonce != expected {
-                return Ok(MessagingExecutionResult::failure(format!(
-                    "Sponsored message nonce {} is not the sender's current nonce {}",
-                    sponsored_msg.nonce, expected
-                )));
-            }
         }
 
         // Validate message format
@@ -668,6 +653,153 @@ impl MessagingExecutor {
             message_id: tx_hash,
             size: sponsored_msg.message_data.len() as u32,
             has_payment: sponsored_msg.koppa_amount.is_some(),
+            block_height,
+            timestamp: block_timestamp,
+        };
+        Self::v_store_message_event(view, &event, tx_index)?;
+
+        tracing::info!(
+            "Sponsored message stored: tx={} sender={} recipient_hash=0x{} block={}",
+            tx_hash,
+            real_sender.to_base58(),
+            hex::encode(sponsored_msg.recipient_hash),
+            block_height
+        );
+
+        Ok(MessagingExecutionResult::success(Some(tx_hash)))
+    }
+
+    /// A sponsored send from `messaging_sponsored_envelope_verification_enabled_from_height`.
+    ///
+    /// The envelope is **authenticated** when it decodes, its signature
+    /// verifies strictly, by the key it names, over the version-2 preimage for
+    /// `chain_id`, and its nonce is the named sender's current messaging
+    /// nonce, read from the candidate so that a second envelope from the same
+    /// sender in this block sees the first. A refusal before that point names
+    /// no authorization, and nothing of the sender's is spent. A refusal after
+    /// it carries the sender and nonce (`MessagingExecutionResult::consumes`):
+    /// from `messaging_fee_nonce_accounting_enabled_from_height` the block loop
+    /// spends that nonce when it settles the refusal, so an authorization
+    /// included once is never valid again, whatever the outcome.
+    ///
+    /// The checks, in order:
+    /// 1. the payload decodes;
+    /// 2. it carries no amount;
+    /// 3. the signature, then the nonce (authentication);
+    /// 4. sponsorship enabled, the sender registered;
+    /// 5. format, size, expiry against the rule clock;
+    /// 6. quota, spam, recipient filters.
+    ///
+    /// Then the sender's messaging nonce and daily count advance and the event
+    /// is stored.
+    #[allow(clippy::too_many_arguments)]
+    fn send_message_enveloped(
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
+        chain_id: u64,
+        data: &[u8],
+        _proposer: &Address,
+        block_height: u64,
+        block_timestamp: u64,
+        clock: u64,
+        tx_index: u32,
+        tx_hash: Hash,
+        accounted: bool,
+    ) -> Result<MessagingExecutionResult> {
+        // ── before authentication: a refusal spends nothing of the sender's ──
+        let sponsored_msg: SponsoredMessage =
+            match Self::decode(data, "Invalid sponsored message data", accounted)? {
+                Ok(decoded) => decoded,
+                Err(refused) => return Ok(refused),
+            };
+
+        // No payment travels with a sponsored envelope: the relayer is not
+        // the sender, so there is no account to move an amount from, and an
+        // event must never report a payment that did not occur.
+        if sponsored_msg.koppa_amount.is_some() {
+            return Ok(MessagingExecutionResult::failure(
+                "Sponsored message carries an amount",
+            ));
+        }
+
+        // The named sender's strict signature over the version-2 preimage,
+        // which binds this chain, the sender key, the recipient, the message
+        // bytes, the nonce, the expiry and the amount.
+        match verify_sponsored_send_v2(&sponsored_msg, chain_id) {
+            Ok(()) => {}
+            Err(SponsoredEnvelopeError::InvalidPublicKey) => {
+                return Ok(MessagingExecutionResult::failure(
+                    "Invalid sponsored message sender key",
+                ));
+            }
+            Err(SponsoredEnvelopeError::InvalidSignature) => {
+                return Ok(MessagingExecutionResult::failure(
+                    "Invalid sponsored message signature",
+                ));
+            }
+        }
+        let real_sender = Address::from_public_key(&sponsored_msg.sender_pubkey);
+        let nonce = sponsored_msg.nonce;
+        let expected = Self::v_get_sender_nonce(view, &real_sender)?;
+        if nonce != expected {
+            return Ok(MessagingExecutionResult::failure(format!(
+                "Sponsored message nonce {} is not the sender's current nonce {}",
+                nonce, expected
+            )));
+        }
+
+        // ── authenticated: a refusal from here spends the nonce ─────────────
+        let refused = |reason: String| {
+            Ok(MessagingExecutionResult::refused_authenticated(
+                reason,
+                real_sender,
+                nonce,
+            ))
+        };
+
+        if !Self::v_is_sponsorship_enabled(view)? {
+            return refused("Sponsorship disabled".to_string());
+        }
+        // A DB read error is a node-local fault, not "unregistered": it
+        // propagates (issue #145), as on the path below the gate.
+        if !Self::v_has_public_key(view, &real_sender)? {
+            return refused("Sender must register public key first".to_string());
+        }
+        if let Err(e) = validate_message_format(&sponsored_msg.message_data) {
+            return refused(format!("Invalid message format: {}", e));
+        }
+        let max_size = Self::v_get_max_message_size(view)?;
+        if sponsored_msg.message_data.len() > max_size as usize {
+            return refused("Message too large".to_string());
+        }
+        if sponsored_msg.expiry < clock {
+            return refused("Sponsored message has expired".to_string());
+        }
+        // Refusals from the accounting gate, errors below it, as before.
+        if let Some(reason) = Self::check_send_limits(
+            view,
+            params,
+            &real_sender,
+            &sponsored_msg.recipient_hash,
+            clock,
+        )? {
+            if !accounted {
+                return Err(StateError::NftError(reason));
+            }
+            return refused(reason);
+        }
+
+        // ── apply ───────────────────────────────────────────────────────────
+        Self::v_increment_sender_nonce(view, &real_sender)?;
+        let day = Self::current_day(clock);
+        Self::v_increment_daily_message_count(view, &real_sender, day)?;
+
+        let event = MessageEvent {
+            sender: real_sender,
+            recipient_hash: sponsored_msg.recipient_hash,
+            message_id: tx_hash,
+            size: sponsored_msg.message_data.len() as u32,
+            has_payment: false,
             block_height,
             timestamp: block_timestamp,
         };

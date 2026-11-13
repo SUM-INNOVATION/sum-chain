@@ -503,3 +503,540 @@ fn the_operations_without_a_business_refusal_succeed_charged_once() {
         assert_eq!(c.balance(&bob().address()), balance - FEE);
     }
 }
+
+// ── the envelope nonce: spent on every included authenticated attempt ───────
+
+/// The `cf::MESSAGING_SENDER_NONCES` key of `a`'s messaging nonce.
+fn msg_nonce_key(a: &sumchain_primitives::Address) -> (String, Vec<u8>) {
+    (
+        cf::MESSAGING_SENDER_NONCES.to_string(),
+        sumchain_storage::messaging_store::sender_nonce_key(a).to_vec(),
+    )
+}
+
+/// `base()` with both gates at `h` and both clock gates open, so the rules
+/// read whole seconds and an expiry can pass.
+fn both_with_clock(h: Option<u64>) -> sumchain_genesis::ChainParams {
+    let mut p = both(h);
+    p.subsystem_block_timestamp_enabled_from_height = Some(0);
+    p.messaging_timestamp_units_enabled_from_height = Some(0);
+    p
+}
+
+/// A refusal of an authenticated envelope: what is prepared, the envelope's
+/// named sender, and the envelope (signed by that sender at its current
+/// messaging nonce).
+struct Authenticated {
+    label: &'static str,
+    params: fn() -> sumchain_genesis::ChainParams,
+    prepare: fn(&mut Chain),
+    sender: fn() -> sumchain_crypto::KeyPair,
+    envelope: fn(&Chain) -> sumchain_primitives::SponsoredMessage,
+}
+
+/// `sender`'s envelope to bob at its current messaging nonce, signed.
+fn current(c: &Chain, sender: &sumchain_crypto::KeyPair) -> sumchain_primitives::SponsoredMessage {
+    c.v2(
+        sender,
+        &bob().address(),
+        c.msg_nonce(&sender.address()),
+        None,
+    )
+}
+
+/// `current`, with `edit` applied before the signature.
+fn current_edited(
+    c: &Chain,
+    sender: &sumchain_crypto::KeyPair,
+    edit: impl Fn(&mut sumchain_primitives::SponsoredMessage),
+) -> sumchain_primitives::SponsoredMessage {
+    let mut m = envelope(
+        sender,
+        &bob().address(),
+        c.msg_nonce(&sender.address()),
+        None,
+    );
+    edit(&mut m);
+    signed_v2(m, sender, c.chain_id)
+}
+
+fn both_at_1() -> sumchain_genesis::ChainParams {
+    both(Some(1))
+}
+
+fn both_at_1_with_clock() -> sumchain_genesis::ChainParams {
+    both_with_clock(Some(1))
+}
+
+#[rustfmt::skip]
+fn authenticated_refusals() -> Vec<Authenticated> {
+    vec![
+        Authenticated { label: "sponsorship disabled", params: both_at_1, prepare: sponsorship_off, sender: carol, envelope: |c| current(c, &carol()) },
+        Authenticated { label: "the sender is not registered", params: both_at_1, prepare: nothing, sender: frank, envelope: |c| current(c, &frank()) },
+        Authenticated { label: "not an SRC-201 message", params: both_at_1, prepare: nothing, sender: carol, envelope: |c| current_edited(c, &carol(), |m| m.message_data = vec![0u8; 16]) },
+        Authenticated { label: "too large", params: both_at_1, prepare: small_messages, sender: carol, envelope: |c| current(c, &carol()) },
+        Authenticated { label: "expired", params: both_at_1_with_clock, prepare: nothing, sender: carol, envelope: |c| { let at = c.next_second(); current_edited(c, &carol(), |m| m.expiry = at - 1) } },
+        Authenticated { label: "over quota", params: both_at_1, prepare: dave_over_quota, sender: dave, envelope: |c| current(c, &dave()) },
+        Authenticated { label: "high spam score without stake", params: both_at_1, prepare: dave_reported, sender: dave, envelope: |c| current(c, &dave()) },
+        Authenticated { label: "the sender is blocked", params: both_at_1, prepare: bob_blocks_dave, sender: dave, envelope: |c| current(c, &dave()) },
+        Authenticated { label: "not in the recipient's contacts", params: both_at_1, prepare: bob_contacts_only, sender: dave, envelope: |c| current(c, &dave()) },
+        Authenticated { label: "the recipient requires stake", params: both_at_1, prepare: bob_staked_only, sender: dave, envelope: |c| current(c, &dave()) },
+    ]
+}
+
+/// At both gates, an authenticated envelope refused for any business
+/// reason is charged to its relayer once and spends the named sender's
+/// messaging nonce, once. Nothing else moves: not the sender's balance or
+/// account nonce, not its daily count, no event.
+#[test]
+fn an_authenticated_refusal_spends_the_envelope_nonce_and_nothing_else() {
+    for case in authenticated_refusals() {
+        let mut c = Chain::new((case.params)());
+        c.setup();
+        (case.prepare)(&mut c);
+        let sender = (case.sender)();
+        let who = sender.address();
+        let m = (case.envelope)(&c);
+        let n = c.msg_nonce(&who);
+        assert_eq!(m.nonce, n, "{}", case.label);
+        let before = c.rows();
+        let (sponsor_balance, sponsor_nonce) =
+            (c.balance(&sponsor().address()), c.nonce(&sponsor()));
+        let sender_account = (c.balance(&who), c.nonce(&sender));
+
+        let r = c.one(c.tx(&sponsor(), sponsored(&m)));
+
+        assert_eq!(
+            (r.status, r.fee_paid),
+            (TxStatus::Failed(7), FEE),
+            "{}",
+            case.label
+        );
+        assert_eq!(
+            c.balance(&sponsor().address()),
+            sponsor_balance - FEE,
+            "{}",
+            case.label
+        );
+        assert_eq!(c.nonce(&sponsor()), sponsor_nonce + 1, "{}", case.label);
+        assert_eq!(
+            c.msg_nonce(&who),
+            n + 1,
+            "{}: the nonce is spent",
+            case.label
+        );
+        assert_eq!(
+            (c.balance(&who), c.nonce(&sender)),
+            sender_account,
+            "{}",
+            case.label
+        );
+        let mut want = vec![
+            account_key(&sponsor().address()),
+            account_key(&proposer()),
+            msg_nonce_key(&who),
+        ];
+        want.sort();
+        assert_eq!(changed(&before, &c.rows()), want, "{}", case.label);
+
+        // The same envelope again, through another relayer: its nonce is
+        // spent, so it is refused before authentication and spends nothing.
+        let before = c.rows();
+        let r = c.one(c.tx(&erin(), sponsored(&m)));
+        assert_eq!(
+            (r.status, r.fee_paid),
+            (TxStatus::Failed(7), FEE),
+            "{}",
+            case.label
+        );
+        assert_eq!(c.msg_nonce(&who), n + 1, "{}: no second effect", case.label);
+        let mut want = vec![account_key(&erin().address()), account_key(&proposer())];
+        want.sort();
+        assert_eq!(changed(&before, &c.rows()), want, "{}", case.label);
+    }
+}
+
+/// A refusal before authentication spends nothing of the named sender's:
+/// an undecodable payload, a signature that does not verify (another key,
+/// another chain, the string form, another domain's preimage, the outer
+/// transaction's own signature), a key that is not a point, a nonce ahead of the sender's (a gap) or behind it (a replay).
+#[test]
+fn a_refusal_before_authentication_spends_nothing_of_the_sender() {
+    use sumchain_crypto::sign;
+    let mut c = Chain::new(both(Some(1)));
+    c.setup();
+    let ok = c.one(c.tx(&sponsor(), sponsored(&current(&c, &carol()))));
+    assert_eq!(ok.status, TxStatus::Success);
+    let carol_addr = carol().address();
+    let n = c.msg_nonce(&carol_addr);
+    assert_eq!(n, 1);
+    let base = envelope(&carol(), &bob().address(), n, None);
+    let string_form = {
+        let mut m = base.clone();
+        let preimage = format!(
+            "SUMCHAIN_SPONSORED_MSG:{}:{}:{}:{}",
+            m.nonce,
+            m.expiry,
+            hex::encode(m.recipient_hash),
+            hex::encode(blake3::hash(&m.message_data).as_bytes())
+        );
+        m.signature = *sign(preimage.as_bytes(), carol().private_key()).as_bytes();
+        m
+    };
+    let registration_preimage = {
+        let mut m = base.clone();
+        let preimage = sumchain_primitives::sponsored_register_v1_signing_preimage(
+            c.chain_id,
+            &sponsor().address(),
+            &m.sender_pubkey,
+        );
+        m.signature = *sign(&preimage, carol().private_key()).as_bytes();
+        m
+    };
+    let outer_signature = {
+        // carol's signature over a transaction's signing hash, presented as
+        // an envelope signature.
+        let tx = c.tx(&carol(), direct_to(&bob().address()));
+        let mut m = base.clone();
+        m.signature = tx.signature;
+        m
+    };
+    let cases: Vec<(&str, MessagingTxData)> = vec![
+        ("undecodable", malformed(MessagingOperation::SendMessage)),
+        ("unsigned", sponsored(&base)),
+        (
+            "signed by another key",
+            sponsored(&signed_v2(base.clone(), &dave(), c.chain_id)),
+        ),
+        (
+            "signed for chain 1",
+            sponsored(&signed_v2(base.clone(), &carol(), 1)),
+        ),
+        ("signed over the string form", sponsored(&string_form)),
+        (
+            "signed over a registration preimage",
+            sponsored(&registration_preimage),
+        ),
+        (
+            "the outer transaction's signature",
+            sponsored(&outer_signature),
+        ),
+        (
+            "a key that is not a curve point",
+            sponsored(&{
+                let mut m = base.clone();
+                m.sender_pubkey = [0x02; 32];
+                m
+            }),
+        ),
+        (
+            "a nonce ahead of the sender's (a gap)",
+            sponsored(&c.v2(&carol(), &bob().address(), n + 1, None)),
+        ),
+        (
+            "a nonce behind the sender's (a replay)",
+            sponsored(&c.v2(&carol(), &bob().address(), n - 1, None)),
+        ),
+    ];
+    for (label, data) in cases {
+        let before = c.rows();
+        let r = c.one(c.tx(&sponsor(), data));
+        assert_eq!(
+            (r.status, r.fee_paid),
+            (TxStatus::Failed(7), FEE),
+            "{label}"
+        );
+        assert_eq!(c.msg_nonce(&carol_addr), n, "{label}: nothing spent");
+        let mut want = vec![account_key(&sponsor().address()), account_key(&proposer())];
+        want.sort();
+        assert_eq!(changed(&before, &c.rows()), want, "{label}");
+    }
+    // The sender's current envelope still executes.
+    let r = c.one(c.tx(&erin(), sponsored(&current(&c, &carol()))));
+    assert_eq!(r.status, TxStatus::Success);
+    assert_eq!(c.msg_nonce(&carol_addr), n + 1);
+}
+
+/// Nonce gaps. Envelopes at n and n + 2 in one block: n executes, n + 2 is
+/// refused unauthenticated and spends nothing; then n + 1 and the same n + 2
+/// envelope, re-relayed, execute in order.
+#[test]
+fn a_nonce_gap_is_refused_without_spending_and_filled_later() {
+    let mut c = Chain::new(both(Some(1)));
+    c.setup();
+    let carol_addr = carol().address();
+    let e0 = c.v2(&carol(), &bob().address(), 0, None);
+    let e1 = c.v2(&carol(), &bob().address(), 1, None);
+    let e2 = c.v2(&carol(), &bob().address(), 2, None);
+    let s = c.nonce(&sponsor());
+    let r = c
+        .block(vec![
+            c.tx_at(&sponsor(), s, sponsored(&e0)),
+            c.tx_at(&sponsor(), s + 1, sponsored(&e2)),
+        ])
+        .unwrap();
+    assert_eq!(
+        r.iter().map(|r| (r.status, r.fee_paid)).collect::<Vec<_>>(),
+        vec![(TxStatus::Success, FEE), (TxStatus::Failed(7), FEE)]
+    );
+    assert_eq!(c.msg_nonce(&carol_addr), 1, "the gap spent nothing");
+    let r = c
+        .block(vec![
+            c.tx_at(&sponsor(), s + 2, sponsored(&e1)),
+            c.tx_at(&erin(), c.nonce(&erin()), sponsored(&e2)),
+        ])
+        .unwrap();
+    assert!(r.iter().all(|r| r.status == TxStatus::Success), "{r:?}");
+    assert_eq!(c.msg_nonce(&carol_addr), 3);
+    assert_eq!(
+        c.sent_by(&carol_addr).len(),
+        2,
+        "one event row per block below the index gate"
+    );
+}
+
+/// A genuine cycle between two sponsors: sponsor relays carol's envelope 1
+/// then dave's 0; erin relays dave's 1 then carol's 0. No block order keeps
+/// both sponsors' account nonces and both senders' envelope nonces. In the
+/// order of the account nonces the block is valid at both gates: exactly the
+/// envelope that comes before its predecessor (carol's 1) is refused,
+/// charged and spends nothing, and the other three execute. Re-relayed, it
+/// then executes.
+#[test]
+fn a_genuine_cycle_between_two_sponsors_refuses_only_the_envelope_out_of_sequence() {
+    let mut c = Chain::new(both(Some(1)));
+    c.setup();
+    let (s, e) = (c.nonce(&sponsor()), c.nonce(&erin()));
+    let carol1 = c.v2(&carol(), &bob().address(), 1, None);
+    let txs = vec![
+        c.tx_at(&sponsor(), s, sponsored(&carol1)),
+        c.tx_at(
+            &sponsor(),
+            s + 1,
+            sponsored(&c.v2(&dave(), &bob().address(), 0, None)),
+        ),
+        c.tx_at(
+            &erin(),
+            e,
+            sponsored(&c.v2(&dave(), &bob().address(), 1, None)),
+        ),
+        c.tx_at(
+            &erin(),
+            e + 1,
+            sponsored(&c.v2(&carol(), &bob().address(), 0, None)),
+        ),
+    ];
+    let screened = c.screen(txs.clone(), 1 << 20);
+    assert!(screened.refused().is_empty());
+    let r = c.block(txs).expect("a valid block");
+    assert_eq!(
+        r.iter().map(|r| (r.status, r.fee_paid)).collect::<Vec<_>>(),
+        vec![
+            (TxStatus::Failed(7), FEE),
+            (TxStatus::Success, FEE),
+            (TxStatus::Success, FEE),
+            (TxStatus::Success, FEE),
+        ]
+    );
+    assert_eq!((c.nonce(&sponsor()), c.nonce(&erin())), (s + 2, e + 2));
+    assert_eq!(c.msg_nonce(&carol().address()), 1);
+    assert_eq!(c.msg_nonce(&dave().address()), 2);
+    let r = c.one(c.tx(&erin(), sponsored(&carol1)));
+    assert_eq!(r.status, TxStatus::Success);
+    assert_eq!(c.msg_nonce(&carol().address()), 2);
+}
+
+/// Unrelated sponsors. The same envelope through two sponsors in one block,
+/// and in consecutive blocks: the first executes, the second is refused and
+/// charged to its own sponsor, and the message is delivered once. Two
+/// different envelopes signed at one nonce for two sponsors: block order
+/// decides. A sponsor's refusal costs no other sponsor anything.
+#[test]
+fn unrelated_sponsors_each_pay_their_own_fee_and_the_envelope_executes_once() {
+    // One block.
+    let mut c = Chain::new(both(Some(1)));
+    c.setup();
+    let m = current(&c, &carol());
+    let r = c
+        .block(vec![
+            c.tx(&sponsor(), sponsored(&m)),
+            c.tx(&erin(), sponsored(&m)),
+        ])
+        .unwrap();
+    assert_eq!(
+        r.iter().map(|r| (r.status, r.fee_paid)).collect::<Vec<_>>(),
+        vec![(TxStatus::Success, FEE), (TxStatus::Failed(7), FEE)]
+    );
+    assert_eq!(c.msg_nonce(&carol().address()), 1);
+    assert_eq!(c.sent_by(&carol().address()).len(), 1);
+    assert_eq!(c.balance(&sponsor().address()), FUNDS - FEE);
+    assert_eq!(c.balance(&erin().address()), FUNDS - FEE);
+
+    // Consecutive blocks.
+    let m = current(&c, &carol());
+    assert_eq!(
+        c.one(c.tx(&erin(), sponsored(&m))).status,
+        TxStatus::Success
+    );
+    let r = c.one(c.tx(&sponsor(), sponsored(&m)));
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Failed(7), FEE));
+    assert_eq!(c.msg_nonce(&carol().address()), 2);
+
+    // Two different envelopes at one nonce: the first in block order wins.
+    let n = c.msg_nonce(&carol().address());
+    let to_bob = c.v2(&carol(), &bob().address(), n, None);
+    let to_alice = c.v2(&carol(), &alice().address(), n, None);
+    let r = c
+        .block(vec![
+            c.tx(&erin(), sponsored(&to_alice)),
+            c.tx(&sponsor(), sponsored(&to_bob)),
+        ])
+        .unwrap();
+    assert_eq!(
+        r.iter().map(|r| r.status).collect::<Vec<_>>(),
+        vec![TxStatus::Success, TxStatus::Failed(7)]
+    );
+    assert_eq!(c.msg_nonce(&carol().address()), n + 1);
+}
+
+/// One sponsor relays, at consecutive account nonces, dave's envelope
+/// over quota, then carol's and alice's. The block is valid for the producer
+/// (screening records no offender) and for the importer: dave's is refused,
+/// charged and spends dave's nonce; carol's and alice's execute.
+#[test]
+fn one_senders_refusal_does_not_hold_the_sponsors_other_envelopes() {
+    let mut c = Chain::new(both(Some(1)));
+    c.setup();
+    dave_over_quota(&mut c);
+    let s = c.nonce(&sponsor());
+    let dave_n = c.msg_nonce(&dave().address());
+    let txs = vec![
+        c.tx_at(&sponsor(), s, sponsored(&current(&c, &dave()))),
+        c.tx_at(&sponsor(), s + 1, sponsored(&current(&c, &carol()))),
+        c.tx_at(&sponsor(), s + 2, sponsored(&current(&c, &alice()))),
+    ];
+    assert!(c.screen(txs.clone(), 1 << 20).refused().is_empty());
+    let r = c.block(txs).expect("a valid block");
+    assert_eq!(
+        r.iter().map(|r| (r.status, r.fee_paid)).collect::<Vec<_>>(),
+        vec![
+            (TxStatus::Failed(7), FEE),
+            (TxStatus::Success, FEE),
+            (TxStatus::Success, FEE),
+        ]
+    );
+    assert_eq!(c.msg_nonce(&dave().address()), dave_n + 1);
+    assert_eq!(c.msg_nonce(&carol().address()), 1);
+    assert_eq!(c.msg_nonce(&alice().address()), 1);
+    assert_eq!(c.nonce(&sponsor()), s + 3);
+}
+
+/// The rule's gate. With both gates at H, an envelope refused because its
+/// sender is not registered: below H (the earlier rule) the refusal is free
+/// and moves no messaging nonce; at H and at H + 1 it is charged and spends
+/// the nonce. Each gate alone (a configuration genesis refuses) does not
+/// spend it: the envelope gate alone settles no refusal, and the accounting
+/// gate alone authenticates no envelope.
+#[test]
+fn the_envelope_nonce_is_spent_from_the_gate() {
+    const H: u64 = 3;
+    let frank_addr = frank().address();
+    let mut c = Chain::new(both(Some(H)));
+    c.setup();
+    assert_eq!(c.height + 1, H - 1);
+    let r = c.one(c.tx(
+        &sponsor(),
+        sponsored(&envelope(&frank(), &bob().address(), 0, None)),
+    ));
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Failed(7), 0), "H-1");
+    assert_eq!(c.msg_nonce(&frank_addr), 0, "H-1");
+    for (height, n) in [(H, 0), (H + 1, 1)] {
+        let r = c.one(c.tx(&sponsor(), sponsored(&current(&c, &frank()))));
+        assert_eq!(c.height, height);
+        assert_eq!(
+            (r.status, r.fee_paid),
+            (TxStatus::Failed(7), FEE),
+            "{height}"
+        );
+        assert_eq!(c.msg_nonce(&frank_addr), n + 1, "{height}");
+    }
+
+    for (label, params) in [
+        ("the envelope gate alone", gates(Some(1), None)),
+        ("the accounting gate alone", gates(None, Some(1))),
+    ] {
+        let mut c = Chain::new(params);
+        c.setup();
+        let r = c.one(c.tx(&sponsor(), sponsored(&current(&c, &frank()))));
+        assert_eq!(r.status, TxStatus::Failed(7), "{label}");
+        assert_eq!(c.msg_nonce(&frank_addr), 0, "{label}");
+    }
+}
+
+/// A spent envelope nonce is durable: after a restart the refused envelope
+/// is still spent and the next one executes.
+#[test]
+fn a_spent_envelope_nonce_survives_a_restart() {
+    let mut c = Chain::new(both(Some(1)));
+    c.setup();
+    sponsorship_off(&mut c);
+    let m = current(&c, &carol());
+    assert_eq!(
+        c.one(c.tx(&sponsor(), sponsored(&m))).status,
+        TxStatus::Failed(7)
+    );
+    let mut c = c.restart();
+    assert_eq!(c.msg_nonce(&carol().address()), 1);
+    let tx = c.tx(
+        &admin(),
+        op(
+            MessagingOperation::SetSponsorshipEnabled,
+            &SetSponsorshipEnabledData { enabled: true },
+        ),
+    );
+    c.all_succeed(vec![tx]);
+    let r = c.one(c.tx(&erin(), sponsored(&m)));
+    assert_eq!(r.status, TxStatus::Failed(7), "spent before the restart");
+    let r = c.one(c.tx(&erin(), sponsored(&current(&c, &carol()))));
+    assert_eq!(r.status, TxStatus::Success);
+    assert_eq!(c.msg_nonce(&carol().address()), 2);
+}
+
+/// The single-transaction arm (`execute_tx_v2`, which no block loop wraps)
+/// spends a refused authenticated envelope's nonce as the loop does, and
+/// keeps the fee charged before dispatch.
+#[test]
+fn the_single_transaction_arm_spends_a_refused_envelopes_nonce() {
+    let mut c = Chain::new(both(Some(1)));
+    c.setup();
+    sponsorship_off(&mut c);
+    let tx = c.tx(&sponsor(), sponsored(&current(&c, &carol())));
+    let v2 = match tx.inner() {
+        sumchain_primitives::TxInner::V2(v2) => v2.clone(),
+        _ => unreachable!("a version-2 transaction"),
+    };
+    let mut cand = sumchain_storage::candidate::CandidateExecution::new(&c.db, 1 << 30);
+    let mut view = cand.view();
+    let r = c
+        .exec
+        .execute_tx_v2(
+            &mut view,
+            &v2,
+            &tx.signature,
+            &tx.public_key,
+            &proposer(),
+            c.height + 1,
+            T_MS,
+            0,
+        )
+        .unwrap();
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Failed(7), FEE));
+    assert_eq!(
+        sumchain_state::MessagingExecutor::v_get_sender_nonce(&view, &carol().address()).unwrap(),
+        1
+    );
+    assert_eq!(
+        sumchain_state::state::StateManager::v_get_balance(&view, &sponsor().address()).unwrap(),
+        c.balance(&sponsor().address()) - FEE
+    );
+}

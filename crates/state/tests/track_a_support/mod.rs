@@ -460,6 +460,38 @@ impl Chain {
         );
     }
 
+    /// Close every handle and reopen the database, as a restarted node does.
+    pub fn restart(self) -> Self {
+        let Chain {
+            state,
+            db,
+            dir,
+            exec,
+            params,
+            chain_id,
+            height,
+            mark,
+        } = self;
+        let root = state.state_root();
+        drop(exec);
+        drop(state);
+        drop(db);
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), chain_id));
+        state.set_state_root(root);
+        let exec = BlockExecutor::new(state.clone(), db.clone(), params.clone());
+        Chain {
+            state,
+            db,
+            dir,
+            exec,
+            params,
+            chain_id,
+            height,
+            mark,
+        }
+    }
+
     /// Execute `txs` in one block and assert every receipt is a success.
     pub fn all_succeed(&mut self, txs: Vec<SignedTransaction>) {
         let receipts = self.block(txs).expect("block published");
