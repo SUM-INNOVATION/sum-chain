@@ -1069,11 +1069,20 @@ impl MessagingExecutor {
             return Ok(MessagingExecutionResult::failure("Claimer mismatch"));
         }
 
-        // Check expiry (if expired, refund to sender)
+        // Check expiry (if expired, refund to sender). From the accounting
+        // gate the refund is the operation's outcome, a success: a refusal
+        // there is rolled back and leaves no value effect. Below the gate, as
+        // before: the refund is staged and the receipt reports a failure.
+        // Inert while the clock gates are closed (the clock reads zero).
         if clock > pending.expiry {
             // Refund to original sender
             StateManager::v_credit(view, &pending.sender, pending.amount)?;
             Self::v_delete_pending_payment(view, &claim_data.message_id)?;
+            if accounted {
+                return Ok(MessagingExecutionResult::success(Some(
+                    claim_data.message_id,
+                )));
+            }
             return Ok(MessagingExecutionResult::failure("Payment expired, refunded to sender"));
         }
 

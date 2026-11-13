@@ -287,6 +287,9 @@ pub struct Chain {
     /// The proposer key every later block names (`PROPOSER_PK` unless a test
     /// makes an account the proposer).
     pub proposer_pk: [u8; 32],
+    /// Added to every later block's timestamp, so a test can move the clock
+    /// past an expiry without producing a week of blocks.
+    pub clock_offset_ms: u64,
 }
 
 impl Chain {
@@ -320,6 +323,7 @@ impl Chain {
             height: 0,
             mark: Hash::ZERO,
             proposer_pk: PROPOSER_PK,
+            clock_offset_ms: 0,
         }
     }
 
@@ -329,7 +333,7 @@ impl Chain {
             BlockHeader::new(
                 Hash::ZERO,
                 height,
-                T_MS + height * MINUTE_MS,
+                T_MS + height * MINUTE_MS + self.clock_offset_ms,
                 Hash::ZERO,
                 Hash::ZERO,
                 self.proposer_pk,
@@ -374,7 +378,7 @@ impl Chain {
     /// The next block's timestamp, in the whole seconds the rules read with
     /// the clock gates open.
     pub fn next_second(&self) -> u64 {
-        (T_MS + (self.height + 1) * MINUTE_MS) / 1000
+        (T_MS + (self.height + 1) * MINUTE_MS + self.clock_offset_ms) / 1000
     }
 
     pub fn nonce(&self, kp: &KeyPair) -> u64 {
@@ -476,6 +480,7 @@ impl Chain {
             height,
             mark,
             proposer_pk,
+            clock_offset_ms,
         } = self;
         let root = state.state_root();
         drop(exec);
@@ -495,6 +500,7 @@ impl Chain {
             height,
             mark,
             proposer_pk,
+            clock_offset_ms,
         }
     }
 

@@ -1745,3 +1745,101 @@ fn an_outcome_key_never_meets_a_nonce_key() {
         "the nonce row reads as before"
     );
 }
+
+// ── an expired claim refunds the sender, as a success, from the gate ────────
+
+/// With the clock gates open an escrow expires seven days after
+/// the block that made it. At both gates the recipient's claim after that is
+/// a success whose effect is the refund: the sender is credited the amount,
+/// both escrow rows are deleted, the claimer is charged the fee once and
+/// receives nothing. Below both gates the same claim is a failed receipt,
+/// uncharged, with the refund made, as before. Value is conserved either way.
+#[test]
+fn an_expired_claim_refunds_the_sender_as_a_success_from_the_gate() {
+    for (gate, want) in [
+        (Some(1), (TxStatus::Success, FEE)),
+        (None, (TxStatus::Failed(7), 0)),
+    ] {
+        let mut c = Chain::new(both_with_clock(gate));
+        c.setup();
+        let pay = c.tx(&alice(), payment_to(&bob().address(), 500));
+        c.all_succeed(vec![pay.clone()]);
+        let total = total_value(&c);
+        let expiry = escrow_of(&c, &pay).expect("escrowed").expiry;
+        c.clock_offset_ms = 8 * 24 * 3600 * 1000;
+        assert!(c.next_second() > expiry);
+        let (alice_before, bob_before) =
+            (c.balance(&alice().address()), c.balance(&bob().address()));
+        let r = c.one(c.tx(
+            &bob(),
+            op(
+                MessagingOperation::ClaimPayment,
+                &ClaimPaymentData {
+                    message_id: pay.hash(),
+                    recipient_address: bob().address(),
+                },
+            ),
+        ));
+        assert_eq!((r.status, r.fee_paid), want, "{gate:?}");
+        assert_eq!(
+            c.balance(&alice().address()),
+            alice_before + 500,
+            "{gate:?}: refunded"
+        );
+        assert_eq!(c.balance(&bob().address()), bob_before - want.1, "{gate:?}");
+        assert!(escrow_of(&c, &pay).is_none(), "{gate:?}");
+        assert!(c
+            .db
+            .iter(cf::MESSAGING_PAYMENTS_BY_RECIPIENT)
+            .unwrap()
+            .next()
+            .is_none());
+        assert_eq!(total_value(&c), total, "{gate:?}: conserved");
+    }
+}
+
+/// The accounting gate at H for expired claims: at H-1 a failed receipt with
+/// the refund, at H and H+1 a charged success with the refund.
+#[test]
+fn the_refund_outcome_starts_exactly_at_the_gate() {
+    const H: u64 = 4;
+    let mut c = Chain::new(both_with_clock(Some(H)));
+    c.setup();
+    let n = c.nonce(&alice());
+    let pays: Vec<_> = (0..3)
+        .map(|i| {
+            c.tx_at(
+                &alice(),
+                n + i,
+                payment_to(&bob().address(), 100 + i as u128),
+            )
+        })
+        .collect();
+    c.all_succeed(pays.clone());
+    c.clock_offset_ms = 8 * 24 * 3600 * 1000;
+    for (pay, height) in pays.iter().zip([H - 1, H, H + 1]) {
+        let alice_before = c.balance(&alice().address());
+        let r = c.one(c.tx(
+            &bob(),
+            op(
+                MessagingOperation::ClaimPayment,
+                &ClaimPaymentData {
+                    message_id: pay.hash(),
+                    recipient_address: bob().address(),
+                },
+            ),
+        ));
+        assert_eq!(c.height, height);
+        let want = if height < H {
+            (TxStatus::Failed(7), 0)
+        } else {
+            (TxStatus::Success, FEE)
+        };
+        assert_eq!((r.status, r.fee_paid), want, "{height}");
+        assert!(
+            c.balance(&alice().address()) > alice_before,
+            "{height}: refunded"
+        );
+        assert!(escrow_of(&c, pay).is_none(), "{height}");
+    }
+}
