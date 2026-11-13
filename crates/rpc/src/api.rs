@@ -35,7 +35,7 @@ use crate::types::{
     ArchiveUnbondingInfo, AssignmentCoverageV2, ChainParamsInfo, EpochInfo, FinalityInfo, GasEstimateResult, HealthResponse, IncomeAttestationInfo, NodeRecordInfo, PushableFileInfoV2, StorageBuildReassignChunksV2Request, StorageBuildResponse, StorageFileInfoV2, TxStatusV2,
     InboxFilterInfo, IssueAcademicCredentialRequest, IssueAcademicCredentialResponse,
     MessageDataInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
-    MessagingSenderNonceInfo,
+    MessagingSenderNonceInfo, PaymentStatusInfo, EnvelopeOutcomeInfo,
     NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
     PublicKeyInfo, ReceiptInfo, RegisterAcademicIssuerRequest, RegisterAcademicIssuerResponse,
     RegisterEmploymentIssuerRequest, RegisterEmploymentIssuerResponse,
@@ -1207,7 +1207,8 @@ pub trait SumChainApi {
     ///
     /// Only for a relayed (sponsored) message the canonical chain executed:
     /// `None` for a transaction with no canonical receipt or a refused one.
-    /// A relayed message never carries a payment, so `has_payment` is false.
+    /// `has_payment` is false and `payment_amount` absent for every relayed
+    /// message; a payment one made is reported by `messaging_getPaymentStatus`.
     #[method(name = "messaging_getMessageData")]
     async fn messaging_get_message_data(
         &self,
@@ -1228,6 +1229,37 @@ pub trait SumChainApi {
         &self,
         tx_hash: String,
     ) -> Result<Option<SponsoredEnvelopeInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// What became of a message's payment, as the canonical chain executed
+    /// it, for a paid send or a relayed message (any other transaction is
+    /// refused, `-32602`). Read from the canonical receipt, the transaction,
+    /// and the escrow row; an amount named in a payload is never evidence on
+    /// its own. `not_included`: no canonical receipt (never carried, or only
+    /// on a branch that lost fork choice). `refused`: the receipt is not a
+    /// success. `none`: executed without a payment, which includes a relayed
+    /// message below the envelope gate (`legacy_amount_unbacked` is then true
+    /// if its envelope named an amount). `escrowed`: the escrow row is
+    /// present (amount and expiry from it). `settled`: the escrow row is gone
+    /// (claimed, or refunded after expiry; while the clock gates are closed
+    /// only a claim settles). Read-only.
+    #[method(name = "messaging_getPaymentStatus")]
+    async fn messaging_get_payment_status(
+        &self,
+        message_id: String,
+    ) -> Result<PaymentStatusInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// What spent `sender`'s sponsored-envelope nonce `nonce`: the
+    /// transaction that carried the envelope (the first includer's, under
+    /// front-running), whether it executed or was refused, and what it
+    /// escrowed, from the outcome row the chain wrote when the nonce was
+    /// spent. `None` while that nonce is unspent, and for every nonce spent
+    /// below the envelope gate. Read-only.
+    #[method(name = "messaging_getEnvelopeOutcome")]
+    async fn messaging_get_envelope_outcome(
+        &self,
+        sender: String,
+        nonce: u64,
+    ) -> Result<Option<EnvelopeOutcomeInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get pending payment by message ID
     #[method(name = "messaging_getPendingPayment")]

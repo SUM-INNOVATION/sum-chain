@@ -1618,12 +1618,14 @@ impl RpcServer {
 
     /// The RPC view of a stored message event.
     ///
-    /// `has_payment` is the executed outcome, not the stored flag alone: it is
-    /// true only for a paid send (`SendMessageWithPayment`), the one operation
-    /// that moves an amount, into escrow. A relayed message never moves one;
-    /// below the envelope gate its stored flag follows the amount the
-    /// envelope claimed, so that flag is not reported. A message whose
-    /// transaction this node does not hold reports no payment.
+    /// `has_payment` is true only for a paid send (`SendMessageWithPayment`),
+    /// whose stored flag always means an amount moved into escrow. A relayed
+    /// message reports no payment here: below the envelope gate its stored
+    /// flag follows the amount the envelope claimed, which moved nothing, and
+    /// this response keeps its earlier values; a payment a relayed message
+    /// made from the gate on is reported by `messaging_getPaymentStatus`. A
+    /// message whose transaction this node does not hold reports no
+    /// payment.
     fn message_event_info(
         &self,
         e: sumchain_primitives::MessageEvent,
@@ -4578,10 +4580,11 @@ impl SumChainApiServer for RpcServer {
         // the key the envelope names.
         let sender = Address::from_public_key(&sponsored_msg.sender_pubkey);
 
-        // A sponsored send never moves an amount. Below the envelope gate an
-        // envelope's `koppa_amount` is carried but no balance moves and no
-        // pending payment is created; from the gate an envelope carrying one
-        // is refused. So no payment is reported, whatever the payload says.
+        // No payment is reported here for a relayed message, whatever the
+        // payload says: below the envelope gate an envelope's `koppa_amount`
+        // moved nothing, and this response keeps its earlier values. A
+        // payment a relayed message made from the gate on is reported by
+        // `messaging_getPaymentStatus`.
         Ok(Some(MessageDataInfo {
             tx_hash: format!("0x{}", hex::encode(hash.as_bytes())),
             block_height: receipt.block_height,
@@ -4640,6 +4643,141 @@ impl SumChainApiServer for RpcServer {
             envelope_signature: format!("0x{}", hex::encode(m.signature)),
             envelope_nonce: m.nonce,
             envelope_expiry: m.expiry,
+        }))
+    }
+
+    async fn messaging_get_payment_status(
+        &self,
+        message_id: String,
+    ) -> std::result::Result<PaymentStatusInfo, jsonrpsee::types::ErrorObjectOwned> {
+        let hash = Hash::from_hex(&message_id)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid message ID: {e}")))?;
+        let mut info = PaymentStatusInfo {
+            message_id: format!("0x{}", hex::encode(hash.as_bytes())),
+            status: "not_included".to_string(),
+            amount: None,
+            sender: None,
+            recipient_hash: None,
+            escrow_expiry: None,
+            included_at_height: None,
+            receipt_status: None,
+            legacy_amount_unbacked: false,
+        };
+        // The canonical receipt first: a transaction stored without one was
+        // never carried, or only by a block that lost fork choice.
+        let receipt = match ReceiptStore::new(&self.db).get(&hash) {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) => return Ok(info),
+            Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
+        };
+        let tx = match TxStore::new(&self.db).get(&hash) {
+            Ok(Some(tx)) => tx,
+            Ok(None) => {
+                return Err(RpcError::Internal(
+                    "a canonical receipt without its transaction".to_string(),
+                )
+                .into())
+            }
+            Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
+        };
+        let (from, data) = match &tx.inner {
+            sumchain_primitives::TxInner::V2(v2) => match &v2.payload {
+                TxPayload::Messaging(d)
+                    if d.operation == MessagingOperation::SendMessage
+                        || d.operation == MessagingOperation::SendMessageWithPayment =>
+                {
+                    (v2.from, d)
+                }
+                _ => {
+                    return Err(
+                        RpcError::InvalidParams("Not a message transaction".to_string()).into(),
+                    )
+                }
+            },
+            _ => return Err(RpcError::InvalidParams("Not a V2 transaction".to_string()).into()),
+        };
+        info.included_at_height = Some(receipt.block_height);
+        info.receipt_status = Some(receipt.status.description().to_string());
+        if !receipt.status.is_success() {
+            info.status = "refused".to_string();
+            return Ok(info);
+        }
+
+        // What the executed transaction paid, by the rule it executed under.
+        let (paid, sender, recipient_hash) = if data.operation
+            == MessagingOperation::SendMessageWithPayment
+        {
+            let d: sumchain_primitives::SendMessageWithPaymentData =
+                bincode::deserialize(&data.data).map_err(|e| {
+                    RpcError::Internal(format!("Failed to deserialize message: {e}"))
+                })?;
+            (d.koppa_amount, from, d.recipient_hash)
+        } else {
+            let m: SponsoredMessage = bincode::deserialize(&data.data)
+                .map_err(|e| RpcError::Internal(format!("Failed to deserialize message: {e}")))?;
+            let named = Address::from_public_key(&m.sender_pubkey);
+            if sumchain_state::MessagingExecutor::sponsored_envelope_verification_gate_open(
+                &self.chain_params,
+                receipt.block_height,
+            ) {
+                (m.koppa_amount.unwrap_or(0), named, m.recipient_hash)
+            } else {
+                // The earlier rule: no amount moved.
+                info.legacy_amount_unbacked = m.koppa_amount.is_some();
+                (0, named, m.recipient_hash)
+            }
+        };
+        if paid == 0 {
+            info.status = "none".to_string();
+            return Ok(info);
+        }
+        match MessagingStore::new(&self.db).get_pending_payment(&hash) {
+            Ok(Some(escrow)) => {
+                info.status = "escrowed".to_string();
+                info.amount = Some(escrow.amount.to_string());
+                info.sender = Some(escrow.sender.to_base58());
+                info.recipient_hash = Some(format!("0x{}", hex::encode(escrow.recipient_hash)));
+                info.escrow_expiry = Some(escrow.expiry);
+            }
+            Ok(None) => {
+                info.status = "settled".to_string();
+                info.amount = Some(paid.to_string());
+                info.sender = Some(sender.to_base58());
+                info.recipient_hash = Some(format!("0x{}", hex::encode(recipient_hash)));
+            }
+            Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
+        }
+        Ok(info)
+    }
+
+    async fn messaging_get_envelope_outcome(
+        &self,
+        sender: String,
+        nonce: u64,
+    ) -> std::result::Result<Option<EnvelopeOutcomeInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = parse_address_arg(&sender)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {e}")))?;
+        let outcome = match MessagingStore::new(&self.db).get_envelope_outcome(&addr, nonce) {
+            Ok(Some(outcome)) => outcome,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
+        };
+        let block_height = ReceiptStore::new(&self.db)
+            .get(&outcome.tx_hash)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+            .map(|r| r.block_height);
+        Ok(Some(EnvelopeOutcomeInfo {
+            sender: addr.to_base58(),
+            nonce,
+            tx_hash: format!("0x{}", hex::encode(outcome.tx_hash.as_bytes())),
+            outcome: if outcome.outcome_code == 0 {
+                "executed".to_string()
+            } else {
+                "refused".to_string()
+            },
+            receipt_code: outcome.outcome_code,
+            escrowed_amount: outcome.escrowed_amount.to_string(),
+            block_height,
         }))
     }
 
