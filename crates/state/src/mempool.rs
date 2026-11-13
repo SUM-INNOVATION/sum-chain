@@ -40,7 +40,8 @@
 //!    verification gate on;
 //! 3. that envelope must carry the sender's expected messaging nonce, and a
 //!    candidate block carries each (sender, nonce) at most once, in order,
-//!    in one order that also keeps every outer sender's account nonces;
+//!    in one order that also keeps every outer sender's account nonces, and
+//!    offers no transaction above a gap in its account's nonces;
 //! 4. with [`MessagingQuotaAdmission`] wired, that envelope's sender must have
 //!    quota left for it, as the canonical chain counts its sends.
 //!
@@ -60,7 +61,7 @@ use sumchain_primitives::{
     verify_sponsored_send_v2, Address, Balance, Hash, MessagingOperation, Nonce, SignedTransaction,
     SponsoredMessage, TxInner, TxPayload, TxStatus,
 };
-use sumchain_storage::{Database, MessagingStore, ReceiptStore};
+use sumchain_storage::{Database, MessagingStore, ReceiptStore, StateStore};
 use tracing::{debug, info, warn};
 
 use crate::education_executor::{
@@ -220,7 +221,9 @@ pub struct TransactionSignatureAdmission {
 ///    carried in nonce order per sender, each (sender, nonce) at most once per
 ///    candidate block, and an envelope the chain has moved past is evicted.
 ///    The block's order keeps that sequence and every outer sender's account
-///    nonces together (`in_combined_order`).
+///    nonces together (`in_combined_order`), from each account's committed
+///    nonce: a transaction above a gap in its account's nonces that the block
+///    does not fill is not offered, nor is anything that depends on it.
 ///    An envelope carried to a failed receipt leaves the committed nonce where
 ///    it was; the sender's later pending envelopes are then evicted too,
 ///    since nothing in the pool can bring them into sequence.
@@ -667,7 +670,8 @@ impl<'a> CombinedOrder<'a> {
         self.by_named.get(&named)?.first().map(|&(_, j)| j)
     }
 
-    /// With nothing ready, every transaction left waits on another one left.
+    /// With nothing ready (and nothing above a nonce gap, which is left out
+    /// first), every transaction left waits on another one left.
     /// Following those waits from the first transaction left, a position
     /// repeats, and the transactions from its first visit on are a cycle.
     /// The victim is the latest of them in `carried` that heads its outer
@@ -689,6 +693,39 @@ impl<'a> CombinedOrder<'a> {
             .copied()
             .filter(|&j| self.is_outer_head(j))
             .max()
+    }
+
+    /// The positions whose account nonce no transaction in the block can
+    /// reach: those of an outer sender above the first nonce, from its
+    /// committed one, at which none of its transactions advances the nonce
+    /// (all of them, when the committed nonce could not be read). Outer
+    /// senders absent from `committed` are not checked.
+    fn beyond_a_gap(&self, committed: &HashMap<Address, Option<Nonce>>) -> Vec<usize> {
+        let mut out = Vec::new();
+        for (outer, left) in &self.by_outer {
+            let Some(known) = committed.get(outer) else {
+                continue;
+            };
+            let Some(mut reach) = *known else {
+                out.extend(left.iter().map(|(_, j)| *j));
+                continue;
+            };
+            let advancing: BTreeSet<Nonce> = left
+                .iter()
+                .filter(|((_, advances), _)| *advances)
+                .map(|((nonce, _), _)| *nonce)
+                .collect();
+            while advancing.contains(&reach) {
+                reach += 1;
+            }
+            out.extend(
+                left.iter()
+                    .filter(|((nonce, _), _)| *nonce > reach)
+                    .map(|(_, j)| *j),
+            );
+        }
+        out.sort_unstable();
+        out
     }
 
     /// Leaves `victim` out, and every transaction left that depends on it, in
@@ -737,6 +774,10 @@ struct LeftOut {
     victims: Vec<Hash>,
     /// The transactions that depend on a victim. They stay in the pool.
     dependents: Vec<Hash>,
+    /// The transactions above a gap in their account's nonces that no
+    /// transaction in the block fills, and those that depend on them. They
+    /// stay in the pool until the gap is filled.
+    gapped: Vec<Hash>,
 }
 
 /// `carried`, in one order that keeps two sequences, and what is left out to
@@ -765,9 +806,24 @@ struct LeftOut {
 /// with every transaction left that depends on it, in turn: its outer
 /// sender's transactions at higher nonces when it advances the nonce, and its
 /// named sender's later envelopes.
+///
+/// `committed` holds the committed account nonce of each outer sender
+/// (`None` where it could not be read). A transaction whose account nonce no
+/// transaction in the block can reach (the account's committed nonce, or one
+/// at which it has a transaction that advances the nonce, is missing below
+/// it) is left out first, before anything is placed, with every transaction
+/// left that depends on it, in turn, as for a cycle's victim. It is not
+/// evicted, and nothing that depends on it is offered into the gap, where it
+/// would take an `InvalidNonce` receipt, or a refusal for an envelope out of
+/// its named sender's sequence, and be deleted. All of an outer sender's
+/// transactions are left out when its committed nonce could not be read.
+/// Outer senders absent from `committed` are not checked: their lowest
+/// transaction is taken as their next, as in a pool without an inclusion
+/// policy.
 fn in_combined_order(
     carried: Vec<SignedTransaction>,
     accounting: bool,
+    committed: &HashMap<Address, Option<Nonce>>,
 ) -> (Vec<SignedTransaction>, LeftOut) {
     let seq: Vec<Sequenced> = carried
         .iter()
@@ -781,6 +837,13 @@ fn in_combined_order(
     let mut placed = Vec::with_capacity(seq.len());
     let mut left_out = LeftOut::default();
     let mut remaining = seq.len();
+    for gapped in order.beyond_a_gap(committed) {
+        let out = order.leave_out(gapped);
+        remaining -= out.len();
+        left_out
+            .gapped
+            .extend(out.iter().map(|&x| carried[x].hash()));
+    }
     while remaining > 0 {
         if let Some(i) = order.ready.pop_first() {
             order.take(i);
@@ -1929,6 +1992,13 @@ impl Mempool {
     /// ([`in_combined_order`]), judged by the next block's account-nonce rule.
     /// Where the two conflict in a cycle, one transaction of the cycle is
     /// evicted and those that depend on it wait in the pool.
+    ///
+    /// With an inclusion policy wired, each outer sender's committed account
+    /// nonce is read too, and a transaction above a gap in its account's
+    /// nonces that the block does not fill is not offered: it waits in the
+    /// pool, with what depends on it, until the gap is filled
+    /// ([`in_combined_order`]). A cycle's victim leaves such a gap
+    /// behind it when it advances its account's nonce.
     pub fn select_for_block(&self, max_count: usize) -> Vec<SignedTransaction> {
         let rules = self.next_block_rules();
         let (carried, evict) = {
@@ -1952,7 +2022,15 @@ impl Mempool {
             );
             self.remove_batch(&evict);
         }
-        let (ordered, left_out) = in_combined_order(carried, rules.accounting);
+        let committed = self.committed_account_nonces(&carried);
+        let (ordered, left_out) = in_combined_order(carried, rules.accounting, &committed);
+        if !left_out.gapped.is_empty() {
+            info!(
+                "Inclusion policy: leaving {} transaction(s) above a gap in their account's \
+                 nonces, or depending on one, for a later block",
+                left_out.gapped.len()
+            );
+        }
         if !left_out.victims.is_empty() {
             info!(
                 "Inclusion policy: {} transaction(s) wait on each other in a cycle of account \
@@ -1964,6 +2042,40 @@ impl Mempool {
             self.remove_batch(&left_out.victims);
         }
         ordered
+    }
+
+    /// The committed account nonce of each account that signs one of
+    /// `carried`, read through the inclusion policy's database, as the
+    /// policy reads receipts and messaging nonces: the canonical chain as it
+    /// stands now. `None` for an account whose nonce cannot be read, whose
+    /// transactions then wait for a later block. Empty without a wired
+    /// policy, and then no account's nonces are checked.
+    fn committed_account_nonces(
+        &self,
+        carried: &[SignedTransaction],
+    ) -> HashMap<Address, Option<Nonce>> {
+        let Some(policy) = &self.inclusion_policy else {
+            return HashMap::new();
+        };
+        let store = StateStore::new(&policy.db);
+        let mut committed = HashMap::new();
+        for tx in carried {
+            let sender = tx.sender();
+            committed
+                .entry(sender)
+                .or_insert_with(|| match store.get_nonce(&sender) {
+                    Ok(nonce) => Some(nonce),
+                    Err(e) => {
+                        warn!(
+                            sender = %sender.to_base58(),
+                            "inclusion policy: cannot read the account nonce; leaving the \
+                             account's transactions out of this block: {e}"
+                        );
+                        None
+                    }
+                });
+        }
+        committed
     }
 
     /// The transactions among `transactions`, in the order given, that this
@@ -2585,6 +2697,16 @@ mod tests {
         txs.iter().map(|t| t.hash()).collect()
     }
 
+    /// [`super::in_combined_order`] with no committed account nonce known, as
+    /// a pool without an inclusion policy orders: no account's nonces are
+    /// checked for a gap.
+    fn in_combined_order(
+        carried: Vec<SignedTransaction>,
+        accounting: bool,
+    ) -> (Vec<SignedTransaction>, LeftOut) {
+        super::in_combined_order(carried, accounting, &HashMap::new())
+    }
+
     fn keys() -> (KeyPair, KeyPair, KeyPair, KeyPair, KeyPair) {
         (
             KeyPair::from_bytes([1u8; 32]),
@@ -2728,7 +2850,10 @@ mod tests {
         );
         assert!(mempool.contains(&r3_transfer.hash()));
         // The cycle is gone: the three left are carried in an order that
-        // keeps both sequences.
+        // keeps both sequences. (This pool has no inclusion policy, so it
+        // cannot read the sponsors' committed nonces and does not see the gap
+        // the victim left; with a policy wired the three wait for it to be
+        // filled: `nothing_above_a_nonce_gap_is_offered`.)
         let next = mempool.select_for_block(10);
         assert_eq!(next.len(), 4);
         assert_eq!(mempool.len(), 4);
@@ -2792,6 +2917,7 @@ mod tests {
             sorted(left_out.dependents.clone()),
             sorted(ids(&[r2_u0, r1_v0, r1_u1, w_u2]))
         );
+        assert!(left_out.gapped.is_empty());
     }
 
     /// Cycles through one, two, three and four sponsors (two, four,
@@ -2830,7 +2956,119 @@ mod tests {
                 .filter(|h| *h != pairs[n - 1].0.hash())
                 .collect();
             assert_eq!(sorted(left_out.dependents.clone()), sorted(rest), "{n}");
+            assert!(left_out.gapped.is_empty(), "{n}");
         }
+    }
+
+    /// With the committed account nonces known, a transaction above a
+    /// gap in its account's nonces is left out, not evicted, with what
+    /// depends on it in turn. `r1`'s committed nonce is 0 and it holds only
+    /// nonce 1, `v`'s envelope 0; `v`'s envelope 1 through `r2` waits on it
+    /// and, from the accounting gate, `r2`'s nonce 1 on that. A third
+    /// sponsor and an unrelated sender are carried. Below the gate the
+    /// relayed envelopes advance no nonce, and the same three wait: `r1`'s
+    /// envelope at nonce 1 has no transaction at nonce 0 to reach it, `v`'s
+    /// envelope 1 waits on it, and `r2`'s envelope at nonce 1 is reached by
+    /// nothing either; `r3`'s envelope at nonce 1 is reached by its transfer
+    /// at nonce 0.
+    #[test]
+    fn nothing_above_a_nonce_gap_is_offered() {
+        let (r1, r2, v, r3, x) = keys();
+        let u = key(6);
+        let r1_v0 = relayed(&r1, 1, &v, 0);
+        let r2_v1 = relayed(&r2, 0, &v, 1);
+        let r2_u0 = relayed(&r2, 1, &u, 0);
+        let r3_transfer = transfer_from(&r3, 0);
+        let r3_x0 = relayed(&r3, 1, &x, 0);
+        let other = transfer_from(&key(7), 0);
+        let carried = vec![
+            r1_v0.clone(),
+            r2_v1.clone(),
+            r2_u0.clone(),
+            r3_transfer.clone(),
+            r3_x0.clone(),
+            other.clone(),
+        ];
+        let committed: HashMap<Address, Option<Nonce>> = [&r1, &r2, &r3, &key(7)]
+            .into_iter()
+            .map(|k| (k.address(), Some(0)))
+            .collect();
+
+        for accounting in [true, false] {
+            let (ordered, left_out) =
+                super::in_combined_order(carried.clone(), accounting, &committed);
+            assert_eq!(
+                ids(&ordered),
+                ids(&[r3_transfer.clone(), r3_x0.clone(), other.clone()]),
+                "accounting {accounting}"
+            );
+            assert!(left_out.victims.is_empty(), "accounting {accounting}");
+            assert!(left_out.dependents.is_empty(), "accounting {accounting}");
+            assert_eq!(
+                sorted(left_out.gapped.clone()),
+                sorted(ids(&[r1_v0.clone(), r2_v1.clone(), r2_u0.clone()])),
+                "accounting {accounting}"
+            );
+        }
+
+        // Without the committed nonces nothing is checked, as before.
+        let (ordered, left_out) = in_combined_order(carried, true);
+        assert_eq!(ordered.len(), 6);
+        assert_eq!(left_out, LeftOut::default());
+    }
+
+    /// A gap the block fills is no gap: `r1`'s transfer at its
+    /// committed nonce 3 reaches its envelope at nonce 4 below the gate (and
+    /// its envelope at 3 shares nonce 3, before the transfer). A transaction
+    /// below the committed nonce is offered as before (it takes
+    /// `InvalidNonce`). A sender whose committed nonce cannot be read waits,
+    /// with what depends on it; one not in `committed` is not checked.
+    #[test]
+    fn a_gap_the_block_fills_is_no_gap() {
+        let (r1, s, t, stale, unread) = keys();
+        let unchecked = key(6);
+        let r1_s0 = relayed(&r1, 3, &s, 0);
+        let r1_transfer = transfer_from(&r1, 3);
+        let r1_s1 = relayed(&r1, 4, &s, 1);
+        let old = transfer_from(&stale, 1);
+        let current = transfer_from(&stale, 2);
+        let unread_t0 = relayed(&unread, 0, &t, 0);
+        let r1_t1 = relayed(&r1, 4, &t, 1);
+        let free = transfer_from(&unchecked, 9);
+        let carried = vec![
+            r1_s1.clone(),
+            r1_transfer.clone(),
+            r1_s0.clone(),
+            current.clone(),
+            old.clone(),
+            unread_t0.clone(),
+            r1_t1.clone(),
+            free.clone(),
+        ];
+        let committed: HashMap<Address, Option<Nonce>> = [
+            (r1.address(), Some(3)),
+            (stale.address(), Some(2)),
+            (unread.address(), None),
+        ]
+        .into_iter()
+        .collect();
+        let (ordered, left_out) = super::in_combined_order(carried, false, &committed);
+        assert_eq!(
+            ids(&ordered),
+            ids(&[
+                r1_s0.clone(),
+                r1_transfer.clone(),
+                r1_s1.clone(),
+                old.clone(),
+                current.clone(),
+                free.clone()
+            ])
+        );
+        assert_eq!(
+            sorted(left_out.gapped.clone()),
+            sorted(ids(&[unread_t0, r1_t1]))
+        );
+        assert!(left_out.victims.is_empty());
     }
 
     /// `filter_map_held` sees each held transaction once and returns what the
