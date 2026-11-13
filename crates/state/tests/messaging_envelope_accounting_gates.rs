@@ -1018,11 +1018,10 @@ fn at_the_gate_a_v2_envelope_is_accepted_once_and_its_replay_refused() {
 
 /// At the gate, every bound field is checked: an envelope signed for another
 /// chain, or whose recipient, content, nonce or amount differ from what was
-/// signed, or carrying an amount at all, or signed by another key, with no
-/// signature, over the pre-gate string form, by a small-order key the legacy
-/// rule would accept, or naming an unregistered sender, is refused as an
-/// ordinary failed operation that stores nothing and moves no counter. A
-/// correct envelope then still passes.
+/// signed, or signed by another key, with no signature, over the pre-gate
+/// string form, or naming an unregistered sender, is refused as an ordinary failed operation that
+/// stores nothing and moves no counter. A correct envelope then still passes,
+/// and a properly signed amount is a payment by the named sender.
 #[test]
 fn at_the_gate_every_bound_field_is_checked() {
     use sumchain_primitives::TxStatus;
@@ -1079,16 +1078,7 @@ fn at_the_gate_every_bound_field_is_checked() {
                 m.koppa_amount = Some(5_000);
                 m
             },
-            "Sponsored message carries an amount",
-        ),
-        (
-            "an amount, properly signed",
-            signed_v2(
-                envelope(&carol(), &bob().address(), 0, NEVER, Some(5_000), [0u8; 64]),
-                &carol(),
-                CHAIN_ID,
-            ),
-            "Sponsored message carries an amount",
+            "Invalid sponsored message signature",
         ),
         (
             "a nonce that is not the sender's current one",
@@ -1176,6 +1166,32 @@ fn at_the_gate_every_bound_field_is_checked() {
         "a correct envelope still passes"
     );
     assert_eq!(c.msg_nonce(&carol_addr), 1);
+
+    // A properly signed amount is a payment: carol, the named sender, funds
+    // it into the escrow keyed by the including transaction's hash.
+    let balance = c.balance(&carol_addr);
+    let paid = c.tx(
+        &sponsor(),
+        sponsored(&signed_v2(
+            envelope(&carol(), &bob().address(), 1, NEVER, Some(5_000), [0u8; 64]),
+            &carol(),
+            CHAIN_ID,
+        )),
+    );
+    let r = c.one(paid.clone());
+    assert_eq!(r.status, TxStatus::Success, "an amount, properly signed");
+    assert_eq!(c.balance(&carol_addr), balance - 5_000);
+    let escrow = c
+        .store()
+        .get_pending_payment(&paid.hash())
+        .unwrap()
+        .expect("escrowed");
+    assert_eq!((escrow.amount, escrow.sender), (5_000, carol_addr));
+    assert!(c
+        .sent_by(&carol_addr)
+        .iter()
+        .any(|e| e.message_id == paid.hash() && e.has_payment));
+    assert_eq!(c.msg_nonce(&carol_addr), 2);
 }
 
 /// With the clock gates open the expiry is compared against the block's

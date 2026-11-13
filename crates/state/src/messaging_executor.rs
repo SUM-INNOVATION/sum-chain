@@ -142,11 +142,13 @@ impl MessagingExecutor {
     }
 
     /// Whether a sponsored `SendMessage` in a block at `block_height` is
-    /// accepted only with a version-2 sender envelope that verifies: no amount,
-    /// a strict signature by the named sender over
-    /// [`sumchain_primitives::sponsored_send_v2_signing_preimage`], and the
-    /// sender's current messaging nonce. Below the gate, or while it is unset,
-    /// the envelope is executed under the earlier rule, as before.
+    /// accepted only with a version-2 sender envelope that verifies: a strict
+    /// signature by the named sender over
+    /// [`sumchain_primitives::sponsored_send_v2_signing_preimage`] and the
+    /// sender's current messaging nonce; a positive amount is then paid by the
+    /// named sender into the pending-payment escrow. Below the gate, or while
+    /// it is unset, the envelope is executed under the earlier rule, as
+    /// before.
     pub fn sponsored_envelope_verification_gate_open(
         params: &ChainParams,
         block_height: u64,
@@ -684,14 +686,27 @@ impl MessagingExecutor {
     ///
     /// The checks, in order:
     /// 1. the payload decodes;
-    /// 2. it carries no amount;
-    /// 3. the signature, then the nonce (authentication);
-    /// 4. sponsorship enabled, the sender registered;
-    /// 5. format, size, expiry against the rule clock;
-    /// 6. quota, spam, recipient filters.
+    /// 2. the signature, then the nonce (authentication);
+    /// 3. sponsorship enabled, the sender registered;
+    /// 4. format, size, expiry against the rule clock;
+    /// 5. quota, spam, recipient filters;
+    /// 6. for a positive amount, the named sender's balance covers it.
     ///
-    /// Then the sender's messaging nonce and daily count advance and the event
-    /// is stored.
+    /// **The amount.** `amount = koppa_amount.unwrap_or(0)`: `Some(0)` and
+    /// `None` both mean no payment (they sign the same preimage). A positive
+    /// amount is a payment by the named sender, who signed it: it is debited
+    /// from the sender and written to the existing pending-payment escrow,
+    /// keyed by this transaction's hash, with the expiry and the claim rules of
+    /// a paid send. The relayer (`tx.from`) pays only the fee; no path here
+    /// moves value out of its balance unless it is itself the named sender.
+    /// Affordability is read from the candidate after the fee: from the
+    /// accounting gate the fee left the relayer before dispatch, so a sender
+    /// that relays its own envelope is checked after paying it, and charged
+    /// the fee once and the amount once.
+    ///
+    /// Then the amount moves, the sender's messaging nonce and daily count
+    /// advance and the event is stored; it reports a payment exactly when the
+    /// escrow was written.
     #[allow(clippy::too_many_arguments)]
     fn send_message_enveloped(
         view: &mut ExecutionView<'_, '_>,
@@ -713,14 +728,7 @@ impl MessagingExecutor {
                 Err(refused) => return Ok(refused),
             };
 
-        // No payment travels with a sponsored envelope: the relayer is not
-        // the sender, so there is no account to move an amount from, and an
-        // event must never report a payment that did not occur.
-        if sponsored_msg.koppa_amount.is_some() {
-            return Ok(MessagingExecutionResult::failure(
-                "Sponsored message carries an amount",
-            ));
-        }
+        let amount = sponsored_msg.koppa_amount.unwrap_or(0);
 
         // The named sender's strict signature over the version-2 preimage,
         // which binds this chain, the sender key, the recipient, the message
@@ -788,8 +796,24 @@ impl MessagingExecutor {
             }
             return refused(reason);
         }
+        if amount > 0 && StateManager::v_get_balance(view, &real_sender)? < amount {
+            return refused("Insufficient balance for payment".to_string());
+        }
 
         // ── apply ───────────────────────────────────────────────────────────
+        if amount > 0 {
+            StateManager::v_deduct(view, &real_sender, amount)?;
+            Self::v_set_pending_payment(
+                view,
+                &tx_hash,
+                &PendingPayment {
+                    recipient_hash: sponsored_msg.recipient_hash,
+                    amount,
+                    expiry: clock + PENDING_PAYMENT_EXPIRY,
+                    sender: real_sender,
+                },
+            )?;
+        }
         Self::v_increment_sender_nonce(view, &real_sender)?;
         let day = Self::current_day(clock);
         Self::v_increment_daily_message_count(view, &real_sender, day)?;
@@ -799,7 +823,8 @@ impl MessagingExecutor {
             recipient_hash: sponsored_msg.recipient_hash,
             message_id: tx_hash,
             size: sponsored_msg.message_data.len() as u32,
-            has_payment: false,
+            // Exactly when the escrow above was written.
+            has_payment: amount > 0,
             block_height,
             timestamp: block_timestamp,
         };

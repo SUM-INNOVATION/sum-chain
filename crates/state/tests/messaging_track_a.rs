@@ -1040,3 +1040,528 @@ fn the_single_transaction_arm_spends_a_refused_envelopes_nonce() {
         c.balance(&sponsor().address()) - FEE
     );
 }
+
+// ── payments: the named sender funds the existing escrow ────────────────────
+
+/// The escrow row of the payment made by `tx`, if any.
+fn escrow_of(
+    c: &Chain,
+    tx: &sumchain_primitives::SignedTransaction,
+) -> Option<sumchain_primitives::PendingPayment> {
+    c.store().get_pending_payment(&tx.hash()).unwrap()
+}
+
+/// The event `tx` stored, if any.
+fn event_of(
+    c: &Chain,
+    sender: &sumchain_primitives::Address,
+    tx: &sumchain_primitives::SignedTransaction,
+) -> Option<sumchain_primitives::MessageEvent> {
+    c.sent_by(sender)
+        .into_iter()
+        .find(|e| e.message_id == tx.hash())
+}
+
+/// Every balance, every escrowed amount, every stake and the sponsorship pool:
+/// what no messaging operation may create or destroy.
+fn total_value(c: &Chain) -> u128 {
+    let balances: u128 = c.balances().iter().sum();
+    let escrowed: u128 =
+        c.db.iter(cf::MESSAGING_PENDING_PAYMENTS)
+            .unwrap()
+            .map(|(_, v)| {
+                sumchain_storage::messaging_store::decode_pending_payment(&v)
+                    .unwrap()
+                    .amount
+            })
+            .sum();
+    let staked: u128 = everyone()
+        .iter()
+        .map(|k| c.store().get_stake_balance(&k.address()).unwrap())
+        .sum();
+    balances + escrowed + staked + c.store().get_sponsorship_balance().unwrap()
+}
+
+/// At both gates a sponsored envelope with a positive amount is
+/// a payment by the named sender: carol is debited the amount, the escrow row
+/// and its recipient index are written (amount, `expiry = clock + 7 days`,
+/// sender carol), the event reports the payment, the sponsor pays the fee
+/// and nothing else, carol's account nonce is unchanged and her messaging
+/// nonce moves once, and the proposer is credited the fee. Bob then claims:
+/// he is credited the amount and charged his fee once, and both escrow rows
+/// are gone. Value is conserved throughout.
+#[test]
+fn a_sponsored_payment_escrows_the_senders_amount_and_the_recipient_claims_it() {
+    use sumchain_storage::messaging_store::{payment_index_key, pending_payment_key};
+    let amount: u128 = 5_000;
+    let mut c = Chain::new(both(Some(1)));
+    c.setup();
+    let total = total_value(&c);
+    let (carol_addr, bob_addr, sponsor_addr) =
+        (carol().address(), bob().address(), sponsor().address());
+    let before = c.rows();
+    let (carol_before, sponsor_before, pool_before) = (
+        (c.balance(&carol_addr), c.nonce(&carol())),
+        (c.balance(&sponsor_addr), c.nonce(&sponsor())),
+        c.balance(&proposer()),
+    );
+    let m = c.v2(&carol(), &bob_addr, 0, Some(amount));
+    let tx = c.tx(&sponsor(), sponsored(&m));
+    let r = c.one(tx.clone());
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Success, FEE));
+    assert_eq!(
+        (c.balance(&carol_addr), c.nonce(&carol())),
+        (carol_before.0 - amount, carol_before.1),
+        "carol pays the amount, her account nonce stays"
+    );
+    assert_eq!(
+        (c.balance(&sponsor_addr), c.nonce(&sponsor())),
+        (sponsor_before.0 - FEE, sponsor_before.1 + 1),
+        "the sponsor pays the fee only"
+    );
+    assert_eq!(c.balance(&proposer()), pool_before + FEE);
+    assert_eq!(c.msg_nonce(&carol_addr), 1);
+    let escrow = escrow_of(&c, &tx).expect("escrowed");
+    assert_eq!(
+        (
+            escrow.amount,
+            escrow.sender,
+            escrow.recipient_hash,
+            escrow.expiry
+        ),
+        (amount, carol_addr, recipient_hash(&bob_addr), 7 * 24 * 3600),
+        "the clock reads zero while the clock gates are closed"
+    );
+    assert!(event_of(&c, &carol_addr, &tx).expect("event").has_payment);
+    assert_eq!(total_value(&c), total, "conserved");
+    let moved = changed(&before, &c.rows());
+    for key in [
+        account_key(&carol_addr),
+        account_key(&sponsor_addr),
+        account_key(&proposer()),
+        (
+            cf::MESSAGING_PENDING_PAYMENTS.to_string(),
+            pending_payment_key(&tx.hash()).to_vec(),
+        ),
+        (
+            cf::MESSAGING_PAYMENTS_BY_RECIPIENT.to_string(),
+            payment_index_key(&recipient_hash(&bob_addr), &tx.hash()),
+        ),
+    ] {
+        assert!(moved.contains(&key), "{key:?}");
+    }
+
+    // The recipient claims.
+    let bob_before = c.balance(&bob_addr);
+    let claim = c.tx(
+        &bob(),
+        op(
+            MessagingOperation::ClaimPayment,
+            &ClaimPaymentData {
+                message_id: tx.hash(),
+                recipient_address: bob_addr,
+            },
+        ),
+    );
+    let r = c.one(claim);
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Success, FEE));
+    assert_eq!(c.balance(&bob_addr), bob_before + amount - FEE);
+    assert!(escrow_of(&c, &tx).is_none());
+    assert!(c
+        .db
+        .iter(cf::MESSAGING_PAYMENTS_BY_RECIPIENT)
+        .unwrap()
+        .next()
+        .is_none());
+    assert_eq!(total_value(&c), total, "conserved");
+}
+
+/// `Some(0)` and `None` sign the same preimage and mean the same thing:
+/// no payment. A relayer that flips one into the other changes the
+/// transaction's hash and nothing else: the rows are identical except the
+/// rows keyed by that hash (the event's id).
+#[test]
+fn some_zero_and_none_are_the_same_envelope() {
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+    let run = |amount: Option<u128>| {
+        let mut c = Chain::new(both(Some(1)));
+        c.setup();
+        let mut m = c.v2(&carol(), &bob().address(), 0, None);
+        m.koppa_amount = amount;
+        let tx = c.tx(&sponsor(), sponsored(&m));
+        let hash = tx.hash();
+        let r = c.one(tx);
+        assert_eq!(r.status, TxStatus::Success, "{amount:?}");
+        let ev = c.sent_by(&carol().address());
+        assert_eq!(ev.len(), 1);
+        assert!(!ev[0].has_payment, "{amount:?}");
+        assert!(c
+            .db
+            .iter(cf::MESSAGING_PENDING_PAYMENTS)
+            .unwrap()
+            .next()
+            .is_none());
+        // Rows that carry the transaction's hash (the event's message id)
+        // set aside, the two runs agree byte for byte.
+        let mut rows = c.rows();
+        let removed = rows.len();
+        rows.retain(|(_, k), v| !contains(k, hash.as_bytes()) && !contains(v, hash.as_bytes()));
+        assert!(rows.len() < removed, "the event rows name the transaction");
+        (rows, c.balances(), ev[0].size)
+    };
+    assert_eq!(run(None), run(Some(0)));
+}
+
+/// A relayer that changes the amount after signing breaks the
+/// signature: refused before authentication, nothing of carol's spent, the
+/// relayer charged.
+#[test]
+fn a_relayer_cannot_change_the_amount() {
+    let mut c = Chain::new(both(Some(1)));
+    c.setup();
+    for (signed, sent) in [
+        (None, Some(1)),
+        (Some(5_000), Some(50_000)),
+        (Some(5_000), None),
+    ] {
+        let mut m = c.v2(&carol(), &bob().address(), 0, signed);
+        m.koppa_amount = sent;
+        let carol_before = c.balance(&carol().address());
+        let r = c.one(c.tx(&sponsor(), sponsored(&m)));
+        assert_eq!((r.status, r.fee_paid), (TxStatus::Failed(7), FEE));
+        assert_eq!(c.balance(&carol().address()), carol_before);
+        assert_eq!(c.msg_nonce(&carol().address()), 0);
+    }
+}
+
+/// Set `kp`'s committed balance, keeping its account nonce.
+fn set_balance(c: &Chain, kp: &sumchain_crypto::KeyPair, balance: u128) {
+    sumchain_storage::StateStore::new(&c.db)
+        .put_account(
+            &kp.address(),
+            &sumchain_storage::schema::AccountState {
+                balance,
+                nonce: c.nonce(kp),
+            },
+        )
+        .unwrap();
+}
+
+/// An amount the sender cannot afford is refused after
+/// authentication: the nonce is spent, no escrow, the sender's balance
+/// unchanged, the sponsor charged the fee. Two payments at `n` and `n + 1` in
+/// one block where the balance covers only the first: the first is escrowed,
+/// the second refused and spent.
+#[test]
+fn an_unaffordable_payment_is_refused_and_spends_the_nonce() {
+    let mut c = Chain::new(both(Some(1)));
+    c.setup();
+    set_balance(&c, &carol(), 7_000);
+    let tx = c.tx(
+        &sponsor(),
+        sponsored(&c.v2(&carol(), &bob().address(), 0, Some(7_001))),
+    );
+    let r = c.one(tx.clone());
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Failed(7), FEE));
+    assert_eq!(c.balance(&carol().address()), 7_000);
+    assert_eq!(c.msg_nonce(&carol().address()), 1);
+    assert!(escrow_of(&c, &tx).is_none());
+
+    let s = c.nonce(&sponsor());
+    let first = c.tx_at(
+        &sponsor(),
+        s,
+        sponsored(&c.v2(&carol(), &bob().address(), 1, Some(4_000))),
+    );
+    let second = c.tx_at(
+        &sponsor(),
+        s + 1,
+        sponsored(&c.v2(&carol(), &bob().address(), 2, Some(4_000))),
+    );
+    let r = c.block(vec![first.clone(), second.clone()]).unwrap();
+    assert_eq!(
+        r.iter().map(|r| (r.status, r.fee_paid)).collect::<Vec<_>>(),
+        vec![(TxStatus::Success, FEE), (TxStatus::Failed(7), FEE)]
+    );
+    assert_eq!(c.balance(&carol().address()), 3_000);
+    assert!(escrow_of(&c, &first).is_some());
+    assert!(escrow_of(&c, &second).is_none());
+    assert_eq!(c.msg_nonce(&carol().address()), 3);
+}
+
+/// Sender = sponsor: carol relays her own envelope. One fee, one
+/// account nonce, one messaging nonce, the amount once. A balance of exactly
+/// fee + amount succeeds and ends at zero; fee + amount - 1 is refused after
+/// the fee is charged, the nonce spent, no escrow.
+#[test]
+fn a_sender_relaying_its_own_payment_is_charged_once() {
+    let amount: u128 = 5_000;
+    for (balance, ok) in [(FEE + amount, true), (FEE + amount - 1, false)] {
+        let mut c = Chain::new(both(Some(1)));
+        c.setup();
+        set_balance(&c, &carol(), balance);
+        let (nonce, pool) = (c.nonce(&carol()), c.balance(&proposer()));
+        let tx = c.tx(
+            &carol(),
+            sponsored(&c.v2(&carol(), &bob().address(), 0, Some(amount))),
+        );
+        let r = c.one(tx.clone());
+        assert_eq!(c.nonce(&carol()), nonce + 1, "{balance}: one account nonce");
+        assert_eq!(
+            c.msg_nonce(&carol().address()),
+            1,
+            "{balance}: one messaging nonce"
+        );
+        assert_eq!(c.balance(&proposer()), pool + FEE, "{balance}: one fee");
+        if ok {
+            assert_eq!((r.status, r.fee_paid), (TxStatus::Success, FEE));
+            assert_eq!(c.balance(&carol().address()), 0);
+            assert_eq!(escrow_of(&c, &tx).unwrap().amount, amount);
+        } else {
+            assert_eq!((r.status, r.fee_paid), (TxStatus::Failed(7), FEE));
+            assert_eq!(c.balance(&carol().address()), balance - FEE);
+            assert!(escrow_of(&c, &tx).is_none());
+        }
+    }
+}
+
+/// The named sender is the block's proposer: the relayer's fee is
+/// credited to it before the payment is checked, so a sender holding
+/// amount - fee pays; the relayer still pays only the fee.
+#[test]
+fn a_sender_that_proposes_the_block_is_credited_the_fee_first() {
+    let amount: u128 = 5_000;
+    let mut c = Chain::new(both(Some(1)));
+    c.setup();
+    c.proposer_pk = *carol().public_key().as_bytes();
+    set_balance(&c, &carol(), amount - FEE);
+    let sponsor_before = c.balance(&sponsor().address());
+    let tx = c.tx(
+        &sponsor(),
+        sponsored(&c.v2(&carol(), &bob().address(), 0, Some(amount))),
+    );
+    let r = c.one(tx.clone());
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Success, FEE));
+    assert_eq!(c.balance(&carol().address()), 0);
+    assert_eq!(c.balance(&sponsor().address()), sponsor_before - FEE);
+    assert_eq!(escrow_of(&c, &tx).unwrap().amount, amount);
+}
+
+/// A third party includes a gossiped envelope first: the payment
+/// executes once, its escrow and event keyed by the third party's
+/// transaction; the relay's own copy is refused (nonce), charged to the
+/// relay, and moves nothing of carol's.
+#[test]
+fn a_third_party_including_first_takes_the_escrow_id() {
+    let mut c = Chain::new(both(Some(1)));
+    c.setup();
+    let m = c.v2(&carol(), &bob().address(), 0, Some(5_000));
+    let third = c.tx(&erin(), sponsored(&m));
+    let relay = c.tx(&sponsor(), sponsored(&m));
+    let carol_before = c.balance(&carol().address());
+    let r = c.block(vec![third.clone(), relay.clone()]).unwrap();
+    assert_eq!(
+        r.iter().map(|r| (r.status, r.fee_paid)).collect::<Vec<_>>(),
+        vec![(TxStatus::Success, FEE), (TxStatus::Failed(7), FEE)]
+    );
+    assert_eq!(
+        c.balance(&carol().address()),
+        carol_before - 5_000,
+        "paid once"
+    );
+    assert!(escrow_of(&c, &third).is_some());
+    assert!(escrow_of(&c, &relay).is_none());
+}
+
+/// Payments across the gate. Both gates at H. Below H an envelope naming an amount
+/// executes under the earlier rule, as before: no debit and no escrow.
+/// At H and H + 1 it is a payment: debited and escrowed, the flag backed.
+#[test]
+fn a_payment_executes_from_the_gate_and_the_earlier_rule_below_it() {
+    const H: u64 = 3;
+    let mut c = Chain::new(both(Some(H)));
+    c.setup();
+    let carol_addr = carol().address();
+    assert_eq!(c.height + 1, H - 1);
+    let below = c.tx(
+        &sponsor(),
+        sponsored(&envelope(&carol(), &bob().address(), 0, Some(5_000))),
+    );
+    let balance = c.balance(&carol_addr);
+    let r = c.one(below.clone());
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Success, FEE));
+    assert_eq!(c.balance(&carol_addr), balance, "H-1: no debit");
+    assert!(escrow_of(&c, &below).is_none(), "H-1: no escrow");
+    assert!(
+        event_of(&c, &carol_addr, &below).unwrap().has_payment,
+        "H-1: the legacy flag"
+    );
+    for height in [H, H + 1] {
+        let n = c.msg_nonce(&carol_addr);
+        let tx = c.tx(
+            &sponsor(),
+            sponsored(&c.v2(&carol(), &bob().address(), n, Some(5_000))),
+        );
+        let balance = c.balance(&carol_addr);
+        let r = c.one(tx.clone());
+        assert_eq!(c.height, height);
+        assert_eq!((r.status, r.fee_paid), (TxStatus::Success, FEE), "{height}");
+        assert_eq!(c.balance(&carol_addr), balance - 5_000, "{height}");
+        assert_eq!(escrow_of(&c, &tx).unwrap().amount, 5_000, "{height}");
+        assert!(
+            event_of(&c, &carol_addr, &tx).unwrap().has_payment,
+            "{height}"
+        );
+    }
+}
+
+/// A second handle on the same key.
+struct KeyPairOf;
+impl KeyPairOf {
+    fn same(kp: &sumchain_crypto::KeyPair) -> sumchain_crypto::KeyPair {
+        sumchain_crypto::KeyPair::from_bytes(*kp.private_key().as_bytes())
+    }
+}
+
+/// A small deterministic generator (SplitMix64), so the property test below
+/// is reproducible from its seed.
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+/// Escrow conservation. Random sequences of sponsored envelopes (with
+/// and without amounts, affordable or not, relayed by a third party or by the
+/// sender itself, valid or with a bad signature or a stale nonce, sometimes
+/// sent with sponsorship turned off) and claims of the escrows made, at both
+/// gates, on chain 7. After every block: balances plus escrow plus stakes plus
+/// the pool are unchanged; a relayer that is not the named sender lost
+/// exactly its fees; a sender lost exactly what it paid into escrows that
+/// executed (plus its own fees when it relayed); and no refused envelope
+/// moved any value.
+#[test]
+fn value_is_conserved_and_a_sponsor_never_pays_value() {
+    let senders: [fn() -> sumchain_crypto::KeyPair; 3] = [alice, carol, dave];
+    let relayers: [fn() -> sumchain_crypto::KeyPair; 2] = [sponsor, erin];
+    for seed in 1..=6u64 {
+        let mut rng = Rng(seed);
+        let mut c = Chain::new(both(Some(1)));
+        c.setup();
+        for kp in senders {
+            set_balance(&c, &kp(), 20_000 + rng.below(10_000) as u128);
+        }
+        let total = total_value(&c);
+        let mut escrows: Vec<sumchain_primitives::Hash> = Vec::new();
+        for step in 0..40 {
+            let pick = rng.below(10);
+            if pick == 0 && !escrows.is_empty() {
+                // bob claims an escrow
+                let id = escrows.remove(rng.below(escrows.len() as u64) as usize);
+                let r = c.one(c.tx(
+                    &bob(),
+                    op(
+                        MessagingOperation::ClaimPayment,
+                        &ClaimPaymentData {
+                            message_id: id,
+                            recipient_address: bob().address(),
+                        },
+                    ),
+                ));
+                assert_eq!(r.status, TxStatus::Success, "seed {seed} step {step}");
+            } else if pick == 1 {
+                // sponsorship toggled
+                let enabled = !c.store().is_sponsorship_enabled().unwrap();
+                let tx = c.tx(
+                    &admin(),
+                    op(
+                        MessagingOperation::SetSponsorshipEnabled,
+                        &SetSponsorshipEnabledData { enabled },
+                    ),
+                );
+                c.all_succeed(vec![tx]);
+            } else {
+                let sender = &senders[rng.below(3) as usize]();
+                let self_relay = rng.below(4) == 0;
+                let relayer = if self_relay {
+                    KeyPairOf::same(sender)
+                } else {
+                    relayers[rng.below(2) as usize]()
+                };
+                let amount = match rng.below(5) {
+                    0 => None,
+                    1 => Some(0),
+                    2 => Some(1 + rng.below(3_000) as u128),
+                    3 => Some(c.balance(&sender.address())),
+                    _ => Some(50_000 + rng.below(50_000) as u128),
+                };
+                let mut n = c.msg_nonce(&sender.address());
+                let corrupt = rng.below(8);
+                if corrupt == 0 && n > 0 {
+                    n -= 1; // a stale nonce
+                }
+                let mut m = c.v2(sender, &bob().address(), n, amount);
+                if corrupt == 1 {
+                    m.signature[0] ^= 1; // a bad signature
+                }
+                let tx = c.tx(&relayer, sponsored(&m));
+                let paid_before = c.balance(&sender.address());
+                let relayer_before = c.balance(&relayer.address());
+                let r = c.one(tx.clone());
+                let escrowed = escrow_of(&c, &tx).map(|e| e.amount).unwrap_or(0);
+                if r.status == TxStatus::Success {
+                    assert_eq!(escrowed, amount.unwrap_or(0), "seed {seed} step {step}");
+                    if escrowed > 0 {
+                        escrows.push(tx.hash());
+                    }
+                } else {
+                    assert_eq!(
+                        escrowed, 0,
+                        "seed {seed} step {step}: a refusal moves no value"
+                    );
+                }
+                // A relayer that cannot pay the fee takes `InsufficientBalance`
+                // from transaction validation: free, and nothing moves.
+                let fee = if r.status == TxStatus::InsufficientBalance {
+                    0
+                } else {
+                    FEE
+                };
+                assert_eq!(r.fee_paid, fee, "seed {seed} step {step}");
+                if self_relay {
+                    assert_eq!(
+                        c.balance(&sender.address()),
+                        paid_before - fee - escrowed,
+                        "seed {seed} step {step}: the fee once and the amount once"
+                    );
+                } else {
+                    assert_eq!(
+                        c.balance(&relayer.address()),
+                        relayer_before - fee,
+                        "seed {seed} step {step}: the relayer pays the fee only"
+                    );
+                    assert_eq!(
+                        c.balance(&sender.address()),
+                        paid_before - escrowed,
+                        "seed {seed} step {step}: the sender pays exactly what was escrowed"
+                    );
+                }
+            }
+            assert_eq!(
+                total_value(&c),
+                total,
+                "seed {seed} step {step}: value conserved"
+            );
+        }
+    }
+}

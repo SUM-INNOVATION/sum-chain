@@ -284,6 +284,9 @@ pub struct Chain {
     /// A value a test's preparation records for later steps (for example a
     /// paying transaction's hash, which is its escrow's id).
     pub mark: Hash,
+    /// The proposer key every later block names (`PROPOSER_PK` unless a test
+    /// makes an account the proposer).
+    pub proposer_pk: [u8; 32],
 }
 
 impl Chain {
@@ -316,6 +319,7 @@ impl Chain {
             chain_id,
             height: 0,
             mark: Hash::ZERO,
+            proposer_pk: PROPOSER_PK,
         }
     }
 
@@ -328,7 +332,7 @@ impl Chain {
                 T_MS + height * MINUTE_MS,
                 Hash::ZERO,
                 Hash::ZERO,
-                PROPOSER_PK,
+                self.proposer_pk,
             ),
             txs,
         )
@@ -471,6 +475,7 @@ impl Chain {
             chain_id,
             height,
             mark,
+            proposer_pk,
         } = self;
         let root = state.state_root();
         drop(exec);
@@ -489,6 +494,7 @@ impl Chain {
             chain_id,
             height,
             mark,
+            proposer_pk,
         }
     }
 
