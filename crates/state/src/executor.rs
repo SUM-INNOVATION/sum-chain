@@ -88,6 +88,29 @@ pub struct TxExecutionResult {
     pub fee_paid: Balance,
 }
 
+/// What a messaging transaction refused at or above
+/// `messaging_fee_nonce_accounting_enabled_from_height` leaves for the block
+/// loop to settle. Internal: never serialized and never part of a receipt.
+///
+/// The refusal is the loop's to settle, as the per-transaction write-set
+/// refusal is: an executor arm cannot open, commit or roll back a scope
+/// (`ExecutionView::transaction_bytes`). The loop rolls the transaction's
+/// scope back, so nothing the operation staged survives, and then, in a scope
+/// of its own, debits `fee` from `payer`, credits the block's proposer and
+/// advances `payer`'s account nonce: the fee is charged exactly once, and no
+/// other effect of a refused operation remains.
+///
+/// A caller that executes one transaction outside a block
+/// ([`BlockExecutor::execute_tx`], [`BlockExecutor::execute_tx_with_validators`])
+/// is not given this record and sees the operation's own outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RefusalCharge {
+    /// The account the fee is charged to: the outer transaction's sender.
+    pub(crate) payer: Address,
+    /// The outer transaction's fee.
+    pub(crate) fee: Balance,
+}
+
 /// What one PROPOSER-LOCAL screening pass found: every transaction in a
 /// candidate proposal that refused execution, with its class, in one pass.
 ///
@@ -342,6 +365,36 @@ fn messaging_sponsored_registration_gate_open(params: &ChainParams, block_height
         params.messaging_sponsored_registration_enabled_from_height,
         Some(h) if block_height >= h
     )
+}
+
+/// Whether `tx` carries a messaging payload (`TxPayload::Messaging`), the
+/// payload whose refusals the block loop settles at or above
+/// `messaging_fee_nonce_accounting_enabled_from_height`.
+fn is_messaging(tx: &SignedTransaction) -> bool {
+    matches!(
+        tx.inner(),
+        sumchain_primitives::TxInner::V2(v2) if matches!(v2.payload, TxPayload::Messaging(_))
+    )
+}
+
+/// Unit tests of this crate only: make the charge of a refused messaging
+/// transaction fail, as a storage failure would, on this thread. Not compiled
+/// outside `cargo test` of this crate.
+#[cfg(test)]
+pub(crate) mod refusal_charge_failure {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn arm(on: bool) {
+        ARMED.with(|a| a.set(on));
+    }
+
+    pub(crate) fn armed() -> bool {
+        ARMED.with(|a| a.get())
+    }
 }
 
 /// Fail-closed seam for the #100 scheduler (issue #100). Runs `schedule` only if
@@ -634,6 +687,34 @@ impl BlockExecutor {
         block_timestamp: u64,
         tx_index: u32,
         active_validator_pubkeys: &[[u8; 32]],
+    ) -> Result<TxExecutionResult> {
+        self.execute_tx_reporting_refusal(
+            view,
+            tx,
+            proposer,
+            block_height,
+            block_timestamp,
+            tx_index,
+            active_validator_pubkeys,
+            &mut None,
+        )
+    }
+
+    /// [`Self::execute_tx_with_validators`], also reporting, through
+    /// `refusal`, a messaging refusal the block loop must settle (see
+    /// [`RefusalCharge`]). `refusal` is left as it was for every other
+    /// outcome.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_tx_reporting_refusal(
+        &self,
+        view: &mut ExecutionView<'_, '_>,
+        tx: &SignedTransaction,
+        proposer: &Address,
+        block_height: u64,
+        block_timestamp: u64,
+        tx_index: u32,
+        active_validator_pubkeys: &[[u8; 32]],
+        refusal: &mut Option<RefusalCharge>,
     ) -> Result<TxExecutionResult> {
         let tx_hash = tx.hash();
         // Resolved ONCE, at the top of the arm, so every subsystem below sees
@@ -968,13 +1049,20 @@ impl BlockExecutor {
                             );
 
                             // From the fee-accounting gate on, a refused
-                            // messaging operation was charged its fee before
-                            // dispatch, and the receipt says so. Below it,
-                            // nothing was charged, as before.
+                            // messaging operation is charged its fee once,
+                            // and the receipt says so. The block loop settles
+                            // it: it rolls the operation back and charges
+                            // the fee in a scope of its own
+                            // (`RefusalCharge`). Below it, nothing was
+                            // charged, as before.
                             let fee_paid = if MessagingExecutor::fee_nonce_accounting_gate_open(
                                 &self.params,
                                 block_height,
                             ) {
+                                *refusal = Some(RefusalCharge {
+                                    payer: v2_tx.from,
+                                    fee: v2_tx.fee,
+                                });
                                 v2_tx.fee
                             } else {
                                 0
@@ -2374,6 +2462,30 @@ impl BlockExecutor {
         })
     }
 
+    /// Charge a refused messaging transaction its fee, once, after the block
+    /// loop has rolled the transaction back: `fee` leaves `charge.payer`, the
+    /// proposer is credited and the payer's account nonce advances, in the
+    /// order the accounting gate charges before dispatch. Any error is an
+    /// invariant or storage failure and makes the block inapplicable.
+    fn charge_messaging_refusal(
+        view: &mut ExecutionView<'_, '_>,
+        proposer: &Address,
+        charge: &RefusalCharge,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if refusal_charge_failure::armed() {
+            return Err(StateError::Storage(
+                sumchain_storage::StorageError::InvalidData(
+                    "unit test: the refusal charge fails".to_string(),
+                ),
+            ));
+        }
+        StateManager::v_deduct(view, &charge.payer, charge.fee)?;
+        StateManager::v_credit(view, proposer, charge.fee)?;
+        StateManager::v_increment_nonce(view, &charge.payer)?;
+        Ok(())
+    }
+
     /// Execute a V2 transaction (supports both transfers and NFT operations)
     #[allow(clippy::too_many_arguments)]
     pub fn execute_tx_v2(
@@ -3678,6 +3790,20 @@ impl BlockExecutor {
         // existed before it.
         let tx_write_set_bound_open =
             crate::subsystem_tx_write_set_bound_gate_open(&self.params, block.height());
+        // ── messaging refusals settled by the loop ──────────────────────────
+        //
+        // From `messaging_fee_nonce_accounting_enabled_from_height` every
+        // messaging transaction runs in a scope of its own, so that a refusal
+        // can be rolled back and then charged (`RefusalCharge`). Resolved once
+        // for the block, like the bound above. Below the gate no scope is
+        // opened for messaging, and nothing changes.
+        let messaging_accounting_open =
+            MessagingExecutor::fee_nonce_accounting_gate_open(&self.params, block.height());
+        let scope_limit = if tx_write_set_bound_open {
+            crate::MAX_TX_WRITE_SET_BYTES
+        } else {
+            u64::MAX
+        };
         let mut refused_for_write_set = 0usize;
         // How many transactions the loop REACHED. Only a screening pass reads
         // it, and only a screening pass can leave this loop early, so on every
@@ -3721,17 +3847,19 @@ impl BlockExecutor {
             // the gate is open: below the gate `u64::MAX` makes the scope a
             // pure undo log that refuses nothing the real execution would have
             // accepted. See `screen_proposal`.
-            let scope_open = tx_write_set_bound_open || screening.is_some();
+            //
+            // A messaging transaction at or above the accounting gate gets a
+            // scope too, with the same limit, so that its refusal can be
+            // undone (below).
+            let messaging_scope = messaging_accounting_open && is_messaging(tx);
+            let scope_open = tx_write_set_bound_open || screening.is_some() || messaging_scope;
             if scope_open {
-                candidate.begin_transaction(if tx_write_set_bound_open {
-                    crate::MAX_TX_WRITE_SET_BYTES
-                } else {
-                    u64::MAX
-                })?;
+                candidate.begin_transaction(scope_limit)?;
             }
+            let mut refusal = None;
             let attempted = {
                 let mut view = candidate.view();
-                self.execute_tx_with_validators(
+                self.execute_tx_reporting_refusal(
                     &mut view,
                     tx,
                     &proposer,
@@ -3742,7 +3870,36 @@ impl BlockExecutor {
                     // event rows must be keyed by.
                     idx as u32,
                     active_validator_pubkeys,
+                    &mut refusal,
                 )
+            };
+
+            // ── a refused messaging operation, at or above the accounting
+            //    gate ───────────────────────────────────────────────────────
+            //
+            // Undo everything the transaction staged, the charge made before
+            // dispatch included, then charge the fee once in a scope of its
+            // own: the receipt stands, and no other effect of the refused
+            // operation remains. The charge cannot fail on balance:
+            // `validate_tx` approved `balance >= fee` against the state the
+            // rollback restores. If it fails anyway, that is an invariant
+            // failure of this node, and it takes the error path below, as any
+            // other storage or invariant failure does: the block is not
+            // applicable.
+            let attempted = match (attempted, refusal) {
+                (Ok(r), Some(charge)) if scope_open => {
+                    candidate.rollback_transaction();
+                    candidate.begin_transaction(scope_limit)?;
+                    let charged = {
+                        let mut view = candidate.view();
+                        Self::charge_messaging_refusal(&mut view, &proposer, &charge)
+                    };
+                    charged.map(|()| r)
+                }
+                (Ok(_), Some(_)) => Err(StateError::InvalidOperation(
+                    "a messaging refusal was reported with no transaction scope open".to_string(),
+                )),
+                (attempted, _) => attempted,
             };
 
             let result = match attempted {
@@ -9875,5 +10032,422 @@ mod tests {
             !store.has_journal(1, &Hash::ZERO).unwrap(),
             "no C1 journal: the empty live transition writes nothing"
         );
+    }
+
+    // ── Messaging refusals, settled by the block loop ───────────────────────
+
+    /// From `messaging_fee_nonce_accounting_enabled_from_height` a refused
+    /// messaging transaction is rolled back and then charged its fee once, in
+    /// a scope of its own. These tests stand a unit-test-only operation in
+    /// for the dispatched one (`messaging_executor::test_operation`), so they
+    /// can stage writes in every kind of row and then refuse, and observe
+    /// exactly what the loop leaves.
+    mod messaging_refusal_settlement {
+        use super::*;
+        use crate::messaging_executor::{test_operation, MessagingExecutionResult};
+        use std::collections::BTreeMap;
+        use sumchain_primitives::{ContactData, MessageEvent, MessagingTxData, PendingPayment};
+        use sumchain_storage::cf;
+        use tempfile::TempDir;
+
+        const FEE: u128 = 100;
+        const FUNDS: u128 = 1_000_000_000;
+        const PROPOSER_PK: [u8; 32] = [0x5B; 32];
+        /// Not 1, so every case here runs on a chain other than the default.
+        const CHAIN: u64 = 7;
+
+        /// Clears the stand-in operation and the forced charge failure however
+        /// a test ends.
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                test_operation::clear();
+                refusal_charge_failure::arm(false);
+            }
+        }
+
+        fn key(seed: u8) -> KeyPair {
+            KeyPair::from_bytes([seed; 32])
+        }
+        fn payer() -> KeyPair {
+            key(0x71)
+        }
+        fn other() -> KeyPair {
+            key(0x72)
+        }
+        fn proposer() -> Address {
+            Address::from_public_key(&PROPOSER_PK)
+        }
+
+        fn params(accounting: Option<u64>, write_set_bound: Option<u64>) -> ChainParams {
+            let mut p = ChainParams::with_v2_enabled();
+            p.messaging_fee_nonce_accounting_enabled_from_height = accounting;
+            p.subsystem_tx_write_set_bound_enabled_from_height = write_set_bound;
+            p
+        }
+
+        struct Chain {
+            state: Arc<StateManager>,
+            db: Arc<Database>,
+            _dir: TempDir,
+            exec: BlockExecutor,
+            height: u64,
+        }
+
+        impl Chain {
+            fn new(params: ChainParams) -> Self {
+                let dir = TempDir::new().unwrap();
+                let db = Arc::new(Database::open_default(dir.path()).unwrap());
+                let state = Arc::new(StateManager::new(db.clone(), CHAIN));
+                for kp in [payer(), other()] {
+                    sumchain_storage::StateStore::new(&db)
+                        .put_account(
+                            &kp.address(),
+                            &sumchain_storage::schema::AccountState {
+                                balance: FUNDS,
+                                nonce: 0,
+                            },
+                        )
+                        .unwrap();
+                }
+                let exec = BlockExecutor::new(state.clone(), db.clone(), params);
+                Self {
+                    state,
+                    db,
+                    _dir: dir,
+                    exec,
+                    height: 0,
+                }
+            }
+
+            fn block(&self, txs: Vec<SignedTransaction>) -> Block {
+                Block::new(
+                    BlockHeader::new(
+                        Hash::ZERO,
+                        self.height + 1,
+                        1_000 + self.height,
+                        Hash::ZERO,
+                        Hash::ZERO,
+                        PROPOSER_PK,
+                    ),
+                    txs,
+                )
+            }
+
+            /// Execute and publish the next block; `Err` is its refusal.
+            fn publish(&mut self, txs: Vec<SignedTransaction>) -> Result<Vec<Receipt>> {
+                let mut block = self.block(txs);
+                let exec = self
+                    .exec
+                    .execute_block(&block, self.state.state_root(), &[])?;
+                block.header.state_root = exec.computed_root();
+                let (executed, _, _) = exec.into_parts();
+                let receipts = executed.receipts().to_vec();
+                let accepted = executed.accept_produced(&block).unwrap();
+                let acc = accepted.accumulator();
+                accepted.publish().unwrap();
+                self.state.set_state_root(acc);
+                self.height += 1;
+                Ok(receipts)
+            }
+
+            fn screen(&self, txs: Vec<SignedTransaction>) -> ProposalScreening {
+                let block = self.block(txs);
+                self.exec
+                    .screen_proposal(&block, self.state.state_root(), &[], 1 << 20)
+                    .unwrap()
+            }
+
+            fn tx(&self, kp: &KeyPair) -> SignedTransaction {
+                let nonce = self.state.get_nonce(&kp.address()).unwrap();
+                messaging_tx(kp, nonce)
+            }
+
+            /// Every row of the account family and of every messaging family.
+            fn rows(&self) -> BTreeMap<(String, Vec<u8>), Vec<u8>> {
+                let mut out = BTreeMap::new();
+                for family in [
+                    cf::STATE,
+                    cf::MESSAGING_CONFIG,
+                    cf::MESSAGING_SENDER_NONCES,
+                    cf::MESSAGING_DAILY_COUNTS,
+                    cf::MESSAGING_STAKES,
+                    cf::MESSAGING_SPAM_SCORES,
+                    cf::MESSAGING_INBOX_FILTERS,
+                    cf::MESSAGING_CONTACTS,
+                    cf::MESSAGING_BLOCKED,
+                    cf::MESSAGING_PENDING_PAYMENTS,
+                    cf::MESSAGING_PAYMENTS_BY_RECIPIENT,
+                    cf::MESSAGING_EVENTS,
+                    cf::MESSAGING_SENDER_EVENTS,
+                    cf::MESSAGING_PUBLIC_KEYS,
+                ] {
+                    for (k, v) in self.db.iter(family).unwrap() {
+                        out.insert((family.to_string(), k.into_vec()), v.into_vec());
+                    }
+                }
+                out
+            }
+
+            fn account(&self, a: &Address) -> (u128, u64) {
+                (
+                    self.state.get_balance(a).unwrap(),
+                    self.state.get_nonce(a).unwrap(),
+                )
+            }
+        }
+
+        /// Any messaging transaction will do: the stand-in replaces the
+        /// operation it names.
+        fn messaging_tx(kp: &KeyPair, nonce: u64) -> SignedTransaction {
+            let tx = TransactionV2 {
+                chain_id: CHAIN,
+                from: kp.address(),
+                fee: FEE,
+                nonce,
+                payload: TxPayload::Messaging(MessagingTxData {
+                    operation: MessagingOperation::AddContact,
+                    data: bincode::serialize(&ContactData {
+                        contact_hash: [9u8; 32],
+                    })
+                    .unwrap(),
+                }),
+            };
+            let sig = sign(tx.signing_hash().as_bytes(), kp.private_key());
+            SignedTransaction::new_v2(tx, *sig.as_bytes(), *kp.public_key().as_bytes())
+        }
+
+        /// Stage a write in every kind of row a messaging operation touches:
+        /// another account's balance, a messaging nonce, an escrow and its
+        /// index, an event and its index, and a configuration row.
+        fn stage_everywhere(view: &mut ExecutionView<'_, '_>) -> Result<()> {
+            let third = other().address();
+            StateManager::v_credit(view, &third, 777)?;
+            MessagingExecutor::v_increment_sender_nonce(view, &third)?;
+            MessagingExecutor::v_set_pending_payment(
+                view,
+                &Hash::hash(b"staged escrow"),
+                &PendingPayment {
+                    recipient_hash: [4u8; 32],
+                    amount: 5,
+                    expiry: 9,
+                    sender: third,
+                },
+            )?;
+            MessagingExecutor::v_store_message_event(
+                view,
+                &MessageEvent {
+                    sender: third,
+                    recipient_hash: [4u8; 32],
+                    message_id: Hash::hash(b"staged event"),
+                    size: 1,
+                    has_payment: true,
+                    block_height: 1,
+                    timestamp: 0,
+                },
+                0,
+            )?;
+            MessagingExecutor::v_set_daily_quota(view, 3)?;
+            Ok(())
+        }
+
+        fn writes_then_refuses() {
+            test_operation::set(Box::new(|view| {
+                stage_everywhere(view)?;
+                Ok(MessagingExecutionResult::failure("refused after writing"))
+            }));
+        }
+
+        fn only_refuses() {
+            test_operation::set(Box::new(|_| {
+                Ok(MessagingExecutionResult::failure("refused"))
+            }));
+        }
+
+        fn writes_then_succeeds() {
+            test_operation::set(Box::new(|view| {
+                stage_everywhere(view)?;
+                Ok(MessagingExecutionResult::success(None))
+            }));
+        }
+
+        /// The structural rule: an operation that writes in every kind of row
+        /// and then refuses leaves exactly what an operation that only refuses
+        /// leaves, row for row, and that is the state before it plus the fee,
+        /// charged once to the payer and credited once to the proposer, and
+        /// one account nonce.
+        #[test]
+        fn a_refusal_after_writes_leaves_only_the_fee_charge() {
+            let _reset = Reset;
+            for bound in [None, Some(1)] {
+                let mut wrote = Chain::new(params(Some(1), bound));
+                let mut clean = Chain::new(params(Some(1), bound));
+                let before = wrote.rows();
+                assert_eq!(before, clean.rows());
+
+                writes_then_refuses();
+                let tx = wrote.tx(&payer());
+                let r = wrote.publish(vec![tx.clone()]).unwrap();
+                only_refuses();
+                let r_clean = clean.publish(vec![tx]).unwrap();
+
+                assert_eq!(r.len(), 1);
+                assert_eq!((r[0].status, r[0].fee_paid), (TxStatus::Failed(7), FEE));
+                assert_eq!(r, r_clean, "bound {bound:?}");
+                assert_eq!(
+                    wrote.rows(),
+                    clean.rows(),
+                    "bound {bound:?}: the staged writes are gone, row for row"
+                );
+                assert_eq!(wrote.account(&payer().address()), (FUNDS - FEE, 1));
+                assert_eq!(wrote.account(&proposer()), (FEE, 0));
+                assert_eq!(wrote.account(&other().address()), (FUNDS, 0));
+                // Exactly two rows moved: the payer's and the proposer's
+                // account rows.
+                let after = wrote.rows();
+                let moved: Vec<_> = after
+                    .iter()
+                    .filter(|(k, v)| before.get(*k) != Some(*v))
+                    .map(|((f, _), _)| f.clone())
+                    .collect();
+                assert_eq!(moved, vec![cf::STATE.to_string(), cf::STATE.to_string()]);
+                assert_eq!(after.len(), before.len() + 1, "the proposer's row is new");
+            }
+        }
+
+        /// A success commits what the operation staged: the scope is there to
+        /// undo a refusal, not to drop work.
+        #[test]
+        fn a_success_keeps_its_writes() {
+            let _reset = Reset;
+            let mut c = Chain::new(params(Some(1), None));
+            writes_then_succeeds();
+            let r = c.publish(vec![c.tx(&payer())]).unwrap();
+            assert_eq!((r[0].status, r[0].fee_paid), (TxStatus::Success, FEE));
+            assert_eq!(c.account(&other().address()), (FUNDS + 777, 0));
+            assert_eq!(
+                sumchain_storage::MessagingStore::new(&c.db)
+                    .get_daily_quota()
+                    .unwrap(),
+                3
+            );
+        }
+
+        /// Below the gate nothing is settled by the loop: what the refused
+        /// operation staged stays, and nothing is charged, as on main.
+        #[test]
+        fn below_the_gate_a_refusal_is_not_rolled_back_or_charged() {
+            let _reset = Reset;
+            for gate in [None, Some(2)] {
+                let mut c = Chain::new(params(gate, None));
+                writes_then_refuses();
+                let r = c.publish(vec![c.tx(&payer())]).unwrap();
+                assert_eq!((r[0].status, r[0].fee_paid), (TxStatus::Failed(7), 0));
+                assert_eq!(c.account(&payer().address()), (FUNDS, 0));
+                assert_eq!(c.account(&other().address()), (FUNDS + 777, 0));
+            }
+        }
+
+        /// The gate at H: H-1 keeps the staged writes uncharged, H rolls them
+        /// back and charges, H+1 likewise.
+        #[test]
+        fn the_settlement_starts_exactly_at_the_gate() {
+            let _reset = Reset;
+            const H: u64 = 3;
+            let mut c = Chain::new(params(Some(H), None));
+            c.publish(Vec::new()).unwrap();
+            writes_then_refuses();
+            let mut third = FUNDS;
+            for height in [H - 1, H, H + 1] {
+                assert_eq!(c.height + 1, height);
+                let r = c.publish(vec![c.tx(&payer())]).unwrap();
+                if height < H {
+                    third += 777;
+                    assert_eq!(r[0].fee_paid, 0, "H-1");
+                } else {
+                    assert_eq!(r[0].fee_paid, FEE, "height {height}");
+                }
+                assert_eq!(r[0].status, TxStatus::Failed(7));
+                assert_eq!(c.account(&other().address()).0, third, "height {height}");
+            }
+            assert_eq!(c.account(&payer().address()), (FUNDS - 2 * FEE, 2));
+        }
+
+        /// With the per-transaction write-set bound open too, a refusal is
+        /// settled the same way; an operation that crosses the bound takes the
+        /// write-set receipt, charged once, not twice.
+        #[test]
+        fn with_the_write_set_bound_open_the_fee_is_charged_once() {
+            let _reset = Reset;
+            let mut c = Chain::new(params(Some(1), Some(1)));
+            test_operation::set(Box::new(|view| {
+                let big = vec![0u8; (crate::MAX_TX_WRITE_SET_BYTES + 1) as usize];
+                view.put(cf::MESSAGING_CONFIG, b"oversize", &big)
+                    .map_err(StateError::Storage)?;
+                Ok(MessagingExecutionResult::failure("unreachable"))
+            }));
+            let r = c.publish(vec![c.tx(&payer())]).unwrap();
+            assert_eq!(
+                (r[0].status, r[0].fee_paid),
+                (
+                    TxStatus::Failed(crate::TX_WRITE_SET_BOUND_RECEIPT_CODE),
+                    FEE
+                )
+            );
+            assert_eq!(c.account(&payer().address()), (FUNDS - FEE, 1));
+            assert_eq!(c.account(&proposer()), (FEE, 0));
+        }
+
+        /// A screening pass settles a refusal exactly as production does: the
+        /// refused transaction is a receipt, not an offender, so nothing is
+        /// recorded and no refusal bytes are charged; production then yields
+        /// the same receipts.
+        #[test]
+        fn screening_treats_a_settled_refusal_as_a_receipt() {
+            let _reset = Reset;
+            let mut c = Chain::new(params(Some(1), None));
+            writes_then_refuses();
+            let txs = vec![c.tx(&payer()), c.tx(&other())];
+            let s = c.screen(txs.clone());
+            assert!(s.refused().is_empty(), "{:?}", s.refused());
+            assert_eq!(s.ceiling_cut(), None);
+            assert_eq!(s.charge_cut(), None);
+            assert_eq!(s.refusal_bytes(), 0);
+            let r = c.publish(txs).unwrap();
+            assert!(r
+                .iter()
+                .all(|r| (r.status, r.fee_paid) == (TxStatus::Failed(7), FEE)));
+        }
+
+        /// The charge after the rollback cannot fail on balance; if it fails
+        /// anyway it is an invariant failure of this node: production refuses
+        /// the block at that transaction, transiently, and screening records
+        /// the transaction as transient and carries on.
+        #[test]
+        fn a_failed_refusal_charge_makes_the_block_inapplicable() {
+            let _reset = Reset;
+            let mut c = Chain::new(params(Some(1), None));
+            only_refuses();
+            refusal_charge_failure::arm(true);
+            let txs = vec![c.tx(&other()), c.tx(&payer())];
+            let s = c.screen(txs.clone());
+            assert_eq!(
+                s.refused(),
+                &[
+                    (0, TxFailureClass::Transient),
+                    (1, TxFailureClass::Transient)
+                ]
+            );
+            let before = c.rows();
+            match c.publish(txs) {
+                Err(StateError::BlockTransactionAborted {
+                    tx_index, class, ..
+                }) => {
+                    assert_eq!((tx_index, class), (0, TxFailureClass::Transient));
+                }
+                other => panic!("expected the block to be refused, got {other:?}"),
+            }
+            assert_eq!(c.rows(), before, "nothing published");
+        }
     }
 }

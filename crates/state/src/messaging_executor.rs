@@ -220,6 +220,10 @@ impl MessagingExecutor {
             StateManager::v_credit(view, proposer, fee)?;
             StateManager::v_increment_nonce(view, sender)?;
         }
+        #[cfg(test)]
+        if let Some(outcome) = test_operation::run(view) {
+            return outcome;
+        }
         match data.operation {
             MessagingOperation::SendMessage => Self::send_message_sponsored(
                 view,
@@ -1167,6 +1171,39 @@ impl MessagingExecutor {
 /// Helper: compute recipient hash from address
 fn recipient_hash_for_address(address: &Address) -> [u8; 32] {
     recipient_hash(address)
+}
+
+/// Unit tests of this crate only: an operation that stands in for whichever
+/// one a messaging transaction names, run after the accounting gate's charge,
+/// so a test can stage writes and then refuse (or succeed) and see what the
+/// block loop leaves. Not compiled outside `cargo test` of this crate.
+#[cfg(test)]
+pub(crate) mod test_operation {
+    use super::{MessagingExecutionResult, Result};
+    use std::cell::RefCell;
+    use sumchain_storage::exec_view::ExecutionView;
+
+    type Operation = Box<dyn Fn(&mut ExecutionView<'_, '_>) -> Result<MessagingExecutionResult>>;
+
+    thread_local! {
+        static OPERATION: RefCell<Option<Operation>> = const { RefCell::new(None) };
+    }
+
+    /// Run `op` in place of every messaging operation on this thread until
+    /// [`clear`].
+    pub(crate) fn set(op: Operation) {
+        OPERATION.with(|o| *o.borrow_mut() = Some(op));
+    }
+
+    pub(crate) fn clear() {
+        OPERATION.with(|o| *o.borrow_mut() = None);
+    }
+
+    pub(super) fn run(
+        view: &mut ExecutionView<'_, '_>,
+    ) -> Option<Result<MessagingExecutionResult>> {
+        OPERATION.with(|o| o.borrow().as_ref().map(|op| op(view)))
+    }
 }
 
 #[cfg(all(test, feature = "legacy_tests"))]
