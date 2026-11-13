@@ -2607,6 +2607,17 @@ mod tests {
             picked.iter().map(|t| t.hash()).collect::<Vec<_>>(),
             vec![o0.hash(), n0.hash(), n1.hash(), n2.hash()]
         );
+        // Each sender's own order, exactly: the sender's run in nonce order,
+        // and the other sender's one transaction.
+        let of = |who: &KeyPair| -> Vec<Hash> {
+            picked
+                .iter()
+                .filter(|t| t.sender() == who.address())
+                .map(|t| t.hash())
+                .collect()
+        };
+        assert_eq!(of(&sender), vec![n0.hash(), n1.hash(), n2.hash()]);
+        assert_eq!(of(&other), vec![o0.hash()]);
 
         // A cut keeps the highest-fee set and orders it: n2 and o0 are the top
         // two, and n2 is alone for its sender.
