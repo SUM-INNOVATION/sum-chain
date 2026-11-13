@@ -2738,6 +2738,32 @@ mod tests {
         );
     }
 
+    /// A dropped envelope's named sender's later envelope, relayed by another
+    /// account: below the accounting gate it leaves (main's rule; it holds
+    /// nothing of that account there), and the other relay's transfer stays;
+    /// from the gate it is carried (to its refusal, out of the sender's
+    /// sequence), so that the other relay's transfer, which it would
+    /// otherwise strand behind a missing nonce, executes.
+    #[test]
+    fn another_relays_envelope_for_a_dropped_envelopes_sender_is_carried_from_the_gate() {
+        let (relay, a, second_relay) = (
+            KeyPair::from_bytes([1u8; 32]),
+            KeyPair::from_bytes([2u8; 32]),
+            KeyPair::from_bytes([7u8; 32]),
+        );
+        let txs = vec![
+            envelope(&relay, &a, 0),
+            envelope(&second_relay, &a, 1),
+            transfer(&second_relay, 1),
+            envelope(&relay, &a, 2),
+        ];
+        assert_eq!(both_at(&txs, 0, false), ids(&[txs[2].clone()]));
+        assert_eq!(
+            both_at(&txs, 0, true),
+            ids(&[txs[1].clone(), txs[2].clone()])
+        );
+    }
+
     /// A transaction that leaves with a run breaks no run of its own, so a
     /// dropped run never takes another account's transactions: the relay's
     /// envelope behind a dropped relay transaction leaves with the relay's

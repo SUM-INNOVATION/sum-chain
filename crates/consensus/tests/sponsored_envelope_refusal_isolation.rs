@@ -72,6 +72,10 @@ fn admin() -> KeyPair {
 fn recipient() -> KeyPair {
     key(0x83)
 }
+/// A recipient that blocks nobody.
+fn other_recipient() -> KeyPair {
+    key(0x84)
+}
 /// Sponsors, `0x90..`; the senders they relay for, `0xa0..`.
 fn sponsor(i: u8) -> KeyPair {
     key(0x90 + i)
@@ -232,7 +236,19 @@ fn relayed(
     user: &KeyPair,
     envelope_nonce: u64,
 ) -> SignedTransaction {
-    let rh = recipient_hash(&recipient().address());
+    relayed_to(sponsor, nonce, fee, user, envelope_nonce, &recipient())
+}
+
+/// [`relayed`], to `to`.
+fn relayed_to(
+    sponsor: &KeyPair,
+    nonce: u64,
+    fee: u128,
+    user: &KeyPair,
+    envelope_nonce: u64,
+    to: &KeyPair,
+) -> SignedTransaction {
+    let rh = recipient_hash(&to.address());
     let mut m = SponsoredMessage {
         message_data: valid_message(rh),
         recipient_hash: rh,
@@ -599,6 +615,73 @@ async fn a_refused_direct_message_holds_nothing_of_another_sponsor() {
         } else {
             assert!(!node.held(&e_s0), "{name}: stale, evicted, as on main");
             assert_eq!(node.messaging_nonce(&s), 1, "{name}");
+        }
+    }
+}
+
+/// A refused sender's later envelope through another sponsor: `s`'s envelope 0 through `r1` is refused (the
+/// recipient blocks `s`) and held, and `s`'s envelope 1, to a recipient that
+/// blocks nobody, goes through `r2`, followed by `r2`'s envelope for `u` and
+/// its transfer. Below the accounting gate `s`'s envelope 1 waits with `s`'s
+/// envelope 0 (main's rule; it holds nothing of `r2` there). From the gate it
+/// is carried: refused and charged from `0x1048`, or below it executed out
+/// of sequence, `s`'s envelope 0 then evicted as stale. At every
+/// configuration `r2`'s other two are delivered in the case's first block and
+/// a later user's envelope through `r2` in the next.
+#[tokio::test]
+async fn a_refused_senders_later_envelope_through_another_sponsor_never_holds_that_sponsor() {
+    for gates in matrix() {
+        let name = gates.name;
+        let node = Node::new(gates);
+        let (r1, r2, s, u, v) = (sponsor(0), sponsor(1), sender(0), sender(1), sender(2));
+        node.set_up(&s).await;
+        let accounting = gates.accounting_at(CASE_BLOCK);
+        let verification = gates.verification_at(CASE_BLOCK);
+
+        let r1_s0 = node.relay(&r1, |n| relayed(&r1, n, 3_000, &s, 0));
+        let r2_s1 = node.relay(&r2, |n| {
+            relayed_to(&r2, n, 2_000, &s, 1, &other_recipient())
+        });
+        let r2_u0 = node.relay(&r2, |n| relayed(&r2, n, 2_000, &u, 0));
+        let r2_t = node.relay(&r2, |n| transfer(&r2, n, 1_000));
+        let r2_before = node.account_nonce(&r2);
+
+        let b3 = node.tick().await;
+        let carried: Vec<_> = b3.transactions.iter().map(|t| t.hash()).collect();
+        assert!(!carried.contains(&r1_s0.hash()), "{name}");
+        assert_eq!(node.status(&r2_u0), Some(TxStatus::Success), "{name}");
+        assert_eq!(node.status(&r2_t), Some(TxStatus::Success), "{name}");
+        match (accounting, verification) {
+            (false, _) => {
+                assert_eq!(node.status(&r2_s1), None, "{name}");
+                assert!(node.held(&r2_s1), "{name}: waits with s's envelope 0");
+            }
+            (true, true) => {
+                let s1 = node.receipt(&r2_s1).expect("carried");
+                assert!(
+                    matches!(s1.status, TxStatus::Failed(_)),
+                    "{name}: {:?}",
+                    s1.status
+                );
+                assert!(s1.fee_paid > 0, "{name}: charged");
+            }
+            (true, false) => {
+                assert_eq!(node.status(&r2_s1), Some(TxStatus::Success), "{name}");
+            }
+        }
+        let advanced = if accounting { 3 } else { 1 };
+        assert_eq!(node.account_nonce(&r2), r2_before + advanced, "{name}");
+
+        let r2_v0 = node.relay(&r2, |n| relayed(&r2, n, 2_000, &v, 0));
+        node.tick().await;
+        assert_eq!(node.status(&r2_v0), Some(TxStatus::Success), "{name}");
+        assert_eq!(node.status(&r1_s0), None, "{name}");
+        if accounting && !verification {
+            assert!(!node.held(&r1_s0), "{name}: stale, evicted");
+            assert_eq!(node.messaging_nonce(&s), 1, "{name}");
+        } else {
+            assert!(node.held(&r1_s0), "{name}: refused, held");
+            assert_eq!(node.messaging_nonce(&s), 0, "{name}");
         }
     }
 }
