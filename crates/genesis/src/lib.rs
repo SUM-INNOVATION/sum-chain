@@ -210,6 +210,23 @@ pub enum GenesisError {
         height: u64,
     },
 
+    /// `messaging_sponsored_envelope_verification_enabled_from_height` and
+    /// `messaging_fee_nonce_accounting_enabled_from_height` are set apart:
+    /// one without the other, or at two heights.
+    #[error(
+        "messaging_sponsored_envelope_verification_enabled_from_height is {envelope:?} and \
+         messaging_fee_nonce_accounting_enabled_from_height is {accounting:?}. The two \
+         gates name one rule for sponsored messages: from the first an envelope is \
+         authenticated and its amount is paid by its sender, from the second a refused \
+         envelope is charged to its relayer and spends its nonce. Apart, an envelope's \
+         authorization could be refused without being spent, or spent without being \
+         authenticated. Set both to the same height, or leave both unset"
+    )]
+    MessagingEnvelopeAndAccountingGatesApart {
+        envelope: Option<u64>,
+        accounting: Option<u64>,
+    },
+
     /// `healthcare_consent_subject_signature_enabled_from_height` is `Some(_)`
     /// while `healthcare_authorization_enabled_from_height` is `None`.
     ///
@@ -3890,6 +3907,32 @@ impl ChainParams {
                 })
             }
             (Some(_), Some(_)) => {}
+        }
+
+        // ── the two sponsored-messaging gates, at one height ────────────────
+        //
+        //     messaging_sponsored_envelope_verification_enabled_from_height
+        //         == messaging_fee_nonce_accounting_enabled_from_height
+        //
+        // Both unset, or both set to the same height. The envelope gate
+        // authenticates a sponsored envelope and executes its amount as a
+        // payment; the accounting gate charges every refusal once and spends
+        // an authenticated envelope's nonce. Apart, there is a band in which an
+        // authorization is refused and stays valid, or one that is never
+        // authenticated is charged. Checked after the peer-declaration
+        // ordering, which applies to each gate on its own.
+        match (
+            self.messaging_sponsored_envelope_verification_enabled_from_height,
+            self.messaging_fee_nonce_accounting_enabled_from_height,
+        ) {
+            (None, None) => {}
+            (Some(envelope), Some(accounting)) if envelope == accounting => {}
+            (envelope, accounting) => {
+                return Err(GenesisError::MessagingEnvelopeAndAccountingGatesApart {
+                    envelope,
+                    accounting,
+                })
+            }
         }
 
         // ── the healthcare consent-grant ordering, enforced at load ─────────

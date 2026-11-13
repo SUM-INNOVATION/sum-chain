@@ -161,6 +161,18 @@ fn each_of_the_twenty_gates_sets_the_deadline_on_its_own() {
             p.healthcare_authorization_enabled_from_height = Some(500);
             floor_gate = "healthcare_authorization_enabled_from_height";
         }
+        // The two sponsored-messaging gates carry a load rule of their own:
+        // `ChainParams::validate` admits them only together, at one height.
+        // Opening the other at the SAME height keeps the deadline at 500 and,
+        // as above, moves only WHICH gate reports it: the envelope gate
+        // precedes the accounting gate in `REMEDIATION_GATES`.
+        if *gate == "messaging_sponsored_envelope_verification_enabled_from_height"
+            || *gate == "messaging_fee_nonce_accounting_enabled_from_height"
+        {
+            p.messaging_sponsored_envelope_verification_enabled_from_height = Some(500);
+            p.messaging_fee_nonce_accounting_enabled_from_height = Some(500);
+            floor_gate = "messaging_sponsored_envelope_verification_enabled_from_height";
+        }
 
         // Unset enforcement: refused.
         match genesis(p.clone()).validate() {
