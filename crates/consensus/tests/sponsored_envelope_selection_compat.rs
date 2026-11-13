@@ -1,15 +1,20 @@
-//! Blocks built by a producer that leaves a cycle's victim's dependents and
-//! anything above a nonce gap in the pool import, below the messaging gates,
-//! on a node that re-executes them, with the producer's state roots and
-//! receipt rows, and blocks built by a producer that offers them import the
-//! same way.
+//! Blocks built by a producer with this branch's selection rules import,
+//! below the messaging gates, on a node that re-executes them, with the
+//! producer's state roots and receipt rows, and blocks built by a producer
+//! without them import the same way.
 //!
 //! The selection rules are node-local: they decide which valid block a
 //! proposer builds, never what a block means. Below the gates (both unset, as
-//! in production, or set above the chain's history) the case here is the
-//! four-transaction cycle of two sponsors and a sponsor's nonce gap, which
-//! this producer holds and a producer without those rules offers into
-//! `InvalidNonce`.
+//! in production, or set above the chain's history) two cases:
+//!
+//! - `cycle`: the four-transaction cycle of two sponsors and a sponsor's nonce
+//!   gap, which this producer holds and a producer without the cycle and gap
+//!   rules offers into `InvalidNonce`;
+//! - `refusals`: a sponsor's direct message refused (its recipient blocks the
+//!   sponsor) with that sponsor's envelope for `s` behind it and `s`'s next
+//!   envelope through a second sponsor, which this producer carries (main's
+//!   rule) and a producer that follows dropped runs in turn holds; and a third
+//!   sponsor's envelope refused beside its envelope for another sender.
 //!
 //! By default each configuration is produced and imported in this binary.
 //! For the cross-binary check (a producer built without the rules, importing
@@ -25,8 +30,9 @@ use sumchain_consensus::{ConsensusEngine, ConsensusQuery, PoAEngine};
 use sumchain_crypto::{recipient_hash, sign, KeyPair};
 use sumchain_genesis::{ChainParams, Genesis, MessagingParams};
 use sumchain_primitives::messaging::{
-    ContentType, MessageFlags, MessageHeader, MessagingTxData, RegisterPublicKeyData,
-    SetSponsorshipEnabledData, SRC201_MAGIC, SRC201_NONCE_SIZE, SRC201_TAG_SIZE, SRC201_VERSION,
+    BlockSenderData, ContentType, MessageFlags, MessageHeader, MessagingTxData,
+    RegisterPublicKeyData, SendMessageData, SetSponsorshipEnabledData, SRC201_MAGIC,
+    SRC201_NONCE_SIZE, SRC201_TAG_SIZE, SRC201_VERSION,
 };
 use sumchain_primitives::{
     sponsored_send_v2_signing_preimage, Block, MessagingOperation, SignedTransaction,
@@ -277,13 +283,8 @@ impl Node {
     }
 }
 
-/// The case, produced by this binary's producer: set-up, then the cycle of
-/// two sponsors (`r1` relays `u`'s envelope 1 at nonce 0 and `v`'s envelope 0
-/// at nonce 1; `r2` relays `v`'s envelope 1 at nonce 0 and `u`'s envelope 0 at
-/// nonce 1) and a third sponsor holding only its nonce 1; three blocks; then
-/// each sponsor's nonce 0 filled, and two more blocks.
-async fn produce(node: &Node) -> Vec<Block> {
-    let mut blocks = Vec::new();
+/// Block 1: sponsorship on, the senders registered.
+async fn set_up(node: &Node) -> Block {
     let mut setup = vec![messaging(
         &admin(),
         0,
@@ -301,7 +302,73 @@ async fn produce(node: &Node) -> Vec<Block> {
         ));
     }
     node.submit(&setup.iter().collect::<Vec<_>>());
+    node.tick().await
+}
+
+/// The `refusals` case: set-up; the recipient blocks `r1` and sender `x`;
+/// then `r1`'s direct message (refused), `r1`'s envelope for `s` at nonce 1
+/// behind it, `s`'s envelope 1 through `r2`, `x`'s envelope through `r3`
+/// (refused) beside `r3`'s envelope for `u`, and a transfer; three blocks.
+async fn produce_refusals(node: &Node) -> Vec<Block> {
+    let mut blocks = vec![set_up(node).await];
+    let (r1, r2, r3) = (sponsor(0), sponsor(1), sponsor(2));
+    let (s, u, x) = (sender(0), sender(1), sender(3));
+    // Below the accounting gate a block-list entry advances no nonce: both
+    // are signed at the recipient's committed nonce.
+    let blocking: Vec<SignedTransaction> = [&r1, &x]
+        .into_iter()
+        .map(|k| {
+            messaging(
+                &recipient(),
+                0,
+                1_000,
+                MessagingOperation::BlockSender,
+                &BlockSenderData {
+                    sender: k.address(),
+                },
+            )
+        })
+        .collect();
+    node.submit(&blocking.iter().collect::<Vec<_>>());
     blocks.push(node.tick().await);
+    let rh = recipient_hash(&recipient().address());
+    let case = [
+        messaging(
+            &r1,
+            0,
+            5_000,
+            MessagingOperation::SendMessageDirect,
+            &SendMessageData {
+                message_data: valid_message(rh),
+                recipient_hash: rh,
+            },
+        ),
+        relayed(&r1, 1, 2_000, &s, 0),
+        relayed(&r2, 0, 2_000, &s, 1),
+        relayed(&r3, 0, 3_000, &x, 0),
+        relayed(&r3, 0, 2_000, &u, 0),
+        transfer(&bystander(), 0, 1_000),
+    ];
+    node.submit(&case.iter().collect::<Vec<_>>());
+    for _ in 0..3 {
+        blocks.push(node.tick().await);
+    }
+    // Both refusals are errors the producer holds, never receipts.
+    let receipts = ReceiptStore::new(&node.db);
+    for refused in [&case[0], &case[3]] {
+        assert!(receipts.get(&refused.hash()).unwrap().is_none());
+        assert!(node.mempool.contains(&refused.hash()));
+    }
+    blocks
+}
+
+/// The case, produced by this binary's producer: set-up, then the cycle of
+/// two sponsors (`r1` relays `u`'s envelope 1 at nonce 0 and `v`'s envelope 0
+/// at nonce 1; `r2` relays `v`'s envelope 1 at nonce 0 and `u`'s envelope 0 at
+/// nonce 1) and a third sponsor holding only its nonce 1; three blocks; then
+/// each sponsor's nonce 0 filled, and two more blocks.
+async fn produce(node: &Node) -> Vec<Block> {
+    let mut blocks = vec![set_up(node).await];
 
     let (r1, r2, r3) = (sponsor(0), sponsor(1), sponsor(2));
     let (u, v, w) = (sender(0), sender(1), sender(2));
@@ -371,10 +438,17 @@ fn read(path: &std::path::Path) -> (Vec<Block>, Vec<Vec<u8>>) {
 async fn blocks_built_with_and_without_the_selection_rules_import_alike() {
     let out = std::env::var_os("SUMCHAIN_SELECTION_COMPAT_OUT").map(std::path::PathBuf::from);
     let input = std::env::var_os("SUMCHAIN_SELECTION_COMPAT_IN").map(std::path::PathBuf::from);
-    for (name, gate) in below_the_gates() {
+    for ((gates, gate), scenario) in below_the_gates()
+        .into_iter()
+        .flat_map(|g| [(g, "cycle"), (g, "refusals")])
+    {
+        let name = format!("{gates}-{scenario}");
         let g = genesis(gate);
         let producer = Node::new(&g);
-        let blocks = produce(&producer).await;
+        let blocks = match scenario {
+            "cycle" => produce(&producer).await,
+            _ => produce_refusals(&producer).await,
+        };
         let rows = producer.rows(&blocks);
         for b in &blocks {
             println!(
