@@ -512,6 +512,8 @@ crates/storage/src/journal.rs	FORMAT_VERSION_V1	EXCLUDE	local	node-local applica
 crates/storage/src/journal.rs	MAGIC	EXCLUDE	local	node-local application undo journal (journal.rs; db.rs:579 "Never hashed into a block and never read by consensus")
 crates/storage/src/journal.rs	UNDO_HISTORY_FLOOR_META_KEY	EXCLUDE	local	node-local application undo journal (journal.rs; db.rs:579 "Never hashed into a block and never read by consensus")
 crates/storage/src/messaging_store.rs	DAILY_QUOTA	EXCLUDE	storage-layout	row key in cf::MESSAGING_CONFIG read/written via messaging_view.rs:61-137; the value is state, the key only names where; messaging families not digested
+crates/storage/src/messaging_store.rs	ENVELOPE_OUTCOME_LEN	EXCLUDE	storage-layout	width of an envelope-outcome row in cf::MESSAGING_SENDER_NONCES, written via messaging_view.rs v_set_envelope_outcome; messaging families not digested
+crates/storage/src/messaging_store.rs	ENVELOPE_OUTCOME_PREFIX	EXCLUDE	storage-layout	key prefix of the envelope-outcome rows in cf::MESSAGING_SENDER_NONCES, written via messaging_view.rs v_set_envelope_outcome; the key only names where; messaging families not digested
 crates/storage/src/messaging_store.rs	INDEX_BACKFILL_V1	EXCLUDE	local	committed-DB backfill marker (messaging_store.rs:715, :803), not on the execution path
 crates/storage/src/messaging_store.rs	INDEX_PRESENT	EXCLUDE	storage-layout	value of a presence/index row; execution only tests existence (messaging_view.rs:366 contains); messaging families not digested
 crates/storage/src/messaging_store.rs	MAX_MESSAGE_SIZE	EXCLUDE	storage-layout	row key in cf::MESSAGING_CONFIG read/written via messaging_view.rs:61-137; the value is state, the key only names where; messaging families not digested

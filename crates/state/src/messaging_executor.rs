@@ -705,8 +705,9 @@ impl MessagingExecutor {
     /// the fee once and the amount once.
     ///
     /// Then the amount moves, the sender's messaging nonce and daily count
-    /// advance and the event is stored; it reports a payment exactly when the
-    /// escrow was written.
+    /// advance, the envelope's outcome row records this transaction (receipt
+    /// code 0 and the amount escrowed), and the event is stored; it reports a
+    /// payment exactly when the escrow was written.
     #[allow(clippy::too_many_arguments)]
     fn send_message_enveloped(
         view: &mut ExecutionView<'_, '_>,
@@ -815,6 +816,16 @@ impl MessagingExecutor {
             )?;
         }
         Self::v_increment_sender_nonce(view, &real_sender)?;
+        Self::v_set_envelope_outcome(
+            view,
+            &real_sender,
+            nonce,
+            &sumchain_storage::messaging_store::EnvelopeOutcome {
+                tx_hash,
+                outcome_code: 0,
+                escrowed_amount: amount,
+            },
+        )?;
         let day = Self::current_day(clock);
         Self::v_increment_daily_message_count(view, &real_sender, day)?;
 

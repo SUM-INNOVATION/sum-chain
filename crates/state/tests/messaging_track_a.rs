@@ -635,6 +635,10 @@ fn an_authenticated_refusal_spends_the_envelope_nonce_and_nothing_else() {
             account_key(&sponsor().address()),
             account_key(&proposer()),
             msg_nonce_key(&who),
+            (
+                cf::MESSAGING_SENDER_NONCES.to_string(),
+                sumchain_storage::messaging_store::envelope_outcome_key(&who, n),
+            ),
         ];
         want.sort();
         assert_eq!(changed(&before, &c.rows()), want, "{}", case.label);
@@ -1564,4 +1568,180 @@ fn value_is_conserved_and_a_sponsor_never_pays_value() {
             );
         }
     }
+}
+
+// ── envelope outcomes ───────────────────────────────────────────────────────
+
+fn outcome(
+    c: &Chain,
+    sender: &sumchain_primitives::Address,
+    nonce: u64,
+) -> Option<sumchain_storage::messaging_store::EnvelopeOutcome> {
+    c.store().get_envelope_outcome(sender, nonce).unwrap()
+}
+
+fn spent(
+    tx: &sumchain_primitives::SignedTransaction,
+    outcome_code: u32,
+    escrowed_amount: u128,
+) -> Option<sumchain_storage::messaging_store::EnvelopeOutcome> {
+    Some(sumchain_storage::messaging_store::EnvelopeOutcome {
+        tx_hash: tx.hash(),
+        outcome_code,
+        escrowed_amount,
+    })
+}
+
+/// At both gates every spent envelope nonce has one outcome row naming
+/// the transaction that spent it, its receipt code and what it escrowed: a
+/// payment (0, the amount), a message without one (0, 0), a refusal after
+/// authentication (7, 0). A refusal before authentication spends no nonce
+/// and writes no row; a front-runner's transaction is the one recorded, and
+/// the relay's later copy, refused, does not overwrite it. The committed
+/// reader and the candidate reader agree, and the rows survive a restart.
+#[test]
+fn every_spent_envelope_nonce_records_what_spent_it() {
+    let mut c = Chain::new(both(Some(1)));
+    c.setup();
+    let carol_addr = carol().address();
+    let bob_addr = bob().address();
+
+    let pay = c.tx(
+        &sponsor(),
+        sponsored(&c.v2(&carol(), &bob_addr, 0, Some(5_000))),
+    );
+    assert_eq!(c.one(pay.clone()).status, TxStatus::Success);
+    assert_eq!(outcome(&c, &carol_addr, 0), spent(&pay, 0, 5_000));
+
+    let plain = c.tx(&erin(), sponsored(&c.v2(&carol(), &bob_addr, 1, Some(0))));
+    assert_eq!(c.one(plain.clone()).status, TxStatus::Success);
+    assert_eq!(outcome(&c, &carol_addr, 1), spent(&plain, 0, 0));
+
+    sponsorship_off(&mut c);
+    let refused = c.tx(&sponsor(), sponsored(&c.v2(&carol(), &bob_addr, 2, None)));
+    assert_eq!(c.one(refused.clone()).status, TxStatus::Failed(7));
+    assert_eq!(outcome(&c, &carol_addr, 2), spent(&refused, 7, 0));
+
+    let tampered = c.tx(
+        &sponsor(),
+        sponsored(&signed_v2(
+            envelope(&carol(), &bob_addr, 3, None),
+            &dave(),
+            c.chain_id,
+        )),
+    );
+    assert_eq!(c.one(tampered).status, TxStatus::Failed(7));
+    assert_eq!(
+        outcome(&c, &carol_addr, 3),
+        None,
+        "no authentication, no row"
+    );
+
+    let tx = c.tx(
+        &admin(),
+        op(
+            MessagingOperation::SetSponsorshipEnabled,
+            &SetSponsorshipEnabledData { enabled: true },
+        ),
+    );
+    c.all_succeed(vec![tx]);
+    let m = c.v2(&carol(), &bob_addr, 3, None);
+    let front = c.tx(&erin(), sponsored(&m));
+    let relay = c.tx(&sponsor(), sponsored(&m));
+    let r = c.block(vec![front.clone(), relay]).unwrap();
+    assert_eq!(
+        r.iter().map(|r| r.status).collect::<Vec<_>>(),
+        vec![TxStatus::Success, TxStatus::Failed(7)]
+    );
+    assert_eq!(
+        outcome(&c, &carol_addr, 3),
+        spent(&front, 0, 0),
+        "the first includer"
+    );
+
+    {
+        let mut cand = sumchain_storage::candidate::CandidateExecution::new(&c.db, 1 << 20);
+        let view = cand.view();
+        for n in 0..4 {
+            assert_eq!(
+                sumchain_state::MessagingExecutor::v_get_envelope_outcome(&view, &carol_addr, n)
+                    .unwrap(),
+                outcome(&c, &carol_addr, n),
+                "{n}"
+            );
+        }
+    }
+    let c = c.restart();
+    assert_eq!(
+        outcome(&c, &carol_addr, 0),
+        spent(&pay, 0, 5_000),
+        "after a restart"
+    );
+    assert_eq!(
+        outcome(&c, &carol_addr, 2),
+        spent(&refused, 7, 0),
+        "after a restart"
+    );
+}
+
+/// No outcome row where no authenticated envelope spends a nonce: below both
+/// gates, and with the accounting gate alone (no envelope is authenticated).
+/// With the envelope gate alone a success spends the nonce and writes its
+/// row; a refusal there spends nothing and writes none.
+#[test]
+fn outcome_rows_follow_the_envelope_gate() {
+    for (label, params, success_row) in [
+        ("both gates absent", both(None), false),
+        ("the accounting gate alone", gates(None, Some(1)), false),
+        ("the envelope gate alone", gates(Some(1), None), true),
+    ] {
+        let mut c = Chain::new(params);
+        c.setup();
+        let carol_addr = carol().address();
+        let tx = c.tx(
+            &sponsor(),
+            sponsored(&c.v2(&carol(), &bob().address(), 0, None)),
+        );
+        assert_eq!(c.one(tx.clone()).status, TxStatus::Success, "{label}");
+        let want = if success_row { spent(&tx, 0, 0) } else { None };
+        assert_eq!(outcome(&c, &carol_addr, 0), want, "{label}");
+        let frank_tx = c.tx(
+            &sponsor(),
+            sponsored(&c.v2(&frank(), &bob().address(), 0, None)),
+        );
+        assert_eq!(c.one(frank_tx).status, TxStatus::Failed(7), "{label}");
+        assert_eq!(outcome(&c, &frank().address(), 0), None, "{label}");
+    }
+}
+
+/// The outcome rows share `cf::MESSAGING_SENDER_NONCES` with the nonce rows
+/// and can never be read as one: a nonce key is a bare 20-byte address, an
+/// outcome key is 52 bytes behind its prefix.
+#[test]
+fn an_outcome_key_never_meets_a_nonce_key() {
+    use sumchain_storage::messaging_store::{
+        envelope_outcome_key, sender_nonce_key, ENVELOPE_OUTCOME_PREFIX,
+    };
+    for kp in everyone() {
+        let a = kp.address();
+        for n in [0, 1, u64::MAX] {
+            let k = envelope_outcome_key(&a, n);
+            assert_eq!(k.len(), 52);
+            assert!(k.starts_with(ENVELOPE_OUTCOME_PREFIX));
+            assert_ne!(k.as_slice(), sender_nonce_key(&a));
+            assert_eq!(sender_nonce_key(&a).len(), 20);
+        }
+    }
+    let mut c = Chain::new(both(Some(1)));
+    c.setup();
+    let tx = c.tx(
+        &sponsor(),
+        sponsored(&c.v2(&carol(), &bob().address(), 0, None)),
+    );
+    c.one(tx);
+    assert_eq!(
+        c.msg_nonce(&carol().address()),
+        1,
+        "the nonce row reads as before"
+    );
 }

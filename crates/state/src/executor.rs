@@ -2482,6 +2482,8 @@ impl BlockExecutor {
         view: &mut ExecutionView<'_, '_>,
         proposer: &Address,
         charge: &RefusalCharge,
+        tx_hash: Hash,
+        receipt_code: u32,
     ) -> Result<()> {
         #[cfg(test)]
         if refusal_charge_failure::armed() {
@@ -2495,18 +2497,22 @@ impl BlockExecutor {
         StateManager::v_credit(view, proposer, charge.fee)?;
         StateManager::v_increment_nonce(view, &charge.payer)?;
         if let Some((sender, nonce)) = charge.consume {
-            Self::spend_envelope_nonce(view, &sender, nonce)?;
+            Self::spend_envelope_nonce(view, &sender, nonce, tx_hash, receipt_code)?;
         }
         Ok(())
     }
 
     /// Spend a refused, authenticated envelope's nonce: `sender`'s messaging
-    /// nonce, which authentication found equal to `nonce`, moves to the next.
-    /// Any other value is an invariant failure.
+    /// nonce, which authentication found equal to `nonce`, moves to the next,
+    /// and the envelope's outcome row records the refusing transaction and its
+    /// receipt code, with nothing escrowed. Any other nonce value is an
+    /// invariant failure.
     fn spend_envelope_nonce(
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         nonce: u64,
+        tx_hash: Hash,
+        receipt_code: u32,
     ) -> Result<()> {
         let current = MessagingExecutor::v_get_sender_nonce(view, sender)?;
         if current != nonce {
@@ -2516,6 +2522,16 @@ impl BlockExecutor {
             )));
         }
         MessagingExecutor::v_increment_sender_nonce(view, sender)?;
+        MessagingExecutor::v_set_envelope_outcome(
+            view,
+            sender,
+            nonce,
+            &sumchain_storage::messaging_store::EnvelopeOutcome {
+                tx_hash,
+                outcome_code: receipt_code,
+                escrowed_amount: 0,
+            },
+        )?;
         Ok(())
     }
 
@@ -2947,7 +2963,7 @@ impl BlockExecutor {
                         block_height,
                     ) {
                         if let Some((sender, nonce)) = result.consumes {
-                            Self::spend_envelope_nonce(view, &sender, nonce)?;
+                            Self::spend_envelope_nonce(view, &sender, nonce, tx_hash, 7)?;
                         }
                         tx.fee
                     } else {
@@ -3930,9 +3946,15 @@ impl BlockExecutor {
                 (Ok(r), Some(charge)) if scope_open => {
                     candidate.rollback_transaction();
                     candidate.begin_transaction(scope_limit)?;
+                    let code = match r.status {
+                        TxStatus::Failed(code) => code,
+                        _ => 0,
+                    };
                     let charged = {
                         let mut view = candidate.view();
-                        Self::charge_messaging_refusal(&mut view, &proposer, &charge)
+                        Self::charge_messaging_refusal(
+                            &mut view, &proposer, &charge, r.tx_hash, code,
+                        )
                     };
                     charged.map(|()| r)
                 }
