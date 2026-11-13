@@ -23,9 +23,8 @@ use sumchain_consensus::{ConsensusEngine, ConsensusQuery, PoAEngine};
 use sumchain_crypto::{recipient_hash, sign, KeyPair};
 use sumchain_genesis::{ChainParams, Genesis, MessagingParams};
 use sumchain_primitives::messaging::{
-    BlockSenderData, ContentType, MessageFlags, MessageHeader, MessagingTxData,
-    RegisterPublicKeyData, SetSponsorshipEnabledData, SRC201_MAGIC, SRC201_NONCE_SIZE,
-    SRC201_TAG_SIZE, SRC201_VERSION,
+    ContentType, MessageFlags, MessageHeader, MessagingTxData, RegisterPublicKeyData,
+    SetSponsorshipEnabledData, SRC201_MAGIC, SRC201_NONCE_SIZE, SRC201_TAG_SIZE, SRC201_VERSION,
 };
 use sumchain_primitives::{
     sponsored_send_v2_signing_preimage, Block, Hash, MessagingOperation, SignedTransaction,
@@ -33,7 +32,8 @@ use sumchain_primitives::{
 };
 use sumchain_state::mempool::{InclusionGates, InclusionPolicy};
 use sumchain_state::{Mempool, MempoolConfig, StateManager};
-use sumchain_storage::{Database, MessagingStore, ReceiptStore};
+use sumchain_storage::messaging_store::daily_count_key;
+use sumchain_storage::{cf, Database, MessagingStore, ReceiptStore};
 use tempfile::TempDir;
 
 const CHAIN_ID: u64 = 1;
@@ -390,11 +390,13 @@ async fn a_cycle_between_two_sponsors_is_not_carried_and_the_rest_is() {
 }
 
 /// From the accounting gate on, a relayed envelope advances its sponsor's
-/// account nonce. When the producer leaves one out of the block (here its
-/// recipient has blocked its sender, which the executor refuses with an
-/// error rather than a receipt), the sponsor's later transaction leaves with
-/// it: carried alone it would take `InvalidNonce` and be deleted from the
-/// pool. Both wait in the pool, and the sponsor's nonce has not moved.
+/// account nonce. When the producer leaves one out of the block (here a
+/// stored row the executor reads for its sender does not decode: a storage
+/// failure, which makes the block inapplicable at that transaction, where a
+/// business check is a charged refusal from the gate), the sponsor's later
+/// transaction leaves with it: carried alone it would take `InvalidNonce`
+/// and be deleted from the pool. Both wait in the pool, and the sponsor's
+/// nonce has not moved.
 #[tokio::test]
 async fn a_left_out_envelope_takes_its_sponsors_later_transactions() {
     let g = genesis();
@@ -409,19 +411,18 @@ async fn a_left_out_envelope_takes_its_sponsors_later_transactions() {
             public_key: pk(&x()),
         },
     );
-    let blocks_x = messaging(
-        &recipient(),
-        node.account_nonce(&recipient()),
-        1_000,
-        MessagingOperation::BlockSender,
-        &BlockSenderData {
-            sender: x().address(),
-        },
-    );
-    node.submit(&[&register, &blocks_x]);
+    node.submit(&[&register]);
     node.tick().await;
     assert_eq!(node.status(&register), Some(TxStatus::Success));
-    assert_eq!(node.status(&blocks_x), Some(TxStatus::Success));
+    // `x`'s daily-count row for day 0 (the clock gates are closed), three
+    // bytes where four are stored: the executor's quota check cannot read it.
+    node.db
+        .put(
+            cf::MESSAGING_DAILY_COUNTS,
+            &daily_count_key(&x().address(), 0),
+            &[1, 2, 3],
+        )
+        .unwrap();
 
     let r1_x0 = relayed(&r1(), 0, 3_000, &x(), 0);
     let r1_s0 = relayed(&r1(), 1, 2_000, &s(), 0);

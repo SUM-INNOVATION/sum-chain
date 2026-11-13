@@ -212,8 +212,12 @@ impl MessagingExecutor {
         // rows that RECORD a time (`MessageEvent::timestamp`,
         // `RegisteredPublicKey::registered_at`) keep `block_timestamp`.
         let clock = Self::rule_clock(params, block_height, block_timestamp);
-        // Exactly once, on every path from here: a refusal below leaves the
-        // charge in place, and nothing below charges again.
+        // Exactly once, on every path from here: nothing below charges again.
+        // A refusal from here on is settled by the block loop, which rolls
+        // this transaction back and charges the fee once in a scope of its
+        // own (`crate::executor::RefusalCharge`). The same flag turns the
+        // business checks that used to make the block inapplicable into
+        // refusals (`Self::refuse`).
         let fee_charged = Self::fee_nonce_accounting_gate_open(params, block_height);
         if fee_charged {
             StateManager::v_deduct(view, sender, fee)?;
@@ -237,6 +241,7 @@ impl MessagingExecutor {
                 clock,
                 tx_index,
                 tx_hash,
+                fee_charged,
             ),
             MessagingOperation::SendMessageDirect => Self::send_message_direct(
                 view,
@@ -267,35 +272,54 @@ impl MessagingExecutor {
                 tx_hash,
             ),
             MessagingOperation::ClaimPayment => {
-                Self::claim_payment(view, sender, &data.data, clock)
+                Self::claim_payment(view, sender, &data.data, clock, fee_charged)
             }
-            MessagingOperation::StakeForTrust => Self::stake_for_trust(view, sender, &data.data),
-            MessagingOperation::Unstake => Self::unstake(view, sender, &data.data),
-            MessagingOperation::SetInboxFilter => Self::set_inbox_filter(view, sender, &data.data),
-            MessagingOperation::AddContact => Self::add_contact(view, sender, &data.data),
-            MessagingOperation::RemoveContact => Self::remove_contact(view, sender, &data.data),
-            MessagingOperation::BlockSender => Self::block_sender(view, sender, &data.data),
-            MessagingOperation::ReportSpam => Self::report_spam(view, sender, &data.data),
-            MessagingOperation::RegisterPublicKey => {
-                Self::register_public_key(view, sender, &data.data, block_height, block_timestamp)
+            MessagingOperation::StakeForTrust => {
+                Self::stake_for_trust(view, sender, &data.data, fee_charged)
             }
+            MessagingOperation::Unstake => Self::unstake(view, sender, &data.data, fee_charged),
+            MessagingOperation::SetInboxFilter => {
+                Self::set_inbox_filter(view, sender, &data.data, fee_charged)
+            }
+            MessagingOperation::AddContact => {
+                Self::add_contact(view, sender, &data.data, fee_charged)
+            }
+            MessagingOperation::RemoveContact => {
+                Self::remove_contact(view, sender, &data.data, fee_charged)
+            }
+            MessagingOperation::BlockSender => {
+                Self::block_sender(view, sender, &data.data, fee_charged)
+            }
+            MessagingOperation::ReportSpam => {
+                Self::report_spam(view, sender, &data.data, fee_charged)
+            }
+            MessagingOperation::RegisterPublicKey => Self::register_public_key(
+                view,
+                sender,
+                &data.data,
+                block_height,
+                block_timestamp,
+                fee_charged,
+            ),
             MessagingOperation::UpdatePublicKey => {
-                Self::update_public_key(view, sender, &data.data, block_height)
+                Self::update_public_key(view, sender, &data.data, block_height, fee_charged)
             }
             // Admin operations
             MessagingOperation::SetDailyQuota => {
-                Self::set_daily_quota(view, params, sender, &data.data)
+                Self::set_daily_quota(view, params, sender, &data.data, fee_charged)
             }
             MessagingOperation::SetMaxMessageSize => {
-                Self::set_max_message_size(view, params, sender, &data.data)
+                Self::set_max_message_size(view, params, sender, &data.data, fee_charged)
             }
             MessagingOperation::SetMinTrustStake => {
-                Self::set_min_trust_stake(view, params, sender, &data.data)
+                Self::set_min_trust_stake(view, params, sender, &data.data, fee_charged)
             }
             MessagingOperation::SetSponsorshipEnabled => {
-                Self::set_sponsorship_enabled(view, params, sender, &data.data)
+                Self::set_sponsorship_enabled(view, params, sender, &data.data, fee_charged)
             }
-            MessagingOperation::FundRegistry => Self::fund_registry(view, sender, &data.data),
+            MessagingOperation::FundRegistry => {
+                Self::fund_registry(view, sender, &data.data, fee_charged)
+            }
             // Issue #145: sponsored public-key registration is dispatched by the
             // state executor's gated, sponsor-pays, per-code path
             // (`BlockExecutor::execute_sponsored_register_v1`) BEFORE this generic
@@ -352,6 +376,36 @@ impl MessagingExecutor {
         (timestamp / MESSAGING_DAY_SECONDS) as u32
     }
 
+    /// A business check that failed, with its reason.
+    ///
+    /// From `messaging_fee_nonce_accounting_enabled_from_height` (`accounted`)
+    /// it is a refusal: an ordinary failed operation, which the block loop
+    /// rolls back and charges once. Below the gate it is the error it always
+    /// was, `StateError::NftError` with the same text, and the block that
+    /// carries it is not applicable, as before.
+    fn refuse(reason: String, accounted: bool) -> Result<MessagingExecutionResult> {
+        if accounted {
+            Ok(MessagingExecutionResult::failure(reason))
+        } else {
+            Err(StateError::NftError(reason))
+        }
+    }
+
+    /// Decode an operation's payload. A payload that does not decode is the
+    /// signer's own bytes, so no state changes the answer: from the
+    /// accounting gate it is a refusal (`Err` inside), below it the error it
+    /// always was, with the same text (`Err` outside).
+    fn decode<T: serde::de::DeserializeOwned>(
+        data: &[u8],
+        what: &str,
+        accounted: bool,
+    ) -> Result<std::result::Result<T, MessagingExecutionResult>> {
+        match bincode::deserialize(data) {
+            Ok(value) => Ok(Ok(value)),
+            Err(e) => Self::refuse(format!("{what}: {e}"), accounted).map(Err),
+        }
+    }
+
     /// The quota bucket a send in a block at `block_height`, with header
     /// timestamp `block_timestamp`, counts against: the day `check_rate_limit`
     /// reads, through the same timestamp gate, the same units gate and the same
@@ -368,12 +422,13 @@ impl MessagingExecutor {
         Self::current_day(Self::rule_clock(params, block_height, block_timestamp))
     }
 
-    /// Check rate limit for sender
+    /// Check rate limit for sender. `Some(reason)` when the sender is over
+    /// its quota; an `Err` is a storage failure.
     fn check_rate_limit(
         view: &ExecutionView<'_, '_>,
         sender: &Address,
         timestamp: u64,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let day = Self::current_day(timestamp);
         let count = Self::v_get_daily_message_count(view, sender, day)?;
         let quota = Self::v_get_daily_quota(view)?;
@@ -388,18 +443,19 @@ impl MessagingExecutor {
         };
 
         if count >= effective_quota {
-            return Err(StateError::NftError("Daily quota exceeded".to_string()));
+            return Ok(Some("Daily quota exceeded".to_string()));
         }
 
-        Ok(())
+        Ok(None)
     }
 
-    /// Check spam score restrictions
+    /// Check spam score restrictions. `Some(reason)` when they refuse the
+    /// sender; an `Err` is a storage failure.
     fn check_spam_restrictions(
         view: &ExecutionView<'_, '_>,
         params: &ChainParams,
         sender: &Address,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let score = Self::v_get_spam_score(view, sender)?;
         let params = Self::messaging_params(params);
 
@@ -408,46 +464,66 @@ impl MessagingExecutor {
             let stake = Self::v_get_stake_balance(view, sender)?;
             let min_stake = Self::v_get_min_trust_stake(view)?;
             if stake < min_stake {
-                return Err(StateError::NftError("High spam score requires stake".to_string()));
+                return Ok(Some("High spam score requires stake".to_string()));
             }
         } else if score >= params.spam_threshold {
             // Moderate spam score: reduced quota (handled in check_rate_limit)
         }
 
-        Ok(())
+        Ok(None)
     }
 
-    /// Check recipient filter
+    /// Check recipient filter. `Some(reason)` when the recipient's filter
+    /// refuses the sender; an `Err` is a storage failure.
     fn check_recipient_filter(
         view: &ExecutionView<'_, '_>,
         sender: &Address,
         recipient_hash: &[u8; 32],
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let filter = Self::v_get_inbox_filter(view, recipient_hash)?;
 
         match filter {
             InboxFilter::AcceptAll => {
                 // Check if blocked
                 if Self::v_is_blocked(view, recipient_hash, sender)? {
-                    return Err(StateError::NftError("Sender is blocked".to_string()));
+                    return Ok(Some("Sender is blocked".to_string()));
                 }
             }
             InboxFilter::ContactsOnly => {
                 let sender_hash = recipient_hash_for_address(sender);
                 if !Self::v_is_contact(view, recipient_hash, &sender_hash)? {
-                    return Err(StateError::NftError("Sender not in contacts".to_string()));
+                    return Ok(Some("Sender not in contacts".to_string()));
                 }
             }
             InboxFilter::StakedOnly => {
                 let stake = Self::v_get_stake_balance(view, sender)?;
                 let min_stake = Self::v_get_min_trust_stake(view)?;
                 if stake < min_stake {
-                    return Err(StateError::NftError("Recipient requires staked senders".to_string()));
+                    return Ok(Some("Recipient requires staked senders".to_string()));
                 }
             }
         }
 
-        Ok(())
+        Ok(None)
+    }
+
+    /// The quota, spam and recipient-filter checks a send passes, in that
+    /// order. `Some(reason)` for the first that refuses; an `Err` is a
+    /// storage failure.
+    fn check_send_limits(
+        view: &ExecutionView<'_, '_>,
+        params: &ChainParams,
+        sender: &Address,
+        recipient_hash: &[u8; 32],
+        clock: u64,
+    ) -> Result<Option<String>> {
+        if let Some(reason) = Self::check_rate_limit(view, sender, clock)? {
+            return Ok(Some(reason));
+        }
+        if let Some(reason) = Self::check_spam_restrictions(view, params, sender)? {
+            return Ok(Some(reason));
+        }
+        Self::check_recipient_filter(view, sender, recipient_hash)
     }
 
     /// Send message with gas sponsorship
@@ -473,6 +549,7 @@ impl MessagingExecutor {
         clock: u64,
         tx_index: u32,
         tx_hash: Hash,
+        accounted: bool,
     ) -> Result<MessagingExecutionResult> {
         // Check if sponsorship is enabled
         if !Self::v_is_sponsorship_enabled(view)? {
@@ -480,8 +557,11 @@ impl MessagingExecutor {
         }
 
         // Parse sponsored message data (includes sender_pubkey)
-        let sponsored_msg: SponsoredMessage = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid sponsored message data: {}", e)))?;
+        let sponsored_msg: SponsoredMessage =
+            match Self::decode(data, "Invalid sponsored message data", accounted)? {
+                Ok(decoded) => decoded,
+                Err(refused) => return Ok(refused),
+            };
 
         // Derive the real sender address from the sender's public key
         let real_sender = Address::from_public_key(&sponsored_msg.sender_pubkey);
@@ -561,14 +641,17 @@ impl MessagingExecutor {
             return Ok(MessagingExecutionResult::failure("Sponsored message has expired"));
         }
 
-        // Check rate limit for the real sender
-        Self::check_rate_limit(view, &real_sender, clock)?;
-
-        // Check spam restrictions for the real sender
-        Self::check_spam_restrictions(view, params, &real_sender)?;
-
-        // Check recipient filter (using real sender)
-        Self::check_recipient_filter(view, &real_sender, &sponsored_msg.recipient_hash)?;
+        // The quota, spam and recipient-filter checks, for the real sender:
+        // refusals from the accounting gate, errors below it, as before.
+        if let Some(reason) = Self::check_send_limits(
+            view,
+            params,
+            &real_sender,
+            &sponsored_msg.recipient_hash,
+            clock,
+        )? {
+            return Self::refuse(reason, accounted);
+        }
 
         // Credit fee to proposer (fee already deducted from sponsor in tx validation)
         // Note: The sponsor pays the fee via normal tx flow, no sponsorship pool deduction needed
@@ -623,8 +706,11 @@ impl MessagingExecutor {
         tx_hash: Hash,
     ) -> Result<MessagingExecutionResult> {
         // Parse message data
-        let msg_data: SendMessageData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid message data: {}", e)))?;
+        let msg_data: SendMessageData =
+            match Self::decode(data, "Invalid message data", fee_charged)? {
+                Ok(decoded) => decoded,
+                Err(refused) => return Ok(refused),
+            };
 
         // Validate message format
         if let Err(e) = validate_message_format(&msg_data.message_data) {
@@ -637,14 +723,13 @@ impl MessagingExecutor {
             return Ok(MessagingExecutionResult::failure("Message too large"));
         }
 
-        // Check rate limit
-        Self::check_rate_limit(view, sender, clock)?;
-
-        // Check spam restrictions
-        Self::check_spam_restrictions(view, params, sender)?;
-
-        // Check recipient filter
-        Self::check_recipient_filter(view, sender, &msg_data.recipient_hash)?;
+        // The quota, spam and recipient-filter checks: refusals from the
+        // accounting gate, errors below it, as before.
+        if let Some(reason) =
+            Self::check_send_limits(view, params, sender, &msg_data.recipient_hash, clock)?
+        {
+            return Self::refuse(reason, fee_charged);
+        }
 
         if !fee_charged {
             // Deduct fee and pay proposer
@@ -703,8 +788,11 @@ impl MessagingExecutor {
         tx_hash: Hash,
     ) -> Result<MessagingExecutionResult> {
         // Parse message data
-        let msg_data: SendMessageWithPaymentData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid message data: {}", e)))?;
+        let msg_data: SendMessageWithPaymentData =
+            match Self::decode(data, "Invalid message data", fee_charged)? {
+                Ok(decoded) => decoded,
+                Err(refused) => return Ok(refused),
+            };
 
         // Validate message format
         if let Err(e) = validate_message_format(&msg_data.message_data) {
@@ -717,14 +805,13 @@ impl MessagingExecutor {
             return Ok(MessagingExecutionResult::failure("Message too large"));
         }
 
-        // Check rate limit
-        Self::check_rate_limit(view, sender, clock)?;
-
-        // Check spam restrictions
-        Self::check_spam_restrictions(view, params, sender)?;
-
-        // Check recipient filter
-        Self::check_recipient_filter(view, sender, &msg_data.recipient_hash)?;
+        // The quota, spam and recipient-filter checks: refusals from the
+        // accounting gate, errors below it, as before.
+        if let Some(reason) =
+            Self::check_send_limits(view, params, sender, &msg_data.recipient_hash, clock)?
+        {
+            return Self::refuse(reason, fee_charged);
+        }
 
         // Calculate total cost
         let total_cost = if fee_charged {
@@ -789,9 +876,13 @@ impl MessagingExecutor {
         sender: &Address,
         data: &[u8],
         clock: u64,
+        accounted: bool,
     ) -> Result<MessagingExecutionResult> {
-        let claim_data: ClaimPaymentData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid claim data: {}", e)))?;
+        let claim_data: ClaimPaymentData =
+            match Self::decode(data, "Invalid claim data", accounted)? {
+                Ok(decoded) => decoded,
+                Err(refused) => return Ok(refused),
+            };
 
         // Get pending payment
         let pending = match Self::v_get_pending_payment(view, &claim_data.message_id)? {
@@ -834,12 +925,25 @@ impl MessagingExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
+        accounted: bool,
     ) -> Result<MessagingExecutionResult> {
-        let stake_data: StakeForTrustData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid stake data: {}", e)))?;
+        let stake_data: StakeForTrustData =
+            match Self::decode(data, "Invalid stake data", accounted)? {
+                Ok(decoded) => decoded,
+                Err(refused) => return Ok(refused),
+            };
 
         if stake_data.amount == 0 {
             return Ok(MessagingExecutionResult::failure("Zero stake amount"));
+        }
+
+        // From the accounting gate a stake the sender cannot afford is a
+        // refusal, checked before anything moves. Below it the debit refuses
+        // the block, as before.
+        if accounted && StateManager::v_get_balance(view, sender)? < stake_data.amount {
+            return Ok(MessagingExecutionResult::failure(
+                "Insufficient balance for stake",
+            ));
         }
 
         // Deduct from sender's balance
@@ -858,9 +962,13 @@ impl MessagingExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
+        accounted: bool,
     ) -> Result<MessagingExecutionResult> {
-        let unstake_data: MessagingUnstakeData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid unstake data: {}", e)))?;
+        let unstake_data: MessagingUnstakeData =
+            match Self::decode(data, "Invalid unstake data", accounted)? {
+                Ok(decoded) => decoded,
+                Err(refused) => return Ok(refused),
+            };
 
         let current_stake = Self::v_get_stake_balance(view, sender)?;
         if current_stake < unstake_data.amount {
@@ -884,9 +992,13 @@ impl MessagingExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
+        accounted: bool,
     ) -> Result<MessagingExecutionResult> {
-        let filter_data: SetInboxFilterData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid filter data: {}", e)))?;
+        let filter_data: SetInboxFilterData =
+            match Self::decode(data, "Invalid filter data", accounted)? {
+                Ok(decoded) => decoded,
+                Err(refused) => return Ok(refused),
+            };
 
         let sender_hash = recipient_hash_for_address(sender);
         Self::v_set_inbox_filter(view, &sender_hash, filter_data.mode)?;
@@ -901,9 +1013,13 @@ impl MessagingExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
+        accounted: bool,
     ) -> Result<MessagingExecutionResult> {
-        let contact_data: ContactData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid contact data: {}", e)))?;
+        let contact_data: ContactData = match Self::decode(data, "Invalid contact data", accounted)?
+        {
+            Ok(decoded) => decoded,
+            Err(refused) => return Ok(refused),
+        };
 
         let sender_hash = recipient_hash_for_address(sender);
         Self::v_add_contact(view, &sender_hash, &contact_data.contact_hash)?;
@@ -918,9 +1034,13 @@ impl MessagingExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
+        accounted: bool,
     ) -> Result<MessagingExecutionResult> {
-        let contact_data: ContactData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid contact data: {}", e)))?;
+        let contact_data: ContactData = match Self::decode(data, "Invalid contact data", accounted)?
+        {
+            Ok(decoded) => decoded,
+            Err(refused) => return Ok(refused),
+        };
 
         let sender_hash = recipient_hash_for_address(sender);
         Self::v_remove_contact(view, &sender_hash, &contact_data.contact_hash)?;
@@ -935,9 +1055,13 @@ impl MessagingExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
+        accounted: bool,
     ) -> Result<MessagingExecutionResult> {
-        let block_data: BlockSenderData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid block data: {}", e)))?;
+        let block_data: BlockSenderData = match Self::decode(data, "Invalid block data", accounted)?
+        {
+            Ok(decoded) => decoded,
+            Err(refused) => return Ok(refused),
+        };
 
         let sender_hash = recipient_hash_for_address(sender);
         Self::v_block_sender(view, &sender_hash, &block_data.sender)?;
@@ -952,9 +1076,13 @@ impl MessagingExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
+        accounted: bool,
     ) -> Result<MessagingExecutionResult> {
-        let report_data: ReportSpamData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid report data: {}", e)))?;
+        let report_data: ReportSpamData =
+            match Self::decode(data, "Invalid report data", accounted)? {
+                Ok(decoded) => decoded,
+                Err(refused) => return Ok(refused),
+            };
 
         // Reporter must have stake
         let reporter_stake = Self::v_get_stake_balance(view, sender)?;
@@ -985,9 +1113,13 @@ impl MessagingExecutor {
         data: &[u8],
         block_height: u64,
         block_timestamp: u64,
+        accounted: bool,
     ) -> Result<MessagingExecutionResult> {
-        let key_data: RegisterPublicKeyData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid key data: {}", e)))?;
+        let key_data: RegisterPublicKeyData =
+            match Self::decode(data, "Invalid key data", accounted)? {
+                Ok(decoded) => decoded,
+                Err(refused) => return Ok(refused),
+            };
 
         // Verify the public key derives to this address
         let derived_address = Address::from_public_key(&key_data.public_key);
@@ -1025,9 +1157,13 @@ impl MessagingExecutor {
         sender: &Address,
         data: &[u8],
         block_height: u64,
+        accounted: bool,
     ) -> Result<MessagingExecutionResult> {
-        let key_data: UpdatePublicKeyData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid key data: {}", e)))?;
+        let key_data: UpdatePublicKeyData = match Self::decode(data, "Invalid key data", accounted)?
+        {
+            Ok(decoded) => decoded,
+            Err(refused) => return Ok(refused),
+        };
 
         // Get existing registration
         let existing = match Self::v_get_public_key(view, sender)? {
@@ -1069,13 +1205,17 @@ impl MessagingExecutor {
         params: &ChainParams,
         sender: &Address,
         data: &[u8],
+        accounted: bool,
     ) -> Result<MessagingExecutionResult> {
         if !Self::v_is_admin(view, params, sender)? {
             return Ok(MessagingExecutionResult::failure("Not admin"));
         }
 
-        let quota_data: SetDailyQuotaData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid quota data: {}", e)))?;
+        let quota_data: SetDailyQuotaData =
+            match Self::decode(data, "Invalid quota data", accounted)? {
+                Ok(decoded) => decoded,
+                Err(refused) => return Ok(refused),
+            };
 
         Self::v_set_daily_quota(view, quota_data.quota)?;
 
@@ -1089,13 +1229,17 @@ impl MessagingExecutor {
         params: &ChainParams,
         sender: &Address,
         data: &[u8],
+        accounted: bool,
     ) -> Result<MessagingExecutionResult> {
         if !Self::v_is_admin(view, params, sender)? {
             return Ok(MessagingExecutionResult::failure("Not admin"));
         }
 
-        let size_data: SetMaxMessageSizeData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid size data: {}", e)))?;
+        let size_data: SetMaxMessageSizeData =
+            match Self::decode(data, "Invalid size data", accounted)? {
+                Ok(decoded) => decoded,
+                Err(refused) => return Ok(refused),
+            };
 
         Self::v_set_max_message_size(view, size_data.size)?;
 
@@ -1109,13 +1253,17 @@ impl MessagingExecutor {
         params: &ChainParams,
         sender: &Address,
         data: &[u8],
+        accounted: bool,
     ) -> Result<MessagingExecutionResult> {
         if !Self::v_is_admin(view, params, sender)? {
             return Ok(MessagingExecutionResult::failure("Not admin"));
         }
 
-        let stake_data: SetMinTrustStakeData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid stake data: {}", e)))?;
+        let stake_data: SetMinTrustStakeData =
+            match Self::decode(data, "Invalid stake data", accounted)? {
+                Ok(decoded) => decoded,
+                Err(refused) => return Ok(refused),
+            };
 
         Self::v_set_min_trust_stake(view, stake_data.amount)?;
 
@@ -1129,13 +1277,17 @@ impl MessagingExecutor {
         params: &ChainParams,
         sender: &Address,
         data: &[u8],
+        accounted: bool,
     ) -> Result<MessagingExecutionResult> {
         if !Self::v_is_admin(view, params, sender)? {
             return Ok(MessagingExecutionResult::failure("Not admin"));
         }
 
-        let enabled_data: SetSponsorshipEnabledData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid enabled data: {}", e)))?;
+        let enabled_data: SetSponsorshipEnabledData =
+            match Self::decode(data, "Invalid enabled data", accounted)? {
+                Ok(decoded) => decoded,
+                Err(refused) => return Ok(refused),
+            };
 
         Self::v_set_sponsorship_enabled(view, enabled_data.enabled)?;
 
@@ -1148,12 +1300,25 @@ impl MessagingExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
+        accounted: bool,
     ) -> Result<MessagingExecutionResult> {
-        let fund_data: FundRegistryData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid fund data: {}", e)))?;
+        let fund_data: FundRegistryData = match Self::decode(data, "Invalid fund data", accounted)?
+        {
+            Ok(decoded) => decoded,
+            Err(refused) => return Ok(refused),
+        };
 
         if fund_data.amount == 0 {
             return Ok(MessagingExecutionResult::failure("Zero fund amount"));
+        }
+
+        // From the accounting gate a deposit the sender cannot afford is a
+        // refusal, checked before anything moves. Below it the debit refuses
+        // the block, as before.
+        if accounted && StateManager::v_get_balance(view, sender)? < fund_data.amount {
+            return Ok(MessagingExecutionResult::failure(
+                "Insufficient balance for deposit",
+            ));
         }
 
         // Deduct from sender
