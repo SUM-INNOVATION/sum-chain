@@ -6,9 +6,17 @@
 //!   is decided before the pool is cut to a block's size: with more such
 //!   transactions than a block carries, at a higher fee, honest transactions
 //!   are carried in every block.
+//! - What is held above a gap does not keep its place in the pool: at its
+//!   `GAP_HOLD_SELECTIONS`-th selection it is evicted, with no receipt, and
+//!   its place is free again; under sustained load the pool holds at most
+//!   that many selections' worth of it, and a full pool admits honest
+//!   transactions again. Below the gates an envelope above its relay's gap
+//!   goes the same way, with its sender's later envelopes, and the sender's
+//!   re-sent envelope is delivered.
 //! - From the accounting gate, a sponsor whose envelope waits on another
 //!   account's gap is carried to that envelope's refusal within
-//!   `CROSS_ACCOUNT_WAIT_SELECTIONS` selections, and its queue moves.
+//!   `CROSS_ACCOUNT_WAIT_SELECTIONS` selections, and its queue moves; the
+//!   other account's envelope above its own gap is evicted.
 //! - The cycle's victim is the later head on the cycle when a non-head pays
 //!   the lowest fee, and the cycle's other transactions are delivered once
 //!   the victim's nonce is filled.
@@ -29,9 +37,9 @@ use sumchain_primitives::{
 };
 use sumchain_state::mempool::{
     advances_nonce_below_accounting_gate, InclusionGates, InclusionPolicy,
-    CROSS_ACCOUNT_WAIT_SELECTIONS,
+    CROSS_ACCOUNT_WAIT_SELECTIONS, GAP_HOLD_SELECTIONS,
 };
-use sumchain_state::{Mempool, MempoolConfig, StateManager};
+use sumchain_state::{Mempool, MempoolConfig, StateError, StateManager};
 use sumchain_storage::{Database, MessagingStore, ReceiptStore};
 use tempfile::TempDir;
 
@@ -315,6 +323,13 @@ impl Node {
         }
     }
 
+    /// `t` offered to the pool: whether admission takes it.
+    fn try_submit(&self, t: &SignedTransaction) -> Result<(), StateError> {
+        self.chain_height
+            .store(self.engine.current_height(), Ordering::Relaxed);
+        self.mempool.add(t.clone()).map(|_| ())
+    }
+
     /// One production tick, as `run_block_producer` runs it.
     async fn tick(&self) -> Block {
         self.chain_height
@@ -442,6 +457,10 @@ fn relay_nonce(node: &Node, k: &KeyPair) -> u64 {
 /// before it is carried to its refusal.
 const BOUND: u64 = CROSS_ACCOUNT_WAIT_SELECTIONS as u64;
 
+/// How many of this node's selections a transaction is held above a gap
+/// before it is evicted.
+const GAP_BOUND: u64 = GAP_HOLD_SELECTIONS as u64;
+
 /// The block's transaction limit (`max_txs_per_block`, which `tick` selects
 /// up to).
 const LIMIT: usize = 1_000;
@@ -452,7 +471,9 @@ const LIMIT: usize = 1_000;
 /// normal fee is submitted before each, and each is carried in its block at
 /// every configuration: what waits above a gap is decided before the pool is
 /// cut to the block's limit and never takes a place in the block. None of the
-/// gapped transactions is carried, and none takes a receipt.
+/// gapped transactions is carried, and none takes a receipt. They are held
+/// for `GAP_BOUND - 1` selections and evicted at the `GAP_BOUND`-th, and the
+/// pool is empty after it.
 #[tokio::test]
 async fn gapped_transactions_never_take_the_block_from_others() {
     for gates in matrix() {
@@ -483,8 +504,204 @@ async fn gapped_transactions_never_take_the_block_from_others() {
                 gapped.iter().all(|t| !carries(&b, t)),
                 "{name}: round {round}"
             );
+            let selections = round + 1;
+            let held = selections < GAP_BOUND;
+            assert!(
+                gapped.iter().all(|t| node.held(t) == held),
+                "{name}: selection {selections}"
+            );
+            assert_eq!(
+                node.mempool.len(),
+                if held { gapped.len() } else { 0 },
+                "{name}: selection {selections}"
+            );
+            if held {
+                assert_eq!(
+                    node.mempool.gap_hold_count(&gapped[0].hash()),
+                    selections as u32,
+                    "{name}"
+                );
+            }
         }
         assert!(gapped.iter().all(|t| node.receipt(t).is_none()), "{name}");
+    }
+}
+
+/// Sustained load over repeated blocks: before each of `GAP_BOUND + 2`
+/// blocks a fresh batch of 1,100 transactions above a gap (eleven new unfunded
+/// keys, nonces 1 to 100, at a fee far above honest traffic) is submitted with
+/// an honest transfer, so that every selection sees more gapped transactions
+/// than a block carries. Every block carries its honest transfer, none of the
+/// gapped transactions is carried or takes a receipt, each batch is evicted at
+/// its `GAP_BOUND`-th selection, and the pool never holds more than
+/// `GAP_BOUND` batches. At every configuration.
+#[tokio::test]
+async fn sustained_gapped_load_never_takes_the_block_or_keeps_the_pool() {
+    const KEYS_PER_BATCH: u8 = 11;
+    const PER_KEY: u64 = 100;
+    let batch_len = usize::from(KEYS_PER_BATCH) * PER_KEY as usize;
+    assert!(batch_len > LIMIT);
+    for gates in matrix() {
+        let name = gates.name;
+        let node = Node::new(gates);
+        node.set_up().await;
+        let mut batches: Vec<Vec<SignedTransaction>> = Vec::new();
+        for round in 0..(GAP_BOUND + 2) {
+            let mut batch = Vec::with_capacity(batch_len);
+            for a in 0..KEYS_PER_BATCH {
+                let k = stranger(round as u8 * KEYS_PER_BATCH + a);
+                for n in 1..=PER_KEY {
+                    let t = transfer_amount(&k, n, 1_000_000_000, 1);
+                    node.submit(&[&t]);
+                    batch.push(t);
+                }
+            }
+            batches.push(batch);
+            let honest = transfer(&bystander(), relay_nonce(&node, &bystander()), 1_000);
+            node.submit(&[&honest]);
+            let b = node.tick().await;
+            assert!(carries(&b, &honest), "{name}: round {round}");
+            assert_eq!(node.status(&honest), Some(TxStatus::Success), "{name}");
+            let mut live = 0;
+            for (i, batch) in batches.iter().enumerate() {
+                let selections = round - i as u64 + 1;
+                let held = selections < GAP_BOUND;
+                assert!(
+                    batch
+                        .iter()
+                        .all(|t| !carries(&b, t) && node.held(t) == held),
+                    "{name}: round {round}, batch {i}"
+                );
+                if held {
+                    live += batch.len();
+                }
+            }
+            assert_eq!(node.mempool.len(), live, "{name}: round {round}");
+            assert!(
+                live <= GAP_BOUND as usize * batch_len,
+                "{name}: round {round}"
+            );
+        }
+        assert!(
+            batches.iter().flatten().all(|t| node.receipt(t).is_none()),
+            "{name}"
+        );
+    }
+}
+
+/// A pool scaled down (40 places, 10 per sender) filled with
+/// transactions above a gap at a high fee. Admission is unchanged, so an
+/// honest transfer at a normal fee is refused while the pool is full, for
+/// `GAP_BOUND - 1` selections; at the `GAP_BOUND`-th the gapped transactions
+/// are evicted with no receipt, their places are free, and the honest
+/// transfer is admitted and carried. At every configuration.
+#[tokio::test]
+async fn gapped_transactions_do_not_keep_the_pool() {
+    for gates in matrix() {
+        let name = gates.name;
+        let node = Node::with_pool(gates, |c| MempoolConfig {
+            max_size: 40,
+            max_per_sender: 10,
+            ..c
+        });
+        node.set_up().await;
+        let mut gapped = Vec::new();
+        for a in 0..4u8 {
+            let k = stranger(a);
+            for n in 1..=10u64 {
+                let t = transfer_amount(&k, n, 1_000_000_000, 1);
+                node.submit(&[&t]);
+                gapped.push(t);
+            }
+        }
+        assert_eq!(node.mempool.len(), 40, "{name}");
+        let honest = transfer(&bystander(), relay_nonce(&node, &bystander()), 1_000);
+        for n in 1..GAP_BOUND {
+            assert!(
+                matches!(node.try_submit(&honest), Err(StateError::MempoolFull)),
+                "{name}: the pool is full, selection {n}"
+            );
+            let b = node.tick().await;
+            assert!(b.transactions.is_empty(), "{name}");
+        }
+        assert!(
+            matches!(node.try_submit(&honest), Err(StateError::MempoolFull)),
+            "{name}: the pool is full"
+        );
+        let b = node.tick().await;
+        assert!(b.transactions.is_empty(), "{name}");
+        assert!(
+            gapped
+                .iter()
+                .all(|t| !node.held(t) && node.receipt(t).is_none()),
+            "{name}: evicted at the bound, with no receipt"
+        );
+        assert_eq!(node.mempool.len(), 0, "{name}: the places are free");
+        node.try_submit(&honest)
+            .unwrap_or_else(|e| panic!("{name}: admitted: {e}"));
+        let b = node.tick().await;
+        assert!(carries(&b, &honest), "{name}");
+        assert_eq!(node.status(&honest), Some(TxStatus::Success), "{name}");
+    }
+}
+
+/// Below every gate (the gates absent and set above history).
+/// `r1`'s transfer at nonce 0 ends with a receipt that does not advance its
+/// nonce (it cannot pay the amount); the relay had signed `s`'s envelope 0 at
+/// `r1`'s nonce 1 while the transfer was pending, and that envelope reaches
+/// the producer after the block: it is above `r1`'s gap, which no relay
+/// request fills below the gate. `s`'s envelope 1 goes through `r2`. Both are
+/// held for `GAP_BOUND - 1` selections; at the `GAP_BOUND`-th the envelope
+/// above the gap is evicted, and with it `s`'s envelope 1, which nothing in
+/// the pool can bring into sequence any more; neither takes a receipt and
+/// `r1`'s nonce does not move. `s` re-sends its envelope 0 through `r2`, and
+/// it is delivered in the next block.
+#[tokio::test]
+async fn below_the_gates_an_envelope_above_a_gap_is_held_at_most_the_bound() {
+    let configs: Vec<Gates> = matrix()
+        .into_iter()
+        .filter(|g| ["absent", "above history"].contains(&g.name))
+        .collect();
+    assert_eq!(configs.len(), 2);
+    for gates in configs {
+        let name = gates.name;
+        let node = Node::new(gates);
+        node.set_up().await;
+        let (r1, r2, s) = (sponsor(0), sponsor(1), sender(0));
+        let failing = transfer_amount(&r1, 0, 1_000, FUNDS * 2);
+        node.submit(&[&failing]);
+        let allocated = relay_nonce(&node, &r1);
+        assert_eq!(allocated, 1, "{name}");
+        let e_s0 = relayed(&r1, allocated, 2_000, &s, 0);
+        node.tick().await;
+        let f = node.receipt(&failing).expect("carried");
+        assert_ne!(f.status, TxStatus::Success, "{name}");
+        assert_eq!(node.account_nonce(&r1), 0, "{name}: the nonce did not move");
+        node.submit(&[&e_s0]);
+        let r2_s1 = relayed(&r2, relay_nonce(&node, &r2), 2_000, &s, 1);
+        node.submit(&[&r2_s1]);
+        for n in 1..GAP_BOUND {
+            let b = node.tick().await;
+            assert!(!carries(&b, &e_s0) && !carries(&b, &r2_s1), "{name}");
+            assert!(
+                node.held(&e_s0) && node.held(&r2_s1),
+                "{name}: selection {n}"
+            );
+        }
+        let b = node.tick().await;
+        assert!(!carries(&b, &e_s0) && !carries(&b, &r2_s1), "{name}");
+        for t in [&e_s0, &r2_s1] {
+            assert!(!node.held(t), "{name}: evicted at the bound");
+            assert!(node.receipt(t).is_none(), "{name}: no receipt");
+        }
+        assert_eq!(node.account_nonce(&r1), 0, "{name}");
+        assert_eq!(node.messaging_nonce(&s), 0, "{name}");
+        let resent = relayed(&r2, relay_nonce(&node, &r2), 2_000, &s, 0);
+        node.submit(&[&resent]);
+        let b = node.tick().await;
+        assert!(carries(&b, &resent), "{name}");
+        assert_eq!(node.status(&resent), Some(TxStatus::Success), "{name}");
+        assert_eq!(node.messaging_nonce(&s), 1, "{name}");
     }
 }
 
@@ -495,7 +712,8 @@ async fn gapped_transactions_never_take_the_block_from_others() {
 /// is carried to its refusal and `r2`'s other two transactions are delivered,
 /// and a later user's envelope through `r2` in the block after. Below the gate
 /// `r2`'s envelopes advance nothing and its other two are delivered at once.
-/// At every configuration.
+/// `r1`'s own envelope, above `r1`'s own gap, is evicted at its
+/// `GAP_BOUND`-th selection with no receipt. At every configuration.
 #[tokio::test]
 async fn a_gap_never_holds_another_sponsors_queue_beyond_the_bound() {
     for gates in matrix() {
@@ -522,9 +740,10 @@ async fn a_gap_never_holds_another_sponsors_queue_beyond_the_bound() {
         let b = node.tick().await;
         assert!(carries(&b, &r2_v0), "{name}");
         assert_eq!(node.status(&r2_v0), Some(TxStatus::Success), "{name}");
-        // r1's own envelope waits for r1's own nonce 0.
+        // r1's own envelope, above r1's own gap, is evicted with no receipt.
+        assert!(BOUND + 1 >= GAP_BOUND);
         assert_eq!(node.status(&r1_s0), None, "{name}");
-        assert!(node.held(&r1_s0), "{name}");
+        assert!(!node.held(&r1_s0), "{name}: evicted, capacity released");
     }
 }
 

@@ -16,6 +16,10 @@
 //! later transactions follow. The count lives in this node's pool only.
 //! Below the accounting gate nothing is counted.
 //!
+//! The transaction the wait is on, above its own account's gap, is held
+//! directly and is evicted at its `GAP_HOLD_SELECTIONS`-th selection (at
+//! every height); each case says where that bound comes first.
+//!
 //! Every case runs under the 14 gate configurations of [`matrix`], or says
 //! why it runs under fewer.
 use std::collections::HashMap;
@@ -33,7 +37,9 @@ use sumchain_primitives::{
     sponsored_send_v2_signing_preimage, Block, Hash, MessagingOperation, Receipt,
     SignedTransaction, SponsoredMessage, TransactionV2, TxPayload, TxStatus,
 };
-use sumchain_state::mempool::{InclusionGates, InclusionPolicy, CROSS_ACCOUNT_WAIT_SELECTIONS};
+use sumchain_state::mempool::{
+    InclusionGates, InclusionPolicy, CROSS_ACCOUNT_WAIT_SELECTIONS, GAP_HOLD_SELECTIONS,
+};
 use sumchain_state::{Mempool, MempoolConfig, StateManager};
 use sumchain_storage::{Database, MessagingStore, ReceiptStore};
 use tempfile::TempDir;
@@ -396,6 +402,17 @@ impl Node {
         self.mempool.cross_account_wait_count(&t.hash())
     }
 
+    fn gap_count(&self, t: &SignedTransaction) -> u32 {
+        self.mempool.gap_hold_count(&t.hash())
+    }
+
+    /// `t` leaves the pool and is admitted again, as a re-sent transaction
+    /// is: its counts start from nothing.
+    fn resent(&self, t: &SignedTransaction) {
+        self.mempool.remove(&t.hash());
+        self.submit(&[t]);
+    }
+
     /// One selection, as `run_block_producer` makes it, without proposing a
     /// block: what it offers.
     fn select(&self) -> Vec<Hash> {
@@ -468,6 +485,7 @@ fn hashes(txs: &[SignedTransaction]) -> Vec<Hash> {
 }
 
 const K: u32 = CROSS_ACCOUNT_WAIT_SELECTIONS;
+const B: u32 = GAP_HOLD_SELECTIONS;
 
 /// The first block, from the case's, at which the accounting gate is open.
 fn first_open(gates: &Gates) -> Option<u64> {
@@ -491,7 +509,11 @@ fn carries(b: &Block, t: &SignedTransaction) -> bool {
 /// sequence (below it), and `r1`'s and `r3`'s next transactions follow in the
 /// same block. `r2`'s own envelope waits for `r2`'s own nonce 0 and is then
 /// delivered (or, after `u`'s envelope 1 executed out of sequence, evicted as
-/// stale). Below the gate nothing is counted, carried or evicted.
+/// stale). Below the gate nothing is counted or carried: `r2`'s envelope for
+/// `u`, `r1`'s for `v` and `r3`'s transfer are above their own accounts' gaps
+/// (no relayed envelope advances a nonce there), and at their `B`-th
+/// selection they are evicted with `u`'s and `v`'s later envelopes, all with
+/// no receipt.
 #[tokio::test]
 async fn a_wait_on_another_account_ends_within_the_bound_for_both_causes() {
     for gates in matrix() {
@@ -509,13 +531,15 @@ async fn a_wait_on_another_account_ends_within_the_bound_for_both_causes() {
         node.submit(&case);
 
         let Some(open) = first_open(&gates) else {
-            for _ in 0..(K + 3) {
+            for n in 1..=(K + 3) {
                 let b = node.tick().await;
                 assert!(case.iter().all(|t| !carries(&b, t)), "{name}");
+                for t in case {
+                    assert_eq!(node.held(t), n < B, "{name}: selection {n}");
+                }
             }
             for t in case {
                 assert_eq!(node.status(t), None, "{name}");
-                assert!(node.held(t), "{name}");
                 assert_eq!(
                     node.count(t),
                     0,
@@ -586,10 +610,13 @@ async fn a_wait_on_another_account_ends_within_the_bound_for_both_causes() {
 
 /// `r1` holds only its nonce 1 (`v`'s envelope 0); `v`'s envelope 1 and then
 /// `u`'s envelope 0 go through `r2`. From the accounting gate `v`'s envelope 1
-/// waits on `r1`'s gap and is counted; when `r1` fills its nonce 0 one block
-/// before the bound, all three are delivered in sequence and nothing is
-/// refused. Below the gate (where `r2`'s envelopes advance no nonce, so `r2`
-/// fills its nonce 0 too) nothing is counted and all three are delivered.
+/// waits on `r1`'s gap and is counted; `r1`'s envelope is above `r1`'s own
+/// gap from the case's first block and is counted toward `B` at every height.
+/// When `r1` fills its nonce 0 one block before the earlier of the two
+/// bounds, all three are delivered in sequence and nothing is refused or
+/// evicted. Below the gate (where `r2`'s envelopes advance no nonce, so `r2`
+/// fills its nonce 0 too) nothing is counted toward `K` and all three are
+/// delivered.
 #[tokio::test]
 async fn an_earlier_envelope_carried_within_the_bound_leaves_nothing_refused() {
     for gates in matrix() {
@@ -603,7 +630,9 @@ async fn an_earlier_envelope_carried_within_the_bound_leaves_nothing_refused() {
         let case = [&r1_v0, &r2_v1, &r2_u0];
         node.submit(&case);
         let open = first_open(&gates);
-        let last_wait = open.map_or(CASE_BLOCK + 1, |f| f + u64::from(K) - 2);
+        let last_wait = open
+            .map_or(CASE_BLOCK + 1, |f| f + u64::from(K) - 2)
+            .min(CASE_BLOCK + u64::from(B) - 2);
         while node.next_height() <= last_wait {
             let h = node.next_height();
             let b = node.tick().await;
@@ -613,6 +642,11 @@ async fn an_earlier_envelope_carried_within_the_bound_leaves_nothing_refused() {
                 _ => 0,
             };
             assert_eq!(node.count(&r2_v1), expected, "{name}: block {h}");
+            assert_eq!(
+                node.gap_count(&r1_v0),
+                (h - CASE_BLOCK + 1) as u32,
+                "{name}: block {h}"
+            );
         }
         let mut fills = vec![transfer(&r1, 0, 1_000)];
         if !gates.accounting_at(node.next_height()) {
@@ -639,7 +673,9 @@ async fn an_earlier_envelope_carried_within_the_bound_leaves_nothing_refused() {
 /// only `K` selections later. At `K` it is offered (out of `v`'s sequence),
 /// after `r2`'s transfer. Once `r1` fills its gap, a block carries `e` in
 /// sequence and its count is gone. Below the gate (the gates absent) nothing
-/// is counted and `e` is never offered before `v`'s envelope 0.
+/// is counted and `e` is never offered before `v`'s envelope 0. `r1`'s
+/// envelope, above `r1`'s own gap, is re-sent before every selection (its own
+/// count toward `B` starts again; `e`'s count is what this case follows).
 #[tokio::test]
 async fn the_count_resets_on_carry_on_leaving_the_pool_and_when_the_wait_stops() {
     let configs: Vec<Gates> = matrix()
@@ -659,17 +695,20 @@ async fn the_count_resets_on_carry_on_leaving_the_pool_and_when_the_wait_stops()
         let c = |n: u32| if counting { n } else { 0 };
 
         for n in 1..K {
+            node.resent(&r1_v0);
             let offered = node.select();
             assert!(!offered.contains(&e.hash()), "{name}: selection {n}");
             assert_eq!(node.count(&e), c(n), "{name}: selection {n}");
         }
         // It stops waiting on another account: r2's transfer leaves the pool.
         node.mempool.remove(&t.hash());
+        node.resent(&r1_v0);
         let offered = node.select();
         assert!(!offered.contains(&e.hash()), "{name}");
         assert_eq!(node.count(&e), 0, "{name}: reset, no longer waiting");
         node.submit(&[&t]);
         for n in 1..K {
+            node.resent(&r1_v0);
             let offered = node.select();
             assert!(!offered.contains(&e.hash()), "{name}: again, selection {n}");
             assert_eq!(node.count(&e), c(n), "{name}: again, selection {n}");
@@ -679,6 +718,7 @@ async fn the_count_resets_on_carry_on_leaving_the_pool_and_when_the_wait_stops()
         assert_eq!(node.count(&e), 0, "{name}: reset, left the pool");
         node.submit(&[&e]);
         for n in 1..=K {
+            node.resent(&r1_v0);
             let offered = node.select();
             assert_eq!(node.count(&e), c(n), "{name}: once more, selection {n}");
             let released = counting && n == K;
@@ -708,11 +748,13 @@ async fn the_count_resets_on_carry_on_leaving_the_pool_and_when_the_wait_stops()
     }
 }
 
-/// The count is not persisted. Inside history, `r2`'s envelope for `v` waits
-/// on `r1`'s gap for `K - 1` blocks; the node restarts on its own database and
-/// its pool takes the same transactions back; the count starts from nothing,
-/// so the envelope is carried to its refusal only at the `K`-th block after
-/// the restart, with `r2`'s next transaction behind it.
+/// The counts are not persisted. Inside history, `r2`'s envelope for `v`
+/// waits on `r1`'s gap for `K - 1` blocks, and `r1`'s envelope is held above
+/// that gap as long; the node restarts on its own database and its pool takes
+/// the same transactions back; both counts start from nothing, so the
+/// envelope is carried to its refusal only at the `K`-th block after the
+/// restart, with `r2`'s next transaction behind it, and `r1`'s envelope is
+/// evicted, with no receipt, only at the `B`-th.
 #[tokio::test]
 async fn a_restarted_node_counts_from_nothing() {
     let gates = matrix()
@@ -726,17 +768,22 @@ async fn a_restarted_node_counts_from_nothing() {
     let r2_v1 = relayed(&r2, 0, 2_200, &v, 1);
     let r2_u0 = relayed(&r2, 1, 2_100, &u, 0);
     node.submit(&[&r1_v0, &r2_v1, &r2_u0]);
+    assert_eq!(K, B, "the case follows both counts together");
     for n in 1..K {
         node.tick().await;
         assert_eq!(node.count(&r2_v1), n);
+        assert_eq!(node.gap_count(&r1_v0), n);
     }
     let node = node.restarted();
     assert_eq!(node.engine.current_height(), CASE_BLOCK + u64::from(K) - 2);
     assert_eq!(node.count(&r2_v1), 0, "a new pool counts from nothing");
+    assert_eq!(node.gap_count(&r1_v0), 0, "a new pool counts from nothing");
     for n in 1..K {
         let b = node.tick().await;
         assert!(!carries(&b, &r2_v1), "after the restart, block {n}");
         assert_eq!(node.count(&r2_v1), n);
+        assert!(node.held(&r1_v0), "after the restart, block {n}");
+        assert_eq!(node.gap_count(&r1_v0), n);
     }
     let b = node.tick().await;
     assert!(carries(&b, &r2_v1));
@@ -745,8 +792,9 @@ async fn a_restarted_node_counts_from_nothing() {
     assert!(matches!(r.status, TxStatus::Failed(_)), "{:?}", r.status);
     assert!(r.fee_paid > 0);
     assert_eq!(node.status(&r2_u0), Some(TxStatus::Success));
+    assert_eq!(node.status(&r1_v0), None);
     assert!(
-        node.held(&r1_v0),
-        "r1's own envelope waits for r1's own nonce"
+        !node.held(&r1_v0),
+        "r1's own envelope, above r1's own gap, is evicted at the B-th block"
     );
 }
