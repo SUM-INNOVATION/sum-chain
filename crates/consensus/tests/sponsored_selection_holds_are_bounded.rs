@@ -99,6 +99,9 @@ impl Gates {
     fn accounting_at(&self, height: u64) -> bool {
         self.accounting.is_some_and(|gate| height >= gate)
     }
+    fn verification_at(&self, height: u64) -> bool {
+        self.verification.is_some_and(|gate| height >= gate)
+    }
 }
 
 /// The gates absent; set above the chain's history; set inside it; and
@@ -744,6 +747,84 @@ async fn a_gap_never_holds_another_sponsors_queue_beyond_the_bound() {
         assert!(BOUND + 1 >= GAP_BOUND);
         assert_eq!(node.status(&r1_s0), None, "{name}");
         assert!(!node.held(&r1_s0), "{name}: evicted, capacity released");
+    }
+}
+
+/// Where both bounds meet, the release wins. A full pool (6 places) evicts
+/// `v`'s envelope 0 (through `r1`, the lowest fee) for a gapped transaction
+/// at a higher fee; `v`'s envelope 1, relayed by `r2` at its nonce 0 with
+/// `r2`'s transfer at nonce 1 behind it, is then both beyond `v`'s first
+/// missing envelope nonce (held directly, counted toward `GAP_BOUND`) and
+/// waiting on an envelope no account carries (counted toward `BOUND`), from
+/// the same selection. At the third selection it is carried to its refusal
+/// (a charged `Failed` from the verification gate; out of `v`'s sequence
+/// below it), not evicted, and `r2`'s transfer follows in the same block; the
+/// gapped transactions are evicted in that selection. At every configuration
+/// where the accounting gate is open at the case's block.
+#[tokio::test]
+async fn where_both_bounds_meet_the_envelope_is_carried_to_its_refusal() {
+    let configs: Vec<Gates> = matrix()
+        .into_iter()
+        .filter(|g| g.accounting_at(CASE_BLOCK))
+        .collect();
+    assert!(!configs.is_empty());
+    assert_eq!(BOUND, GAP_BOUND);
+    for gates in configs {
+        let name = gates.name;
+        let node = Node::with_pool(gates, |c| MempoolConfig { max_size: 6, ..c });
+        node.set_up().await;
+        let (r1, r2, v) = (sponsor(0), sponsor(1), sender(1));
+        let r1_v0 = relayed(&r1, 0, 1_000, &v, 0);
+        let r2_v1 = relayed(&r2, 0, 2_200, &v, 1);
+        let r2_t = transfer(&r2, 1, 2_100);
+        node.submit(&[&r1_v0, &r2_v1, &r2_t]);
+        let k = stranger(0);
+        let gapped: Vec<SignedTransaction> = (1..=4u64)
+            .map(|n| transfer_amount(&k, n, 1_000_000_000, 1))
+            .collect();
+        node.submit(&gapped[..3].iter().collect::<Vec<_>>());
+        assert_eq!(node.mempool.len(), 6, "{name}: the pool is full");
+        node.submit(&[&gapped[3]]);
+        assert!(!node.held(&r1_v0), "{name}: evicted for a higher fee");
+        for n in 1..BOUND {
+            let b = node.tick().await;
+            assert!(b.transactions.is_empty(), "{name}: selection {n}");
+            assert_eq!(
+                node.mempool.cross_account_wait_count(&r2_v1.hash()),
+                n as u32,
+                "{name}"
+            );
+            assert_eq!(
+                node.mempool.gap_hold_count(&r2_v1.hash()),
+                n as u32,
+                "{name}"
+            );
+        }
+        let b = node.tick().await;
+        assert_eq!(
+            hashes(&b.transactions),
+            hashes(&[r2_v1.clone(), r2_t.clone()]),
+            "{name}: carried, with its account's next transaction behind it"
+        );
+        let r = node.receipt(&r2_v1).expect("carried");
+        if gates.verification_at(b.height()) {
+            assert!(
+                matches!(r.status, TxStatus::Failed(_)),
+                "{name}: {:?}",
+                r.status
+            );
+            assert!(r.fee_paid > 0, "{name}: one fee, to the sponsor");
+        } else {
+            assert_eq!(r.status, TxStatus::Success, "{name}");
+        }
+        assert_eq!(node.status(&r2_t), Some(TxStatus::Success), "{name}");
+        assert_eq!(node.account_nonce(&r2), 2, "{name}");
+        assert!(
+            gapped
+                .iter()
+                .all(|t| !node.held(t) && node.receipt(t).is_none()),
+            "{name}: the gapped transactions evicted"
+        );
     }
 }
 
