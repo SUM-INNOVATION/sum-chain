@@ -512,6 +512,16 @@ pub struct Mempool {
     /// account-nonce rule below the accounting gate, as before. See
     /// [`Mempool::with_inclusion_gates`].
     inclusion_gates: Option<InclusionGates>,
+    /// Per held sponsored envelope, how many of this node's selections in a
+    /// row, from the accounting gate on, have left it out only because its
+    /// named sender's earlier envelope is missing or held with another
+    /// account ([`CROSS_ACCOUNT_WAIT_SELECTIONS`]). Kept in memory only: a
+    /// restarted node counts from nothing.
+    cross_account_waits: RwLock<HashMap<Hash, u32>>,
+    /// The envelopes the last selection carried out of their named sender's
+    /// sequence after that many selections; the screen carries them so again
+    /// when the producer applies the policy to the block it builds.
+    released_envelopes: RwLock<HashSet<Hash>>,
 }
 
 /// Whether executing `tx` advances its sender's account nonce below
@@ -786,6 +796,42 @@ impl<'a> CombinedOrder<'a> {
     }
 }
 
+/// How many of this node's selections a sponsored envelope may be left out,
+/// from `messaging_fee_nonce_accounting_enabled_from_height` on, only because
+/// its named sender's earlier envelope is not carried with it — that envelope
+/// is not in the pool, or is held with another account (above that account's
+/// nonce gap, or with a cycle's victim) — while every earlier transaction of
+/// its own account is carried. At this many such selections in a row it is
+/// carried at its place in its own account's sequence without the earlier
+/// envelope, and takes its canonical refusal: from
+/// `messaging_sponsored_envelope_verification_enabled_from_height` on a
+/// charged failed receipt, its envelope nonce not being its sender's current
+/// one; below that gate it executes out of its sender's sequence. Its
+/// account's later transactions then follow it.
+///
+/// From the accounting gate on, each relayed envelope advances its sponsor's
+/// account nonce, so an envelope held behind another account's transaction
+/// holds its own sponsor's whole queue: without a bound, for as long as the
+/// other account leaves its nonce unfilled or the sender does not re-send a
+/// missing envelope. This bounds that wait (no queue is held indefinitely)
+/// without restricting admission.
+///
+/// Why three: the selection right after a cycle's victim is evicted must not
+/// offer what depends on it, and a gap that is about to be filled
+/// (a sponsor's next relayed transaction, a sender's re-send) is given more
+/// than one further selection to close before anything is refused; three
+/// bounds every such wait at three of this node's proposals.
+///
+/// What a premature carry costs: one fee, charged to the envelope's sponsor.
+/// The named sender consumes nothing: an envelope whose nonce is not its
+/// sender's current one fails before anything of the sender is touched, and
+/// the sender's client signs the envelope again once its earlier envelope has
+/// executed.
+///
+/// Node-local proposer selection only: block validity, execution and import
+/// are unchanged, and below the accounting gate nothing is counted.
+pub const CROSS_ACCOUNT_WAIT_SELECTIONS: u32 = 3;
+
 /// What [`in_combined_order`] leaves out of a block.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct LeftOut {
@@ -846,14 +892,20 @@ fn in_combined_order(
     accounting: bool,
     committed: &HashMap<Address, Option<Nonce>>,
 ) -> (Vec<SignedTransaction>, LeftOut) {
-    let seq: Vec<Sequenced> = carried
-        .iter()
-        .map(|tx| Sequenced {
-            outer: tx.sender(),
-            key: (tx.nonce(), advances_nonce(tx, accounting)),
-            envelope: sponsored_identity(tx),
-        })
-        .collect();
+    in_combined_order_releasing(carried, accounting, committed, &HashSet::new())
+}
+
+/// [`in_combined_order`], with the envelopes in `released` placed in their
+/// own account's sequence only: their named sender's sequence does not hold
+/// them, and nothing that leaves with their named sender's earlier envelopes
+/// takes them ([`CROSS_ACCOUNT_WAIT_SELECTIONS`]).
+fn in_combined_order_releasing(
+    carried: Vec<SignedTransaction>,
+    accounting: bool,
+    committed: &HashMap<Address, Option<Nonce>>,
+    released: &HashSet<Hash>,
+) -> (Vec<SignedTransaction>, LeftOut) {
+    let seq: Vec<Sequenced> = sequenced(&carried, accounting, released);
     let mut order = CombinedOrder::new(&seq).with_committed(committed);
     let mut placed = Vec::with_capacity(seq.len());
     let mut left_out = LeftOut::default();
@@ -890,6 +942,26 @@ fn in_combined_order(
         .filter_map(|i| carried[i].take())
         .collect();
     (ordered, left_out)
+}
+
+/// Each transaction's place in the two sequences, with the envelopes in
+/// `released` taken out of their named sender's sequence.
+fn sequenced(
+    txs: &[SignedTransaction],
+    accounting: bool,
+    released: &HashSet<Hash>,
+) -> Vec<Sequenced> {
+    txs.iter()
+        .map(|tx| Sequenced {
+            outer: tx.sender(),
+            key: (tx.nonce(), advances_nonce(tx, accounting)),
+            envelope: if released.contains(&tx.hash()) {
+                None
+            } else {
+                sponsored_identity(tx)
+            },
+        })
+        .collect()
 }
 
 /// What [`Mempool::pool_holds`] holds back from the next block.
@@ -930,6 +1002,8 @@ impl Mempool {
             messaging_quota_admission: None,
             relayed_envelopes: RwLock::new(HashMap::new()),
             inclusion_gates: None,
+            cross_account_waits: RwLock::new(HashMap::new()),
+            released_envelopes: RwLock::new(HashSet::new()),
         }
     }
 
@@ -1963,6 +2037,9 @@ impl Mempool {
             }
         }
 
+        self.cross_account_waits.write().remove(hash);
+        self.released_envelopes.write().remove(hash);
+
         debug!("Removed tx {} from mempool", hash);
 
         Some(entry.tx)
@@ -2048,7 +2125,22 @@ impl Mempool {
                 .collect()
         };
         let committed = self.committed_account_nonces(pool.iter());
-        let holds = self.pool_holds(&pool, rules.accounting, &committed);
+        let mut holds = self.pool_holds(&pool, rules.accounting, &committed);
+        // From the accounting gate, an envelope that has waited on another
+        // account for CROSS_ACCOUNT_WAIT_SELECTIONS selections is released
+        // in this one: carried in its own account's sequence only.
+        let released =
+            self.released_cross_account_waits(rules.accounting, &pool, &holds, &committed);
+        if !released.is_empty() {
+            info!(
+                "Inclusion policy: carrying {} envelope(s) that waited {} selections in a row \
+                 on another account; each takes its refusal and its account's queue moves",
+                released.len(),
+                CROSS_ACCOUNT_WAIT_SELECTIONS
+            );
+            holds = self.pool_holds_releasing(&pool, rules.accounting, &committed, &released);
+        }
+        *self.released_envelopes.write() = released.clone();
         if !holds.held.is_empty() {
             info!(
                 "Inclusion policy: leaving {} transaction(s) above a gap in their account's \
@@ -2057,8 +2149,9 @@ impl Mempool {
             );
         }
         let (carried, evict) = self.screen_for_inclusion(
-            pool.into_iter()
-                .filter(|tx| !holds.held.contains(&tx.hash())),
+            pool.iter()
+                .filter(|tx| !holds.held.contains(&tx.hash()))
+                .cloned(),
             max_count,
             rules.forms,
         );
@@ -2070,7 +2163,11 @@ impl Mempool {
             );
             self.remove_batch(&evict);
         }
-        let (ordered, left_out) = in_combined_order(carried, rules.accounting, &committed);
+        let (ordered, left_out) = if released.is_empty() {
+            in_combined_order(carried, rules.accounting, &committed)
+        } else {
+            in_combined_order_releasing(carried, rules.accounting, &committed, &released)
+        };
         if !left_out.gapped.is_empty() {
             debug!(
                 "Inclusion policy: leaving {} transaction(s) whose account's earlier nonce was \
@@ -2088,7 +2185,180 @@ impl Mempool {
             );
             self.remove_batch(&left_out.victims);
         }
+        self.count_cross_account_waits(
+            rules.accounting,
+            &pool,
+            &ordered,
+            &left_out,
+            &evict,
+            &released,
+            &committed,
+        );
         ordered
+    }
+
+    /// How many selections in a row `hash` has been counted as waiting on
+    /// another account ([`CROSS_ACCOUNT_WAIT_SELECTIONS`]); 0 when it is not.
+    pub fn cross_account_wait_count(&self, hash: &Hash) -> u32 {
+        self.cross_account_waits
+            .read()
+            .get(hash)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The envelopes to release in this selection: from the accounting gate
+    /// on, those that the pool view `holds` holds only because of another
+    /// account ([`Self::waiting_on_another_account`], with everything not
+    /// held taken as carried) and that were counted in the
+    /// `CROSS_ACCOUNT_WAIT_SELECTIONS - 1` selections before this one.
+    fn released_cross_account_waits(
+        &self,
+        accounting: bool,
+        pool: &[SignedTransaction],
+        holds: &PoolHolds,
+        committed: &HashMap<Address, Option<Nonce>>,
+    ) -> HashSet<Hash> {
+        if !accounting {
+            return HashSet::new();
+        }
+        let carriable: Vec<&SignedTransaction> = pool
+            .iter()
+            .filter(|tx| !holds.held.contains(&tx.hash()))
+            .collect();
+        let waiting = self.waiting_on_another_account(
+            pool.iter().filter(|tx| holds.held.contains(&tx.hash())),
+            carriable.iter().copied(),
+            committed,
+        );
+        let counts = self.cross_account_waits.read();
+        waiting
+            .into_iter()
+            .filter(|hash| {
+                counts.get(hash).copied().unwrap_or(0) + 1 >= CROSS_ACCOUNT_WAIT_SELECTIONS
+            })
+            .collect()
+    }
+
+    /// Counts this selection for [`CROSS_ACCOUNT_WAIT_SELECTIONS`], from its
+    /// final placement `ordered`: each envelope of the pool left out (other
+    /// than a cycle's victim or a transaction evicted) that waits only on
+    /// another account, and each envelope `released` in it, has its count
+    /// raised by one; every other count is dropped. A released envelope keeps
+    /// its count until it leaves the pool, so that it is released again if
+    /// the block that carries it is not made. Below the accounting gate, and
+    /// without an inclusion policy, nothing is counted.
+    #[allow(clippy::too_many_arguments)]
+    fn count_cross_account_waits(
+        &self,
+        accounting: bool,
+        pool: &[SignedTransaction],
+        ordered: &[SignedTransaction],
+        left_out: &LeftOut,
+        evicted: &[Hash],
+        released: &HashSet<Hash>,
+        committed: &HashMap<Address, Option<Nonce>>,
+    ) {
+        if !accounting || self.inclusion_policy.is_none() {
+            self.cross_account_waits.write().clear();
+            return;
+        }
+        let placed: HashSet<Hash> = ordered.iter().map(|tx| tx.hash()).collect();
+        let gone: HashSet<Hash> = left_out
+            .victims
+            .iter()
+            .chain(evicted.iter())
+            .copied()
+            .collect();
+        let waiting = self.waiting_on_another_account(
+            pool.iter().filter(|tx| {
+                let hash = tx.hash();
+                !placed.contains(&hash) && !gone.contains(&hash)
+            }),
+            ordered.iter(),
+            committed,
+        );
+        let counted: HashSet<Hash> = waiting.union(released).copied().collect();
+        let mut counts = self.cross_account_waits.write();
+        counts.retain(|hash, _| counted.contains(hash));
+        for hash in counted {
+            *counts.entry(hash).or_insert(0) += 1;
+        }
+    }
+
+    /// The sponsored envelopes among `left` that wait only on another account
+    /// when `carried` are the transactions carried: every earlier transaction
+    /// of their own account is carried (the account's nonce, from its
+    /// committed one through the carried transactions that advance it,
+    /// reaches theirs), and among their named sender's envelopes from its
+    /// committed messaging nonce up to theirs at least one is not carried,
+    /// each of those is missing from the pool or relayed by another account,
+    /// and none is relayed by their own.
+    fn waiting_on_another_account<'a>(
+        &self,
+        left: impl Iterator<Item = &'a SignedTransaction>,
+        carried: impl Iterator<Item = &'a SignedTransaction>,
+        committed: &HashMap<Address, Option<Nonce>>,
+    ) -> HashSet<Hash> {
+        let Some(policy) = &self.inclusion_policy else {
+            return HashSet::new();
+        };
+        let mut carried_hashes: HashSet<Hash> = HashSet::new();
+        let mut advancing: HashMap<Address, BTreeSet<Nonce>> = HashMap::new();
+        for tx in carried {
+            carried_hashes.insert(tx.hash());
+            if advances_nonce(tx, true) {
+                advancing.entry(tx.sender()).or_default().insert(tx.nonce());
+            }
+        }
+        let reach = |account: &Address| -> Option<Nonce> {
+            let mut n = (*committed.get(account)?)?;
+            if let Some(nonces) = advancing.get(account) {
+                while nonces.contains(&n) {
+                    n += 1;
+                }
+            }
+            Some(n)
+        };
+        let messaging = MessagingStore::new(&policy.db);
+        let mut messaging_nonces: HashMap<Address, Option<u64>> = HashMap::new();
+        let txs = self.txs.read();
+        let in_flight = self.sponsored_in_flight.read();
+        let mut waiting = HashSet::new();
+        for tx in left {
+            let Some((named, nonce)) = sponsored_identity(tx) else {
+                continue;
+            };
+            let own = tx.sender();
+            if reach(&own) != Some(tx.nonce()) {
+                continue;
+            }
+            let from = *messaging_nonces
+                .entry(named)
+                .or_insert_with(|| messaging.get_sender_nonce(&named).ok());
+            let Some(from) = from else {
+                continue;
+            };
+            let pending = in_flight.get(&named);
+            let mut blocked = false;
+            let mut by_own_account = false;
+            for earlier in from..nonce {
+                match pending.and_then(|nonces| nonces.get(&earlier)) {
+                    None => blocked = true,
+                    Some(carrier) if carried_hashes.contains(carrier) => {}
+                    Some(carrier) => {
+                        blocked = true;
+                        if txs.get(carrier).is_some_and(|e| e.tx.sender() == own) {
+                            by_own_account = true;
+                        }
+                    }
+                }
+            }
+            if blocked && !by_own_account {
+                waiting.insert(tx.hash());
+            }
+        }
+        waiting
     }
 
     /// The committed account nonce of each account that signs one of
@@ -2146,17 +2416,23 @@ impl Mempool {
         accounting: bool,
         committed: &HashMap<Address, Option<Nonce>>,
     ) -> PoolHolds {
+        self.pool_holds_releasing(pool, accounting, committed, &HashSet::new())
+    }
+
+    /// [`Self::pool_holds`], with the envelopes in `released` out of their
+    /// named sender's sequence: each is held only by its own account
+    /// ([`CROSS_ACCOUNT_WAIT_SELECTIONS`]).
+    fn pool_holds_releasing(
+        &self,
+        pool: &[SignedTransaction],
+        accounting: bool,
+        committed: &HashMap<Address, Option<Nonce>>,
+        released: &HashSet<Hash>,
+    ) -> PoolHolds {
         let Some(policy) = &self.inclusion_policy else {
             return PoolHolds::default();
         };
-        let seq: Vec<Sequenced> = pool
-            .iter()
-            .map(|tx| Sequenced {
-                outer: tx.sender(),
-                key: (tx.nonce(), advances_nonce(tx, accounting)),
-                envelope: sponsored_identity(tx),
-            })
-            .collect();
+        let seq = sequenced(pool, accounting, released);
         let mut order = CombinedOrder::new(&seq).with_committed(committed);
         let account_gapped = order.beyond_a_gap(committed);
         let messaging = MessagingStore::new(&policy.db);
@@ -2229,8 +2505,10 @@ impl Mempool {
     /// first seen is deferred and carried after the pass if the sequence has
     /// reached it by then, so a sender's run of envelopes goes into one block
     /// whatever the fee order put them in; otherwise it waits for a later
-    /// block. A storage read that fails leaves the transaction out of this
-    /// block and in the pool.
+    /// block — unless the last selection released it after it waited
+    /// [`CROSS_ACCOUNT_WAIT_SELECTIONS`] selections on another account, when
+    /// it is carried out of sequence. A storage read that fails leaves the
+    /// transaction out of this block and in the pool.
     ///
     /// Stops once `max_count` transactions are carried.
     fn screen_for_inclusion(
@@ -2314,7 +2592,13 @@ impl Mempool {
                         continue;
                     }
                     if nonce > next {
-                        deferred.push((tx, sender, nonce));
+                        if self.released_envelopes.read().contains(&hash) {
+                            // Released: carried out of its sender's sequence,
+                            // which does not move for it.
+                            carried.push(tx);
+                        } else {
+                            deferred.push((tx, sender, nonce));
+                        }
                         continue;
                     }
                     sequence.insert(sender, (committed, next + 1));
@@ -2392,6 +2676,8 @@ impl Mempool {
         self.education_in_flight.write().clear();
         self.sponsored_in_flight.write().clear();
         self.relayed_envelopes.write().clear();
+        self.cross_account_waits.write().clear();
+        self.released_envelopes.write().clear();
         info!("Mempool cleared");
     }
 

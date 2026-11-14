@@ -6,6 +6,9 @@
 //!   is decided before the pool is cut to a block's size: with more such
 //!   transactions than a block carries, at a higher fee, honest transactions
 //!   are carried in every block.
+//! - From the accounting gate, a sponsor whose envelope waits on another
+//!   account's gap is carried to that envelope's refusal within
+//!   `CROSS_ACCOUNT_WAIT_SELECTIONS` selections, and its queue moves.
 //! - The cycle's victim is the later head on the cycle when a non-head pays
 //!   the lowest fee, and the cycle's other transactions are delivered once
 //!   the victim's nonce is filled.
@@ -26,6 +29,7 @@ use sumchain_primitives::{
 };
 use sumchain_state::mempool::{
     advances_nonce_below_accounting_gate, InclusionGates, InclusionPolicy,
+    CROSS_ACCOUNT_WAIT_SELECTIONS,
 };
 use sumchain_state::{Mempool, MempoolConfig, StateManager};
 use sumchain_storage::{Database, MessagingStore, ReceiptStore};
@@ -434,6 +438,10 @@ fn relay_nonce(node: &Node, k: &KeyPair) -> u64 {
     nonce
 }
 
+/// How many of this node's selections an envelope waits on another account
+/// before it is carried to its refusal.
+const BOUND: u64 = CROSS_ACCOUNT_WAIT_SELECTIONS as u64;
+
 /// The block's transaction limit (`max_txs_per_block`, which `tick` selects
 /// up to).
 const LIMIT: usize = 1_000;
@@ -477,6 +485,46 @@ async fn gapped_transactions_never_take_the_block_from_others() {
             );
         }
         assert!(gapped.iter().all(|t| node.receipt(t).is_none()), "{name}");
+    }
+}
+
+/// `r1` holds only its nonce 1 (`s`'s envelope 0) and its nonce
+/// 0 never comes; `s`'s envelope 1, `u`'s envelope 0 and a transfer go
+/// through `r2` at the nonces its relay allocates. From the accounting gate
+/// `s`'s envelope 1 holds `r2`'s queue behind `r1`'s gap; within the bound it
+/// is carried to its refusal and `r2`'s other two transactions are delivered,
+/// and a later user's envelope through `r2` in the block after. Below the gate
+/// `r2`'s envelopes advance nothing and its other two are delivered at once.
+/// At every configuration.
+#[tokio::test]
+async fn a_gap_never_holds_another_sponsors_queue_beyond_the_bound() {
+    for gates in matrix() {
+        let name = gates.name;
+        let node = Node::new(gates);
+        node.set_up().await;
+        let (r1, r2) = (sponsor(0), sponsor(1));
+        let (s, u, v) = (sender(0), sender(1), sender(2));
+        let r1_s0 = relayed(&r1, 1, 2_000, &s, 0);
+        node.submit(&[&r1_s0]);
+        let r2_s1 = relayed(&r2, relay_nonce(&node, &r2), 2_000, &s, 1);
+        node.submit(&[&r2_s1]);
+        let r2_u0 = relayed(&r2, relay_nonce(&node, &r2), 2_000, &u, 0);
+        node.submit(&[&r2_u0]);
+        let r2_t = transfer(&r2, relay_nonce(&node, &r2), 1_000);
+        node.submit(&[&r2_t]);
+        for _ in 0..BOUND {
+            node.tick().await;
+        }
+        assert_eq!(node.status(&r2_u0), Some(TxStatus::Success), "{name}");
+        assert_eq!(node.status(&r2_t), Some(TxStatus::Success), "{name}");
+        let r2_v0 = relayed(&r2, relay_nonce(&node, &r2), 2_000, &v, 0);
+        node.submit(&[&r2_v0]);
+        let b = node.tick().await;
+        assert!(carries(&b, &r2_v0), "{name}");
+        assert_eq!(node.status(&r2_v0), Some(TxStatus::Success), "{name}");
+        // r1's own envelope waits for r1's own nonce 0.
+        assert_eq!(node.status(&r1_s0), None, "{name}");
+        assert!(node.held(&r1_s0), "{name}");
     }
 }
 

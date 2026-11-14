@@ -517,7 +517,10 @@ fn fill_nonce_zero(
 /// block, the cycle's victim (`r2_v1`) is evicted and the three that depend
 /// on it are held; the next block offers none of them (none takes
 /// `InvalidNonce` or a refusal: `r2`'s nonce 0 is the gap); once `r2` fills
-/// its nonce 0 they are delivered, in order. Below the gate the same
+/// its nonce 0 within the bound they are delivered, in order (the bound on a
+/// wait for another account, `CROSS_ACCOUNT_WAIT_SELECTIONS`, counts from the
+/// victim's block, so the gap is filled in the block after the next one).
+/// Below the gate the same
 /// submissions leave both sponsors' nonce-1 envelopes beyond a gap (a relayed
 /// envelope advances nothing there), so all four are held, and nothing is
 /// evicted until both sponsors fill their nonce 0, when the cycle forms at the
@@ -546,8 +549,8 @@ async fn the_block_after_a_cycle_offers_nothing_into_the_victims_gap() {
             gates.name
         );
         assert!(watch.delivered("unrelated_envelope"), "{}", gates.name);
-        // Two more blocks with nothing new to offer.
-        for _ in 0..2 {
+        // One more block with nothing new to offer, inside the bound.
+        for _ in 0..1 {
             let (h, carried) = watch.tick().await;
             assert!(carried.is_empty(), "{}: block {h}: {carried:?}", gates.name);
         }
@@ -555,7 +558,7 @@ async fn the_block_after_a_cycle_offers_nothing_into_the_victims_gap() {
         match watch.evicted.as_slice() {
             [] => {
                 // Below the accounting gate throughout: all four held.
-                assert!(!gates.accounting_at(CASE_BLOCK + 2), "{}", gates.name);
+                assert!(!gates.accounting_at(CASE_BLOCK + 1), "{}", gates.name);
                 for name in cycle {
                     assert!(watch.held(name), "{}: {name}", gates.name);
                 }
@@ -602,8 +605,8 @@ async fn the_block_after_a_cycle_offers_nothing_into_the_victims_gap() {
 /// `w` (a third sponsor) relays `u`'s envelope 2 at the lowest
 /// fee: it waits on the cycle (through `u`'s envelope 1) but is not on it,
 /// and is never the victim. Where the cycle forms, `r2_v1` is evicted and
-/// `w`'s envelope is held with the others; once the gap is filled it is
-/// delivered after `u`'s envelope 1.
+/// `w`'s envelope is held with the others; once the gap is filled, within the
+/// bound, it is delivered after `u`'s envelope 1.
 #[tokio::test]
 async fn a_transaction_that_only_waits_on_a_cycle_is_never_evicted() {
     for gates in matrix() {
@@ -614,7 +617,7 @@ async fn a_transaction_that_only_waits_on_a_cycle_is_never_evicted() {
         watch.add("w_u2", relayed(&w, 0, 1_000, &sender(0), 2));
         let all: Vec<SignedTransaction> = watch.case.iter().map(|(_, t)| t.clone()).collect();
         node.submit(&all.iter().collect::<Vec<_>>());
-        for _ in 0..3 {
+        for _ in 0..2 {
             let (h, carried) = watch.tick().await;
             assert!(carried.is_empty(), "{}: block {h}: {carried:?}", gates.name);
         }
@@ -627,7 +630,7 @@ async fn a_transaction_that_only_waits_on_a_cycle_is_never_evicted() {
         );
         assert_eq!(
             watch.evicted.len(),
-            usize::from(gates.accounting_at(CASE_BLOCK + 2)),
+            usize::from(gates.accounting_at(CASE_BLOCK + 1)),
             "{}",
             gates.name
         );
@@ -657,7 +660,7 @@ async fn a_transaction_that_only_waits_on_a_cycle_is_never_evicted() {
 /// is the last sponsor's nonce 0. Everywhere: the unrelated pair is carried
 /// in the case's first block; exactly one transaction is ever evicted, that
 /// victim; nothing is offered into its gap; once the nonce-0 slots are
-/// filled every other transaction is delivered.
+/// filled, within the bound, every other transaction is delivered.
 #[tokio::test]
 async fn each_genuine_cycle_loses_only_its_victim() {
     const NAMES: [[&str; 2]; 4] = [
@@ -698,7 +701,7 @@ async fn each_genuine_cycle_loses_only_its_victim() {
                 vec!["unrelated_transfer", "unrelated_envelope"],
                 "{label}"
             );
-            for _ in 0..2 {
+            for _ in 0..1 {
                 let (h, carried) = watch.tick().await;
                 assert!(carried.is_empty(), "{label}: block {h}: {carried:?}");
             }
@@ -736,9 +739,11 @@ async fn each_genuine_cycle_loses_only_its_victim() {
 /// 0), and `v`'s envelope 1 and then `u`'s envelope 0 go through `r2`. Nothing
 /// of the three is offered (none takes `InvalidNonce` or a refusal), nothing
 /// is evicted, and an unrelated sponsor, its user and a bystander's transfer
-/// are carried. Once `r1` fills its nonce 0 (and below the accounting gate
-/// `r2` its own, which a relayed envelope does not advance there) the three
-/// are delivered.
+/// are carried. Once `r1` fills its nonce 0 within the bound (and below the
+/// accounting gate `r2` its own, which a relayed envelope does not advance
+/// there) the three are delivered. (Left unfilled, `r2`'s envelope is
+/// carried to its refusal at the bound and `r2`'s queue moves: see
+/// `sponsored_selection_holds_are_bounded.rs`.)
 #[tokio::test]
 async fn nothing_above_a_nonce_gap_is_offered_and_the_rest_is_carried() {
     for gates in matrix() {
@@ -769,7 +774,7 @@ async fn nothing_above_a_nonce_gap_is_offered_and_the_rest_is_carried() {
             "{}",
             gates.name
         );
-        for _ in 0..2 {
+        for _ in 0..1 {
             let (h, carried) = watch.tick().await;
             assert!(carried.is_empty(), "{}: block {h}: {carried:?}", gates.name);
         }

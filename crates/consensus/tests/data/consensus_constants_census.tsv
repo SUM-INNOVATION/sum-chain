@@ -209,6 +209,7 @@ crates/state/src/lib.rs	TX_WRITE_SET_BOUND_RECEIPT_CODE	EXCLUDE	receipt-detail	c
 crates/state/src/lib.rs	UNNAMED_POLICY_ID	COMMITTED	registry	0x2518
 crates/state/src/lib.rs	UNPAYABLE_ROYALTY_UNSUPPORTED	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
 crates/state/src/lib.rs	VERIFY_PROOF_UNSUPPORTED	EXCLUDE	telemetry	error/log text in *ExecutionResult.error, only printed via warn!/debug! (e.g. executor.rs:677); receipt carries a numeric code, root folds is_success+fee
+crates/state/src/mempool.rs	CROSS_ACCOUNT_WAIT_SELECTIONS	EXCLUDE	local-proposer	how many of this node's selections a sponsored envelope may wait on another account's transaction before it is carried to its refusal (mempool.rs select_for_block); node-local proposer selection, never hashed into a block, importers never read it
 crates/state/src/mempool.rs	STRING_FORM	EXCLUDE	local-proposer	the inclusion policy's refusal text for a string-form envelope (mempool.rs envelope_form_refusal); node-local admission and selection, never hashed into a block
 crates/state/src/mempool.rs	UNGATED	EXCLUDE	local-proposer	the inclusion policy's next-block rules without InclusionGates (mempool.rs NextBlockRules); node-local admission and proposer selection, importers never read it
 crates/state/src/messaging_executor.rs	MESSAGING_DAY_SECONDS	COMMITTED	registry	0x2519
