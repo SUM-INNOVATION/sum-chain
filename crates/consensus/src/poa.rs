@@ -1020,7 +1020,9 @@ impl PoAEngine {
             .as_ref()
             .map_or(0, |b| b.height() + 1);
         // Whether a relayed message advances its sponsor's account nonce in
-        // this block, for the runs a dropped transaction takes with it.
+        // this block, for the runs a dropped transaction takes with it. Judged
+        // once, at the height of the block being built, for both the
+        // screening pass and the fitting loop below.
         let accounting = sumchain_state::MessagingExecutor::fee_nonce_accounting_gate_open(
             &self.params,
             next_height,
@@ -1056,7 +1058,7 @@ impl PoAEngine {
         // screening verdict that turns out wrong costs a re-execution, never a
         // bad block — which is the whole reason the loop stays behind it rather
         // than being replaced by it.
-        let mut candidate_txs = self.screen_selection(transactions);
+        let mut candidate_txs = self.screen_selection(transactions, accounting);
         // Two budgets, spent independently: one for shrinks nobody is at fault
         // for, one for drops of a NAMED transaction. See
         // `MAX_REFUSED_TX_DROPS` for what sharing them cost.
@@ -1286,7 +1288,16 @@ impl PoAEngine {
     /// caller is entitled to, and a screening pass that guessed at them would
     /// be deciding a proposal's fate on a failure that was never about the
     /// proposal.
-    fn screen_selection(&self, transactions: Vec<SignedTransaction>) -> Vec<SignedTransaction> {
+    ///
+    /// `accounting` is whether the block being built is at or above
+    /// `messaging_fee_nonce_accounting_enabled_from_height`, judged once by
+    /// `create_block` for this pass and its fitting loop alike, so the runs a
+    /// refused transaction takes with it are the same in both.
+    fn screen_selection(
+        &self,
+        transactions: Vec<SignedTransaction>,
+        accounting: bool,
+    ) -> Vec<SignedTransaction> {
         if transactions.is_empty() {
             return transactions;
         }
@@ -1424,8 +1435,6 @@ impl PoAEngine {
         if !evict.is_empty() {
             self.mempool.remove_batch(&evict);
         }
-        let accounting =
-            sumchain_state::MessagingExecutor::fee_nonce_accounting_gate_open(&self.params, height);
         let survivors =
             Self::drop_all_with_sender_tails(&transactions, &drop_indices, keep_prefix, accounting);
         info!(
