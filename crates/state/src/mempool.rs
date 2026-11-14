@@ -760,6 +760,44 @@ impl<'a> CombinedOrder<'a> {
         out
     }
 
+    /// Leaves out every transaction left that depends on `taken`, which has
+    /// been taken already, and what depends on those in turn: its outer
+    /// sender's transactions at higher nonces when it advances the nonce (and
+    /// is not below its account's committed nonce, where that is known), and
+    /// its named sender's later envelopes ([`Self::leave_out`]).
+    fn leave_out_dependents(&mut self, taken: usize) -> Vec<usize> {
+        let seq = self.seq;
+        let t = &seq[taken];
+        let stale = self
+            .committed
+            .get(&t.outer)
+            .is_some_and(|committed| t.key.0 < *committed);
+        let mut first = Vec::new();
+        if t.key.1 && !stale {
+            if let Some(left) = self.by_outer.get(&t.outer) {
+                first.extend(
+                    left.iter()
+                        .filter(|((nonce, _), _)| *nonce > t.key.0)
+                        .map(|(_, j)| *j),
+                );
+            }
+        }
+        if let Some((named, nonce)) = t.envelope {
+            if let Some(left) = self.by_named.get(&named) {
+                first.extend(
+                    left.iter()
+                        .filter(|(later, _)| *later > nonce)
+                        .map(|(_, j)| *j),
+                );
+            }
+        }
+        let mut out = Vec::new();
+        for j in first {
+            out.extend(self.leave_out(j));
+        }
+        out
+    }
+
     /// Leaves `victim` out, and every transaction left that depends on it, in
     /// turn: its outer sender's transactions at higher nonces when it
     /// advances the nonce (and is not below its account's committed nonce,
@@ -2176,7 +2214,11 @@ impl Mempool {
     ///
     /// What waits is decided over the whole pool before the pool is cut to
     /// `max_count` ([`Self::pool_holds`]): a transaction that waits never
-    /// takes a place in the block from one that can be carried. Nothing waits
+    /// takes a place in the block from one that can be carried. The cut then
+    /// takes what can be carried account by account and named sender by named
+    /// sender ([`Self::within_the_block_limit`]): nothing enters it ahead of
+    /// its account's or its named sender's predecessor, and nothing that
+    /// depends on a transaction its account cannot pay for. Nothing waits
     /// without a bound: from the accounting gate an envelope that waits on
     /// another account is carried to its refusal after
     /// [`CROSS_ACCOUNT_WAIT_SELECTIONS`] selections, and at every height a
@@ -2232,13 +2274,20 @@ impl Mempool {
                 holds.held.len()
             );
         }
-        let (carried, evict) = self.screen_for_inclusion(
+        // The block's limit is applied account by account and named sender by
+        // named sender, never ahead of a predecessor (`within_the_block_limit`).
+        let candidates = self.within_the_block_limit(
             pool.iter()
                 .filter(|tx| !holds.held.contains(&tx.hash()))
-                .cloned(),
+                .cloned()
+                .collect(),
             max_count,
-            rules.forms,
+            rules.accounting,
+            &committed,
+            &released,
         );
+        let (carried, evict) =
+            self.screen_for_inclusion(candidates.into_iter(), max_count, rules.forms);
         if !evict.is_empty() {
             info!(
                 "Inclusion policy: evicting {} held transaction(s) the canonical chain has \
@@ -2594,6 +2643,120 @@ impl Mempool {
             }
         }
         waiting
+    }
+
+    /// The transactions of `candidates` (the pool less what it holds, in fee
+    /// order) that go to the screen for a block of at most `max_count`, in fee
+    /// order. Every one of them when they fit and each can pay for itself.
+    ///
+    /// They are taken one at a time as [`in_combined_order`] places them: of
+    /// those whose key is the lowest left for their account and, for an
+    /// envelope, whose envelope nonce is the lowest left for its named sender,
+    /// the earliest in fee order. So nothing is taken ahead of its account's
+    /// or its named sender's predecessor: a run is taken behind its cheapest
+    /// transaction so far, and later transactions priced above the cut never
+    /// take its places while their predecessor is below it, to be left out of
+    /// the block after the cut.
+    ///
+    /// A transaction its account cannot pay for — by the executor's check
+    /// before execution: the account's committed balance, less the amount and
+    /// fee of what was taken before it from the account, plus the amounts
+    /// transactions taken before it pay to the account, is below its own
+    /// amount and fee — is still taken, and takes its uncharged
+    /// `InsufficientBalance` receipt in the block, as on main. Nothing that
+    /// depends on it is taken ([`CombinedOrder::leave_out_dependents`]): its
+    /// account's later nonces when it advances the nonce, and its named
+    /// sender's later envelopes, with what depends on those in turn. They stay
+    /// in the pool, where the next selection finds them above a gap. An
+    /// account whose balance cannot be read is not checked.
+    ///
+    /// When nothing is ready (a cycle of account and envelope nonces), the
+    /// rest is taken in fee order, and the combined order deals with the cycle
+    /// within the block as before.
+    ///
+    /// Without an inclusion policy (which cannot read state) the candidates
+    /// are returned as they are, and the screen cuts them in fee order, as
+    /// before.
+    fn within_the_block_limit(
+        &self,
+        candidates: Vec<SignedTransaction>,
+        max_count: usize,
+        accounting: bool,
+        committed: &HashMap<Address, Option<Nonce>>,
+        released: &HashSet<Hash>,
+    ) -> Vec<SignedTransaction> {
+        if self.inclusion_policy.is_none() {
+            return candidates;
+        }
+        let seq = sequenced(&candidates, accounting, released);
+        let mut order = CombinedOrder::new(&seq).with_committed(committed);
+        let mut spendable = self.committed_account_balances(candidates.iter());
+        let mut taken: Vec<usize> = Vec::new();
+        while taken.len() < max_count {
+            let Some(i) = order.ready.pop_first() else {
+                taken.extend(
+                    (0..seq.len())
+                        .filter(|&j| order.left[j])
+                        .take(max_count - taken.len()),
+                );
+                break;
+            };
+            order.take(i);
+            taken.push(i);
+            let tx = &candidates[i];
+            let cost = tx.amount().saturating_add(tx.fee());
+            let Some(balance) = spendable.get_mut(&tx.sender()) else {
+                continue;
+            };
+            if *balance < cost {
+                order.leave_out_dependents(i);
+                continue;
+            }
+            *balance -= cost;
+            if let Some(to) = tx.recipient() {
+                if let Some(credited) = spendable.get_mut(&to) {
+                    *credited = credited.saturating_add(tx.amount());
+                }
+            }
+        }
+        taken.sort_unstable();
+        let mut candidates: Vec<Option<SignedTransaction>> =
+            candidates.into_iter().map(Some).collect();
+        taken
+            .into_iter()
+            .filter_map(|i| candidates[i].take())
+            .collect()
+    }
+
+    /// The committed balance of each account that signs one of `txs`, read
+    /// through the inclusion policy's database; an account whose balance
+    /// cannot be read is left out. Empty without a wired policy.
+    fn committed_account_balances<'a>(
+        &self,
+        txs: impl Iterator<Item = &'a SignedTransaction>,
+    ) -> HashMap<Address, Balance> {
+        let Some(policy) = &self.inclusion_policy else {
+            return HashMap::new();
+        };
+        let store = StateStore::new(&policy.db);
+        let mut balances = HashMap::new();
+        for tx in txs {
+            let sender = tx.sender();
+            if balances.contains_key(&sender) {
+                continue;
+            }
+            match store.get_balance(&sender) {
+                Ok(balance) => {
+                    balances.insert(sender, balance);
+                }
+                Err(e) => warn!(
+                    sender = %sender.to_base58(),
+                    "inclusion policy: cannot read the account balance; not checking what \
+                     the account can pay for in this block: {e}"
+                ),
+            }
+        }
+        balances
     }
 
     /// The committed account nonce of each account that signs one of
@@ -3746,8 +3909,23 @@ mod tests {
         assert!(left_out.victims.is_empty());
     }
 
+    /// Gives `who` a committed balance in the policy pool's database, as a
+    /// block would have.
+    fn fund(mempool: &Mempool, who: &KeyPair) {
+        let db = &mempool.inclusion_policy.as_ref().unwrap().db;
+        StateStore::new(db)
+            .put_account(
+                &who.address(),
+                &sumchain_storage::schema::AccountState {
+                    balance: 1_000_000,
+                    nonce: 0,
+                },
+            )
+            .unwrap();
+    }
+
     /// A pool wired with an inclusion policy over an empty database: every
-    /// committed account and messaging nonce reads 0.
+    /// committed account and messaging nonce reads 0, and every balance 0.
     fn policy_pool() -> (Mempool, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();
         let db = Arc::new(Database::open_default(dir.path()).unwrap());
@@ -3835,6 +4013,8 @@ mod tests {
     fn the_gap_hold_count_restarts_when_the_gap_closes_or_the_transaction_leaves() {
         let (a, _, _, _, x) = keys();
         let (mempool, _dir) = policy_pool();
+        // `a` can pay for its run, so the cut carries it once the gap closes.
+        fund(&mempool, &a);
         let above = transfer_from(&a, 1);
         let fill = transfer_from(&a, 0);
         let other = transfer_from(&x, 0);
