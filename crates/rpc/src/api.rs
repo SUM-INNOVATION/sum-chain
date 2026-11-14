@@ -1244,7 +1244,11 @@ pub trait SumChainApi {
     /// if its envelope named an amount). `escrowed`: the escrow row is
     /// present (amount and expiry from it). `settled`: the escrow row is gone
     /// (claimed, or refunded after expiry; while the clock gates are closed
-    /// only a claim settles). Read-only.
+    /// only a claim settles). A send of value 0 is `none` at every height. One
+    /// historical difference: a paid send of amount 0 included below the
+    /// envelope gate is still reported by the existing message methods with
+    /// `has_payment: true` (their earlier value, kept exactly); from the gate
+    /// they report `false`, as this method does. Read-only.
     #[method(name = "messaging_getPaymentStatus")]
     async fn messaging_get_payment_status(
         &self,

@@ -1294,3 +1294,90 @@ async fn a_nonce_spent_without_an_envelope_reads_as_spent_not_unspent() {
         3
     );
 }
+
+// ── a paid send of amount 0 ───────────────────────────────────────────────
+
+/// A successful paid send of amount 0 included at or above the envelope gate
+/// reports `has_payment: false` (no amount) in the existing methods; below
+/// the gate each method keeps its earlier answer, `true`. The rule follows
+/// the inclusion height, not the query height: every query here runs with
+/// the tip past the gate. `messaging_getPaymentStatus` reports such a send
+/// `none` at every height. Presentation only: the stored event flag and the
+/// zero escrow row are written as before. The same blocks carry, as
+/// controls, a paid send of 500 (a payment at every height), relayed
+/// messages with no amount and with `Some(0)` (no payment at every height),
+/// and a relayed payment of 700 (a payment from the gate, none below it).
+/// Every response is parsed strictly.
+#[tokio::test]
+async fn a_zero_value_paid_send_reports_no_payment_from_the_gate() {
+    let s = serve(&genesis());
+    let srv = &s.server;
+    assert!(all_ok(&s.publish(1, setup(&s))));
+    let mut carol_nonce = 0;
+    let mut sent = Vec::new();
+    for height in [GATE - 1, GATE, GATE + 1] {
+        let n = s.state.get_nonce(&alice().address()).unwrap();
+        let zero = s.tx_at(&alice(), n, paid(&bob(), 0));
+        let five_hundred = s.tx_at(&alice(), n + 1, paid(&bob(), 500));
+        // Below the accounting gate a relayed message does not advance its
+        // relayer's account nonce, so each has its own relayer there.
+        let relayers = if height < GATE {
+            [sponsor(), admin(), dave()]
+        } else {
+            [sponsor(), sponsor(), sponsor()]
+        };
+        let mut relayed = Vec::new();
+        for (i, (relayer, amount)) in relayers.iter().zip([None, Some(0), Some(700)]).enumerate() {
+            let base = s.state.get_nonce(&relayer.address()).unwrap();
+            let nonce = if height < GATE { base } else { base + i as u64 };
+            relayed.push(relayed_at(
+                &s,
+                relayer,
+                nonce,
+                &envelope(&carol(), &bob(), carol_nonce, amount),
+            ));
+            carol_nonce += 1;
+        }
+        let mut txs = vec![zero.clone(), five_hundred.clone()];
+        txs.extend(relayed.iter().cloned());
+        let r = s.publish(height, txs);
+        assert!(all_ok(&r), "{height}: {r:?}");
+        sent.push((height, zero, five_hundred, relayed));
+    }
+
+    for (height, zero, five_hundred, relayed) in &sent {
+        let height = *height;
+        let below = height < GATE;
+        // The zero paid send: what is stored is unchanged at every height.
+        assert_eq!(stored_flag(&s, zero), Some(true), "{height}");
+        assert_eq!(escrow(&s, zero), Some(0), "{height}: the zero escrow row");
+        assert_eq!(
+            event_fields(srv, zero, &alice(), &bob(), height).await,
+            vec![Some((below, None)); 4],
+            "{height}: zero-value paid send"
+        );
+        let st = status_of(srv, zero).await;
+        assert_eq!((st.status.as_str(), st.amount), ("none", None), "{height}");
+        // The controls.
+        assert_eq!(
+            event_fields(srv, five_hundred, &alice(), &bob(), height).await,
+            vec![Some((true, None)); 4],
+            "{height}: paid send of 500"
+        );
+        assert_eq!(status_of(srv, five_hundred).await.status, "escrowed");
+        for t in &relayed[..2] {
+            assert_eq!(
+                relayed_fields(srv, t, &carol(), &bob(), height).await,
+                no_payment(),
+                "{height}: relayed, no amount or Some(0)"
+            );
+            assert_eq!(status_of(srv, t).await.status, "none", "{height}");
+        }
+        let want = if below { no_payment() } else { payment("700") };
+        assert_eq!(
+            relayed_fields(srv, &relayed[2], &carol(), &bob(), height).await,
+            want,
+            "{height}: relayed payment of 700"
+        );
+    }
+}

@@ -1959,7 +1959,11 @@ pub struct MessageEventInfo {
     /// Whether the message moved a payment into escrow: a paid send, or a
     /// relayed message executed at or above the envelope gate that carried a
     /// positive amount. It stays true after the payment is claimed or
-    /// refunded; `messaging_getPaymentStatus` reports where it stands.
+    /// refunded; `messaging_getPaymentStatus` reports where it stands. From
+    /// the envelope gate a paid send of amount 0 reports false; below the
+    /// gate it keeps its historical `true` (judged at the message's inclusion
+    /// height), while `messaging_getPaymentStatus` reports it `none` at every
+    /// height.
     pub has_payment: bool,
     /// Payment amount (if has_payment)
     pub payment_amount: Option<String>,

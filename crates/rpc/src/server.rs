@@ -1622,7 +1622,11 @@ impl RpcServer {
     /// paid send, and for a relayed message executed at or above the envelope
     /// gate (there the flag is set exactly when the escrow is written). Below
     /// the gate a relayed message's flag followed the amount its envelope
-    /// claimed, which moved nothing, so it is not reported. The flag and the
+    /// claimed, which moved nothing, so it is not reported. A paid send of
+    /// amount 0 included at or above the envelope gate escrowed no value and
+    /// reports no payment; below the gate it keeps its earlier `true`. The
+    /// gate is judged at the event's height, the transaction's canonical
+    /// inclusion height, never the height of the query. The flag and the
     /// transaction outlive the escrow row, so a claimed or refunded payment
     /// is still reported. A refused attempt stores no event. A message whose
     /// transaction this node does not hold reports no payment.
@@ -1643,11 +1647,14 @@ impl RpcServer {
         })
     }
 
-    /// Whether an event's stored payment flag is backed by an escrow: for a
-    /// paid send, always; for a relayed message, only from the envelope gate,
-    /// where the flag is set exactly when the escrow was written. Below the
-    /// gate a relayed message's flag followed the amount its envelope named,
-    /// and nothing moved.
+    /// Whether an event's stored payment flag is backed by an escrow of value,
+    /// judged at the event's height (the transaction's canonical inclusion
+    /// height). A paid send: below the envelope gate always, as before; from
+    /// the gate only for a positive amount (a paid send of amount 0 escrowed
+    /// no value). A relayed message: only from the envelope gate, where the
+    /// flag is set exactly when the escrow was written. Below the gate a
+    /// relayed message's flag followed the amount its envelope named, and
+    /// nothing moved.
     fn payment_backed(
         &self,
         e: &sumchain_primitives::MessageEvent,
@@ -1656,15 +1663,28 @@ impl RpcServer {
         let tx = TxStore::new(&self.db)
             .get(&e.message_id)
             .map_err(|err| RpcError::Internal(err.to_string()))?;
+        let gate_open =
+            sumchain_state::MessagingExecutor::sponsored_envelope_verification_gate_open(
+                &self.chain_params,
+                e.block_height,
+            );
         Ok(match tx.as_ref().map(|t| &t.inner) {
             Some(TxInner::V2(v2)) => match &v2.payload {
+                TxPayload::Messaging(d)
+                    if d.operation == MessagingOperation::SendMessageWithPayment =>
+                {
+                    if gate_open {
+                        let paid: sumchain_primitives::SendMessageWithPaymentData =
+                            bincode::deserialize(&d.data).map_err(|err| {
+                                RpcError::Internal(format!("Failed to deserialize message: {err}"))
+                            })?;
+                        paid.koppa_amount > 0
+                    } else {
+                        true
+                    }
+                }
                 TxPayload::Messaging(d) => {
-                    d.operation == MessagingOperation::SendMessageWithPayment
-                        || (d.operation == MessagingOperation::SendMessage
-                            && sumchain_state::MessagingExecutor::sponsored_envelope_verification_gate_open(
-                                &self.chain_params,
-                                e.block_height,
-                            ))
+                    d.operation == MessagingOperation::SendMessage && gate_open
                 }
                 _ => false,
             },
