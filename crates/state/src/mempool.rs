@@ -870,9 +870,14 @@ impl<'a> CombinedOrder<'a> {
 /// The count is of this node's own selections, so in blocks the bound is
 /// about three times the number of validators that take turns. For a cycle,
 /// the wait counts from the selection that finds the cycle and evicts its
-/// victim: a gap the victim leaves must be filled within two more of this
-/// node's selections, or the envelopes waiting on it are carried to their
-/// refusals.
+/// victim, so the victim's sponsor has about two more of this node's
+/// selections to refill the victim's nonce before the envelopes waiting on
+/// it are carried to their charged refusals.
+///
+/// Only a hold is counted. An envelope left out only because the block is
+/// full — its named sender's earlier envelope is in the pool, held by
+/// nothing, below the block's limit — waits on room, not on another account:
+/// it is not counted, and a later hold gets the whole bound.
 ///
 /// What a premature carry costs: one fee, charged to the envelope's sponsor.
 /// The named sender consumes nothing: an envelope whose nonce is not its
@@ -2322,6 +2327,7 @@ impl Mempool {
             rules.accounting,
             &pool,
             &ordered,
+            &holds.held,
             &left_out,
             &evict,
             &released,
@@ -2525,19 +2531,24 @@ impl Mempool {
     }
 
     /// Counts this selection for [`CROSS_ACCOUNT_WAIT_SELECTIONS`], from its
-    /// final placement `ordered`: each envelope of the pool left out (other
-    /// than a cycle's victim or a transaction evicted) that waits only on
-    /// another account, and each envelope `released` in it, has its count
-    /// raised by one; every other count is dropped. A released envelope keeps
-    /// its count until it leaves the pool, so that it is released again if
-    /// the block that carries it is not made. Below the accounting gate, and
-    /// without an inclusion policy, nothing is counted.
+    /// final placement `ordered`: each envelope of the pool that is held —
+    /// over the whole pool (`held`, [`Self::pool_holds`]) or with a cycle's
+    /// victim (`left_out`'s dependents) — and waits only on another account,
+    /// and each envelope `released` in it, has its count raised by one; every
+    /// other count is dropped. An envelope left out only because the block is
+    /// full waits on room, not on an account, and is not counted: a fee cut
+    /// alone never releases it, and it must not carry a count into a later
+    /// hold. A released envelope keeps its count until it leaves the pool, so
+    /// that it is released again if the block that carries it is not made.
+    /// Below the accounting gate, and without an inclusion policy, nothing is
+    /// counted.
     #[allow(clippy::too_many_arguments)]
     fn count_cross_account_waits(
         &self,
         accounting: bool,
         pool: &[SignedTransaction],
         ordered: &[SignedTransaction],
+        held: &HashSet<Hash>,
         left_out: &LeftOut,
         evicted: &[Hash],
         released: &HashSet<Hash>,
@@ -2554,10 +2565,13 @@ impl Mempool {
             .chain(evicted.iter())
             .copied()
             .collect();
+        let with_a_victim: HashSet<Hash> = left_out.dependents.iter().copied().collect();
         let waiting = self.waiting_on_another_account(
             pool.iter().filter(|tx| {
                 let hash = tx.hash();
-                !placed.contains(&hash) && !gone.contains(&hash)
+                !placed.contains(&hash)
+                    && !gone.contains(&hash)
+                    && (held.contains(&hash) || with_a_victim.contains(&hash))
             }),
             ordered.iter(),
             committed,
