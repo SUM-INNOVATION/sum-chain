@@ -522,10 +522,13 @@ pub struct Mempool {
     /// sequence after that many selections; the screen carries them so again
     /// when the producer applies the policy to the block it builds.
     released_envelopes: RwLock<HashSet<Hash>>,
-    /// Per transaction held directly above a gap, how many of this node's
-    /// selections in a row have held it ([`GAP_HOLD_SELECTIONS`]). Kept in
-    /// memory only.
+    /// Per transaction held directly above a gap, how many blocks in a row
+    /// have held it ([`GAP_HOLD_SELECTIONS`]). Kept in memory only.
     gap_holds: RwLock<HashMap<Hash, u32>>,
+    /// Whether this node has selected since the last head it committed: the
+    /// next head's block was then counted by that selection
+    /// ([`Mempool::at_new_head`]).
+    selected_since_head: AtomicBool,
 }
 
 /// Whether executing `tx` advances its sender's account nonce below
@@ -826,6 +829,13 @@ impl<'a> CombinedOrder<'a> {
 /// than one further selection to close before anything is refused; three
 /// bounds every such wait at three of this node's proposals.
 ///
+/// The count is of this node's own selections, so in blocks the bound is
+/// about three times the number of validators that take turns. For a cycle,
+/// the wait counts from the selection that finds the cycle and evicts its
+/// victim: a gap the victim leaves must be filled within two more of this
+/// node's selections, or the envelopes waiting on it are carried to their
+/// refusals.
+///
 /// What a premature carry costs: one fee, charged to the envelope's sponsor.
 /// The named sender consumes nothing: an envelope whose nonce is not its
 /// sender's current one fails before anything of the sender is touched, and
@@ -836,31 +846,40 @@ impl<'a> CombinedOrder<'a> {
 /// are unchanged, and below the accounting gate nothing is counted.
 pub const CROSS_ACCOUNT_WAIT_SELECTIONS: u32 = 3;
 
-/// How many of this node's selections in a row a transaction may be held
-/// directly — above a gap in its own account's nonces that no transaction in
-/// the pool fills, or a sponsored envelope beyond its named sender's first
-/// missing envelope nonce ([`Mempool::pool_holds`]) — before it is evicted
-/// from the pool. At every height.
+/// How many blocks in a row a transaction may be held directly — above a gap
+/// in its own account's nonces that no transaction in the pool fills, or a
+/// sponsored envelope beyond its named sender's first missing envelope nonce
+/// ([`Mempool::pool_holds`]) — before it is evicted from the pool. At every
+/// height, and on every node: each block is counted once, by this node's
+/// selection for it when this node proposes it ([`Mempool::select_for_block`])
+/// and otherwise at the head this node commits for it
+/// ([`Mempool::at_new_head`]: a block it imports, the new head of a chain
+/// switch, counted once). A node that never proposes counts every block at
+/// its head, so it evicts as a producer does. In blocks, whatever the number
+/// of validators; [`CROSS_ACCOUNT_WAIT_SELECTIONS`] counts this node's own
+/// proposals only.
 ///
 /// Such a transaction cannot be carried until its gap is filled, and on main
 /// it is offered into an uncharged `InvalidNonce` and deleted with the block.
 /// Held without a bound it would keep its place in the pool for good, and
 /// enough of them would keep honest transactions out of a full pool. At this
-/// many selections it is evicted instead: the pool's capacity is released,
+/// many blocks it is evicted instead: the pool's capacity is released,
 /// nothing is charged, and its named sender's later envelopes that nothing in
 /// the pool can bring into sequence any more are evicted with an envelope, as
-/// main evicts them after a failed receipt (except one released in the same
-/// selection under [`CROSS_ACCOUNT_WAIT_SELECTIONS`], which is carried). The
-/// transaction is lost, as on main; the client re-sends. Unlike main, no
-/// receipt records it: a status query reports it unknown, not failed.
+/// main evicts them after a failed receipt. An envelope that this node counts
+/// toward [`CROSS_ACCOUNT_WAIT_SELECTIONS`] (a released one keeps its count
+/// until it leaves the pool) is neither evicted nor stranded here: that
+/// bound governs it, and it is carried to its refusal. The transaction is
+/// lost, as on main; the client re-sends. Unlike main, no receipt records it:
+/// a status query reports it unknown, not failed.
 ///
-/// Why three: the same bound as a wait on another account, long enough for a
-/// gap about to be filled (the sponsor's next relayed transaction, a sender's
-/// re-send) to close, short enough that what can never be carried leaves
-/// within three of this node's proposals.
+/// Why three: the same number as the bound on a wait on another account,
+/// long enough for a gap about to be filled (the sponsor's next relayed
+/// transaction, a sender's re-send) to close, short enough that what can
+/// never be carried leaves within three blocks.
 ///
-/// Node-local proposer selection only: block validity, execution and import
-/// are unchanged.
+/// Node-local pool policy only: block validity, execution and import are
+/// unchanged.
 pub const GAP_HOLD_SELECTIONS: u32 = 3;
 
 /// What [`in_combined_order`] leaves out of a block.
@@ -875,7 +894,7 @@ struct LeftOut {
     /// The transactions above a gap in their account's nonces that no
     /// transaction in the block fills, and those that depend on them. They
     /// stay in the pool until the gap is filled, or, held directly above it,
-    /// for at most [`GAP_HOLD_SELECTIONS`] selections.
+    /// for at most [`GAP_HOLD_SELECTIONS`] blocks.
     gapped: Vec<Hash>,
 }
 
@@ -1041,6 +1060,7 @@ impl Mempool {
             cross_account_waits: RwLock::new(HashMap::new()),
             released_envelopes: RwLock::new(HashSet::new()),
             gap_holds: RwLock::new(HashMap::new()),
+            selected_since_head: AtomicBool::new(false),
         }
     }
 
@@ -1092,10 +1112,19 @@ impl Mempool {
         let Some(gates) = &self.inclusion_gates else {
             return NextBlockRules::UNGATED;
         };
-        let height = gates
-            .current_height
-            .load(Ordering::Relaxed)
-            .saturating_add(1);
+        self.block_rules(
+            gates
+                .current_height
+                .load(Ordering::Relaxed)
+                .saturating_add(1),
+        )
+    }
+
+    /// The inclusion rules of the block at `height`.
+    fn block_rules(&self, height: u64) -> NextBlockRules {
+        let Some(gates) = &self.inclusion_gates else {
+            return NextBlockRules::UNGATED;
+        };
         let forms = if MessagingExecutor::sponsored_envelope_verification_gate_open(
             &gates.params,
             height,
@@ -2141,9 +2170,9 @@ impl Mempool {
     /// nonce is read too, and a transaction above a gap in its account's
     /// nonces that the block does not fill is not offered: it waits in the
     /// pool, with what depends on it, until the gap is filled
-    /// ([`in_combined_order`]), for at most [`GAP_HOLD_SELECTIONS`]
-    /// selections. A cycle's victim leaves such a gap behind it when it
-    /// advances its account's nonce.
+    /// ([`in_combined_order`]), for at most [`GAP_HOLD_SELECTIONS`] blocks. A
+    /// cycle's victim leaves such a gap behind it when it advances its
+    /// account's nonce.
     ///
     /// What waits is decided over the whole pool before the pool is cut to
     /// `max_count` ([`Self::pool_holds`]): a transaction that waits never
@@ -2151,22 +2180,12 @@ impl Mempool {
     /// without a bound: from the accounting gate an envelope that waits on
     /// another account is carried to its refusal after
     /// [`CROSS_ACCOUNT_WAIT_SELECTIONS`] selections, and at every height a
-    /// transaction held above a gap is evicted after [`GAP_HOLD_SELECTIONS`].
+    /// transaction held above a gap is evicted after [`GAP_HOLD_SELECTIONS`]
+    /// blocks (counted here for the block this selection is for, and at the
+    /// head of every other block, [`Self::at_new_head`]).
     pub fn select_for_block(&self, max_count: usize) -> Vec<SignedTransaction> {
         let rules = self.next_block_rules();
-        let mut pool: Vec<SignedTransaction> = {
-            let by_fee = self.by_fee.read();
-            let txs = self.txs.read();
-            let refuse_contracts = self.refuses_contract_transactions();
-            // Nothing held can be a contract transaction while the refusal is
-            // on (see `set_refuse_contract_transactions`); the filter is a
-            // second line.
-            by_fee
-                .values()
-                .filter_map(|hash| txs.get(hash).map(|e| e.tx.clone()))
-                .filter(|tx| !(refuse_contracts && is_contract_transaction(tx)))
-                .collect()
-        };
+        let mut pool = self.pool_in_fee_order();
         let committed = self.committed_account_nonces(pool.iter());
         let mut holds = self.pool_holds(&pool, rules.accounting, &committed);
         // From the accounting gate, an envelope that has waited on another
@@ -2182,13 +2201,17 @@ impl Mempool {
                 CROSS_ACCOUNT_WAIT_SELECTIONS
             );
         }
-        // A transaction held directly for GAP_HOLD_SELECTIONS selections in a
-        // row is evicted in this one, with what its eviction strands.
-        let expired = self.expired_gap_holds(&holds, &released);
+        // This selection counts the block it is for: a transaction held
+        // directly for GAP_HOLD_SELECTIONS blocks in a row is evicted in it,
+        // with what its eviction strands, unless the cross-account bound
+        // governs it.
+        self.selected_since_head.store(true, Ordering::SeqCst);
+        let governed = self.governed_by_the_cross_account_bound(&released);
+        let expired = self.expired_gap_holds(&holds, &governed);
         if !expired.is_empty() {
-            let gone = self.evict_gap_holds(&pool, &expired, &released);
+            let gone = self.evict_gap_holds(&pool, &expired, &governed);
             info!(
-                "Inclusion policy: evicting {} transaction(s) held {} selections in a row above \
+                "Inclusion policy: evicting {} transaction(s) held {} blocks in a row above \
                  a gap in their account's or their named sender's nonces, and {} envelope(s) \
                  that nothing in the pool can bring into sequence any more",
                 expired.len(),
@@ -2268,22 +2291,103 @@ impl Mempool {
             .unwrap_or(0)
     }
 
-    /// How many selections in a row `hash` has been held directly above a gap
+    /// How many blocks in a row `hash` has been held directly above a gap
     /// ([`GAP_HOLD_SELECTIONS`]); 0 when it is not.
     pub fn gap_hold_count(&self, hash: &Hash) -> u32 {
         self.gap_holds.read().get(hash).copied().unwrap_or(0)
     }
 
+    /// Counts the block whose head this node has just committed toward
+    /// [`GAP_HOLD_SELECTIONS`], unless this node's own selection counted it,
+    /// and evicts what reaches the bound with it.
+    ///
+    /// The consensus engine calls this on every node after each head it
+    /// commits, once the pool has dropped what that head's block carries: a
+    /// block this node produced, a block it imported, the new head of a chain
+    /// switch (once, after the switch's reconciliation). When this node has
+    /// selected since the last head, that selection counted this block
+    /// ([`Self::select_for_block`]) and nothing more is done; otherwise —
+    /// always, on a node that never proposes — the pool is viewed as the next
+    /// block's selection views it ([`Self::pool_holds`], under the rules of
+    /// the block at `head + 1`) and counted as a selection counts it: what
+    /// reaches the bound is evicted with no receipt, with its named sender's
+    /// later envelopes that nothing left in the pool can bring into sequence
+    /// ([`Self::stranded_envelopes`]), except an envelope the cross-account
+    /// bound governs; then each transaction held directly has its count
+    /// raised by one and every other count is dropped. Nothing is verified,
+    /// charged or written; without an inclusion policy nothing happens.
+    pub fn at_new_head(&self, head: u64) {
+        if self.selected_since_head.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        if self.inclusion_policy.is_none() {
+            return;
+        }
+        let rules = self.block_rules(head.saturating_add(1));
+        let mut pool = self.pool_in_fee_order();
+        let committed = self.committed_account_nonces(pool.iter());
+        let released = self.released_envelopes.read().clone();
+        let mut holds = self.pool_holds_releasing(&pool, rules.accounting, &committed, &released);
+        let governed = self.governed_by_the_cross_account_bound(&released);
+        let expired = self.expired_gap_holds(&holds, &governed);
+        if !expired.is_empty() {
+            let gone = self.evict_gap_holds(&pool, &expired, &governed);
+            info!(
+                "Inclusion policy: at head {head}, evicting {} transaction(s) held {} blocks in \
+                 a row above a gap in their account's or their named sender's nonces, and {} \
+                 envelope(s) that nothing in the pool can bring into sequence any more",
+                expired.len(),
+                GAP_HOLD_SELECTIONS,
+                gone.len() - expired.len()
+            );
+            pool.retain(|tx| !gone.contains(&tx.hash()));
+            holds = self.pool_holds_releasing(&pool, rules.accounting, &committed, &released);
+        }
+        self.count_gap_holds(&holds);
+    }
+
+    /// Every transaction this pool holds, in fee order (as `by_fee` keeps it),
+    /// without a contract transaction while this node refuses them.
+    fn pool_in_fee_order(&self) -> Vec<SignedTransaction> {
+        let by_fee = self.by_fee.read();
+        let txs = self.txs.read();
+        let refuse_contracts = self.refuses_contract_transactions();
+        // Nothing held can be a contract transaction while the refusal is on
+        // (see `set_refuse_contract_transactions`); the filter is a second
+        // line.
+        by_fee
+            .values()
+            .filter_map(|hash| txs.get(hash).map(|e| e.tx.clone()))
+            .filter(|tx| !(refuse_contracts && is_contract_transaction(tx)))
+            .collect()
+    }
+
+    /// The envelopes the cross-account bound governs, which the gap-hold
+    /// bound neither evicts nor strands: those this node counts toward
+    /// [`CROSS_ACCOUNT_WAIT_SELECTIONS`] (a released one keeps its count until
+    /// it leaves the pool), and those `released` in this selection.
+    fn governed_by_the_cross_account_bound(&self, released: &HashSet<Hash>) -> HashSet<Hash> {
+        let mut governed: HashSet<Hash> = self
+            .cross_account_waits
+            .read()
+            .iter()
+            .filter(|(_, count)| **count > 0)
+            .map(|(hash, _)| *hash)
+            .collect();
+        governed.extend(released.iter().copied());
+        governed
+    }
+
     /// The transactions the pool view `holds` holds directly that were held
-    /// directly in the `GAP_HOLD_SELECTIONS - 1` selections before this one,
-    /// other than an envelope `released` in this one.
-    fn expired_gap_holds(&self, holds: &PoolHolds, released: &HashSet<Hash>) -> Vec<Hash> {
+    /// directly in the `GAP_HOLD_SELECTIONS - 1` blocks before this one,
+    /// other than those in `governed`.
+    fn expired_gap_holds(&self, holds: &PoolHolds, governed: &HashSet<Hash>) -> Vec<Hash> {
         let counts = self.gap_holds.read();
         let mut expired: Vec<Hash> = holds
             .direct
             .iter()
             .filter(|hash| {
-                !released.contains(hash)
+                !governed.contains(hash)
                     && counts.get(hash).copied().unwrap_or(0) + 1 >= GAP_HOLD_SELECTIONS
             })
             .copied()
@@ -2295,12 +2399,12 @@ impl Mempool {
     /// Evicts `expired` from the pool and, for each envelope among them, its
     /// named sender's later envelopes that nothing left in the pool can bring
     /// into sequence ([`Self::stranded_envelopes`], as after a failed
-    /// receipt), other than those in `released`. Returns everything evicted.
+    /// receipt), other than those in `governed`. Returns everything evicted.
     fn evict_gap_holds(
         &self,
         pool: &[SignedTransaction],
         expired: &[Hash],
-        released: &HashSet<Hash>,
+        governed: &HashSet<Hash>,
     ) -> HashSet<Hash> {
         let mut gone: HashSet<Hash> = expired.iter().copied().collect();
         if let Some(policy) = &self.inclusion_policy {
@@ -2316,7 +2420,7 @@ impl Mempool {
                     gone.extend(
                         self.stranded_envelopes(&sender, committed, hash)
                             .into_iter()
-                            .filter(|stranded| !released.contains(stranded)),
+                            .filter(|stranded| !governed.contains(stranded)),
                     );
                 }
             }
@@ -2327,9 +2431,9 @@ impl Mempool {
         gone
     }
 
-    /// Counts this selection for [`GAP_HOLD_SELECTIONS`]: each transaction the
-    /// pool view `holds` holds directly has its count raised by one; every
-    /// other count is dropped.
+    /// Counts a block for [`GAP_HOLD_SELECTIONS`]: each transaction the pool
+    /// view `holds` holds directly has its count raised by one; every other
+    /// count is dropped.
     fn count_gap_holds(&self, holds: &PoolHolds) {
         let mut counts = self.gap_holds.write();
         counts.retain(|hash, _| holds.direct.contains(hash));
@@ -3765,6 +3869,60 @@ mod tests {
         // The bound: evicted; the unrelated transaction stays.
         assert_eq!(ids(&mempool.select_for_block(10)), vec![other.hash()]);
         assert!(!mempool.contains(&above.hash()));
+        assert_eq!(count(), 0);
+        assert!(mempool.contains(&other.hash()));
+        assert_eq!(mempool.len(), 1);
+    }
+
+    /// The count at heads, on a pool that does not select (a node that never
+    /// proposes): `a`'s transfer above `a`'s gap is counted once per head and
+    /// evicted at its `GAP_HOLD_SELECTIONS`-th, with nothing else touched;
+    /// the count restarts when the gap closes and when it leaves the pool. A
+    /// selection since the last head counts the block itself, and that head
+    /// then counts nothing: one count per block.
+    #[test]
+    fn a_pool_that_does_not_select_counts_at_each_head() {
+        let (a, _, _, _, x) = keys();
+        let (mempool, _dir) = policy_pool();
+        let above = transfer_from(&a, 1);
+        let fill = transfer_from(&a, 0);
+        let other = transfer_from(&x, 0);
+        mempool.add(above.clone()).unwrap();
+        mempool.add(other.clone()).unwrap();
+        let count = || mempool.gap_hold_count(&above.hash());
+        for head in 1..GAP_HOLD_SELECTIONS {
+            mempool.at_new_head(u64::from(head));
+            assert_eq!(count(), head);
+        }
+        // A selection counts the block: the third, which evicts it.
+        mempool.select_for_block(10);
+        assert!(!mempool.contains(&above.hash()), "evicted by the selection");
+        assert_eq!(count(), 0);
+        // Admitted again; a selection counts its block, and that block's
+        // head counts nothing more.
+        mempool.add(above.clone()).unwrap();
+        mempool.select_for_block(10);
+        assert_eq!(count(), 1);
+        mempool.at_new_head(10);
+        assert_eq!(count(), 1, "that head was counted by the selection");
+        // The gap closes, then opens again: counted from nothing.
+        mempool.add(fill.clone()).unwrap();
+        mempool.at_new_head(11);
+        assert_eq!(count(), 0);
+        mempool.remove(&fill.hash());
+        mempool.at_new_head(12);
+        assert_eq!(count(), 1);
+        // It leaves the pool and comes back: counted from nothing.
+        mempool.remove(&above.hash());
+        assert_eq!(count(), 0);
+        mempool.add(above.clone()).unwrap();
+        for head in 13..(13 + u64::from(GAP_HOLD_SELECTIONS) - 1) {
+            mempool.at_new_head(head);
+            assert!(mempool.contains(&above.hash()), "head {head}");
+        }
+        assert_eq!(count(), GAP_HOLD_SELECTIONS - 1);
+        mempool.at_new_head(20);
+        assert!(!mempool.contains(&above.hash()), "evicted at the bound");
         assert_eq!(count(), 0);
         assert!(mempool.contains(&other.hash()));
         assert_eq!(mempool.len(), 1);

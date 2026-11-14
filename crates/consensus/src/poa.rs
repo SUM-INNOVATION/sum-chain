@@ -1714,6 +1714,9 @@ impl PoAEngine {
         // Remove included transactions from mempool
         let tx_hashes: Vec<Hash> = block.transactions.iter().map(|tx| tx.hash()).collect();
         self.mempool.remove_batch(&tx_hashes);
+        // The pool's bound on what it holds above a gap: this head's block
+        // was counted by the selection that built it, if this node made one.
+        self.mempool.at_new_head(height);
 
         info!(
             "Created block {} at height {} with {} txs",
@@ -1825,6 +1828,9 @@ impl PoAEngine {
                 *self.best_block.write() = Some(block.clone());
                 let tx_hashes: Vec<Hash> = block.transactions.iter().map(|tx| tx.hash()).collect();
                 self.mempool.remove_batch(&tx_hashes);
+                // The pool's bound on what it holds above a gap counts this
+                // block, on a node that never proposes as on one that does.
+                self.mempool.at_new_head(height);
                 let _ = self.event_tx.send(ConsensusEvent::BlockImported(block));
             }
 
@@ -2203,6 +2209,11 @@ impl PoAEngine {
         included.sort();
         self.mempool.remove_batch(&included);
         self.mempool.revalidate(&self.state, self.state.chain_id());
+        // The pool's bound on what it holds above a gap counts the switch
+        // once, at its new head, over the reconciled pool.
+        if let Some(tip) = plan.new_branch.last() {
+            self.mempool.at_new_head(tip.height());
+        }
         Ok(())
     }
 
