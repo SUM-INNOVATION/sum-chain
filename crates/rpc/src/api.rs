@@ -1255,8 +1255,12 @@ pub trait SumChainApi {
     /// transaction that carried the envelope (the first includer's, under
     /// front-running), whether it executed or was refused, and what it
     /// escrowed, from the outcome row the chain wrote when the nonce was
-    /// spent. `None` while that nonce is unspent, and for every nonce spent
-    /// below the envelope gate. Read-only.
+    /// spent. A nonce below the sender's current messaging nonce with no
+    /// outcome row is reported as `spent_without_outcome`, with no
+    /// transaction, receipt code or height: the sender's own direct or paid
+    /// send spent it (revoking any envelope signed at it), or a sponsored
+    /// message executed below the envelope gate did. `None` only while the
+    /// nonce is unspent. Read-only.
     #[method(name = "messaging_getEnvelopeOutcome")]
     async fn messaging_get_envelope_outcome(
         &self,

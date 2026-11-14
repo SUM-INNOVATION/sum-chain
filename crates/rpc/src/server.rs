@@ -4780,9 +4780,31 @@ impl SumChainApiServer for RpcServer {
     ) -> std::result::Result<Option<EnvelopeOutcomeInfo>, jsonrpsee::types::ErrorObjectOwned> {
         let addr = parse_address_arg(&sender)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {e}")))?;
-        let outcome = match MessagingStore::new(&self.db).get_envelope_outcome(&addr, nonce) {
+        let store = MessagingStore::new(&self.db);
+        let outcome = match store.get_envelope_outcome(&addr, nonce) {
             Ok(Some(outcome)) => outcome,
-            Ok(None) => return Ok(None),
+            Ok(None) => {
+                // No row. A nonce below the sender's current messaging nonce
+                // was spent all the same, by an operation that writes none:
+                // the sender's own direct or paid send (which revokes an
+                // envelope signed at it) or a sponsored message executed
+                // below the envelope gate. What spent it is not recorded.
+                let current = store
+                    .get_sender_nonce(&addr)
+                    .map_err(|e| RpcError::Internal(e.to_string()))?;
+                if nonce < current {
+                    return Ok(Some(EnvelopeOutcomeInfo {
+                        sender: addr.to_base58(),
+                        nonce,
+                        tx_hash: None,
+                        outcome: "spent_without_outcome".to_string(),
+                        receipt_code: None,
+                        escrowed_amount: "0".to_string(),
+                        block_height: None,
+                    }));
+                }
+                return Ok(None);
+            }
             Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
         };
         let block_height = ReceiptStore::new(&self.db)
@@ -4792,13 +4814,13 @@ impl SumChainApiServer for RpcServer {
         Ok(Some(EnvelopeOutcomeInfo {
             sender: addr.to_base58(),
             nonce,
-            tx_hash: format!("0x{}", hex::encode(outcome.tx_hash.as_bytes())),
+            tx_hash: Some(format!("0x{}", hex::encode(outcome.tx_hash.as_bytes()))),
             outcome: if outcome.outcome_code == 0 {
                 "executed".to_string()
             } else {
                 "refused".to_string()
             },
-            receipt_code: outcome.outcome_code,
+            receipt_code: Some(outcome.outcome_code),
             escrowed_amount: outcome.escrowed_amount.to_string(),
             block_height,
         }))

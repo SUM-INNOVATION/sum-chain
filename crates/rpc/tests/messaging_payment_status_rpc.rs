@@ -399,9 +399,9 @@ struct PaymentStatus {
 struct EnvelopeOutcome {
     sender: String,
     nonce: u64,
-    tx_hash: String,
+    tx_hash: Option<String>,
     outcome: String,
-    receipt_code: u32,
+    receipt_code: Option<u32>,
     escrowed_amount: String,
     block_height: Option<u64>,
 }
@@ -649,17 +649,25 @@ async fn payment_status_and_envelope_outcomes_report_what_the_chain_executed() {
     };
     assert_eq!(
         outcome(carol_b58.clone(), 0).await,
-        None,
-        "spent below the gates: no row"
+        Some(EnvelopeOutcome {
+            sender: carol_b58.clone(),
+            nonce: 0,
+            tx_hash: None,
+            outcome: "spent_without_outcome".into(),
+            receipt_code: None,
+            escrowed_amount: "0".into(),
+            block_height: None,
+        }),
+        "spent below the gates: no row, but spent"
     );
     assert_eq!(
         outcome(carol_b58.clone(), 1).await,
         Some(EnvelopeOutcome {
             sender: carol_b58.clone(),
             nonce: 1,
-            tx_hash: id(&pay_claimed),
+            tx_hash: Some(id(&pay_claimed)),
             outcome: "executed".into(),
-            receipt_code: 0,
+            receipt_code: Some(0),
             escrowed_amount: "7000".into(),
             block_height: Some(3),
         })
@@ -674,9 +682,9 @@ async fn payment_status_and_envelope_outcomes_report_what_the_chain_executed() {
         Some(EnvelopeOutcome {
             sender: dave_b58.clone(),
             nonce: 0,
-            tx_hash: id(&unaffordable),
+            tx_hash: Some(id(&unaffordable)),
             outcome: "refused".into(),
-            receipt_code: 7,
+            receipt_code: Some(7),
             escrowed_amount: "0".into(),
             block_height: Some(3),
         })
@@ -1204,4 +1212,85 @@ async fn messages_the_rule_does_not_concern_keep_their_earlier_values() {
             "{height}"
         );
     }
+}
+
+// ── a nonce spent without an envelope outcome ───────────────────────────────
+
+/// A nonce the sender spent itself reads as spent, not as unspent. At the
+/// gate alice spends messaging nonce 0 with a direct send and 1 with a paid
+/// send (revoking any envelope signed at them); an envelope at 2 executes;
+/// an envelope signed at the revoked nonce 0 is then refused without writing
+/// a row. Nonces 0 and 1 read `spent_without_outcome` (no transaction, code
+/// or height), 2 reads `executed` with its transaction, 3 and beyond are
+/// unspent (`None`).
+#[tokio::test]
+async fn a_nonce_spent_without_an_envelope_reads_as_spent_not_unspent() {
+    let s = serve(&genesis());
+    let srv = &s.server;
+    assert!(all_ok(&s.publish(1, setup(&s))));
+    assert!(s.publish(GATE - 1, vec![]).is_empty());
+    let n = s.state.get_nonce(&alice().address()).unwrap();
+    let direct_send = s.tx_at(&alice(), n, direct(&bob()));
+    let paid_send = s.tx_at(&alice(), n + 1, paid(&bob(), 500));
+    let sp = s.state.get_nonce(&sponsor().address()).unwrap();
+    let enveloped = relayed_at(&s, &sponsor(), sp, &envelope(&alice(), &bob(), 2, None));
+    let revoked = relayed_at(&s, &sponsor(), sp + 1, &envelope(&alice(), &bob(), 0, None));
+    let r = s.publish(
+        GATE,
+        vec![direct_send, paid_send, enveloped.clone(), revoked.clone()],
+    );
+    assert_eq!(
+        r.iter().map(|r| r.status).collect::<Vec<_>>(),
+        vec![
+            TxStatus::Success,
+            TxStatus::Success,
+            TxStatus::Success,
+            TxStatus::Failed(7)
+        ]
+    );
+    let alice_b58 = alice().address().to_base58();
+    let outcome = |nonce: u64| {
+        let alice_b58 = alice_b58.clone();
+        async move {
+            srv.messaging_get_envelope_outcome(alice_b58, nonce)
+                .await
+                .unwrap()
+                .map(|v| strict::<EnvelopeOutcome>(&v))
+        }
+    };
+    for nonce in [0, 1] {
+        assert_eq!(
+            outcome(nonce).await,
+            Some(EnvelopeOutcome {
+                sender: alice_b58.clone(),
+                nonce,
+                tx_hash: None,
+                outcome: "spent_without_outcome".into(),
+                receipt_code: None,
+                escrowed_amount: "0".into(),
+                block_height: None,
+            }),
+            "{nonce}"
+        );
+    }
+    assert_eq!(
+        outcome(2).await,
+        Some(EnvelopeOutcome {
+            sender: alice_b58.clone(),
+            nonce: 2,
+            tx_hash: Some(format!("0x{}", hex::encode(enveloped.hash().as_bytes()))),
+            outcome: "executed".into(),
+            receipt_code: Some(0),
+            escrowed_amount: "0".into(),
+            block_height: Some(GATE),
+        })
+    );
+    assert_eq!(outcome(3).await, None, "unspent");
+    assert_eq!(outcome(u64::MAX).await, None, "unspent");
+    assert_eq!(
+        MessagingStore::new(&s.db)
+            .get_sender_nonce(&alice().address())
+            .unwrap(),
+        3
+    );
 }

@@ -2046,7 +2046,8 @@ pub struct PaymentStatusInfo {
 }
 
 /// What spent a sponsored envelope's nonce (`messaging_getEnvelopeOutcome`),
-/// read from the envelope-outcome row the chain wrote when it was spent.
+/// read from the envelope-outcome row the chain wrote when it was spent, or,
+/// for a nonce spent without such a row, that it was spent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvelopeOutcomeInfo {
     /// The envelope's named sender (base58).
@@ -2054,16 +2055,24 @@ pub struct EnvelopeOutcomeInfo {
     /// The envelope's nonce.
     pub nonce: u64,
     /// The transaction that carried the envelope and spent the nonce (hex
-    /// with 0x prefix). Under front-running, the first includer's.
-    pub tx_hash: String,
-    /// `executed` or `refused`.
+    /// with 0x prefix). Under front-running, the first includer's. Absent
+    /// for `spent_without_outcome`: no row records what spent it.
+    pub tx_hash: Option<String>,
+    /// `executed` or `refused` (from the outcome row), or
+    /// `spent_without_outcome`: the nonce is below the sender's current
+    /// messaging nonce and no outcome row exists. It was spent by the
+    /// sender's own direct or paid send, which revokes any envelope signed
+    /// at that nonce, or by a sponsored message executed below the envelope
+    /// gate.
     pub outcome: String,
     /// That transaction's receipt code: 0 for success, otherwise the
-    /// `Failed` code.
-    pub receipt_code: u32,
-    /// The amount that transaction escrowed (decimal), `0` when none.
+    /// `Failed` code. Absent for `spent_without_outcome`.
+    pub receipt_code: Option<u32>,
+    /// The amount that transaction escrowed (decimal), `0` when none
+    /// (always `0` for `spent_without_outcome`).
     pub escrowed_amount: String,
-    /// The height of the block that carried it.
+    /// The height of the block that carried it; absent for
+    /// `spent_without_outcome`.
     pub block_height: Option<u64>,
 }
 
