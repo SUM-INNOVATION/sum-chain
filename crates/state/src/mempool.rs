@@ -871,6 +871,14 @@ fn in_combined_order(
     (ordered, left_out)
 }
 
+/// What [`Mempool::pool_holds`] holds back from the next block.
+#[derive(Debug, Default)]
+struct PoolHolds {
+    /// The transactions held directly, and every transaction that depends on
+    /// one of them, in turn.
+    held: HashSet<Hash>,
+}
+
 /// Whether `tx` is a contract deploy or call.
 fn is_contract_transaction(tx: &SignedTransaction) -> bool {
     matches!(
@@ -1999,21 +2007,40 @@ impl Mempool {
     /// pool, with what depends on it, until the gap is filled
     /// ([`in_combined_order`]). A cycle's victim leaves such a gap
     /// behind it when it advances its account's nonce.
+    ///
+    /// What waits is decided over the whole pool before the pool is cut to
+    /// `max_count` ([`Self::pool_holds`]): a transaction that waits never
+    /// takes a place in the block from one that can be carried.
     pub fn select_for_block(&self, max_count: usize) -> Vec<SignedTransaction> {
         let rules = self.next_block_rules();
-        let (carried, evict) = {
+        let pool: Vec<SignedTransaction> = {
             let by_fee = self.by_fee.read();
             let txs = self.txs.read();
             let refuse_contracts = self.refuses_contract_transactions();
             // Nothing held can be a contract transaction while the refusal is
             // on (see `set_refuse_contract_transactions`); the filter is a
             // second line.
-            let candidates = by_fee
+            by_fee
                 .values()
                 .filter_map(|hash| txs.get(hash).map(|e| e.tx.clone()))
-                .filter(move |tx| !(refuse_contracts && is_contract_transaction(tx)));
-            self.screen_for_inclusion(candidates, max_count, rules.forms)
+                .filter(|tx| !(refuse_contracts && is_contract_transaction(tx)))
+                .collect()
         };
+        let committed = self.committed_account_nonces(pool.iter());
+        let holds = self.pool_holds(&pool, rules.accounting, &committed);
+        if !holds.held.is_empty() {
+            info!(
+                "Inclusion policy: leaving {} transaction(s) above a gap in their account's \
+                 or their named sender's nonces, or depending on one, for a later block",
+                holds.held.len()
+            );
+        }
+        let (carried, evict) = self.screen_for_inclusion(
+            pool.into_iter()
+                .filter(|tx| !holds.held.contains(&tx.hash())),
+            max_count,
+            rules.forms,
+        );
         if !evict.is_empty() {
             info!(
                 "Inclusion policy: evicting {} held transaction(s) the canonical chain has \
@@ -2022,12 +2049,11 @@ impl Mempool {
             );
             self.remove_batch(&evict);
         }
-        let committed = self.committed_account_nonces(&carried);
         let (ordered, left_out) = in_combined_order(carried, rules.accounting, &committed);
         if !left_out.gapped.is_empty() {
-            info!(
-                "Inclusion policy: leaving {} transaction(s) above a gap in their account's \
-                 nonces, or depending on one, for a later block",
+            debug!(
+                "Inclusion policy: leaving {} transaction(s) whose account's earlier nonce was \
+                 cut from this block for a later block",
                 left_out.gapped.len()
             );
         }
@@ -2050,9 +2076,9 @@ impl Mempool {
     /// stands now. `None` for an account whose nonce cannot be read, whose
     /// transactions then wait for a later block. Empty without a wired
     /// policy, and then no account's nonces are checked.
-    fn committed_account_nonces(
+    fn committed_account_nonces<'a>(
         &self,
-        carried: &[SignedTransaction],
+        carried: impl Iterator<Item = &'a SignedTransaction>,
     ) -> HashMap<Address, Option<Nonce>> {
         let Some(policy) = &self.inclusion_policy else {
             return HashMap::new();
@@ -2076,6 +2102,70 @@ impl Mempool {
                 });
         }
         committed
+    }
+
+    /// What of `pool` (the whole pool, in fee order) cannot be carried in the
+    /// next block whatever else it carries, judged before the pool is cut to
+    /// a block's size, so that none of it takes a place in the block.
+    ///
+    /// Held directly: a transaction above a gap in its own account's nonces
+    /// that no transaction in the pool fills (as [`in_combined_order`] judges
+    /// it, from `committed`), and a sponsored envelope beyond the first
+    /// envelope nonce, from its named sender's committed messaging nonce, that
+    /// no envelope in the pool carries (the screen would only defer it). Held
+    /// in turn: every transaction that depends on one held, as for a cycle's
+    /// victim ([`CombinedOrder::leave_out`]): its account's later nonces when
+    /// it advances the nonce, and its named sender's later envelopes.
+    ///
+    /// Nothing is verified or evicted here; the screen still judges what is
+    /// not held. Without an inclusion policy nothing is held.
+    fn pool_holds(
+        &self,
+        pool: &[SignedTransaction],
+        accounting: bool,
+        committed: &HashMap<Address, Option<Nonce>>,
+    ) -> PoolHolds {
+        let Some(policy) = &self.inclusion_policy else {
+            return PoolHolds::default();
+        };
+        let seq: Vec<Sequenced> = pool
+            .iter()
+            .map(|tx| Sequenced {
+                outer: tx.sender(),
+                key: (tx.nonce(), advances_nonce(tx, accounting)),
+                envelope: sponsored_identity(tx),
+            })
+            .collect();
+        let mut order = CombinedOrder::new(&seq);
+        let account_gapped = order.beyond_a_gap(committed);
+        let messaging = MessagingStore::new(&policy.db);
+        let mut envelope_gapped = Vec::new();
+        for (named, left) in &order.by_named {
+            let Ok(from) = messaging.get_sender_nonce(named) else {
+                continue;
+            };
+            let mut next = from;
+            let mut gap = false;
+            for &(nonce, j) in left {
+                if nonce < from {
+                    // Below the committed nonce: the screen evicts it.
+                    continue;
+                }
+                if !gap && nonce == next {
+                    next += 1;
+                } else if nonce > next {
+                    gap = true;
+                }
+                if gap {
+                    envelope_gapped.push(j);
+                }
+            }
+        }
+        let mut held = HashSet::new();
+        for &j in account_gapped.iter().chain(envelope_gapped.iter()) {
+            held.extend(order.leave_out(j).into_iter().map(|x| pool[x].hash()));
+        }
+        PoolHolds { held }
     }
 
     /// The transactions among `transactions`, in the order given, that this
@@ -2931,6 +3021,29 @@ mod tests {
         assert!(left_out.gapped.is_empty());
     }
 
+    /// The victim is a head on the cycle even when the latest cycle
+    /// member in `carried` is not a head: here `r2`'s nonce 1, `u`'s envelope
+    /// 0, comes last. (From the producer this order cannot arise: the screen
+    /// carries every envelope after its named sender's earlier ones, so each
+    /// non-head on a cycle comes before the head that waits on it; the head
+    /// filter is pinned here, on the order alone.)
+    #[test]
+    fn the_victim_is_a_head_even_when_a_later_cycle_member_is_not() {
+        let (r1, r2, u, v, _) = keys();
+        let r1_u1 = relayed(&r1, 0, &u, 1);
+        let r2_v1 = relayed(&r2, 0, &v, 1);
+        let r1_v0 = relayed(&r1, 1, &v, 0);
+        let r2_u0 = relayed(&r2, 1, &u, 0);
+        let carried = vec![r1_u1.clone(), r2_v1.clone(), r1_v0.clone(), r2_u0.clone()];
+        let (ordered, left_out) = in_combined_order(carried, true);
+        assert!(ordered.is_empty());
+        assert_eq!(left_out.victims, vec![r2_v1.hash()]);
+        assert_eq!(
+            sorted(left_out.dependents.clone()),
+            sorted(ids(&[r1_u1, r1_v0, r2_u0]))
+        );
+    }
+
     /// Cycles through one, two, three and four sponsors (two, four,
     /// six and eight transactions; a cycle alternates a sponsor's head and a
     /// transaction behind one, so it has no odd length): exactly one victim,
@@ -3080,6 +3193,60 @@ mod tests {
             sorted(ids(&[unread_t0, r1_t1]))
         );
         assert!(left_out.victims.is_empty());
+    }
+
+    /// A pool wired with an inclusion policy over an empty database: every
+    /// committed account and messaging nonce reads 0.
+    fn policy_pool() -> (Mempool, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        (
+            Mempool::new(MempoolConfig::default()).with_inclusion_policy(InclusionPolicy { db }),
+            dir,
+        )
+    }
+
+    /// What waits is decided over the whole pool. `s`'s envelope 0 is missing
+    /// from the pool, so `s`'s envelope 1, relayed by `r2` at its nonce 0, is
+    /// held directly; `r2` also sends transfers at nonces 0, 1 and 2. `r1`
+    /// holds transfers at nonces 1 and 2 and its envelope for `t` at nonce 3,
+    /// with nothing at its committed nonce 0: all three are held, and so is
+    /// `t`'s envelope 1 through `r3`, behind `t`'s envelope 0. Unrelated `x` is
+    /// not held. From the accounting gate `s`'s envelope advances `r2`'s nonce,
+    /// so `r2`'s transfers at nonces 1 and 2 are held with it; below the gate
+    /// it advances nothing and they are not.
+    #[test]
+    fn what_waits_is_decided_over_the_whole_pool() {
+        let (r1, r2, s, t, x) = keys();
+        let r3 = key(6);
+        let (pool_mempool, _dir) = policy_pool();
+        let s1 = relayed(&r2, 0, &s, 1);
+        let r2_transfers: Vec<SignedTransaction> = (0..3).map(|n| transfer_from(&r2, n)).collect();
+        let r1_above: Vec<SignedTransaction> = (1..3).map(|n| transfer_from(&r1, n)).collect();
+        let r1_t0 = relayed(&r1, 3, &t, 0);
+        let r3_t1 = relayed(&r3, 0, &t, 1);
+        let x0 = transfer_from(&x, 0);
+        let mut pool = vec![s1.clone(), r1_t0.clone(), r3_t1.clone(), x0.clone()];
+        pool.extend(r2_transfers.iter().cloned());
+        pool.extend(r1_above.iter().cloned());
+        let committed: HashMap<Address, Option<Nonce>> = [&r1, &r2, &r3, &x]
+            .into_iter()
+            .map(|k| (k.address(), Some(0)))
+            .collect();
+        let mut always: Vec<Hash> = ids(&r1_above);
+        always.extend([s1.hash(), r1_t0.hash(), r3_t1.hash()]);
+
+        let held = pool_mempool.pool_holds(&pool, true, &committed).held;
+        let mut expected = always.clone();
+        expected.extend(ids(&r2_transfers[1..]));
+        assert_eq!(sorted(held.into_iter().collect()), sorted(expected));
+
+        let held = pool_mempool.pool_holds(&pool, false, &committed).held;
+        assert_eq!(sorted(held.into_iter().collect()), sorted(always));
+
+        // Without a policy nothing is held.
+        let bare = Mempool::new(MempoolConfig::default());
+        assert!(bare.pool_holds(&pool, true, &committed).held.is_empty());
     }
 
     /// `filter_map_held` sees each held transaction once and returns what the
