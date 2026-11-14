@@ -569,6 +569,9 @@ struct CombinedOrder<'a> {
     /// named sender. A position stays ready until it is placed or left out:
     /// what is left only shrinks, so the lowest of a set only rises.
     ready: BTreeSet<usize>,
+    /// The committed account nonce of each outer sender, where known
+    /// ([`Self::with_committed`]).
+    committed: HashMap<Address, Nonce>,
 }
 
 impl<'a> CombinedOrder<'a> {
@@ -587,11 +590,23 @@ impl<'a> CombinedOrder<'a> {
             by_named,
             left: vec![true; seq.len()],
             ready: BTreeSet::new(),
+            committed: HashMap::new(),
         };
         for i in 0..seq.len() {
             order.mark_if_ready(i);
         }
         order
+    }
+
+    /// The order, knowing each outer sender's committed account nonce (where
+    /// `committed` holds one): a transaction below it holds nothing of its
+    /// account behind it ([`Self::leave_out`]).
+    fn with_committed(mut self, committed: &HashMap<Address, Option<Nonce>>) -> Self {
+        self.committed = committed
+            .iter()
+            .filter_map(|(account, nonce)| nonce.map(|n| (*account, n)))
+            .collect();
+        self
     }
 
     fn is_ready(&self, i: usize) -> bool {
@@ -730,7 +745,9 @@ impl<'a> CombinedOrder<'a> {
 
     /// Leaves `victim` out, and every transaction left that depends on it, in
     /// turn: its outer sender's transactions at higher nonces when it
-    /// advances the nonce, and its named sender's later envelopes.
+    /// advances the nonce (and is not below its account's committed nonce,
+    /// where that is known: such a transaction can never take its nonce, and
+    /// nothing waits on it), and its named sender's later envelopes.
     fn leave_out(&mut self, victim: usize) -> Vec<usize> {
         let seq = self.seq;
         let mut out = Vec::new();
@@ -740,7 +757,11 @@ impl<'a> CombinedOrder<'a> {
                 continue;
             }
             let t = &seq[x];
-            if t.key.1 {
+            let stale = self
+                .committed
+                .get(&t.outer)
+                .is_some_and(|committed| t.key.0 < *committed);
+            if t.key.1 && !stale {
                 if let Some(left) = self.by_outer.get(&t.outer) {
                     work.extend(
                         left.iter()
@@ -833,7 +854,7 @@ fn in_combined_order(
             envelope: sponsored_identity(tx),
         })
         .collect();
-    let mut order = CombinedOrder::new(&seq);
+    let mut order = CombinedOrder::new(&seq).with_committed(committed);
     let mut placed = Vec::with_capacity(seq.len());
     let mut left_out = LeftOut::default();
     let mut remaining = seq.len();
@@ -2136,7 +2157,7 @@ impl Mempool {
                 envelope: sponsored_identity(tx),
             })
             .collect();
-        let mut order = CombinedOrder::new(&seq);
+        let mut order = CombinedOrder::new(&seq).with_committed(committed);
         let account_gapped = order.beyond_a_gap(committed);
         let messaging = MessagingStore::new(&policy.db);
         let mut envelope_gapped = Vec::new();
@@ -3247,6 +3268,31 @@ mod tests {
         // Without a policy nothing is held.
         let bare = Mempool::new(MempoolConfig::default());
         assert!(bare.pool_holds(&pool, true, &committed).held.is_empty());
+    }
+
+    /// A transaction below its account's committed nonce can never take its
+    /// nonce, so nothing of its account waits on it. `r1`'s committed nonce is
+    /// 2; its envelope for `s` at nonce 1 is stale and is held (`s`'s envelope
+    /// 0 is missing), and `r1`'s transfers at nonces 2 and 3 are not held with
+    /// it, from the accounting gate (where the envelope would advance the
+    /// nonce) as below it.
+    #[test]
+    fn a_transaction_below_its_committed_nonce_holds_nothing_behind_it() {
+        let (r1, _, s, _, _) = keys();
+        let (pool_mempool, _dir) = policy_pool();
+        let stale = relayed(&r1, 1, &s, 1);
+        let later = [transfer_from(&r1, 2), transfer_from(&r1, 3)];
+        let pool = vec![stale.clone(), later[0].clone(), later[1].clone()];
+        let committed: HashMap<Address, Option<Nonce>> =
+            [(r1.address(), Some(2))].into_iter().collect();
+        for accounting in [true, false] {
+            let held = pool_mempool.pool_holds(&pool, accounting, &committed).held;
+            assert_eq!(
+                held.into_iter().collect::<Vec<_>>(),
+                vec![stale.hash()],
+                "accounting {accounting}"
+            );
+        }
     }
 
     /// `filter_map_held` sees each held transaction once and returns what the
