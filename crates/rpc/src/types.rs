@@ -1956,9 +1956,10 @@ pub struct MessageEventInfo {
     pub content_type: u8,
     /// Message flags
     pub flags: u16,
-    /// Whether the message moved a payment into escrow: true only for a paid
-    /// send. A relayed message reports no payment here; one it made is
-    /// reported by `messaging_getPaymentStatus`.
+    /// Whether the message moved a payment into escrow: a paid send, or a
+    /// relayed message executed at or above the envelope gate that carried a
+    /// positive amount. It stays true after the payment is claimed or
+    /// refunded; `messaging_getPaymentStatus` reports where it stands.
     pub has_payment: bool,
     /// Payment amount (if has_payment)
     pub payment_amount: Option<String>,
@@ -1979,9 +1980,10 @@ pub struct MessageDataInfo {
     pub message_data: String,
     /// Sender's public key (hex with 0x prefix)
     pub sender_pubkey: String,
-    /// Whether message has payment attached. Always false for a relayed
-    /// message; a payment a relayed message made is reported by
-    /// `messaging_getPaymentStatus`.
+    /// Whether the relayed message paid an amount into escrow: only at or
+    /// above the envelope gate, where the named sender funds it; never below
+    /// it. It stays true after the payment is claimed or refunded;
+    /// `messaging_getPaymentStatus` reports where it stands.
     pub has_payment: bool,
     /// Payment amount (if has_payment)
     pub payment_amount: Option<String>,

@@ -8,8 +8,10 @@
 //! payments (one claimed, one left in escrow), a sponsored message without an
 //! amount, an unaffordable sponsored payment (refused, its nonce spent) and a
 //! paid send that is claimed. Existing responses keep the shape a strict
-//! client of the earlier response parses and the values the earlier code
-//! gives (a relayed message reports no payment).
+//! client of the earlier response parses; their payment fields describe an
+//! actual, successfully funded payment: a sponsored payment executed at or
+//! above the gate (still after its claim or refund), never a failed
+//! transaction, never an amount named below the gate.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -20,8 +22,8 @@ use sumchain_crypto::{recipient_hash, sign, KeyPair};
 use sumchain_genesis::{ChainParams, Genesis, MessagingParams};
 use sumchain_primitives::messaging::{
     ClaimPaymentData, ContentType, MessageFlags, MessageHeader, MessagingTxData,
-    RegisterPublicKeyData, SendMessageWithPaymentData, SetSponsorshipEnabledData, SRC201_MAGIC,
-    SRC201_NONCE_SIZE, SRC201_TAG_SIZE, SRC201_VERSION,
+    RegisterPublicKeyData, SendMessageData, SendMessageWithPaymentData, SetSponsorshipEnabledData,
+    SRC201_MAGIC, SRC201_NONCE_SIZE, SRC201_TAG_SIZE, SRC201_VERSION,
 };
 use sumchain_primitives::{
     sponsored_send_v2_signing_preimage, Block, BlockHeader, Hash, MessagingOperation, Receipt,
@@ -33,7 +35,7 @@ use sumchain_rpc::metrics::Metrics;
 use sumchain_rpc::rate_limit::RateLimitConfig;
 use sumchain_rpc::server::RpcServer;
 use sumchain_state::{BlockExecutor, Mempool, MempoolConfig, StateManager};
-use sumchain_storage::Database;
+use sumchain_storage::{Database, MessagingStore};
 use tokio::sync::mpsc;
 
 const CHAIN_ID: u64 = 7;
@@ -87,6 +89,13 @@ fn sponsor_key_configured() {
 }
 
 fn genesis() -> Genesis {
+    genesis_with(false)
+}
+
+/// `genesis()`, with both clock gates open from genesis when `clocked` (the
+/// rules then read whole seconds of the block timestamp, so an escrow can
+/// expire). A test chain only.
+fn genesis_with(clocked: bool) -> Genesis {
     let mut p = ChainParams::with_v2_enabled();
     p.messaging = Some(MessagingParams {
         registry_admin: Some(admin().address().to_base58()),
@@ -98,6 +107,10 @@ fn genesis() -> Genesis {
     p.messaging_sponsored_envelope_verification_enabled_from_height = Some(GATE);
     p.messaging_fee_nonce_accounting_enabled_from_height = Some(GATE);
     p.peer_protocol_declaration_required_from_height = Some(1);
+    if clocked {
+        p.subsystem_block_timestamp_enabled_from_height = Some(0);
+        p.messaging_timestamp_units_enabled_from_height = Some(0);
+    }
     let mut alloc = HashMap::new();
     for k in [
         validator(),
@@ -244,10 +257,20 @@ fn serve(g: &Genesis) -> Served {
 
 impl Served {
     fn publish(&self, height: u64, txs: Vec<SignedTransaction>) -> Vec<Receipt> {
+        self.publish_at(height, 1_000 + height, txs)
+    }
+
+    /// `publish` with the block timestamp `timestamp_ms`.
+    fn publish_at(
+        &self,
+        height: u64,
+        timestamp_ms: u64,
+        txs: Vec<SignedTransaction>,
+    ) -> Vec<Receipt> {
         let header = BlockHeader::new(
             Hash::ZERO,
             height,
-            1_000 + height,
+            timestamp_ms,
             Hash::ZERO,
             Hash::ZERO,
             *validator().public_key().as_bytes(),
@@ -664,25 +687,31 @@ async fn payment_status_and_envelope_outcomes_report_what_the_chain_executed() {
         .await
         .is_err());
 
-    // ── the existing methods: earlier shape, earlier values ────────────────
-    // A relayed message reports no payment in every existing method, a real
-    // sponsored payment included; a paid send reports its payment, as before.
+    // ── the existing methods: earlier shape; payments as executed ──────────
+    // A relayed message executed at the envelope gate reports the payment it
+    // made, in every existing method; below the gate, none; a paid send
+    // reports its payment, as before.
     let events: Vec<MessageEventInfo> = strict(
         &srv.messaging_get_sent_messages(carol_b58.clone(), None, None)
             .await
             .unwrap(),
     );
     assert_eq!(events.len(), 4);
-    assert!(events
-        .iter()
-        .all(|e| !e.has_payment && e.payment_amount.is_none()));
+    for e in &events {
+        let paid = e.tx_hash == id(&pay_claimed) || e.tx_hash == id(&pay_kept);
+        assert_eq!(e.has_payment, paid, "{}", e.tx_hash);
+        assert!(e.payment_amount.is_none());
+    }
     let to_bob: Vec<MessageEventInfo> = strict(
         &srv.messaging_get_messages(bob_rh.clone(), None, None)
             .await
             .unwrap(),
     );
     for e in &to_bob {
-        assert_eq!(e.has_payment, e.tx_hash == id(&paid_send), "{}", e.tx_hash);
+        let paid = [&paid_send, &pay_claimed, &pay_kept]
+            .iter()
+            .any(|t| e.tx_hash == id(t));
+        assert_eq!(e.has_payment, paid, "{}", e.tx_hash);
     }
     let in_block: Vec<MessageEventInfo> =
         strict(&srv.messaging_get_messages_in_block(3, None).await.unwrap());
@@ -692,11 +721,22 @@ async fn payment_status_and_envelope_outcomes_report_what_the_chain_executed() {
             .await
             .unwrap(),
     );
-    assert!(!one.unwrap().has_payment);
+    assert!(one.unwrap().has_payment);
     let data: Option<MessageDataInfo> =
         strict(&srv.messaging_get_message_data(hx(&pay_kept)).await.unwrap());
     let data = data.unwrap();
-    assert_eq!((data.has_payment, data.payment_amount), (false, None));
+    assert_eq!(
+        (data.has_payment, data.payment_amount.as_deref()),
+        (true, Some("1000"))
+    );
+    let data: Option<MessageDataInfo> =
+        strict(&srv.messaging_get_message_data(hx(&legacy)).await.unwrap());
+    let data = data.unwrap();
+    assert_eq!(
+        (data.has_payment, data.payment_amount),
+        (false, None),
+        "below the gate the named amount moved nothing"
+    );
     // The escrow itself is reported, as before, by the escrow methods.
     let pending = srv
         .messaging_get_pending_payment(hx(&pay_kept))
@@ -707,4 +747,461 @@ async fn payment_status_and_envelope_outcomes_report_what_the_chain_executed() {
         (pending.amount.as_str(), pending.sender),
         ("1000", carol_b58)
     );
+}
+
+// ── the payment fields of the existing methods, one test per rule ─────────
+//
+// The rules for `has_payment` / `payment_amount` in the existing
+// methods: they describe an actual, successfully funded payment; a sponsored
+// payment executed at or above the gate is included; a historical sponsored
+// amount without an escrow remains "no payment"; a failed transaction never
+// reports a payment; a payment remains a payment after its claim or refund
+// (where it stands is `messaging_getPaymentStatus`'s); shapes and unaffected
+// historical responses are preserved exactly (also the byte pins of
+// `messaging_rpc_response_pins.rs`).
+
+/// The payment fields one method reports for one message; `None` where the
+/// method has no message for it.
+type Fields = Option<(bool, Option<String>)>;
+
+/// A payment of `amount`: the flag in the four event methods (an event row
+/// stores no amount, as for a paid send), the flag and the amount in
+/// `getMessageData`.
+fn payment(amount: &str) -> Vec<Fields> {
+    let mut v = vec![Some((true, None)); 4];
+    v.push(Some((true, Some(amount.to_string()))));
+    v
+}
+
+/// An executed relayed message without a payment.
+fn no_payment() -> Vec<Fields> {
+    vec![Some((false, None)); 5]
+}
+
+/// No message at all, which is what a failed transaction leaves.
+fn no_message() -> Vec<Fields> {
+    vec![None; 5]
+}
+
+/// The four event methods' payment fields for the message `t` from `sender`
+/// to `to`, carried at `height`: `getMessageByTxHash`, `getSentMessages`,
+/// `getMessages`, `getMessagesInBlock`. Each response is parsed strictly, as
+/// a client of the earlier shape parses it.
+async fn event_fields(
+    srv: &RpcServer,
+    t: &SignedTransaction,
+    sender: &KeyPair,
+    to: &KeyPair,
+    height: u64,
+) -> Vec<Fields> {
+    let id = format!("0x{}", hex::encode(t.hash().as_bytes()));
+    let pick = |events: Vec<MessageEventInfo>| -> Fields {
+        let mut found = events.into_iter().filter(|e| e.tx_hash == id);
+        let one = found.next().map(|e| (e.has_payment, e.payment_amount));
+        assert!(found.next().is_none(), "one row per message");
+        one
+    };
+    let one: Option<MessageEventInfo> = strict(
+        &srv.messaging_get_message_by_tx_hash(t.hash().to_hex())
+            .await
+            .unwrap(),
+    );
+    let sent: Vec<MessageEventInfo> = strict(
+        &srv.messaging_get_sent_messages(sender.address().to_base58(), None, None)
+            .await
+            .unwrap(),
+    );
+    let received: Vec<MessageEventInfo> = strict(
+        &srv.messaging_get_messages(hex32(&recipient_hash(&to.address())), None, None)
+            .await
+            .unwrap(),
+    );
+    let in_block: Vec<MessageEventInfo> = strict(
+        &srv.messaging_get_messages_in_block(height, None)
+            .await
+            .unwrap(),
+    );
+    vec![
+        one.map(|e| (e.has_payment, e.payment_amount)),
+        pick(sent),
+        pick(received),
+        pick(in_block),
+    ]
+}
+
+/// `event_fields`, then `getMessageData`, for a relayed message.
+async fn relayed_fields(
+    srv: &RpcServer,
+    t: &SignedTransaction,
+    sender: &KeyPair,
+    to: &KeyPair,
+    height: u64,
+) -> Vec<Fields> {
+    let mut v = event_fields(srv, t, sender, to, height).await;
+    let data: Option<MessageDataInfo> = strict(
+        &srv.messaging_get_message_data(t.hash().to_hex())
+            .await
+            .unwrap(),
+    );
+    v.push(data.map(|d| (d.has_payment, d.payment_amount)));
+    v
+}
+
+async fn status_of(srv: &RpcServer, t: &SignedTransaction) -> PaymentStatus {
+    strict(
+        &srv.messaging_get_payment_status(t.hash().to_hex())
+            .await
+            .unwrap(),
+    )
+}
+
+/// The escrow row's amount for `t`, read from storage.
+fn escrow(s: &Served, t: &SignedTransaction) -> Option<u128> {
+    MessagingStore::new(&s.db)
+        .get_pending_payment(&t.hash())
+        .unwrap()
+        .map(|p| p.amount)
+}
+
+/// The event row's stored payment flag for `t`, read from storage.
+fn stored_flag(s: &Served, t: &SignedTransaction) -> Option<bool> {
+    MessagingStore::new(&s.db)
+        .get_message_by_tx_hash(t.hash().as_bytes())
+        .unwrap()
+        .map(|e| e.has_payment)
+}
+
+fn balance(s: &Served, kp: &KeyPair) -> u128 {
+    s.state.get_balance(&kp.address()).unwrap()
+}
+
+fn all_ok(r: &[Receipt]) -> bool {
+    r.iter().all(|r| r.status == TxStatus::Success)
+}
+
+/// Sponsorship on, and every sender's key registered.
+fn setup(s: &Served) -> Vec<SignedTransaction> {
+    vec![
+        s.tx(
+            &admin(),
+            op(
+                MessagingOperation::SetSponsorshipEnabled,
+                &SetSponsorshipEnabledData { enabled: true },
+            ),
+        ),
+        s.tx(&alice(), register(&alice())),
+        s.tx(&bob(), register(&bob())),
+        s.tx(&carol(), register(&carol())),
+        s.tx(&dave(), register(&dave())),
+    ]
+}
+
+fn direct(to: &KeyPair) -> MessagingTxData {
+    let rh = recipient_hash(&to.address());
+    op(
+        MessagingOperation::SendMessageDirect,
+        &SendMessageData {
+            message_data: valid_message(rh),
+            recipient_hash: rh,
+        },
+    )
+}
+
+/// Included: a sponsored payment executed at or above the gate, exactly at
+/// the boundary. The gate is H = 3. At H−1 a relayed message naming an
+/// amount reports no payment (its stored flag is set; nothing was
+/// escrowed). At H and at H+1 a positive amount reports the payment in every
+/// method, as its escrow holds it; at H an amount of zero and no amount
+/// report none.
+#[tokio::test]
+async fn a_sponsored_payment_is_reported_from_the_gate_at_h_minus_1_h_and_h_plus_1() {
+    let s = serve(&genesis());
+    let srv = &s.server;
+    assert!(all_ok(&s.publish(1, setup(&s))));
+    let below = relayed_by(&s, &sponsor(), &envelope(&carol(), &bob(), 0, Some(5_000)));
+    assert!(all_ok(&s.publish(GATE - 1, vec![below.clone()])));
+    let sp = s.state.get_nonce(&sponsor().address()).unwrap();
+    let at = relayed_at(
+        &s,
+        &sponsor(),
+        sp,
+        &envelope(&carol(), &bob(), 1, Some(7_000)),
+    );
+    let zero = relayed_at(
+        &s,
+        &sponsor(),
+        sp + 1,
+        &envelope(&carol(), &bob(), 2, Some(0)),
+    );
+    let none = relayed_at(&s, &sponsor(), sp + 2, &envelope(&carol(), &bob(), 3, None));
+    assert!(all_ok(
+        &s.publish(GATE, vec![at.clone(), zero.clone(), none.clone()])
+    ));
+    let above = relayed_by(&s, &sponsor(), &envelope(&carol(), &bob(), 4, Some(9_000)));
+    assert!(all_ok(&s.publish(GATE + 1, vec![above.clone()])));
+
+    assert_eq!(stored_flag(&s, &below), Some(true));
+    assert_eq!(escrow(&s, &below), None);
+    assert_eq!(
+        relayed_fields(srv, &below, &carol(), &bob(), GATE - 1).await,
+        no_payment(),
+        "H-1"
+    );
+    assert_eq!(escrow(&s, &at), Some(7_000));
+    assert_eq!(
+        relayed_fields(srv, &at, &carol(), &bob(), GATE).await,
+        payment("7000"),
+        "H"
+    );
+    for t in [&zero, &none] {
+        assert_eq!(escrow(&s, t), None);
+        assert_eq!(
+            relayed_fields(srv, t, &carol(), &bob(), GATE).await,
+            no_payment(),
+            "H, no positive amount"
+        );
+    }
+    assert_eq!(escrow(&s, &above), Some(9_000));
+    assert_eq!(
+        relayed_fields(srv, &above, &carol(), &bob(), GATE + 1).await,
+        payment("9000"),
+        "H+1"
+    );
+}
+
+/// No escrow, no payment: amounts named below the gate stay "no payment" in
+/// every method, also once the chain has passed the gate. One exceeds what
+/// its named sender holds; below the gate nothing moved, so it executed and
+/// both named senders keep their balances.
+#[tokio::test]
+async fn an_amount_named_below_the_gate_remains_no_payment() {
+    let s = serve(&genesis());
+    let srv = &s.server;
+    assert!(all_ok(&s.publish(1, setup(&s))));
+    let (carol_before, dave_before) = (balance(&s, &carol()), balance(&s, &dave()));
+    // Two relayers: below the accounting gate a relayed message does not
+    // advance its relayer's account nonce (the earlier rule).
+    let named = relayed_by(&s, &sponsor(), &envelope(&carol(), &bob(), 0, Some(5_000)));
+    let beyond = relayed_by(&s, &admin(), &envelope(&dave(), &bob(), 0, Some(FUNDS * 2)));
+    let r = s.publish(2, vec![named.clone(), beyond.clone()]);
+    assert!(all_ok(&r), "{r:?}");
+    assert!(s.publish(GATE, vec![]).is_empty());
+    assert!(s.publish(GATE + 1, vec![]).is_empty());
+    assert_eq!(
+        (balance(&s, &carol()), balance(&s, &dave())),
+        (carol_before, dave_before)
+    );
+    for (t, sender) in [(&named, carol()), (&beyond, dave())] {
+        assert_eq!(stored_flag(&s, t), Some(true));
+        assert_eq!(escrow(&s, t), None);
+        assert_eq!(
+            relayed_fields(srv, t, &sender, &bob(), 2).await,
+            no_payment()
+        );
+        let st = status_of(srv, t).await;
+        assert_eq!(
+            (st.status.as_str(), st.amount, st.legacy_amount_unbacked),
+            ("none", None, true)
+        );
+    }
+}
+
+/// Never for a failed transaction, at H and at H+1: an unaffordable
+/// sponsored payment (an authenticated refusal; its nonce is spent), an
+/// envelope whose signature fails, and one at a nonce that is not its
+/// sender's. Each is a charged failed receipt; no method reports a message
+/// or a payment for it, nothing is escrowed and the named senders keep
+/// their balances. A sponsored payment in the same block is reported.
+#[tokio::test]
+async fn a_failed_transaction_never_reports_a_payment() {
+    let s = serve(&genesis());
+    let srv = &s.server;
+    assert!(all_ok(&s.publish(1, setup(&s))));
+    for (i, height) in [GATE, GATE + 1].into_iter().enumerate() {
+        let i = i as u64;
+        let (carol_before, dave_before) = (balance(&s, &carol()), balance(&s, &dave()));
+        let sp = s.state.get_nonce(&sponsor().address()).unwrap();
+        let control = relayed_at(
+            &s,
+            &sponsor(),
+            sp,
+            &envelope(&alice(), &bob(), i, Some(2_000)),
+        );
+        let unaffordable = relayed_at(
+            &s,
+            &sponsor(),
+            sp + 1,
+            &envelope(&dave(), &bob(), i, Some(FUNDS * 2)),
+        );
+        let mut tampered = envelope(&carol(), &bob(), 0, Some(1_000));
+        tampered.signature[0] ^= 1;
+        let tampered = relayed_at(&s, &sponsor(), sp + 2, &tampered);
+        let wrong_nonce = relayed_at(
+            &s,
+            &sponsor(),
+            sp + 3,
+            &envelope(&carol(), &bob(), 99, Some(1_000)),
+        );
+        let r = s.publish(
+            height,
+            vec![
+                control.clone(),
+                unaffordable.clone(),
+                tampered.clone(),
+                wrong_nonce.clone(),
+            ],
+        );
+        assert_eq!(
+            r.iter().map(|r| r.status).collect::<Vec<_>>(),
+            vec![
+                TxStatus::Success,
+                TxStatus::Failed(7),
+                TxStatus::Failed(7),
+                TxStatus::Failed(7)
+            ],
+            "{height}"
+        );
+        assert_eq!(
+            relayed_fields(srv, &control, &alice(), &bob(), height).await,
+            payment("2000"),
+            "{height}"
+        );
+        for (t, sender) in [
+            (&unaffordable, dave()),
+            (&tampered, carol()),
+            (&wrong_nonce, carol()),
+        ] {
+            assert_eq!(stored_flag(&s, t), None, "{height}");
+            assert_eq!(escrow(&s, t), None, "{height}");
+            assert_eq!(
+                relayed_fields(srv, t, &sender, &bob(), height).await,
+                no_message(),
+                "{height}"
+            );
+            let st = status_of(srv, t).await;
+            assert_eq!(
+                (st.status.as_str(), st.amount),
+                ("refused", None),
+                "{height}"
+            );
+        }
+        assert_eq!(
+            (balance(&s, &carol()), balance(&s, &dave())),
+            (carol_before, dave_before),
+            "{height}"
+        );
+    }
+}
+
+/// Still a payment after its claim and after its refund. With the clock
+/// gates open (a test chain), two sponsored payments at the gate; the
+/// recipient claims one at H+1, and the other eight days later, when its
+/// escrow has expired and the claim refunds the sender (a success from the
+/// accounting gate). Both escrow rows are gone; every method still reports
+/// each payment; `messaging_getPaymentStatus` reports them settled.
+#[tokio::test]
+async fn a_payment_stays_a_payment_after_its_claim_and_its_refund() {
+    const T_MS: u64 = 1_760_000_000_000;
+    const MINUTE_MS: u64 = 60_000;
+    const DAY_MS: u64 = 24 * 3600 * 1000;
+    let at = |h: u64| T_MS + h * MINUTE_MS;
+    let s = serve(&genesis_with(true));
+    let srv = &s.server;
+    assert!(all_ok(&s.publish_at(1, at(1), setup(&s))));
+    assert!(s.publish_at(2, at(2), vec![]).is_empty());
+    let sp = s.state.get_nonce(&sponsor().address()).unwrap();
+    let claimed = relayed_at(
+        &s,
+        &sponsor(),
+        sp,
+        &envelope(&carol(), &bob(), 0, Some(7_000)),
+    );
+    let refunded = relayed_at(
+        &s,
+        &sponsor(),
+        sp + 1,
+        &envelope(&carol(), &bob(), 1, Some(3_000)),
+    );
+    assert!(all_ok(&s.publish_at(
+        GATE,
+        at(GATE),
+        vec![claimed.clone(), refunded.clone()]
+    )));
+    for (t, amount) in [(&claimed, "7000"), (&refunded, "3000")] {
+        assert_eq!(status_of(srv, t).await.status, "escrowed");
+        assert_eq!(
+            relayed_fields(srv, t, &carol(), &bob(), GATE).await,
+            payment(amount),
+            "escrowed"
+        );
+    }
+
+    let bob_before = balance(&s, &bob());
+    let r = s.publish_at(GATE + 1, at(GATE + 1), vec![claim(&s, claimed.hash())]);
+    assert_eq!(r[0].status, TxStatus::Success);
+    assert_eq!(balance(&s, &bob()), bob_before + 7_000 - r[0].fee_paid);
+
+    let carol_before = balance(&s, &carol());
+    let r = s.publish_at(
+        GATE + 2,
+        at(GATE + 2) + 8 * DAY_MS,
+        vec![claim(&s, refunded.hash())],
+    );
+    assert_eq!(r[0].status, TxStatus::Success, "the refund is the outcome");
+    assert_eq!(balance(&s, &carol()), carol_before + 3_000, "refunded");
+
+    for (t, amount) in [(&claimed, "7000"), (&refunded, "3000")] {
+        assert_eq!(escrow(&s, t), None, "the escrow row is gone");
+        let st = status_of(srv, t).await;
+        assert_eq!(
+            (st.status.as_str(), st.amount.as_deref()),
+            ("settled", Some(amount))
+        );
+        assert_eq!(
+            relayed_fields(srv, t, &carol(), &bob(), GATE).await,
+            payment(amount),
+            "after settlement"
+        );
+    }
+}
+
+/// Unaffected responses keep their earlier values, below and at the gate,
+/// with each message on its own event row: a paid send reports its payment
+/// (the flag; no amount, as before), a direct message and a relayed message
+/// without an amount report none. The byte pins hold every existing
+/// response of a history below the gates.
+#[tokio::test]
+async fn messages_the_rule_does_not_concern_keep_their_earlier_values() {
+    let s = serve(&genesis());
+    let srv = &s.server;
+    assert!(all_ok(&s.publish(1, setup(&s))));
+    for (height, carol_nonce) in [(GATE - 1, 0), (GATE, 1)] {
+        let n = s.state.get_nonce(&alice().address()).unwrap();
+        let paid_send = s.tx_at(&alice(), n, paid(&bob(), 500));
+        let direct_send = s.tx_at(&alice(), n + 1, direct(&bob()));
+        let plain = relayed_by(
+            &s,
+            &sponsor(),
+            &envelope(&carol(), &bob(), carol_nonce, None),
+        );
+        assert!(all_ok(&s.publish(
+            height,
+            vec![paid_send.clone(), direct_send.clone(), plain.clone()]
+        )));
+        assert_eq!(
+            event_fields(srv, &paid_send, &alice(), &bob(), height).await,
+            vec![Some((true, None)); 4],
+            "{height}"
+        );
+        assert_eq!(
+            event_fields(srv, &direct_send, &alice(), &bob(), height).await,
+            vec![Some((false, None)); 4],
+            "{height}"
+        );
+        assert_eq!(
+            relayed_fields(srv, &plain, &carol(), &bob(), height).await,
+            no_payment(),
+            "{height}"
+        );
+    }
 }

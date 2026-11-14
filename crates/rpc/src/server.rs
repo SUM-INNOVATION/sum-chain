@@ -1618,19 +1618,19 @@ impl RpcServer {
 
     /// The RPC view of a stored message event.
     ///
-    /// `has_payment` is true only for a paid send (`SendMessageWithPayment`),
-    /// whose stored flag always means an amount moved into escrow. A relayed
-    /// message reports no payment here: below the envelope gate its stored
-    /// flag follows the amount the envelope claimed, which moved nothing, and
-    /// this response keeps its earlier values; a payment a relayed message
-    /// made from the gate on is reported by `messaging_getPaymentStatus`. A
-    /// message whose transaction this node does not hold reports no
-    /// payment.
+    /// `has_payment` is the stored flag where it is backed by an escrow: for a
+    /// paid send, and for a relayed message executed at or above the envelope
+    /// gate (there the flag is set exactly when the escrow is written). Below
+    /// the gate a relayed message's flag followed the amount its envelope
+    /// claimed, which moved nothing, so it is not reported. The flag and the
+    /// transaction outlive the escrow row, so a claimed or refunded payment
+    /// is still reported. A refused attempt stores no event. A message whose
+    /// transaction this node does not hold reports no payment.
     fn message_event_info(
         &self,
         e: sumchain_primitives::MessageEvent,
     ) -> std::result::Result<MessageEventInfo, RpcError> {
-        let has_payment = e.has_payment && self.is_paid_send(&e.message_id)?;
+        let has_payment = e.has_payment && self.payment_backed(&e)?;
         Ok(MessageEventInfo {
             tx_hash: format!("0x{}", hex::encode(e.message_id.as_bytes())),
             block_height: e.block_height,
@@ -1643,17 +1643,31 @@ impl RpcServer {
         })
     }
 
-    /// Whether the transaction `tx_hash` is a paid send.
-    fn is_paid_send(&self, tx_hash: &Hash) -> std::result::Result<bool, RpcError> {
+    /// Whether an event's stored payment flag is backed by an escrow: for a
+    /// paid send, always; for a relayed message, only from the envelope gate,
+    /// where the flag is set exactly when the escrow was written. Below the
+    /// gate a relayed message's flag followed the amount its envelope named,
+    /// and nothing moved.
+    fn payment_backed(
+        &self,
+        e: &sumchain_primitives::MessageEvent,
+    ) -> std::result::Result<bool, RpcError> {
         use sumchain_primitives::TxInner;
         let tx = TxStore::new(&self.db)
-            .get(tx_hash)
-            .map_err(|e| RpcError::Internal(e.to_string()))?;
+            .get(&e.message_id)
+            .map_err(|err| RpcError::Internal(err.to_string()))?;
         Ok(match tx.as_ref().map(|t| &t.inner) {
-            Some(TxInner::V2(v2)) => matches!(
-                &v2.payload,
-                TxPayload::Messaging(d) if d.operation == MessagingOperation::SendMessageWithPayment
-            ),
+            Some(TxInner::V2(v2)) => match &v2.payload {
+                TxPayload::Messaging(d) => {
+                    d.operation == MessagingOperation::SendMessageWithPayment
+                        || (d.operation == MessagingOperation::SendMessage
+                            && sumchain_state::MessagingExecutor::sponsored_envelope_verification_gate_open(
+                                &self.chain_params,
+                                e.block_height,
+                            ))
+                }
+                _ => false,
+            },
             _ => false,
         })
     }
@@ -4579,12 +4593,21 @@ impl SumChainApiServer for RpcServer {
         // The sender the executed message was stored under: the address of
         // the key the envelope names.
         let sender = Address::from_public_key(&sponsored_msg.sender_pubkey);
+        let paid = if sumchain_state::MessagingExecutor::sponsored_envelope_verification_gate_open(
+            &self.chain_params,
+            receipt.block_height,
+        ) {
+            sponsored_msg.koppa_amount.unwrap_or(0)
+        } else {
+            0
+        };
 
-        // No payment is reported here for a relayed message, whatever the
-        // payload says: below the envelope gate an envelope's `koppa_amount`
-        // moved nothing, and this response keeps its earlier values. A
-        // payment a relayed message made from the gate on is reported by
-        // `messaging_getPaymentStatus`.
+        // A payment is reported exactly where the chain executed one: from
+        // the envelope gate a positive amount was paid into escrow by the
+        // named sender (the receipt is a success); below it an envelope's
+        // `koppa_amount` moved nothing, so none is reported. The amount is
+        // read from the stored transaction, not the escrow row, so a claimed
+        // or refunded payment is still reported.
         Ok(Some(MessageDataInfo {
             tx_hash: format!("0x{}", hex::encode(hash.as_bytes())),
             block_height: receipt.block_height,
@@ -4592,8 +4615,8 @@ impl SumChainApiServer for RpcServer {
             recipient_hash: format!("0x{}", hex::encode(sponsored_msg.recipient_hash)),
             message_data: format!("0x{}", hex::encode(&sponsored_msg.message_data)),
             sender_pubkey: format!("0x{}", hex::encode(sponsored_msg.sender_pubkey)),
-            has_payment: false,
-            payment_amount: None,
+            has_payment: paid > 0,
+            payment_amount: (paid > 0).then(|| paid.to_string()),
         }))
     }
 

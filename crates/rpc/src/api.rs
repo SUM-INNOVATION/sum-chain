@@ -1207,8 +1207,11 @@ pub trait SumChainApi {
     ///
     /// Only for a relayed (sponsored) message the canonical chain executed:
     /// `None` for a transaction with no canonical receipt or a refused one.
-    /// `has_payment` is false and `payment_amount` absent for every relayed
-    /// message; a payment one made is reported by `messaging_getPaymentStatus`.
+    /// `has_payment` and `payment_amount` report a payment exactly where the
+    /// chain executed one: a relayed message executed at or above the envelope
+    /// gate whose envelope carried a positive amount; never below the gate.
+    /// The payment stays reported after it is claimed or refunded;
+    /// `messaging_getPaymentStatus` says whether it is still escrowed.
     #[method(name = "messaging_getMessageData")]
     async fn messaging_get_message_data(
         &self,
