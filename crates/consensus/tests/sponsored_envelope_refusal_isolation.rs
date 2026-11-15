@@ -555,6 +555,70 @@ async fn one_sponsors_refused_envelope_never_holds_another_sponsors_queue() {
     }
 }
 
+/// The fitting loop's own drops, at the block that opens the accounting
+/// gate as at every other. The first case with the proposer's
+/// screening pass skipped (`Failpoint::SkipProposalScreening`): the refusal
+/// of `x`'s envelope reaches `create_block`'s fitting loop, which drops it
+/// with the runs it breaks as the block being built judges them, not as its
+/// parent would. The case's first block carries what the first case's does: `r2`'s three
+/// transactions, never `x`'s envelope; from the gate `r1`'s envelope for `s`
+/// leaves with `r1`'s run (held, no receipt); below it, it is delivered. At
+/// every configuration.
+#[tokio::test]
+async fn the_fitting_loop_drops_a_refused_envelopes_runs_as_the_block_being_built_judges_them() {
+    use sumchain_consensus::branch_switch::failpoints::{arm, Failpoint};
+    for gates in matrix() {
+        let name = gates.name;
+        let node = Node::new(gates);
+        let (r1, r2, s, u, x) = (sponsor(0), sponsor(1), sender(0), sender(1), sender(3));
+        node.set_up(&x).await;
+        let accounting = gates.accounting_at(CASE_BLOCK);
+        let verification = gates.verification_at(CASE_BLOCK);
+
+        let r1_x0 = node.relay(&r1, |n| relayed(&r1, n, 3_000, &x, 0));
+        let r1_s0 = node.relay(&r1, |n| relayed(&r1, n, 2_000, &s, 0));
+        let r2_s1 = node.relay(&r2, |n| relayed(&r2, n, 2_000, &s, 1));
+        let r2_u0 = node.relay(&r2, |n| relayed(&r2, n, 2_000, &u, 0));
+        let r2_t = node.relay(&r2, |n| transfer(&r2, n, 1_000));
+        let r2_before = node.account_nonce(&r2);
+
+        arm(Some(Failpoint::SkipProposalScreening));
+        let b3 = node.tick().await;
+        arm(None);
+        assert_eq!(b3.height(), CASE_BLOCK);
+        let carried: Vec<_> = b3.transactions.iter().map(|t| t.hash()).collect();
+        assert!(!carried.contains(&r1_x0.hash()), "{name}");
+        for t in [&r2_s1, &r2_u0, &r2_t] {
+            assert!(carried.contains(&t.hash()), "{name}: {} carried", t.hash());
+        }
+        assert_eq!(node.status(&r2_u0), Some(TxStatus::Success), "{name}");
+        assert_eq!(node.status(&r2_t), Some(TxStatus::Success), "{name}");
+        let s1 = node.receipt(&r2_s1).expect("r2_s1 has a receipt");
+        if accounting && verification {
+            assert!(
+                matches!(s1.status, TxStatus::Failed(_)),
+                "{name}: {:?}",
+                s1.status
+            );
+        } else {
+            assert_eq!(s1.status, TxStatus::Success, "{name}");
+        }
+        if accounting {
+            assert_eq!(node.status(&r1_s0), None, "{name}: no receipt");
+            assert!(
+                node.held(&r1_s0) || !verification,
+                "{name}: left with r1's run"
+            );
+        } else {
+            assert_eq!(node.status(&r1_s0), Some(TxStatus::Success), "{name}");
+        }
+        assert_eq!(node.status(&r1_x0), None, "{name}");
+        assert!(node.held(&r1_x0), "{name}: left in the pool");
+        let advanced = if accounting { 3 } else { 1 };
+        assert_eq!(node.account_nonce(&r2), r2_before + advanced, "{name}");
+    }
+}
+
 /// `r1`'s own direct message is refused (the recipient blocks
 /// `r1`) and held; `r1`'s envelope for `s` behind it leaves with `r1`'s run.
 /// At every configuration `r2`'s envelope for `s` is carried in the case's

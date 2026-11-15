@@ -1301,6 +1301,12 @@ impl PoAEngine {
         if transactions.is_empty() {
             return transactions;
         }
+        #[cfg(feature = "failpoints")]
+        if crate::branch_switch::failpoints::hit(
+            crate::branch_switch::failpoints::Failpoint::SkipProposalScreening,
+        ) {
+            return transactions;
+        }
         let (draft, height) = match self.draft_block(transactions.clone()) {
             Ok(drafted) => drafted,
             Err(e) => {

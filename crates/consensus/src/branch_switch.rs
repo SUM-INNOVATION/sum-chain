@@ -471,6 +471,11 @@ pub mod failpoints {
         StartMarkerAfterCommit,
         /// The node's start marker: its commit fails (an armed failpoint).
         StartMarkerCommitFails,
+        /// Not a branch-switch failpoint: the proposer's screening pass
+        /// (`PoAEngine::screen_selection`) is skipped and returns the
+        /// selection unchanged, so the fitting loop alone acts on every
+        /// refusal. For tests of the fitting loop's drops.
+        SkipProposalScreening,
     }
 
     impl Failpoint {
@@ -494,6 +499,7 @@ pub mod failpoints {
                 Failpoint::StartMarkerBeforeCommit => "start-marker-before-commit".into(),
                 Failpoint::StartMarkerAfterCommit => "start-marker-after-commit".into(),
                 Failpoint::StartMarkerCommitFails => "start-marker-commit-fails".into(),
+                Failpoint::SkipProposalScreening => "skip-proposal-screening".into(),
             }
         }
     }
