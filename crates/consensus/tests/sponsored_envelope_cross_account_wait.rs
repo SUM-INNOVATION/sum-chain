@@ -1173,6 +1173,60 @@ async fn a_cycle_within_one_sponsor_is_released_only_above_another_sponsors_enve
     }
 }
 
+/// Node-local recomputation ("missing" is this node's view at each
+/// selection). In [`one_sponsor_cycle`]'s missing case, `s`'s envelope
+/// 0 reaches the pool after the case's first block, before the gap bound,
+/// relayed by `x` at its nonce 0. In the next selection nothing is above a
+/// gap any more: `x`'s envelope is delivered, `r`'s envelopes are no longer
+/// counted toward the gap bound, and the existing rules for the cycle within
+/// `r` apply — its victim, `r`'s envelope 2 at `r`'s nonce 0 (the head on the
+/// cycle), is evicted with no receipt (not a gap-bound eviction), and `r`'s
+/// envelope 1 stays, now above `r`'s own free nonce 0. When `r` fills that
+/// nonce, `r`'s envelope 1 is delivered in sequence. Where both messaging
+/// gates are open at the case's block.
+#[tokio::test]
+async fn a_missing_envelope_that_arrives_before_the_gap_bound_is_recomputed() {
+    for gates in both_gates_open() {
+        let name = gates.name;
+        let node = Node::new(gates);
+        node.set_up().await;
+        let (x, s) = (sponsor(2), s_of());
+        let (r, _, r_s1, r_s2) = one_sponsor_cycle(&node, Env0::Missing);
+        node.tick().await;
+        for t in [&r_s1, &r_s2] {
+            assert_eq!(node.gap_count(t), 1, "{name}: above the missing envelope");
+            assert_eq!(node.count(t), 0, "{name}");
+        }
+        let x_s0 = relayed(&x, 0, 2_000, &s, 0);
+        node.submit(&[&x_s0]);
+        let b = node.tick().await;
+        assert!(carries(&b, &x_s0), "{name}");
+        assert_eq!(node.status(&x_s0), Some(TxStatus::Success), "{name}");
+        assert_eq!(node.messaging_nonce(&s), 1, "{name}");
+        assert!(
+            !carries(&b, &r_s2) && !node.held(&r_s2),
+            "{name}: the cycle's victim"
+        );
+        assert!(node.receipt(&r_s2).is_none(), "{name}");
+        assert!(
+            !node.mempool.evicted_above_a_gap(&r_s2.hash()),
+            "{name}: not a gap-bound eviction"
+        );
+        assert!(node.held(&r_s1), "{name}");
+        assert_eq!(node.gap_count(&r_s1), 0, "{name}: recomputed");
+        node.tick().await;
+        assert!(node.held(&r_s1), "{name}");
+        assert_eq!(node.gap_count(&r_s1), 1, "{name}: above r's free nonce 0");
+        let fill = transfer(&r, 0, 1_000);
+        node.submit(&[&fill]);
+        let b = node.tick().await;
+        assert!(carries(&b, &fill) && carries(&b, &r_s1), "{name}");
+        assert_eq!(node.status(&r_s1), Some(TxStatus::Success), "{name}");
+        assert_eq!(node.messaging_nonce(&s), 2, "{name}");
+        assert_eq!(node.account_nonce(&r), 2, "{name}");
+    }
+}
+
 /// The sender of [`cycle_above_another_gap`]'s envelopes.
 fn s_of() -> KeyPair {
     sender(0)

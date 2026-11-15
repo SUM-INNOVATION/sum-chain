@@ -32,7 +32,7 @@ use sumchain_state::mempool::{
     CROSS_ACCOUNT_WAIT_SELECTIONS, GAP_HOLD_SELECTIONS,
 };
 use sumchain_state::{BlockExecutor, Mempool, MempoolConfig, StateError, StateManager};
-use sumchain_storage::{Database, ReceiptStore};
+use sumchain_storage::{Database, MessagingStore, ReceiptStore};
 use tempfile::TempDir;
 
 const CHAIN_ID: u64 = 1;
@@ -791,4 +791,179 @@ async fn a_chain_switch_counts_at_its_new_head_and_keeps_what_the_new_branch_unb
             assert_eq!(count(t), 0, "{name}");
         }
     }
+}
+
+/// Node-local recomputation ("missing" is a node's own view),
+/// when canonical state changes. A follower `q` holds a cycle within one
+/// sponsor above `s`'s missing envelope 0: `r` relays `s`'s envelope 2 at its
+/// nonce 0 and envelope 1 at its nonce 1, and `q` took `s`'s envelope 0
+/// (through `x`) and then lost it. The producer `p` never sees `r`'s
+/// envelopes. In the case's first block `q` counts both of `r`'s toward the
+/// gap bound. Where `p` then takes `s`'s envelope 0 and carries it in the next
+/// block, `q`, importing it, recomputes: `r`'s envelopes are no longer above a
+/// gap, their counts are gone, and `q` keeps both past the gap bound, with no
+/// receipt and nothing in its eviction history. Where no block carries it,
+/// `q` evicts both at the `GAP_BOUND`-th block, into its eviction history.
+/// Where both messaging gates are open at the case's block.
+#[tokio::test]
+async fn a_follower_recomputes_a_missing_envelope_when_an_imported_block_executes_it() {
+    for gates in matrix()
+        .into_iter()
+        .filter(|g| g.accounting_at(CASE_BLOCK) && g.verification.is_some_and(|v| CASE_BLOCK >= v))
+    {
+        for executed in [false, true] {
+            let name = format!("{}, envelope 0 executed: {executed}", gates.name);
+            let p = Node::new(gates);
+            let q = Node::follower(genesis(gates), gates, |c| c);
+            p.set_up().await;
+            for h in 1..=p.engine.current_height() {
+                q.import(&p.engine.get_block_by_height(h).unwrap()).await;
+            }
+            let (r, x, s) = (sponsor(0), sponsor(2), sender(0));
+            let x_s0 = relayed(&x, 0, 2_000, &s, 0);
+            let r_s1 = relayed(&r, 1, 2_000, &s, 1);
+            let r_s2 = relayed(&r, 0, 2_000, &s, 2);
+            q.submit(&[&x_s0, &r_s1, &r_s2]);
+            q.mempool.remove(&x_s0.hash());
+            let count = |t: &SignedTransaction| q.mempool.gap_hold_count(&t.hash());
+            let b = p.tick().await;
+            q.import(&b).await;
+            assert_eq!((count(&r_s1), count(&r_s2)), (1, 1), "{name}");
+            if executed {
+                p.submit(&[&x_s0]);
+            }
+            for n in 2..=(GAP_BOUND + 1) {
+                let b = p.tick().await;
+                assert_eq!(carries(&b, &x_s0), executed && n == 2, "{name}: block {n}");
+                q.import(&b).await;
+                let held = executed || n < GAP_BOUND;
+                for t in [&r_s1, &r_s2] {
+                    assert_eq!(q.held(t), held, "{name}: head {n}");
+                    assert!(q.receipt(t).is_none(), "{name}: head {n}");
+                    assert_eq!(
+                        q.mempool.evicted_above_a_gap(&t.hash()),
+                        !held,
+                        "{name}: head {n}"
+                    );
+                    if executed {
+                        assert_eq!(count(t), 0, "{name}: recomputed at head {n}");
+                    }
+                }
+            }
+            let messaging = MessagingStore::new(&q.db)
+                .get_sender_nonce(&s.address())
+                .unwrap();
+            assert_eq!(messaging, u64::from(executed), "{name}");
+            assert_eq!(q.account_nonce(&r), 0, "{name}");
+        }
+    }
+}
+
+/// Node-local recomputation at a chain switch. Two validators; two off-node
+/// builders share a prefix (sponsorship on and `s` registered, then a
+/// filler) and then compete. Two followers hold the cycle of the previous
+/// case above `s`'s missing envelope 0 and import branch A's two empty
+/// blocks, each counting `r`'s envelopes toward the gap bound. Branch B
+/// carries `s`'s envelope 0 (through `x`) in its first block. The follower
+/// `q` imports B: its blocks that lose fork choice count nothing, and at the
+/// switch (one new head) `r`'s envelopes are no longer above a gap, their
+/// counts are gone and both stay, with no receipt and nothing in the
+/// eviction history; B's later blocks change nothing of that. The follower
+/// `q2` stays on A and evicts both at A's third block. With the gates inside
+/// the chain's history.
+#[tokio::test]
+async fn a_follower_recomputes_a_missing_envelope_at_a_chain_switch_that_executes_it() {
+    let gates = matrix()
+        .into_iter()
+        .find(|g| g.name == "inside history")
+        .unwrap();
+    let name = gates.name;
+    let validators = [validator(), key(0x84)];
+    let g = genesis_with(gates, &validators);
+    let q = Node::follower(g.clone(), gates, |c| c);
+    let q2 = Node::follower(g.clone(), gates, |c| c);
+    let mut a = Builder::new(&g, &validators, 0);
+    let mut b = Builder::new(&g, &validators, 0);
+    let (r, x, s) = (sponsor(0), sponsor(2), sender(0));
+    let setup = vec![
+        messaging(
+            &admin(),
+            0,
+            1_000,
+            MessagingOperation::SetSponsorshipEnabled,
+            &SetSponsorshipEnabledData { enabled: true },
+        ),
+        messaging(
+            &s,
+            0,
+            1_000,
+            MessagingOperation::RegisterPublicKey,
+            &RegisterPublicKeyData { public_key: pk(&s) },
+        ),
+    ];
+    let filler = vec![transfer(&bystander(), 0, 1_000)];
+    for txs in [setup, filler] {
+        let block = a.produce(txs.clone());
+        assert_eq!(b.produce(txs).hash(), block.hash(), "{name}: one prefix");
+        for node in [&q, &q2] {
+            node.import(&block).await;
+        }
+    }
+    let x_s0 = relayed(&x, 0, 2_000, &s, 0);
+    let r_s1 = relayed(&r, 1, 2_000, &s, 1);
+    let r_s2 = relayed(&r, 0, 2_000, &s, 2);
+    for node in [&q, &q2] {
+        node.submit(&[&x_s0, &r_s1, &r_s2]);
+        node.mempool.remove(&x_s0.hash());
+    }
+    let count = |node: &Node, t: &SignedTransaction| node.mempool.gap_hold_count(&t.hash());
+    let a3 = a.produce(Vec::new());
+    let a4 = a.produce(Vec::new());
+    for (n, block) in [(1u32, &a3), (2, &a4)] {
+        for node in [&q, &q2] {
+            node.import(block).await;
+            for t in [&r_s1, &r_s2] {
+                assert_eq!(count(node, t), n, "{name}: A's block {n}");
+            }
+        }
+    }
+    let a5 = a.produce(Vec::new());
+    q2.import(&a5).await;
+    for t in [&r_s1, &r_s2] {
+        assert!(!q2.held(t), "{name}: evicted on A at the gap bound");
+        assert!(q2.mempool.evicted_above_a_gap(&t.hash()), "{name}");
+    }
+
+    b.salt = 1;
+    let b3 = b.produce(vec![x_s0.clone()]);
+    let b4 = b.produce(Vec::new());
+    let b5 = b.produce(Vec::new());
+    let b6 = b.produce(Vec::new());
+    let mut switched = false;
+    for blk in [&b3, &b4, &b5, &b6] {
+        q.import(blk).await;
+        if q.engine.best_block_hash() != blk.hash() {
+            assert_eq!(q.engine.best_block_hash(), a4.hash(), "{name}");
+            for t in [&r_s1, &r_s2] {
+                assert_eq!(count(&q, t), 2, "{name}: a losing block counts nothing");
+            }
+            continue;
+        }
+        switched = true;
+        for t in [&r_s1, &r_s2] {
+            assert!(q.held(t), "{name}: kept at the switch and after");
+            assert_eq!(count(&q, t), 0, "{name}: recomputed");
+            assert!(q.receipt(t).is_none(), "{name}");
+            assert!(!q.mempool.evicted_above_a_gap(&t.hash()), "{name}");
+        }
+    }
+    assert!(switched, "{name}: switched to B");
+    assert_eq!(q.engine.best_block_hash(), b6.hash(), "{name}");
+    assert_eq!(
+        MessagingStore::new(&q.db)
+            .get_sender_nonce(&s.address())
+            .unwrap(),
+        1,
+        "{name}: s's envelope 0 executed on B"
+    );
 }
