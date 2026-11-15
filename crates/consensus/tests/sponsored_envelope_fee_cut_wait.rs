@@ -4,9 +4,9 @@
 //! An envelope left out only because the block is full — its named sender's
 //! earlier envelope is in the pool, held by nothing, just below the block's
 //! limit — waits on nothing but room, and is never released for it. Its count
-//! stays at zero, so when its earlier envelope later leaves the pool and the
-//! wait becomes a hold, it gets the whole bound before it is carried to its
-//! refusal.
+//! stays at zero, so when the wait later becomes a hold — its earlier
+//! envelope leaves the pool, or is left above its own relay's gap — it gets
+//! the whole bound before it is carried to its refusal.
 //!
 //! Runs where the accounting gate is open at the case's block, under the
 //! gate configurations of [`matrix`].
@@ -433,16 +433,31 @@ impl Node {
     }
 }
 
-/// A block limit of 4. `s`'s envelope 0 goes through `r1` at a low fee,
-/// its envelope 1 through `r2` at a high fee; before each of four blocks four
-/// funded transfers at a middle fee fill the block, so `s`'s envelope 0 stays
-/// just below the limit and its envelope 1 waits behind it. Neither is
+/// What turns the wait for room into a hold.
+#[derive(Clone, Copy, Debug)]
+enum Hold {
+    /// `s`'s envelope 0 leaves the pool (as a lowest-fee eviction would
+    /// remove it): envelope 1 waits on an envelope no account carries.
+    Missing,
+    /// `r1`'s transaction at its nonce 0, ahead of `s`'s envelope 0 at `r1`'s
+    /// nonce 1, leaves the pool: envelope 0 is above `r1`'s gap, and envelope
+    /// 1 waits on another account's hold.
+    BehindAnotherAccount,
+}
+
+/// For both causes of a hold. A block limit of 4. `s`'s envelope 0 goes
+/// through `r1` at a low fee (behind `r1`'s own transfer at its nonce 0, at
+/// a lower fee, for [`Hold::BehindAnotherAccount`]); `s`'s envelope 1 goes
+/// through `r2` at a high fee. Before each of four blocks four funded
+/// transfers at a middle fee fill the block, so `s`'s envelope 0 stays below
+/// the limit and its envelope 1 waits behind it for room only: neither is
 /// carried, and envelope 1's count toward the cross-account bound stays at
-/// zero. Then `s`'s envelope 0 leaves the pool (as a lowest-fee eviction
-/// would remove it): envelope 1 is now held, counted from one, carried in
-/// none of the next `BOUND - 1` blocks, and carried to its charged refusal in
-/// the `BOUND`-th, with `r2`'s next transaction (sent meanwhile) behind it.
-/// Where both messaging gates are open at the case's block.
+/// zero through all four. Then the wait becomes a hold, and `r2` sends its
+/// next transaction behind its envelope. Envelope 1 has the whole bound: it
+/// is not carried at the first or the second held selection (its count 1,
+/// then 2), and is carried to its charged refusal at the third, with `r2`'s
+/// next transaction behind it. Where both messaging gates are open at the
+/// case's block.
 #[tokio::test]
 async fn a_wait_behind_a_full_block_is_not_counted_toward_the_cross_account_bound() {
     let configs: Vec<Gates> = matrix()
@@ -450,60 +465,76 @@ async fn a_wait_behind_a_full_block_is_not_counted_toward_the_cross_account_boun
         .filter(|g| g.accounting_at(CASE_BLOCK) && g.verification.is_some_and(|v| v <= CASE_BLOCK))
         .collect();
     assert!(!configs.is_empty());
+    assert!(BOUND >= 3);
     for gates in configs {
-        let name = gates.name;
-        let node = Node::new(gates);
-        node.set_up().await;
-        let (r1, r2, s) = (sponsor(0), sponsor(1), sender(0));
-        let r1_s0 = relayed(&r1, relay_nonce(&node, &r1), 1_500, &s, 0);
-        node.submit(&[&r1_s0]);
-        let r2_s1 = relayed(&r2, relay_nonce(&node, &r2), 5_000, &s, 1);
-        node.submit(&[&r2_s1]);
-        let fillers = [bystander(), unrelated_sponsor(), sponsor(2), sponsor(3)];
-        for round in 1..=4 {
-            for k in &fillers {
-                let t = transfer(k, relay_nonce(&node, k), 3_000);
-                node.submit(&[&t]);
+        for hold in [Hold::Missing, Hold::BehindAnotherAccount] {
+            let name = format!("{}, {hold:?}", gates.name);
+            let node = Node::new(gates);
+            node.set_up().await;
+            let (r1, r2, s) = (sponsor(0), sponsor(1), sender(0));
+            let r1_t = transfer(&r1, relay_nonce(&node, &r1), 1_000);
+            if matches!(hold, Hold::BehindAnotherAccount) {
+                node.submit(&[&r1_t]);
+            }
+            let r1_s0 = relayed(&r1, relay_nonce(&node, &r1), 1_500, &s, 0);
+            node.submit(&[&r1_s0]);
+            let r2_s1 = relayed(&r2, relay_nonce(&node, &r2), 5_000, &s, 1);
+            node.submit(&[&r2_s1]);
+            let fillers = [bystander(), unrelated_sponsor(), sponsor(2), sponsor(3)];
+            for round in 1..=4 {
+                for k in &fillers {
+                    let t = transfer(k, relay_nonce(&node, k), 3_000);
+                    node.submit(&[&t]);
+                }
+                let b = node.tick_within(LIMIT).await;
+                assert_eq!(
+                    b.transactions.len(),
+                    LIMIT,
+                    "{name}: round {round}: a full block"
+                );
+                for t in [&r1_t, &r1_s0, &r2_s1] {
+                    assert!(!carries(&b, t), "{name}: round {round}");
+                }
+                assert_eq!(
+                    node.mempool.cross_account_wait_count(&r2_s1.hash()),
+                    0,
+                    "{name}: round {round}: a wait for room is not counted"
+                );
+            }
+            // The wait becomes a hold; `r2` sends its next transaction.
+            match hold {
+                Hold::Missing => node.mempool.remove(&r1_s0.hash()),
+                Hold::BehindAnotherAccount => node.mempool.remove(&r1_t.hash()),
+            };
+            let r2_t = transfer(&r2, relay_nonce(&node, &r2), 4_000);
+            node.submit(&[&r2_t]);
+            for n in 1..BOUND {
+                let b = node.tick_within(LIMIT).await;
+                assert!(
+                    !carries(&b, &r2_s1),
+                    "{name}: not released at held selection {n}"
+                );
+                assert_eq!(
+                    node.mempool.cross_account_wait_count(&r2_s1.hash()),
+                    n as u32,
+                    "{name}: held selection {n}"
+                );
+                assert!(node.receipt(&r2_s1).is_none(), "{name}");
             }
             let b = node.tick_within(LIMIT).await;
-            assert_eq!(
-                b.transactions.len(),
-                LIMIT,
-                "{name}: round {round}: a full block"
+            assert!(
+                carries(&b, &r2_s1),
+                "{name}: released at held selection {BOUND}"
             );
-            for t in [&r1_s0, &r2_s1] {
-                assert!(!carries(&b, t), "{name}: round {round}");
-            }
-            assert_eq!(
-                node.mempool.cross_account_wait_count(&r2_s1.hash()),
-                0,
-                "{name}: round {round}: a wait for room is not counted"
+            assert!(carries(&b, &r2_t), "{name}: r2's next transaction follows");
+            let r = node.receipt(&r2_s1).expect("carried");
+            assert!(
+                matches!(r.status, TxStatus::Failed(_)),
+                "{name}: {:?}",
+                r.status
             );
+            assert!(r.fee_paid > 0, "{name}: one fee, to the sponsor");
+            assert_eq!(node.status(&r2_t), Some(TxStatus::Success), "{name}");
         }
-        // The earlier envelope leaves the pool: now a hold. `r2` sends its
-        // next transaction behind its envelope.
-        node.mempool.remove(&r1_s0.hash());
-        let r2_t = transfer(&r2, relay_nonce(&node, &r2), 4_000);
-        node.submit(&[&r2_t]);
-        for n in 1..BOUND {
-            let b = node.tick_within(LIMIT).await;
-            assert!(!carries(&b, &r2_s1), "{name}: held selection {n}");
-            assert_eq!(
-                node.mempool.cross_account_wait_count(&r2_s1.hash()),
-                n as u32,
-                "{name}: held selection {n}"
-            );
-        }
-        let b = node.tick_within(LIMIT).await;
-        assert!(carries(&b, &r2_s1), "{name}: at the bound");
-        assert!(carries(&b, &r2_t), "{name}: r2's next transaction follows");
-        let r = node.receipt(&r2_s1).expect("carried");
-        assert!(
-            matches!(r.status, TxStatus::Failed(_)),
-            "{name}: {:?}",
-            r.status
-        );
-        assert!(r.fee_paid > 0, "{name}: one fee, to the sponsor");
-        assert_eq!(node.status(&r2_t), Some(TxStatus::Success), "{name}");
     }
 }
