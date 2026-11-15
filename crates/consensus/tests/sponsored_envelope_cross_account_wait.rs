@@ -987,16 +987,19 @@ async fn controls_for_the_one_sponsor_cycle_inside_another_accounts_hold() {
 /// The gap bound never strands an envelope that the cross-account bound
 /// governs, including one relayed by the evicted envelope's own relay, which
 /// the relay rule of the accounting gate leaves to be stranded. `s`'s
-/// envelope 0 leaves the pool once `s`'s envelopes 1 and 2 are admitted,
-/// relayed by `r` at its nonces 1 and 0: both are held directly, above `s`'s
-/// missing envelope 0. `r`'s envelope 2, at `r`'s nonce 0, waits on the
-/// missing envelope and is counted from the first selection; `r`'s envelope
-/// 1, behind `r`'s nonce 0, is not counted, and reaches the gap bound at the
-/// `K`-th selection. In that selection `r`'s envelope 2 (`s`'s later envelope,
+/// envelope 0 leaves the pool once `s`'s envelopes 1 to 3 are admitted:
+/// envelopes 1 and 3 relayed by `r` at its nonces 1 and 0 (a cycle within
+/// one sponsor), envelope 2 by `q` at its nonce 0. All three are held
+/// directly, above `s`'s missing envelope 0. `q`'s envelope 2 and `r`'s
+/// envelope 3, each at its own account's next nonce, wait on another
+/// account's envelope (`q`'s on `r`'s envelope 1, `r`'s on `q`'s envelope 2)
+/// and are counted from the first selection; `r`'s envelope 1, behind `r`'s
+/// nonce 0, is not counted, and reaches the gap bound at the `K`-th
+/// selection. In that selection `r`'s envelope 3 (`s`'s later envelope,
 /// through the same relay) is not evicted with it: it is carried to its
-/// charged refusal (`Failed(7)`, its whole fee). What becomes of `r`'s
-/// envelope 1 is not this case's concern. Where both messaging gates are open
-/// at the case's block.
+/// charged refusal (`Failed(7)`, its whole fee), and so is `q`'s envelope 2.
+/// What becomes of `r`'s envelope 1 is not this case's concern. Where both
+/// messaging gates are open at the case's block.
 #[tokio::test]
 async fn an_envelope_the_cross_account_bound_governs_is_not_stranded_through_its_own_relay() {
     let configs: Vec<Gates> = matrix()
@@ -1009,33 +1012,39 @@ async fn an_envelope_the_cross_account_bound_governs_is_not_stranded_through_its
         let name = gates.name;
         let node = Node::new(gates);
         node.set_up().await;
-        let (r, q, s) = (sponsor(0), sponsor(1), s_of());
-        let q_s0 = relayed(&q, 0, 2_000, &s, 0);
+        let (r, q, x, s) = (sponsor(0), sponsor(1), sponsor(2), s_of());
+        let x_s0 = relayed(&x, 0, 2_000, &s, 0);
         let r_s1 = relayed(&r, 1, 2_000, &s, 1);
-        let r_s2 = relayed(&r, 0, 2_000, &s, 2);
-        node.submit(&[&q_s0, &r_s1, &r_s2]);
-        node.mempool.remove(&q_s0.hash());
+        let q_s2 = relayed(&q, 0, 2_000, &s, 2);
+        let r_s3 = relayed(&r, 0, 2_000, &s, 3);
+        node.submit(&[&x_s0, &r_s1, &q_s2, &r_s3]);
+        node.mempool.remove(&x_s0.hash());
         for n in 1..K {
             let b = node.tick().await;
-            for x in [&r_s1, &r_s2] {
-                assert!(!carries(&b, x), "{name}: block {n}");
+            for t in [&r_s1, &q_s2, &r_s3] {
+                assert!(!carries(&b, t), "{name}: block {n}");
             }
-            assert_eq!(node.count(&r_s2), n, "{name}: block {n}");
+            assert_eq!(node.count(&r_s3), n, "{name}: block {n}");
+            assert_eq!(node.count(&q_s2), n, "{name}: block {n}");
             assert_eq!(node.count(&r_s1), 0, "{name}: behind r's nonce 0");
             assert_eq!(node.gap_count(&r_s1), n, "{name}: block {n}");
         }
         let b = node.tick().await;
         assert!(
-            carries(&b, &r_s2),
+            carries(&b, &r_s3),
             "{name}: not stranded; released at the K-th selection"
         );
-        let refusal = node.receipt(&r_s2).expect("carried");
-        assert_eq!(refusal.status, TxStatus::Failed(7), "{name}");
-        assert_eq!(
-            refusal.fee_paid, 2_000,
-            "{name}: its whole fee, to the sponsor"
-        );
+        assert!(carries(&b, &q_s2), "{name}: released at the K-th selection");
+        for t in [&r_s3, &q_s2] {
+            let refusal = node.receipt(t).expect("carried");
+            assert_eq!(refusal.status, TxStatus::Failed(7), "{name}");
+            assert_eq!(
+                refusal.fee_paid, 2_000,
+                "{name}: its whole fee, to the sponsor"
+            );
+        }
         assert_eq!(node.account_nonce(&r), 1, "{name}");
+        assert_eq!(node.account_nonce(&q), 1, "{name}");
         assert_eq!(node.messaging_nonce(&s), 0, "{name}");
     }
 }
