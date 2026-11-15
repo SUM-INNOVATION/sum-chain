@@ -798,3 +798,61 @@ async fn a_restarted_node_counts_from_nothing() {
         "r1's own envelope, above r1's own gap, is evicted at the B-th block"
     );
 }
+
+/// A one-sponsor cycle inside what is held over the pool is not a wait on
+/// another account. `s`'s envelope 0 is relayed by `r2`
+/// at its nonce 1, with nothing at `r2`'s nonce 0: it is above `r2`'s gap.
+/// `r` relays `t`'s envelope 0 at its nonce 0 and `s`'s envelope 1 at its
+/// nonce 1; `t`'s envelope leaves the pool, and `r`'s relay refills `r`'s
+/// nonce 0 with `s`'s envelope 2. Envelopes 2 and 1 now wait on each other
+/// inside `r`'s own account (2 before 1 by `r`'s nonces, 1 before 2 by `s`'s),
+/// besides waiting on `r2`'s gap; all three are held over the pool, so no
+/// cycle victim is chosen. What envelope 2 waits on is partly its own
+/// account's, so it is never counted toward `K`, and nothing of `r`'s is
+/// carried to a refusal. At the gap bound `s`'s envelope 0 is evicted, and
+/// with it `s`'s envelopes 1 and 2, which nothing in the pool can bring into
+/// sequence any more: no receipt, no fee, and `r`'s nonces are free again —
+/// the outcome main's stranded eviction gives after a failed receipt, and the
+/// one `CROSS_ACCOUNT_WAIT_SELECTIONS`' "only because of another account"
+/// reads. Where both messaging gates are open at the case's block.
+#[tokio::test]
+async fn a_one_sponsor_cycle_inside_a_hold_is_evicted_as_stranded_not_released() {
+    let configs: Vec<Gates> = matrix()
+        .into_iter()
+        .filter(|g| g.accounting_at(CASE_BLOCK) && g.verification_at(CASE_BLOCK))
+        .collect();
+    assert!(!configs.is_empty());
+    for gates in configs {
+        let name = gates.name;
+        let node = Node::new(gates);
+        node.set_up().await;
+        let (r, r2, s, t) = (sponsor(0), sponsor(1), sender(0), sender(2));
+        let r2_s0 = relayed(&r2, 1, 2_000, &s, 0);
+        let r_t0 = relayed(&r, 0, 2_000, &t, 0);
+        let r_s1 = relayed(&r, 1, 2_000, &s, 1);
+        node.submit(&[&r2_s0, &r_t0, &r_s1]);
+        node.mempool.remove(&r_t0.hash());
+        let r_s2 = relayed(&r, 0, 2_000, &s, 2);
+        node.submit(&[&r_s2]);
+        let case = [&r2_s0, &r_s1, &r_s2];
+        for n in 1..u64::from(B) {
+            let b = node.tick().await;
+            assert!(case.iter().all(|x| !carries(&b, x)), "{name}: block {n}");
+            assert!(case.iter().all(|x| node.held(x)), "{name}: block {n}");
+            assert_eq!(
+                node.count(&r_s2),
+                0,
+                "{name}: not a wait on another account"
+            );
+            assert_eq!(node.count(&r_s1), 0, "{name}");
+        }
+        let b = node.tick().await;
+        assert!(case.iter().all(|x| !carries(&b, x)), "{name}");
+        for x in case {
+            assert!(!node.held(x), "{name}: evicted, stranded");
+            assert_eq!(node.status(x), None, "{name}: no receipt");
+        }
+        assert_eq!(node.account_nonce(&r), 0, "{name}: nothing of r's charged");
+        assert_eq!(node.messaging_nonce(&s), 0, "{name}");
+    }
+}

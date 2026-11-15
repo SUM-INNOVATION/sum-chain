@@ -875,6 +875,15 @@ impl<'a> CombinedOrder<'a> {
 /// nothing, below the block's limit — waits on room, not on another account:
 /// it is not counted, and a later hold gets the whole bound.
 ///
+/// Nor is a wait that is partly on the envelope's own account. When one of
+/// the earlier envelopes it waits on is relayed by its own account, at a
+/// later nonce (a cycle within one sponsor: the account's order puts it
+/// first, the named sender's order second), it does not wait only on another
+/// account. Such a cycle reaching a block loses a victim there; inside a
+/// hold it ends with the hold, when the gap bound evicts the held envelope
+/// and the named sender's later envelopes with it, stranded, with no receipt
+/// and nothing charged to the sponsor.
+///
 /// What a premature carry costs: one fee, charged to the envelope's sponsor.
 /// The named sender consumes nothing: an envelope whose nonce is not its
 /// sender's current one fails before anything of the sender is touched, and
