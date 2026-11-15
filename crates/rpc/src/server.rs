@@ -359,6 +359,24 @@ pub(crate) fn classify_tx_status(
     }
 }
 
+/// `status` with this node's eviction history applied: what would read
+/// `Unknown` (no canonical receipt, not in this node's pool) reads `Dropped`
+/// when this node's pool evicted it above a gap and has not admitted it since
+/// (`Mempool::evicted_above_a_gap`). A receipt and a place in the pool take
+/// precedence; every other status is unchanged.
+///
+/// `Dropped` is a local observation: another node may still hold the
+/// transaction or carry it in a block, and after a restart, or once the
+/// bounded history has forgotten it, this node reads `Unknown` again. It is
+/// not proof of non-delivery; a client should not sign a new transaction for
+/// the same intent because of it alone.
+pub(crate) fn report_local_eviction(status: TxStatusV2, evicted_here: bool) -> TxStatusV2 {
+    match status {
+        TxStatusV2::Unknown if evicted_here => TxStatusV2::Dropped,
+        other => other,
+    }
+}
+
 /// Peer info provider function type
 pub type PeerInfoProvider = Arc<dyn Fn() -> Vec<RpcPeerInfo> + Send + Sync>;
 /// P2P stats provider function type
@@ -2465,11 +2483,14 @@ impl SumChainApiServer for RpcServer {
             .map_err(|e| RpcError::Internal(e.to_string()))?;
         let in_mempool = self.mempool.get(&hash).is_some();
 
-        Ok(classify_tx_status(
-            receipt.as_ref(),
-            in_mempool,
-            |h| self.consensus.is_finalized(h),
-            self.consensus.finality_mechanism(),
+        Ok(report_local_eviction(
+            classify_tx_status(
+                receipt.as_ref(),
+                in_mempool,
+                |h| self.consensus.is_finalized(h),
+                self.consensus.finality_mechanism(),
+            ),
+            self.mempool.evicted_above_a_gap(&hash),
         ))
     }
 
@@ -10541,6 +10562,47 @@ mod phase_0b_rpc_tests {
     }
 
     // ------- classify_tx_status --------------------------------------------
+
+    /// The eviction history only turns `Unknown` into `Dropped`: a receipt
+    /// and a place in the pool take precedence.
+    #[test]
+    fn a_local_eviction_reads_dropped_only_without_a_receipt_or_a_place_in_the_pool() {
+        let unknown = classify_tx_status(None, false, |_| true, FinalityMechanism::LocalDepth);
+        assert!(matches!(
+            report_local_eviction(unknown.clone(), true),
+            TxStatusV2::Dropped
+        ));
+        assert!(matches!(
+            report_local_eviction(unknown, false),
+            TxStatusV2::Unknown
+        ));
+        let pending = classify_tx_status(None, true, |_| true, FinalityMechanism::LocalDepth);
+        assert!(matches!(
+            report_local_eviction(pending, true),
+            TxStatusV2::Pending
+        ));
+        for (receipt, finalized) in [
+            (mk_receipt(TxStatus::Success, 7), true),
+            (mk_receipt(TxStatus::Success, 7), false),
+            (mk_receipt(TxStatus::InvalidNonce, 7), true),
+        ] {
+            let status = classify_tx_status(
+                Some(&receipt),
+                false,
+                |_| finalized,
+                FinalityMechanism::LocalDepth,
+            );
+            let expected = serde_json::to_value(&status).unwrap();
+            assert_eq!(
+                serde_json::to_value(report_local_eviction(status, true)).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(TxStatusV2::Dropped).unwrap(),
+            serde_json::json!({ "kind": "dropped" })
+        );
+    }
 
     #[test]
     fn classify_unknown_when_no_receipt_and_no_mempool() {

@@ -123,14 +123,15 @@ loop {
         TxStatusV2::Finalized { block_height } => return Ok(block_height),
         TxStatusV2::Failed { block_height, reason } => return Err((block_height, reason)),
         TxStatusV2::Unknown => sleep(block_time_ms),  // not in mempool yet, or evicted
-        TxStatusV2::Dropped => return Err("dropped"),  // reserved; not currently emitted
+        TxStatusV2::Dropped => sleep(block_time_ms),  // this node evicted it: see below
     }
 }
 ```
 
 **Caveats:**
 - Under PoA (`finality_depth = 3`), `Failed { block_height }` in an unfinalized block can in principle reorg out. Treat `Failed` as terminal only once `block_height <= chain_getBlockHeight("finalized").height`.
-- `Unknown` ≠ tx never sent. The mempool doesn't track evictions, so an evicted tx also returns `Unknown`. If you see `Unknown` after a successful `send_raw_transaction`, retry-submit after the mempool TTL.
+- `Unknown` ≠ tx never sent. An evicted tx can also return `Unknown`. If you see `Unknown` after a successful `send_raw_transaction`, retry-submit after the mempool TTL.
+- `Dropped` means only that THIS node's pool evicted the transaction above a gap in its account's or its sponsored sender's nonces and has not taken it back. It is a local observation from a bounded, in-memory history (gone after a restart, oldest entries forgotten first): another node may still hold the transaction or include it. It is not proof of non-delivery. Do not sign a new transaction for the same intent because of `Dropped` alone; decide from the canonical receipt and your intent's own checks (account nonce; for a sponsored envelope, the sender's messaging nonce and whether the message executed). Re-submitting the same signed transaction is safe.
 
 `block_time_ms`, `finality_depth` come from `chain_getChainParams` — don't hardcode.
 

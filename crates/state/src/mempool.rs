@@ -49,7 +49,7 @@
 //! consensus rule: a block built by a proposer that applies none of it is
 //! validated, executed and imported exactly as before.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -450,6 +450,48 @@ pub fn sponsored_envelope_sender(tx: &SignedTransaction) -> Option<Address> {
     sponsored_identity(tx).map(|(sender, _)| sender)
 }
 
+/// The hashes a pool evicted above a gap ([`GAP_HOLD_SELECTIONS`]), oldest
+/// first, for [`Mempool::evicted_above_a_gap`]. In memory only, and never more
+/// entries than the pool has places: the oldest is forgotten first.
+#[derive(Debug, Default)]
+struct EvictionHistory {
+    order: VecDeque<Hash>,
+    held: HashSet<Hash>,
+}
+
+impl EvictionHistory {
+    /// Records `hash` (once), then forgets the oldest entries beyond `cap`.
+    fn record(&mut self, hash: Hash, cap: usize) {
+        if self.held.insert(hash) {
+            self.order.push_back(hash);
+        }
+        while self.order.len() > cap {
+            match self.order.pop_front() {
+                Some(oldest) => {
+                    self.held.remove(&oldest);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Forgets `hash`, if recorded.
+    fn forget(&mut self, hash: &Hash) {
+        if self.held.remove(hash) {
+            self.order.retain(|h| h != hash);
+        }
+    }
+
+    fn contains(&self, hash: &Hash) -> bool {
+        self.held.contains(hash)
+    }
+
+    fn clear(&mut self) {
+        self.order.clear();
+        self.held.clear();
+    }
+}
+
 /// Transaction mempool
 pub struct Mempool {
     /// All transactions by hash
@@ -529,6 +571,9 @@ pub struct Mempool {
     /// next head's block was then counted by that selection
     /// ([`Mempool::at_new_head`]).
     selected_since_head: AtomicBool,
+    /// What this pool evicted above a gap and has not admitted since, at most
+    /// `max_size` entries ([`Mempool::evicted_above_a_gap`]).
+    gap_evictions: RwLock<EvictionHistory>,
 }
 
 /// Whether executing `tx` advances its sender's account nonce below
@@ -927,7 +972,8 @@ pub const CROSS_ACCOUNT_WAIT_SELECTIONS: u32 = 3;
 /// until it leaves the pool) is neither evicted nor stranded here: that
 /// bound governs it, and it is carried to its refusal. The transaction is
 /// lost, as on main; the client re-sends. Unlike main, no receipt records it:
-/// a status query reports it unknown, not failed.
+/// this node reports it `dropped` while its bounded eviction history keeps it
+/// ([`Mempool::evicted_above_a_gap`]), a local observation only.
 ///
 /// Why three: the same number as the bound on a wait on another account,
 /// long enough for a gap about to be filled (the sponsor's next relayed
@@ -1117,6 +1163,7 @@ impl Mempool {
             released_envelopes: RwLock::new(HashSet::new()),
             gap_holds: RwLock::new(HashMap::new()),
             selected_since_head: AtomicBool::new(false),
+            gap_evictions: RwLock::new(EvictionHistory::default()),
         }
     }
 
@@ -1448,6 +1495,10 @@ impl Mempool {
             // in `remove`.
             *self.relayed_envelopes.write().entry(sender).or_default() += 1;
         }
+
+        // Admitted again: no longer dropped here. Only a successful admission
+        // clears it; a refused one leaves it.
+        self.gap_evictions.write().forget(&hash);
 
         debug!("Added tx {} to mempool (fee: {})", hash, fee);
 
@@ -2507,7 +2558,27 @@ impl Mempool {
         let mut evict: Vec<Hash> = gone.iter().copied().collect();
         evict.sort();
         self.remove_batch(&evict);
+        let mut history = self.gap_evictions.write();
+        for hash in &evict {
+            history.record(*hash, self.config.max_size);
+        }
         gone
+    }
+
+    /// Whether this node's pool evicted `hash` above a gap
+    /// ([`GAP_HOLD_SELECTIONS`]), with no receipt, and has not admitted it
+    /// since. The history is in memory only and holds at most as many entries
+    /// as the pool has places (`max_size`), the oldest forgotten first; it is
+    /// empty after a restart. Only a successful admission clears an entry.
+    ///
+    /// A local observation: another node may still hold the transaction, or
+    /// carry it in a block. It is not proof that the transaction will not be
+    /// delivered, and a client should not sign a new transaction for the same
+    /// intent because of it alone: a canonical receipt, and the client's own
+    /// check of what its intent needs (for an envelope, its sender's
+    /// messaging nonce and whether the message executed), decide.
+    pub fn evicted_above_a_gap(&self, hash: &Hash) -> bool {
+        self.gap_evictions.read().contains(hash)
     }
 
     /// Counts a block for [`GAP_HOLD_SELECTIONS`]: each transaction the pool
@@ -3129,6 +3200,7 @@ impl Mempool {
         self.cross_account_waits.write().clear();
         self.released_envelopes.write().clear();
         self.gap_holds.write().clear();
+        self.gap_evictions.write().clear();
         info!("Mempool cleared");
     }
 
@@ -4150,6 +4222,89 @@ mod tests {
         assert_eq!(count(), 0);
         assert!(mempool.contains(&other.hash()));
         assert_eq!(mempool.len(), 1);
+    }
+
+    /// The eviction history is first in, first out, and holds at most as many
+    /// entries as the pool has places. A pool of 4 evicts four transactions
+    /// above a gap, then four more: the first four are forgotten, the last
+    /// four are remembered.
+    #[test]
+    fn the_eviction_history_forgets_the_oldest_beyond_the_pool_capacity() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let mempool = Mempool::new(MempoolConfig {
+            max_size: 4,
+            ..MempoolConfig::default()
+        })
+        .with_inclusion_policy(InclusionPolicy { db });
+        let batch = |from: u8| -> Vec<SignedTransaction> {
+            (from..from + 4)
+                .map(|i| transfer_from(&key(i), 1))
+                .collect()
+        };
+        let mut head = 0;
+        let mut evict_all = |txs: &[SignedTransaction]| {
+            for t in txs {
+                mempool.add(t.clone()).unwrap();
+            }
+            for _ in 0..GAP_HOLD_SELECTIONS {
+                head += 1;
+                mempool.at_new_head(head);
+            }
+            assert!(txs.iter().all(|t| !mempool.contains(&t.hash())));
+        };
+        let first = batch(20);
+        let second = batch(30);
+        evict_all(&first);
+        assert!(first.iter().all(|t| mempool.evicted_above_a_gap(&t.hash())));
+        evict_all(&second);
+        assert!(first
+            .iter()
+            .all(|t| !mempool.evicted_above_a_gap(&t.hash())));
+        assert!(second
+            .iter()
+            .all(|t| mempool.evicted_above_a_gap(&t.hash())));
+        mempool.clear();
+        assert!(second
+            .iter()
+            .all(|t| !mempool.evicted_above_a_gap(&t.hash())));
+    }
+
+    /// Only a successful admission clears an eviction entry. A pool of 2
+    /// evicts `g` above a gap; with the pool full at the same fee, admitting
+    /// `g` again is refused and the entry stays; with a place free, `g` is
+    /// admitted and the entry is gone.
+    #[test]
+    fn only_a_successful_admission_clears_an_eviction_entry() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let mempool = Mempool::new(MempoolConfig {
+            max_size: 2,
+            ..MempoolConfig::default()
+        })
+        .with_inclusion_policy(InclusionPolicy { db });
+        let g = transfer_from(&key(40), 1);
+        mempool.add(g.clone()).unwrap();
+        for head in 1..=u64::from(GAP_HOLD_SELECTIONS) {
+            mempool.at_new_head(head);
+        }
+        assert!(!mempool.contains(&g.hash()));
+        assert!(mempool.evicted_above_a_gap(&g.hash()));
+        let fillers = [transfer_from(&key(41), 0), transfer_from(&key(42), 0)];
+        for t in &fillers {
+            mempool.add(t.clone()).unwrap();
+        }
+        assert!(matches!(
+            mempool.add(g.clone()),
+            Err(StateError::MempoolFull)
+        ));
+        assert!(
+            mempool.evicted_above_a_gap(&g.hash()),
+            "a refused admission"
+        );
+        mempool.remove(&fillers[0].hash());
+        mempool.add(g.clone()).unwrap();
+        assert!(!mempool.evicted_above_a_gap(&g.hash()), "admitted again");
     }
 
     /// An account whose nonce cannot be read has every transaction held, but

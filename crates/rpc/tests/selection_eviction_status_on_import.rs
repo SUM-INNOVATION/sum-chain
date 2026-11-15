@@ -6,9 +6,10 @@
 //! producer's blocks. A transfer above its account's nonce gap and an
 //! envelope above its relay's gap are in both pools. At every height until
 //! the `GAP_HOLD_SELECTIONS`-th head the follower reports them `pending` and
-//! `sum_getTransaction` finds them; from that head on it reports `unknown`,
-//! never `pending` again, and finds neither: no receipt was written, as on
-//! the producer. With the gates absent and inside the chain's history.
+//! `sum_getTransaction` finds them; from that head on it reports `dropped`
+//! (its own observation, from its bounded eviction history), never `pending`
+//! again, and finds neither: no receipt was written, as on the producer. With
+//! the gates absent and inside the chain's history.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -339,7 +340,7 @@ async fn a_node_that_only_imports_reports_the_eviction_at_the_same_head() {
                 let expected = if held {
                     json!({ "kind": "pending" })
                 } else {
-                    json!({ "kind": "unknown" })
+                    json!({ "kind": "dropped" })
                 };
                 assert_eq!(q.status(t).await, expected, "{name}: height {height}");
                 assert_eq!(q.found(t).await, held, "{name}: height {height}");

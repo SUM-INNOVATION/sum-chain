@@ -665,7 +665,11 @@ pub trait SumChainApi {
     /// `Finalized { block_height, finality_mechanism }` (at or below this
     /// node's local finalized height: `finality_depth` blocks on top of it on
     /// THIS node — `"local-depth"`, not certified network finality, #270), or
-    /// `Failed { ... }`. `Dropped` is reserved but not currently returned.
+    /// `Failed { ... }`, or `Dropped` (this node's pool evicted it above a gap
+    /// and has not admitted it since: a local observation from a bounded,
+    /// in-memory history, not proof of non-delivery; see `TxStatusV2`).
+    /// Precedence: a canonical receipt, then a place in the pool, then the
+    /// eviction history, then `Unknown`.
     /// The experimental BFT engine is refused at startup (#271), so no serving
     /// node reports BFT finality.
     #[method(name = "chain_getTransactionStatus")]

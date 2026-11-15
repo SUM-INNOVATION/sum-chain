@@ -944,9 +944,20 @@ pub struct ConsensusConfigTransitionInfo {
 /// Distinguishes mempool / included-but-unfinalized / finalized states so
 /// clients don't have to compose `get_receipt` + `is_block_finalized` themselves.
 ///
-/// Note: `Dropped` is reserved for mempool evictions but not currently
-/// returned — current mempool does not track eviction history, so an evicted
-/// tx returns `Unknown`. Distinguishing the two requires future mempool work.
+/// `Dropped`: this node's pool evicted the transaction above a gap in its
+/// account's or its named sender's nonces (`GAP_HOLD_SELECTIONS`), with no
+/// receipt, and has not admitted it since. The node keeps a bounded,
+/// in-memory history of such evictions (at most as many entries as its pool
+/// has places, the oldest forgotten first; empty after a restart), so the
+/// same transaction may later read `Unknown`. A canonical receipt takes
+/// precedence, then a place in the pool (`Pending`). `Dropped` is a local
+/// observation: another node may still hold the transaction or carry it in a
+/// block. It is not proof of non-delivery; clients must not sign a new
+/// transaction for the same intent because of it alone, and should keep
+/// checking the canonical receipt and what their intent needs (for a
+/// sponsored envelope, the sender's messaging nonce and whether the message
+/// executed). Other evictions (a full pool, revalidation after a chain
+/// switch) are not recorded and read `Unknown`.
 ///
 /// `Failed { block_height }` reports the block in which the failure was
 /// recorded but does **not** encode whether that block is finalized. Under
@@ -982,7 +993,8 @@ pub enum TxStatusV2 {
     },
     /// Executed and reverted, or rejected pre-execution.
     Failed { block_height: Option<BlockHeight>, reason: String },
-    /// Evicted from mempool without inclusion. Reserved; not currently emitted.
+    /// Evicted from this node's pool above a gap, with no receipt, and not
+    /// admitted since: a local observation (see the type's documentation).
     Dropped,
 }
 

@@ -7,13 +7,14 @@
 //! this node's selections and evicted at the next, with no receipt. At every
 //! height until then `chain_getTransactionStatus` reports `pending` and
 //! `sum_getTransaction` finds the transaction; from the eviction on the
-//! status is `unknown` (never `pending` again) and the transaction is not
-//! found. The envelope has no `messaging_getSponsoredEnvelope` answer at any
-//! height, and the sender's messaging nonce stays where it was, so a client
-//! that reads it re-sends from there.
+//! status is `dropped` (never `pending` again; this node's local
+//! observation, from its bounded eviction history) and the transaction is
+//! not found. The envelope has no `messaging_getSponsoredEnvelope` answer at
+//! any height, and the sender's messaging nonce stays where it was: those,
+//! not `dropped`, tell a client the message was not delivered.
 //!
 //! The sender's later envelope, through another relay, goes with it below
-//! the accounting gate (the gates absent): evicted, `unknown`. From the gate
+//! the accounting gate (the gates absent): evicted, `dropped`. From the gate
 //! (the gates inside the chain's history) it waits on the other relay's
 //! account and is carried to its refusal at the
 //! `CROSS_ACCOUNT_WAIT_SELECTIONS`-th selection instead: `failed`, at the
@@ -372,7 +373,7 @@ async fn an_evicted_transaction_is_never_reported_pending_again() {
                 let expected = if held {
                     json!({ "kind": "pending" })
                 } else {
-                    json!({ "kind": "unknown" })
+                    json!({ "kind": "dropped" })
                 };
                 assert_eq!(
                     node.status(t).await,
