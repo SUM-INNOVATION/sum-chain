@@ -104,6 +104,9 @@ impl Gates {
     fn accounting_at(&self, height: u64) -> bool {
         self.accounting.is_some_and(|gate| height >= gate)
     }
+    fn verification_at(&self, height: u64) -> bool {
+        self.verification.is_some_and(|gate| height >= gate)
+    }
 }
 
 /// The gates absent; set above the chain's history; set inside it; and
@@ -548,10 +551,13 @@ async fn an_unfunded_predecessor_never_lets_its_later_nonces_take_the_block() {
 /// unfunded relay `r` at `r`'s nonce 0, and `r`'s transfers at nonces 1 to
 /// 99, all far above honest traffic: 1,111 transactions. Every block carries
 /// its honest transfer. Nothing is carried ahead of its account's or its
-/// named sender's predecessor: such a transaction is carried only as the
-/// first of what it waits on, and takes an uncharged `InsufficientBalance`
-/// receipt. Within `BOUND + GAP_BOUND + 1` blocks nothing of the submissions is
-/// held, and no transfer of `r`'s ever takes a receipt.
+/// named sender's predecessor. The first block carries each sender's
+/// envelope 0 and then, its turn come, envelope 1 (through another account,
+/// so not held back for envelope 0): both take an uncharged
+/// `InsufficientBalance` receipt, neither relay being able to pay. No
+/// transfer of `r`'s is ever carried or takes a receipt: above the gap its
+/// unpayable envelope leaves, they are evicted at the gap bound. Within
+/// `BOUND + GAP_BOUND + 1` blocks nothing of the submissions is held.
 #[tokio::test]
 async fn an_unfunded_envelope_predecessor_never_lets_another_relays_later_nonces_take_the_block() {
     let configs: Vec<Gates> = matrix()
@@ -585,13 +591,10 @@ async fn an_unfunded_envelope_predecessor_never_lets_another_relays_later_nonces
             let b = node.tick().await;
             assert!(carries(&b, &honest), "{name}: round {round}");
             if round == 0 {
-                let carried_first: Vec<Hash> = envelopes
-                    .iter()
-                    .filter(|t| carries(&b, t))
-                    .map(|t| t.hash())
-                    .collect();
-                let firsts: Vec<Hash> = envelopes.iter().step_by(2).map(|t| t.hash()).collect();
-                assert_eq!(carried_first, firsts, "{name}: only each sender's envelope 0");
+                assert!(
+                    envelopes.iter().all(|t| carries(&b, t)),
+                    "{name}: each sender's envelopes 0 and 1"
+                );
             }
             assert_eq!(node.status(&honest), Some(TxStatus::Success), "{name}");
             assert!(
@@ -619,10 +622,9 @@ async fn an_unfunded_envelope_predecessor_never_lets_another_relays_later_nonces
                 0,
                 "{name}: nothing of the sender was delivered"
             );
-            assert!(
-                node.receipt(&pair[0]).is_some(),
-                "{name}: envelope 0 offered once"
-            );
+            for t in pair {
+                assert!(node.receipt(t).is_some(), "{name}: offered once");
+            }
         }
     }
 }
@@ -746,5 +748,82 @@ async fn a_run_paid_for_earlier_in_the_block_is_carried_whole() {
                 .all(|t| node.status(t) == Some(TxStatus::Success)),
             "{name}"
         );
+    }
+}
+
+/// An unpayable envelope resent before every block
+/// never holds another relay's queue. An unfunded key relays `s`'s envelope
+/// 0 at the minimum fee; the honest relay `r2` carries `s`'s envelope 1, then
+/// `v`'s envelope 0 and its own transfer. The first block carries all four:
+/// `s`'s envelope 0 takes an uncharged `InsufficientBalance`; `s`'s envelope 1
+/// takes the outcome its envelope nonce meets — from the verification gate a
+/// `Failed` refusal, charged from the accounting gate and uncharged below it;
+/// below the verification gate it executes out of `s`'s sequence, as on
+/// main; and `r2`'s other two are delivered. Where `s`'s nonce has not moved,
+/// the unfunded key resends envelope 0 with a new fee before each of three more
+/// blocks: each resend takes its uncharged receipt, and a later user's
+/// envelope through `r2` is delivered in every one of those blocks. At every
+/// configuration.
+#[tokio::test]
+async fn an_unpayable_envelope_resent_before_every_block_never_holds_another_relays_queue() {
+    for gates in matrix() {
+        let name = gates.name;
+        let node = Node::new(gates);
+        node.set_up().await;
+        let (r2, s, v) = (sponsor(1), sender(0), sender(1));
+        let unfunded = stranger(0x5a);
+        let e0 = relayed(&unfunded, 0, min_fee(gates), &s, 0);
+        node.submit(&[&e0]);
+        let r2_s1 = relayed(&r2, relay_nonce(&node, &r2), 2_000, &s, 1);
+        node.submit(&[&r2_s1]);
+        let r2_v0 = relayed(&r2, relay_nonce(&node, &r2), 2_000, &v, 0);
+        node.submit(&[&r2_v0]);
+        let r2_t = transfer(&r2, relay_nonce(&node, &r2), 1_000);
+        node.submit(&[&r2_t]);
+        let b = node.tick().await;
+        let h = b.height();
+        for t in [&e0, &r2_s1, &r2_v0, &r2_t] {
+            assert!(carries(&b, t), "{name}: {} carried", t.hash());
+        }
+        let r = node.receipt(&e0).expect("offered");
+        assert_eq!(r.status, TxStatus::InsufficientBalance, "{name}");
+        assert_eq!(r.fee_paid, 0, "{name}");
+        let r = node.receipt(&r2_s1).expect("offered");
+        if gates.verification_at(h) {
+            assert!(
+                matches!(r.status, TxStatus::Failed(_)),
+                "{name}: {:?}",
+                r.status
+            );
+            assert_eq!(
+                r.fee_paid > 0,
+                gates.accounting_at(h),
+                "{name}: charged from 0x1049"
+            );
+        } else {
+            assert_eq!(
+                r.status,
+                TxStatus::Success,
+                "{name}: out of sequence, as on main"
+            );
+        }
+        assert_eq!(node.status(&r2_v0), Some(TxStatus::Success), "{name}");
+        assert_eq!(node.status(&r2_t), Some(TxStatus::Success), "{name}");
+        if node.messaging_nonce(&s) != 0 {
+            continue;
+        }
+        for round in 1..=3u128 {
+            let resent = relayed(&unfunded, 0, min_fee(gates) + round, &s, 0);
+            node.submit(&[&resent]);
+            let user = sender(1 + round as u8);
+            let later = relayed(&r2, relay_nonce(&node, &r2), 2_000, &user, 0);
+            node.submit(&[&later]);
+            let b = node.tick().await;
+            assert!(carries(&b, &later), "{name}: round {round}");
+            assert_eq!(node.status(&later), Some(TxStatus::Success), "{name}");
+            let r = node.receipt(&resent).expect("offered");
+            assert_eq!(r.status, TxStatus::InsufficientBalance, "{name}");
+            assert_eq!(r.fee_paid, 0, "{name}");
+        }
     }
 }

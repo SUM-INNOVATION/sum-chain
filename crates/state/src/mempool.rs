@@ -760,42 +760,38 @@ impl<'a> CombinedOrder<'a> {
         out
     }
 
-    /// Leaves out every transaction left that depends on `taken`, which has
-    /// been taken already, and what depends on those in turn: its outer
-    /// sender's transactions at higher nonces when it advances the nonce (and
-    /// is not below its account's committed nonce, where that is known), and
-    /// its named sender's later envelopes ([`Self::leave_out`]).
-    fn leave_out_dependents(&mut self, taken: usize) -> Vec<usize> {
+    /// Takes out, without placing them, the transactions left of `taken`'s
+    /// own account at higher nonces, when `taken` (taken already) advances the
+    /// nonce and is not below its account's committed nonce: none of them can
+    /// follow a transaction that will not execute. Nothing of another account
+    /// goes with them. Taking them out moves their named senders' sequences
+    /// on, so those senders' later envelopes through other accounts are placed
+    /// when their turn comes, as a broken run never takes another account's
+    /// transactions.
+    fn take_out_account_tail(&mut self, taken: usize) -> Vec<usize> {
         let seq = self.seq;
         let t = &seq[taken];
         let stale = self
             .committed
             .get(&t.outer)
             .is_some_and(|committed| t.key.0 < *committed);
-        let mut first = Vec::new();
-        if t.key.1 && !stale {
-            if let Some(left) = self.by_outer.get(&t.outer) {
-                first.extend(
-                    left.iter()
-                        .filter(|((nonce, _), _)| *nonce > t.key.0)
-                        .map(|(_, j)| *j),
-                );
-            }
+        if !t.key.1 || stale {
+            return Vec::new();
         }
-        if let Some((named, nonce)) = t.envelope {
-            if let Some(left) = self.by_named.get(&named) {
-                first.extend(
-                    left.iter()
-                        .filter(|(later, _)| *later > nonce)
-                        .map(|(_, j)| *j),
-                );
-            }
+        let tail: Vec<usize> = self
+            .by_outer
+            .get(&t.outer)
+            .map(|left| {
+                left.iter()
+                    .filter(|((nonce, _), _)| *nonce > t.key.0)
+                    .map(|(_, j)| *j)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for &j in &tail {
+            self.take(j);
         }
-        let mut out = Vec::new();
-        for j in first {
-            out.extend(self.leave_out(j));
-        }
-        out
+        tail
     }
 
     /// Leaves `victim` out, and every transaction left that depends on it, in
@@ -2677,12 +2673,19 @@ impl Mempool {
     /// fee of what was taken before it from the account, plus the amounts
     /// transactions taken before it pay to the account, is below its own
     /// amount and fee — is still taken, and takes its uncharged
-    /// `InsufficientBalance` receipt in the block, as on main. Nothing that
-    /// depends on it is taken ([`CombinedOrder::leave_out_dependents`]): its
-    /// account's later nonces when it advances the nonce, and its named
-    /// sender's later envelopes, with what depends on those in turn. They stay
-    /// in the pool, where the next selection finds them above a gap. An
-    /// account whose balance cannot be read is not checked.
+    /// `InsufficientBalance` receipt in the block, as on main. Its own
+    /// account's later nonces are not taken when it advances the nonce
+    /// ([`CombinedOrder::take_out_account_tail`]): they cannot follow it, and
+    /// stay in the pool, where the next selection finds them above a gap.
+    /// Nothing of another account is held back for it: its named sender's
+    /// later envelopes through other accounts are taken when their turn comes,
+    /// and take the outcome their envelope nonce meets (from
+    /// `messaging_sponsored_envelope_verification_enabled_from_height` a
+    /// refusal, charged from the accounting gate; below it they execute out
+    /// of their sender's sequence, as on main), and their accounts' queues
+    /// move: an unpayable envelope resent before every block cannot hold
+    /// another relay's queue. An account whose balance cannot be
+    /// read is not checked.
     ///
     /// When nothing is ready (a cycle of account and envelope nonces), the
     /// rest is taken in fee order, and the combined order deals with the cycle
@@ -2723,7 +2726,7 @@ impl Mempool {
                 continue;
             };
             if *balance < cost {
-                order.leave_out_dependents(i);
+                order.take_out_account_tail(i);
                 continue;
             }
             *balance -= cost;
