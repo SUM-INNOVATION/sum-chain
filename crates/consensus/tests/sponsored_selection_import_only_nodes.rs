@@ -485,11 +485,14 @@ const BOUND: u64 = CROSS_ACCOUNT_WAIT_SELECTIONS as u64;
 /// `GAP_BOUND - 1` blocks, with `q`'s pool full (a fresh honest transfer is
 /// refused, as admission refuses it); in the `GAP_BOUND`-th block the 30
 /// transfers and `r1`'s envelope are gone from `q`'s pool, none of the 31
-/// with a receipt; `s`'s envelope 1 is gone by the block after (from the
-/// accounting gate `p` carries it to its refusal at its cross-account bound
-/// and `q` drops it with that block, as it is not stranded with `r1`'s;
-/// below the gate both evict it with `r1`'s), and `q` admits the honest
-/// transfer. At every configuration.
+/// with a receipt, and `q` admits the honest transfer. `s`'s envelope 1 is
+/// checked at every head: where the accounting gate is open at the
+/// `GAP_BOUND`-th block it is not stranded with `r1`'s, and `p` carries it to
+/// its refusal at its `BOUND`-th counted selection (counted from the first
+/// block at the gate), so `q` holds it until the block that carries it and
+/// drops it with that block's receipt; below the gate there, `q` evicts it
+/// with `r1`'s at the `GAP_BOUND`-th block, with no receipt. At every
+/// configuration.
 #[tokio::test]
 async fn a_node_that_only_imports_blocks_evicts_at_the_same_bound() {
     for gates in matrix() {
@@ -519,9 +522,32 @@ async fn a_node_that_only_imports_blocks_evicts_at_the_same_bound() {
         }
         assert_eq!(q.mempool.len(), 32, "{name}: q's pool is full");
         let honest = transfer(&unrelated_user(), relay_nonce(&q, &unrelated_user()), 1_000);
+        // The block (from the case's first, 1) at which `q` no longer holds
+        // `s`'s envelope 1, and whether a receipt goes with it.
+        let evicted_with_r1 = GAP_BOUND;
+        let (gone_at, with_receipt) = if gates.accounting_at(CASE_BLOCK + evicted_with_r1 - 1) {
+            let first = (CASE_BLOCK..).find(|h| gates.accounting_at(*h)).unwrap();
+            (first - CASE_BLOCK + BOUND, true)
+        } else {
+            (evicted_with_r1, false)
+        };
+        assert!(gone_at <= GAP_BOUND + 1, "{name}: inside the case");
         for n in 1..=(GAP_BOUND + 1) {
             let b = p.tick().await;
             q.import(&b).await;
+            assert_eq!(
+                q.held(&r2_s1),
+                n < gone_at,
+                "{name}: s's envelope 1, head {n}"
+            );
+            if n >= gone_at {
+                assert_eq!(
+                    q.receipt(&r2_s1).is_some(),
+                    with_receipt,
+                    "{name}: head {n}"
+                );
+                assert_eq!(carries(&b, &r2_s1), with_receipt && n == gone_at, "{name}");
+            }
             let held = n < GAP_BOUND;
             assert!(
                 gapped
@@ -535,7 +561,6 @@ async fn a_node_that_only_imports_blocks_evicts_at_the_same_bound() {
                     matches!(q.try_submit(&honest), Err(StateError::MempoolFull)),
                     "{name}: q's pool is still full at head {n}"
                 );
-                assert!(q.held(&r2_s1), "{name}: head {n}");
             }
             assert_eq!(
                 gapped.iter().chain([&r1_s0]).filter(|t| p.held(t)).count(),
@@ -543,7 +568,6 @@ async fn a_node_that_only_imports_blocks_evicts_at_the_same_bound() {
                 "{name}: the producer at head {n}"
             );
         }
-        assert!(!q.held(&r2_s1), "{name}: gone by the end");
         q.try_submit(&honest)
             .unwrap_or_else(|e| panic!("{name}: q admits it once the places are free: {e}"));
         // From the accounting gate `p` carries `s`'s envelope 1 at its
