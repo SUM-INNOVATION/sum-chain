@@ -16,17 +16,21 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 use sumchain_consensus::{ConsensusEngine, ConsensusQuery, PoAEngine};
-use sumchain_crypto::{sign, KeyPair};
+use sumchain_crypto::{recipient_hash, sign, KeyPair};
 use sumchain_genesis::{ChainParams, Genesis, MessagingParams};
 use sumchain_primitives::messaging::{
-    MessagingTxData, RegisterPublicKeyData, SetSponsorshipEnabledData,
+    ContentType, MessageFlags, MessageHeader, MessagingTxData, RegisterPublicKeyData,
+    SetSponsorshipEnabledData, SRC201_MAGIC, SRC201_NONCE_SIZE, SRC201_TAG_SIZE, SRC201_VERSION,
 };
-use sumchain_primitives::{Block, MessagingOperation, SignedTransaction, TransactionV2, TxPayload};
+use sumchain_primitives::{
+    sponsored_send_v2_signing_preimage, Block, MessagingOperation, SignedTransaction,
+    SponsoredMessage, TransactionV2, TxPayload,
+};
 use sumchain_rpc::api::SumChainApiServer;
 use sumchain_rpc::server::RpcServer;
 use sumchain_state::mempool::{InclusionGates, InclusionPolicy, GAP_HOLD_SELECTIONS};
 use sumchain_state::{Mempool, MempoolConfig, StateError, StateManager};
-use sumchain_storage::Database;
+use sumchain_storage::{Database, MessagingStore, ReceiptStore};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
@@ -134,6 +138,53 @@ fn transfer(from: &KeyPair, nonce: u64) -> SignedTransaction {
             to: recipient().address(),
             amount: 1,
         },
+    )
+}
+
+/// A valid encrypted message body for recipient hash `rh`.
+fn valid_message(rh: [u8; 32]) -> Vec<u8> {
+    let header = MessageHeader {
+        magic: SRC201_MAGIC,
+        version: SRC201_VERSION,
+        flags: MessageFlags::encrypted(),
+        content_type: ContentType::TextPlain,
+        attachment_count: 0,
+        recipient_hash: rh,
+        ephemeral_pubkey: [2u8; 32],
+    };
+    let mut m = header.to_bytes().to_vec();
+    m.extend_from_slice(&[0u8; SRC201_NONCE_SIZE]);
+    m.extend_from_slice(&[0u8, 0u8]);
+    m.extend_from_slice(&[0u8; SRC201_TAG_SIZE]);
+    m
+}
+
+/// `named`'s version-2 envelope at envelope nonce `envelope_nonce`, relayed
+/// by `relay` at account nonce `nonce` with fee 2,000.
+fn relayed(relay: &KeyPair, nonce: u64, named: &KeyPair, envelope_nonce: u64) -> SignedTransaction {
+    let rh = recipient_hash(&recipient().address());
+    let mut m = SponsoredMessage {
+        message_data: valid_message(rh),
+        recipient_hash: rh,
+        signature: [0u8; 64],
+        sender_pubkey: pk(named),
+        nonce: envelope_nonce,
+        expiry: u64::MAX,
+        koppa_amount: None,
+    };
+    m.signature = *sign(
+        &sponsored_send_v2_signing_preimage(CHAIN_ID, &m),
+        named.private_key(),
+    )
+    .as_bytes();
+    signed(
+        relay,
+        nonce,
+        2_000,
+        TxPayload::Messaging(MessagingTxData {
+            operation: MessagingOperation::SendMessage,
+            data: bincode::serialize(&m).unwrap(),
+        }),
     )
 }
 
@@ -457,6 +508,72 @@ async fn a_restarted_node_reports_unknown() {
             status(&setup[0]).await,
             json!({ "kind": "included", "block_height": 1 }),
             "{name}"
+        );
+    }
+}
+
+/// From the accounting gate, a
+/// cycle within one sponsor above a missing envelope is not released.
+/// `sender`'s envelope 0 is admitted through `relay_two` and then leaves the
+/// pool (it is in no block); `relay_one` relays `sender`'s envelope 2 at its
+/// nonce 0 and envelope 1 at its nonce 1. Both read `pending` for
+/// `GAP_HOLD_SELECTIONS - 1` blocks and `dropped` from the
+/// `GAP_HOLD_SELECTIONS`-th while the eviction history holds them: neither
+/// is carried or has a receipt, and `relay_one`'s balance and nonce and
+/// `sender`'s messaging nonce are unchanged. With the gates inside the
+/// chain's history and at the case's first block.
+#[tokio::test]
+async fn a_cycle_within_one_sponsor_above_a_missing_envelope_reads_dropped_for_both() {
+    for (name, gate) in [
+        ("inside history", Some(1)),
+        ("at the case's block", Some(2)),
+    ] {
+        let p = Node::new(gate);
+        set_up(&p, &[]).await;
+        let (r, s) = (relay_one(), sender());
+        let balance = p.server.get_balance(r.address().to_base58()).await.unwrap();
+        let s0 = relayed(&relay_two(), 0, &s, 0);
+        let r_s1 = relayed(&r, 1, &s, 1);
+        let r_s2 = relayed(&r, 0, &s, 2);
+        p.submit(&[&s0, &r_s1, &r_s2]);
+        p.mempool.remove(&s0.hash());
+        for n in 1..=(GAP_HOLD_SELECTIONS + 2) {
+            p.tick().await;
+            let expected = if n < GAP_HOLD_SELECTIONS {
+                json!({ "kind": "pending" })
+            } else {
+                json!({ "kind": "dropped" })
+            };
+            for t in [&r_s1, &r_s2] {
+                assert_eq!(p.status(t).await, expected, "{name}: block {n}");
+                assert!(
+                    !p.head().transactions.iter().any(|x| x.hash() == t.hash()),
+                    "{name}: never carried, block {n}"
+                );
+            }
+        }
+        for t in [&r_s1, &r_s2] {
+            assert!(
+                ReceiptStore::new(&p.db).get(&t.hash()).unwrap().is_none(),
+                "{name}: no receipt"
+            );
+        }
+        assert_eq!(
+            p.server.get_balance(r.address().to_base58()).await.unwrap(),
+            balance,
+            "{name}: nothing charged"
+        );
+        assert_eq!(
+            p.server.get_nonce(r.address().to_base58()).await.unwrap(),
+            0,
+            "{name}"
+        );
+        assert_eq!(
+            MessagingStore::new(&p.db)
+                .get_sender_nonce(&s.address())
+                .unwrap(),
+            0,
+            "{name}: no envelope nonce consumed"
         );
     }
 }

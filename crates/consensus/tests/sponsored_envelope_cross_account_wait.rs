@@ -1049,6 +1049,130 @@ async fn an_envelope_the_cross_account_bound_governs_is_not_stranded_through_its
     }
 }
 
+/// Where `s`'s envelope 0 stands in [`one_sponsor_cycle`]'s shape.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Env0 {
+    /// Admitted through `r2` and then gone from the pool, and not in the
+    /// chain: missing, in this node's view.
+    Missing,
+    /// Relayed by `r2` at its nonce 1, with nothing at `r2`'s nonce 0:
+    /// present, held through another sponsor.
+    HeldAtAnotherSponsor,
+}
+
+/// A cycle within one sponsor: `r` relays `s`'s envelope 2 at its nonce 0
+/// and `s`'s envelope 1 at its nonce 1. `s`'s envelope 0 is admitted through
+/// `r2` at its nonce 1 and stays in the pool or leaves it as `env0` says.
+/// Returns `(r, r2's envelope 0, r's envelope 1, r's envelope 2)`.
+fn one_sponsor_cycle(
+    node: &Node,
+    env0: Env0,
+) -> (
+    KeyPair,
+    SignedTransaction,
+    SignedTransaction,
+    SignedTransaction,
+) {
+    let (r, r2, s) = (sponsor(0), sponsor(1), s_of());
+    let r2_s0 = relayed(&r2, 1, 2_000, &s, 0);
+    let r_s1 = relayed(&r, 1, 2_000, &s, 1);
+    let r_s2 = relayed(&r, 0, 2_000, &s, 2);
+    node.submit(&[&r2_s0, &r_s1, &r_s2]);
+    if env0 == Env0::Missing {
+        node.mempool.remove(&r2_s0.hash());
+    }
+    (r, r2_s0, r_s1, r_s2)
+}
+
+/// The configurations where both messaging gates are open at the case's
+/// block.
+fn both_gates_open() -> Vec<Gates> {
+    let configs: Vec<Gates> = matrix()
+        .into_iter()
+        .filter(|g| g.accounting_at(CASE_BLOCK) && g.verification_at(CASE_BLOCK))
+        .collect();
+    assert!(!configs.is_empty());
+    configs
+}
+
+/// A missing predecessor, and one held through another sponsor: the
+/// same cycle within one sponsor ([`one_sponsor_cycle`]), differing only in
+/// whether `s`'s envelope 0 is missing or present, held through another
+/// sponsor. From the accounting gate:
+/// - Missing: neither of `r`'s envelopes is counted toward `K`. Both are held
+///   directly above the missing envelope and evicted at the `B`-th block,
+///   never carried: no receipt, `r`'s balance and nonce and `s`'s messaging
+///   nonce unchanged, and both in this node's eviction history (the status
+///   method reads `dropped` for them).
+/// - Held at another sponsor: `r`'s envelope 2, at `r`'s nonce 0, is counted
+///   from the first selection and carried at the `K`-th to its charged
+///   refusal (`Failed(7)`, its whole fee), in the selection in which `s`'s
+///   envelope 0 reaches the gap bound at `r2`'s gap and is evicted with no
+///   receipt. What then becomes of `r`'s envelope 1 is not read here.
+///
+/// Where both messaging gates are open at the case's block.
+#[tokio::test]
+async fn a_cycle_within_one_sponsor_is_released_only_above_another_sponsors_envelope() {
+    assert_eq!(K, B, "the case reads both bounds together");
+    for gates in both_gates_open() {
+        for env0 in [Env0::Missing, Env0::HeldAtAnotherSponsor] {
+            let name = format!("{}, {env0:?}", gates.name);
+            let node = Node::new(gates);
+            node.set_up().await;
+            let s = s_of();
+            let (r, r2_s0, r_s1, r_s2) = one_sponsor_cycle(&node, env0);
+            let balance = |k: &KeyPair| node.state.get_balance(&k.address()).unwrap();
+            let funds = balance(&r);
+            for n in 1..B {
+                let b = node.tick().await;
+                for x in [&r2_s0, &r_s1, &r_s2] {
+                    assert!(!carries(&b, x), "{name}: block {n}");
+                }
+                let counted = if env0 == Env0::Missing { 0 } else { n };
+                assert_eq!(node.count(&r_s2), counted, "{name}: block {n}");
+                assert_eq!(node.count(&r_s1), 0, "{name}: behind r's nonce 0");
+                assert!(node.held(&r_s1) && node.held(&r_s2), "{name}: block {n}");
+            }
+            let b = node.tick().await;
+            assert!(!node.held(&r2_s0), "{name}");
+            assert_eq!(node.status(&r2_s0), None, "{name}");
+            match env0 {
+                Env0::Missing => {
+                    for x in [&r_s1, &r_s2] {
+                        assert!(!carries(&b, x), "{name}");
+                        assert!(!node.held(x), "{name}: evicted at the gap bound");
+                    }
+                    for n in 1..=B {
+                        let b = node.tick().await;
+                        for x in [&r_s1, &r_s2] {
+                            assert!(!carries(&b, x), "{name}: never carried, block {n}");
+                        }
+                    }
+                    for x in [&r_s1, &r_s2] {
+                        assert!(node.receipt(x).is_none(), "{name}: no receipt");
+                        assert!(
+                            node.mempool.evicted_above_a_gap(&x.hash()),
+                            "{name}: in the eviction history"
+                        );
+                    }
+                    assert_eq!(balance(&r), funds, "{name}: nothing charged");
+                    assert_eq!(node.account_nonce(&r), 0, "{name}");
+                }
+                Env0::HeldAtAnotherSponsor => {
+                    assert!(carries(&b, &r_s2), "{name}: released at the K-th selection");
+                    assert!(!carries(&b, &r_s1), "{name}");
+                    let refusal = node.receipt(&r_s2).expect("carried");
+                    assert_eq!(refusal.status, TxStatus::Failed(7), "{name}");
+                    assert_eq!(refusal.fee_paid, 2_000, "{name}: its whole fee");
+                    assert_eq!(balance(&r), funds - refusal.fee_paid, "{name}");
+                    assert_eq!(node.account_nonce(&r), 1, "{name}");
+                }
+            }
+            assert_eq!(node.messaging_nonce(&s), 0, "{name}");
+        }
+    }
+}
+
 /// The sender of [`cycle_above_another_gap`]'s envelopes.
 fn s_of() -> KeyPair {
     sender(0)

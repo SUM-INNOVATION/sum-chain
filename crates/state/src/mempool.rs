@@ -1129,6 +1129,30 @@ struct PoolHolds {
     held: HashSet<Hash>,
 }
 
+/// From the accounting gate, whether a wait inside one sponsor counts toward
+/// [`CROSS_ACCOUNT_WAIT_SELECTIONS`]: an envelope at its own account's next
+/// nonce that waits on, among its named sender's earlier envelopes not
+/// carried, one relayed by its own account at a later nonce (a cycle within
+/// one sponsor), and on what else is `missing` from the pool or relayed by
+/// another account (`by_another_account`).
+///
+/// - Another account's envelope part of it, nothing missing: counted, and
+///   carried to its charged refusal at the bound.
+/// - A missing envelope part of it, nothing of another account: not counted:
+///   the gap bound evicts the
+///   sponsor's envelopes with no receipt.
+/// - Both (a missing envelope and another account's envelope): counted, as
+///   before.
+/// - Neither (the sponsor's own envelopes only): not counted.
+fn counts_within_one_sponsor(missing: bool, by_another_account: bool) -> bool {
+    match (missing, by_another_account) {
+        (false, true) => true,
+        (true, false) => false,
+        (true, true) => true,
+        (false, false) => false,
+    }
+}
+
 /// Whether `tx` is a contract deploy or call.
 fn is_contract_transaction(tx: &SignedTransaction) -> bool {
     matches!(
@@ -2683,11 +2707,13 @@ impl Mempool {
     /// when `carried` are the transactions carried: every earlier transaction
     /// of their own account is carried (the account's nonce, from its
     /// committed one through the carried transactions that advance it,
-    /// reaches theirs), and among their named sender's envelopes from its
-    /// committed messaging nonce up to theirs at least one that is not
-    /// carried is missing from the pool or relayed by another account (others
-    /// not carried may be relayed by their own account, at a later nonce: a
-    /// cycle within one sponsor, held with another account's hold).
+    /// reaches theirs), and what they wait on among their named sender's
+    /// envelopes from its committed messaging nonce up to theirs, of those not
+    /// carried, counts ([`counts_within_one_sponsor`] when one of them is
+    /// relayed by their own account, at a later nonce: a cycle within one
+    /// sponsor; otherwise when one is missing from the pool or relayed by
+    /// another account). "Missing" is this pool's view, recomputed at every
+    /// selection.
     fn waiting_on_another_account<'a>(
         &self,
         left: impl Iterator<Item = &'a SignedTransaction>,
@@ -2734,19 +2760,26 @@ impl Mempool {
                 continue;
             };
             let pending = in_flight.get(&named);
-            let mut by_another_account = false;
+            let (mut missing, mut by_another_account, mut by_own_account) = (false, false, false);
             for earlier in from..nonce {
                 match pending.and_then(|nonces| nonces.get(&earlier)) {
-                    None => by_another_account = true,
+                    None => missing = true,
                     Some(carrier) if carried_hashes.contains(carrier) => {}
                     Some(carrier) => {
-                        if !txs.get(carrier).is_some_and(|e| e.tx.sender() == own) {
+                        if txs.get(carrier).is_some_and(|e| e.tx.sender() == own) {
+                            by_own_account = true;
+                        } else {
                             by_another_account = true;
                         }
                     }
                 }
             }
-            if by_another_account {
+            let counted = if by_own_account {
+                counts_within_one_sponsor(missing, by_another_account)
+            } else {
+                missing || by_another_account
+            };
+            if counted {
                 waiting.insert(tx.hash());
             }
         }
