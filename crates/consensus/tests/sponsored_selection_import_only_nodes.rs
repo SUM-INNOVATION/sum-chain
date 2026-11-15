@@ -715,8 +715,9 @@ impl Builder {
 /// keeps it), `x`'s nonces 0 and 1 and `y`'s nonce 1 (`y`'s nonce 0 is not in
 /// its pool). Branch A carries `x`'s nonce 0 in its first block; the
 /// follower imports A's two blocks, and `g` and `y`'s nonce 1 are counted at
-/// each. Branch B carries `y`'s nonce 0 in its first block and wins at its
-/// third. At the switch (one new head): `g` reaches the bound and is evicted
+/// each. Branch B carries `y`'s nonce 0 in its first block; its blocks that
+/// lose fork choice count nothing, and the one that wins it switches the
+/// chain. At the switch (one new head): `g` reaches the bound and is evicted
 /// with no receipt; `y`'s nonce 1 is no longer above a gap, so its count is
 /// gone and it stays; `x`'s nonce 0 is offered back and both of `x`'s are
 /// held, counted from nothing. One more of B's blocks changes nothing of
@@ -755,16 +756,30 @@ async fn a_chain_switch_counts_at_its_new_head_and_keeps_what_the_new_branch_unb
         let b1 = b.produce(vec![y0.clone()]);
         let b2 = b.produce(Vec::new());
         let b3 = b.produce(Vec::new());
+        // B's blocks lose fork choice until one wins it: no head moves and
+        // nothing is counted for them. The block that wins it switches the
+        // chain, and the switch is counted once, at its new head.
+        let mut switched = false;
         for blk in [&b1, &b2, &b3] {
             q.import(blk).await;
+            if q.engine.best_block_hash() != blk.hash() {
+                assert_eq!(q.engine.best_block_hash(), a2.hash(), "{name}");
+                assert!(q.held(&stray), "{name}: a losing block counts nothing");
+                assert_eq!(count(&stray), 2, "{name}");
+                continue;
+            }
+            if !switched {
+                switched = true;
+                assert!(!q.held(&stray), "{name}: evicted at the switch's head");
+                assert!(q.receipt(&stray).is_none(), "{name}");
+                for t in [&y1, &x0, &x1] {
+                    assert!(q.held(t), "{name}");
+                    assert_eq!(count(t), 0, "{name}");
+                }
+            }
         }
-        assert_eq!(
-            q.engine.best_block_hash(),
-            b3.hash(),
-            "{name}: switched to B"
-        );
-        assert!(!q.held(&stray), "{name}: evicted at the switch's head");
-        assert!(q.receipt(&stray).is_none(), "{name}");
+        assert!(switched, "{name}: switched to B");
+        assert_eq!(q.engine.best_block_hash(), b3.hash(), "{name}");
         for t in [&y1, &x0, &x1] {
             assert!(q.held(t), "{name}");
             assert_eq!(count(t), 0, "{name}");
