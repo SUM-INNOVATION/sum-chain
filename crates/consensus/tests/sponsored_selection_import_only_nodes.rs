@@ -484,10 +484,11 @@ const BOUND: u64 = CROSS_ACCOUNT_WAIT_SELECTIONS as u64;
 /// `r2`. `p` produces, `q` imports. On `q`, as on `p`: held for
 /// `GAP_BOUND - 1` blocks, with `q`'s pool full (a fresh honest transfer is
 /// refused, as admission refuses it); in the `GAP_BOUND`-th block the 30
-/// transfers, `r1`'s envelope and `s`'s envelope 1 (which `p` carries at its
-/// cross-account bound from the accounting gate; `q`, which counts no such
-/// wait, evicts it with `r1`'s unless a block carried it first) are gone from
-/// `q`'s pool, none of the 31 with a receipt, and `q` admits the honest
+/// transfers and `r1`'s envelope are gone from `q`'s pool, none of the 31
+/// with a receipt; `s`'s envelope 1 is gone by the block after (from the
+/// accounting gate `p` carries it to its refusal at its cross-account bound
+/// and `q` drops it with that block, as it is not stranded with `r1`'s;
+/// below the gate both evict it with `r1`'s), and `q` admits the honest
 /// transfer. At every configuration.
 #[tokio::test]
 async fn a_node_that_only_imports_blocks_evicts_at_the_same_bound() {
@@ -535,8 +536,6 @@ async fn a_node_that_only_imports_blocks_evicts_at_the_same_bound() {
                     "{name}: q's pool is still full at head {n}"
                 );
                 assert!(q.held(&r2_s1), "{name}: head {n}");
-            } else {
-                assert!(!q.held(&r2_s1), "{name}: head {n}");
             }
             assert_eq!(
                 gapped.iter().chain([&r1_s0]).filter(|t| p.held(t)).count(),
@@ -544,6 +543,7 @@ async fn a_node_that_only_imports_blocks_evicts_at_the_same_bound() {
                 "{name}: the producer at head {n}"
             );
         }
+        assert!(!q.held(&r2_s1), "{name}: gone by the end");
         q.try_submit(&honest)
             .unwrap_or_else(|e| panic!("{name}: q admits it once the places are free: {e}"));
         // From the accounting gate `p` carries `s`'s envelope 1 at its

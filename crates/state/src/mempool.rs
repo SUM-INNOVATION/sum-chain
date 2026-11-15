@@ -875,14 +875,18 @@ impl<'a> CombinedOrder<'a> {
 /// nothing, below the block's limit — waits on room, not on another account:
 /// it is not counted, and a later hold gets the whole bound.
 ///
-/// Nor is a wait that is partly on the envelope's own account. When one of
-/// the earlier envelopes it waits on is relayed by its own account, at a
-/// later nonce (a cycle within one sponsor: the account's order puts it
-/// first, the named sender's order second), it does not wait only on another
-/// account. Such a cycle reaching a block loses a victim there; inside a
-/// hold it ends with the hold, when the gap bound evicts the held envelope
-/// and the named sender's later envelopes with it, stranded, with no receipt
-/// and nothing charged to the sponsor.
+/// A wait counts when another account's envelope is part of what it waits
+/// on (missing from the pool, or relayed by another account and not
+/// carried), even if an earlier envelope of its own account's, at a later
+/// nonce, is too (a cycle within one sponsor held with another account's
+/// hold): a valid, funded outer transaction is never stranded
+/// solely by another account's envelope dependency; it reaches its charged
+/// refusal within the bound. A wait only on its own account's later
+/// envelopes (a cycle within one sponsor and nothing else) is not counted:
+/// such a cycle loses a victim in the block. Nothing with a gap in its own
+/// account's nonces below it is counted or released, and the executor's
+/// checks are never skipped: an outer transaction that cannot pay takes an
+/// uncharged `InsufficientBalance`.
 ///
 /// What a premature carry costs: one fee, charged to the envelope's sponsor.
 /// The named sender consumes nothing: an envelope whose nonce is not its
@@ -914,7 +918,11 @@ pub const CROSS_ACCOUNT_WAIT_SELECTIONS: u32 = 3;
 /// many blocks it is evicted instead: the pool's capacity is released,
 /// nothing is charged, and its named sender's later envelopes that nothing in
 /// the pool can bring into sequence any more are evicted with an envelope, as
-/// main evicts them after a failed receipt. An envelope that this node counts
+/// main evicts them after a failed receipt — below the accounting gate. From
+/// the gate on, those relayed by another account than the evicted envelope's
+/// are not stranded: they stay, waiting on a missing envelope, and
+/// [`CROSS_ACCOUNT_WAIT_SELECTIONS`] carries each to its charged refusal once
+/// its own account's earlier transactions are carried. An envelope that this node counts
 /// toward [`CROSS_ACCOUNT_WAIT_SELECTIONS`] (a released one keeps its count
 /// until it leaves the pool) is neither evicted nor stranded here: that
 /// bound governs it, and it is carried to its refusal. The transaction is
@@ -2261,7 +2269,7 @@ impl Mempool {
         let governed = self.governed_by_the_cross_account_bound(&released);
         let expired = self.expired_gap_holds(&holds, &governed);
         if !expired.is_empty() {
-            let gone = self.evict_gap_holds(&pool, &expired, &governed);
+            let gone = self.evict_gap_holds(&pool, &expired, &governed, rules.accounting);
             info!(
                 "Inclusion policy: evicting {} transaction(s) held {} blocks in a row above \
                  a gap in their account's or their named sender's nonces, and {} envelope(s) \
@@ -2391,7 +2399,7 @@ impl Mempool {
         let governed = self.governed_by_the_cross_account_bound(&released);
         let expired = self.expired_gap_holds(&holds, &governed);
         if !expired.is_empty() {
-            let gone = self.evict_gap_holds(&pool, &expired, &governed);
+            let gone = self.evict_gap_holds(&pool, &expired, &governed, rules.accounting);
             info!(
                 "Inclusion policy: at head {head}, evicting {} transaction(s) held {} blocks in \
                  a row above a gap in their account's or their named sender's nonces, and {} \
@@ -2459,12 +2467,16 @@ impl Mempool {
     /// Evicts `expired` from the pool and, for each envelope among them, its
     /// named sender's later envelopes that nothing left in the pool can bring
     /// into sequence ([`Self::stranded_envelopes`], as after a failed
-    /// receipt), other than those in `governed`. Returns everything evicted.
+    /// receipt), other than those in `governed` and, from the accounting gate
+    /// (`accounting`), those relayed by another account than the evicted
+    /// envelope's: those stay for the cross-account bound. Returns everything
+    /// evicted.
     fn evict_gap_holds(
         &self,
         pool: &[SignedTransaction],
         expired: &[Hash],
         governed: &HashSet<Hash>,
+        accounting: bool,
     ) -> HashSet<Hash> {
         let mut gone: HashSet<Hash> = expired.iter().copied().collect();
         if let Some(policy) = &self.inclusion_policy {
@@ -2472,15 +2484,22 @@ impl Mempool {
                 pool.iter().map(|tx| (tx.hash(), tx)).collect();
             let messaging = MessagingStore::new(&policy.db);
             for hash in expired {
-                let Some((sender, _)) = by_hash.get(hash).and_then(|tx| sponsored_identity(tx))
-                else {
+                let Some(evicted) = by_hash.get(hash) else {
                     continue;
                 };
+                let Some((sender, _)) = sponsored_identity(evicted) else {
+                    continue;
+                };
+                let relay = evicted.sender();
                 if let Ok(committed) = messaging.get_sender_nonce(&sender) {
                     gone.extend(
                         self.stranded_envelopes(&sender, committed, hash)
                             .into_iter()
-                            .filter(|stranded| !governed.contains(stranded)),
+                            .filter(|stranded| !governed.contains(stranded))
+                            .filter(|stranded| {
+                                !accounting
+                                    || by_hash.get(stranded).is_some_and(|tx| tx.sender() == relay)
+                            }),
                     );
                 }
             }
@@ -2594,9 +2613,10 @@ impl Mempool {
     /// of their own account is carried (the account's nonce, from its
     /// committed one through the carried transactions that advance it,
     /// reaches theirs), and among their named sender's envelopes from its
-    /// committed messaging nonce up to theirs at least one is not carried,
-    /// each of those is missing from the pool or relayed by another account,
-    /// and none is relayed by their own.
+    /// committed messaging nonce up to theirs at least one that is not
+    /// carried is missing from the pool or relayed by another account (others
+    /// not carried may be relayed by their own account, at a later nonce: a
+    /// cycle within one sponsor, held with another account's hold).
     fn waiting_on_another_account<'a>(
         &self,
         left: impl Iterator<Item = &'a SignedTransaction>,
@@ -2643,21 +2663,19 @@ impl Mempool {
                 continue;
             };
             let pending = in_flight.get(&named);
-            let mut blocked = false;
-            let mut by_own_account = false;
+            let mut by_another_account = false;
             for earlier in from..nonce {
                 match pending.and_then(|nonces| nonces.get(&earlier)) {
-                    None => blocked = true,
+                    None => by_another_account = true,
                     Some(carrier) if carried_hashes.contains(carrier) => {}
                     Some(carrier) => {
-                        blocked = true;
-                        if txs.get(carrier).is_some_and(|e| e.tx.sender() == own) {
-                            by_own_account = true;
+                        if !txs.get(carrier).is_some_and(|e| e.tx.sender() == own) {
+                            by_another_account = true;
                         }
                     }
                 }
             }
-            if blocked && !by_own_account {
+            if by_another_account {
                 waiting.insert(tx.hash());
             }
         }
