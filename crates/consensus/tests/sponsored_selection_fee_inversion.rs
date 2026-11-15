@@ -763,26 +763,38 @@ async fn a_run_paid_for_earlier_in_the_block_is_carried_whole() {
 /// uncharged below it), `v`'s envelope and the transfer are delivered, and
 /// each resend of `s`'s envelope 0 takes an uncharged `InsufficientBalance`.
 /// `r2`'s account nonce moves every block from the accounting gate. Below the
-/// verification gate `s`'s envelope 1 executes out of sequence in the first
-/// block, as on main, `s`'s nonce moves past envelope 0, and the resend is
-/// no longer admitted: the case ends there. At every configuration.
+/// verification gate (`0x1048`) at the case's first block the case is a
+/// single round by design: `s`'s envelope 1 executes out of sequence in that
+/// block, as on main, `s`'s nonce moves past envelope 0, and the resend is no
+/// longer admitted; the case asserts that it ends there. At every
+/// configuration.
 #[tokio::test]
 async fn an_unpayable_envelope_resent_before_every_block_never_holds_another_relays_queue() {
     /// Blocks of resubmission: three times the larger bound, and more.
     const ROUNDS: u64 = 3 * if BOUND > GAP_BOUND { BOUND } else { GAP_BOUND } + 3;
     /// Selections from a transaction's submission to the block carrying it.
+    /// Nothing of `r2`'s depends on the unpayable transaction in the cut (it
+    /// holds back only its own account's later nonces), so each of `r2`'s
+    /// transactions is carried by the first selection after its submission:
+    /// `N = 1`, within both bounds, so neither bound is what lets it through.
     const PROGRESS: u64 = 1;
+    const _: () = assert!(
+        PROGRESS <= BOUND && PROGRESS <= GAP_BOUND,
+        "the progress bound is within CROSS_ACCOUNT_WAIT_SELECTIONS and GAP_HOLD_SELECTIONS"
+    );
     for gates in matrix() {
         let name = gates.name;
         let node = Node::new(gates);
         node.set_up().await;
         let (r2, s, v) = (sponsor(1), sender(0), sender(1));
         let unfunded = stranger(0x5a);
+        let mut rounds = 0;
         for round in 0..ROUNDS {
             let h = node.next_height();
             if round > 0 && node.messaging_nonce(&s) != 0 {
                 break;
             }
+            rounds += 1;
             let e0 = relayed(&unfunded, 0, min_fee(gates) + u128::from(round), &s, 0);
             node.submit(&[&e0]);
             let r2_s1 = relayed(
@@ -860,5 +872,14 @@ async fn an_unpayable_envelope_resent_before_every_block_never_holds_another_rel
                 "{name}: round {round}"
             );
         }
+        let expected = if gates.verification_at(CASE_BLOCK) {
+            ROUNDS
+        } else {
+            1
+        };
+        assert_eq!(
+            rounds, expected,
+            "{name}: every round from 0x1048; a single round below it, by design"
+        );
     }
 }
