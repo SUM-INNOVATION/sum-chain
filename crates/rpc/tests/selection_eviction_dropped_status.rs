@@ -512,8 +512,8 @@ async fn a_restarted_node_reports_unknown() {
     }
 }
 
-/// From the accounting gate, a
-/// cycle within one sponsor above a missing envelope is not released.
+/// Row 3 of the selection oracle: from the accounting gate, a cycle within one sponsor above a
+/// missing envelope is not released.
 /// `sender`'s envelope 0 is admitted through `relay_two` and then leaves the
 /// pool (it is in no block); `relay_one` relays `sender`'s envelope 2 at its
 /// nonce 0 and envelope 1 at its nonce 1. Both read `pending` for

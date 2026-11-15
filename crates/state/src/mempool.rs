@@ -885,9 +885,9 @@ impl<'a> CombinedOrder<'a> {
 /// How many of this node's selections a sponsored envelope may be left out,
 /// from `messaging_fee_nonce_accounting_enabled_from_height` on, only because
 /// its named sender's earlier envelope is not carried with it — that envelope
-/// is not in the pool, or is held with another account (above that account's
-/// nonce gap, or with a cycle's victim) — while every earlier transaction of
-/// its own account is carried. At this many such selections in a row it is
+/// is in the pool but held with another account (above that account's nonce
+/// gap, or with a cycle's victim) — while every earlier transaction of its
+/// own account is carried. At this many such selections in a row it is
 /// carried at its place in its own account's sequence without the earlier
 /// envelope, and takes its canonical refusal: from
 /// `messaging_sponsored_envelope_verification_enabled_from_height` on a
@@ -913,25 +913,34 @@ impl<'a> CombinedOrder<'a> {
 /// the wait counts from the selection that finds the cycle and evicts its
 /// victim, so the victim's sponsor has about two more of this node's
 /// selections to refill the victim's nonce before the envelopes waiting on
-/// it are carried to their charged refusals.
+/// it through another account are carried to their charged refusals (an
+/// envelope whose required predecessor was the victim itself has it missing
+/// from then on: row 3, below).
 ///
 /// Only a hold is counted. An envelope left out only because the block is
 /// full — its named sender's earlier envelope is in the pool, held by
 /// nothing, below the block's limit — waits on room, not on another account:
 /// it is not counted, and a later hold gets the whole bound.
 ///
-/// A wait counts when another account's envelope is part of what it waits
-/// on (missing from the pool, or relayed by another account and not
-/// carried), even if an earlier envelope of its own account's, at a later
-/// nonce, is too (a cycle within one sponsor held with another account's
-/// hold): a valid, funded outer transaction is never stranded
-/// solely by another account's envelope dependency; it reaches its charged
-/// refusal within the bound. A wait only on its own account's later
-/// envelopes (a cycle within one sponsor and nothing else) is not counted:
-/// such a cycle loses a victim in the block. Nothing with a gap in its own
-/// account's nonces below it is counted or released, and the executor's
-/// checks are never skipped: an outer transaction that cannot pay takes an
-/// uncharged `InsufficientBalance`.
+/// Which waits count is the selection oracle from `0x1049`
+/// ([`RequiredPredecessors`]), judged at every
+/// selection against the pool as it then stands, nothing kept from an
+/// earlier one. An envelope's required predecessors are its named sender's
+/// envelope nonces from the sender's current canonical next one up to its
+/// own; a consumed nonce is never required. Rows 1 and 2 first: nothing with
+/// a gap in its own account's nonces below it is counted or released, and
+/// the executor's checks are never skipped (an outer transaction that cannot
+/// pay takes an uncharged `InsufficientBalance`). Row 3 before row 4: when
+/// any required predecessor is missing locally, in neither the canonical
+/// sequence nor this pool, the envelope is not counted, also when another
+/// predecessor is held elsewhere or it was counted before; the gap bound
+/// evicts it within [`GAP_HOLD_SELECTIONS`] with no receipt. Row 4:
+/// every required predecessor is in the pool and one that is not carried is
+/// relayed by another account, even with an earlier envelope of its own
+/// account's at a later nonce among them (a cycle within one sponsor held
+/// with another account's hold): counted, and carried to its
+/// charged refusal at the bound. Row 5, otherwise: the existing rules; a
+/// cycle within one sponsor and nothing else loses a victim in the block.
 ///
 /// What a premature carry costs: one fee, charged to the envelope's sponsor.
 /// The named sender consumes nothing: an envelope whose nonce is not its
@@ -965,12 +974,13 @@ pub const CROSS_ACCOUNT_WAIT_SELECTIONS: u32 = 3;
 /// the pool can bring into sequence any more are evicted with an envelope, as
 /// main evicts them after a failed receipt — below the accounting gate. From
 /// the gate on, those relayed by another account than the evicted envelope's
-/// are not stranded: they stay, waiting on a missing envelope, and
-/// [`CROSS_ACCOUNT_WAIT_SELECTIONS`] carries each to its charged refusal once
-/// its own account's earlier transactions are carried. An envelope that this node counts
-/// toward [`CROSS_ACCOUNT_WAIT_SELECTIONS`] (a released one keeps its count
-/// until it leaves the pool) is neither evicted nor stranded here: that
-/// bound governs it, and it is carried to its refusal. The transaction is
+/// are not stranded: they stay, now with a required predecessor missing
+/// (row 3 of the selection oracle, [`RequiredPredecessors`]), and are
+/// evicted at this bound in turn unless that envelope reaches the pool again
+/// first; none of them is counted toward [`CROSS_ACCOUNT_WAIT_SELECTIONS`]
+/// or charged. An envelope released toward its charged refusal in this
+/// selection (row 4 when the release was decided) is neither evicted nor
+/// stranded here: it is carried to its refusal. The transaction is
 /// lost, as on main; the client re-sends. Unlike main, no receipt records it:
 /// this node reports it `dropped` while its bounded eviction history keeps it
 /// ([`Mempool::evicted_above_a_gap`]), a local observation only.
@@ -1129,27 +1139,64 @@ struct PoolHolds {
     held: HashSet<Hash>,
 }
 
-/// From the accounting gate, whether a wait inside one sponsor counts toward
-/// [`CROSS_ACCOUNT_WAIT_SELECTIONS`]: an envelope at its own account's next
-/// nonce that waits on, among its named sender's earlier envelopes not
-/// carried, one relayed by its own account at a later nonce (a cycle within
-/// one sponsor), and on what else is `missing` from the pool or relayed by
-/// another account (`by_another_account`).
-///
-/// - Another account's envelope part of it, nothing missing: counted, and
-///   carried to its charged refusal at the bound.
-/// - A missing envelope part of it, nothing of another account: not counted:
-///   the gap bound evicts the
-///   sponsor's envelopes with no receipt.
-/// - Both (a missing envelope and another account's envelope): counted, as
-///   before.
-/// - Neither (the sponsor's own envelopes only): not counted.
-fn counts_within_one_sponsor(missing: bool, by_another_account: bool) -> bool {
-    match (missing, by_another_account) {
-        (false, true) => true,
-        (true, false) => false,
-        (true, true) => true,
-        (false, false) => false,
+/// What the required predecessors of a pending sponsored envelope are in
+/// this pool's view, as the selection oracle from `0x1049` reads them: its named sender's
+/// envelope nonces from the sender's current canonical next one up to the
+/// envelope's own; a consumed nonce is never required. Rows 1 and 2 (a gap in
+/// the outer transaction's own account nonces, an outer transaction that
+/// cannot pay) are decided before this and elsewhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequiredPredecessors {
+    /// Row 3: at least one is missing locally, in neither the canonical
+    /// sequence nor this pool. It takes precedence over row 4: the envelope
+    /// is not counted toward [`CROSS_ACCOUNT_WAIT_SELECTIONS`], and the gap
+    /// bound evicts it within [`GAP_HOLD_SELECTIONS`], never included or
+    /// charged.
+    Missing,
+    /// Row 4: every one is in the pool and one that is not carried is
+    /// relayed by another sponsor: counted, and carried to its charged
+    /// refusal at the bound.
+    HeldThroughAnotherSponsor,
+    /// Row 5: every one is in the pool, or none is required, and none that is
+    /// not carried is relayed by another sponsor: the existing rules.
+    Complete,
+}
+
+/// [`RequiredPredecessors`] of an envelope at envelope nonce `nonce`, its
+/// named sender's current canonical next nonce being `from` and the sender's
+/// pending envelopes in this pool `pending` (envelope nonce to hash: one
+/// entry per distinct nonce, so two envelopes can never both stand for one
+/// nonce and hide a gap; admission keeps one pending envelope per sender and
+/// nonce). `held_elsewhere` says of a pending one whether it is not carried
+/// and is relayed by another sponsor than the envelope's; it is asked once
+/// for each entry visited. The work is bounded by the entries of `pending`
+/// from `from` up to `nonce`, never by the numeric range between them:
+/// whether every required nonce is present is a count of distinct nonces
+/// against `nonce - from`, in checked arithmetic. At or below `from` nothing
+/// is required.
+fn required_predecessors(
+    pending: Option<&BTreeMap<u64, Hash>>,
+    from: u64,
+    nonce: u64,
+    held_elsewhere: impl Fn(&Hash) -> bool,
+) -> RequiredPredecessors {
+    let Some(required) = nonce.checked_sub(from).filter(|n| *n > 0) else {
+        return RequiredPredecessors::Complete;
+    };
+    let mut present: u64 = 0;
+    let mut elsewhere = false;
+    if let Some(pending) = pending {
+        for (_, carrier) in pending.range(from..nonce) {
+            present = present.saturating_add(1);
+            elsewhere |= held_elsewhere(carrier);
+        }
+    }
+    if present < required {
+        RequiredPredecessors::Missing
+    } else if elsewhere {
+        RequiredPredecessors::HeldThroughAnotherSponsor
+    } else {
+        RequiredPredecessors::Complete
     }
 }
 
@@ -2505,20 +2552,14 @@ impl Mempool {
             .collect()
     }
 
-    /// The envelopes the cross-account bound governs, which the gap-hold
-    /// bound neither evicts nor strands: those this node counts toward
-    /// [`CROSS_ACCOUNT_WAIT_SELECTIONS`] (a released one keeps its count until
-    /// it leaves the pool), and those `released` in this selection.
+    /// The envelopes the cross-account bound governs in this selection, which
+    /// the gap-hold bound neither evicts nor strands: those `released` in it,
+    /// row 4 of the selection oracle when the release was decided. A count
+    /// alone governs nothing: no classification is kept from an earlier
+    /// selection, and an envelope whose required predecessor has gone missing
+    /// is row 3 at once.
     fn governed_by_the_cross_account_bound(&self, released: &HashSet<Hash>) -> HashSet<Hash> {
-        let mut governed: HashSet<Hash> = self
-            .cross_account_waits
-            .read()
-            .iter()
-            .filter(|(_, count)| **count > 0)
-            .map(|(hash, _)| *hash)
-            .collect();
-        governed.extend(released.iter().copied());
-        governed
+        released.clone()
     }
 
     /// The transactions the pool view `holds` holds directly that were held
@@ -2707,13 +2748,12 @@ impl Mempool {
     /// when `carried` are the transactions carried: every earlier transaction
     /// of their own account is carried (the account's nonce, from its
     /// committed one through the carried transactions that advance it,
-    /// reaches theirs), and what they wait on among their named sender's
-    /// envelopes from its committed messaging nonce up to theirs, of those not
-    /// carried, counts ([`counts_within_one_sponsor`] when one of them is
-    /// relayed by their own account, at a later nonce: a cycle within one
-    /// sponsor; otherwise when one is missing from the pool or relayed by
-    /// another account). "Missing" is this pool's view, recomputed at every
-    /// selection.
+    /// reaches theirs: rows 1 and 2 of the selection oracle come first), and
+    /// their required predecessors are row 4 ([`required_predecessors`]):
+    /// all in this pool, one that is not carried relayed by another account.
+    /// Row 3 (one missing locally) is never waiting, whatever else holds. The
+    /// pool is read as it stands, so nothing keeps a classification it had
+    /// at an earlier selection.
     fn waiting_on_another_account<'a>(
         &self,
         left: impl Iterator<Item = &'a SignedTransaction>,
@@ -2759,27 +2799,11 @@ impl Mempool {
             let Some(from) = from else {
                 continue;
             };
-            let pending = in_flight.get(&named);
-            let (mut missing, mut by_another_account, mut by_own_account) = (false, false, false);
-            for earlier in from..nonce {
-                match pending.and_then(|nonces| nonces.get(&earlier)) {
-                    None => missing = true,
-                    Some(carrier) if carried_hashes.contains(carrier) => {}
-                    Some(carrier) => {
-                        if txs.get(carrier).is_some_and(|e| e.tx.sender() == own) {
-                            by_own_account = true;
-                        } else {
-                            by_another_account = true;
-                        }
-                    }
-                }
-            }
-            let counted = if by_own_account {
-                counts_within_one_sponsor(missing, by_another_account)
-            } else {
-                missing || by_another_account
-            };
-            if counted {
+            let row = required_predecessors(in_flight.get(&named), from, nonce, |carrier| {
+                !carried_hashes.contains(carrier)
+                    && !txs.get(carrier).is_some_and(|e| e.tx.sender() == own)
+            });
+            if row == RequiredPredecessors::HeldThroughAnotherSponsor {
                 waiting.insert(tx.hash());
             }
         }
@@ -4409,5 +4433,116 @@ mod tests {
 
         let result = mempool.add(tx);
         assert!(matches!(result, Err(StateError::FeeTooLow { .. })));
+    }
+
+    /// A per-sender pending-envelope index over `nonces`, each entry its own
+    /// hash.
+    fn envelope_index(nonces: &[u64]) -> BTreeMap<u64, Hash> {
+        nonces
+            .iter()
+            .zip(1u8..)
+            .map(|(nonce, b)| (*nonce, Hash::new([b; 32])))
+            .collect()
+    }
+
+    /// Bounded selection work (the selection oracle's gap check), on the
+    /// helper itself: a
+    /// sparse index spanning a huge range, entries at `from`, `from + 1` and
+    /// 2^60, and a query at `u64::MAX - 1`. The answer is row 3 (missing),
+    /// after visiting exactly the three entries, within a deadline: a walk
+    /// over the numeric range would not finish.
+    #[test]
+    fn the_gap_check_visits_only_the_index_entries_in_range() {
+        let from = 5u64;
+        let index = envelope_index(&[from, from + 1, 1 << 60]);
+        let (answer, answered) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let visited = std::cell::Cell::new(0u64);
+            let row = required_predecessors(Some(&index), from, u64::MAX - 1, |_| {
+                visited.set(visited.get() + 1);
+                false
+            });
+            let _ = answer.send((row, visited.get()));
+        });
+        let (row, visited) = answered
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("answered within the deadline");
+        assert_eq!(row, RequiredPredecessors::Missing);
+        assert_eq!(visited, 3, "only the entries in range are visited");
+    }
+
+    /// The selection oracle's gap check at the nonce boundaries, in checked
+    /// arithmetic: nothing is required at or below the sender's next nonce
+    /// (also for a stale envelope below it, and at `u64::MAX`); one required
+    /// nonce from 0 and just below `u64::MAX`; the envelope's own nonce is
+    /// never its own predecessor; entries outside the range are neither
+    /// visited nor counted.
+    #[test]
+    fn the_gap_check_at_the_nonce_boundaries() {
+        use RequiredPredecessors::{Complete, HeldThroughAnotherSponsor, Missing};
+        let not_visited =
+            |_: &Hash| -> bool { panic!("nothing is required, so nothing is visited") };
+        let own = |_: &Hash| false;
+        let elsewhere = |_: &Hash| true;
+        assert_eq!(required_predecessors(None, 0, 0, not_visited), Complete);
+        assert_eq!(
+            required_predecessors(Some(&envelope_index(&[5])), 5, 5, not_visited),
+            Complete
+        );
+        assert_eq!(
+            required_predecessors(Some(&envelope_index(&[3, 4])), 5, 3, not_visited),
+            Complete
+        );
+        assert_eq!(
+            required_predecessors(None, u64::MAX, u64::MAX, not_visited),
+            Complete
+        );
+        assert_eq!(
+            required_predecessors(None, u64::MAX, 0, not_visited),
+            Complete
+        );
+        assert_eq!(
+            required_predecessors(Some(&envelope_index(&[0])), 0, 1, own),
+            Complete
+        );
+        assert_eq!(
+            required_predecessors(Some(&envelope_index(&[0])), 0, 1, elsewhere),
+            HeldThroughAnotherSponsor
+        );
+        assert_eq!(required_predecessors(None, 0, 1, own), Missing);
+        assert_eq!(
+            required_predecessors(
+                Some(&envelope_index(&[u64::MAX - 1])),
+                u64::MAX - 1,
+                u64::MAX,
+                elsewhere
+            ),
+            HeldThroughAnotherSponsor
+        );
+        assert_eq!(
+            required_predecessors(
+                Some(&envelope_index(&[u64::MAX])),
+                u64::MAX - 1,
+                u64::MAX,
+                own
+            ),
+            Missing
+        );
+        assert_eq!(
+            required_predecessors(Some(&envelope_index(&[0, 1])), 0, u64::MAX, own),
+            Missing
+        );
+        assert_eq!(
+            required_predecessors(Some(&envelope_index(&[2, 3, 4])), 2, 5, own),
+            Complete
+        );
+        assert_eq!(
+            required_predecessors(Some(&envelope_index(&[1, 2, 3, 9])), 2, 4, own),
+            Complete
+        );
+        assert_eq!(
+            required_predecessors(Some(&envelope_index(&[1, 3, 9])), 2, 4, own),
+            Missing
+        );
     }
 }

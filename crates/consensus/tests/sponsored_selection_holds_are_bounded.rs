@@ -750,17 +750,17 @@ async fn a_gap_never_holds_another_sponsors_queue_beyond_the_bound() {
     }
 }
 
-/// Where both bounds meet, the release wins. A full pool (6 places) evicts
-/// `v`'s envelope 0 (through `r1`, the lowest fee) for a gapped transaction
-/// at a higher fee; `v`'s envelope 1, relayed by `r2` at its nonce 0 with
-/// `r2`'s transfer at nonce 1 behind it, is then both beyond `v`'s first
-/// missing envelope nonce (held directly, counted toward `GAP_BOUND`) and
-/// waiting on an envelope no account carries (counted toward `BOUND`), from
-/// the same selection. At the third selection it is carried to its refusal
-/// (a charged `Failed` from the verification gate; out of `v`'s sequence
-/// below it), not evicted, and `r2`'s transfer follows in the same block; the
-/// gapped transactions are evicted in that selection. At every configuration
-/// where the accounting gate is open at the case's block.
+/// Where both bounds would meet. A full pool (6 places) evicts `v`'s
+/// envelope 0 (through `r1`, the lowest fee) for a gapped transaction at a
+/// higher fee; `v`'s envelope 1, relayed by `r2` at its nonce 0 with `r2`'s
+/// transfer at nonce 1 behind it, is then beyond `v`'s first missing
+/// envelope nonce, held directly and counted toward `GAP_BOUND`. Under the
+/// selection oracle its required predecessor is missing (row 3, which takes
+/// precedence): it is never counted toward `BOUND`, so the two bounds never
+/// meet on it, and at the third selection it is evicted with the gapped
+/// transactions, never carried or charged; `r2`'s transfer, above `r2`'s own
+/// nonce 0 from then on (row 1), is not carried either. At every
+/// configuration where the accounting gate is open at the case's block.
 #[tokio::test]
 async fn where_both_bounds_meet_the_envelope_is_carried_to_its_refusal() {
     let configs: Vec<Gates> = matrix()
@@ -791,8 +791,8 @@ async fn where_both_bounds_meet_the_envelope_is_carried_to_its_refusal() {
             assert!(b.transactions.is_empty(), "{name}: selection {n}");
             assert_eq!(
                 node.mempool.cross_account_wait_count(&r2_v1.hash()),
-                n as u32,
-                "{name}"
+                0,
+                "{name}: row 3, never counted"
             );
             assert_eq!(
                 node.mempool.gap_hold_count(&r2_v1.hash()),
@@ -801,24 +801,16 @@ async fn where_both_bounds_meet_the_envelope_is_carried_to_its_refusal() {
             );
         }
         let b = node.tick().await;
-        assert_eq!(
-            hashes(&b.transactions),
-            hashes(&[r2_v1.clone(), r2_t.clone()]),
-            "{name}: carried, with its account's next transaction behind it"
-        );
-        let r = node.receipt(&r2_v1).expect("carried");
-        if gates.verification_at(b.height()) {
-            assert!(
-                matches!(r.status, TxStatus::Failed(_)),
-                "{name}: {:?}",
-                r.status
-            );
-            assert!(r.fee_paid > 0, "{name}: one fee, to the sponsor");
-        } else {
-            assert_eq!(r.status, TxStatus::Success, "{name}");
+        for t in [&r2_v1, &r2_t] {
+            assert!(!carries(&b, t), "{name}: never carried");
+            assert!(node.receipt(t).is_none(), "{name}: nothing charged");
         }
-        assert_eq!(node.status(&r2_t), Some(TxStatus::Success), "{name}");
-        assert_eq!(node.account_nonce(&r2), 2, "{name}");
+        assert!(
+            !node.held(&r2_v1),
+            "{name}: row 3, evicted at the gap bound"
+        );
+        assert!(node.mempool.evicted_above_a_gap(&r2_v1.hash()), "{name}");
+        assert_eq!(node.account_nonce(&r2), 0, "{name}");
         assert!(
             gapped
                 .iter()

@@ -453,10 +453,14 @@ enum Hold {
 /// the limit and its envelope 1 waits behind it for room only: neither is
 /// carried, and envelope 1's count toward the cross-account bound stays at
 /// zero through all four. Then the wait becomes a hold, and `r2` sends its
-/// next transaction behind its envelope. Envelope 1 has the whole bound: it
-/// is not carried at the first or the second held selection (its count 1,
-/// then 2), and is carried to its charged refusal at the third, with `r2`'s
-/// next transaction behind it. Where both messaging gates are open at the
+/// next transaction behind its envelope. Envelope 1 has the whole bound of
+/// its row in the selection oracle. Behind another account (row 4): it is
+/// not carried at the first or the second held selection (its count 1, then
+/// 2), and is carried to its charged refusal at the third, with `r2`'s next
+/// transaction behind it. Missing (row 3): it is never counted toward the
+/// cross-account bound; its gap-hold count is 1, then 2, and at the third
+/// held selection it is evicted, never carried or charged, and `r2`'s next
+/// transaction is not carried. Where both messaging gates are open at the
 /// case's block.
 #[tokio::test]
 async fn a_wait_behind_a_full_block_is_not_counted_toward_the_cross_account_bound() {
@@ -508,6 +512,7 @@ async fn a_wait_behind_a_full_block_is_not_counted_toward_the_cross_account_boun
             };
             let r2_t = transfer(&r2, relay_nonce(&node, &r2), 4_000);
             node.submit(&[&r2_t]);
+            let missing = matches!(hold, Hold::Missing);
             for n in 1..BOUND {
                 let b = node.tick_within(LIMIT).await;
                 assert!(
@@ -516,12 +521,30 @@ async fn a_wait_behind_a_full_block_is_not_counted_toward_the_cross_account_boun
                 );
                 assert_eq!(
                     node.mempool.cross_account_wait_count(&r2_s1.hash()),
-                    n as u32,
+                    if missing { 0 } else { n as u32 },
                     "{name}: held selection {n}"
                 );
+                if missing {
+                    assert_eq!(
+                        node.mempool.gap_hold_count(&r2_s1.hash()),
+                        n as u32,
+                        "{name}: row 3, held selection {n}"
+                    );
+                }
                 assert!(node.receipt(&r2_s1).is_none(), "{name}");
             }
             let b = node.tick_within(LIMIT).await;
+            if missing {
+                for t in [&r2_s1, &r2_t] {
+                    assert!(!carries(&b, t), "{name}: row 3, never carried");
+                    assert!(node.receipt(t).is_none(), "{name}: nothing charged");
+                }
+                assert!(
+                    !node.mempool.contains(&r2_s1.hash()),
+                    "{name}: evicted at held selection {BOUND}"
+                );
+                continue;
+            }
             assert!(
                 carries(&b, &r2_s1),
                 "{name}: released at held selection {BOUND}"

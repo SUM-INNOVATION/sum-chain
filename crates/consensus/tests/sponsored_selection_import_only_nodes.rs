@@ -486,12 +486,15 @@ const BOUND: u64 = CROSS_ACCOUNT_WAIT_SELECTIONS as u64;
 /// refused, as admission refuses it); in the `GAP_BOUND`-th block the 30
 /// transfers and `r1`'s envelope are gone from `q`'s pool, none of the 31
 /// with a receipt, and `q` admits the honest transfer. `s`'s envelope 1 is
-/// checked at every head: where the accounting gate is open at the
-/// `GAP_BOUND`-th block it is not stranded with `r1`'s, and `p` carries it to
-/// its refusal at its `BOUND`-th counted selection (counted from the first
-/// block at the gate), so `q` holds it until the block that carries it and
-/// drops it with that block's receipt; below the gate there, `q` evicts it
-/// with `r1`'s at the `GAP_BOUND`-th block, with no receipt. At every
+/// checked at every head, under the selection oracle: while `r1`'s envelope
+/// is in the pool it is row 4. Where the accounting gate is open from the
+/// case's first block, `p` releases it at its `BOUND`-th counted selection,
+/// the `GAP_BOUND`-th block, and `q` drops it with that block's receipt.
+/// Where the gate opens later but is open at the `GAP_BOUND`-th block, it is
+/// not stranded with `r1`'s there, but from then on its envelope 0 is missing
+/// (row 3): never counted or carried, it is evicted within the gap bound on
+/// both nodes, with no receipt. Below the gate at the `GAP_BOUND`-th block,
+/// both nodes evict it with `r1`'s there, with no receipt. At every
 /// configuration.
 #[tokio::test]
 async fn a_node_that_only_imports_blocks_evicts_at_the_same_bound() {
@@ -525,14 +528,19 @@ async fn a_node_that_only_imports_blocks_evicts_at_the_same_bound() {
         // The block (from the case's first, 1) at which `q` no longer holds
         // `s`'s envelope 1, and whether a receipt goes with it.
         let evicted_with_r1 = GAP_BOUND;
-        let (gone_at, with_receipt) = if gates.accounting_at(CASE_BLOCK + evicted_with_r1 - 1) {
-            let first = (CASE_BLOCK..).find(|h| gates.accounting_at(*h)).unwrap();
-            (first - CASE_BLOCK + BOUND, true)
-        } else {
-            (evicted_with_r1, false)
+        let at_gate = gates.accounting_at(CASE_BLOCK + evicted_with_r1 - 1);
+        let first = (CASE_BLOCK..CASE_BLOCK + 20).find(|h| gates.accounting_at(*h));
+        let (gone_at, with_receipt) = match first {
+            // Row 4 when its release is decided, with `r1`'s envelope there.
+            Some(f) if at_gate && f + BOUND - 1 <= CASE_BLOCK + evicted_with_r1 - 1 => {
+                (f - CASE_BLOCK + BOUND, true)
+            }
+            // Row 3 once `r1`'s envelope is evicted: the gap bound from there.
+            _ if at_gate => (evicted_with_r1 + GAP_BOUND - 1, false),
+            // Below the gate: stranded with `r1`'s envelope.
+            _ => (evicted_with_r1, false),
         };
-        assert!(gone_at <= GAP_BOUND + 1, "{name}: inside the case");
-        for n in 1..=(GAP_BOUND + 1) {
+        for n in 1..=gone_at.max(GAP_BOUND + 1) {
             let b = p.tick().await;
             q.import(&b).await;
             assert_eq!(
@@ -570,28 +578,23 @@ async fn a_node_that_only_imports_blocks_evicts_at_the_same_bound() {
         }
         q.try_submit(&honest)
             .unwrap_or_else(|e| panic!("{name}: q admits it once the places are free: {e}"));
-        // From the accounting gate `p` carries `s`'s envelope 1 at its
-        // cross-account bound (the gap bound neither evicts nor strands it);
-        // below the gate it was evicted with `r1`'s.
-        assert_eq!(
-            p.receipt(&r2_s1).is_some(),
-            gates.accounting_at(CASE_BLOCK + 1),
-            "{name}"
-        );
+        // `p` carries `s`'s envelope 1 to its refusal only where its release
+        // was decided while `r1`'s envelope was in the pool (row 4).
+        assert_eq!(p.receipt(&r2_s1).is_some(), with_receipt, "{name}");
     }
 }
 
-/// Where the gap bound comes first, the cross-account bound still governs.
-/// The accounting gate opens one block after the case's first (`H-1`). A
-/// full pool (6 places) evicts `v`'s envelope 0 (through `r1`, the lowest
-/// fee) for a gapped transfer at a higher fee; `v`'s envelope 1, relayed by
-/// `r2` at its nonce 0, is then beyond `v`'s first missing envelope nonce.
-/// Its gap-hold count starts at the case's first block, below the gate; its
-/// wait on another account is counted only from the gate's first selection.
-/// In the `GAP_BOUND`-th block the gapped transfers are evicted but the
-/// envelope stays, and at its `BOUND`-th counted selection it is carried to
-/// its charged refusal. At both configurations where the accounting gate
-/// opens at `H+1` (the verification gate is open by then).
+/// Where the gap bound comes first. The accounting gate opens one block after
+/// the case's first (`H-1`). A full pool (6 places) evicts `v`'s envelope 0
+/// (through `r1`, the lowest fee) for a gapped transfer at a higher fee;
+/// `v`'s envelope 1, relayed by `r2` at its nonce 0, is then beyond `v`'s
+/// first missing envelope nonce, and its gap-hold count starts at the case's
+/// first block, below the gate. Under the selection oracle its required
+/// predecessor is missing (row 3), from the gate as below it: it is never
+/// counted toward the cross-account bound, and in the `GAP_BOUND`-th block it
+/// is evicted with the gapped transfers, never carried or charged. At both
+/// configurations where the accounting gate opens at `H+1` (the
+/// verification gate is open by then).
 #[tokio::test]
 async fn where_the_gap_bound_comes_first_the_wait_on_another_account_still_ends_in_a_refusal() {
     let configs: Vec<Gates> = matrix()
@@ -624,36 +627,18 @@ async fn where_the_gap_bound_comes_first_the_wait_on_another_account_still_ends_
             gapped.iter().all(|t| !node.held(t)),
             "{name}: evicted at the gap bound"
         );
+        assert!(!node.held(&r2_v1), "{name}: row 3, evicted with them");
         assert!(
-            node.held(&r2_v1),
-            "{name}: governed by the cross-account bound"
+            node.receipt(&r2_v1).is_none(),
+            "{name}: never carried or charged"
         );
+        assert!(node.mempool.evicted_above_a_gap(&r2_v1.hash()), "{name}");
         assert_eq!(
-            node.mempool.gap_hold_count(&r2_v1.hash()),
-            GAP_BOUND as u32,
-            "{name}"
+            node.mempool.cross_account_wait_count(&r2_v1.hash()),
+            0,
+            "{name}: never counted"
         );
-        let mut carried_at = None;
-        for _ in 0..BOUND {
-            let b = node.tick().await;
-            if carries(&b, &r2_v1) {
-                carried_at = Some(b.height());
-                break;
-            }
-        }
-        let at = carried_at.expect("carried within the cross-account bound");
-        assert_eq!(
-            at,
-            CASE_BLOCK + 1 + BOUND - 1,
-            "{name}: at its BOUND-th counted selection"
-        );
-        let r = node.receipt(&r2_v1).expect("carried");
-        assert!(
-            matches!(r.status, TxStatus::Failed(_)),
-            "{name}: {:?}",
-            r.status
-        );
-        assert!(r.fee_paid > 0, "{name}: one fee, to the sponsor");
+        assert_eq!(node.account_nonce(&r2), 0, "{name}");
     }
 }
 
@@ -818,7 +803,8 @@ async fn a_chain_switch_counts_at_its_new_head_and_keeps_what_the_new_branch_unb
 }
 
 /// Node-local recomputation ("missing" is a node's own view),
-/// when canonical state changes. A follower `q` holds a cycle within one
+/// when canonical state changes: row 3 becomes row 5 at the head that
+/// executes the missing envelope. A follower `q` holds a cycle within one
 /// sponsor above `s`'s missing envelope 0: `r` relays `s`'s envelope 2 at its
 /// nonce 0 and envelope 1 at its nonce 1, and `q` took `s`'s envelope 0
 /// (through `x`) and then lost it. The producer `p` never sees `r`'s
@@ -883,7 +869,8 @@ async fn a_follower_recomputes_a_missing_envelope_when_an_imported_block_execute
     }
 }
 
-/// Node-local recomputation at a chain switch. Two validators; two off-node
+/// Node-local recomputation at a chain switch: row 3 becomes row 5 at the
+/// switch's head. Two validators; two off-node
 /// builders share a prefix (sponsorship on and `s` registered, then a
 /// filler) and then compete. Two followers hold the cycle of the previous
 /// case above `s`'s missing envelope 0 and import branch A's two empty
