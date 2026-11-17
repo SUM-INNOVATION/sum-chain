@@ -72,7 +72,14 @@ impl BackoffStorage {
     /// Updates the backoff for a peer (if there is already a more restrictive backoff then this call
     /// doesn't change anything).
     pub(crate) fn update_backoff(&mut self, topic: &TopicHash, peer: &PeerId, time: Duration) {
-        let instant = Instant::now() + time;
+        // SUM-CHAIN: backported from libp2p-gossipsub 0.49.3 (RUSTSEC-2026-0535,
+        // libp2p/rust-libp2p@84153a559bdb): a backoff that would overflow the
+        // Instant is ignored instead of panicking.
+        let Some(instant) = Instant::now().checked_add(time) else {
+            tracing::warn!("ignoring oversized prune backoff");
+            return;
+        };
+
         let insert_into_backoffs_by_heartbeat =
             |heartbeat_index: HeartbeatIndex,
              backoffs_by_heartbeat: &mut Vec<HashSet<_>>,

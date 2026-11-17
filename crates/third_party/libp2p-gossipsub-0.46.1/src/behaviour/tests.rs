@@ -5113,3 +5113,28 @@ fn test_graft_without_subscribe() {
     // We unsubscribe from the topic.
     let _ = gs.unsubscribe(&Topic::new(topic));
 }
+
+// SUM-CHAIN: regression for RUSTSEC-2026-0535, fixed by the backport from
+// libp2p-gossipsub 0.49.3. A PRUNE asking for a backoff of u64::MAX seconds, and
+// a backoff that overflows the Instant, must be ignored without a panic.
+#[test]
+fn test_oversized_prune_backoff_does_not_panic() {
+    let (mut gs, peers, topics) = inject_nodes1()
+        .peer_no(1)
+        .topics(vec!["test".into()])
+        .to_subscribe(true)
+        .create_network();
+
+    gs.handle_prune(
+        &peers[0],
+        vec![(topics[0].clone(), Vec::new(), Some(u64::MAX))],
+    );
+
+    let topic = TopicHash::from_raw("oversized");
+    let mut backoffs = BackoffStorage::new(&Duration::from_secs(60), Duration::from_secs(1), 1);
+    backoffs.update_backoff(&topic, &peers[0], Duration::MAX);
+    assert!(
+        backoffs.get_backoff_time(&topic, &peers[0]).is_none(),
+        "a backoff that overflows the Instant must not be stored"
+    );
+}
