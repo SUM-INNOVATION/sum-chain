@@ -9,18 +9,23 @@
 //! leaves because it follows a transaction that itself only left with a run,
 //! and from the gate an envelope relayed by another account is carried, to the
 //! outcome its envelope nonce meets in the block, so that account's queue
-//! keeps moving.
+//! keeps moving. From the accounting gate the messaging refusals these cases
+//! use (a recipient who blocks the sender) are charged failed receipts in the
+//! block, not executor errors, so the producer drops nothing for them; an
+//! authenticated envelope's refusal spends its sender's envelope nonce.
 //!
 //! - `r1` relays `x`'s envelope (the
-//!   recipient blocks `x`, so the executor refuses it with an error and the
-//!   producer holds it) and then `s`'s envelope 0; `r2` relays `s`'s
+//!   recipient blocks `x`: below the accounting gate the executor refuses it
+//!   with an error and the producer holds it; from the gate it is a charged
+//!   failed receipt) and then `s`'s envelope 0; `r2` relays `s`'s
 //!   envelope 1, `u`'s envelope 0 and its own transfer. `r2`'s queue is
 //!   carried in the case's first block and a later user's envelope through
 //!   `r2` in the next, at every gate configuration.
 //! - `r1`'s own direct message is refused (the recipient blocks
 //!   `r1`), `r1` relays `s`'s envelope 0 behind it, `r2` relays `s`'s
 //!   envelope 1. Below the gates the producer builds main's block; at and
-//!   above them `r2`'s envelope is carried and `r2`'s queue moves.
+//!   above them the refusal is a charged failed receipt, `r1`'s run follows
+//!   in sequence, and `r2`'s envelope is carried and `r2`'s queue moves.
 //!
 //! Every case runs under the 6 gate configurations of [`matrix`] (the gates
 //! absent, set above the chain's history, set inside it, and both at the
@@ -604,16 +609,19 @@ fn direct(from: &KeyPair, nonce: u64, fee: u128) -> SignedTransaction {
     )
 }
 
-/// At every configuration: `x`'s envelope is held (refused with an
-/// error, never in a block); `r2`'s envelope for `u` and `r2`'s transfer are
-/// delivered in the case's first block, and a later user's envelope through
-/// `r2` in the next. `s`'s envelope 1 through `r2` is carried in the first
-/// block too, to the outcome its envelope nonce meets: below the accounting
-/// gate `r1`'s envelope for `s` leaves nothing behind (main's rule) and both
-/// of `s`'s envelopes are delivered in sequence; from the gate `s`'s envelope
-/// 0 waits behind `x`'s with `r1`'s queue, and `s`'s envelope 1 takes a
-/// charged refusal (from `0x1048`) or, below `0x1048`, executes out of
-/// sequence and `s`'s envelope 0 is then evicted as stale.
+/// At every configuration `r2`'s envelope for `u` and `r2`'s
+/// transfer are delivered in the case's first block, and a later user's
+/// envelope through `r2` in the next; `s`'s envelope 1 through `r2` is
+/// carried in the first block too, to the outcome its envelope nonce meets.
+/// Below the gates `x`'s envelope is held (refused with an error, never in a
+/// block), `r1`'s envelope for `s` leaves nothing behind (main's rule) and
+/// both of `s`'s envelopes are delivered in sequence. From the gates `x`'s
+/// envelope is carried to a charged failed receipt that spends `x`'s envelope
+/// nonce, so `r1`'s envelope for `s` follows in `r1`'s sequence and
+/// `s`'s envelope 1 meets `s`'s nonce 1: both of `s`'s envelopes are
+/// delivered in the case's first block. At `both at H-1` the gates open at
+/// the second block, where `x`'s envelope, held after the case's block, is
+/// refused and charged in the same way.
 #[tokio::test]
 async fn one_sponsors_refused_envelope_never_holds_another_sponsors_queue() {
     for gates in matrix() {
@@ -741,12 +749,14 @@ async fn one_sponsors_refused_envelope_never_holds_another_sponsors_queue() {
 /// The fitting loop's own drops, at the block that opens the accounting
 /// gate as at every other. The first case with the proposer's
 /// screening pass skipped (`Failpoint::SkipProposalScreening`): the refusal
-/// of `x`'s envelope reaches `create_block`'s fitting loop, which drops it
-/// with the runs it breaks as the block being built judges them, not as its
-/// parent would. The case's first block carries what the first case's does: `r2`'s three
-/// transactions, never `x`'s envelope; from the gate `r1`'s envelope for `s`
-/// leaves with `r1`'s run (held, no receipt); below it, it is delivered. At
-/// every configuration.
+/// of `x`'s envelope reaches `create_block`'s fitting loop. Below the gates
+/// it is an error, which the loop drops with the runs it breaks as the block
+/// being built judges them, not as its parent would; from the gates it is a
+/// charged failed receipt, which the loop keeps and drops nothing for. The
+/// case's first block carries what the first case's does: `r2`'s three transactions;
+/// below the gates never `x`'s envelope, and `r1`'s envelope for `s` is
+/// delivered; from them `x`'s refusal and `r1`'s envelope for `s` in
+/// sequence. At every configuration.
 #[tokio::test]
 async fn the_fitting_loop_drops_a_refused_envelopes_runs_as_the_block_being_built_judges_them() {
     use sumchain_consensus::branch_switch::failpoints::{arm, Failpoint};
@@ -821,13 +831,16 @@ async fn the_fitting_loop_drops_a_refused_envelopes_runs_as_the_block_being_buil
 }
 
 /// `r1`'s own direct message is refused (the recipient blocks
-/// `r1`) and held; `r1`'s envelope for `s` behind it leaves with `r1`'s run.
-/// At every configuration `r2`'s envelope for `s` is carried in the case's
-/// first block with an unrelated transfer, and `r2`'s next transaction in the
-/// next block. Below `0x1048` `s`'s envelope 1 executes out of sequence and
-/// `s`'s envelope 0 is then evicted as stale (main's behaviour below the
-/// gates); from `0x1048` it is refused (charged from the accounting gate) and
-/// `s`'s envelope 0 waits with `r1`'s queue.
+/// `r1`). At every configuration `r2`'s envelope for `s` is carried in the
+/// case's first block with an unrelated transfer, and `r2`'s next transaction
+/// in the next block. Below the gates the refused message is held, `r1`'s
+/// envelope for `s` behind it leaves with `r1`'s run, `s`'s envelope 1
+/// executes out of sequence and `s`'s envelope 0 is then evicted as stale
+/// (main's behaviour). From the gates the refusal is a charged failed receipt
+/// in the block, so `r1`'s envelope for `s` follows in sequence and
+/// `s`'s envelope 1 meets `s`'s nonce 1: four transactions are carried. At
+/// `both at H-1` the gates open at the second block, where the direct
+/// message, held after the case's block, is refused and charged.
 #[tokio::test]
 async fn a_refused_direct_message_holds_nothing_of_another_sponsor() {
     for gates in matrix() {
@@ -933,14 +946,19 @@ async fn a_refused_direct_message_holds_nothing_of_another_sponsor() {
 }
 
 /// A refused sender's later envelope through another sponsor: `s`'s envelope 0 through `r1` is refused (the
-/// recipient blocks `s`) and held, and `s`'s envelope 1, to a recipient that
-/// blocks nobody, goes through `r2`, followed by `r2`'s envelope for `u` and
-/// its transfer. Below the accounting gate `s`'s envelope 1 waits with `s`'s
-/// envelope 0 (main's rule; it holds nothing of `r2` there). From the gate it
-/// is carried: refused and charged from `0x1048`, or below it executed out
-/// of sequence, `s`'s envelope 0 then evicted as stale. At every
-/// configuration `r2`'s other two are delivered in the case's first block and
-/// a later user's envelope through `r2` in the next.
+/// recipient blocks `s`), and `s`'s envelope 1, to a recipient that blocks
+/// nobody, goes through `r2`, followed by `r2`'s envelope for `u` and its
+/// transfer. Below the gates `s`'s envelope 0 is held and `s`'s envelope 1
+/// waits with it (main's rule; it holds nothing of `r2` there). From the
+/// gates `s`'s envelope 0 is a charged failed receipt in the block that
+/// spends `s`'s envelope nonce, so it is held nowhere and `s`'s
+/// envelope 1 through `r2` meets `s`'s nonce 1 and executes. At `both at
+/// H-1` the gates open at the second block: `s`'s envelope 0 is refused and
+/// charged there, and `s`'s envelope 1, whose wrapper `r2` signed below the
+/// accounting gate at the account nonce its transfer then used, is offered
+/// stale and takes an uncharged `InvalidNonce`. At every configuration `r2`'s
+/// other two are delivered in the case's first block and a later user's
+/// envelope through `r2` in the next: nothing of `r2`'s is held.
 #[tokio::test]
 async fn a_refused_senders_later_envelope_through_another_sponsor_never_holds_that_sponsor() {
     for gates in matrix() {

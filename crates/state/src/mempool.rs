@@ -214,8 +214,10 @@ pub struct TransactionSignatureAdmission {
 ///    that block executes. Without it, the string form only, as before.
 ///
 /// 3. **A sponsored envelope carries the sender's expected messaging nonce.**
-///    The named sender's messaging nonce is the count of its successful sends
-///    as the canonical chain records it: at admission the envelope must
+///    The named sender's messaging nonce is the count of its sends as the
+///    canonical chain records it (its successful sends and, from the
+///    accounting gate, each authenticated envelope its block refused): at
+///    admission the envelope must
 ///    continue the sequence that runs from that committed nonce through this
 ///    node's pending envelopes for the sender; at selection, envelopes are
 ///    carried in nonce order per sender, each (sender, nonce) at most once per
@@ -225,17 +227,23 @@ pub struct TransactionSignatureAdmission {
 ///    nonce: a transaction above a gap in its account's nonces that the block
 ///    does not fill is not offered, nor is anything that depends on it.
 ///    An envelope carried to a failed receipt leaves the committed nonce where
-///    it was; the sender's later pending envelopes are then evicted too,
-///    since nothing in the pool can bring them into sequence.
+///    it was when it did not authenticate (a signature, key or nonce that is
+///    not the sender's), and below the accounting gate in every case; the
+///    sender's later pending envelopes are then evicted too, since nothing in
+///    the pool can bring them into sequence. From the accounting gate an
+///    authenticated envelope its block refuses spends its nonce, and the
+///    sender's next pending envelope is then in sequence and stays.
 ///
 /// 4. **A sponsored envelope's sender has quota left for it** (only with
 ///    [`Mempool::with_messaging_quota_admission`]). At admission, an envelope
 ///    is refused when the sender it names has already used its effective
 ///    quota in the bucket the next block counts sends in, counting this
 ///    pool's envelopes already pending for that sender. Such an envelope
-///    cannot be executed while the count stands — the executor refuses it
-///    with an error, not a receipt — so the client is told now rather than
-///    left waiting on an envelope no block can carry.
+///    cannot be executed while the count stands: below the accounting gate
+///    the executor refuses it with an error, not a receipt; from the gate it
+///    is a charged refusal that spends the sender's nonce. Either way the
+///    client is told now rather than left paying for, or waiting on, an
+///    envelope no block can execute.
 ///
 /// None of this decides what a block MEANS. A block built by a proposer
 /// without this policy is validated, executed and imported as before. The
@@ -1580,10 +1588,13 @@ impl Mempool {
     /// into sequence: every one above `committed`, when no pending envelope
     /// other than `failed` carries `committed` itself.
     ///
-    /// Read when an envelope is evicted for a receipt that is not a success:
-    /// such a receipt left the sender's committed nonce where it was, so the
-    /// sender's later envelopes wait for a value only a fresh submission can
-    /// supply. Evicting them keeps the pool's sequence equal to what the chain
+    /// Read when an envelope is evicted for a receipt that is not a success,
+    /// with `committed` read after that receipt. Below the accounting gate,
+    /// and for an envelope that did not authenticate, the receipt left the
+    /// committed nonce where it was; from the gate an authenticated refusal
+    /// spent it. Either way the envelopes above `committed`, when none but
+    /// `failed` carries `committed` itself, wait for a value only a fresh
+    /// submission can supply. Evicting them keeps the pool's sequence equal to what the chain
     /// expects, and a client that re-reads the sender's nonce and resends its
     /// run is admitted again in order.
     fn stranded_envelopes(&self, sender: &Address, committed: u64, failed: &Hash) -> Vec<Hash> {
