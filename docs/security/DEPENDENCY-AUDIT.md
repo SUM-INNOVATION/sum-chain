@@ -48,9 +48,10 @@ in `supply-chain-audit` and daily in `vendored-object.yml`, and
 `scripts/check-vendored-object.sh` (CI job `rollout-tooling`) checks that the copy
 matches crates.io. See the #306 section below. The vendored `memmap2` 0.5.10 and
 0.6.2 (RUSTSEC-2026-0186) are checked the same way by
-`scripts/check-vendored-memmap2.sh`, and the vendored `lru` 0.12.5
-(RUSTSEC-2026-0253, RUSTSEC-2026-0002) by `scripts/check-vendored-lru.sh`; see
-their sections below.
+`scripts/check-vendored-memmap2.sh`, the vendored `lru` 0.12.5
+(RUSTSEC-2026-0253, RUSTSEC-2026-0002) by `scripts/check-vendored-lru.sh`, and
+the vendored `libp2p-gossipsub` 0.46.1 (RUSTSEC-2026-0534 to -0537) by
+`scripts/check-vendored-gossipsub.sh`; see their sections below.
 
 ## License policy
 
@@ -210,6 +211,43 @@ detaching it, so a key whose `Drop` panics under `catch_unwind` leaves a danglin
 | Exception | **Adopted by the owner on 2026-11-07, for this verified, patched `lru` 0.12.5 copy only.** RUSTSEC-2026-0253 and RUSTSEC-2026-0002 are ignored in the `advisories` check above and nowhere else: `.cargo/audit.toml` and `deny.toml` keep empty `ignore` lists, and the workspace `cargo audit` gate has no exception for them. Other advisories and any source drift fail the guards. |
 | Exit | Delete the patch and the directory once libp2p no longer resolves `lru` 0.12.x (cargo then reports the patch as unused, which the script refuses). That is the libp2p upgrade, tracked separately. |
 
+### Resolved — RUSTSEC-2026-0534, -0535, -0536 and -0537 (`libp2p-gossipsub` 0.46.1), by vendored backport
+
+Four advisories against `libp2p-gossipsub` 0.46.1 entered the database on 2026-11-13. Each is fixed only in a release that needs a
+breaking libp2p upgrade (≥ 0.49.3; 0.46.1 is the last 0.46.x).
+
+| Advisory | Locked → fixed in | Issue | Upstream fix backported |
+|---|---|---|---|
+| [RUSTSEC-2026-0535](https://rustsec.org/advisories/RUSTSEC-2026-0535.html) | 0.46.1 → ≥ 0.49.3 | `Instant::now() + backoff` panics on overflow when a PRUNE backoff is stored | libp2p/rust-libp2p@84153a559bdbcb92a48413dd2a31035800cb882d (0.49.3) |
+| [RUSTSEC-2026-0537](https://rustsec.org/advisories/RUSTSEC-2026-0537.html) | 0.46.1 → ≥ 0.49.4 | a backoff just small enough to be stored overflows at the next heartbeat (`backoff_time + slack`) | libp2p/rust-libp2p@55e4a64630f66d55fec5955c8f9905413c5d0859 (0.49.4) |
+| [RUSTSEC-2026-0536](https://rustsec.org/advisories/RUSTSEC-2026-0536.html) | 0.46.1 → ≥ 0.49.5 | a GRAFT records every topic it names for the peer, subscribed or not | the GRAFT handling of libp2p/rust-libp2p@51ed5f00e1b0620ded3444ecadf18477052148ea (0.49.5; libp2p/rust-libp2p#6608 on master) |
+| [RUSTSEC-2026-0534](https://rustsec.org/advisories/RUSTSEC-2026-0534.html) | 0.46.1 → ≥ 0.50.1 | a PRUNE records a backoff for topics the node never joined, kept up to the backoff's expiry | libp2p/rust-libp2p@9c647828abea0dfc0b4e827dff1e176ec8b44752 (0.50.1; libp2p/rust-libp2p#6707 on master) |
+
+| Item | Finding |
+|---|---|
+| Path | `libp2p-gossipsub` is used only by `sumchain-p2p` (workspace requirement `"0.46"`), which the node, RPC, wallet and integration-test crates depend on. The node runs gossipsub on every connection that negotiates it, and all four inputs are control messages a connected gossipsub peer sends. This describes the code path; it does not claim that any deployment is exposed or that any issue has been exploited. |
+| Change | The root `Cargo.toml` `[patch.crates-io]` points `libp2p-gossipsub` at `crates/third_party/libp2p-gossipsub-0.46.1`: the crates.io `.crate` extracted verbatim (sha256 `d665144a616dadebdc5fff186b1233488cdcd8bfb1223218ff084b6d052c94f7`, the checksum `Cargo.lock` recorded), with upstream's fixes backported, one commit each, every hunk under a `// SUM-CHAIN` comment. `BackoffStorage::update_backoff` ignores a backoff that overflows the `Instant` (-0535). `remove_peer_from_mesh` caps a backoff a peer asks for at one hour; the backoff heartbeat uses `checked_add`; the IWANT follow-up, peer-score retention and duplicate-cache expiries use `checked_add`, and the fanout TTL and GRAFT flood-cutoff checks compare durations (-0537; 0.49.4's IDONTWANT hunk has no counterpart in 0.46.1, which has no IDONTWANT). `handle_graft` no longer adds a GRAFT's topics to `peer_topics` / `topic_peers`, and drops a GRAFT for a topic the peer has not subscribed to (-0536), and the two upstream tests 0.49.5 changes to subscribe their peers are changed the same way. `handle_prune` skips topics the node has not joined (-0534). No wire format, protocol ID, `Config` field or default, or dependency changes. It is not a workspace member. |
+| Not taken | 0.49.5 also changes the `Behaviour`'s default subscription filter from `AllowAllSubscriptionFilter` to `MaxCountSubscriptionFilter<AllowAllSubscriptionFilter>` (2000 topics, 2000 subscriptions per request; 0.50.0 ships the same default with 100 / 100, from libp2p/rust-libp2p#6527). The advisory text lists it as part of the fix. `sumchain-p2p` builds `gossipsub::Behaviour` with the default filter, so taking it would change a networking default; it is deliberately left out, and the vendored crate keeps `AllowAllSubscriptionFilter`. In that respect the vendored copy matches no release the database treats as unaffected. |
+| Residual | SUBSCRIBE-driven growth of a peer's topic set is unchanged from the deployed release: it is bounded only by the subscription filter `sumchain-p2p` uses today, `AllowAllSubscriptionFilter`, which sets no count limit. In 0.46.1 a peer's `peer_topics` entry is freed when it disconnects, but `topic_peers` keeps a key for every topic hash any peer has subscribed to. Adopting a subscription-count filter is a networking-default change and a separate decision. |
+| `Cargo.lock` | Compared structurally (package set, sources, checksums and dependency edges): the `libp2p-gossipsub` 0.46.1 entry loses its `source` and `checksum` lines. No package is added or removed and no edge changes. |
+| Regressions | Upstream added none, so one per advisory is added to the vendored crate's `src/behaviour/tests.rs`, marked `SUM-CHAIN`: a PRUNE with a backoff of `u64::MAX` and `update_backoff` with `Duration::MAX` (-0535); a PRUNE backoff that fits the `Instant` but overflows once the heartbeat's slack is added, then a full cycle of heartbeats, and a stored backoff at most an hour away (-0537); GRAFTs for 100 unknown topics and for a joined topic from a peer that never subscribed (-0536); PRUNEs for 100 unknown topics, and a PRUNE for the joined topic that still records its backoff (-0534). `scripts/check-vendored-gossipsub.sh regressions` runs the crate's 128 unit tests from a copy outside the workspace on the pinned toolchain; the published manifest drops libp2p's unpublished `quickcheck-ext` dev-dependency, which the script recreates beside the copy from upstream's source. With `--without-fixes` it runs the four regressions on the crates.io source plus only the tests and requires each to fail: two panic with `overflow when adding duration to instant`, and the GRAFT and PRUNE assertions fail. Run against each backport commit, each regression passes from its own fix onwards. |
+| Verify | `bash scripts/check-vendored-gossipsub.sh` (CI job `rollout-tooling`, and `vendored-object.yml`) downloads the crate from crates.io, checks the pinned sha256, and fails unless git's diff of it against the vendored directory (`git diff --no-index`, Myers with the indent heuristic, no context, full blob ids) is exactly the backported fixes and their regressions. Mutations checked: an extra line in the vendored source, the -0534 fix reverted, the -0537 cap weakened, the `[patch]` entry removed, `Cargo.lock` resolving 0.46.1 from the registry, an unused patch, a wrong sha256 pin and a vendored version change each fail it. `crates/third_party/.gitattributes` unsets the `whitespace` attribute for this directory only, because upstream ships a trailing space and two blank lines at end of file that `git diff --check` would otherwise report. |
+| Monitoring | `scripts/check-vendored-gossipsub.sh advisories` writes a synthetic `Cargo.lock` declaring the crates.io identity and runs `cargo audit --file Cargo.lock --deny warnings` with the four IDs ignored and the repository's `.cargo/audit.toml`: any other advisory against `libp2p-gossipsub` 0.46.1 fails. It runs in `supply-chain-audit` on every PR and push to main, and daily in `vendored-object.yml` with the source check and the regressions job. Every mode fails first if the pin drifts from what is built. Checked with local probe databases: the real database passes, and a test vulnerability, a test unsound advisory and a test unmaintained advisory against `libp2p-gossipsub` each fail it. |
+| Exception | **Pending the owner's adoption**, for this verified, patched copy only. RUSTSEC-2026-0534 to -0537 are ignored in the `advisories` check above and nowhere else: `.cargo/audit.toml` and `deny.toml` keep their ignore lists unchanged, and the workspace `cargo audit` gate has no exception for them. For RUSTSEC-2026-0536 the exception covers the backported GRAFT fix, not 0.49.5's default-filter change (see Not taken). |
+| Exit | Delete the patch and the directory once the workspace no longer resolves `libp2p-gossipsub` 0.46.1 (cargo then reports the patch as unused, which the script refuses). That is the libp2p upgrade, tracked separately. |
+
+### Resolved — RUSTSEC-2026-0544 (`libz-sys` 1.1.31), by libz-sys 1.1.33
+
+[RUSTSEC-2026-0544](https://rustsec.org/advisories/RUSTSEC-2026-0544.html) (2026-11-11, published 2026-11-17; CVE-2026-85091): the zlib
+that `libz-sys` 1.1.25 to 1.1.32 bundles (zlib 1.3.1.2 to 1.3.2) can overflow a heap buffer in `gz_vacate()` when `gzprintf()` or
+`gzvprintf()` follows a stalled non-blocking `gzwrite()`. Patched in 1.1.33.
+
+| Item | Finding |
+|---|---|
+| Path | `libz-sys` is reached only by `librocksdb-sys` 0.16.0+8.10.0 (feature `zlib`, from `rocksdb` 0.22's default features, built `static` from the bundled source) ← `rocksdb` 0.22.0 ← `sumchain-storage`. `cargo tree -i libz-sys -e all --target all` shows no other dependent, build-dependencies included; `flate2` uses `miniz_oxide`. A search of the `librocksdb-sys` sources finds no use of zlib's `gz*` file functions. |
+| Compression | Verified from the code: `rocksdb` is built with snappy, lz4, zstd, zlib and bzip2; `sumchain-storage` sets no compression option on any `Options` (it sets only creation, open-file, write-buffer and paranoid-check options), and no commit in the repository's history ever set one; RocksDB 8.10's default (`options.cc`: `compression(Snappy_Supported() ? kSnappyCompression : kNoCompression)`, bottommost compression disabled, WAL compression off) is therefore Snappy. Not verified: the compression recorded in deployed databases, which an `OPTIONS-*` file in each data directory states. |
+| Change | `libz-sys` 1.1.31 → 1.1.33 in `Cargo.lock` only: version and checksum (`fee3f59f4321dab0c78d828942e7aa09d0bd8ad6e78a501977e6bf3d02938045`, the sha256 of the crates.io `.crate`). Its dependencies (`cc` 1.2.49, `pkg-config` 0.3.32, `vcpkg` 0.2.15) and every other edge are unchanged; 1.1.33 declares the same dependencies and features, and its `Cargo.toml` and `build.rs` differ only in the version. The bundled C library moves from zlib 1.3.2 to zlib 1.4. |
+
 ### Non-security warnings (documented, non-blocking)
 
 RustSec informational warnings present at this snapshot — surfaced by `cargo
@@ -232,6 +270,11 @@ audit`, not failed, and not broadly allowed:
   and update the revision/date at the top of this file.
 - **A new license appears:** `cargo deny check licenses` fails; add it to the
   `deny.toml` allow-list with a rationale row here, or remove the offending dep.
+- **The vendored `libp2p-gossipsub` 0.46.1:** never edit
+  `crates/third_party/libp2p-gossipsub-0.46.1` beyond the backported fixes and
+  their regressions; `scripts/check-vendored-gossipsub.sh` fails on any other
+  difference, and its `advisories` mode fails on any other RustSec advisory
+  against 0.46.1. Its exit is the libp2p upgrade.
 - **The vendored `object` 0.32.2 (#306):** never edit
   `crates/third_party/object-0.32.2` beyond its `default` list;
   `scripts/check-vendored-object.sh` fails on any other difference.
