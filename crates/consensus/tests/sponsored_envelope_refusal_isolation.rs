@@ -40,8 +40,8 @@ use sumchain_primitives::messaging::{
     SRC201_NONCE_SIZE, SRC201_TAG_SIZE, SRC201_VERSION,
 };
 use sumchain_primitives::{
-    sponsored_send_v2_signing_preimage, Block, MessagingOperation, Receipt, SignedTransaction,
-    SponsoredMessage, TransactionV2, TxPayload, TxStatus,
+    sponsored_send_v2_signing_preimage, Block, Hash, MessagingOperation, Receipt,
+    SignedTransaction, SponsoredMessage, TransactionV2, TxPayload, TxStatus,
 };
 use sumchain_state::mempool::{
     advances_nonce_below_accounting_gate, InclusionGates, InclusionPolicy,
@@ -443,6 +443,128 @@ impl Node {
         self.submit(&[&t]);
         t
     }
+
+    fn balance(&self, k: &KeyPair) -> u128 {
+        self.state.get_balance(&k.address()).unwrap()
+    }
+
+    /// Whether a message event is stored for `t`.
+    fn message_stored(&self, t: &SignedTransaction) -> bool {
+        MessagingStore::new(&self.db)
+            .get_message_by_tx_hash(t.hash().as_bytes())
+            .unwrap()
+            .is_some()
+    }
+
+    /// The envelope-outcome row of `k`'s envelope nonce `nonce`: the
+    /// transaction that spent it and its receipt code.
+    fn envelope_outcome(&self, k: &KeyPair, nonce: u64) -> Option<(Hash, u32)> {
+        MessagingStore::new(&self.db)
+            .get_envelope_outcome(&k.address(), nonce)
+            .unwrap()
+            .map(|o| (o.tx_hash, o.outcome_code))
+    }
+
+    /// What a charged refusal may change, read before the block that
+    /// carries it: the payer's balance and account and messaging nonces, the
+    /// named sender's balance and envelope nonce, the recipient's balance.
+    fn around(&self, payer: &KeyPair, sender: &KeyPair) -> Around {
+        Around {
+            payer: self.balance(payer),
+            payer_nonce: self.account_nonce(payer),
+            payer_messaging_nonce: self.messaging_nonce(payer),
+            sender: self.balance(sender),
+            sender_nonce: self.messaging_nonce(sender),
+            recipient: self.balance(&recipient()),
+        }
+    }
+}
+
+/// [`Node::around`].
+#[derive(Clone, Copy)]
+struct Around {
+    payer: u128,
+    payer_nonce: u64,
+    payer_messaging_nonce: u64,
+    sender: u128,
+    sender_nonce: u64,
+    recipient: u128,
+}
+
+/// The checks for a charged refusal, on `t`
+/// carried in a block, with `before` read before that block:
+/// - `t` pays its fee exactly once: its receipt is `Failed(7)` with `fee`,
+///   and its payer's balance falls by exactly `payer_fees`, the fees of the
+///   payer's transactions in that block (`t`'s among them, each once);
+/// - the payer's account nonce moves by exactly `payer_txs`, one for each
+///   of its transactions in the block;
+/// - for an authenticated envelope (`envelope`: the named sender, its
+///   envelope nonce, and how far the block moves that sender's envelope
+///   nonce in all), `t` spends the envelope nonce (its outcome row names
+///   `t`), and the named sender's balance does not move; for a direct
+///   message (`None`), no messaging nonce moves;
+/// - nothing else of the inner operation happens: no message is stored for
+///   `t`, and the recipient's balance moves only by `recipient_in`, from the
+///   block's other transactions.
+#[allow(clippy::too_many_arguments)]
+fn assert_charged_refusal(
+    node: &Node,
+    name: &str,
+    t: &SignedTransaction,
+    fee: u128,
+    payer: &KeyPair,
+    before: Around,
+    payer_fees: u128,
+    payer_txs: u64,
+    envelope: Option<(&KeyPair, u64, u64)>,
+    recipient_in: u128,
+) {
+    let r = node.receipt(t).expect("a receipt");
+    assert_eq!(
+        (r.status, r.fee_paid),
+        (TxStatus::Failed(7), fee),
+        "{name}: one fee"
+    );
+    assert_eq!(
+        before.payer - node.balance(payer),
+        payer_fees,
+        "{name}: each of the payer's fees once"
+    );
+    assert_eq!(
+        node.account_nonce(payer),
+        before.payer_nonce + payer_txs,
+        "{name}: one account nonce each"
+    );
+    assert!(!node.message_stored(t), "{name}: no message");
+    assert_eq!(
+        node.balance(&recipient()),
+        before.recipient + recipient_in,
+        "{name}: no payment to the recipient"
+    );
+    match envelope {
+        Some((sender, nonce, moves)) => {
+            assert_eq!(
+                node.envelope_outcome(sender, nonce),
+                Some((t.hash(), 7)),
+                "{name}: the authenticated attempt spends its envelope nonce"
+            );
+            assert_eq!(
+                node.messaging_nonce(sender),
+                before.sender_nonce + moves,
+                "{name}"
+            );
+            assert_eq!(
+                node.balance(sender),
+                before.sender,
+                "{name}: no value from the named sender"
+            );
+        }
+        None => assert_eq!(
+            node.messaging_nonce(payer),
+            before.payer_messaging_nonce,
+            "{name}: the refused direct message moves no messaging nonce"
+        ),
+    }
 }
 
 /// The account nonce a relay signs `k`'s next transaction at for the next
@@ -516,10 +638,13 @@ async fn one_sponsors_refused_envelope_never_holds_another_sponsors_queue() {
         let r2_t = node.relay(&r2, |n| transfer(&r2, n, 1_000));
         let r2_before = node.account_nonce(&r2);
 
+        let before_b3 = node.around(&r1, &x);
         let b3 = node.tick().await;
         assert_eq!(b3.height(), CASE_BLOCK);
         let carried: Vec<_> = b3.transactions.iter().map(|t| t.hash()).collect();
-        assert!(!carried.contains(&r1_x0.hash()), "{name}");
+        // From the accounting gate x's refusal is a charged failed receipt in
+        // the block; below it, an executor error, and it is held.
+        assert_eq!(carried.contains(&r1_x0.hash()), accounting, "{name}");
         for t in [&r2_s1, &r2_u0, &r2_t] {
             assert!(carried.contains(&t.hash()), "{name}: {} carried", t.hash());
         }
@@ -527,14 +652,27 @@ async fn one_sponsors_refused_envelope_never_holds_another_sponsors_queue() {
         assert_eq!(node.status(&r2_t), Some(TxStatus::Success), "{name}");
         let s1 = node.receipt(&r2_s1).expect("r2_s1 has a receipt");
         if accounting && verification {
-            assert!(
-                matches!(s1.status, TxStatus::Failed(_)),
-                "{name}: {:?}",
-                s1.status
+            // x's refusal spends x's envelope nonce and r1's account
+            // nonce, so r1's envelope for s follows in r1's sequence and s's
+            // envelope 1 meets s's nonce 1: both execute in this block. r1
+            // pays x's fee and s's once each; r2's transfer is the only value
+            // the recipient receives.
+            assert_charged_refusal(
+                &node,
+                name,
+                &r1_x0,
+                3_000,
+                &r1,
+                before_b3,
+                3_000 + 2_000,
+                2,
+                Some((&x, 0, 1)),
+                1,
             );
+            assert_eq!(s1.status, TxStatus::Success, "{name}");
             assert!(s1.fee_paid > 0, "{name}: charged");
-            assert_eq!(node.status(&r1_s0), None, "{name}");
-            assert!(node.held(&r1_s0), "{name}: with r1's queue");
+            assert_eq!(node.status(&r1_s0), Some(TxStatus::Success), "{name}");
+            assert!(!node.held(&r1_s0), "{name}: carried in r1's sequence");
         } else {
             assert_eq!(s1.status, TxStatus::Success, "{name}");
         }
@@ -548,6 +686,7 @@ async fn one_sponsors_refused_envelope_never_holds_another_sponsors_queue() {
 
         // A later user's envelope through r2 is delivered in the next block.
         let r2_v0 = node.relay(&r2, |n| relayed(&r2, n, 2_000, &v, 0));
+        let before_b4 = node.around(&r1, &x);
         let b4 = node.tick().await;
         assert!(
             b4.transactions.iter().any(|t| t.hash() == r2_v0.hash()),
@@ -555,15 +694,40 @@ async fn one_sponsors_refused_envelope_never_holds_another_sponsors_queue() {
         );
         assert_eq!(node.status(&r2_v0), Some(TxStatus::Success), "{name}");
 
-        // x's envelope stays held (its refusal is an error, never a receipt).
-        assert_eq!(node.status(&r1_x0), None, "{name}");
-        assert!(node.held(&r1_x0), "{name}");
+        // At `both at H-1` the second block crosses activation: the gates open there.
+        if gates.accounting_at(CASE_BLOCK + 1) {
+            // x's envelope: refused in a block, charged, its nonce spent.
+            if !accounting {
+                // Refused in the second block, r1's only transaction there.
+                assert_charged_refusal(
+                    &node,
+                    name,
+                    &r1_x0,
+                    3_000,
+                    &r1,
+                    before_b4,
+                    3_000,
+                    1,
+                    Some((&x, 0, 1)),
+                    0,
+                );
+            }
+            let x0 = node.receipt(&r1_x0).expect("r1_x0 has a receipt");
+            assert_eq!(x0.status, TxStatus::Failed(7), "{name}");
+            assert!(x0.fee_paid > 0, "{name}: charged to r1");
+            assert!(!node.held(&r1_x0), "{name}");
+            assert_eq!(node.messaging_nonce(&x), 1, "{name}: x's nonce spent");
+        } else {
+            // x's envelope stays held (its refusal is an error, never a receipt).
+            assert_eq!(node.status(&r1_x0), None, "{name}");
+            assert!(node.held(&r1_x0), "{name}");
+        }
         let s_nonce = node.messaging_nonce(&s);
         match (accounting, verification) {
             (false, _) => assert_eq!(s_nonce, 2, "{name}"),
             (true, true) => {
-                assert_eq!(s_nonce, 0, "{name}");
-                assert!(node.held(&r1_s0), "{name}");
+                assert_eq!(s_nonce, 2, "{name}: both of s's envelopes, in sequence");
+                assert!(!node.held(&r1_s0), "{name}");
             }
             (true, false) => {
                 assert_eq!(s_nonce, 1, "{name}");
@@ -601,28 +765,30 @@ async fn the_fitting_loop_drops_a_refused_envelopes_runs_as_the_block_being_buil
         let r2_t = node.relay(&r2, |n| transfer(&r2, n, 1_000));
         let r2_before = node.account_nonce(&r2);
 
+        let before_b3 = node.around(&r1, &x);
         arm(Some(Failpoint::SkipProposalScreening));
         let b3 = node.tick().await;
         arm(None);
         assert_eq!(b3.height(), CASE_BLOCK);
         let carried: Vec<_> = b3.transactions.iter().map(|t| t.hash()).collect();
-        assert!(!carried.contains(&r1_x0.hash()), "{name}");
+        // From the accounting gate x's refusal is a charged failed receipt in
+        // the block; below it, an executor error, and it is held.
+        assert_eq!(carried.contains(&r1_x0.hash()), accounting, "{name}");
         for t in [&r2_s1, &r2_u0, &r2_t] {
             assert!(carried.contains(&t.hash()), "{name}: {} carried", t.hash());
         }
         assert_eq!(node.status(&r2_u0), Some(TxStatus::Success), "{name}");
         assert_eq!(node.status(&r2_t), Some(TxStatus::Success), "{name}");
         let s1 = node.receipt(&r2_s1).expect("r2_s1 has a receipt");
+        // From the gates the fitting loop meets a charged receipt, not an
+        // error, and drops nothing: r1's run is carried in sequence and s's
+        // envelope 1 meets s's nonce 1. Below them s's
+        // envelope 1 executes as before.
+        assert_eq!(s1.status, TxStatus::Success, "{name}");
         if accounting && verification {
-            assert!(
-                matches!(s1.status, TxStatus::Failed(_)),
-                "{name}: {:?}",
-                s1.status
-            );
-        } else {
-            assert_eq!(s1.status, TxStatus::Success, "{name}");
-        }
-        if accounting {
+            assert_eq!(node.status(&r1_s0), Some(TxStatus::Success), "{name}");
+            assert!(!node.held(&r1_s0), "{name}: carried in r1's sequence");
+        } else if accounting {
             assert_eq!(node.status(&r1_s0), None, "{name}: no receipt");
             assert!(
                 node.held(&r1_s0) || !verification,
@@ -631,8 +797,24 @@ async fn the_fitting_loop_drops_a_refused_envelopes_runs_as_the_block_being_buil
         } else {
             assert_eq!(node.status(&r1_s0), Some(TxStatus::Success), "{name}");
         }
-        assert_eq!(node.status(&r1_x0), None, "{name}");
-        assert!(node.held(&r1_x0), "{name}: left in the pool");
+        if accounting {
+            assert_charged_refusal(
+                &node,
+                name,
+                &r1_x0,
+                3_000,
+                &r1,
+                before_b3,
+                3_000 + 2_000,
+                2,
+                Some((&x, 0, 1)),
+                1,
+            );
+            assert!(!node.held(&r1_x0), "{name}");
+        } else {
+            assert_eq!(node.status(&r1_x0), None, "{name}");
+            assert!(node.held(&r1_x0), "{name}: left in the pool");
+        }
         let advanced = if accounting { 3 } else { 1 };
         assert_eq!(node.account_nonce(&r2), r2_before + advanced, "{name}");
     }
@@ -663,14 +845,25 @@ async fn a_refused_direct_message_holds_nothing_of_another_sponsor() {
         assert_eq!(d0.nonce(), 0);
         assert_eq!(e_s0.nonce(), 1, "{name}: signed behind r1's direct message");
 
+        let before_b3 = node.around(&r1, &r1);
         let b3 = node.tick().await;
         let carried: Vec<_> = b3.transactions.iter().map(|t| t.hash()).collect();
-        assert_eq!(carried.len(), 2, "{name}: {carried:?}");
+        if accounting {
+            // From the accounting gate r1's refused direct message is a
+            // charged failed receipt in the block: r1's account
+            // nonce moves, r1's envelope for s follows in sequence, and s's
+            // envelope 1 through r2 meets s's nonce 1.
+            assert_eq!(carried.len(), 4, "{name}: {carried:?}");
+            assert!(carried.contains(&d0.hash()), "{name}");
+            assert!(carried.contains(&e_s0.hash()), "{name}");
+        } else {
+            assert_eq!(carried.len(), 2, "{name}: {carried:?}");
+        }
         assert!(carried.contains(&e_s1.hash()), "{name}");
         assert!(carried.contains(&wt.hash()), "{name}");
         assert_eq!(node.status(&wt), Some(TxStatus::Success), "{name}");
         let s1 = node.receipt(&e_s1).expect("e_s1 has a receipt");
-        if verification {
+        if verification && !accounting {
             assert!(
                 matches!(s1.status, TxStatus::Failed(_)),
                 "{name}: {:?}",
@@ -680,8 +873,26 @@ async fn a_refused_direct_message_holds_nothing_of_another_sponsor() {
         } else {
             assert_eq!(s1.status, TxStatus::Success, "{name}");
         }
+        if accounting {
+            assert!(s1.fee_paid > 0, "{name}: charged from 0x1049");
+            // r1 pays d0's fee and its envelope for s's once each; the
+            // bystander's transfer is the only value the recipient receives.
+            assert_charged_refusal(
+                &node,
+                name,
+                &d0,
+                5_000,
+                &r1,
+                before_b3,
+                5_000 + 2_000,
+                2,
+                None,
+                1,
+            );
+        }
 
         let r2_next = node.relay(&r2, |n| transfer(&r2, n, 1_000));
+        let before_b4 = node.around(&r1, &r1);
         let b4 = node.tick().await;
         assert!(
             b4.transactions.iter().any(|t| t.hash() == r2_next.hash()),
@@ -689,15 +900,34 @@ async fn a_refused_direct_message_holds_nothing_of_another_sponsor() {
         );
         assert_eq!(node.status(&r2_next), Some(TxStatus::Success), "{name}");
 
-        assert_eq!(node.status(&d0), None, "{name}");
-        assert!(node.held(&d0), "{name}");
-        assert_eq!(node.status(&e_s0), None, "{name}");
-        if verification {
-            assert!(node.held(&e_s0), "{name}: waits with r1's queue");
-            assert_eq!(node.messaging_nonce(&s), 0, "{name}");
-        } else {
+        if accounting {
+            assert_eq!(node.status(&d0), Some(TxStatus::Failed(7)), "{name}");
+            assert!(!node.held(&d0), "{name}");
+            assert_eq!(node.status(&e_s0), Some(TxStatus::Success), "{name}");
+            assert!(!node.held(&e_s0), "{name}: carried in r1's sequence");
+            assert_eq!(node.messaging_nonce(&s), 2, "{name}");
+        } else if gates.accounting_at(CASE_BLOCK + 1) {
+            // At `both at H-1` the second block crosses activation: d0, held
+            // after the case's block, is refused and charged there;
+            // s's envelope 0 was evicted as stale after the case's block. d0
+            // is r1's only transaction there; r2's transfer is the only value
+            // the recipient receives.
+            assert_charged_refusal(&node, name, &d0, 5_000, &r1, before_b4, 5_000, 1, None, 1);
+            assert!(!node.held(&d0), "{name}");
+            assert_eq!(node.status(&e_s0), None, "{name}");
             assert!(!node.held(&e_s0), "{name}: stale, evicted, as on main");
             assert_eq!(node.messaging_nonce(&s), 1, "{name}");
+        } else {
+            assert_eq!(node.status(&d0), None, "{name}");
+            assert!(node.held(&d0), "{name}");
+            assert_eq!(node.status(&e_s0), None, "{name}");
+            if verification {
+                assert!(node.held(&e_s0), "{name}: waits with r1's queue");
+                assert_eq!(node.messaging_nonce(&s), 0, "{name}");
+            } else {
+                assert!(!node.held(&e_s0), "{name}: stale, evicted, as on main");
+                assert_eq!(node.messaging_nonce(&s), 1, "{name}");
+            }
         }
     }
 }
@@ -729,9 +959,12 @@ async fn a_refused_senders_later_envelope_through_another_sponsor_never_holds_th
         let r2_t = node.relay(&r2, |n| transfer(&r2, n, 1_000));
         let r2_before = node.account_nonce(&r2);
 
+        let before_b3 = node.around(&r1, &s);
         let b3 = node.tick().await;
         let carried: Vec<_> = b3.transactions.iter().map(|t| t.hash()).collect();
-        assert!(!carried.contains(&r1_s0.hash()), "{name}");
+        // From the accounting gate s's refused envelope 0 is a charged failed
+        // receipt in the block; below it, an executor error, held.
+        assert_eq!(carried.contains(&r1_s0.hash()), accounting, "{name}");
         assert_eq!(node.status(&r2_u0), Some(TxStatus::Success), "{name}");
         assert_eq!(node.status(&r2_t), Some(TxStatus::Success), "{name}");
         match (accounting, verification) {
@@ -740,12 +973,26 @@ async fn a_refused_senders_later_envelope_through_another_sponsor_never_holds_th
                 assert!(node.held(&r2_s1), "{name}: waits with s's envelope 0");
             }
             (true, true) => {
-                let s1 = node.receipt(&r2_s1).expect("carried");
-                assert!(
-                    matches!(s1.status, TxStatus::Failed(_)),
-                    "{name}: {:?}",
-                    s1.status
+                // s's refusal spends s's envelope nonce, so s's
+                // envelope 1 through r2 meets s's nonce 1 and executes: r2 is
+                // held by nothing of r1's or s's.
+                // r1's only transaction in the block; s's envelope nonce moves
+                // twice (its refusal, then envelope 1); r2's transfer is the
+                // only value the recipient receives.
+                assert_charged_refusal(
+                    &node,
+                    name,
+                    &r1_s0,
+                    3_000,
+                    &r1,
+                    before_b3,
+                    3_000,
+                    1,
+                    Some((&s, 0, 2)),
+                    1,
                 );
+                let s1 = node.receipt(&r2_s1).expect("carried");
+                assert_eq!(s1.status, TxStatus::Success, "{name}");
                 assert!(s1.fee_paid > 0, "{name}: charged");
             }
             (true, false) => {
@@ -754,17 +1001,76 @@ async fn a_refused_senders_later_envelope_through_another_sponsor_never_holds_th
         }
         let advanced = if accounting { 3 } else { 1 };
         assert_eq!(node.account_nonce(&r2), r2_before + advanced, "{name}");
+        // At every configuration s's refused envelope 0 holds nothing of
+        // another sponsor's: r2's envelope for u and its transfer are
+        // delivered in the case's block and left in no pool.
+        for t in [&r2_u0, &r2_t] {
+            assert_eq!(node.status(t), Some(TxStatus::Success), "{name}");
+            assert!(!node.held(t), "{name}");
+        }
 
         let r2_v0 = node.relay(&r2, |n| relayed(&r2, n, 2_000, &v, 0));
+        let before_b4 = node.around(&r1, &s);
         node.tick().await;
+        // ...and r2's next envelope is delivered in the next block.
         assert_eq!(node.status(&r2_v0), Some(TxStatus::Success), "{name}");
-        assert_eq!(node.status(&r1_s0), None, "{name}");
-        if accounting && !verification {
-            assert!(!node.held(&r1_s0), "{name}: stale, evicted");
-            assert_eq!(node.messaging_nonce(&s), 1, "{name}");
+        assert!(!node.held(&r2_v0), "{name}");
+        // At `both at H-1` the second block crosses activation: the gates open there.
+        if gates.accounting_at(CASE_BLOCK + 1) && gates.verification_at(CASE_BLOCK + 1) {
+            // Refused in a block, so not held: no indefinite hold. s's
+            // envelope 0 spends its nonce.
+            if !accounting {
+                // Refused in the second block, r1's only transaction there;
+                // s's envelope nonce moves by exactly one there, spent by the
+                // refusal; no transfer to the recipient in that block.
+                assert_charged_refusal(
+                    &node,
+                    name,
+                    &r1_s0,
+                    3_000,
+                    &r1,
+                    before_b4,
+                    3_000,
+                    1,
+                    Some((&s, 0, 1)),
+                    0,
+                );
+                // At `both at H-1` the relay account-nonce rule activates at b4, so r2_s1's wrapper, signed at r2 nonce 0 below the gate, is stale.
+                // r2's transfer took nonce 0 in the case's block. The pool
+                // offers a transaction below its account's committed nonce
+                // (mempool.rs, `in_combined_order`; `a_gap_the_block_fills_is_no_gap`),
+                // after s's envelope 0 in s's sequence, and it takes an
+                // uncharged `InvalidNonce` before its envelope is read.
+                let w = node.receipt(&r2_s1).expect("r2_s1 offered in b4");
+                assert_eq!(
+                    (w.status, w.fee_paid),
+                    (TxStatus::InvalidNonce, 0),
+                    "{name}"
+                );
+                assert!(!node.held(&r2_s1), "{name}");
+                assert_eq!(node.messaging_nonce(&s), 1, "{name}");
+            } else {
+                // s's envelope 1 through r2 met s's nonce 1 in the case's
+                // block and executed.
+                assert_eq!(
+                    (node.status(&r2_s1), node.messaging_nonce(&s)),
+                    (Some(TxStatus::Success), 2),
+                    "{name}"
+                );
+            }
+            let s0 = node.receipt(&r1_s0).expect("r1_s0 has a receipt");
+            assert_eq!(s0.status, TxStatus::Failed(7), "{name}");
+            assert!(s0.fee_paid > 0, "{name}: charged to r1");
+            assert!(!node.held(&r1_s0), "{name}: refused in a block");
         } else {
-            assert!(node.held(&r1_s0), "{name}: refused, held");
-            assert_eq!(node.messaging_nonce(&s), 0, "{name}");
+            assert_eq!(node.status(&r1_s0), None, "{name}");
+            if accounting && !verification {
+                assert!(!node.held(&r1_s0), "{name}: stale, evicted");
+                assert_eq!(node.messaging_nonce(&s), 1, "{name}");
+            } else {
+                assert!(node.held(&r1_s0), "{name}: refused, held");
+                assert_eq!(node.messaging_nonce(&s), 0, "{name}");
+            }
         }
     }
 }
