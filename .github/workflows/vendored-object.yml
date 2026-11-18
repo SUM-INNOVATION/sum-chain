@@ -17,6 +17,12 @@ name: vendored-object
 #     backported regressions natively and under Miri, plus, under Miri, against
 #     the crates.io source with only the regressions added, where they must
 #     report undefined behaviour (scripts/check-vendored-lru.sh).
+#   * vendored libp2p-gossipsub 0.46.1 (RUSTSEC-2026-0534..0537): the same two
+#     checks for crates/third_party/libp2p-gossipsub-0.46.1, the crates.io crate
+#     with upstream's PRUNE and GRAFT fixes backported, and a job running the
+#     crate's unit tests with the four regressions, plus the regressions against
+#     the crates.io source with only the tests added, where each must fail
+#     (scripts/check-vendored-gossipsub.sh).
 #   * wasmer artifacts base vs head: Module::serialize() of the test WAT corpus,
 #     plain and metered Singlepass, is byte-identical at the PR's merge base and
 #     head, on x86_64 and aarch64 Linux (scripts/compare-wasmer-artifacts.sh).
@@ -33,6 +39,7 @@ on:
       - scripts/check-vendored-object.sh
       - scripts/check-vendored-memmap2.sh
       - scripts/check-vendored-lru.sh
+      - scripts/check-vendored-gossipsub.sh
       - scripts/compare-wasmer-artifacts.sh
       - .cargo/audit.toml
       - .github/workflows/vendored-object.yml
@@ -77,6 +84,12 @@ jobs:
       - name: No RustSec advisory but RUSTSEC-2026-0253 / RUSTSEC-2026-0002 against crates.io lru 0.12.5
         run: bash scripts/check-vendored-lru.sh advisories
 
+      - name: Vendored libp2p-gossipsub 0.46.1 is the crates.io crate but for the backported fixes and their regressions
+        run: bash scripts/check-vendored-gossipsub.sh source
+
+      - name: No RustSec advisory but RUSTSEC-2026-0534..0537 against crates.io libp2p-gossipsub 0.46.1
+        run: bash scripts/check-vendored-gossipsub.sh advisories
+
   lru-regressions:
     name: vendored lru regressions (native and Miri)
     runs-on: ubuntu-latest
@@ -101,6 +114,22 @@ jobs:
 
       - name: Without the fixes, Miri reports undefined behaviour in every regression
         run: bash scripts/check-vendored-lru.sh regressions --miri --without-fixes
+
+  gossipsub-regressions:
+    name: vendored libp2p-gossipsub unit tests and regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pinned toolchain
+        run: rustup show
+
+      - name: The crate's unit tests pass, including the backported-fix regressions
+        run: bash scripts/check-vendored-gossipsub.sh regressions
+
+      - name: Without the fixes, every regression fails
+        run: bash scripts/check-vendored-gossipsub.sh regressions --without-fixes
 
   artifacts:
     name: wasmer artifacts base vs head (${{ matrix.arch }})

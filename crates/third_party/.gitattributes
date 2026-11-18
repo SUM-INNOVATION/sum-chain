@@ -1,0 +1,5 @@
+# The vendored crates.io libp2p-gossipsub 0.46.1 is kept byte for byte as
+# published (scripts/check-vendored-gossipsub.sh checks it), including the
+# trailing whitespace and blank lines at EOF upstream ships, so git diff --check
+# does not report whitespace in it.
+libp2p-gossipsub-0.46.1/** -whitespace

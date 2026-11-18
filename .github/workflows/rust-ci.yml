@@ -159,6 +159,14 @@ jobs:
       - name: cargo-audit — vendored lru 0.12.5 as its crates.io identity (RUSTSEC-2026-0253, RUSTSEC-2026-0002)
         run: bash scripts/check-vendored-lru.sh advisories
 
+      # RUSTSEC-2026-0534..0537: the same for the vendored libp2p-gossipsub 0.46.1.
+      # Every advisory against its crates.io identity fails except those four,
+      # which the backported fixes address (for -0536 the GRAFT fix; 0.49.5's
+      # MaxCount default subscription filter is not taken). vendored-object.yml
+      # also runs this daily.
+      - name: cargo-audit — vendored libp2p-gossipsub 0.46.1 as its crates.io identity (RUSTSEC-2026-0534..0537)
+        run: bash scripts/check-vendored-gossipsub.sh advisories
+
   build-test-clippy-aarch64:
     # C3 (issue #127 dependency hardening): build/test/clippy the ENTIRE workspace
     # — including the `blst`-backed `sumchain-beacon-crypto` now linked into

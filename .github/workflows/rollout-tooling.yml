@@ -17,6 +17,8 @@ name: rollout-tooling
 #     bounds checks backported from 0.9.11 (RUSTSEC-2026-0186)
 #   * vendored lru 0.12.5 is the crates.io crate but for upstream's pop and
 #     IterMut fixes and their regressions (RUSTSEC-2026-0253, RUSTSEC-2026-0002)
+#   * vendored libp2p-gossipsub 0.46.1 is the crates.io crate but for upstream's
+#     PRUNE/GRAFT fixes and their regressions (RUSTSEC-2026-0534..0537)
 #   * git diff --check, no AI attribution in commit messages, clean tree
 
 on:
@@ -83,6 +85,9 @@ jobs:
 
       - name: Vendored lru 0.12.5 matches crates.io but for the backported fixes (RUSTSEC-2026-0253, RUSTSEC-2026-0002)
         run: bash scripts/check-vendored-lru.sh
+
+      - name: Vendored libp2p-gossipsub 0.46.1 matches crates.io but for the backported fixes (RUSTSEC-2026-0534..0537)
+        run: bash scripts/check-vendored-gossipsub.sh
 
       - name: git diff --check over the change
         run: |
