@@ -209,9 +209,11 @@ pub struct TransactionSignatureAdmission {
 ///    `messaging_sponsored_envelope_verification_enabled_from_height`, or
 ///    while it is unset, the string form above or the version-2 envelope
 ///    (a strict signature by the named sender over the version-2 preimage
-///    for this chain, and no amount), which the executor below the gate also
-///    executes; from the gate on, the version-2 envelope only, the one form
-///    that block executes. Without it, the string form only, as before.
+///    for this chain, and no amount: `Some(0)` names none), which the
+///    executor below the gate also executes; from the gate on, the version-2
+///    envelope only, the one form that block executes, with or without an
+///    amount (a positive one the named sender pays into escrow). Without it,
+///    the string form only, as before.
 ///
 /// 3. **A sponsored envelope carries the sender's expected messaging nonce.**
 ///    The named sender's messaging nonce is the count of its sends as the
@@ -383,19 +385,28 @@ fn sponsored_message(
 }
 
 /// Why `m` is in no form `forms` accepts; `None` when it is in one.
+///
+/// The amount is `koppa_amount.unwrap_or(0)`: `Some(0)` and `None` both name
+/// none, at every height. A version-2 envelope for a block below the envelope
+/// verification gate names none, since that block moves no amount; from the
+/// gate on it may name one, which the named sender pays into escrow (or the
+/// block refuses, charged, when the sender cannot). The string form is
+/// judged as before.
 fn envelope_form_refusal(m: &SponsoredMessage, forms: EnvelopeForms) -> Option<String> {
     const STRING_FORM: &str =
         "the envelope signature does not verify, by the named sender's key, over the relay \
          preimage";
-    let version_2 = |chain_id: u64| -> Option<&'static str> {
+    let version_2 = |chain_id: u64, amounts: bool| -> Option<&'static str> {
         if verify_sponsored_send_v2(m, chain_id).is_err() {
             return Some(
                 "the envelope signature does not verify, by the named sender's key, over the \
                  version-2 envelope preimage",
             );
         }
-        if m.koppa_amount.is_some() {
-            return Some("a version-2 envelope carries no amount");
+        if !amounts && m.koppa_amount.unwrap_or(0) > 0 {
+            return Some(
+                "below the envelope verification gate a version-2 envelope carries no amount",
+            );
         }
         None
     };
@@ -407,9 +418,10 @@ fn envelope_form_refusal(m: &SponsoredMessage, forms: EnvelopeForms) -> Option<S
             if sponsored_envelope_verifies(m) {
                 return None;
             }
-            version_2(chain_id).map(|why| format!("neither envelope form is accepted: {why}"))
+            version_2(chain_id, false)
+                .map(|why| format!("neither envelope form is accepted: {why}"))
         }
-        EnvelopeForms::Version2 { chain_id } => version_2(chain_id).map(|why| {
+        EnvelopeForms::Version2 { chain_id } => version_2(chain_id, true).map(|why| {
             format!(
                 "from the envelope verification gate only the version-2 envelope is accepted: \
                  {why}"

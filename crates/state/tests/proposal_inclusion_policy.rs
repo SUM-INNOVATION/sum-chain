@@ -1509,3 +1509,128 @@ fn production_wiring_judges_the_envelope_form_of_the_next_block() {
         &string_envelope(&someone_else(), 0)
     ))));
 }
+
+// ── amounts: positive from the envelope gate, `Some(0)` as none ─────────────
+
+/// The production parameters with both messaging gates at `h` (the genesis
+/// relation requires them equal).
+fn both_gates(h: u64) -> ChainParams {
+    let mut p = gated(Some(h));
+    p.messaging_fee_nonce_accounting_enabled_from_height = Some(h);
+    p
+}
+
+/// `user`'s version-2 envelope to `recipient()` at `nonce` naming `amount`.
+fn v2_paying(user: &KeyPair, nonce: u64, amount: Option<u128>) -> SponsoredMessage {
+    let mut m = envelope(*user.public_key().as_bytes(), &recipient().address(), nonce);
+    m.koppa_amount = amount;
+    v2_signed(m, user)
+}
+
+/// A positive amount is admitted only for a block at or above the envelope
+/// gate, judged at the next block's height: refused for `H - 1` (that block
+/// moves no amount), admitted for `H` and `H + 1`.
+#[test]
+fn a_positive_amount_is_admitted_only_for_a_block_at_or_above_the_envelope_gate() {
+    let params = both_gates(ENVELOPE_GATE);
+    let c = Chain::ready_with(params.clone());
+    for (tip, admitted) in [
+        (ENVELOPE_GATE - 2, false),
+        (ENVELOPE_GATE - 1, true),
+        (ENVELOPE_GATE, true),
+    ] {
+        let (pool, _) = c.gated_pool(&params, tip);
+        let paying = v2_paying(&someone_else(), 0, Some(5_000));
+        let r = pool.add(sponsored_tx(&other_relayer(), 0, &paying));
+        assert_eq!(r.is_ok(), admitted, "next block {}: {r:?}", tip + 1);
+        if !admitted {
+            let why = refusal(&r);
+            assert!(why.contains("no amount"), "{why}");
+        }
+    }
+}
+
+/// `Some(0)` names no amount at every height: a version-2 envelope carrying
+/// it is admitted for `H - 1`, `H` and `H + 1`, as one carrying none is.
+#[test]
+fn an_amount_of_zero_is_no_amount_at_every_height() {
+    let params = both_gates(ENVELOPE_GATE);
+    let c = Chain::ready_with(params.clone());
+    let (zero_relayer, none_relayer) = (relayer(), other_relayer());
+    let (zero_user, none_user) = (sender(), someone_else());
+    for tip in [ENVELOPE_GATE - 2, ENVELOPE_GATE - 1, ENVELOPE_GATE] {
+        let (pool, _) = c.gated_pool(&params, tip);
+        for (relayer, user, amount) in [
+            (&zero_relayer, &zero_user, Some(0)),
+            (&none_relayer, &none_user, None),
+        ] {
+            let r = pool.add(sponsored_tx(relayer, 0, &v2_paying(user, 0, amount)));
+            assert!(r.is_ok(), "next block {}: {amount:?}: {r:?}", tip + 1);
+        }
+    }
+}
+
+/// A positive amount admitted for the block at the gate is selected, carried
+/// and executed there: the named sender pays it into escrow and the relayer
+/// pays only the fee.
+#[test]
+fn a_payment_admitted_for_the_gate_is_carried_and_escrowed() {
+    let params = both_gates(ENVELOPE_GATE);
+    let mut c = Chain::ready_with(params.clone());
+    while c.height < ENVELOPE_GATE - 1 {
+        c.block(vec![]);
+    }
+    let (pool, _) = c.gated_pool(&params, c.height);
+    let paying = sponsored_tx(
+        &other_relayer(),
+        0,
+        &v2_paying(&someone_else(), 0, Some(5_000)),
+    );
+    let balance = |kp: &KeyPair| c.state.get_balance(&kp.address()).unwrap();
+    let (payer_before, relayer_before) = (balance(&someone_else()), balance(&other_relayer()));
+    pool.add(paying.clone())
+        .expect("admitted for the block at the gate");
+    let selected = pool.select_for_block(10);
+    assert_eq!(hashes(&selected), vec![paying.hash()]);
+    let receipts = c.block(selected);
+    assert_eq!(c.height, ENVELOPE_GATE);
+    assert_eq!(receipts[0].status, TxStatus::Success);
+    let escrow = MessagingStore::new(&c.db)
+        .get_pending_payment(&paying.hash())
+        .unwrap()
+        .map(|p| (p.amount, p.sender));
+    assert_eq!(escrow, Some((5_000, someone_else().address())));
+    let balance = |kp: &KeyPair| c.state.get_balance(&kp.address()).unwrap();
+    assert_eq!(balance(&someone_else()), payer_before - 5_000);
+    assert_eq!(
+        balance(&other_relayer()),
+        relayer_before - receipts[0].fee_paid
+    );
+}
+
+/// A positive amount admitted for the block at the gate is not carried into
+/// a block below it: when the next block is `H - 1` again (a chain switch
+/// back below the gate), selection evicts it, and so does revalidation.
+#[test]
+fn a_payment_held_when_the_next_block_falls_below_the_gate_is_evicted() {
+    let params = both_gates(ENVELOPE_GATE);
+    let c = Chain::ready_with(params.clone());
+    let paying = sponsored_tx(
+        &other_relayer(),
+        0,
+        &v2_paying(&someone_else(), 0, Some(5_000)),
+    );
+    let (by_selection, live_s) = c.gated_pool(&params, ENVELOPE_GATE - 1);
+    let (by_revalidation, live_r) = c.gated_pool(&params, ENVELOPE_GATE - 1);
+    for pool in [&by_selection, &by_revalidation] {
+        pool.add(paying.clone())
+            .expect("admitted for the block at the gate");
+    }
+    live_s.store(ENVELOPE_GATE - 2, Ordering::Relaxed);
+    live_r.store(ENVELOPE_GATE - 2, Ordering::Relaxed);
+
+    by_revalidation.revalidate(&c.state, CHAIN_ID);
+    assert!(!by_revalidation.contains(&paying.hash()));
+    assert!(by_selection.select_for_block(10).is_empty());
+    assert!(!by_selection.contains(&paying.hash()));
+}
