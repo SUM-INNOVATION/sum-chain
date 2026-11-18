@@ -19,8 +19,10 @@
 //! - an unrelated sponsor and its user are carried throughout.
 //!
 //! Every case runs under each gate configuration of [`matrix`]: the gates
-//! absent, set above the chain's history, set inside it, and with each gate
-//! at the case's block, one below it and one above it. Below the accounting
+//! absent, set above the chain's history, set inside it, and with both gates
+//! at the case's block, one below it and one above it (the configurations
+//! that set the two gates apart are refused at genesis:
+//! [`apart_configurations`]). Below the accounting
 //! gate the same submissions are judged by that rule (a relayed envelope
 //! advances no nonce there), and the assertions that hold everywhere are
 //! asserted everywhere: no transaction of a case ever takes a receipt other
@@ -104,10 +106,12 @@ impl Gates {
     }
 }
 
-/// The gates absent; set above the chain's history; set inside it; and
-/// `0x1049`, `0x1048` and both at the case's block `H`, one below (`H-1`:
-/// the case's first block is below the gate, the next at it) and one above
-/// (`H+1`).
+/// The gates absent; set above the chain's history; set inside it; and both
+/// at the case's block `H`, one below (`H-1`: the case's first block is below
+/// the gates, the next at them) and one above (`H+1`). A node runs only a
+/// chain whose two messaging gates are unset or at one height; the
+/// configurations that set them apart are [`apart_configurations`], each
+/// refused at genesis.
 fn matrix() -> Vec<Gates> {
     let h = CASE_BLOCK;
     let g = |name, verification, accounting| Gates {
@@ -122,6 +126,22 @@ fn matrix() -> Vec<Gates> {
         g("both at H-1", Some(h + 1), Some(h + 1)),
         g("both at H", Some(h), Some(h)),
         g("both at H+1", Some(h - 1), Some(h - 1)),
+    ]
+}
+
+/// `0x1049` and `0x1048` each at the case's block `H`, one below and one
+/// above, with the other gate inside the chain's history, and each alone at
+/// `H`. The two gates name one rule and must be unset or at one height,
+/// so a node refuses each of these genesis files and no case runs on
+/// them: [`apart_gate_configurations_are_refused_at_genesis`].
+fn apart_configurations() -> Vec<Gates> {
+    let h = CASE_BLOCK;
+    let g = |name, verification, accounting| Gates {
+        name,
+        verification,
+        accounting,
+    };
+    vec![
         g("0x1049 at H-1", Some(1), Some(h + 1)),
         g("0x1049 at H", Some(1), Some(h)),
         g("0x1049 at H+1", Some(1), Some(h - 1)),
@@ -800,5 +820,33 @@ async fn nothing_above_a_nonce_gap_is_offered_and_the_rest_is_carried() {
         assert_eq!(node.messaging_nonce(&u), 1, "{}", gates.name);
         assert_eq!(node.messaging_nonce(&v), 2, "{}", gates.name);
         assert!(node.mempool.is_empty(), "{}", gates.name);
+    }
+}
+
+/// Each configuration that sets `0x1048` and `0x1049` apart is refused when
+/// the node initialises its genesis, with the error naming both gates:
+/// such a chain cannot be run, so no case runs on it.
+#[tokio::test]
+async fn apart_gate_configurations_are_refused_at_genesis() {
+    let apart = apart_configurations();
+    assert_eq!(apart.len(), 8);
+    for gates in apart {
+        let g = genesis(gates);
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), CHAIN_ID));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let engine = PoAEngine::new(db, state, mempool, &g, Some(validator())).unwrap();
+        let want = sumchain_genesis::GenesisError::MessagingEnvelopeAndAccountingGatesApart {
+            envelope: gates.verification,
+            accounting: gates.accounting,
+        }
+        .to_string();
+        match engine.init_genesis(&g) {
+            Err(sumchain_consensus::ConsensusError::State(
+                sumchain_state::StateError::ActivationParams(m),
+            )) => assert_eq!(m, want, "{}", gates.name),
+            other => panic!("{}: expected the refusal, got {other:?}", gates.name),
+        }
     }
 }

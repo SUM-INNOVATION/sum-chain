@@ -10,8 +10,10 @@
 //! its `InvalidNonce` is imported; here no block names it, so the follower
 //! must count and evict it itself.
 //!
-//! Every case runs under the 14 gate configurations of [`matrix`], or says
-//! why it runs under fewer.
+//! Every case runs under the 6 gate configurations of [`matrix`] (the two
+//! messaging gates unset or at one height), or says why it runs under fewer;
+//! the 8 that set the gates apart are refused at genesis
+//! ([`apart_configurations`]).
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -95,10 +97,12 @@ impl Gates {
     }
 }
 
-/// The gates absent; set above the chain's history; set inside it; and
-/// `0x1049`, `0x1048` and both at the case's block `H`, one below (`H-1`:
-/// the case's first block is below the gate, the next at it) and one above
-/// (`H+1`).
+/// The gates absent; set above the chain's history; set inside it; and both
+/// at the case's block `H`, one below (`H-1`: the case's first block is below
+/// the gates, the next at them) and one above (`H+1`). A node runs only a
+/// chain whose two messaging gates are unset or at one height; the
+/// configurations that set them apart are [`apart_configurations`], each
+/// refused at genesis.
 fn matrix() -> Vec<Gates> {
     let h = CASE_BLOCK;
     let g = |name, verification, accounting| Gates {
@@ -113,6 +117,22 @@ fn matrix() -> Vec<Gates> {
         g("both at H-1", Some(h + 1), Some(h + 1)),
         g("both at H", Some(h), Some(h)),
         g("both at H+1", Some(h - 1), Some(h - 1)),
+    ]
+}
+
+/// `0x1049` and `0x1048` each at the case's block `H`, one below and one
+/// above, with the other gate inside the chain's history, and each alone at
+/// `H`. The two gates name one rule and must be unset or at one height,
+/// so a node refuses each of these genesis files and no case runs on
+/// them: [`apart_gate_configurations_are_refused_at_genesis`].
+fn apart_configurations() -> Vec<Gates> {
+    let h = CASE_BLOCK;
+    let g = |name, verification, accounting| Gates {
+        name,
+        verification,
+        accounting,
+    };
+    vec![
         g("0x1049 at H-1", Some(1), Some(h + 1)),
         g("0x1049 at H", Some(1), Some(h)),
         g("0x1049 at H+1", Some(1), Some(h - 1)),
@@ -592,16 +612,17 @@ async fn a_node_that_only_imports_blocks_evicts_at_the_same_bound() {
 /// first block, below the gate. Under the selection oracle its required
 /// predecessor is missing (row 3), from the gate as below it: it is never
 /// counted toward the cross-account bound, and in the `GAP_BOUND`-th block it
-/// is evicted with the gapped transfers, never carried or charged. At both
-/// configurations where the accounting gate opens at `H+1` (the
-/// verification gate is open by then).
+/// is evicted with the gapped transfers, never carried or charged. At the
+/// configuration where both gates open at `H+1` (`both at H-1`); the one
+/// with the verification gate open earlier sets the gates apart and is
+/// refused at genesis ([`apart_configurations`]).
 #[tokio::test]
 async fn where_the_gap_bound_comes_first_the_wait_on_another_account_still_ends_in_a_refusal() {
     let configs: Vec<Gates> = matrix()
         .into_iter()
-        .filter(|g| ["both at H-1", "0x1049 at H-1"].contains(&g.name))
+        .filter(|g| g.name == "both at H-1")
         .collect();
-    assert_eq!(configs.len(), 2);
+    assert_eq!(configs.len(), 1);
     for gates in configs {
         let name = gates.name;
         let node = Node::with_pool(gates, |c| MempoolConfig { max_size: 6, ..c });
@@ -977,4 +998,32 @@ async fn a_follower_recomputes_a_missing_envelope_at_a_chain_switch_that_execute
         1,
         "{name}: s's envelope 0 executed on B"
     );
+}
+
+/// Each configuration that sets `0x1048` and `0x1049` apart is refused when
+/// the node initialises its genesis, with the error naming both gates:
+/// such a chain cannot be run, so no case runs on it.
+#[tokio::test]
+async fn apart_gate_configurations_are_refused_at_genesis() {
+    let apart = apart_configurations();
+    assert_eq!(apart.len(), 8);
+    for gates in apart {
+        let g = genesis(gates);
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), CHAIN_ID));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let engine = PoAEngine::new(db, state, mempool, &g, Some(validator())).unwrap();
+        let want = sumchain_genesis::GenesisError::MessagingEnvelopeAndAccountingGatesApart {
+            envelope: gates.verification,
+            accounting: gates.accounting,
+        }
+        .to_string();
+        match engine.init_genesis(&g) {
+            Err(sumchain_consensus::ConsensusError::State(
+                sumchain_state::StateError::ActivationParams(m),
+            )) => assert_eq!(m, want, "{}", gates.name),
+            other => panic!("{}: expected the refusal, got {other:?}", gates.name),
+        }
+    }
 }
