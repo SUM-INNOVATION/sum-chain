@@ -4224,7 +4224,7 @@ fn test_opportunistic_grafting() {
     let (mut gs, peers, topics) = inject_nodes1()
         .peer_no(5)
         .topics(vec!["test".into()])
-        .to_subscribe(false)
+        .to_subscribe(true)
         .gs_config(config)
         .explicit(0)
         .outbound(0)
@@ -4529,7 +4529,7 @@ fn test_limit_number_of_message_ids_inside_ihave() {
     let (mut gs, peers, topics) = inject_nodes1()
         .peer_no(config.mesh_n_high())
         .topics(vec!["test".into()])
-        .to_subscribe(false)
+        .to_subscribe(true)
         .gs_config(config)
         .create_network();
 
