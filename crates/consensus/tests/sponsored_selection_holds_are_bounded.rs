@@ -359,6 +359,14 @@ impl Node {
         self.engine.propose_block(txs).await.expect("a block")
     }
 
+    /// One production tick with a block limit of `limit`.
+    async fn tick_within(&self, limit: usize) -> Block {
+        self.chain_height
+            .store(self.engine.current_height(), Ordering::Relaxed);
+        let txs = self.mempool.select_for_block(limit);
+        self.engine.propose_block(txs).await.expect("a block")
+    }
+
     fn status(&self, t: &SignedTransaction) -> Option<TxStatus> {
         ReceiptStore::new(&self.db)
             .get(&t.hash())
@@ -545,6 +553,60 @@ async fn gapped_transactions_never_take_the_block_from_others() {
             }
         }
         assert!(gapped.iter().all(|t| node.receipt(t).is_none()), "{name}");
+    }
+}
+
+/// The funded counterpart of the previous case. Four funded keys each submit their nonces 1 to 3 (never 0) at
+/// a fee far above honest traffic: 12 transactions above a gap against a
+/// block limit of 8. The combined order does not read committed nonces, so a
+/// funded key's lowest pending nonce would be ready in it, and an account that
+/// can pay has its next nonce taken after it: only the pool's holds, decided
+/// before the cut, keep the gapped transactions out of it. Before each of the
+/// `GAP_BOUND` selections a fresh honest transfer at a normal fee is
+/// submitted, and each is carried in its block; none of the gapped
+/// transactions is carried or takes a receipt, they are evicted at the
+/// `GAP_BOUND`-th selection, and no funded key's nonce moves. At every
+/// configuration.
+#[tokio::test]
+async fn funded_gapped_transactions_never_take_the_block_from_others() {
+    const SMALL: usize = 8;
+    for gates in matrix() {
+        let name = gates.name;
+        let node = Node::new(gates);
+        node.set_up().await;
+        let funded = [sponsor(0), sponsor(1), sponsor(2), sponsor(3)];
+        let mut gapped = Vec::new();
+        for k in &funded {
+            for n in 1..=3u64 {
+                let t = transfer(k, n, 1_000_000_000);
+                node.submit(&[&t]);
+                gapped.push(t);
+            }
+        }
+        assert!(gapped.len() > SMALL);
+        for round in 0..GAP_BOUND {
+            let honest = transfer(&bystander(), relay_nonce(&node, &bystander()), 1_000);
+            node.submit(&[&honest]);
+            let b = node.tick_within(SMALL).await;
+            assert!(
+                carries(&b, &honest),
+                "{name}: round {round}: the honest transfer is carried"
+            );
+            assert_eq!(node.status(&honest), Some(TxStatus::Success), "{name}");
+            assert!(
+                gapped.iter().all(|t| !carries(&b, t)),
+                "{name}: round {round}"
+            );
+        }
+        assert!(
+            gapped
+                .iter()
+                .all(|t| !node.held(t) && node.receipt(t).is_none()),
+            "{name}: evicted at the gap bound, no receipt"
+        );
+        for k in &funded {
+            assert_eq!(node.account_nonce(k), 0, "{name}");
+        }
     }
 }
 

@@ -1515,6 +1515,57 @@ async fn a_second_copy_of_an_envelope_never_conceals_a_missing_predecessor() {
     }
 }
 
+/// Row 5 of the selection oracle: an
+/// envelope whose required predecessors are complete and held only through
+/// its own sponsor is never counted or charged. `r` relays `s`'s envelope 0
+/// (Y) at its nonce 2, above `r`'s own gap (its nonce 1 never comes: row 1),
+/// and `s`'s envelope 1 (X) at its nonce 0: X's only required predecessor, Y,
+/// is in the pool and relayed by X's own sponsor. X is never counted toward
+/// `K`. Y is evicted at the gap bound; X, its predecessor then missing (row
+/// 3), leaves within the gap bound after it. Neither is carried or charged,
+/// both are in the eviction history, and no nonce moves. Where both messaging
+/// gates are open at the case's block.
+#[tokio::test]
+async fn an_envelope_held_only_through_its_own_sponsor_is_never_counted_or_charged() {
+    for gates in both_gates_open() {
+        let name = gates.name;
+        let node = Node::new(gates);
+        node.set_up().await;
+        let (r, s) = (sponsor(0), s_of());
+        let y = relayed(&r, 2, 2_000, &s, 0);
+        let x = relayed(&r, 0, 2_000, &s, 1);
+        node.submit(&[&y, &x]);
+        let funds = node.state.get_balance(&r.address()).unwrap();
+        for n in 1..=(2 * B) {
+            let b = node.tick().await;
+            for t in [&x, &y] {
+                assert!(!carries(&b, t), "{name}: block {n}");
+            }
+            assert_eq!(node.count(&x), 0, "{name}: row 5, never counted, block {n}");
+            assert_eq!(
+                node.held(&y),
+                n < B,
+                "{name}: Y at the gap bound, block {n}"
+            );
+        }
+        for t in [&x, &y] {
+            assert!(!node.held(t), "{name}: evicted");
+            assert!(
+                node.receipt(t).is_none(),
+                "{name}: never carried or charged"
+            );
+            assert!(node.mempool.evicted_above_a_gap(&t.hash()), "{name}");
+        }
+        assert_eq!(
+            node.state.get_balance(&r.address()).unwrap(),
+            funds,
+            "{name}"
+        );
+        assert_eq!(node.account_nonce(&r), 0, "{name}");
+        assert_eq!(node.messaging_nonce(&s), 0, "{name}");
+    }
+}
+
 /// The sender of [`cycle_above_another_gap`]'s envelopes.
 fn s_of() -> KeyPair {
     sender(0)
