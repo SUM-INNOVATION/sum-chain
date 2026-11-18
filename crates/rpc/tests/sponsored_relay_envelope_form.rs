@@ -616,9 +616,9 @@ async fn the_relay_applies_the_envelope_form_of_the_next_block() {
             "{err}"
         );
         let err = s
-            .relay(&v2(envelope(0, 3, Some(5))))
+            .relay(&v2(envelope(0, 3, Some(ACCOUNT_FUNDS + 1))))
             .await
-            .expect_err("an amount is refused");
+            .expect_err("an amount the named sender cannot fund is refused");
         assert!(err.message().contains("koppa_amount"), "{err}");
         let err = s.relay(&envelope(0, 4, None)).await.expect_err("unsigned");
         assert!(err.message().contains("Invalid sender signature"), "{err}");
@@ -2874,4 +2874,134 @@ async fn an_ambiguous_error_after_acceptance_stays_counted() {
         Step::Done(Outcome::Delivered { .. })
     ));
     assert_eq!((t.requests, deliveries(&s, &intent)), (1, 1));
+}
+
+// ── payments: a positive amount from the envelope gate, "0" as none ─────────
+
+/// The envelope gate (and the accounting gate) in the payment cases.
+const PAY_GATE: u64 = 3;
+
+/// The chain's blocks up to `tip`, empty, so the relay judges the next block
+/// to be `tip + 1`.
+fn up_to(s: &Served, tip: u64) {
+    let mut h = sumchain_storage::BlockStore::new(&s.db)
+        .get_latest_height()
+        .unwrap()
+        .unwrap_or(0);
+    while h < tip {
+        h += 1;
+        s.publish(h, vec![]);
+    }
+}
+
+/// The relay relays a positive amount only for a block at or above the
+/// envelope gate, judged at the next block's height: refused for `H - 1`,
+/// relayed for `H` (carried there: the named sender pays it into escrow, the
+/// sponsor pays the fee) and for `H + 1`.
+#[tokio::test]
+async fn the_relay_relays_a_payment_only_for_a_block_at_or_above_the_envelope_gate() {
+    let s = serve(&genesis_on(CHAIN_ID, Some(PAY_GATE), Some(PAY_GATE)));
+    up_to(&s, PAY_GATE - 2);
+    let err = s
+        .relay(&v2(envelope(0, 1, Some(5_000))))
+        .await
+        .expect_err("next block H - 1: no amount moves there");
+    assert!(err.message().contains("koppa_amount"), "{err}");
+    assert!(relayed_envelopes(&s).is_empty());
+
+    up_to(&s, PAY_GATE - 1);
+    let (carol_before, sponsor_before) = (s.balance(&carol()), s.balance(&sponsor()));
+    let paid = s.relay(&v2(envelope(0, 2, Some(5_000)))).await.unwrap();
+    let (_, receipts) = s.publish_pool(PAY_GATE);
+    assert_eq!(statuses(&receipts), vec![(TxStatus::Success, RELAY_FEE)]);
+    let escrow = MessagingStore::new(&s.db)
+        .get_pending_payment(&Hash::from_hex(&paid).unwrap())
+        .unwrap()
+        .map(|p| (p.amount, p.sender));
+    assert_eq!(escrow, Some((5_000, carol().address())));
+    assert_eq!(s.balance(&carol()), carol_before - 5_000);
+    assert_eq!(s.balance(&sponsor()), sponsor_before - RELAY_FEE);
+
+    // Next block H + 1.
+    s.relay(&v2(envelope(1, 3, Some(7_000))))
+        .await
+        .expect("next block H + 1");
+}
+
+/// `"0"` names no amount at every height: relayed for `H - 1`, `H` and
+/// `H + 1` as an envelope naming none, and carried as one.
+#[tokio::test]
+async fn an_amount_of_zero_relays_as_no_amount_at_every_height() {
+    let s = serve(&genesis_on(CHAIN_ID, Some(PAY_GATE), Some(PAY_GATE)));
+    for (i, tip) in [PAY_GATE - 2, PAY_GATE - 1, PAY_GATE]
+        .into_iter()
+        .enumerate()
+    {
+        up_to(&s, tip);
+        let nonce = s.messaging_nonce(&carol());
+        s.relay(&v2(envelope(nonce, 10 + i as u8, Some(0))))
+            .await
+            .unwrap_or_else(|e| panic!("next block {}: {e}", tip + 1));
+        let relayed = relayed_envelopes(&s);
+        assert_eq!(relayed.len(), 1, "next block {}", tip + 1);
+        assert_eq!(relayed[0].koppa_amount, None, "relayed as none");
+        let (_, receipts) = s.publish_pool(tip + 1);
+        assert_eq!(status_only(&receipts), vec![TxStatus::Success]);
+    }
+}
+
+/// The relay's preflight for a payment: the named sender's balance must cover
+/// the amount beyond what its envelopes already pending in this node's pool
+/// name, and beyond this wrapper's fee when the sender is the relay's own
+/// key. Advice only: the block re-checks.
+#[tokio::test]
+async fn the_relay_refuses_a_payment_its_named_sender_cannot_fund() {
+    let s = serve(&genesis_on(CHAIN_ID, Some(PAY_GATE), Some(PAY_GATE)));
+    up_to(&s, PAY_GATE - 1);
+    let err = s
+        .relay(&v2(envelope(0, 1, Some(ACCOUNT_FUNDS + 1))))
+        .await
+        .expect_err("more than carol holds");
+    assert!(err.message().contains("cannot fund"), "{err}");
+    s.relay(&v2(envelope(0, 2, Some(ACCOUNT_FUNDS - 10))))
+        .await
+        .expect("within carol's balance");
+    let err = s
+        .relay(&v2(envelope(1, 3, Some(11))))
+        .await
+        .expect_err("the pending envelope already names most of it");
+    assert!(err.message().contains("cannot fund"), "{err}");
+    s.relay(&v2(envelope(1, 4, Some(10))))
+        .await
+        .expect("exactly what is left");
+
+    // The relay's own key as the named sender: the fee comes first.
+    let store = MessagingStore::new(&s.db);
+    store
+        .set_public_key(
+            &sponsor().address(),
+            &RegisteredPublicKey {
+                public_key: *sponsor().public_key().as_bytes(),
+                address: sponsor().address(),
+                registered_at_block: 0,
+                registered_at: 0,
+                updated_at_block: 0,
+            },
+        )
+        .unwrap();
+    let own = |nonce, salt, amount| {
+        v2_by(
+            envelope_from(&sponsor(), nonce, salt, Some(amount)),
+            &sponsor(),
+            CHAIN_ID,
+        )
+    };
+    let err = s
+        .relay(&own(0, 5, SPONSOR_FUNDS - RELAY_FEE + 1))
+        .await
+        .expect_err("the amount and the fee exceed the sponsor's balance");
+    assert!(err.message().contains("cannot fund"), "{err}");
+    s.relay(&own(0, 6, SPONSOR_FUNDS - RELAY_FEE))
+        .await
+        .expect("the amount after the fee");
 }

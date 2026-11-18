@@ -1381,3 +1381,69 @@ async fn a_zero_value_paid_send_reports_no_payment_from_the_gate() {
         );
     }
 }
+
+// ── a string-form envelope naming an amount ─────────────────────────────────
+
+/// `sender`'s envelope to `to` at `nonce` naming `amount`, signed over the
+/// string form the relay checked before the envelope gate, which does not
+/// cover the amount.
+fn string_form(
+    sender: &KeyPair,
+    to: &KeyPair,
+    nonce: u64,
+    amount: Option<u128>,
+) -> SponsoredMessage {
+    let rh = recipient_hash(&to.address());
+    let mut m = SponsoredMessage {
+        message_data: valid_message(rh),
+        recipient_hash: rh,
+        signature: [0u8; 64],
+        sender_pubkey: *sender.public_key().as_bytes(),
+        nonce,
+        expiry: 4_000_000_000,
+        koppa_amount: amount,
+    };
+    let preimage = format!(
+        "SUMCHAIN_SPONSORED_MSG:{}:{}:{}:{}",
+        m.nonce,
+        m.expiry,
+        hex::encode(m.recipient_hash),
+        hex::encode(blake3::hash(&m.message_data).as_bytes())
+    );
+    m.signature = *sign(preimage.as_bytes(), sender.private_key()).as_bytes();
+    m
+}
+
+/// `messaging_getPaymentStatus` (new) for a string-form envelope naming an
+/// amount: `none` with `legacy_amount_unbacked` at H−1, where it executes
+/// and moves nothing, and `refused` at H and H+1. The existing methods'
+/// bytes, the balances and the nonces for the same envelope are pinned in
+/// `messaging_string_form_amount.rs`.
+#[tokio::test]
+async fn a_string_form_amount_reads_none_below_the_gate_and_refused_from_it() {
+    let s = serve(&genesis());
+    let srv = &s.server;
+    assert!(all_ok(&s.publish(1, setup(&s))));
+    for height in [GATE - 1, GATE, GATE + 1] {
+        let nonce = MessagingStore::new(&s.db)
+            .get_sender_nonce(&carol().address())
+            .unwrap();
+        let t = relayed_by(
+            &s,
+            &sponsor(),
+            &string_form(&carol(), &bob(), nonce, Some(5_000)),
+        );
+        s.publish(height, vec![t.clone()]);
+        let st = status_of(srv, &t).await;
+        let want = if height < GATE {
+            ("none", None, true)
+        } else {
+            ("refused", None, false)
+        };
+        assert_eq!(
+            (st.status.as_str(), st.amount, st.legacy_amount_unbacked),
+            want,
+            "{height}"
+        );
+    }
+}

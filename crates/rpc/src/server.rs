@@ -1541,6 +1541,18 @@ impl RpcServer {
             .collect()
     }
 
+    /// The amounts named by `sender_key`'s version-2 envelopes pending in this
+    /// node's pool, relayed by any sponsor, summed (`Some(0)` names none).
+    fn pending_v2_envelope_amounts(&self, sender_key: &[u8; 32], chain_id: u64) -> u128 {
+        self.mempool
+            .filter_map_held(|tx| relayed_envelope_from(tx, sender_key))
+            .into_iter()
+            .filter(|m| sumchain_primitives::verify_sponsored_send_v2(m, chain_id).is_ok())
+            .fold(0u128, |sum, m| {
+                sum.saturating_add(m.koppa_amount.unwrap_or(0))
+            })
+    }
+
     /// Whether this node's pool holds the registrant's own `RegisterPublicKey`:
     /// from `registrant`, signed by the key that address derives from. It
     /// would execute before, or instead of, a sponsored registration of the
@@ -5090,16 +5102,19 @@ impl SumChainApiServer for RpcServer {
         let v2_envelope = v2_only || v2_signed;
 
         if v2_envelope {
-            // The version-2 rule, as the executor applies it from the gate: no
-            // amount, a strict signature by the named sender over the version-2
+            // The version-2 rule, as the executor applies it from the gate: a
+            // strict signature by the named sender over the version-2
             // preimage, and (checked below, with the pool) the sender's next
-            // messaging nonce.
-            if sponsored_msg.koppa_amount.is_some() {
-                return Err(RpcError::InvalidParams(
-                    "A sponsored message in the version-2 envelope cannot carry a \
-                     koppa_amount; send the payment as SendMessageWithPayment"
-                        .to_string(),
-                )
+            // messaging nonce. An amount (`koppa_amount` above; "0" names none
+            // and is relayed as none) is paid into escrow by the named sender
+            // only in a block at or above the gate; a block below it moves
+            // nothing, so there an envelope naming one is refused.
+            if sponsored_msg.koppa_amount.is_some() && !v2_only {
+                return Err(RpcError::InvalidParams(format!(
+                    "A sponsored payment (koppa_amount) is relayed only for a block at or \
+                     above the envelope verification height; the next block is \
+                     {inclusion_height}. Send the payment as SendMessageWithPayment"
+                ))
                 .into());
             }
             if !v2_signed {
@@ -5168,6 +5183,7 @@ impl SumChainApiServer for RpcServer {
         // same one.
         let relay_guard = self.relay_lock.lock().await;
         let sponsor_address = sponsor_keypair.address();
+        let fee = 1_000_000u128; // 0.001 Koppa fee
 
         if v2_envelope {
             // The envelope nonce must be the sender's next messaging nonce: the
@@ -5205,6 +5221,32 @@ impl SumChainApiServer for RpcServer {
                 ))
                 .into());
             }
+            if let Some(amount) = sponsored_msg.koppa_amount {
+                // Advisory preflight (the block re-checks): the named sender
+                // holds the amount beyond what its envelopes already pending
+                // in this node's pool name, and beyond this wrapper's fee when
+                // it is this relay's own sponsor key (affordability after the
+                // fee, as the block judges it). An envelope its sender cannot
+                // fund is refused in the block, charged to this sponsor, and
+                // spends the sender's nonce.
+                let pending = self.pending_v2_envelope_amounts(&sender_pubkey, chain_id);
+                let balance = self.state.get_balance(&sender_address).map_err(|e| {
+                    RpcError::Internal(format!("Failed to read the sender's balance: {e}"))
+                })?;
+                let own_fee = if sender_address == sponsor_address {
+                    fee
+                } else {
+                    0
+                };
+                if balance < amount.saturating_add(pending).saturating_add(own_fee) {
+                    return Err(RpcError::InvalidParams(format!(
+                        "The named sender cannot fund koppa_amount {amount}: its balance is \
+                         {balance}, its envelopes pending in this node's pool already name \
+                         {pending}, and this wrapper's fee from its own balance is {own_fee}"
+                    ))
+                    .into());
+                }
+            }
         } else if self.string_form_envelope_pending(&sponsored_msg) {
             // The string form carries no envelope nonce, so the sequence above
             // does not apply; a second wrapper of the same signed envelope is
@@ -5221,8 +5263,6 @@ impl SumChainApiServer for RpcServer {
         // Create the messaging transaction
         // tx.from = sponsor_address (matches the signer)
         // The real message sender is in the SponsoredMessage.sender_pubkey
-        let fee = 1_000_000u128; // 0.001 Koppa fee
-
         let tx = TransactionV2::messaging(
             chain_id,
             sponsor_address, // Sponsor address as tx.from (matches signer)

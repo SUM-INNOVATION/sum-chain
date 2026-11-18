@@ -2110,7 +2110,9 @@ pub struct SubmitSponsoredMessageRequest {
     pub nonce: u64,
     /// Expiry timestamp
     pub expiry: u64,
-    /// Optional koppa amount
+    /// Optional payment the named sender makes into escrow (decimal); `"0"`
+    /// names none. Relayed only for a block at or above the envelope
+    /// verification height (`messaging_submitSponsored`).
     pub koppa_amount: Option<String>,
 }
 

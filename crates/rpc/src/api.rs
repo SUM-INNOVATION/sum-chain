@@ -1363,6 +1363,17 @@ pub trait SumChainApi {
     /// in the RPC tests asks for at most three wrappers per message); the
     /// sponsor pays for each wrapper that executes, and nothing for one
     /// refused with `InvalidNonce`.
+    ///
+    /// `koppa_amount` (decimal; `"0"` or absent names none, at every height)
+    /// is a payment the named sender makes into the existing escrow. It is
+    /// relayed only in a version-2 envelope for a block at or above the
+    /// envelope verification height (the next block, the tip plus one);
+    /// below it an envelope naming a positive amount is refused. As advice,
+    /// the relay checks that the named sender's balance covers the amount
+    /// beyond what its envelopes pending in this node's pool already name
+    /// (and this wrapper's fee, when the sender is the relay's own key). The
+    /// block re-checks: an envelope its sender cannot fund there is a charged
+    /// refusal that spends the sender's nonce. The sponsor pays only the fee.
     #[method(name = "messaging_submitSponsored")]
     async fn messaging_submit_sponsored(
         &self,
