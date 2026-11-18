@@ -1335,18 +1335,9 @@ where
 
         let mut do_px = self.config.do_px();
 
-        // For each topic, if a peer has grafted us, then we necessarily must be in their mesh
-        // and they must be subscribed to the topic. Ensure we have recorded the mapping.
-        for topic in &topics {
-            self.peer_topics
-                .entry(*peer_id)
-                .or_default()
-                .insert(topic.clone());
-            self.topic_peers
-                .entry(topic.clone())
-                .or_default()
-                .insert(*peer_id);
-        }
+        // SUM-CHAIN: backported from libp2p-gossipsub 0.49.5 (RUSTSEC-2026-0536,
+        // libp2p/rust-libp2p@51ed5f00e1b0, libp2p/rust-libp2p#6608): a GRAFT no longer
+        // records its topics in peer_topics / topic_peers.
 
         // we don't GRAFT to/from explicit peers; complain loudly if this happens
         if self.explicit_peers.contains(peer_id) {
@@ -1430,6 +1421,19 @@ where
                         to_prune_topics.insert(topic_hash.clone());
                         // but we won't PX to them
                         do_px = false;
+                        continue;
+                    }
+
+                    // SUM-CHAIN: backported from libp2p-gossipsub 0.49.5 (RUSTSEC-2026-0536).
+                    // Discard the GRAFT if the user hasn't subscribed to the topic.
+                    if !self
+                        .peer_topics
+                        .get(peer_id)
+                        .is_some_and(|topics| topics.contains(&topic_hash))
+                    {
+                        do_px = false;
+                        tracing::debug!(peer=%peer_id, topic=%topic_hash,
+                            "GRAFT: dropping unsubscribed topic from peer");
                         continue;
                     }
 

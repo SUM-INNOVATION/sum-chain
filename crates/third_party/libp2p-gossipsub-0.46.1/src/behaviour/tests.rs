@@ -5190,3 +5190,39 @@ fn test_prune_backoff_near_instant_max_does_not_panic_heartbeat() {
         "a remote PRUNE backoff must be capped at one hour"
     );
 }
+
+// SUM-CHAIN: regression for RUSTSEC-2026-0536, fixed by the backport of the GRAFT
+// handling from libp2p-gossipsub 0.49.5. A GRAFT records no topics for the peer,
+// and a GRAFT for a topic the peer has not subscribed to does not add it to the
+// mesh.
+#[test]
+fn test_graft_records_no_topics_and_needs_subscription() {
+    let (mut gs, peers, topics) = inject_nodes1()
+        .peer_no(1)
+        .topics(vec!["test".into()])
+        .to_subscribe(false)
+        .create_network();
+
+    let unknown: Vec<TopicHash> = (0..100)
+        .map(|i| TopicHash::from_raw(format!("unknown-{i}")))
+        .collect();
+    gs.handle_graft(&peers[0], unknown.clone());
+    gs.handle_graft(&peers[0], topics.clone());
+
+    assert!(
+        gs.peer_topics
+            .get(&peers[0])
+            .map_or(true, |t| t.is_empty()),
+        "a GRAFT must not record topics for the peer"
+    );
+    for topic in &unknown {
+        assert!(
+            !gs.topic_peers.contains_key(topic),
+            "a GRAFT must not create topic_peers entries"
+        );
+    }
+    assert!(
+        !gs.mesh[&topics[0]].contains(&peers[0]),
+        "a GRAFT from a peer that has not subscribed must not add it to the mesh"
+    );
+}
