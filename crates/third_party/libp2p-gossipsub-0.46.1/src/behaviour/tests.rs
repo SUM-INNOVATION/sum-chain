@@ -5138,3 +5138,55 @@ fn test_oversized_prune_backoff_does_not_panic() {
         "a backoff that overflows the Instant must not be stored"
     );
 }
+
+// SUM-CHAIN: regression for RUSTSEC-2026-0537, fixed by the backport from
+// libp2p-gossipsub 0.49.4. A PRUNE backoff small enough to be stored, but close
+// enough to the largest Instant that adding the heartbeat's slack overflows,
+// must not panic the heartbeat; a backoff a peer asks for is capped at one hour.
+#[test]
+fn test_prune_backoff_near_instant_max_does_not_panic_heartbeat() {
+    // A 10 s slack (heartbeat_interval * backoff_slack) leaves a wide window of
+    // backoffs that fit the Instant but overflow once the slack is added.
+    let config = ConfigBuilder::default().backoff_slack(10).build().unwrap();
+    let (mut gs, peers, topics) = inject_nodes1()
+        .peer_no(1)
+        .topics(vec!["test".into()])
+        .to_subscribe(true)
+        .gs_config(config.clone())
+        .create_network();
+
+    // The largest whole-second Duration Instant::now() can still be advanced by.
+    let now = Instant::now();
+    let (mut lo, mut hi) = (0u64, u64::MAX);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2 + 1;
+        if now.checked_add(Duration::from_secs(mid)).is_some() {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let backoff = lo - 5;
+
+    gs.handle_prune(
+        &peers[0],
+        vec![(topics[0].clone(), Vec::new(), Some(backoff))],
+    );
+
+    // One full cycle of the backoff slots visits the slot the backoff was put in.
+    let slots = config.prune_backoff().as_secs() / config.heartbeat_interval().as_secs()
+        + u64::from(config.backoff_slack())
+        + 1;
+    for _ in 0..2 * slots {
+        gs.heartbeat();
+    }
+
+    let stored = gs
+        .backoffs
+        .get_backoff_time(&topics[0], &peers[0])
+        .expect("the PRUNE backoff is recorded");
+    assert!(
+        stored <= Instant::now() + Duration::from_secs(3600),
+        "a remote PRUNE backoff must be capped at one hour"
+    );
+}

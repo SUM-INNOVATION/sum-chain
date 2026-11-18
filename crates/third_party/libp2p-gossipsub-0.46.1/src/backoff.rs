@@ -159,7 +159,12 @@ impl BackoffStorage {
             let now = Instant::now();
             s.retain(|(topic, peer)| {
                 let keep = match Self::get_backoff_time_from_backoffs(backoffs, topic, peer) {
-                    Some(backoff_time) => backoff_time + slack > now,
+                    // SUM-CHAIN: backported from libp2p-gossipsub 0.49.4
+                    // (RUSTSEC-2026-0537, libp2p/rust-libp2p@55e4a64630f6).
+                    Some(backoff_time) => backoff_time
+                        .checked_add(slack)
+                        .map(|backoff| backoff > now)
+                        .unwrap_or(false),
                     None => false,
                 };
                 if !keep {

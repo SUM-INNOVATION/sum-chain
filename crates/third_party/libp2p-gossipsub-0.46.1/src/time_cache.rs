@@ -135,11 +135,18 @@ where
         self.remove_expired_keys(now);
         match self.map.entry(key) {
             Occupied(entry) => Entry::Occupied(OccupiedEntry { entry }),
-            Vacant(entry) => Entry::Vacant(VacantEntry {
-                expiration: now + self.ttl,
-                entry,
-                list: &mut self.list,
-            }),
+            // SUM-CHAIN: backported from libp2p-gossipsub 0.49.4 (RUSTSEC-2026-0537).
+            Vacant(entry) => {
+                let expiration = now.checked_add(self.ttl).unwrap_or_else(|| {
+                    tracing::error!("invalid time cache ttl");
+                    now
+                });
+                Entry::Vacant(VacantEntry {
+                    expiration,
+                    entry,
+                    list: &mut self.list,
+                })
+            }
         }
     }
 
