@@ -166,6 +166,17 @@ memmap2-0510 = { package = "memmap2", path = "crates/third_party/memmap2-0.5.10"
 # regressions in src/lib.rs; scripts/check-vendored-lru.sh proves that in CI.
 # sumchain-state's lru 0.18.5 is not patched. See docs/security/DEPENDENCY-AUDIT.md.
 lru = { path = "crates/third_party/lru-0.12.5" }
+# RUSTSEC-2026-0534 / -0535 / -0536 / -0537: libp2p-gossipsub 0.46.1 (sumchain-p2p)
+# records backoffs for PRUNEs naming topics it never joined, panics on an oversized
+# PRUNE backoff when storing it or at the next heartbeat, and records the topics a
+# GRAFT names without a subscription. Every fixed release is a breaking libp2p
+# upgrade. crates/third_party/libp2p-gossipsub-0.46.1 is the crates.io crate
+# verbatim except for upstream's fixes (0.49.3, 0.49.4, 0.49.5's GRAFT handling,
+# 0.50.1) and their regressions; 0.49.5's MaxCount default subscription filter is
+# not taken, so the default filter (AllowAllSubscriptionFilter) is unchanged.
+# scripts/check-vendored-gossipsub.sh proves that in CI. Not a workspace member.
+# See docs/security/DEPENDENCY-AUDIT.md.
+libp2p-gossipsub = { path = "crates/third_party/libp2p-gossipsub-0.46.1" }
 
 [profile.release]
 lto = true
