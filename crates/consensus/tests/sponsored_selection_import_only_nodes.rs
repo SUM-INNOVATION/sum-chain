@@ -1027,3 +1027,65 @@ async fn apart_gate_configurations_are_refused_at_genesis() {
         }
     }
 }
+
+/// A release decided in a selection whose block is never made does not
+/// outlive it. A node `q` holds `s`'s envelope 0 through `r2` at its nonce 1
+/// (above `r2`'s gap), a transfer of `r`'s at its nonce 0, and `s`'s envelope
+/// 1 (X) through `r` at its nonce 1. `q` makes three selections whose blocks
+/// are never made (proposals that are not committed): X, row 4, is counted,
+/// and released at the third, in which `s`'s envelope 0 reaches the gap bound
+/// and is evicted. Then `q` only imports `p`'s empty blocks; the first head
+/// after the selections is the one they counted. From the next head on, X is
+/// judged as it stands, with no release, by the gap bound: row 3 (its envelope
+/// 0 now missing), and, where `r`'s transfer also leaves `q`'s pool
+/// uncommitted (as a lowest-fee eviction removes it), row 1 as well (above
+/// `r`'s own gap). Either way X is held at the first `GAP_BOUND - 1` counted
+/// heads and evicted at the `GAP_BOUND`-th, never carried or charged, and is
+/// in `q`'s eviction history. Where both messaging gates are open at the
+/// case's block.
+#[tokio::test]
+async fn a_release_from_a_selection_whose_block_is_never_made_does_not_outlive_it() {
+    for gates in matrix()
+        .into_iter()
+        .filter(|g| g.accounting_at(CASE_BLOCK) && g.verification.is_some_and(|v| CASE_BLOCK >= v))
+    {
+        for transfer_leaves in [false, true] {
+            let name = format!("{}, r's transfer leaves: {transfer_leaves}", gates.name);
+            let p = Node::new(gates);
+            let q = Node::follower(genesis(gates), gates, |c| c);
+            p.set_up().await;
+            for h in 1..=p.engine.current_height() {
+                q.import(&p.engine.get_block_by_height(h).unwrap()).await;
+            }
+            let (r, r2, s) = (sponsor(0), sponsor(1), sender(0));
+            let r2_s0 = relayed(&r2, 1, 2_000, &s, 0);
+            let t0 = transfer(&r, 0, 2_000);
+            let x = relayed(&r, 1, 2_000, &s, 1);
+            q.submit(&[&r2_s0, &t0, &x]);
+            for n in 1..=BOUND {
+                q.chain_height
+                    .store(q.engine.current_height(), Ordering::Relaxed);
+                let selected = q.mempool.select_for_block(1_000);
+                let released = selected.iter().any(|tx| tx.hash() == x.hash());
+                assert_eq!(released, n == BOUND, "{name}: selection {n}");
+            }
+            assert!(!q.held(&r2_s0), "{name}: s's envelope 0 at the gap bound");
+            assert!(q.held(&x), "{name}: released, its block never made");
+            if transfer_leaves {
+                q.mempool.remove(&t0.hash());
+            }
+            let first = p.tick().await;
+            q.import(&first).await;
+            assert!(q.held(&x), "{name}: the head the selections counted");
+            for n in 1..=GAP_BOUND {
+                let b = p.tick().await;
+                q.import(&b).await;
+                assert!(!carries(&b, &x), "{name}");
+                assert_eq!(q.held(&x), n < GAP_BOUND, "{name}: counted head {n}");
+            }
+            assert!(q.receipt(&x).is_none(), "{name}: never carried or charged");
+            assert!(q.mempool.evicted_above_a_gap(&x.hash()), "{name}");
+            assert_eq!(q.account_nonce(&r), 0, "{name}");
+        }
+    }
+}

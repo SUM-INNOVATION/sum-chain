@@ -2513,11 +2513,20 @@ impl Mempool {
     /// the block at `head + 1`) and counted as a selection counts it: what
     /// reaches the bound is evicted with no receipt, with its named sender's
     /// later envelopes that nothing left in the pool can bring into sequence
-    /// ([`Self::stranded_envelopes`]), except an envelope the cross-account
-    /// bound governs; then each transaction held directly has its count
-    /// raised by one and every other count is dropped. Nothing is verified,
-    /// charged or written; without an inclusion policy nothing happens.
+    /// ([`Self::stranded_envelopes`]); then each transaction held directly
+    /// has its count raised by one and every other count is dropped. Nothing
+    /// is verified, charged or written; without an inclusion policy nothing
+    /// happens.
+    ///
+    /// A release toward a charged refusal belongs to the selection that
+    /// decided it, for the block that selection was for (row 4 of the
+    /// selection oracle at that selection). A new head ends it whether that
+    /// block was made or not: the release is cleared at every head, and a
+    /// counted head judges each envelope as it stands, with no release, so an
+    /// envelope released for a block never made is held, counted and evicted
+    /// at the gap bound like any other: nothing is sticky.
     pub fn at_new_head(&self, head: u64) {
+        self.released_envelopes.write().clear();
         if self.selected_since_head.swap(false, Ordering::SeqCst) {
             return;
         }
@@ -2527,7 +2536,7 @@ impl Mempool {
         let rules = self.block_rules(head.saturating_add(1));
         let mut pool = self.pool_in_fee_order();
         let committed = self.committed_account_nonces(pool.iter());
-        let released = self.released_envelopes.read().clone();
+        let released = HashSet::new();
         let mut holds = self.pool_holds_releasing(&pool, rules.accounting, &committed, &released);
         let governed = self.governed_by_the_cross_account_bound(&released);
         let expired = self.expired_gap_holds(&holds, &governed);
