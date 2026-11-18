@@ -5226,3 +5226,38 @@ fn test_graft_records_no_topics_and_needs_subscription() {
         "a GRAFT from a peer that has not subscribed must not add it to the mesh"
     );
 }
+
+// SUM-CHAIN: regression for RUSTSEC-2026-0534, fixed by the backport from
+// libp2p-gossipsub 0.50.1. A PRUNE for a topic the node has not joined records no
+// backoff; a PRUNE for a joined topic still does.
+#[test]
+fn test_prune_for_unjoined_topic_records_no_backoff() {
+    let (mut gs, peers, topics) = inject_nodes1()
+        .peer_no(1)
+        .topics(vec!["test".into()])
+        .to_subscribe(true)
+        .create_network();
+
+    let unknown: Vec<TopicHash> = (0..100)
+        .map(|i| TopicHash::from_raw(format!("unknown-{i}")))
+        .collect();
+    gs.handle_prune(
+        &peers[0],
+        unknown
+            .iter()
+            .map(|topic| (topic.clone(), Vec::new(), Some(3600)))
+            .collect(),
+    );
+    for topic in &unknown {
+        assert!(
+            gs.backoffs.get_backoff_time(topic, &peers[0]).is_none(),
+            "a PRUNE for a topic the node has not joined must not record a backoff"
+        );
+    }
+
+    gs.handle_prune(&peers[0], vec![(topics[0].clone(), Vec::new(), Some(60))]);
+    assert!(
+        gs.backoffs.get_backoff_time(&topics[0], &peers[0]).is_some(),
+        "a PRUNE for a joined topic still records the backoff"
+    );
+}

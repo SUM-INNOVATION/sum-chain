@@ -1567,6 +1567,17 @@ where
         let (below_threshold, score) =
             self.score_below_threshold(peer_id, |pst| pst.accept_px_threshold);
         for (topic_hash, px, backoff) in prune_data {
+            // SUM-CHAIN: backported from libp2p-gossipsub 0.50.1 (RUSTSEC-2026-0534,
+            // libp2p/rust-libp2p@9c647828abea, libp2p/rust-libp2p#6707).
+            if !self.mesh.contains_key(&topic_hash) {
+                tracing::debug!(
+                    peer=%peer_id,
+                    topic=%topic_hash,
+                    "PRUNE: Received prune for unknown topic from peer"
+                );
+                continue;
+            }
+
             self.remove_peer_from_mesh(peer_id, &topic_hash, backoff, true, Churn::Prune);
 
             if self.mesh.contains_key(&topic_hash) {
