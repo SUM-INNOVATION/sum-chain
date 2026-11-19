@@ -1997,3 +1997,116 @@ fn sponsored_registration_charging_starts_exactly_at_the_gate() {
         );
     }
 }
+
+// ── a payment envelope carried to a charged refusal moves no value ──────────
+
+/// A payment envelope that selection carries before its named sender's
+/// earlier envelope (a release toward a charged refusal; from the gate the
+/// inclusion policy admits amounts) moves no value when its block refuses it.
+/// The executor sees only the block, so each arm is a block:
+/// - (a) carried without its predecessor: carol's nonce 1 is not her current
+///   nonce, so the attempt is unauthenticated: a charged `Failed(7)`, one fee
+///   and one account nonce to its sponsor, carol's balance and envelope nonce
+///   unchanged, no escrow, no outcome row;
+/// - (b) carried after its predecessor, naming more than carol holds: an
+///   authenticated refusal: a charged `Failed(7)`, one fee, carol's nonce 1
+///   spent (its outcome row: code 7, nothing escrowed), no value, no escrow;
+/// - (c) as (b) with an amount carol can pay, as a control: it executes and
+///   is escrowed.
+#[test]
+fn a_payment_envelope_refused_in_its_block_moves_no_value() {
+    let carol_outcome = |c: &Chain, n: u64| {
+        outcome(c, &carol().address(), n).map(|o| (o.tx_hash, o.outcome_code, o.escrowed_amount))
+    };
+
+    // (a)
+    let mut c = Chain::new(both(Some(1)));
+    c.setup();
+    let (carol0, sp0, prop0) = (
+        c.balance(&carol().address()),
+        c.balance(&sponsor().address()),
+        c.balance(&proposer()),
+    );
+    let sp_nonce = c.nonce(&sponsor());
+    let released = c.tx(
+        &sponsor(),
+        sponsored(&c.v2(&carol(), &bob().address(), 1, Some(5_000))),
+    );
+    let r = c.one(released.clone());
+    assert_eq!((r.status, r.fee_paid), (TxStatus::Failed(7), FEE));
+    assert_eq!(c.balance(&sponsor().address()), sp0 - FEE, "one fee");
+    assert_eq!(c.balance(&proposer()), prop0 + FEE);
+    assert_eq!(c.nonce(&sponsor()), sp_nonce + 1, "one account nonce");
+    assert_eq!(c.balance(&carol().address()), carol0, "no value from carol");
+    assert!(
+        c.store()
+            .get_pending_payment(&released.hash())
+            .unwrap()
+            .is_none(),
+        "no escrow"
+    );
+    assert_eq!(
+        c.msg_nonce(&carol().address()),
+        0,
+        "unauthenticated: nothing spent"
+    );
+    assert_eq!(
+        (carol_outcome(&c, 0), carol_outcome(&c, 1)),
+        (None, None),
+        "no outcome row"
+    );
+
+    // (b) and (c)
+    for (amount, executes) in [(FUNDS * 2, false), (5_000, true)] {
+        let mut c = Chain::new(both(Some(1)));
+        c.setup();
+        let (carol0, sp0, erin0) = (
+            c.balance(&carol().address()),
+            c.balance(&sponsor().address()),
+            c.balance(&erin().address()),
+        );
+        let pred = c.tx(
+            &erin(),
+            sponsored(&c.v2(&carol(), &bob().address(), 0, None)),
+        );
+        let released = c.tx(
+            &sponsor(),
+            sponsored(&c.v2(&carol(), &bob().address(), 1, Some(amount))),
+        );
+        let r = c
+            .block(vec![pred.clone(), released.clone()])
+            .expect("published");
+        assert_eq!(r[0].status, TxStatus::Success);
+        assert_eq!(c.balance(&erin().address()), erin0 - FEE);
+        assert_eq!(
+            c.balance(&sponsor().address()),
+            sp0 - FEE,
+            "the released one: one fee"
+        );
+        assert_eq!(
+            c.msg_nonce(&carol().address()),
+            2,
+            "authenticated: spent either way"
+        );
+        let escrow = c
+            .store()
+            .get_pending_payment(&released.hash())
+            .unwrap()
+            .map(|p| p.amount);
+        if executes {
+            assert_eq!((r[1].status, r[1].fee_paid), (TxStatus::Success, FEE));
+            assert_eq!(escrow, Some(amount));
+            assert_eq!(c.balance(&carol().address()), carol0 - amount);
+            assert_eq!(carol_outcome(&c, 1), Some((released.hash(), 0, amount)));
+        } else {
+            assert_eq!((r[1].status, r[1].fee_paid), (TxStatus::Failed(7), FEE));
+            assert_eq!(escrow, None, "no escrow");
+            assert_eq!(c.balance(&carol().address()), carol0, "no value from carol");
+            assert_eq!(
+                carol_outcome(&c, 1),
+                Some((released.hash(), 7, 0)),
+                "spent by the refusal"
+            );
+        }
+    }
+}
