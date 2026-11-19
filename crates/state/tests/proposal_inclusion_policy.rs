@@ -1634,3 +1634,47 @@ fn a_payment_held_when_the_next_block_falls_below_the_gate_is_evicted() {
     assert!(by_selection.select_for_block(10).is_empty());
     assert!(!by_selection.contains(&paying.hash()));
 }
+
+/// Below the envelope verification gate a relay-signed string-form envelope
+/// that names an amount is admitted, carried and executed exactly as before,
+/// with the next-block rules wired as on a production node (the `Either`
+/// forms): the string form is kept as it was. The named amount moves no value and opens
+/// no escrow. With the envelope gate unset, and with both messaging gates
+/// set above the chain's height.
+#[test]
+fn below_the_envelope_gate_a_string_form_envelope_naming_an_amount_executes_and_moves_nothing() {
+    for params in [gated(None), both_gates(ENVELOPE_GATE)] {
+        let gate = params.messaging_sponsored_envelope_verification_enabled_from_height;
+        let mut c = Chain::ready_with(params.clone());
+        let (pool, _) = c.gated_pool(&params, c.height);
+        let mut m = envelope(*sender().public_key().as_bytes(), &recipient().address(), 0);
+        m.koppa_amount = Some(5);
+        let string_form = sponsored_tx(&relayer(), 0, &relay_signed(m, &sender()));
+        let balance = |c: &Chain, kp: &KeyPair| c.state.get_balance(&kp.address()).unwrap();
+        let (sender_before, recipient_before) = (balance(&c, &sender()), balance(&c, &recipient()));
+        pool.add(string_form.clone())
+            .unwrap_or_else(|e| panic!("{gate:?}: admitted below the gate: {e:?}"));
+        let selected = pool.select_for_block(10);
+        assert_eq!(hashes(&selected), vec![string_form.hash()], "{gate:?}");
+        let receipts = c.block(selected);
+        assert_eq!(receipts[0].status, TxStatus::Success, "{gate:?}");
+        assert_eq!(
+            balance(&c, &sender()),
+            sender_before,
+            "{gate:?}: no value from the named sender"
+        );
+        assert_eq!(
+            balance(&c, &recipient()),
+            recipient_before,
+            "{gate:?}: none to the recipient"
+        );
+        assert!(
+            MessagingStore::new(&c.db)
+                .get_pending_payment(&string_form.hash())
+                .unwrap()
+                .is_none(),
+            "{gate:?}: no escrow"
+        );
+        assert_eq!(c.messaging_nonce(&sender().address()), 1, "{gate:?}");
+    }
+}
