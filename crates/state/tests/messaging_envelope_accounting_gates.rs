@@ -2277,3 +2277,133 @@ fn the_envelope_is_bound_to_the_chain_the_block_belongs_to() {
         1
     );
 }
+
+// ── strict verification of the envelope signature, with the sender's key ────
+
+/// The seed of carol's key (`carol()`).
+const CAROL_SEED: [u8; 32] = [0x64; 32];
+
+/// `m`, signed by carol with her own private key over the version-2
+/// preimage for `chain_id`, re-expressed with R the identity point and
+/// s = k·a, where k = SHA-512(R ‖ A ‖ M) mod l over those R bytes. The
+/// verification equation still holds, so the legacy rule accepts the
+/// signature; strict verification refuses it, because R is a small-order
+/// component.
+fn carol_identity_r_v2(mut m: SponsoredMessage, chain_id: u64) -> SponsoredMessage {
+    use curve25519_dalek::Scalar;
+    use ed25519_dalek::hazmat::ExpandedSecretKey;
+    use sha2::{Digest, Sha512};
+    /// The compressed identity point (y = 1).
+    const IDENTITY: [u8; 32] = {
+        let mut b = [0u8; 32];
+        b[0] = 1;
+        b
+    };
+    assert_eq!(
+        m.sender_pubkey,
+        *KeyPair::from_bytes(CAROL_SEED).public_key().as_bytes(),
+        "the envelope names carol"
+    );
+    let preimage = sumchain_primitives::sponsored_send_v2_signing_preimage(chain_id, &m);
+    let mut h = Sha512::new();
+    h.update(IDENTITY);
+    h.update(m.sender_pubkey);
+    h.update(&preimage);
+    let k = Scalar::from_bytes_mod_order_wide(&h.finalize().into());
+    let s = k * ExpandedSecretKey::from(&CAROL_SEED).scalar;
+    m.signature[..32].copy_from_slice(&IDENTITY);
+    m.signature[32..].copy_from_slice(s.as_bytes());
+    m
+}
+
+/// From the envelope gate the version-2 envelope signature is verified
+/// strictly. With the envelope gate at block 2, and with both messaging gates
+/// there, carol's envelope signed with her own key and re-expressed with R the
+/// identity point (a signature the legacy rule accepts) is refused in each
+/// block from the gate on: a failed receipt, nothing stored, and carol's
+/// messaging nonce and daily count unmoved; the executor names the signature
+/// as the reason. After each refusal the same envelope signed the ordinary way
+/// is accepted (the control).
+#[test]
+fn from_the_gate_the_envelope_signature_is_verified_strictly() {
+    use sumchain_crypto::{verify_bytes, verify_bytes_strict};
+    use sumchain_primitives::TxStatus;
+    use sumchain_state::MessagingExecutor;
+    const GATE: u64 = 2;
+    for (config, params) in [
+        ("envelope gate", with_envelope_gate(Some(GATE))),
+        ("both gates", with_both_gates(Some(GATE))),
+    ] {
+        let mut c = Chain::new(params);
+        c.setup();
+        let carol_addr = carol().address();
+        for round in 0..2u64 {
+            let n = c.msg_nonce(&carol_addr);
+            assert_eq!(n, round, "{config}");
+            let sent = c.sent_by(&carol_addr).len();
+            let daily = c.daily(&carol_addr, 0);
+
+            let m = carol_identity_r_v2(carol_to_bob(n), CHAIN_ID);
+            let preimage = sumchain_primitives::sponsored_send_v2_signing_preimage(CHAIN_ID, &m);
+            assert!(
+                verify_bytes(&preimage, &m.signature, &m.sender_pubkey).is_ok(),
+                "{config}: the legacy rule accepts the re-expressed signature"
+            );
+            assert!(
+                verify_bytes_strict(&preimage, &m.signature, &m.sender_pubkey).is_err(),
+                "{config}: strict verification refuses it"
+            );
+
+            let r = c.one(c.tx(&sponsor(), sponsored(&m)));
+            assert!(c.height >= GATE, "{config}: a block at or above the gate");
+            assert_eq!(
+                r.status,
+                TxStatus::Failed(7),
+                "{config}, block {}: an envelope signature that only the legacy rule \
+                 accepts must be refused, because the version-2 envelope signature is \
+                 verified strictly",
+                c.height
+            );
+            assert_eq!(c.sent_by(&carol_addr).len(), sent, "{config}: nothing stored");
+            assert_eq!(c.msg_nonce(&carol_addr), n, "{config}: nonce unmoved");
+            assert_eq!(c.daily(&carol_addr, 0), daily, "{config}: daily count unmoved");
+            {
+                let mut cand = common::candidate(&c.db);
+                let mut view = cand.view();
+                let r = MessagingExecutor::execute(
+                    &mut view,
+                    &c.params,
+                    CHAIN_ID,
+                    &sponsor().address(),
+                    &sponsored(&m),
+                    &Address::from_public_key(&PROPOSER_PK),
+                    FEE,
+                    c.height + 1,
+                    T_MS,
+                    0,
+                    Hash::hash(config.as_bytes()),
+                )
+                .unwrap();
+                assert!(!r.success, "{config}");
+                assert_eq!(
+                    r.error.as_deref(),
+                    Some("Invalid sponsored message signature"),
+                    "{config}: refused for its signature"
+                );
+            }
+
+            // The control: the same envelope, signed the ordinary way.
+            let r = c.one(c.tx(
+                &sponsor(),
+                sponsored(&signed_v2(carol_to_bob(n), &carol(), CHAIN_ID)),
+            ));
+            assert_eq!(
+                r.status,
+                TxStatus::Success,
+                "{config}: the ordinarily signed envelope is accepted"
+            );
+            assert_eq!(c.msg_nonce(&carol_addr), n + 1, "{config}");
+            assert_eq!(c.sent_by(&carol_addr).len(), sent + 1, "{config}");
+        }
+    }
+}
