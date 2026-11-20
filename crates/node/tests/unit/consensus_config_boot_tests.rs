@@ -756,6 +756,118 @@ fn the_schema_4_gates_through_the_boot_sequence() {
     }
 }
 
+// ── schema 5 through the boot sequence ──────────────────────────────────────
+
+/// The release that wrote schema 4: it read schemas 1 to 4, wrote 4, and knew
+/// schema 5 only as a draft.
+static SCHEMA_4_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
+    reads: &[
+        &ccfg::SCHEMA_1,
+        &ccfg::SCHEMA_2,
+        &ccfg::SCHEMA_3,
+        &ccfg::SCHEMA_4,
+    ],
+    writes: &ccfg::SCHEMA_4,
+    knows: &ccfg::SCHEMA_5,
+};
+
+const ENVELOPE_NAME: &str = "messaging_sponsored_envelope_verification_enabled_from_height";
+const ACCOUNTING_NAME: &str = "messaging_fee_nonce_accounting_enabled_from_height";
+
+/// The two messaging gates through the real boot sequence, on a directory the
+/// schema-4 release recorded:
+///
+/// * unset, this binary boots it unchanged, still schema 4;
+/// * set together (with the peer-declaration deadline) before the move, the
+///   boot is refused, naming the stopped-node command with both commitments,
+///   and the configuration record is not rewritten;
+/// * after the move, the set genesis also commits the envelope tag, which is
+///   not a gate, so the boot is refused and names the field-level
+///   acknowledgement; acknowledged, the node boots with the two heights and
+///   the tag recorded, and a fresh directory commits all three from its first
+///   boot, in schema 5.
+#[test]
+fn the_messaging_gates_through_the_boot_sequence() {
+    let g = genesis();
+    let scheduled = {
+        let mut s = genesis();
+        s.params.peer_protocol_declaration_required_from_height = Some(900);
+        s.params
+            .messaging_sponsored_envelope_verification_enabled_from_height = Some(1_000);
+        s.params.messaging_fee_nonce_accounting_enabled_from_height = Some(1_000);
+        s
+    };
+    scheduled.validate().unwrap();
+    let dir = tempfile::TempDir::new().unwrap();
+    {
+        let db = Database::open_default(dir.path()).unwrap();
+        ccfg::record::check_at_startup_with(&db, &g, 0, &SCHEMA_4_RELEASE).unwrap();
+    }
+    let before = record(dir.path()).unwrap();
+    assert_eq!(before.config.schema().number, 4);
+
+    boot(dir.path(), &g).unwrap();
+    assert_eq!(record(dir.path()).unwrap(), before, "runs as it stands");
+
+    let pending = {
+        let db = Database::open_default(dir.path()).unwrap();
+        ccfg::pending_schema_transition(&db).unwrap().unwrap()
+    };
+    assert_eq!((pending.from_schema, pending.to_schema), (4, 5));
+    let err = boot(dir.path(), &scheduled).unwrap_err();
+    assert!(err.contains(ENVELOPE_NAME), "{err}");
+    assert!(err.contains(ACCOUNTING_NAME), "{err}");
+    assert!(
+        err.contains(&format!(
+            "acknowledge-consensus-config-schema --old {} --new {}",
+            pending.old, pending.new
+        )),
+        "{err}"
+    );
+    assert_eq!(record(dir.path()).unwrap(), before, "not rewritten");
+
+    boot(dir.path(), &g).unwrap();
+    assert_eq!(record(dir.path()).unwrap(), before);
+    {
+        let db = Database::open_default(dir.path()).unwrap();
+        ccfg::acknowledge_schema_transition(&db, 0, pending.old, pending.new).unwrap();
+    }
+    boot(dir.path(), &g).unwrap();
+    assert_eq!(record(dir.path()).unwrap().commitment, pending.new);
+
+    let err = boot(dir.path(), &scheduled).unwrap_err();
+    assert!(err.contains("SPONSORED_SEND_V2_TAG"), "{err}");
+    assert!(err.contains("acknowledge-consensus-config --old"), "{err}");
+    assert_eq!(record(dir.path()).unwrap().commitment, pending.new);
+    let computed = ccfg::build(&scheduled).unwrap().commitment();
+    {
+        let db = Database::open_default(dir.path()).unwrap();
+        ccfg::acknowledge(&db, &scheduled, 0, pending.new, computed).unwrap();
+    }
+    boot(dir.path(), &scheduled).unwrap();
+    let r = record(dir.path()).unwrap();
+    assert_eq!(r.config.schema().number, 5);
+    assert_eq!(r.commitment, computed);
+    assert_eq!(r.config.get(0x1048), Some(&ccfg::Value::U64(1_000)));
+    assert_eq!(r.config.get(0x1049), Some(&ccfg::Value::U64(1_000)));
+    assert_eq!(
+        r.config.get(0x252b),
+        Some(&ccfg::Value::Bytes(
+            sumchain_primitives::SPONSORED_SEND_V2_TAG.to_vec()
+        ))
+    );
+    assert_eq!(
+        height_of(&activation_heights(dir.path()), ENVELOPE_NAME),
+        Some(1_000)
+    );
+
+    let fresh = tempfile::TempDir::new().unwrap();
+    boot(fresh.path(), &scheduled).unwrap();
+    let r = record(fresh.path()).unwrap();
+    assert_eq!(r.config.schema().number, 5);
+    assert_eq!(r.commitment, computed);
+}
+
 type Rows = Vec<(String, Vec<u8>, Vec<u8>)>;
 
 /// Every row of every column family.

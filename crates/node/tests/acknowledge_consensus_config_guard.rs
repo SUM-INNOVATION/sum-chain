@@ -170,6 +170,19 @@ static SCHEMA_3_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
     knows: &ccfg::SCHEMA_5,
 };
 
+/// The release that wrote schema 4: it read schemas 1 to 4, wrote 4, and knew
+/// schema 5 only as a draft.
+static SCHEMA_4_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
+    reads: &[
+        &ccfg::SCHEMA_1,
+        &ccfg::SCHEMA_2,
+        &ccfg::SCHEMA_3,
+        &ccfg::SCHEMA_4,
+    ],
+    writes: &ccfg::SCHEMA_4,
+    knows: &ccfg::SCHEMA_5,
+};
+
 /// A database whose baseline the previous release recorded (schema 1), and the
 /// commitment this binary moves it to.
 fn schema_1_fixture() -> (tempfile::TempDir, std::path::PathBuf, String, String) {
@@ -209,6 +222,21 @@ fn schema_3_fixture() -> (tempfile::TempDir, std::path::PathBuf, String, String)
     ccfg::record::check_at_startup_with(&db, &genesis(), 0, &SCHEMA_3_RELEASE).unwrap();
     let r = ccfg::read_record(&db).unwrap().unwrap();
     assert_eq!(r.config.schema().number, 3);
+    let pending = ccfg::pending_schema_transition(&db)
+        .unwrap()
+        .expect("this binary offers schema 5");
+    (dir, data, r.commitment.to_string(), pending.new.to_string())
+}
+
+/// A database the schema-4 release created (schema 4), and the commitment this
+/// binary moves it to.
+fn schema_4_fixture() -> (tempfile::TempDir, std::path::PathBuf, String, String) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let data = dir.path().join("data");
+    let db = Database::open_default(&data).unwrap();
+    ccfg::record::check_at_startup_with(&db, &genesis(), 0, &SCHEMA_4_RELEASE).unwrap();
+    let r = ccfg::read_record(&db).unwrap().unwrap();
+    assert_eq!(r.config.schema().number, 4);
     let pending = ccfg::pending_schema_transition(&db)
         .unwrap()
         .expect("this binary offers schema 5");
@@ -319,6 +347,30 @@ fn the_schema_transition_moves_a_schema_3_database() {
         history[0].changed_ids,
         vec![0x1044, 0x1045, 0x1046, 0x1047, 0x1048, 0x1049, 0x252b]
     );
+    assert_eq!(history[0].old_commitment.to_string(), old);
+}
+
+/// A schema-4 database, as the schema-4 release records, moves to schema 5 the
+/// same way, adding exactly the two messaging gates and the envelope tag.
+#[test]
+fn the_schema_transition_moves_a_schema_4_database() {
+    let (_dir, data, old, new) = schema_4_fixture();
+    let out = ack_schema(&data, &old, &new);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("schema 4 -> 5"), "{}", text(&out));
+    assert!(
+        text(&out).contains("3 field(s) added absent"),
+        "{}",
+        text(&out)
+    );
+    let db = Database::open_default(&data).unwrap();
+    let r = ccfg::read_record(&db).unwrap().unwrap();
+    assert_eq!(r.config.schema().number, 5);
+    assert_eq!(r.commitment.to_string(), new);
+    let history = ccfg::read_transitions(&db).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].kind, ccfg::TransitionKind::SchemaTransition);
+    assert_eq!(history[0].changed_ids, vec![0x1048, 0x1049, 0x252b]);
     assert_eq!(history[0].old_commitment.to_string(), old);
 }
 
