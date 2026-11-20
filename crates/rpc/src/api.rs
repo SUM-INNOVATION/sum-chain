@@ -35,14 +35,15 @@ use crate::types::{
     ArchiveUnbondingInfo, AssignmentCoverageV2, ChainParamsInfo, EpochInfo, FinalityInfo, GasEstimateResult, HealthResponse, IncomeAttestationInfo, NodeRecordInfo, PushableFileInfoV2, StorageBuildReassignChunksV2Request, StorageBuildResponse, StorageFileInfoV2, TxStatusV2,
     InboxFilterInfo, IssueAcademicCredentialRequest, IssueAcademicCredentialResponse,
     MessageDataInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
-    MessagingSenderNonceInfo,
+    MessagingSenderNonceInfo, PaymentStatusInfo, EnvelopeOutcomeInfo,
     NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
     PublicKeyInfo, ReceiptInfo, RegisterAcademicIssuerRequest, RegisterAcademicIssuerResponse,
     RegisterEmploymentIssuerRequest, RegisterEmploymentIssuerResponse,
     RevokeAcademicCredentialRequest, RevokeAcademicCredentialResponse,
     RevokeEmploymentCredentialRequest, RevokeEmploymentCredentialResponse,
     RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary, SpamReportInfo,
-    SponsoredRegistrationRequest, SponsoredRegistrationResponse, StakingParamsInfo, StakingSummary,
+    SponsoredEnvelopeInfo, SponsoredRegistrationRequest, SponsoredRegistrationResponse,
+    StakingParamsInfo, StakingSummary,
     StakingValidatorInfo, SubmitSponsoredMessageRequest, TokenHoldings, TokenInfo, TokenMintersInfo,
     TransactionHistoryResponse, TransactionInfo, UnbondingDelegationRpcInfo,
     ValidatorDelegationSummary, ValidatorSetInfo, ValidatorSetRpcInfo, ValidatorSigningRpcInfo,
@@ -664,7 +665,11 @@ pub trait SumChainApi {
     /// `Finalized { block_height, finality_mechanism }` (at or below this
     /// node's local finalized height: `finality_depth` blocks on top of it on
     /// THIS node — `"local-depth"`, not certified network finality, #270), or
-    /// `Failed { ... }`. `Dropped` is reserved but not currently returned.
+    /// `Failed { ... }`, or `Dropped` (this node's pool evicted it above a gap
+    /// and has not admitted it since: a local observation from a bounded,
+    /// in-memory history, not proof of non-delivery; see `TxStatusV2`).
+    /// Precedence: a canonical receipt, then a place in the pool, then the
+    /// eviction history, then `Unknown`.
     /// The experimental BFT engine is refused at startup (#271), so no serving
     /// node reports BFT finality.
     #[method(name = "chain_getTransactionStatus")]
@@ -1146,7 +1151,9 @@ pub trait SumChainApi {
 
     /// The sender's committed messaging nonce: how many messages this address
     /// has sent (sponsored or direct), and therefore the `nonce` the next
-    /// sponsored `SendMessage` envelope from it must carry. Read-only.
+    /// sponsored `SendMessage` envelope from it must carry: in either envelope
+    /// form under this node's inclusion policy, and in consensus from the
+    /// envelope verification gate on. Read-only.
     #[method(name = "messaging_getSenderNonce")]
     async fn messaging_get_sender_nonce(
         &self,
@@ -1197,11 +1204,73 @@ pub trait SumChainApi {
     ) -> Result<Vec<MessageEventInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get the encrypted message data for a specific message by transaction hash
+    ///
+    /// Only for a relayed (sponsored) message the canonical chain executed:
+    /// `None` for a transaction with no canonical receipt or a refused one.
+    /// `has_payment` and `payment_amount` report a payment exactly where the
+    /// chain executed one: a relayed message executed at or above the envelope
+    /// gate whose envelope carried a positive amount; never below the gate.
+    /// The payment stays reported after it is claimed or refunded;
+    /// `messaging_getPaymentStatus` says whether it is still escrowed.
     #[method(name = "messaging_getMessageData")]
     async fn messaging_get_message_data(
         &self,
         tx_hash: String,
     ) -> Result<Option<MessageDataInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// The signed envelope an executed relayed message carried: the sender's
+    /// key, recipient, content, and the envelope's signature, nonce and expiry,
+    /// read from the stored transaction (nothing derived; all of it already
+    /// on chain). A client matches these against the envelope it signed to
+    /// tell whether its own message was delivered (see
+    /// `messaging_submitSponsored`). Read-only.
+    ///
+    /// `None` for a relayed message with no canonical receipt or a refused
+    /// one. A transaction that is not a relayed message is refused (`-32602`).
+    #[method(name = "messaging_getSponsoredEnvelope")]
+    async fn messaging_get_sponsored_envelope(
+        &self,
+        tx_hash: String,
+    ) -> Result<Option<SponsoredEnvelopeInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// What became of a message's payment, as the canonical chain executed
+    /// it, for a paid send or a relayed message (any other transaction is
+    /// refused, `-32602`). Read from the canonical receipt, the transaction,
+    /// and the escrow row; an amount named in a payload is never evidence on
+    /// its own. `not_included`: no canonical receipt (never carried, or only
+    /// on a branch that lost fork choice). `refused`: the receipt is not a
+    /// success. `none`: executed without a payment, which includes a relayed
+    /// message below the envelope gate (`legacy_amount_unbacked` is then true
+    /// if its envelope named an amount). `escrowed`: the escrow row is
+    /// present (amount and expiry from it). `settled`: the escrow row is gone
+    /// (claimed, or refunded after expiry; while the clock gates are closed
+    /// only a claim settles). A send of value 0 is `none` at every height. One
+    /// historical difference: a paid send of amount 0 included below the
+    /// envelope gate is still reported by the existing message methods with
+    /// `has_payment: true` (their earlier value, kept exactly); from the gate
+    /// they report `false`, as this method does. Read-only.
+    #[method(name = "messaging_getPaymentStatus")]
+    async fn messaging_get_payment_status(
+        &self,
+        message_id: String,
+    ) -> Result<PaymentStatusInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// What spent `sender`'s sponsored-envelope nonce `nonce`: the
+    /// transaction that carried the envelope (the first includer's, under
+    /// front-running), whether it executed or was refused, and what it
+    /// escrowed, from the outcome row the chain wrote when the nonce was
+    /// spent. A nonce below the sender's current messaging nonce with no
+    /// outcome row is reported as `spent_without_outcome`, with no
+    /// transaction, receipt code or height: the sender's own direct or paid
+    /// send spent it (revoking any envelope signed at it), or a sponsored
+    /// message executed below the envelope gate did. `None` only while the
+    /// nonce is unspent. Read-only.
+    #[method(name = "messaging_getEnvelopeOutcome")]
+    async fn messaging_get_envelope_outcome(
+        &self,
+        sender: String,
+        nonce: u64,
+    ) -> Result<Option<EnvelopeOutcomeInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get pending payment by message ID
     #[method(name = "messaging_getPendingPayment")]
@@ -1248,6 +1317,63 @@ pub trait SumChainApi {
     ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Submit a sponsored message (meta-transaction)
+    ///
+    /// The relay wraps the signed envelope in a transaction from its sponsor
+    /// key (a wrapper) and returns the wrapper's hash. A wrapper the chain
+    /// refuses with `InvalidNonce` never executed: it charged no fee and moved
+    /// no messaging nonce. On such a receipt a client looks for the exact
+    /// envelope the user signed among the transactions of every block above the
+    /// height that was final when it was signed (`get_finality` at signing; a
+    /// chain switch can replace blocks above it, even below the signing
+    /// height), up to the tip: `get_block_by_height`, then
+    /// `messaging_getSponsoredEnvelope` for each transaction, which answers from
+    /// the stored transaction and its receipt, and only for a relayed message
+    /// that executed successfully. It matches the envelope's signature, nonce
+    /// and expiry as well as sender key, recipient and content (two messages
+    /// with the same text are two intents), whichever wrapper carried it; and
+    /// it reads `messaging_getSenderNonce`. It checks again after a chain switch.
+    /// A search that cannot be completed (a block not available, an RPC
+    /// error) or that covers blocks not yet final does not mean "not
+    /// delivered": the client neither asks for a new signature nor reports the
+    /// message lost until the blocks that show it are final, on the branch it
+    /// is reading: a chain switch that replaces the block at which it first saw
+    /// the condition starts the wait again.
+    ///
+    /// A client uses one relay per intent: the relay refuses a second wrapper
+    /// of an envelope pending in its own pool, which another relay's pool may
+    /// not hold yet. `messaging_getSentMessages` is not a
+    /// substitute: it returns the oldest 1,000 records, and below the
+    /// transaction-index gate it keeps one row per sender per block.
+    /// - the message is on the chain: it is delivered, and never sent again;
+    /// - not delivered, and the envelope's nonce is the committed nonce: the
+    ///   client asks for a fresh wrapper of the same signed envelope;
+    /// - not delivered, and the committed nonce moved past the envelope's: the
+    ///   user signs a new envelope at the committed nonce; the relay cannot;
+    /// - a string-form envelope the relay no longer takes: the user signs a
+    ///   version-2 envelope; the relay cannot convert it.
+    ///
+    /// The relay refuses a second wrapper of an envelope already pending in its
+    /// pool: by its nonce for a version-2 envelope, as the identical signed
+    /// envelope for the string form.
+    ///
+    /// A moved nonce is never read as a delivery. The client bounds its
+    /// retries, and persists the count (written, and synced, before each
+    /// request, and lowered only on a definite refusal) and the
+    /// first-submission height with the message (the reference client
+    /// in the RPC tests asks for at most three wrappers per message); the
+    /// sponsor pays for each wrapper that executes, and nothing for one
+    /// refused with `InvalidNonce`.
+    ///
+    /// `koppa_amount` (decimal; `"0"` or absent names none, at every height)
+    /// is a payment the named sender makes into the existing escrow. It is
+    /// relayed only in a version-2 envelope for a block at or above the
+    /// envelope verification height (the next block, the tip plus one);
+    /// below it an envelope naming a positive amount is refused. As advice,
+    /// the relay checks that the named sender's balance covers the amount
+    /// beyond what its envelopes pending in this node's pool already name
+    /// (and this wrapper's fee, when the sender is the relay's own key). The
+    /// block re-checks: an envelope its sender cannot fund there is a charged
+    /// refusal that spends the sender's nonce. The sponsor pays only the fee.
     #[method(name = "messaging_submitSponsored")]
     async fn messaging_submit_sponsored(
         &self,
@@ -1264,6 +1390,13 @@ pub trait SumChainApi {
     /// yet active. The registrant must sign the canonical
     /// `RegisterPublicKeySponsoredV1` preimage (see
     /// `SponsoredRegistrationRequest`).
+    ///
+    /// Also refuses, before it takes a sponsor nonce, a public key whose
+    /// sponsored registration is already pending in this node's pool, an
+    /// address whose own `RegisterPublicKey` is pending there, and an address
+    /// already registered: the block would refuse either, and this
+    /// relay signs registrations and `messaging_submitSponsored` messages in
+    /// one sponsor nonce sequence.
     #[method(name = "messaging_registerSponsored")]
     async fn messaging_register_sponsored(
         &self,

@@ -9,7 +9,7 @@
 //!
 //! The release that wrote schema 2 read schemas 1 and 2 and wrote 2:
 //! [`SCHEMA_2_RELEASE`] models it, and is this file's subject. This binary
-//! writes schema 3 ([`PRODUCTION`], `consensus_config_schema3.rs`) and still
+//! writes schema 4 ([`PRODUCTION`], `consensus_config_schema4.rs`) and still
 //! runs a schema-2 record as it stands. The release before schema 2 read and
 //! wrote schema 1 and knew schema 2 only as a draft: [`PREVIOUS`] models it, for
 //! what an older binary does with a schema-2 database. [`TEST_SCHEMA_2`] adds
@@ -115,18 +115,25 @@ static TEST_SCHEMA_3: Schema = Schema {
     added: ccfg::schema::SCHEMA_3_ADDED,
 };
 
-/// [`TEST_SCHEMA_3`] plus the draft schema 4, as [`PRODUCTION`] knows it.
+/// [`TEST_SCHEMA_3`] plus schema 4, as [`PRODUCTION`] knows it.
 static TEST_SCHEMA_4: Schema = Schema {
     number: 4,
     previous: Some(&TEST_SCHEMA_3),
     added: ccfg::schema::SCHEMA_4_ADDED,
 };
 
+/// [`TEST_SCHEMA_4`] plus the draft schema 5, as [`PRODUCTION`] knows it.
+static TEST_SCHEMA_5: Schema = Schema {
+    number: 5,
+    previous: Some(&TEST_SCHEMA_4),
+    added: ccfg::schema::SCHEMA_5_ADDED,
+};
+
 /// A binary that reads schemas 1 and 2 and writes 2.
 static ENABLED: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &TEST_SCHEMA_2],
     writes: &TEST_SCHEMA_2,
-    knows: &TEST_SCHEMA_4,
+    knows: &TEST_SCHEMA_5,
 };
 
 /// The previous release's shape — reads and writes schema 1, schema 2 a draft —
@@ -134,7 +141,7 @@ static ENABLED: SchemaPolicy = SchemaPolicy {
 static DRAFT: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1],
     writes: &SCHEMA_1,
-    knows: &TEST_SCHEMA_4,
+    knows: &TEST_SCHEMA_5,
 };
 
 /// The release before schema 2: it read and wrote schema 1 and knew the real
@@ -142,7 +149,7 @@ static DRAFT: SchemaPolicy = SchemaPolicy {
 static PREVIOUS: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1],
     writes: &SCHEMA_1,
-    knows: &ccfg::SCHEMA_4,
+    knows: &ccfg::SCHEMA_5,
 };
 
 /// The release that wrote schema 2: it read schemas 1 and 2, wrote 2, and knew
@@ -150,7 +157,7 @@ static PREVIOUS: SchemaPolicy = SchemaPolicy {
 static SCHEMA_2_RELEASE: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &SCHEMA_2],
     writes: &SCHEMA_2,
-    knows: &ccfg::SCHEMA_4,
+    knows: &ccfg::SCHEMA_5,
 };
 
 // ── the schema-1 fixture ────────────────────────────────────────────────────
@@ -380,11 +387,11 @@ fn schema_2_is_frozen_and_was_written() {
             .collect::<Vec<_>>(),
         [1, 2]
     );
-    // This binary keeps reading it for good and writes schema 3, which extends
+    // This binary keeps reading it for good and writes schema 4, which extends
     // it; schema 2 itself is unchanged.
     assert!(PRODUCTION.reads.iter().any(|s| std::ptr::eq(*s, &SCHEMA_2)));
-    assert!(std::ptr::eq(PRODUCTION.writes, &ccfg::SCHEMA_3));
-    assert!(ccfg::SCHEMA_3.extends(&SCHEMA_2));
+    assert!(std::ptr::eq(PRODUCTION.writes, &ccfg::SCHEMA_4));
+    assert!(ccfg::SCHEMA_4.extends(&SCHEMA_2));
     PRODUCTION.check().unwrap();
     SCHEMA_2_RELEASE.check().unwrap();
     PREVIOUS.check().unwrap();
@@ -1258,7 +1265,7 @@ fn dropping_an_older_schema_from_reads_refuses_a_transitioned_history() {
     static DROPPED_SCHEMA_1: SchemaPolicy = SchemaPolicy {
         reads: &[&TEST_SCHEMA_2],
         writes: &TEST_SCHEMA_2,
-        knows: &TEST_SCHEMA_4,
+        knows: &TEST_SCHEMA_5,
     };
     DROPPED_SCHEMA_1.check().unwrap();
     set_example(None);
@@ -1323,10 +1330,15 @@ fn schema_2_encodes_in_id_order_whatever_the_registration_order() {
         previous: Some(schema),
         added: ccfg::schema::SCHEMA_3_ADDED,
     }));
-    let knows: &'static Schema = Box::leak(Box::new(Schema {
+    let four: &'static Schema = Box::leak(Box::new(Schema {
         number: 4,
         previous: Some(three),
         added: ccfg::schema::SCHEMA_4_ADDED,
+    }));
+    let knows: &'static Schema = Box::leak(Box::new(Schema {
+        number: 5,
+        previous: Some(four),
+        added: ccfg::schema::SCHEMA_5_ADDED,
     }));
     let policy: &'static SchemaPolicy = Box::leak(Box::new(SchemaPolicy {
         reads,

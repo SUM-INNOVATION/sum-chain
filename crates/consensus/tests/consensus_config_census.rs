@@ -479,6 +479,47 @@ fn every_schema_2_constant_row_names_a_schema_2_field_and_back() {
     }
 }
 
+/// Constants committed by the draft schema 5: each `COMMITTED schema-5` row
+/// names a field `SCHEMA_5_ADDED` registers — the constant's own field — and
+/// every schema-5 field in the compiled-constant range has its row.
+#[test]
+fn every_schema_5_constant_row_names_a_schema_5_field_and_back() {
+    use sumchain_consensus::consensus_config::schema::SCHEMA_5_ADDED;
+    let constant_range = 0x2000..=0x2fff;
+    let rows: Vec<[String; 5]> = census_rows()
+        .into_iter()
+        .filter(|r| r[2] == "COMMITTED" && r[3] == "schema-5")
+        .collect();
+    assert!(!rows.is_empty());
+    for r in &rows {
+        let id = r[4].split_whitespace().next().unwrap();
+        let id = u16::from_str_radix(id.trim_start_matches("0x"), 16).unwrap();
+        let added = SCHEMA_5_ADDED
+            .iter()
+            .find(|a| a.spec.id == id)
+            .unwrap_or_else(|| panic!("{r:?}: {id:#06x} is not a schema-5 field"));
+        assert!(constant_range.contains(&id), "{r:?}");
+        assert!(
+            added.spec.name.ends_with(&format!("::{}", r[1])),
+            "{r:?} names {}",
+            added.spec.name
+        );
+    }
+    for a in SCHEMA_5_ADDED
+        .iter()
+        .filter(|a| constant_range.contains(&a.spec.id))
+    {
+        let constant = a.spec.name.rsplit("::").next().unwrap();
+        let id = format!("{:#06x}", a.spec.id);
+        assert!(
+            rows.iter()
+                .any(|r| r[1] == constant && r[4].starts_with(&id)),
+            "schema-5 field {} has no census row",
+            a.spec.name
+        );
+    }
+}
+
 /// Gated constants (the beacon's DSTs and wire format) are committed although
 /// the gate cannot open today; this pins that it still cannot, so the day it can
 /// is a deliberate review of what the beacon path commits to.

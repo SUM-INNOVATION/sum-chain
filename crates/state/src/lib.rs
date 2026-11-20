@@ -63,6 +63,7 @@ pub mod tax_executor;
 pub mod tax_view;
 pub mod token_executor;
 pub mod token_view;
+pub mod tx_signature;
 pub mod validator_quorum;
 
 /// The activation height for the executor-written block timestamp.

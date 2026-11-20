@@ -174,6 +174,14 @@ enum Commands {
     },
 
     /// Restore database from a backup
+    ///
+    /// Not part of any upgrade or recovery procedure, and never run over
+    /// accepted history. It refuses to change the existing database's migration
+    /// provenance: the consensus-configuration record and its history must be
+    /// identical in the backup, and a start marker the existing database holds
+    /// must be held by the backup at the same record state. A backup whose
+    /// provenance cannot be read is refused. There is no flag that bypasses
+    /// this.
     Restore {
         /// Backup directory to restore from
         #[arg(short, long)]
@@ -183,9 +191,19 @@ enum Commands {
         #[arg(short, long, default_value = "data")]
         data_dir: PathBuf,
 
-        /// Force restore even if target exists
+        /// Overwrite an existing target. Does not bypass the provenance check
+        /// above.
         #[arg(long)]
         force: bool,
+
+        /// Acknowledge that a MISSING target path is a new node's data
+        /// directory. Required when the backup holds no start marker: such a
+        /// backup predates every normal start of this binary on that database,
+        /// and restoring it into an empty path yields a database the binary
+        /// cannot tell from one that was never moved. Not a bypass: an existing
+        /// target keeps the provenance comparison whatever this flag says.
+        #[arg(long)]
+        new_node: bool,
     },
 
     /// List available backups
@@ -399,6 +417,8 @@ enum Commands {
     ///
     /// Local only. It authorizes nothing on the network and activates nothing.
     /// A binary that records the schema the database already holds refuses.
+    /// Until the node first runs on the moved record,
+    /// `revert-consensus-config-schema` can undo the move.
     AcknowledgeConsensusConfigSchema {
         /// Data directory
         #[arg(short, long, default_value = "data")]
@@ -419,6 +439,49 @@ enum Commands {
         /// Print the move this binary would make, with both commitments exactly
         /// as `--old` and `--new` take them, and exit. Opens the database
         /// read-only and writes nothing; meant for a stopped node.
+        #[arg(long, conflicts_with_all = ["old", "new", "yes"])]
+        show: bool,
+    },
+
+    /// PRE-START ONLY: undo this binary's consensus-configuration schema move
+    /// (#268) on a stopped node that has not run on the moved record.
+    ///
+    /// For an upgrade abandoned after `acknowledge-consensus-config-schema`
+    /// and before the node's first start: a binary that does not read the
+    /// newer schema refuses the moved record. This writes back exactly the
+    /// record the move replaced, which the move kept, and removes the move's
+    /// history entry, so the configuration rows are byte for byte what they
+    /// were before the move. It touches no block, no state and no other row;
+    /// it is not a rollback of the chain.
+    ///
+    /// Refused unless the move is the last recorded change, no normal start
+    /// has been attempted since (every start writes a marker first, before any
+    /// other write, whatever the start then does), and the chain is still
+    /// exactly at the height the move was made at, with no block above it.
+    /// Once a start has been attempted on the moved record, recovery is forward
+    /// only, with a binary that reads the newer schema. The operator names
+    /// BOTH commitments: `--show` prints them, the head and the start marker
+    /// without writing.
+    RevertConsensusConfigSchema {
+        /// Data directory
+        #[arg(short, long, default_value = "data")]
+        data_dir: PathBuf,
+
+        /// The commitment recorded in this database (the moved record), exactly
+        #[arg(long, required_unless_present = "show")]
+        old: Option<String>,
+
+        /// The commitment the move replaced, which is restored, exactly
+        #[arg(long, required_unless_present = "show")]
+        new: Option<String>,
+
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+
+        /// Print the revert this binary would make, with both commitments
+        /// exactly as `--old` and `--new` take them, or why none is available,
+        /// and exit. Opens the database read-only and writes nothing.
         #[arg(long, conflicts_with_all = ["old", "new", "yes"])]
         show: bool,
     },
@@ -670,7 +733,10 @@ async fn main() -> Result<()> {
         Commands::Info { data_dir } => {
             init_logging("info", false)?;
 
-            let db = Database::open_default(&data_dir)?;
+            // Read-only: a stopped node's directory is inspected, never
+            // changed, and no start marker is written.
+            let db = Database::open_read_only(&data_dir)
+                .with_context(|| format!("cannot open {data_dir:?} read-only"))?;
             let block_store = sumchain_storage::BlockStore::new(&db);
 
             match block_store.get_latest()? {
@@ -736,7 +802,10 @@ async fn main() -> Result<()> {
             backup,
             data_dir,
             force,
+            new_node,
         } => {
+            use sumchain_consensus::consensus_config as ccfg;
+
             init_logging("info", false)?;
 
             // Check if target exists
@@ -747,9 +816,112 @@ async fn main() -> Result<()> {
                 );
             }
 
+            // The backup's migration provenance, read from the backup itself
+            // (a checkpoint is a complete database): its start marker and its
+            // consensus-configuration rows. Unreadable means refused.
+            let backup_provenance = {
+                let b = Database::open_read_only(&backup).with_context(|| {
+                    format!(
+                        "refusing to restore: cannot open the backup {backup:?} read-only, so \
+                         its migration provenance cannot be established"
+                    )
+                })?;
+                ccfg::migration_provenance(&b).map_err(|e| {
+                    anyhow::anyhow!(
+                        "refusing to restore: the backup's migration provenance cannot be \
+                         established ({e})"
+                    )
+                })?
+            };
+            // A missing target has nothing to compare with. A backup that holds
+            // no start marker predates every normal start of this binary on
+            // that database; restored into an empty path it comes back as a
+            // database the binary cannot tell from one that was never moved,
+            // which is how a validator's directory moved aside and a pre-move
+            // copy restored in its place would look. So that restore needs the
+            // operator's explicit word that the path is a new node's. The
+            // backup's head and record schema are printed first.
+            if !data_dir.exists() {
+                let b = Database::open_read_only(&backup).with_context(|| {
+                    format!("refusing to restore: cannot open the backup {backup:?} read-only")
+                })?;
+                let blocks = sumchain_storage::schema::BlockStore::new(&b);
+                let head = match (blocks.get_latest_height()?, blocks.get_latest_hash()?) {
+                    (Some(h), Some(hash)) => format!("{h} {hash}"),
+                    _ => "none".to_string(),
+                };
+                let schema = ccfg::read_record(&b)
+                    .ok()
+                    .flatten()
+                    .map_or("none".to_string(), |r| r.config.schema().number.to_string());
+                drop(b);
+                println!("The target {data_dir:?} does not exist.");
+                println!("  Backup head:                   {head}");
+                println!("  Backup configuration schema:   {schema}");
+                println!(
+                    "  Backup start marker:           {}",
+                    match &backup_provenance.marker {
+                        Some(m) => format!("attempt {} at {:?}", m.attempt, m.record),
+                        None => "none".to_string(),
+                    }
+                );
+                if backup_provenance.marker.is_none() && !new_node {
+                    anyhow::bail!(
+                        "refusing to restore into the missing target {data_dir:?}: the backup \
+                         holds no start marker, so the result would be a database this binary \
+                         cannot tell from one that was never moved (the way a validator's \
+                         directory moved aside and a pre-move copy restored in its place would \
+                         look). If this path is a new node's data directory, pass --new-node. \
+                         Nothing was created"
+                    );
+                }
+            }
+            // An existing database keeps its protection: the record history
+            // and the start marker's record state must survive the restore.
+            // There is no flag that bypasses this, --new-node included.
+            if data_dir.exists() {
+                let current = {
+                    let t = Database::open_read_only(&data_dir).with_context(|| {
+                        format!(
+                            "refusing to restore: cannot open the existing database \
+                             {data_dir:?} read-only, so its migration provenance cannot be \
+                             established"
+                        )
+                    })?;
+                    ccfg::migration_provenance(&t).map_err(|e| {
+                        anyhow::anyhow!(
+                            "refusing to restore: the existing database's migration \
+                             provenance cannot be established ({e})"
+                        )
+                    })?
+                };
+                ccfg::restore_preserves_provenance(&current, &backup_provenance).map_err(
+                    |why| {
+                        anyhow::anyhow!(
+                            "refusing to restore: {why}. Nothing was changed. There is no \
+                             force bypass; recovery after a consensus-configuration schema \
+                             move is forward only"
+                        )
+                    },
+                )?;
+            }
+
             info!("Restoring database from backup");
 
             Database::restore_from_backup(&backup, &data_dir)?;
+            println!(
+                "Migration provenance preserved: start marker {}, {} consensus-configuration \
+                 row(s)",
+                match &backup_provenance.marker {
+                    Some(m) => format!("attempt {} at {:?}", m.attempt, m.record),
+                    None => "none".to_string(),
+                },
+                backup_provenance
+                    .rows
+                    .iter()
+                    .filter(|(k, _)| k.starts_with(b"consensus_config/"))
+                    .count()
+            );
 
             println!("Database restored successfully!");
             println!("  From: {:?}", backup);
@@ -1031,6 +1203,7 @@ async fn main() -> Result<()> {
             // go deeper than this node's undo history reaches. Those live in the
             // consensus crate rather than here because a correctness-critical
             // unwind only a binary can reach is one no test can reach either.
+            use sumchain_consensus::consensus_config as ccfg;
             use sumchain_consensus::reorg::{
                 execute_rollback, plan_rollback, refuse_rollback_across_certified,
             };
@@ -1083,6 +1256,29 @@ async fn main() -> Result<()> {
             // that check trusts the stored pointer only once this has passed.
             sumchain_storage::certified_guard::audit_at_start(&db)
                 .map_err(|e| anyhow::anyhow!("refusing to roll back: {e}"))?;
+
+            // The migration provenance — the start marker and the
+            // consensus-configuration record with its history — must be
+            // readable now and identical afterwards. A rollback never reopens
+            // the pre-start schema revert: that revert is decided by the start
+            // marker, which no block or journal row carries, so the unwind
+            // below cannot touch it; this establishes and then verifies that.
+            // While a schema move awaits its first start or its revert, nothing
+            // but those two may change the database.
+            let provenance = ccfg::migration_provenance(&db).map_err(|e| {
+                anyhow::anyhow!(
+                    "refusing to roll back: the migration provenance cannot be established \
+                     ({e})"
+                )
+            })?;
+            if ccfg::pending_schema_revert(&db).is_ok() {
+                anyhow::bail!(
+                    "refusing to roll back: a consensus-configuration schema move awaits its \
+                     first start or its pre-start revert on this database. Decide the abort \
+                     first (`revert-consensus-config-schema`) or start the node; nothing was \
+                     changed"
+                );
+            }
 
             let (source, gates) = match configured {
                 Some(configured) => configured,
@@ -1176,6 +1372,35 @@ async fn main() -> Result<()> {
             let state = StateManager::new(db.clone(), 0);
             let report = execute_rollback(&db, &state, &plan, &journals, journals.policy())
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
+            // A tripwire, not a tested branch: no correct rollback can change the
+            // provenance (the unwind touches blocks, journals, indexes, the head
+            // and finality only), so nothing can make this fire. It is here so
+            // that a future unwind that did touch those rows would be reported,
+            // and its presence is pinned by a source tripwire in
+            // `tests/acknowledge_consensus_config_guard.rs`.
+            let after = ccfg::migration_provenance(&db).map_err(|e| {
+                anyhow::anyhow!("the rollback left the migration provenance unreadable ({e})")
+            })?;
+            if after != provenance {
+                anyhow::bail!(
+                    "the rollback changed the migration provenance (the start marker or the \
+                     consensus-configuration rows); this must not happen. Stop and report; \
+                     do not start the node"
+                );
+            }
+            println!(
+                "Migration provenance preserved: start marker {}, {} consensus-configuration \
+                 row(s)",
+                match &after.marker {
+                    Some(m) => format!("attempt {} at {:?}", m.attempt, m.record),
+                    None => "none".to_string(),
+                },
+                after
+                    .rows
+                    .iter()
+                    .filter(|(k, _)| k.starts_with(b"consensus_config/"))
+                    .count()
+            );
 
             println!();
             println!("Rollback complete.");
@@ -1605,8 +1830,9 @@ async fn main() -> Result<()> {
             println!("  Re-encoded:     {new}");
             println!();
             println!("The recorded rules are unchanged; fields the newer schema adds are");
-            println!("recorded absent. This does not make any other node agree, and it");
-            println!("cannot be undone: the history is append-only.");
+            println!("recorded absent. This does not make any other node agree. Until this");
+            println!("node first runs on the moved record, `revert-consensus-config-schema`");
+            println!("can undo it; once a block above this height exists, it cannot.");
             if !yes {
                 println!();
                 println!("Type 'yes' to proceed:");
@@ -1629,6 +1855,103 @@ async fn main() -> Result<()> {
                 done.from,
                 done.to,
                 done.added.len()
+            );
+        }
+
+        Commands::RevertConsensusConfigSchema {
+            data_dir,
+            old,
+            new,
+            yes,
+            show,
+        } => {
+            use sumchain_consensus::consensus_config as ccfg;
+
+            init_logging("info", false)?;
+
+            if show {
+                // Read-only: no lock, no write. The record, its whole history
+                // and the chain position are checked exactly as the revert
+                // checks them.
+                let db = Database::open_read_only(&data_dir)
+                    .with_context(|| format!("cannot open {data_dir:?} read-only"))?;
+                // The start marker and the head, as they are, before the verdict:
+                // what a pair-wide check compares across nodes.
+                match ccfg::read_start_marker(&db) {
+                    Ok(None) => println!("Start marker: none (no normal start recorded)"),
+                    Ok(Some(m)) => println!(
+                        "Start marker: attempt {}, configuration record {:?}, head {:?}",
+                        m.attempt, m.record, m.head
+                    ),
+                    Err(e) => println!("Start marker: UNREADABLE ({e})"),
+                }
+                {
+                    let blocks = sumchain_storage::schema::BlockStore::new(&db);
+                    match (blocks.get_latest_height()?, blocks.get_latest_hash()?) {
+                        (Some(h), Some(hash)) => println!("Head: {h} {hash}"),
+                        _ => println!("Head: none"),
+                    }
+                }
+                match ccfg::pending_schema_revert(&db) {
+                    Ok(p) => {
+                        println!(
+                            "Recorded in schema {} by schema transition {} at height {}; the \
+                             chain is still at height {}, and no normal start has been \
+                             attempted since the move. This binary can restore schema {}.",
+                            p.from_schema, p.seq, p.at_height, p.at_height, p.to_schema
+                        );
+                        println!("  --old {}", p.old);
+                        println!("  --new {}", p.new);
+                    }
+                    Err(ccfg::ConfigError::Refused(why)) => {
+                        println!("No pre-start revert is available: {why}");
+                    }
+                    Err(e) => anyhow::bail!("{e}"),
+                }
+                return Ok(());
+            }
+            let (Some(old), Some(new)) = (old, new) else {
+                anyhow::bail!("--old and --new are both required");
+            };
+            let old = sumchain_primitives::Hash::from_hex(&old)
+                .map_err(|e| anyhow::anyhow!("--old is not a commitment: {e}"))?;
+            let new = sumchain_primitives::Hash::from_hex(&new)
+                .map_err(|e| anyhow::anyhow!("--new is not a commitment: {e}"))?;
+
+            // Opening takes RocksDB's exclusive lock on the data directory, so
+            // this fails while a node holds it.
+            let db = Database::open_default(&data_dir).with_context(|| {
+                format!("cannot open {data_dir:?}; the node must be stopped before reverting")
+            })?;
+            sumchain_storage::journal::validate_startup(&db)
+                .context("application journal format check failed")?;
+
+            println!("Reverting this node's consensus configuration schema move (pre-start only).");
+            println!("  Data directory: {data_dir:?}");
+            println!("  Recorded:       {old}");
+            println!("  Restored:       {new}");
+            println!();
+            println!("This restores the record the move replaced and removes the move's");
+            println!("history entry. It touches no block and no state, and it is refused");
+            println!("if a normal start was attempted since the move or if any block above");
+            println!("the move's height exists.");
+            if !yes {
+                println!();
+                println!("Type 'yes' to proceed:");
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if input.trim().to_lowercase() != "yes" {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+            }
+
+            let done = ccfg::revert_schema_transition(&db, old, new)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!();
+            println!(
+                "Reverted transition {} at height {}: schema {} -> {} ({} -> {})",
+                done.seq, done.at_height, done.from_schema, done.to_schema, done.from, done.to
             );
         }
 

@@ -117,14 +117,14 @@ async fn the_rpc_reports_the_recorded_baseline_and_its_history() {
 
     let info = s.server.chain_get_consensus_config().await.unwrap();
     let c = ccfg::build(&g).unwrap().commitment().to_string();
-    assert_eq!(info.schema, 3, "a fresh baseline is recorded in schema 3");
+    assert_eq!(info.schema, 4, "a fresh baseline is recorded in schema 4");
     assert_eq!(info.status, "unverified-local-baseline");
     assert!(!info.network_agreement);
     assert_eq!(info.commitment.as_deref(), Some(c.as_str()));
     assert_eq!(info.initial_commitment.as_deref(), Some(c.as_str()));
     assert_eq!(info.baseline_height, Some(42));
     assert_eq!(info.matches_baseline, Some(true));
-    assert_eq!(info.fields.len(), ccfg::SCHEMA_3.specs().len());
+    assert_eq!(info.fields.len(), ccfg::SCHEMA_4.specs().len());
     assert_eq!(info.rules.quorum, "none");
     assert_eq!(info.rules.membership, "static-genesis");
     assert_eq!(info.rules.unfinalized_production, "unbounded");
@@ -152,25 +152,30 @@ async fn the_rpc_reports_the_recorded_baseline_and_its_history() {
     assert_eq!(info.matches_baseline, Some(false));
 }
 
-/// A baseline an older release recorded (schema 1 or 2) is reported in the
+/// A baseline an older release recorded (schema 1, 2 or 3) is reported in the
 /// schema it holds until its operator moves it, and matches the running rules
 /// as the startup check sees them — compared in the record's schema — although
-/// its commitment differs from the schema-3 running commitment. A real
+/// its commitment differs from the schema-4 running commitment. A real
 /// difference in rules still does not match.
 #[tokio::test]
 async fn the_rpc_reports_an_older_schema_baseline_as_recorded() {
-    // Know the draft schema 4 only because this binary's genesis carries the
-    // schema-3 gate and the draft schema-4 gates; unset, they add nothing to
-    // the record written.
+    // Know the draft schema 5 only because this binary's genesis carries the
+    // schema-3 gate, the schema-4 gates and the draft schema-5 gates; unset,
+    // they add nothing to the record written.
     static SCHEMA_1_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
         reads: &[&ccfg::SCHEMA_1],
         writes: &ccfg::SCHEMA_1,
-        knows: &ccfg::SCHEMA_4,
+        knows: &ccfg::SCHEMA_5,
     };
     static SCHEMA_2_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
         reads: &[&ccfg::SCHEMA_1, &ccfg::SCHEMA_2],
         writes: &ccfg::SCHEMA_2,
-        knows: &ccfg::SCHEMA_4,
+        knows: &ccfg::SCHEMA_5,
+    };
+    static SCHEMA_3_RELEASE: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
+        reads: &[&ccfg::SCHEMA_1, &ccfg::SCHEMA_2, &ccfg::SCHEMA_3],
+        writes: &ccfg::SCHEMA_3,
+        knows: &ccfg::SCHEMA_5,
     };
     for (policy, schema, fields) in [
         (
@@ -179,6 +184,7 @@ async fn the_rpc_reports_an_older_schema_baseline_as_recorded() {
             ccfg::SCHEMA_V1_FIELDS.len(),
         ),
         (&SCHEMA_2_RELEASE, 2, ccfg::SCHEMA_2.specs().len()),
+        (&SCHEMA_3_RELEASE, 3, ccfg::SCHEMA_3.specs().len()),
     ] {
         let g = genesis();
         let s = serve(&g);

@@ -1,5 +1,6 @@
 //! RPC server implementation.
 
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -358,6 +359,24 @@ pub(crate) fn classify_tx_status(
     }
 }
 
+/// `status` with this node's eviction history applied: what would read
+/// `Unknown` (no canonical receipt, not in this node's pool) reads `Dropped`
+/// when this node's pool evicted it above a gap and has not admitted it since
+/// (`Mempool::evicted_above_a_gap`). A receipt and a place in the pool take
+/// precedence; every other status is unchanged.
+///
+/// `Dropped` is a local observation: another node may still hold the
+/// transaction or carry it in a block, and after a restart, or once the
+/// bounded history has forgotten it, this node reads `Unknown` again. It is
+/// not proof of non-delivery; a client should not sign a new transaction for
+/// the same intent because of it alone.
+pub(crate) fn report_local_eviction(status: TxStatusV2, evicted_here: bool) -> TxStatusV2 {
+    match status {
+        TxStatusV2::Unknown if evicted_here => TxStatusV2::Dropped,
+        other => other,
+    }
+}
+
 /// Peer info provider function type
 pub type PeerInfoProvider = Arc<dyn Fn() -> Vec<RpcPeerInfo> + Send + Sync>;
 /// P2P stats provider function type
@@ -489,6 +508,11 @@ pub struct RpcServer {
     /// key) this node serves. Both off unless the operator opts in; see
     /// `crate::custodial`.
     custodial: CustodialSigningMethods,
+    /// Held by a relay request (`messaging_submitSponsored`,
+    /// `messaging_registerSponsored`) from choosing the nonces it signs at
+    /// until its transaction is in the pool, so two requests read the pool
+    /// one after the other and are never given the same nonce.
+    relay_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// The consensus handle this server holds is the READ view, and nothing wider.
@@ -644,6 +668,7 @@ impl RpcServer {
             genesis_identity: None,
             running_consensus_config: None,
             custodial: CustodialSigningMethods::default(),
+            relay_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -1412,6 +1437,332 @@ impl RpcServer {
         arr.copy_from_slice(&key[..20]);
         Address::new(arr)
     }
+
+    /// The account nonce a relay signs its next transaction at, for the
+    /// sponsor key `sponsor`, when that transaction would land in a block at
+    /// `inclusion_height`.
+    ///
+    /// The first nonce at or above the committed one that no transaction this
+    /// node holds from `sponsor` takes. A held transaction takes its nonce when
+    /// executing it advances the account nonce. Below
+    /// `messaging_fee_nonce_accounting_enabled_from_height` a relayed
+    /// `SendMessage` does not, so relays share the committed nonce there, as
+    /// they always have; from that gate on every messaging operation does, so
+    /// each relay takes the next nonce, and the producer carries one sender's
+    /// transactions in nonce order (`Mempool::select_for_block`). The caller
+    /// holds `relay_lock` from here until its transaction is in the pool.
+    ///
+    /// The pool is read before the committed nonce. The node commits a block
+    /// before it removes the block's transactions from the pool, so a block
+    /// committed between the two reads is seen in one of them: either its
+    /// transactions are still held, or the committed nonce is past them. Read
+    /// the other way round, the committed nonce could predate the block and
+    /// the pool no longer hold its transactions, and the relay would sign at a
+    /// nonce the block already used.
+    ///
+    /// A chain switch is the exception: the engine offers the abandoned
+    /// branch's transactions back to the pool only after the switch has
+    /// committed, so for that moment the committed nonce has gone back while
+    /// the returned wrappers are not yet held. A request in that window can be
+    /// given a nonce a returned wrapper holds; one of the two then takes
+    /// `InvalidNonce`, uncharged, and its client asks for a fresh wrapper (the
+    /// protocol in the `messaging_submitSponsored` API doc).
+    ///
+    /// The allocation assumes one relay process per sponsor key: a second
+    /// process holding the same key allocates from its own pool and lock, and
+    /// the two collide. Operate one relay per sponsor key.
+    fn relay_sponsor_nonce(
+        &self,
+        sponsor: &Address,
+        inclusion_height: u64,
+    ) -> std::result::Result<u64, RpcError> {
+        let pending = self.mempool.get_by_sender(sponsor);
+        #[cfg(test)]
+        relay_read_hook::between_reads();
+        let committed = self
+            .state
+            .get_nonce(sponsor)
+            .map_err(|e| RpcError::Internal(format!("Failed to get sponsor nonce: {e}")))?;
+        let accounting = sumchain_state::MessagingExecutor::fee_nonce_accounting_gate_open(
+            &self.chain_params,
+            inclusion_height,
+        );
+        let held: BTreeSet<u64> = pending
+            .iter()
+            .filter(|tx| {
+                accounting || sumchain_state::mempool::advances_nonce_below_accounting_gate(tx)
+            })
+            .map(|tx| tx.nonce())
+            .filter(|n| *n >= committed)
+            .collect();
+        Ok(first_free_from(committed, &held))
+    }
+
+    /// Whether this node's pool holds a sponsored registration of the key
+    /// `registrant_key`, from any sponsor, whose registrant signature verifies
+    /// for the sponsor that relays it. Such a registration would execute
+    /// before, or instead of, one requested now, and the later of the two is
+    /// refused in the block.
+    ///
+    /// The pool is read in place; only a registration naming this key has its
+    /// signature checked.
+    fn sponsored_registration_pending(&self, registrant_key: &[u8; 32], chain_id: u64) -> bool {
+        use sumchain_primitives::{
+            verify_sponsored_registration_v1, RegisterPublicKeySponsoredV1Data,
+        };
+        self.mempool
+            .filter_map_held(|tx| {
+                let d = messaging_data(tx)?;
+                if d.operation != MessagingOperation::RegisterPublicKeySponsoredV1 {
+                    return None;
+                }
+                let reg = RegisterPublicKeySponsoredV1Data::from_bytes(&d.data).ok()?;
+                (reg.registrant_public_key == *registrant_key).then(|| (tx.sender(), reg))
+            })
+            .iter()
+            .any(|(sponsor, reg)| verify_sponsored_registration_v1(reg, chain_id, sponsor).is_ok())
+    }
+
+    /// The nonces of the version-2 `SendMessage` envelopes from the sender
+    /// whose key is `sender_key` that this node's pool holds, relayed by any
+    /// sponsor, for `chain_id`.
+    ///
+    /// The pool is read in place. Each pooled `SendMessage` is decoded and its
+    /// sender key compared first; only an envelope from this sender has its
+    /// signature verified, after the pool's lock is released. The signature
+    /// checks one request costs are therefore bounded by the envelopes from
+    /// its own sender that the pool holds, not by the size of the pool.
+    fn pending_v2_envelope_nonces(&self, sender_key: &[u8; 32], chain_id: u64) -> Vec<u64> {
+        self.mempool
+            .filter_map_held(|tx| relayed_envelope_from(tx, sender_key))
+            .into_iter()
+            .filter(|m| sumchain_primitives::verify_sponsored_send_v2(m, chain_id).is_ok())
+            .map(|m| m.nonce)
+            .collect()
+    }
+
+    /// The amounts named by `sender_key`'s version-2 envelopes pending in this
+    /// node's pool, relayed by any sponsor, summed (`Some(0)` names none).
+    fn pending_v2_envelope_amounts(&self, sender_key: &[u8; 32], chain_id: u64) -> u128 {
+        self.mempool
+            .filter_map_held(|tx| relayed_envelope_from(tx, sender_key))
+            .into_iter()
+            .filter(|m| sumchain_primitives::verify_sponsored_send_v2(m, chain_id).is_ok())
+            .fold(0u128, |sum, m| {
+                sum.saturating_add(m.koppa_amount.unwrap_or(0))
+            })
+    }
+
+    /// Whether this node's pool holds the registrant's own `RegisterPublicKey`:
+    /// from `registrant`, signed by the key that address derives from. It
+    /// would execute before, or instead of, a sponsored registration of the
+    /// same address, which the block would then refuse.
+    fn direct_registration_pending(&self, registrant: &Address) -> bool {
+        self.mempool.get_by_sender(registrant).iter().any(|tx| {
+            let sumchain_primitives::TxInner::V2(v2) = &tx.inner else {
+                return false;
+            };
+            matches!(
+                messaging_data(tx),
+                Some(d) if d.operation == MessagingOperation::RegisterPublicKey
+            ) && Address::from_public_key(&tx.public_key) == *registrant
+                && sumchain_crypto::verify_bytes_strict(
+                    v2.signing_hash().as_bytes(),
+                    &tx.signature,
+                    &tx.public_key,
+                )
+                .is_ok()
+        })
+    }
+
+    /// The sender's committed messaging nonce, and the nonces at or above it
+    /// of the version-2 envelopes from that sender this node's pool holds.
+    /// The pool is read before the committed nonce (see
+    /// [`Self::relay_sponsor_nonce`]).
+    fn envelope_sequence(
+        &self,
+        sender_key: &[u8; 32],
+        sender: &Address,
+        chain_id: u64,
+    ) -> std::result::Result<(u64, BTreeSet<u64>), RpcError> {
+        let pending = self.pending_v2_envelope_nonces(sender_key, chain_id);
+        #[cfg(test)]
+        relay_read_hook::between_reads();
+        let committed = MessagingStore::new(&self.db)
+            .get_sender_nonce(sender)
+            .map_err(|e| {
+                RpcError::Internal(format!("Failed to read the sender's messaging nonce: {e}"))
+            })?;
+        Ok((
+            committed,
+            pending.into_iter().filter(|n| *n >= committed).collect(),
+        ))
+    }
+
+    /// Whether this node's pool holds a relayed `SendMessage` carrying the
+    /// same signed string-form envelope as `m`: the same sender key,
+    /// signature, nonce, expiry, recipient and content, from any sponsor.
+    /// The pool is read in place, comparing the sender key first.
+    fn string_form_envelope_pending(&self, m: &SponsoredMessage) -> bool {
+        self.mempool
+            .filter_map_held(|tx| relayed_envelope_from(tx, &m.sender_pubkey))
+            .iter()
+            .any(|p| {
+                p.signature == m.signature
+                    && p.nonce == m.nonce
+                    && p.expiry == m.expiry
+                    && p.recipient_hash == m.recipient_hash
+                    && p.message_data == m.message_data
+            })
+    }
+
+    /// The height the next block will have: the chain tip plus one. A store
+    /// read error is surfaced, never read as a tip of 0.
+    fn relay_inclusion_height(&self) -> std::result::Result<u64, RpcError> {
+        match BlockStore::new(&self.db).get_latest() {
+            Ok(Some(block)) => Ok(block.header.height.saturating_add(1)),
+            Ok(None) => Ok(1),
+            Err(e) => Err(RpcError::Internal(format!(
+                "Failed to read chain tip during sponsored-message preflight: {e}"
+            ))),
+        }
+    }
+
+    /// The RPC view of a stored message event.
+    ///
+    /// `has_payment` is the stored flag where it is backed by an escrow: for a
+    /// paid send, and for a relayed message executed at or above the envelope
+    /// gate (there the flag is set exactly when the escrow is written). Below
+    /// the gate a relayed message's flag followed the amount its envelope
+    /// claimed, which moved nothing, so it is not reported. A paid send of
+    /// amount 0 included at or above the envelope gate escrowed no value and
+    /// reports no payment; below the gate it keeps its earlier `true`. The
+    /// gate is judged at the event's height, the transaction's canonical
+    /// inclusion height, never the height of the query. The flag and the
+    /// transaction outlive the escrow row, so a claimed or refunded payment
+    /// is still reported. A refused attempt stores no event. A message whose
+    /// transaction this node does not hold reports no payment.
+    fn message_event_info(
+        &self,
+        e: sumchain_primitives::MessageEvent,
+    ) -> std::result::Result<MessageEventInfo, RpcError> {
+        let has_payment = e.has_payment && self.payment_backed(&e)?;
+        Ok(MessageEventInfo {
+            tx_hash: format!("0x{}", hex::encode(e.message_id.as_bytes())),
+            block_height: e.block_height,
+            sender: e.sender.to_base58(),
+            recipient_hash: format!("0x{}", hex::encode(e.recipient_hash)),
+            content_type: 0, // Not stored in MessageEvent
+            flags: 0,        // Not stored in MessageEvent
+            has_payment,
+            payment_amount: None, // Amount not stored in MessageEvent
+        })
+    }
+
+    /// Whether an event's stored payment flag is backed by an escrow of value,
+    /// judged at the event's height (the transaction's canonical inclusion
+    /// height). A paid send: below the envelope gate always, as before; from
+    /// the gate only for a positive amount (a paid send of amount 0 escrowed
+    /// no value). A relayed message: only from the envelope gate, where the
+    /// flag is set exactly when the escrow was written. Below the gate a
+    /// relayed message's flag followed the amount its envelope named, and
+    /// nothing moved.
+    fn payment_backed(
+        &self,
+        e: &sumchain_primitives::MessageEvent,
+    ) -> std::result::Result<bool, RpcError> {
+        use sumchain_primitives::TxInner;
+        let tx = TxStore::new(&self.db)
+            .get(&e.message_id)
+            .map_err(|err| RpcError::Internal(err.to_string()))?;
+        let gate_open =
+            sumchain_state::MessagingExecutor::sponsored_envelope_verification_gate_open(
+                &self.chain_params,
+                e.block_height,
+            );
+        Ok(match tx.as_ref().map(|t| &t.inner) {
+            Some(TxInner::V2(v2)) => match &v2.payload {
+                TxPayload::Messaging(d)
+                    if d.operation == MessagingOperation::SendMessageWithPayment =>
+                {
+                    if gate_open {
+                        let paid: sumchain_primitives::SendMessageWithPaymentData =
+                            bincode::deserialize(&d.data).map_err(|err| {
+                                RpcError::Internal(format!("Failed to deserialize message: {err}"))
+                            })?;
+                        paid.koppa_amount > 0
+                    } else {
+                        true
+                    }
+                }
+                TxPayload::Messaging(d) => {
+                    d.operation == MessagingOperation::SendMessage && gate_open
+                }
+                _ => false,
+            },
+            _ => false,
+        })
+    }
+}
+
+/// A hook between the relay's pool read and its committed-nonce read, for
+/// this crate's unit tests only: a test can commit a block exactly there.
+/// Compiled out of every other build.
+#[cfg(test)]
+pub(crate) mod relay_read_hook {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    }
+
+    /// Runs `f` at the next point between the two reads on this thread.
+    pub(crate) fn install(f: impl FnOnce() + 'static) {
+        HOOK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    pub(crate) fn between_reads() {
+        if let Some(f) = HOOK.with(|h| h.borrow_mut().take()) {
+            f();
+        }
+    }
+}
+
+/// The messaging payload `tx` carries, if it is a messaging transaction.
+fn messaging_data(tx: &SignedTransaction) -> Option<&MessagingTxData> {
+    match &tx.inner {
+        sumchain_primitives::TxInner::V2(v2) => match &v2.payload {
+            TxPayload::Messaging(d) => Some(d),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The first value at or above `from` that `held` does not contain.
+fn first_free_from(from: u64, held: &BTreeSet<u64>) -> u64 {
+    let mut n = from;
+    while held.contains(&n) {
+        n += 1;
+    }
+    n
+}
+
+/// The envelope a relayed `SendMessage` carries, when it decodes and names
+/// `sender_key` as its sender. Its signature is not checked here: the caller
+/// verifies the version-2 form, so that a string-form envelope, whose nonce
+/// below the envelope gate is never read, claims no place in the sender's
+/// sequence.
+fn relayed_envelope_from(
+    tx: &SignedTransaction,
+    sender_key: &[u8; 32],
+) -> Option<SponsoredMessage> {
+    let d = messaging_data(tx)?;
+    if d.operation != MessagingOperation::SendMessage {
+        return None;
+    }
+    let m: SponsoredMessage = bincode::deserialize(&d.data).ok()?;
+    (m.sender_pubkey == *sender_key).then_some(m)
 }
 
 #[async_trait::async_trait]
@@ -2180,11 +2531,14 @@ impl SumChainApiServer for RpcServer {
             .map_err(|e| RpcError::Internal(e.to_string()))?;
         let in_mempool = self.mempool.get(&hash).is_some();
 
-        Ok(classify_tx_status(
-            receipt.as_ref(),
-            in_mempool,
-            |h| self.consensus.is_finalized(h),
-            self.consensus.finality_mechanism(),
+        Ok(report_local_eviction(
+            classify_tx_status(
+                receipt.as_ref(),
+                in_mempool,
+                |h| self.consensus.is_finalized(h),
+                self.consensus.finality_mechanism(),
+            ),
+            self.mempool.evicted_above_a_gap(&hash),
         ))
     }
 
@@ -4139,19 +4493,10 @@ impl SumChainApiServer for RpcServer {
             .get_messages_by_recipient(&hash_arr, 0, u64::MAX, limit.unwrap_or(100) as usize)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
-        let results: Vec<MessageEventInfo> = events
+        let results = events
             .into_iter()
-            .map(|e| MessageEventInfo {
-                tx_hash: format!("0x{}", hex::encode(e.message_id.as_bytes())),
-                block_height: e.block_height,
-                sender: e.sender.to_base58(),
-                recipient_hash: format!("0x{}", hex::encode(e.recipient_hash)),
-                content_type: 0, // Not stored in MessageEvent
-                flags: 0, // Not stored in MessageEvent
-                has_payment: e.has_payment,
-                payment_amount: None, // Amount not stored in MessageEvent
-            })
-            .collect();
+            .map(|e| self.message_event_info(e))
+            .collect::<std::result::Result<Vec<MessageEventInfo>, RpcError>>()?;
 
         Ok(results)
     }
@@ -4172,19 +4517,10 @@ impl SumChainApiServer for RpcServer {
             .get_messages_by_sender(&addr, limit, offset)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
-        let results: Vec<MessageEventInfo> = events
+        let results = events
             .into_iter()
-            .map(|e| MessageEventInfo {
-                tx_hash: format!("0x{}", hex::encode(e.message_id.as_bytes())),
-                block_height: e.block_height,
-                sender: e.sender.to_base58(),
-                recipient_hash: format!("0x{}", hex::encode(e.recipient_hash)),
-                content_type: 0, // Not stored in MessageEvent
-                flags: 0,        // Not stored in MessageEvent
-                has_payment: e.has_payment,
-                payment_amount: None, // Amount not stored in MessageEvent
-            })
-            .collect();
+            .map(|e| self.message_event_info(e))
+            .collect::<std::result::Result<Vec<MessageEventInfo>, RpcError>>()?;
 
         Ok(results)
     }
@@ -4205,16 +4541,7 @@ impl SumChainApiServer for RpcServer {
 
         let store = MessagingStore::new(&self.db);
         match store.get_message_by_tx_hash(&hash_arr) {
-            Ok(Some(event)) => Ok(Some(MessageEventInfo {
-                tx_hash: format!("0x{}", hex::encode(event.message_id.as_bytes())),
-                block_height: event.block_height,
-                sender: event.sender.to_base58(),
-                recipient_hash: format!("0x{}", hex::encode(event.recipient_hash)),
-                content_type: 0,
-                flags: 0,
-                has_payment: event.has_payment,
-                payment_amount: None,
-            })),
+            Ok(Some(event)) => Ok(Some(self.message_event_info(event)?)),
             Ok(None) => Ok(None),
             Err(e) => Err(RpcError::Internal(e.to_string()).into()),
         }
@@ -4236,19 +4563,10 @@ impl SumChainApiServer for RpcServer {
             self.refuse_below_history_floor(block_height)?;
         }
 
-        let results: Vec<MessageEventInfo> = events
+        let results = events
             .into_iter()
-            .map(|e| MessageEventInfo {
-                tx_hash: format!("0x{}", hex::encode(e.message_id.as_bytes())),
-                block_height: e.block_height,
-                sender: e.sender.to_base58(),
-                recipient_hash: format!("0x{}", hex::encode(e.recipient_hash)),
-                content_type: 0,
-                flags: 0,
-                has_payment: e.has_payment,
-                payment_amount: None,
-            })
-            .collect();
+            .map(|e| self.message_event_info(e))
+            .collect::<std::result::Result<Vec<MessageEventInfo>, RpcError>>()?;
 
         Ok(results)
     }
@@ -4268,14 +4586,6 @@ impl SumChainApiServer for RpcServer {
             Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
         };
 
-        // Get the receipt to find block height
-        let receipt_store = ReceiptStore::new(&self.db);
-        let block_height = match receipt_store.get(&hash) {
-            Ok(Some(receipt)) => receipt.block_height,
-            Ok(None) => 0,
-            Err(_) => 0,
-        };
-
         // Extract the payload from the transaction
         let payload = match &tx.inner {
             sumchain_primitives::TxInner::V2(tx_v2) => &tx_v2.payload,
@@ -4293,22 +4603,258 @@ impl SumChainApiServer for RpcServer {
             return Err(RpcError::InvalidParams("Not a sponsored message transaction".to_string()).into());
         }
 
+        // A message exists only where the canonical chain executed it. A
+        // transaction with no canonical receipt (never carried, or carried
+        // only by a block that lost fork choice) or with a refused receipt
+        // stored no message, so there is nothing to report: no sender, no
+        // content, no payment. What is reported is the executed outcome, never
+        // the raw payload alone.
+        let receipt = match ReceiptStore::new(&self.db).get(&hash) {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
+        };
+        if !receipt.status.is_success() {
+            return Ok(None);
+        }
+
         // Deserialize the SponsoredMessage from the data
         let sponsored_msg: SponsoredMessage = bincode::deserialize(&messaging_data.data)
             .map_err(|e| RpcError::Internal(format!("Failed to deserialize message: {}", e)))?;
 
-        // Derive sender address from public key
+        // The sender the executed message was stored under: the address of
+        // the key the envelope names.
         let sender = Address::from_public_key(&sponsored_msg.sender_pubkey);
+        let paid = if sumchain_state::MessagingExecutor::sponsored_envelope_verification_gate_open(
+            &self.chain_params,
+            receipt.block_height,
+        ) {
+            sponsored_msg.koppa_amount.unwrap_or(0)
+        } else {
+            0
+        };
 
+        // A payment is reported exactly where the chain executed one: from
+        // the envelope gate a positive amount was paid into escrow by the
+        // named sender (the receipt is a success); below it an envelope's
+        // `koppa_amount` moved nothing, so none is reported. The amount is
+        // read from the stored transaction, not the escrow row, so a claimed
+        // or refunded payment is still reported.
         Ok(Some(MessageDataInfo {
             tx_hash: format!("0x{}", hex::encode(hash.as_bytes())),
-            block_height,
+            block_height: receipt.block_height,
             sender: sender.to_base58(),
             recipient_hash: format!("0x{}", hex::encode(sponsored_msg.recipient_hash)),
             message_data: format!("0x{}", hex::encode(&sponsored_msg.message_data)),
             sender_pubkey: format!("0x{}", hex::encode(sponsored_msg.sender_pubkey)),
-            has_payment: sponsored_msg.koppa_amount.is_some(),
-            payment_amount: sponsored_msg.koppa_amount.map(|a| a.to_string()),
+            has_payment: paid > 0,
+            payment_amount: (paid > 0).then(|| paid.to_string()),
+        }))
+    }
+
+    async fn messaging_get_sponsored_envelope(
+        &self,
+        tx_hash: String,
+    ) -> std::result::Result<Option<SponsoredEnvelopeInfo>, jsonrpsee::types::ErrorObjectOwned>
+    {
+        let hash = Hash::from_hex(&tx_hash)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid tx hash: {e}")))?;
+        let tx = match TxStore::new(&self.db).get(&hash) {
+            Ok(Some(tx)) => tx,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
+        };
+        // Only a relayed message: any other transaction is refused, as
+        // `messaging_getMessageData` refuses it.
+        let data = match &tx.inner {
+            sumchain_primitives::TxInner::V2(v2) => match &v2.payload {
+                TxPayload::Messaging(d) if d.operation == MessagingOperation::SendMessage => d,
+                _ => {
+                    return Err(RpcError::InvalidParams(
+                        "Not a sponsored message transaction".to_string(),
+                    )
+                    .into())
+                }
+            },
+            _ => return Err(RpcError::InvalidParams("Not a V2 transaction".to_string()).into()),
+        };
+        // Only one the canonical chain executed.
+        let receipt = match ReceiptStore::new(&self.db).get(&hash) {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
+        };
+        if !receipt.status.is_success() {
+            return Ok(None);
+        }
+        let m: SponsoredMessage = bincode::deserialize(&data.data)
+            .map_err(|e| RpcError::Internal(format!("Failed to deserialize message: {e}")))?;
+        Ok(Some(SponsoredEnvelopeInfo {
+            tx_hash: format!("0x{}", hex::encode(hash.as_bytes())),
+            block_height: receipt.block_height,
+            sender_pubkey: format!("0x{}", hex::encode(m.sender_pubkey)),
+            recipient_hash: format!("0x{}", hex::encode(m.recipient_hash)),
+            message_data: format!("0x{}", hex::encode(&m.message_data)),
+            envelope_signature: format!("0x{}", hex::encode(m.signature)),
+            envelope_nonce: m.nonce,
+            envelope_expiry: m.expiry,
+        }))
+    }
+
+    async fn messaging_get_payment_status(
+        &self,
+        message_id: String,
+    ) -> std::result::Result<PaymentStatusInfo, jsonrpsee::types::ErrorObjectOwned> {
+        let hash = Hash::from_hex(&message_id)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid message ID: {e}")))?;
+        let mut info = PaymentStatusInfo {
+            message_id: format!("0x{}", hex::encode(hash.as_bytes())),
+            status: "not_included".to_string(),
+            amount: None,
+            sender: None,
+            recipient_hash: None,
+            escrow_expiry: None,
+            included_at_height: None,
+            receipt_status: None,
+            legacy_amount_unbacked: false,
+        };
+        // The canonical receipt first: a transaction stored without one was
+        // never carried, or only by a block that lost fork choice.
+        let receipt = match ReceiptStore::new(&self.db).get(&hash) {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) => return Ok(info),
+            Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
+        };
+        let tx = match TxStore::new(&self.db).get(&hash) {
+            Ok(Some(tx)) => tx,
+            Ok(None) => {
+                return Err(RpcError::Internal(
+                    "a canonical receipt without its transaction".to_string(),
+                )
+                .into())
+            }
+            Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
+        };
+        let (from, data) = match &tx.inner {
+            sumchain_primitives::TxInner::V2(v2) => match &v2.payload {
+                TxPayload::Messaging(d)
+                    if d.operation == MessagingOperation::SendMessage
+                        || d.operation == MessagingOperation::SendMessageWithPayment =>
+                {
+                    (v2.from, d)
+                }
+                _ => {
+                    return Err(
+                        RpcError::InvalidParams("Not a message transaction".to_string()).into(),
+                    )
+                }
+            },
+            _ => return Err(RpcError::InvalidParams("Not a V2 transaction".to_string()).into()),
+        };
+        info.included_at_height = Some(receipt.block_height);
+        info.receipt_status = Some(receipt.status.description().to_string());
+        if !receipt.status.is_success() {
+            info.status = "refused".to_string();
+            return Ok(info);
+        }
+
+        // What the executed transaction paid, by the rule it executed under.
+        let (paid, sender, recipient_hash) = if data.operation
+            == MessagingOperation::SendMessageWithPayment
+        {
+            let d: sumchain_primitives::SendMessageWithPaymentData =
+                bincode::deserialize(&data.data).map_err(|e| {
+                    RpcError::Internal(format!("Failed to deserialize message: {e}"))
+                })?;
+            (d.koppa_amount, from, d.recipient_hash)
+        } else {
+            let m: SponsoredMessage = bincode::deserialize(&data.data)
+                .map_err(|e| RpcError::Internal(format!("Failed to deserialize message: {e}")))?;
+            let named = Address::from_public_key(&m.sender_pubkey);
+            if sumchain_state::MessagingExecutor::sponsored_envelope_verification_gate_open(
+                &self.chain_params,
+                receipt.block_height,
+            ) {
+                (m.koppa_amount.unwrap_or(0), named, m.recipient_hash)
+            } else {
+                // The earlier rule: no amount moved.
+                info.legacy_amount_unbacked = m.koppa_amount.is_some();
+                (0, named, m.recipient_hash)
+            }
+        };
+        if paid == 0 {
+            info.status = "none".to_string();
+            return Ok(info);
+        }
+        match MessagingStore::new(&self.db).get_pending_payment(&hash) {
+            Ok(Some(escrow)) => {
+                info.status = "escrowed".to_string();
+                info.amount = Some(escrow.amount.to_string());
+                info.sender = Some(escrow.sender.to_base58());
+                info.recipient_hash = Some(format!("0x{}", hex::encode(escrow.recipient_hash)));
+                info.escrow_expiry = Some(escrow.expiry);
+            }
+            Ok(None) => {
+                info.status = "settled".to_string();
+                info.amount = Some(paid.to_string());
+                info.sender = Some(sender.to_base58());
+                info.recipient_hash = Some(format!("0x{}", hex::encode(recipient_hash)));
+            }
+            Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
+        }
+        Ok(info)
+    }
+
+    async fn messaging_get_envelope_outcome(
+        &self,
+        sender: String,
+        nonce: u64,
+    ) -> std::result::Result<Option<EnvelopeOutcomeInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = parse_address_arg(&sender)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {e}")))?;
+        let store = MessagingStore::new(&self.db);
+        let outcome = match store.get_envelope_outcome(&addr, nonce) {
+            Ok(Some(outcome)) => outcome,
+            Ok(None) => {
+                // No row. A nonce below the sender's current messaging nonce
+                // was spent all the same, by an operation that writes none:
+                // the sender's own direct or paid send (which revokes an
+                // envelope signed at it) or a sponsored message executed
+                // below the envelope gate. What spent it is not recorded.
+                let current = store
+                    .get_sender_nonce(&addr)
+                    .map_err(|e| RpcError::Internal(e.to_string()))?;
+                if nonce < current {
+                    return Ok(Some(EnvelopeOutcomeInfo {
+                        sender: addr.to_base58(),
+                        nonce,
+                        tx_hash: None,
+                        outcome: "spent_without_outcome".to_string(),
+                        receipt_code: None,
+                        escrowed_amount: "0".to_string(),
+                        block_height: None,
+                    }));
+                }
+                return Ok(None);
+            }
+            Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
+        };
+        let block_height = ReceiptStore::new(&self.db)
+            .get(&outcome.tx_hash)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+            .map(|r| r.block_height);
+        Ok(Some(EnvelopeOutcomeInfo {
+            sender: addr.to_base58(),
+            nonce,
+            tx_hash: Some(format!("0x{}", hex::encode(outcome.tx_hash.as_bytes()))),
+            outcome: if outcome.outcome_code == 0 {
+                "executed".to_string()
+            } else {
+                "refused".to_string()
+            },
+            receipt_code: Some(outcome.outcome_code),
+            escrowed_amount: outcome.escrowed_amount.to_string(),
+            block_height,
         }))
     }
 
@@ -4515,35 +5061,6 @@ impl SumChainApiServer for RpcServer {
         let mut recipient_hash: [u8; 32] = [0u8; 32];
         recipient_hash.copy_from_slice(&recipient_hash_bytes);
 
-        // Verify the sender's signature over the sponsored message request
-        // Format: "SUMCHAIN_SPONSORED_MSG:{nonce}:{expiry}:{recipient_hash}:{message_data_hash}"
-        let message_data_hash = blake3::hash(&message_data);
-        let sign_message = format!(
-            "SUMCHAIN_SPONSORED_MSG:{}:{}:{}:{}",
-            request.nonce,
-            request.expiry,
-            recipient_hash_hex,
-            hex::encode(message_data_hash.as_bytes())
-        );
-
-        // Strict Ed25519 verification, the rule the mempool's inclusion policy
-        // applies to the same envelope, so the relay and the pool agree. The
-        // signed string, the signature and the key are unchanged; this is a
-        // node-local preflight and decides nothing about block validity.
-        if sumchain_crypto::verify_bytes_strict(sign_message.as_bytes(), &sig_array, &sender_pubkey).is_err() {
-            return Err(RpcError::InvalidParams("Invalid sender signature".to_string()).into());
-        }
-
-        // Check expiry
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        if request.expiry < now {
-            return Err(RpcError::InvalidParams("Sponsored message request has expired".to_string()).into());
-        }
-
         // Parse optional koppa amount
         let koppa_amount = if let Some(ref amount_str) = request.koppa_amount {
             let amount: u128 = amount_str.parse()
@@ -4564,23 +5081,188 @@ impl SumChainApiServer for RpcServer {
             koppa_amount,
         };
 
+        // Which envelope forms the block this transaction would land in
+        // accepts, judged at the next block's height: from
+        // `messaging_sponsored_envelope_verification_enabled_from_height` on,
+        // the version-2 envelope only; below it, either the string form, as
+        // before, or the version-2 envelope, which the executor below the gate
+        // also executes. Accepting version 2 early lets a client switch as soon
+        // as this relay is deployed, so an envelope relayed before the gate is
+        // still valid if it lands at or above it. An advisory preflight either
+        // way (consensus re-checks at execution). A store read error is not
+        // treated as a tip of 0: it is surfaced.
+        let chain_id = self.state.chain_id();
+        let inclusion_height = self.relay_inclusion_height()?;
+        let v2_only = sumchain_state::MessagingExecutor::sponsored_envelope_verification_gate_open(
+            &self.chain_params,
+            inclusion_height,
+        );
+        let v2_signed =
+            sumchain_primitives::verify_sponsored_send_v2(&sponsored_msg, chain_id).is_ok();
+        let v2_envelope = v2_only || v2_signed;
+
+        if v2_envelope {
+            // The version-2 rule, as the executor applies it from the gate: a
+            // strict signature by the named sender over the version-2
+            // preimage, and (checked below, with the pool) the sender's next
+            // messaging nonce. An amount (`koppa_amount` above; "0" names none
+            // and is relayed as none) is paid into escrow by the named sender
+            // only in a block at or above the gate; a block below it moves
+            // nothing, so there an envelope naming one is refused.
+            if sponsored_msg.koppa_amount.is_some() && !v2_only {
+                return Err(RpcError::InvalidParams(format!(
+                    "A sponsored payment (koppa_amount) is relayed only for a block at or \
+                     above the envelope verification height; the next block is \
+                     {inclusion_height}. Send the payment as SendMessageWithPayment"
+                ))
+                .into());
+            }
+            if !v2_signed {
+                return Err(RpcError::InvalidParams(
+                    "Invalid sender signature: from the envelope verification height on the \
+                     signature is over the version-2 envelope preimage \
+                     (SPONSORED_SEND_V2_TAG || chain_id || sender_pubkey || recipient_hash || \
+                     blake3(message_data) || nonce || expiry || amount, big-endian)"
+                        .to_string(),
+                )
+                .into());
+            }
+        } else {
+            // Below the gate, and not the version-2 form: the sender's
+            // signature over the string form
+            // "SUMCHAIN_SPONSORED_MSG:{nonce}:{expiry}:{recipient_hash}:{message_data_hash}",
+            // under the strict rule, the rule the mempool's inclusion policy
+            // applies to the same envelope, so the relay and the pool agree.
+            let message_data_hash = blake3::hash(&sponsored_msg.message_data);
+            let sign_message = format!(
+                "SUMCHAIN_SPONSORED_MSG:{}:{}:{}:{}",
+                request.nonce,
+                request.expiry,
+                recipient_hash_hex,
+                hex::encode(message_data_hash.as_bytes())
+            );
+
+            if sumchain_crypto::verify_bytes_strict(
+                sign_message.as_bytes(),
+                &sig_array,
+                &sender_pubkey,
+            )
+            .is_err()
+            {
+                return Err(RpcError::InvalidParams(
+                    "Invalid sender signature: neither the version-2 envelope preimage nor the \
+                     string form verifies"
+                        .to_string(),
+                )
+                .into());
+            }
+        }
+
+        // Check expiry
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        if request.expiry < now {
+            return Err(RpcError::InvalidParams(
+                "Sponsored message request has expired".to_string(),
+            )
+            .into());
+        }
+
         let messaging_data = MessagingTxData {
             operation: MessagingOperation::SendMessage, // Use sponsored message operation
             data: bincode::serialize(&sponsored_msg)
                 .map_err(|e| RpcError::Internal(format!("Failed to serialize sponsored message: {}", e)))?,
         };
 
-        // Get sponsor's current nonce
+        // From here until the transaction is in the pool, one relay request at
+        // a time: the envelope sequence and the sponsor nonce are both read from
+        // what this node already holds, and two requests must not be given the
+        // same one.
+        let relay_guard = self.relay_lock.lock().await;
         let sponsor_address = sponsor_keypair.address();
-        let sponsor_nonce = self.state.get_nonce(&sponsor_address)
-            .map_err(|e| RpcError::Internal(format!("Failed to get sponsor nonce: {}", e)))?;
+        let fee = 1_000_000u128; // 0.001 Koppa fee
+
+        if v2_envelope {
+            // The envelope nonce must be the sender's next messaging nonce: the
+            // committed one, extended by each version-2 envelope from this
+            // sender this node's pool holds, relayed by this sponsor or any
+            // other. One envelope per (sender, nonce): a second could only be
+            // refused in the block, at its sponsor's expense. The pool is read
+            // before the committed nonce: the node commits a block before it
+            // removes the block's transactions from the pool, so a block
+            // committed between the two reads is seen in one of them.
+            let (committed, held) =
+                self.envelope_sequence(&sender_pubkey, &sender_address, chain_id)?;
+            let next = first_free_from(committed, &held);
+            if sponsored_msg.nonce < committed {
+                return Err(RpcError::InvalidParams(format!(
+                    "Envelope nonce {} is already used: the sender's messaging nonce is {committed} \
+                     (messaging_getSenderNonce)",
+                    sponsored_msg.nonce
+                ))
+                .into());
+            }
+            if held.contains(&sponsored_msg.nonce) {
+                return Err(RpcError::InvalidParams(format!(
+                    "An envelope from this sender at nonce {} is already pending in this node's pool",
+                    sponsored_msg.nonce
+                ))
+                .into());
+            }
+            if sponsored_msg.nonce != next {
+                return Err(RpcError::InvalidParams(format!(
+                    "Envelope nonce {} is not the sender's next messaging nonce {next} \
+                     (messaging_getSenderNonce reports {committed}; each envelope from this \
+                     sender pending in this node's pool adds one)",
+                    sponsored_msg.nonce
+                ))
+                .into());
+            }
+            if let Some(amount) = sponsored_msg.koppa_amount {
+                // Advisory preflight (the block re-checks): the named sender
+                // holds the amount beyond what its envelopes already pending
+                // in this node's pool name, and beyond this wrapper's fee when
+                // it is this relay's own sponsor key (affordability after the
+                // fee, as the block judges it). An envelope its sender cannot
+                // fund is refused in the block, charged to this sponsor, and
+                // spends the sender's nonce.
+                let pending = self.pending_v2_envelope_amounts(&sender_pubkey, chain_id);
+                let balance = self.state.get_balance(&sender_address).map_err(|e| {
+                    RpcError::Internal(format!("Failed to read the sender's balance: {e}"))
+                })?;
+                let own_fee = if sender_address == sponsor_address {
+                    fee
+                } else {
+                    0
+                };
+                if balance < amount.saturating_add(pending).saturating_add(own_fee) {
+                    return Err(RpcError::InvalidParams(format!(
+                        "The named sender cannot fund koppa_amount {amount}: its balance is \
+                         {balance}, its envelopes pending in this node's pool already name \
+                         {pending}, and this wrapper's fee from its own balance is {own_fee}"
+                    ))
+                    .into());
+                }
+            }
+        } else if self.string_form_envelope_pending(&sponsored_msg) {
+            // The string form carries no envelope nonce, so the sequence above
+            // does not apply; a second wrapper of the same signed envelope is
+            // refused while one is pending in this node's pool (a client
+            // resubmitting after a restart, say).
+            return Err(RpcError::InvalidParams(
+                "This signed envelope is already pending in this node's pool".to_string(),
+            )
+            .into());
+        }
+
+        let sponsor_nonce = self.relay_sponsor_nonce(&sponsor_address, inclusion_height)?;
 
         // Create the messaging transaction
         // tx.from = sponsor_address (matches the signer)
         // The real message sender is in the SponsoredMessage.sender_pubkey
-        let chain_id = self.state.chain_id();
-        let fee = 1_000_000u128; // 0.001 Koppa fee
-
         let tx = TransactionV2::messaging(
             chain_id,
             sponsor_address, // Sponsor address as tx.from (matches signer)
@@ -4600,10 +5282,12 @@ impl SumChainApiServer for RpcServer {
 
         let tx_hash = signed_tx.hash();
 
-        // Add to mempool
+        // Add to mempool. A refusal here (a full pool, or the sponsor's
+        // per-sender limit) is reported, and nothing is broadcast.
         self.mempool
             .add(signed_tx.clone())
             .map_err(|e| RpcError::TxRejected(format!("Mempool rejected: {}", e)))?;
+        drop(relay_guard);
 
         // Broadcast to network
         self.tx_sender
@@ -4755,10 +5439,62 @@ impl SumChainApiServer for RpcServer {
             operation: MessagingOperation::RegisterPublicKeySponsoredV1,
             data: reg.to_bytes(),
         };
-        let sponsor_nonce = self
-            .state
-            .get_nonce(&sponsor_address)
-            .map_err(|e| RpcError::Internal(format!("Failed to get sponsor nonce: {}", e)))?;
+        // The same sponsor key as `messaging_submitSponsored`, so the same
+        // nonce allocation, under the same lock, until the transaction is in
+        // the pool. A message relayed after this registration takes the next
+        // sponsor nonce, which is valid only if the registration executes: a
+        // registration refused in the block (an address already registered,
+        // 394) is free and advances nothing. So a registration is taken only
+        // for an address that is not registered and has no registration
+        // pending in this node's pool, sponsored or its own. These are checked
+        // under the lock, the pool before the committed state: a block committed
+        // between the two reads is seen in one of them (the node commits a
+        // block before it removes the block's transactions from the pool).
+        let inclusion_height = self.relay_inclusion_height()?;
+        let relay_guard = self.relay_lock.lock().await;
+        if self.sponsored_registration_pending(&registrant_public_key, chain_id) {
+            return Ok(SponsoredRegistrationResponse {
+                address: registrant_address.to_base58(),
+                success: false,
+                tx_hash: None,
+                error: Some(
+                    "A sponsored registration of this public key is already pending; the \
+                     address is registered once that transaction executes."
+                        .to_string(),
+                ),
+            });
+        }
+        if self.direct_registration_pending(&registrant_address) {
+            return Ok(SponsoredRegistrationResponse {
+                address: registrant_address.to_base58(),
+                success: false,
+                tx_hash: None,
+                error: Some(
+                    "This address's own registration (RegisterPublicKey) is already pending; \
+                     it is registered once that transaction executes."
+                        .to_string(),
+                ),
+            });
+        }
+        let registered = MessagingStore::new(&self.db)
+            .has_public_key(&registrant_address)
+            .map_err(|e| {
+                RpcError::Internal(format!(
+                    "Failed to read the registrant's registration state: {e}"
+                ))
+            })?;
+        if registered {
+            return Ok(SponsoredRegistrationResponse {
+                address: registrant_address.to_base58(),
+                success: false,
+                tx_hash: None,
+                error: Some(
+                    "This address is already registered; use UpdatePublicKey to change its key."
+                        .to_string(),
+                ),
+            });
+        }
+        let sponsor_nonce = self.relay_sponsor_nonce(&sponsor_address, inclusion_height)?;
         let fee = 1_000_000u128; // 0.001 Koppa fee, same as messaging_submitSponsored.
         let tx = TransactionV2::messaging(chain_id, sponsor_address, fee, sponsor_nonce, messaging_data);
         let signing_hash = tx.signing_hash();
@@ -4779,6 +5515,7 @@ impl SumChainApiServer for RpcServer {
                 error: Some(format!("Mempool rejected: {}", e)),
             });
         }
+        drop(relay_guard);
         if let Err(e) = self.tx_sender.send(signed_tx).await {
             // Broadcast failed after mempool admission. Roll back the local
             // admission so the tx is not left pending on this node alone —
@@ -10068,6 +10805,47 @@ mod phase_0b_rpc_tests {
     }
 
     // ------- classify_tx_status --------------------------------------------
+
+    /// The eviction history only turns `Unknown` into `Dropped`: a receipt
+    /// and a place in the pool take precedence.
+    #[test]
+    fn a_local_eviction_reads_dropped_only_without_a_receipt_or_a_place_in_the_pool() {
+        let unknown = classify_tx_status(None, false, |_| true, FinalityMechanism::LocalDepth);
+        assert!(matches!(
+            report_local_eviction(unknown.clone(), true),
+            TxStatusV2::Dropped
+        ));
+        assert!(matches!(
+            report_local_eviction(unknown, false),
+            TxStatusV2::Unknown
+        ));
+        let pending = classify_tx_status(None, true, |_| true, FinalityMechanism::LocalDepth);
+        assert!(matches!(
+            report_local_eviction(pending, true),
+            TxStatusV2::Pending
+        ));
+        for (receipt, finalized) in [
+            (mk_receipt(TxStatus::Success, 7), true),
+            (mk_receipt(TxStatus::Success, 7), false),
+            (mk_receipt(TxStatus::InvalidNonce, 7), true),
+        ] {
+            let status = classify_tx_status(
+                Some(&receipt),
+                false,
+                |_| finalized,
+                FinalityMechanism::LocalDepth,
+            );
+            let expected = serde_json::to_value(&status).unwrap();
+            assert_eq!(
+                serde_json::to_value(report_local_eviction(status, true)).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(TxStatusV2::Dropped).unwrap(),
+            serde_json::json!({ "kind": "dropped" })
+        );
+    }
 
     #[test]
     fn classify_unknown_when_no_receipt_and_no_mempool() {
@@ -15363,5 +16141,166 @@ mod registry_dry_run_rpc_tests {
         assert_eq!(tags(&disabled), vec!["not_admissible_status"]);
         assert_eq!(disabled.candidate.as_ref().unwrap().status, "disabled");
         assert_ne!(refused.refusals, disabled.refusals);
+    }
+}
+
+#[cfg(test)]
+mod relay_read_order_tests {
+    //! The relay reads the pool before the committed nonce, both for the
+    //! sponsor nonce and for a sender's envelope sequence. A block committed
+    //! between the two reads (the node writes the block, then removes its
+    //! transactions from the pool) is then seen in one of them. The hook in
+    //! `relay_read_hook` places such a commit exactly between the reads.
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_primitives::{sponsored_send_v2_signing_preimage, TransactionV2};
+    use sumchain_state::MempoolConfig;
+    use sumchain_storage::schema::AccountState;
+    use sumchain_storage::StateStore;
+    use tempfile::TempDir;
+
+    const CHAIN_ID: u64 = 1;
+
+    /// A server whose next block is at or above the accounting gate, so
+    /// every pending messaging transaction of the sponsor holds its nonce.
+    fn server() -> (RpcServer, Arc<Database>, Arc<Mempool>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), CHAIN_ID));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            CHAIN_ID,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1_000_000u128)]),
+            ChainParams::with_v2_enabled(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(
+                db.clone(),
+                state.clone(),
+                mempool.clone(),
+                &genesis,
+                Some(validator),
+            )
+            .unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(64);
+        let mut params = ChainParams::with_v2_enabled();
+        params.messaging_sponsored_envelope_verification_enabled_from_height = Some(1);
+        params.messaging_fee_nonce_accounting_enabled_from_height = Some(1);
+        let srv = RpcServer::new(
+            db.clone(),
+            state,
+            mempool.clone(),
+            engine,
+            tx_sender,
+            Arc::new(|| 0usize),
+        )
+        .with_chain_params(params);
+        (srv, db, mempool, dir)
+    }
+
+    /// `sponsor`'s relayed `SendMessage` of `envelope` at account nonce `nonce`.
+    fn wrapper(sponsor: &KeyPair, nonce: u64, envelope: &SponsoredMessage) -> SignedTransaction {
+        let tx = TransactionV2::messaging(
+            CHAIN_ID,
+            sponsor.address(),
+            1_000_000,
+            nonce,
+            MessagingTxData {
+                operation: MessagingOperation::SendMessage,
+                data: bincode::serialize(envelope).unwrap(),
+            },
+        );
+        let sig = sumchain_crypto::sign(tx.signing_hash().as_bytes(), sponsor.private_key());
+        SignedTransaction::new_v2(tx, *sig.as_bytes(), *sponsor.public_key().as_bytes())
+    }
+
+    /// `sender`'s version-2 envelope at `nonce`.
+    fn envelope(sender: &KeyPair, nonce: u64) -> SponsoredMessage {
+        let mut m = SponsoredMessage {
+            message_data: vec![1, 2, 3],
+            recipient_hash: [9u8; 32],
+            signature: [0u8; 64],
+            sender_pubkey: *sender.public_key().as_bytes(),
+            nonce,
+            expiry: u64::MAX,
+            koppa_amount: None,
+        };
+        let preimage = sponsored_send_v2_signing_preimage(CHAIN_ID, &m);
+        m.signature = *sumchain_crypto::sign(&preimage, sender.private_key()).as_bytes();
+        m
+    }
+
+    /// The sponsor's wrapper at nonce 0 is pending; a block carrying it is
+    /// committed between the relay's two reads (the sponsor's nonce becomes 1,
+    /// then the wrapper leaves the pool). The relay's next sponsor nonce is 1,
+    /// not the nonce the block used.
+    #[test]
+    fn a_block_committed_between_the_reads_is_seen_by_the_sponsor_nonce() {
+        let (srv, db, mempool, _dir) = server();
+        let sponsor = KeyPair::from_bytes([0x65; 32]);
+        let carried = wrapper(&sponsor, 0, &envelope(&KeyPair::from_bytes([0x64; 32]), 0));
+        mempool.add(carried.clone()).unwrap();
+        assert_eq!(srv.relay_sponsor_nonce(&sponsor.address(), 1).unwrap(), 1);
+
+        let (db2, mempool2, address) = (db.clone(), mempool.clone(), sponsor.address());
+        relay_read_hook::install(move || {
+            StateStore::new(&db2)
+                .put_account(
+                    &address,
+                    &AccountState {
+                        balance: 1,
+                        nonce: 1,
+                    },
+                )
+                .unwrap();
+            assert!(mempool2.remove(&carried.hash()).is_some());
+        });
+        assert_eq!(
+            srv.relay_sponsor_nonce(&sponsor.address(), 1).unwrap(),
+            1,
+            "the nonce the committed block used is not given again"
+        );
+        assert!(mempool.is_empty(), "the hook ran");
+    }
+
+    /// carol's envelope at nonce 0 is pending in another sponsor's wrapper; a
+    /// block carrying it is committed between the relay's two reads (carol's
+    /// messaging nonce becomes 1, then the wrapper leaves the pool). Her next
+    /// envelope nonce is 1, not the one the block used.
+    #[test]
+    fn a_block_committed_between_the_reads_is_seen_by_the_envelope_sequence() {
+        let (srv, db, mempool, _dir) = server();
+        let carol = KeyPair::from_bytes([0x64; 32]);
+        let carried = wrapper(&KeyPair::from_bytes([0x67; 32]), 0, &envelope(&carol, 0));
+        mempool.add(carried.clone()).unwrap();
+        let key = *carol.public_key().as_bytes();
+        let (committed, held) = srv
+            .envelope_sequence(&key, &carol.address(), CHAIN_ID)
+            .unwrap();
+        assert_eq!(first_free_from(committed, &held), 1);
+
+        let (db2, mempool2, address) = (db.clone(), mempool.clone(), carol.address());
+        relay_read_hook::install(move || {
+            MessagingStore::new(&db2)
+                .set_sender_nonce(&address, 1)
+                .unwrap();
+            assert!(mempool2.remove(&carried.hash()).is_some());
+        });
+        let (committed, held) = srv
+            .envelope_sequence(&key, &carol.address(), CHAIN_ID)
+            .unwrap();
+        assert_eq!(
+            first_free_from(committed, &held),
+            1,
+            "the envelope nonce the committed block used is not taken again"
+        );
+        assert!(mempool.is_empty(), "the hook ran");
     }
 }

@@ -49,11 +49,12 @@
 //!
 //! [`schema`] holds the mechanism: schema 2 is schema 1's registry plus an
 //! append-only list of added fields, each optional with absence meaning the
-//! pre-existing behaviour; schema 3 is schema 2 plus one more such list. This
-//! binary writes schema 3 ([`schema::PRODUCTION`]), which freezes it: a fresh
-//! database records schema 3, and an existing schema-1 or schema-2 record runs
-//! unchanged until its operator moves it, in one step, with the stopped-node
-//! schema transition.
+//! pre-existing behaviour; schema 3 is schema 2 plus one more such list, and
+//! schema 4 is schema 3 plus another. This binary writes schema 4
+//! ([`schema::PRODUCTION`]), which freezes it: a fresh database records schema
+//! 4, and an existing schema-1, schema-2 or schema-3 record runs unchanged
+//! until its operator moves it, in one step, with the stopped-node schema
+//! transition.
 //!
 //! # Older schemas are read for good
 //!
@@ -76,17 +77,23 @@ pub mod codec;
 pub mod fields;
 pub mod record;
 pub mod schema;
+pub mod start_marker;
 
 pub use codec::{commitment_of, ConsensusConfig, Field, FieldChange, Value, SCHEMA_V1};
 pub use fields::{build, build_with, FieldSpec, SCHEMA_V1_FIELDS};
 pub use record::{
-    acknowledge, acknowledge_schema_transition, check_at_startup, pending_schema_transition,
-    pending_schema_transition_for, read_record, read_transitions, Acknowledged, BaselineRecord,
-    BaselineStatus, PendingSchemaTransition, SchemaTransitioned, StartupOutcome, Transition,
-    TransitionKind,
+    acknowledge, acknowledge_schema_transition, check_at_startup, migration_provenance,
+    pending_schema_revert, pending_schema_transition, pending_schema_transition_for, read_record,
+    read_transitions, restore_preserves_provenance, revert_schema_transition, Acknowledged,
+    BaselineRecord, BaselineStatus, PendingSchemaRevert, PendingSchemaTransition, Provenance,
+    SchemaReverted, SchemaTransitioned, StartupOutcome, Transition, TransitionKind,
 };
 pub use schema::{
     AddedField, Schema, SchemaPolicy, Source, PRODUCTION, SCHEMA_1, SCHEMA_2, SCHEMA_3, SCHEMA_4,
+    SCHEMA_5,
+};
+pub use start_marker::{
+    read_start_marker, record_start, RecordState, StartMarker, START_MARKER_KEY,
 };
 
 /// Why a configuration could not be built, decoded, compared or recorded.

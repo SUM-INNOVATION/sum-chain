@@ -1,0 +1,1091 @@
+//! A node that only imports blocks holds what selection holds, evicts it at
+//! the same bound, and releases its pool's places, as a producer does; across
+//! a chain switch too.
+//!
+//! A gapped transaction leaves a pool in its `GAP_HOLD_SELECTIONS`-th block,
+//! counted once per block on every node: by the selection of a node that
+//! proposes the block, and otherwise at the head the node commits (a block it
+//! imports, a chain switch's new head, counted once). On main such a
+//! transaction leaves a follower's pool when the producer's block carrying
+//! its `InvalidNonce` is imported; here no block names it, so the follower
+//! must count and evict it itself.
+//!
+//! Every case runs under the 6 gate configurations of [`matrix`] (the two
+//! messaging gates unset or at one height), or says why it runs under fewer;
+//! the 8 that set the gates apart are refused at genesis
+//! ([`apart_configurations`]).
+use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use sumchain_consensus::{ConsensusEngine, ConsensusQuery, PoAEngine};
+use sumchain_crypto::{recipient_hash, sign, KeyPair};
+use sumchain_genesis::{ChainParams, Genesis, MessagingParams};
+use sumchain_primitives::messaging::{
+    ContentType, MessageFlags, MessageHeader, MessagingTxData, RegisterPublicKeyData,
+    SetSponsorshipEnabledData, SRC201_MAGIC, SRC201_NONCE_SIZE, SRC201_TAG_SIZE, SRC201_VERSION,
+};
+use sumchain_primitives::{
+    sponsored_send_v2_signing_preimage, Block, BlockHeader, Hash, MessagingOperation, Receipt,
+    SignedTransaction, SponsoredMessage, TransactionV2, TxPayload, TxStatus,
+};
+use sumchain_state::mempool::{
+    advances_nonce_below_accounting_gate, InclusionGates, InclusionPolicy,
+    CROSS_ACCOUNT_WAIT_SELECTIONS, GAP_HOLD_SELECTIONS,
+};
+use sumchain_state::{BlockExecutor, Mempool, MempoolConfig, StateError, StateManager};
+use sumchain_storage::{Database, MessagingStore, ReceiptStore};
+use tempfile::TempDir;
+
+const CHAIN_ID: u64 = 1;
+/// Senders registered by `set_up`.
+const SENDERS: u8 = 4;
+const FUNDS: u128 = 1_000_000_000_000;
+const NEVER: u64 = u64::MAX;
+/// The block each case turns on: block 1 sets the chain up, block 2 carries
+/// an unrelated transfer, and the case's transactions are offered from block
+/// 3 on.
+const CASE_BLOCK: u64 = 3;
+
+fn key(i: u8) -> KeyPair {
+    KeyPair::from_bytes([i; 32])
+}
+fn pk(k: &KeyPair) -> [u8; 32] {
+    *k.public_key().as_bytes()
+}
+fn validator() -> KeyPair {
+    key(0x81)
+}
+fn admin() -> KeyPair {
+    key(0x82)
+}
+fn recipient() -> KeyPair {
+    key(0x83)
+}
+/// Sponsors, `0x90..`; the senders they relay for, `0xa0..`.
+fn sponsor(i: u8) -> KeyPair {
+    key(0x90 + i)
+}
+fn sender(i: u8) -> KeyPair {
+    key(0xa0 + i)
+}
+/// A sponsor and a user unrelated to every case's cycle or gap.
+fn unrelated_sponsor() -> KeyPair {
+    key(0xb0)
+}
+fn unrelated_user() -> KeyPair {
+    key(0xb1)
+}
+/// An account that only sends transfers.
+fn bystander() -> KeyPair {
+    key(0xb2)
+}
+
+/// One configuration of the two messaging gates
+/// (`messaging_sponsored_envelope_verification_enabled_from_height`, `0x1048`,
+/// and `messaging_fee_nonce_accounting_enabled_from_height`, `0x1049`).
+#[derive(Clone, Copy, Debug)]
+struct Gates {
+    name: &'static str,
+    verification: Option<u64>,
+    accounting: Option<u64>,
+}
+
+impl Gates {
+    fn accounting_at(&self, height: u64) -> bool {
+        self.accounting.is_some_and(|gate| height >= gate)
+    }
+}
+
+/// The gates absent; set above the chain's history; set inside it; and both
+/// at the case's block `H`, one below (`H-1`: the case's first block is below
+/// the gates, the next at them) and one above (`H+1`). A node runs only a
+/// chain whose two messaging gates are unset or at one height; the
+/// configurations that set them apart are [`apart_configurations`], each
+/// refused at genesis.
+fn matrix() -> Vec<Gates> {
+    let h = CASE_BLOCK;
+    let g = |name, verification, accounting| Gates {
+        name,
+        verification,
+        accounting,
+    };
+    vec![
+        g("absent", None, None),
+        g("above history", Some(1_000_000), Some(1_000_000)),
+        g("inside history", Some(1), Some(1)),
+        g("both at H-1", Some(h + 1), Some(h + 1)),
+        g("both at H", Some(h), Some(h)),
+        g("both at H+1", Some(h - 1), Some(h - 1)),
+    ]
+}
+
+/// `0x1049` and `0x1048` each at the case's block `H`, one below and one
+/// above, with the other gate inside the chain's history, and each alone at
+/// `H`. The two gates name one rule and must be unset or at one height,
+/// so a node refuses each of these genesis files and no case runs on
+/// them: [`apart_gate_configurations_are_refused_at_genesis`].
+fn apart_configurations() -> Vec<Gates> {
+    let h = CASE_BLOCK;
+    let g = |name, verification, accounting| Gates {
+        name,
+        verification,
+        accounting,
+    };
+    vec![
+        g("0x1049 at H-1", Some(1), Some(h + 1)),
+        g("0x1049 at H", Some(1), Some(h)),
+        g("0x1049 at H+1", Some(1), Some(h - 1)),
+        g("0x1049 only, at H", None, Some(h)),
+        g("0x1048 at H-1", Some(h + 1), Some(1)),
+        g("0x1048 at H", Some(h), Some(1)),
+        g("0x1048 at H+1", Some(h - 1), Some(1)),
+        g("0x1048 only, at H", Some(h), None),
+    ]
+}
+
+fn genesis(gates: Gates) -> Genesis {
+    genesis_with(gates, &[validator()])
+}
+
+/// [`genesis`], with `validators` as the validator set.
+fn genesis_with(gates: Gates, validators: &[KeyPair]) -> Genesis {
+    let any_gate = gates.verification.is_some() || gates.accounting.is_some();
+    let params = ChainParams {
+        application_journal_enabled_from_height: Some(1),
+        finality_depth: 1_000_000,
+        messaging: Some(MessagingParams {
+            registry_admin: Some(admin().address().to_base58()),
+            ..MessagingParams::default()
+        }),
+        messaging_sponsored_envelope_verification_enabled_from_height: gates.verification,
+        messaging_fee_nonce_accounting_enabled_from_height: gates.accounting,
+        // A remediation gate set obliges the peer declaration at or below it.
+        peer_protocol_declaration_required_from_height: any_gate.then_some(1),
+        ..ChainParams::with_v2_enabled()
+    };
+    let mut alloc = HashMap::new();
+    let mut accounts: Vec<KeyPair> = validators
+        .iter()
+        .map(|k| KeyPair::from_bytes(*k.private_key().as_bytes()))
+        .collect();
+    accounts.extend([
+        admin(),
+        recipient(),
+        unrelated_sponsor(),
+        unrelated_user(),
+        bystander(),
+    ]);
+    accounts.extend((0..4).map(sponsor));
+    accounts.extend((0..SENDERS).map(sender));
+    for k in accounts {
+        alloc.insert(k.address().to_base58(), FUNDS);
+    }
+    Genesis::new(
+        CHAIN_ID,
+        0,
+        validators
+            .iter()
+            .map(|v| v.public_key().to_base58())
+            .collect(),
+        alloc,
+        params,
+    )
+}
+
+fn valid_message(rh: [u8; 32]) -> Vec<u8> {
+    let header = MessageHeader {
+        magic: SRC201_MAGIC,
+        version: SRC201_VERSION,
+        flags: MessageFlags::encrypted(),
+        content_type: ContentType::TextPlain,
+        attachment_count: 0,
+        recipient_hash: rh,
+        ephemeral_pubkey: [2u8; 32],
+    };
+    let mut m = header.to_bytes().to_vec();
+    m.extend_from_slice(&[0u8; SRC201_NONCE_SIZE]);
+    m.extend_from_slice(&[0u8, 0u8]);
+    m.extend_from_slice(&[0u8; SRC201_TAG_SIZE]);
+    m
+}
+
+fn signed(kp: &KeyPair, nonce: u64, fee: u128, payload: TxPayload) -> SignedTransaction {
+    let tx = TransactionV2 {
+        chain_id: CHAIN_ID,
+        from: kp.address(),
+        fee,
+        nonce,
+        payload,
+    };
+    let sig = sign(tx.signing_hash().as_bytes(), kp.private_key());
+    SignedTransaction::new_v2(tx, *sig.as_bytes(), pk(kp))
+}
+
+fn messaging(
+    kp: &KeyPair,
+    nonce: u64,
+    fee: u128,
+    operation: MessagingOperation,
+    payload: &impl serde::Serialize,
+) -> SignedTransaction {
+    signed(
+        kp,
+        nonce,
+        fee,
+        TxPayload::Messaging(MessagingTxData {
+            operation,
+            data: bincode::serialize(payload).unwrap(),
+        }),
+    )
+}
+
+fn transfer(from: &KeyPair, nonce: u64, fee: u128) -> SignedTransaction {
+    signed(
+        from,
+        nonce,
+        fee,
+        TxPayload::Transfer {
+            to: recipient().address(),
+            amount: 1,
+        },
+    )
+}
+
+/// `user`'s version-2 envelope at envelope nonce `envelope_nonce`, relayed
+/// by `sponsor` at account nonce `nonce` with fee `fee`.
+fn relayed(
+    sponsor: &KeyPair,
+    nonce: u64,
+    fee: u128,
+    user: &KeyPair,
+    envelope_nonce: u64,
+) -> SignedTransaction {
+    let rh = recipient_hash(&recipient().address());
+    let mut m = SponsoredMessage {
+        message_data: valid_message(rh),
+        recipient_hash: rh,
+        signature: [0u8; 64],
+        sender_pubkey: pk(user),
+        nonce: envelope_nonce,
+        expiry: NEVER,
+        koppa_amount: None,
+    };
+    m.signature = *sign(
+        &sponsored_send_v2_signing_preimage(CHAIN_ID, &m),
+        user.private_key(),
+    )
+    .as_bytes();
+    messaging(sponsor, nonce, fee, MessagingOperation::SendMessage, &m)
+}
+
+/// A validator wired as `Node::new` wires its pool: the inclusion policy over
+/// its own database and the next-block rules at its live height.
+struct Node {
+    _dir: TempDir,
+    db: Arc<Database>,
+    state: Arc<StateManager>,
+    mempool: Arc<Mempool>,
+    engine: Arc<PoAEngine>,
+    chain_height: Arc<AtomicU64>,
+    gates: Gates,
+}
+
+impl Node {
+    fn new(gates: Gates) -> Self {
+        Self::with_pool(gates, |c| c)
+    }
+
+    /// [`Node::new`], with the pool's configuration tuned by `tune`.
+    fn with_pool(gates: Gates, tune: impl FnOnce(MempoolConfig) -> MempoolConfig) -> Self {
+        Self::build(genesis(gates), gates, Some(validator()), tune)
+    }
+
+    /// A node on `g` that never proposes (no validator key), wired as
+    /// `Node::new` wires its pool: it only imports blocks.
+    fn follower(
+        g: Genesis,
+        gates: Gates,
+        tune: impl FnOnce(MempoolConfig) -> MempoolConfig,
+    ) -> Self {
+        Self::build(g, gates, None, tune)
+    }
+
+    fn build(
+        g: Genesis,
+        gates: Gates,
+        key: Option<KeyPair>,
+        tune: impl FnOnce(MempoolConfig) -> MempoolConfig,
+    ) -> Self {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), CHAIN_ID));
+        let chain_height = Arc::new(AtomicU64::new(0));
+        let mempool = Arc::new(
+            Mempool::new(tune(MempoolConfig {
+                min_fee: g.params.min_fee,
+                max_tx_bytes: g.params.max_block_bytes,
+                ..MempoolConfig::default()
+            }))
+            .with_inclusion_policy(InclusionPolicy { db: db.clone() })
+            .with_inclusion_gates(InclusionGates {
+                params: Arc::new(g.params.clone()),
+                chain_id: g.chain_id,
+                current_height: chain_height.clone(),
+            }),
+        );
+        let engine =
+            Arc::new(PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &g, key).unwrap());
+        engine.init_genesis(&g).unwrap();
+        Self {
+            _dir: dir,
+            db,
+            state,
+            mempool,
+            engine,
+            chain_height,
+            gates,
+        }
+    }
+
+    fn submit(&self, txs: &[&SignedTransaction]) {
+        self.chain_height
+            .store(self.engine.current_height(), Ordering::Relaxed);
+        for t in txs {
+            self.mempool
+                .add((*t).clone())
+                .unwrap_or_else(|e| panic!("{}: admitted: {e}", self.gates.name));
+        }
+    }
+
+    /// `t` offered to the pool: whether admission takes it.
+    fn try_submit(&self, t: &SignedTransaction) -> Result<(), StateError> {
+        self.chain_height
+            .store(self.engine.current_height(), Ordering::Relaxed);
+        self.mempool.add(t.clone()).map(|_| ())
+    }
+
+    /// `b`, imported as gossip delivers it, with the pool's view of the
+    /// height moved to the new head as the node's event loop moves it.
+    async fn import(&self, b: &Block) {
+        self.engine.import_block(b.clone()).await.expect("imports");
+        self.chain_height
+            .store(self.engine.current_height(), Ordering::Relaxed);
+    }
+
+    /// One production tick, as `run_block_producer` runs it.
+    async fn tick(&self) -> Block {
+        self.chain_height
+            .store(self.engine.current_height(), Ordering::Relaxed);
+        let txs = self.mempool.select_for_block(1_000);
+        self.engine.propose_block(txs).await.expect("a block")
+    }
+
+    fn status(&self, t: &SignedTransaction) -> Option<TxStatus> {
+        ReceiptStore::new(&self.db)
+            .get(&t.hash())
+            .unwrap()
+            .map(|r| r.status)
+    }
+
+    fn account_nonce(&self, k: &KeyPair) -> u64 {
+        self.state.get_nonce(&k.address()).unwrap()
+    }
+
+    /// The next block's height.
+    fn next_height(&self) -> u64 {
+        self.engine.current_height() + 1
+    }
+
+    /// Block 1: sponsorship on, the senders and the unrelated user
+    /// registered. Block 2: an unrelated transfer. The case starts at block 3.
+    async fn set_up(&self) {
+        let mut txs = vec![messaging(
+            &admin(),
+            0,
+            1_000,
+            MessagingOperation::SetSponsorshipEnabled,
+            &SetSponsorshipEnabledData { enabled: true },
+        )];
+        for k in (0..SENDERS).map(sender).chain([unrelated_user()]) {
+            txs.push(messaging(
+                &k,
+                0,
+                1_000,
+                MessagingOperation::RegisterPublicKey,
+                &RegisterPublicKeyData { public_key: pk(&k) },
+            ));
+        }
+        self.submit(&txs.iter().collect::<Vec<_>>());
+        let b1 = self.tick().await;
+        assert_eq!(b1.height(), 1);
+        for t in &txs {
+            assert_eq!(
+                self.status(t),
+                Some(TxStatus::Success),
+                "{}",
+                self.gates.name
+            );
+        }
+        let filler = transfer(&bystander(), 0, 1_000);
+        self.submit(&[&filler]);
+        let b2 = self.tick().await;
+        assert_eq!(hashes(&b2.transactions), vec![filler.hash()]);
+        assert_eq!(self.next_height(), CASE_BLOCK);
+    }
+
+    fn receipt(&self, t: &SignedTransaction) -> Option<Receipt> {
+        ReceiptStore::new(&self.db).get(&t.hash()).unwrap()
+    }
+
+    fn held(&self, t: &SignedTransaction) -> bool {
+        self.mempool.contains(&t.hash())
+    }
+}
+
+fn hashes(txs: &[SignedTransaction]) -> Vec<Hash> {
+    txs.iter().map(|t| t.hash()).collect()
+}
+
+fn carries(b: &Block, t: &SignedTransaction) -> bool {
+    b.transactions.iter().any(|x| x.hash() == t.hash())
+}
+
+/// An unfunded key no genesis account or registration knows.
+fn stranger(i: u8) -> KeyPair {
+    let mut b = [0xc5u8; 32];
+    b[31] = i;
+    KeyPair::from_bytes(b)
+}
+
+fn transfer_amount(from: &KeyPair, nonce: u64, fee: u128, amount: u128) -> SignedTransaction {
+    signed(
+        from,
+        nonce,
+        fee,
+        TxPayload::Transfer {
+            to: recipient().address(),
+            amount,
+        },
+    )
+}
+
+/// The account nonce a relay signs `k`'s next transaction at for the next
+/// block (`relay_sponsor_nonce`).
+fn relay_nonce(node: &Node, k: &KeyPair) -> u64 {
+    let accounting = node.gates.accounting_at(node.next_height());
+    let committed = node.account_nonce(k);
+    let held: BTreeSet<u64> = node
+        .mempool
+        .get_by_sender(&k.address())
+        .iter()
+        .filter(|tx| accounting || advances_nonce_below_accounting_gate(tx))
+        .map(|tx| tx.nonce())
+        .filter(|n| *n >= committed)
+        .collect();
+    let mut nonce = committed;
+    while held.contains(&nonce) {
+        nonce += 1;
+    }
+    nonce
+}
+
+/// How many blocks a transaction is held above a gap before it is evicted.
+const GAP_BOUND: u64 = GAP_HOLD_SELECTIONS as u64;
+
+/// How many of this node's selections an envelope waits on another account
+/// before it is carried to its refusal.
+const BOUND: u64 = CROSS_ACCOUNT_WAIT_SELECTIONS as u64;
+
+/// A producer `p` and a follower `q` (no validator key, a pool of 32
+/// places) on one genesis. Both pools take the same 32 transactions above a
+/// gap: three unfunded keys' nonces 1 to 10, `s`'s envelope 0 through `r1`
+/// at `r1`'s nonce 1 (nothing at its nonce 0), and `s`'s envelope 1 through
+/// `r2`. `p` produces, `q` imports. On `q`, as on `p`: held for
+/// `GAP_BOUND - 1` blocks, with `q`'s pool full (a fresh honest transfer is
+/// refused, as admission refuses it); in the `GAP_BOUND`-th block the 30
+/// transfers and `r1`'s envelope are gone from `q`'s pool, none of the 31
+/// with a receipt, and `q` admits the honest transfer. `s`'s envelope 1 is
+/// checked at every head, under the selection oracle: while `r1`'s envelope
+/// is in the pool it is row 4. Where the accounting gate is open from the
+/// case's first block, `p` releases it at its `BOUND`-th counted selection,
+/// the `GAP_BOUND`-th block, and `q` drops it with that block's receipt.
+/// Where the gate opens later but is open at the `GAP_BOUND`-th block, it is
+/// not stranded with `r1`'s there, but from then on its envelope 0 is missing
+/// (row 3): never counted or carried, it is evicted within the gap bound on
+/// both nodes, with no receipt. Below the gate at the `GAP_BOUND`-th block,
+/// both nodes evict it with `r1`'s there, with no receipt. At every
+/// configuration.
+#[tokio::test]
+async fn a_node_that_only_imports_blocks_evicts_at_the_same_bound() {
+    for gates in matrix() {
+        let name = gates.name;
+        let p = Node::new(gates);
+        let q = Node::follower(genesis(gates), gates, |c| MempoolConfig {
+            max_size: 32,
+            ..c
+        });
+        p.set_up().await;
+        for h in 1..=p.engine.current_height() {
+            q.import(&p.engine.get_block_by_height(h).unwrap()).await;
+        }
+        let (r1, r2, s) = (sponsor(0), sponsor(1), sender(0));
+        let mut gapped = Vec::new();
+        for a in 0..3u8 {
+            let k = stranger(0x20 + a);
+            for n in 1..=10u64 {
+                gapped.push(transfer_amount(&k, n, 1_000_000, 1));
+            }
+        }
+        let r1_s0 = relayed(&r1, 1, 2_000, &s, 0);
+        let r2_s1 = relayed(&r2, relay_nonce(&p, &r2), 2_000, &s, 1);
+        for node in [&p, &q] {
+            node.submit(&gapped.iter().collect::<Vec<_>>());
+            node.submit(&[&r1_s0, &r2_s1]);
+        }
+        assert_eq!(q.mempool.len(), 32, "{name}: q's pool is full");
+        let honest = transfer(&unrelated_user(), relay_nonce(&q, &unrelated_user()), 1_000);
+        // The block (from the case's first, 1) at which `q` no longer holds
+        // `s`'s envelope 1, and whether a receipt goes with it.
+        let evicted_with_r1 = GAP_BOUND;
+        let at_gate = gates.accounting_at(CASE_BLOCK + evicted_with_r1 - 1);
+        let first = (CASE_BLOCK..CASE_BLOCK + 20).find(|h| gates.accounting_at(*h));
+        let (gone_at, with_receipt) = match first {
+            // Row 4 when its release is decided, with `r1`'s envelope there.
+            Some(f) if at_gate && f + BOUND - 1 <= CASE_BLOCK + evicted_with_r1 - 1 => {
+                (f - CASE_BLOCK + BOUND, true)
+            }
+            // Row 3 once `r1`'s envelope is evicted: the gap bound from there.
+            _ if at_gate => (evicted_with_r1 + GAP_BOUND - 1, false),
+            // Below the gate: stranded with `r1`'s envelope.
+            _ => (evicted_with_r1, false),
+        };
+        for n in 1..=gone_at.max(GAP_BOUND + 1) {
+            let b = p.tick().await;
+            q.import(&b).await;
+            assert_eq!(
+                q.held(&r2_s1),
+                n < gone_at,
+                "{name}: s's envelope 1, head {n}"
+            );
+            if n >= gone_at {
+                assert_eq!(
+                    q.receipt(&r2_s1).is_some(),
+                    with_receipt,
+                    "{name}: head {n}"
+                );
+                assert_eq!(carries(&b, &r2_s1), with_receipt && n == gone_at, "{name}");
+            }
+            let held = n < GAP_BOUND;
+            assert!(
+                gapped
+                    .iter()
+                    .chain([&r1_s0])
+                    .all(|t| q.held(t) == held && q.receipt(t).is_none()),
+                "{name}: head {n} after the case"
+            );
+            if held {
+                assert!(
+                    matches!(q.try_submit(&honest), Err(StateError::MempoolFull)),
+                    "{name}: q's pool is still full at head {n}"
+                );
+            }
+            assert_eq!(
+                gapped.iter().chain([&r1_s0]).filter(|t| p.held(t)).count(),
+                if held { 31 } else { 0 },
+                "{name}: the producer at head {n}"
+            );
+        }
+        q.try_submit(&honest)
+            .unwrap_or_else(|e| panic!("{name}: q admits it once the places are free: {e}"));
+        // `p` carries `s`'s envelope 1 to its refusal only where its release
+        // was decided while `r1`'s envelope was in the pool (row 4).
+        assert_eq!(p.receipt(&r2_s1).is_some(), with_receipt, "{name}");
+    }
+}
+
+/// Where the gap bound comes first. The accounting gate opens one block after
+/// the case's first (`H-1`). A full pool (6 places) evicts `v`'s envelope 0
+/// (through `r1`, the lowest fee) for a gapped transfer at a higher fee;
+/// `v`'s envelope 1, relayed by `r2` at its nonce 0, is then beyond `v`'s
+/// first missing envelope nonce, and its gap-hold count starts at the case's
+/// first block, below the gate. Under the selection oracle its required
+/// predecessor is missing (row 3), from the gate as below it: it is never
+/// counted toward the cross-account bound, and in the `GAP_BOUND`-th block it
+/// is evicted with the gapped transfers, never carried or charged. At the
+/// configuration where both gates open at `H+1` (`both at H-1`); the one
+/// with the verification gate open earlier sets the gates apart and is
+/// refused at genesis ([`apart_configurations`]).
+#[tokio::test]
+async fn where_the_gap_bound_comes_first_the_wait_on_another_account_still_ends_in_a_refusal() {
+    let configs: Vec<Gates> = matrix()
+        .into_iter()
+        .filter(|g| g.name == "both at H-1")
+        .collect();
+    assert_eq!(configs.len(), 1);
+    for gates in configs {
+        let name = gates.name;
+        let node = Node::with_pool(gates, |c| MempoolConfig { max_size: 6, ..c });
+        node.set_up().await;
+        let (r1, r2, v) = (sponsor(0), sponsor(1), sender(1));
+        let r1_v0 = relayed(&r1, 0, 1_000, &v, 0);
+        let r2_v1 = relayed(&r2, 0, 2_200, &v, 1);
+        node.submit(&[&r1_v0, &r2_v1]);
+        let k = stranger(0x10);
+        let gapped: Vec<SignedTransaction> = (1..=5u64)
+            .map(|n| transfer_amount(&k, n, 1_000_000_000, 1))
+            .collect();
+        node.submit(&gapped[..4].iter().collect::<Vec<_>>());
+        assert_eq!(node.mempool.len(), 6, "{name}: the pool is full");
+        node.submit(&[&gapped[4]]);
+        assert!(!node.held(&r1_v0), "{name}: evicted for a higher fee");
+        assert!(!gates.accounting_at(CASE_BLOCK) && gates.accounting_at(CASE_BLOCK + 1));
+        for n in 1..=GAP_BOUND {
+            let b = node.tick().await;
+            assert!(b.transactions.is_empty(), "{name}: head {n}");
+        }
+        assert!(
+            gapped.iter().all(|t| !node.held(t)),
+            "{name}: evicted at the gap bound"
+        );
+        assert!(!node.held(&r2_v1), "{name}: row 3, evicted with them");
+        assert!(
+            node.receipt(&r2_v1).is_none(),
+            "{name}: never carried or charged"
+        );
+        assert!(node.mempool.evicted_above_a_gap(&r2_v1.hash()), "{name}");
+        assert_eq!(
+            node.mempool.cross_account_wait_count(&r2_v1.hash()),
+            0,
+            "{name}: never counted"
+        );
+        assert_eq!(node.account_nonce(&r2), 0, "{name}");
+    }
+}
+
+/// A block builder off the nodes under test: its own database over the same
+/// genesis, real execution (as `sponsored_capacity_reorg.rs` builds them).
+struct Builder {
+    _dir: TempDir,
+    state: Arc<StateManager>,
+    executor: BlockExecutor,
+    keys: Vec<KeyPair>,
+    validators: Vec<[u8; 32]>,
+    head: Block,
+    salt: u64,
+}
+
+impl Builder {
+    fn new(g: &Genesis, keys: &[KeyPair], salt: u64) -> Self {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), CHAIN_ID));
+        let engine = PoAEngine::new(
+            db.clone(),
+            state.clone(),
+            Arc::new(Mempool::new(MempoolConfig::default())),
+            g,
+            None,
+        )
+        .unwrap();
+        let head = engine.init_genesis(g).unwrap();
+        drop(engine);
+        let executor = BlockExecutor::new(state.clone(), db.clone(), g.params.clone());
+        Self {
+            _dir: dir,
+            state,
+            executor,
+            keys: keys
+                .iter()
+                .map(|k| KeyPair::from_bytes(*k.private_key().as_bytes()))
+                .collect(),
+            validators: g.validator_pubkeys().unwrap(),
+            head,
+            salt,
+        }
+    }
+
+    fn produce(&mut self, txs: Vec<SignedTransaction>) -> Block {
+        let height = self.head.height() + 1;
+        let want = self.validators[(height % self.validators.len() as u64) as usize];
+        let proposer = self.keys.iter().find(|k| pk(k) == want).unwrap();
+        let proposer = KeyPair::from_bytes(*proposer.private_key().as_bytes());
+        let mut b = Block::new(
+            BlockHeader::new(
+                self.head.hash(),
+                height,
+                self.head.header.timestamp + 10 + self.salt,
+                Hash::ZERO,
+                Hash::ZERO,
+                pk(&proposer),
+            ),
+            txs,
+        );
+        b.header.tx_root = b.compute_tx_root();
+        let exec = self
+            .executor
+            .execute_block(&b, self.state.state_root(), &self.validators)
+            .unwrap();
+        b.header.state_root = exec.computed_root();
+        let s = sign(b.header.signing_hash().as_bytes(), proposer.private_key());
+        b.header.set_signature(*s.as_bytes());
+        let (executed, _, _) = exec.into_parts();
+        let accepted = executed.accept_produced(&b).unwrap();
+        let acc = accepted.accumulator();
+        accepted.publish().unwrap();
+        self.state.set_state_root(acc);
+        self.head = b.clone();
+        b
+    }
+}
+
+/// A chain switch on a node that only imports. Two validators; two off-node
+/// builders produce competing branches. The follower holds `g` (a funded
+/// account's nonce 1, its nonce 0 never sent, so the switch's revalidation
+/// keeps it), `x`'s nonces 0 and 1 and `y`'s nonce 1 (`y`'s nonce 0 is not in
+/// its pool). Branch A carries `x`'s nonce 0 in its first block; the
+/// follower imports A's two blocks, and `g` and `y`'s nonce 1 are counted at
+/// each. Branch B carries `y`'s nonce 0 in its first block; its blocks that
+/// lose fork choice count nothing, and the one that wins it switches the
+/// chain. At the switch (one new head): `g` reaches the bound and is evicted
+/// with no receipt; `y`'s nonce 1 is no longer above a gap, so its count is
+/// gone and it stays; `x`'s nonce 0 is offered back and both of `x`'s are
+/// held, counted from nothing. One more of B's blocks changes nothing of
+/// that. With the gates absent and inside the chain's history.
+#[tokio::test]
+async fn a_chain_switch_counts_at_its_new_head_and_keeps_what_the_new_branch_unblocks() {
+    for gates in matrix()
+        .into_iter()
+        .filter(|g| ["absent", "inside history"].contains(&g.name))
+    {
+        let name = gates.name;
+        let validators = [validator(), key(0x84)];
+        let g = genesis_with(gates, &validators);
+        let q = Node::follower(g.clone(), gates, |c| c);
+        let mut a = Builder::new(&g, &validators, 0);
+        let mut b = Builder::new(&g, &validators, 1);
+        let (x, y) = (sponsor(2), sponsor(3));
+        let stray = transfer(&sponsor(0), 1, 1_000);
+        let (x0, x1, y0, y1) = (
+            transfer(&x, 0, 1_000),
+            transfer(&x, 1, 1_000),
+            transfer(&y, 0, 1_000),
+            transfer(&y, 1, 1_000),
+        );
+        q.submit(&[&stray, &x0, &x1, &y1]);
+        let count = |t: &SignedTransaction| q.mempool.gap_hold_count(&t.hash());
+
+        let a1 = a.produce(vec![x0.clone()]);
+        q.import(&a1).await;
+        assert!(!q.held(&x0), "{name}: carried by A");
+        assert_eq!((count(&stray), count(&y1), count(&x1)), (1, 1, 0), "{name}");
+        let a2 = a.produce(Vec::new());
+        q.import(&a2).await;
+        assert_eq!((count(&stray), count(&y1)), (2, 2), "{name}");
+
+        let b1 = b.produce(vec![y0.clone()]);
+        let b2 = b.produce(Vec::new());
+        let b3 = b.produce(Vec::new());
+        // B's blocks lose fork choice until one wins it: no head moves and
+        // nothing is counted for them. The block that wins it switches the
+        // chain, and the switch is counted once, at its new head.
+        let mut switched = false;
+        for blk in [&b1, &b2, &b3] {
+            q.import(blk).await;
+            if q.engine.best_block_hash() != blk.hash() {
+                assert_eq!(q.engine.best_block_hash(), a2.hash(), "{name}");
+                assert!(q.held(&stray), "{name}: a losing block counts nothing");
+                assert_eq!(count(&stray), 2, "{name}");
+                continue;
+            }
+            if !switched {
+                switched = true;
+                assert!(!q.held(&stray), "{name}: evicted at the switch's head");
+                assert!(q.receipt(&stray).is_none(), "{name}");
+                for t in [&y1, &x0, &x1] {
+                    assert!(q.held(t), "{name}");
+                    assert_eq!(count(t), 0, "{name}");
+                }
+            }
+        }
+        assert!(switched, "{name}: switched to B");
+        assert_eq!(q.engine.best_block_hash(), b3.hash(), "{name}");
+        for t in [&y1, &x0, &x1] {
+            assert!(q.held(t), "{name}");
+            assert_eq!(count(t), 0, "{name}");
+        }
+        let b4 = b.produce(Vec::new());
+        q.import(&b4).await;
+        for t in [&y1, &x0, &x1] {
+            assert!(q.held(t), "{name}");
+            assert_eq!(count(t), 0, "{name}");
+        }
+    }
+}
+
+/// Node-local recomputation ("missing" is a node's own view),
+/// when canonical state changes: row 3 becomes row 5 at the head that
+/// executes the missing envelope. A follower `q` holds a cycle within one
+/// sponsor above `s`'s missing envelope 0: `r` relays `s`'s envelope 2 at its
+/// nonce 0 and envelope 1 at its nonce 1, and `q` took `s`'s envelope 0
+/// (through `x`) and then lost it. The producer `p` never sees `r`'s
+/// envelopes. In the case's first block `q` counts both of `r`'s toward the
+/// gap bound. Where `p` then takes `s`'s envelope 0 and carries it in the next
+/// block, `q`, importing it, recomputes: `r`'s envelopes are no longer above a
+/// gap, their counts are gone, and `q` keeps both past the gap bound, with no
+/// receipt and nothing in its eviction history. Where no block carries it,
+/// `q` evicts both at the `GAP_BOUND`-th block, into its eviction history.
+/// Where both messaging gates are open at the case's block.
+#[tokio::test]
+async fn a_follower_recomputes_a_missing_envelope_when_an_imported_block_executes_it() {
+    for gates in matrix()
+        .into_iter()
+        .filter(|g| g.accounting_at(CASE_BLOCK) && g.verification.is_some_and(|v| CASE_BLOCK >= v))
+    {
+        for executed in [false, true] {
+            let name = format!("{}, envelope 0 executed: {executed}", gates.name);
+            let p = Node::new(gates);
+            let q = Node::follower(genesis(gates), gates, |c| c);
+            p.set_up().await;
+            for h in 1..=p.engine.current_height() {
+                q.import(&p.engine.get_block_by_height(h).unwrap()).await;
+            }
+            let (r, x, s) = (sponsor(0), sponsor(2), sender(0));
+            let x_s0 = relayed(&x, 0, 2_000, &s, 0);
+            let r_s1 = relayed(&r, 1, 2_000, &s, 1);
+            let r_s2 = relayed(&r, 0, 2_000, &s, 2);
+            q.submit(&[&x_s0, &r_s1, &r_s2]);
+            q.mempool.remove(&x_s0.hash());
+            let count = |t: &SignedTransaction| q.mempool.gap_hold_count(&t.hash());
+            let b = p.tick().await;
+            q.import(&b).await;
+            assert_eq!((count(&r_s1), count(&r_s2)), (1, 1), "{name}");
+            if executed {
+                p.submit(&[&x_s0]);
+            }
+            for n in 2..=(GAP_BOUND + 1) {
+                let b = p.tick().await;
+                assert_eq!(carries(&b, &x_s0), executed && n == 2, "{name}: block {n}");
+                q.import(&b).await;
+                let held = executed || n < GAP_BOUND;
+                for t in [&r_s1, &r_s2] {
+                    assert_eq!(q.held(t), held, "{name}: head {n}");
+                    assert!(q.receipt(t).is_none(), "{name}: head {n}");
+                    assert_eq!(
+                        q.mempool.evicted_above_a_gap(&t.hash()),
+                        !held,
+                        "{name}: head {n}"
+                    );
+                    if executed {
+                        assert_eq!(count(t), 0, "{name}: recomputed at head {n}");
+                    }
+                }
+            }
+            let messaging = MessagingStore::new(&q.db)
+                .get_sender_nonce(&s.address())
+                .unwrap();
+            assert_eq!(messaging, u64::from(executed), "{name}");
+            assert_eq!(q.account_nonce(&r), 0, "{name}");
+        }
+    }
+}
+
+/// Node-local recomputation at a chain switch: row 3 becomes row 5 at the
+/// switch's head. Two validators; two off-node
+/// builders share a prefix (sponsorship on and `s` registered, then a
+/// filler) and then compete. Two followers hold the cycle of the previous
+/// case above `s`'s missing envelope 0 and import branch A's two empty
+/// blocks, each counting `r`'s envelopes toward the gap bound. Branch B
+/// carries `s`'s envelope 0 (through `x`) in its first block. The follower
+/// `q` imports B: its blocks that lose fork choice count nothing, and at the
+/// switch (one new head) `r`'s envelopes are no longer above a gap, their
+/// counts are gone and both stay, with no receipt and nothing in the
+/// eviction history; B's later blocks change nothing of that. The follower
+/// `q2` stays on A and evicts both at A's third block. With the gates inside
+/// the chain's history.
+#[tokio::test]
+async fn a_follower_recomputes_a_missing_envelope_at_a_chain_switch_that_executes_it() {
+    let gates = matrix()
+        .into_iter()
+        .find(|g| g.name == "inside history")
+        .unwrap();
+    let name = gates.name;
+    let validators = [validator(), key(0x84)];
+    let g = genesis_with(gates, &validators);
+    let q = Node::follower(g.clone(), gates, |c| c);
+    let q2 = Node::follower(g.clone(), gates, |c| c);
+    let mut a = Builder::new(&g, &validators, 0);
+    let mut b = Builder::new(&g, &validators, 0);
+    let (r, x, s) = (sponsor(0), sponsor(2), sender(0));
+    let setup = vec![
+        messaging(
+            &admin(),
+            0,
+            1_000,
+            MessagingOperation::SetSponsorshipEnabled,
+            &SetSponsorshipEnabledData { enabled: true },
+        ),
+        messaging(
+            &s,
+            0,
+            1_000,
+            MessagingOperation::RegisterPublicKey,
+            &RegisterPublicKeyData { public_key: pk(&s) },
+        ),
+    ];
+    let filler = vec![transfer(&bystander(), 0, 1_000)];
+    for txs in [setup, filler] {
+        let block = a.produce(txs.clone());
+        assert_eq!(b.produce(txs).hash(), block.hash(), "{name}: one prefix");
+        for node in [&q, &q2] {
+            node.import(&block).await;
+        }
+    }
+    let x_s0 = relayed(&x, 0, 2_000, &s, 0);
+    let r_s1 = relayed(&r, 1, 2_000, &s, 1);
+    let r_s2 = relayed(&r, 0, 2_000, &s, 2);
+    for node in [&q, &q2] {
+        node.submit(&[&x_s0, &r_s1, &r_s2]);
+        node.mempool.remove(&x_s0.hash());
+    }
+    let count = |node: &Node, t: &SignedTransaction| node.mempool.gap_hold_count(&t.hash());
+    let a3 = a.produce(Vec::new());
+    let a4 = a.produce(Vec::new());
+    for (n, block) in [(1u32, &a3), (2, &a4)] {
+        for node in [&q, &q2] {
+            node.import(block).await;
+            for t in [&r_s1, &r_s2] {
+                assert_eq!(count(node, t), n, "{name}: A's block {n}");
+            }
+        }
+    }
+    let a5 = a.produce(Vec::new());
+    q2.import(&a5).await;
+    for t in [&r_s1, &r_s2] {
+        assert!(!q2.held(t), "{name}: evicted on A at the gap bound");
+        assert!(q2.mempool.evicted_above_a_gap(&t.hash()), "{name}");
+    }
+
+    b.salt = 1;
+    let b3 = b.produce(vec![x_s0.clone()]);
+    let b4 = b.produce(Vec::new());
+    let b5 = b.produce(Vec::new());
+    let b6 = b.produce(Vec::new());
+    let mut switched = false;
+    for blk in [&b3, &b4, &b5, &b6] {
+        q.import(blk).await;
+        if q.engine.best_block_hash() != blk.hash() {
+            assert_eq!(q.engine.best_block_hash(), a4.hash(), "{name}");
+            for t in [&r_s1, &r_s2] {
+                assert_eq!(count(&q, t), 2, "{name}: a losing block counts nothing");
+            }
+            continue;
+        }
+        switched = true;
+        for t in [&r_s1, &r_s2] {
+            assert!(q.held(t), "{name}: kept at the switch and after");
+            assert_eq!(count(&q, t), 0, "{name}: recomputed");
+            assert!(q.receipt(t).is_none(), "{name}");
+            assert!(!q.mempool.evicted_above_a_gap(&t.hash()), "{name}");
+        }
+    }
+    assert!(switched, "{name}: switched to B");
+    assert_eq!(q.engine.best_block_hash(), b6.hash(), "{name}");
+    assert_eq!(
+        MessagingStore::new(&q.db)
+            .get_sender_nonce(&s.address())
+            .unwrap(),
+        1,
+        "{name}: s's envelope 0 executed on B"
+    );
+}
+
+/// Each configuration that sets `0x1048` and `0x1049` apart is refused when
+/// the node initialises its genesis, with the error naming both gates:
+/// such a chain cannot be run, so no case runs on it.
+#[tokio::test]
+async fn apart_gate_configurations_are_refused_at_genesis() {
+    let apart = apart_configurations();
+    assert_eq!(apart.len(), 8);
+    for gates in apart {
+        let g = genesis(gates);
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), CHAIN_ID));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let engine = PoAEngine::new(db, state, mempool, &g, Some(validator())).unwrap();
+        let want = sumchain_genesis::GenesisError::MessagingEnvelopeAndAccountingGatesApart {
+            envelope: gates.verification,
+            accounting: gates.accounting,
+        }
+        .to_string();
+        match engine.init_genesis(&g) {
+            Err(sumchain_consensus::ConsensusError::State(
+                sumchain_state::StateError::ActivationParams(m),
+            )) => assert_eq!(m, want, "{}", gates.name),
+            other => panic!("{}: expected the refusal, got {other:?}", gates.name),
+        }
+    }
+}
+
+/// A release decided in a selection whose block is never made does not
+/// outlive it. A node `q` holds `s`'s envelope 0 through `r2` at its nonce 1
+/// (above `r2`'s gap), a transfer of `r`'s at its nonce 0, and `s`'s envelope
+/// 1 (X) through `r` at its nonce 1. `q` makes three selections whose blocks
+/// are never made (proposals that are not committed): X, row 4, is counted,
+/// and released at the third, in which `s`'s envelope 0 reaches the gap bound
+/// and is evicted. Then `q` only imports `p`'s empty blocks; the first head
+/// after the selections is the one they counted. From the next head on, X is
+/// judged as it stands, with no release, by the gap bound: row 3 (its envelope
+/// 0 now missing), and, where `r`'s transfer also leaves `q`'s pool
+/// uncommitted (as a lowest-fee eviction removes it), row 1 as well (above
+/// `r`'s own gap). Either way X is held at the first `GAP_BOUND - 1` counted
+/// heads and evicted at the `GAP_BOUND`-th, never carried or charged, and is
+/// in `q`'s eviction history. Where both messaging gates are open at the
+/// case's block.
+#[tokio::test]
+async fn a_release_from_a_selection_whose_block_is_never_made_does_not_outlive_it() {
+    for gates in matrix()
+        .into_iter()
+        .filter(|g| g.accounting_at(CASE_BLOCK) && g.verification.is_some_and(|v| CASE_BLOCK >= v))
+    {
+        for transfer_leaves in [false, true] {
+            let name = format!("{}, r's transfer leaves: {transfer_leaves}", gates.name);
+            let p = Node::new(gates);
+            let q = Node::follower(genesis(gates), gates, |c| c);
+            p.set_up().await;
+            for h in 1..=p.engine.current_height() {
+                q.import(&p.engine.get_block_by_height(h).unwrap()).await;
+            }
+            let (r, r2, s) = (sponsor(0), sponsor(1), sender(0));
+            let r2_s0 = relayed(&r2, 1, 2_000, &s, 0);
+            let t0 = transfer(&r, 0, 2_000);
+            let x = relayed(&r, 1, 2_000, &s, 1);
+            q.submit(&[&r2_s0, &t0, &x]);
+            for n in 1..=BOUND {
+                q.chain_height
+                    .store(q.engine.current_height(), Ordering::Relaxed);
+                let selected = q.mempool.select_for_block(1_000);
+                let released = selected.iter().any(|tx| tx.hash() == x.hash());
+                assert_eq!(released, n == BOUND, "{name}: selection {n}");
+            }
+            assert!(!q.held(&r2_s0), "{name}: s's envelope 0 at the gap bound");
+            assert!(q.held(&x), "{name}: released, its block never made");
+            if transfer_leaves {
+                q.mempool.remove(&t0.hash());
+            }
+            let first = p.tick().await;
+            q.import(&first).await;
+            assert!(q.held(&x), "{name}: the head the selections counted");
+            for n in 1..=GAP_BOUND {
+                let b = p.tick().await;
+                q.import(&b).await;
+                assert!(!carries(&b, &x), "{name}");
+                assert_eq!(q.held(&x), n < GAP_BOUND, "{name}: counted head {n}");
+            }
+            assert!(q.receipt(&x).is_none(), "{name}: never carried or charged");
+            assert!(q.mempool.evicted_above_a_gap(&x.hash()), "{name}");
+            assert_eq!(q.account_nonce(&r), 0, "{name}");
+        }
+    }
+}

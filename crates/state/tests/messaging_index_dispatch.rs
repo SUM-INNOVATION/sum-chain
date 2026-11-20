@@ -63,6 +63,7 @@ fn direct_send_success_writes_sender_index() {
     let res = MessagingExecutor::execute(
         &mut candidate.view(),
         &params,
+        1,
         &sender,
         &tx,
         &proposer,
@@ -121,6 +122,7 @@ fn failed_send_writes_neither_primary_nor_index() {
     let res = MessagingExecutor::execute(
         &mut candidate.view(),
         &params,
+        1,
         &sender,
         &tx,
         &proposer,

@@ -511,13 +511,17 @@ async fn a_node_restarting_across_an_activation_boundary_reaches_the_same_state(
         "the comparison must cover the real store, not a handful of families: {}",
         families.len()
     );
-    // The differing ROWS, named exactly. Three, and all are things a BOOT writes
+    // The differing ROWS, named exactly. Four, and all are things a BOOT writes
     // rather than things an EXECUTION writes: the control was never booted
-    // through `Node`, so it has neither the activation record, the consensus
-    // configuration baseline (#268) nor the messaging index-backfill marker.
-    // Compared as a key set rather than as a family set, so a genuine execution
-    // difference inside either family would still fail.
+    // through `Node`, so it has neither the start marker, the activation
+    // record, the consensus configuration baseline (#268) nor the messaging
+    // index-backfill marker. Compared as a key set rather than as a family set,
+    // so a genuine execution difference inside either family would still fail.
     let expected_only_on_the_booted_node: std::collections::BTreeSet<(String, Vec<u8>)> = [
+        (
+            cf::META.to_string(),
+            sumchain_consensus::consensus_config::START_MARKER_KEY.to_vec(),
+        ),
         (cf::META.to_string(), Node::ACTIVATION_META_KEY.to_vec()),
         (
             cf::META.to_string(),
@@ -547,7 +551,7 @@ async fn a_node_restarting_across_an_activation_boundary_reaches_the_same_state(
     assert_eq!(
         differing, expected_only_on_the_booted_node,
         "a restarted producer and an uninterrupted follower must agree on every \
-         row of every family except the three a BOOT writes: the activation \
+         row of every family except the four a BOOT writes: the start marker, the activation \
          record, the consensus configuration baseline and the messaging \
          index-backfill marker. Anything else here is an execution difference \
          the restart introduced"

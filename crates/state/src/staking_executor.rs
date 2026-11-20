@@ -85,6 +85,20 @@ pub struct StakingExecutor;
 
 impl StakingExecutor {
 
+    /// `ChainParams::staking_submit_evidence_unsupported_enabled_from_height`.
+    fn submit_evidence_unsupported_activation(params: &ChainParams) -> Option<u64> {
+        params.staking_submit_evidence_unsupported_enabled_from_height
+    }
+
+    /// Whether the legacy `SubmitEvidence` operation, `DoubleSign` and
+    /// `Downtime` alike, is refused in a block at `block_height`.
+    pub fn submit_evidence_unsupported(params: &ChainParams, block_height: BlockHeight) -> bool {
+        matches!(
+            Self::submit_evidence_unsupported_activation(params),
+            Some(h) if block_height >= h
+        )
+    }
+
     /// Execute a staking operation from transaction data
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
@@ -134,6 +148,15 @@ impl StakingExecutor {
             }
             // Slashing operations
             StakingOperation::SubmitEvidence => {
+                // From the refusal gate on, the whole operation is refused,
+                // both evidence variants, before its payload is read. The fee
+                // deducted above stays deducted, as for every other failed
+                // staking operation.
+                if Self::submit_evidence_unsupported(params, block_height) {
+                    return Ok(StakingExecutionResult::failure(
+                        "SubmitEvidence is not supported at this height".to_string(),
+                    ));
+                }
                 Self::execute_submit_evidence(view, params, &staking_data.data, block_height)
             }
         }

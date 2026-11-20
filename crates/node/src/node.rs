@@ -27,7 +27,8 @@ use sumchain_rpc::{
 use sumchain_state::education_executor::EducationExecutor;
 use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
 use sumchain_state::mempool::{
-    EducationAdmission, InclusionPolicy, InferenceAttestationAdmission, MessagingQuotaAdmission,
+    EducationAdmission, InclusionGates, InclusionPolicy, InferenceAttestationAdmission,
+    MessagingQuotaAdmission, TransactionSignatureAdmission,
 };
 use sumchain_state::{Mempool, MempoolConfig, StateManager};
 use sumchain_storage::{BlockStore, Database};
@@ -426,6 +427,30 @@ impl Node {
         // Open database
         let db = Arc::new(Database::open_default(&data_dir)?);
 
+        // ── the start marker: the first logical write of a normal start ──────
+        //
+        // Immediately after the open, before any check that may write or
+        // refuse: the journal format gate, the messaging backfill, the
+        // activation-height record, the configuration baseline, genesis
+        // initialization and the node key. It records that THIS database saw a
+        // normal start attempt, at which configuration record and head. The
+        // pre-start revert of a consensus-configuration schema move refuses once
+        // a marker written at or after the move exists, whatever the start then
+        // did: ran, imported nothing, or was refused below. If the marker cannot
+        // be written the start refuses here, with nothing else written
+        // (`sumchain_consensus::consensus_config::start_marker`).
+        let start_marker =
+            sumchain_consensus::consensus_config::record_start(&db).map_err(|e| {
+                anyhow::anyhow!(
+                    "refusing to start: the start marker was not recorded ({e}); nothing else \
+                     was written"
+                )
+            })?;
+        info!(
+            "Start marker recorded: attempt {}, configuration record {:?}, head {:?}",
+            start_marker.attempt, start_marker.record, start_marker.head
+        );
+
         // ── the application-journal downgrade gate, before anything else ─────
         //
         // First thing after the open, and before state, consensus, RPC or the
@@ -606,6 +631,15 @@ impl Node {
             current_height: chain_height.clone(),
         };
 
+        // Transaction-signature admission: from the strict-signature gate on,
+        // judged at the next block's height, a signature must pass the rule
+        // that block applies. Same live `chain_height` Arc as the two above.
+        // Dormant (checks nothing) while the gate is unset.
+        let signature_admission = TransactionSignatureAdmission {
+            params: Arc::new(genesis.params.clone()),
+            current_height: chain_height.clone(),
+        };
+
         // Create mempool with admission wired in.
         let mempool = Arc::new(
             Mempool::new(MempoolConfig {
@@ -620,6 +654,7 @@ impl Node {
             })
             .with_inference_admission(inference_admission)
             .with_education_admission(education_admission)
+            .with_signature_admission(signature_admission)
             // The node-local inclusion policy, judged against this node's own
             // canonical database: no transaction already included, and only
             // authenticated, in-sequence sponsored envelopes. Always wired on
@@ -631,6 +666,14 @@ impl Node {
             // the SAME live `chain_height` the other admission gates use.
             .with_messaging_quota_admission(MessagingQuotaAdmission {
                 params: Arc::new(genesis.params.clone()),
+                current_height: chain_height.clone(),
+            })
+            // ... in the envelope forms the next block accepts, judged at the
+            // SAME live `chain_height`: the string form or version 2 below the
+            // envelope verification gate, version 2 only from it.
+            .with_inclusion_gates(InclusionGates {
+                params: Arc::new(genesis.params.clone()),
+                chain_id: genesis.chain_id,
                 current_height: chain_height.clone(),
             }),
         );
@@ -2040,20 +2083,27 @@ fn shutdown_both(stop_health: impl FnOnce(), stop_rpc: impl FnOnce() -> Result<(
     stop_rpc()
 }
 
-// Production-wiring contract is enforced by tests in
-// `crates/state/tests/inference_attestation_mempool.rs`:
-//   - `production_wiring_rejects_attestation_pre_activation`
-//   - `production_wiring_height_advance_opens_gate`
-// They mirror the exact admission recipe in `Node::new` above.
-// If you refactor the wiring (the `InferenceAttestationAdmission { ... }`
-// or `EducationAdmission { ... }` literals, the `.with_*_admission(...)`
-// builder chain, the `chain_height.store(...)` calls in the event loop,
-// or the `Arc::new(BlockStore::new(&db).get_latest_height()…)`
-// initialization), update those tests too — they are intentionally a
-// verbatim mirror so that drift produces compile or assertion failures
-// rather than silent security regressions. `EducationAdmission` shares
-// the SAME `chain_height` Arc, so the event-loop `chain_height.store`
-// calls cover both admission gates.
+// Production-wiring contract is enforced by tests that mirror the exact
+// admission recipe in `Node::new` above:
+//   - `crates/state/tests/inference_attestation_mempool.rs`:
+//       - `production_wiring_rejects_attestation_pre_activation`
+//       - `production_wiring_height_advance_opens_gate`
+//   - `crates/state/tests/signature_evidence_gates.rs`, module `key_holder`:
+//       - `production_wiring_installs_signature_admission`
+//       - `production_wiring_refuses_a_legacy_only_signature_once_inclusion_reaches_the_gate`
+//   - `crates/state/tests/proposal_inclusion_policy.rs`:
+//       - `production_wiring_judges_the_envelope_form_of_the_next_block`
+// If you refactor the wiring (the `InferenceAttestationAdmission { ... }`,
+// `EducationAdmission { ... }` or `TransactionSignatureAdmission { ... }`
+// literals, the `InclusionPolicy { ... }` and `InclusionGates { ... }`
+// literals, the `.with_*(...)` builder chain, the
+// `chain_height.store(...)` calls in the event loop, or the
+// `Arc::new(BlockStore::new(&db).get_latest_height()…)` initialization),
+// update those tests too — they are intentionally a verbatim mirror so that
+// drift produces compile or assertion failures rather than silent
+// regressions. `EducationAdmission`, `TransactionSignatureAdmission` and
+// `InclusionGates` share the SAME `chain_height` Arc, so the event-loop
+// `chain_height.store` calls cover every height-judged admission rule.
 
 /// Build the fully-configured production RPC server.
 ///

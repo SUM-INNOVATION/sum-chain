@@ -73,6 +73,27 @@ pub fn sender_nonce_key(sender: &Address) -> &[u8] {
     sender.as_bytes()
 }
 
+/// Key prefix of the envelope-outcome rows, which share
+/// `cf::MESSAGING_SENDER_NONCES` with the sender-nonce rows.
+///
+/// A sender-nonce key is a bare 20-byte address ([`sender_nonce_key`]); an
+/// envelope-outcome key is this 24-byte prefix, a 20-byte address and an
+/// 8-byte nonce ([`envelope_outcome_key`]), 52 bytes, so the two shapes never
+/// meet. A key prefix in an existing family rather than a new family: a
+/// binary that does not know these rows still opens the database (it opens
+/// exactly the families it lists).
+pub const ENVELOPE_OUTCOME_PREFIX: &[u8] = b"msg-envelope-outcome/v1/";
+
+/// Envelope-outcome row key: `ENVELOPE_OUTCOME_PREFIX(24) || sender(20) ||
+/// nonce(8 BE)`. Big-endian, so one sender's rows sort by nonce.
+pub fn envelope_outcome_key(sender: &Address, nonce: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(ENVELOPE_OUTCOME_PREFIX.len() + 28);
+    key.extend_from_slice(ENVELOPE_OUTCOME_PREFIX);
+    key.extend_from_slice(sender.as_bytes());
+    key.extend_from_slice(&nonce.to_be_bytes());
+    key
+}
+
 /// Daily-count row key: `sender(20) || day(4 BE)`.
 pub fn daily_count_key(sender: &Address, day: u32) -> Vec<u8> {
     let mut key = Vec::with_capacity(24);
@@ -213,6 +234,56 @@ pub fn decode_inbox_filter(bytes: &[u8]) -> InboxFilter {
 /// corrupt row disable the admin checks instead of failing the block.
 pub fn decode_registry_admin(bytes: &[u8]) -> Result<Address> {
     Address::from_slice(bytes).map_err(|e| StorageError::InvalidData(e.to_string()))
+}
+
+/// What became of an authenticated sponsored envelope: the transaction that
+/// spent its nonce, how it ended, and what it escrowed. One row per
+/// `(named sender, envelope nonce)`, written when the nonce is spent, by the
+/// envelope's success or by its refusal; nothing else writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnvelopeOutcome {
+    /// The transaction that carried the envelope and spent its nonce. Under
+    /// front-running this is the first includer's, not the hash a relay
+    /// returned to its client.
+    pub tx_hash: Hash,
+    /// That transaction's receipt code: `0` for `Success`, `n` for
+    /// `Failed(n)` (`7` for every messaging refusal).
+    pub outcome_code: u32,
+    /// The amount that transaction moved into escrow; `0` when none.
+    pub escrowed_amount: Balance,
+}
+
+/// Width of an envelope-outcome row: `tx_hash(32) || outcome_code(4 BE) ||
+/// escrowed_amount(16 BE)`.
+pub const ENVELOPE_OUTCOME_LEN: usize = 52;
+
+pub fn encode_envelope_outcome(outcome: &EnvelopeOutcome) -> Vec<u8> {
+    let mut v = Vec::with_capacity(ENVELOPE_OUTCOME_LEN);
+    v.extend_from_slice(outcome.tx_hash.as_bytes());
+    v.extend_from_slice(&outcome.outcome_code.to_be_bytes());
+    v.extend_from_slice(&outcome.escrowed_amount.to_be_bytes());
+    v
+}
+
+/// A row of any other width is an error, never a default.
+pub fn decode_envelope_outcome(bytes: &[u8]) -> Result<EnvelopeOutcome> {
+    if bytes.len() != ENVELOPE_OUTCOME_LEN {
+        return Err(StorageError::InvalidData(format!(
+            "envelope outcome row of {} bytes, expected {ENVELOPE_OUTCOME_LEN}",
+            bytes.len()
+        )));
+    }
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&bytes[..32]);
+    let mut code = [0u8; 4];
+    code.copy_from_slice(&bytes[32..36]);
+    let mut amount = [0u8; 16];
+    amount.copy_from_slice(&bytes[36..]);
+    Ok(EnvelopeOutcome {
+        tx_hash: Hash::new(hash),
+        outcome_code: u32::from_be_bytes(code),
+        escrowed_amount: Balance::from_be_bytes(amount),
+    })
 }
 
 pub fn encode_pending_payment(payment: &PendingPayment) -> Result<Vec<u8>> {
@@ -373,6 +444,22 @@ impl<'a> MessagingStore<'a> {
     // ========================================================================
     // Rate Limiting
     // ========================================================================
+
+    /// The envelope-outcome row of `sender`'s envelope at `nonce`, if that
+    /// nonce has been spent by an authenticated envelope.
+    pub fn get_envelope_outcome(
+        &self,
+        sender: &Address,
+        nonce: u64,
+    ) -> Result<Option<EnvelopeOutcome>> {
+        match self.db.get(
+            cf::MESSAGING_SENDER_NONCES,
+            &envelope_outcome_key(sender, nonce),
+        )? {
+            Some(bytes) => Ok(Some(decode_envelope_outcome(&bytes)?)),
+            None => Ok(None),
+        }
+    }
 
     /// Get sender's message nonce (for replay protection)
     pub fn get_sender_nonce(&self, sender: &Address) -> Result<u64> {

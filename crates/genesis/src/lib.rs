@@ -210,6 +210,23 @@ pub enum GenesisError {
         height: u64,
     },
 
+    /// `messaging_sponsored_envelope_verification_enabled_from_height` and
+    /// `messaging_fee_nonce_accounting_enabled_from_height` are set apart:
+    /// one without the other, or at two heights.
+    #[error(
+        "messaging_sponsored_envelope_verification_enabled_from_height is {envelope:?} and \
+         messaging_fee_nonce_accounting_enabled_from_height is {accounting:?}. The two \
+         gates name one rule for sponsored messages: from the first an envelope is \
+         authenticated and its amount is paid by its sender, from the second a refused \
+         envelope is charged to its relayer and spends its nonce. Apart, an envelope's \
+         authorization could be refused without being spent, or spent without being \
+         authenticated. Set both to the same height, or leave both unset"
+    )]
+    MessagingEnvelopeAndAccountingGatesApart {
+        envelope: Option<u64>,
+        accounting: Option<u64>,
+    },
+
     /// `healthcare_consent_subject_signature_enabled_from_height` is `Some(_)`
     /// while `healthcare_authorization_enabled_from_height` is `None`.
     ///
@@ -2946,9 +2963,6 @@ pub struct ChainParams {
     /// `BeginUnstake` counts only the sender's own open storage challenges
     /// (#369).
     ///
-    /// PROVISIONAL NAME, for review: the field's name is not settled; it
-    /// changes before any release that writes the schema registering it.
-    ///
     /// An archive with an open retrievability challenge cannot begin unbonding
     /// (code 324). Below this height the check reads the challenge node index
     /// from `[b'N', sender]` onward without stopping at the sender's keys, so
@@ -2966,12 +2980,17 @@ pub struct ChainParams {
     /// every validator must run the identical reviewed binary and observe the
     /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
     /// in this branch.
+    ///
+    /// It is consensus-configuration field `0x1044`, which only schema 4 can
+    /// express. A node whose recorded configuration is schema 1, 2 or 3
+    /// refuses to start with it set, naming the stopped-node
+    /// `acknowledge-consensus-config-schema` that moves the record to schema 4;
+    /// genesis validation also requires
+    /// `peer_protocol_declaration_required_from_height` at or below it.
     #[serde(default)]
     pub archive_unbonding_own_challenges_enabled_from_height: Option<u64>,
 
     /// A storage challenge targets only an archive that attested the chunk.
-    ///
-    /// The field's name is adopted; its schema-4 allocation is provisional.
     ///
     /// On the assignment-aware challenge paths (the targeting gate
     /// `por_assignment_targeting_enabled_from_height` and the scheduler gate
@@ -2996,8 +3015,128 @@ pub struct ChainParams {
     /// every validator must run the identical reviewed binary and observe the
     /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
     /// in this branch.
+    ///
+    /// It is consensus-configuration field `0x1045`, which only schema 4 can
+    /// express, with the same start-up refusal and peer-declaration rule as
+    /// `0x1044` above.
     #[serde(default)]
     pub por_attested_targets_enabled_from_height: Option<u64>,
+
+    /// Transaction signatures are checked with the strict Ed25519 rule.
+    ///
+    /// Below this height, or while it is unset, a transaction's signature is
+    /// checked with `sumchain_crypto::verify_bytes`, exactly as every existing
+    /// block was checked, so historical blocks execute, import and replay as
+    /// they did. At and above it, the signature of every transaction in a
+    /// block at that height is checked with
+    /// `sumchain_crypto::verify_bytes_strict` (canonical encodings, no
+    /// small-order components), for every transaction. Mempool admission
+    /// applies the rule of
+    /// the height a transaction would be included at, the next block's.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    ///
+    /// It is consensus-configuration field `0x1046`, which only schema 4 can
+    /// express, with the same start-up refusal and peer-declaration rule as
+    /// `0x1044` above.
+    #[serde(default)]
+    pub strict_transaction_signatures_enabled_from_height: Option<u64>,
+
+    /// The legacy staking `SubmitEvidence` operation is refused.
+    ///
+    /// Below this height, or while it is unset, `SubmitEvidence` executes
+    /// exactly as before. At and above it, a `SubmitEvidence` transaction,
+    /// `DoubleSign` or `Downtime`, is refused before its payload is read. A
+    /// refused transaction is charged as any other failed staking operation is:
+    /// the fee is debited, the proposer credited and the nonce advanced (all
+    /// three only when the fee is nonzero), and the receipt is `Failed(6)` with
+    /// `fee_paid: 0`.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    ///
+    /// It is consensus-configuration field `0x1047`, which only schema 4 can
+    /// express, with the same start-up refusal and peer-declaration rule as
+    /// `0x1044` above.
+    #[serde(default)]
+    pub staking_submit_evidence_unsupported_enabled_from_height: Option<u64>,
+
+    /// A sponsored `SendMessage` carries a version-2 sender envelope, verified
+    /// in consensus.
+    ///
+    /// PROPOSED NAME, for review; it is the first field of a draft schema 5
+    /// (`0x1048`, proposed).
+    ///
+    /// Below this height, or while it is unset, a sponsored `SendMessage`
+    /// executes exactly as before, under the earlier envelope rule, so
+    /// historical blocks execute, import and replay as they did.
+    /// At and above it, the envelope is accepted only when it carries no
+    /// amount, its `signature` verifies strictly, by the key it names as the
+    /// sender, over the version-2 preimage
+    /// (`sumchain_wire::messaging::sponsored_send_v2_signing_preimage`, which
+    /// binds the chain, the sender key, the recipient, the message bytes, the
+    /// nonce, the expiry and the amount), the sender is registered, and its
+    /// `nonce` equals the sender's current messaging nonce; then the nonce is
+    /// advanced and the message stored, as before. An envelope that fails any
+    /// check is an ordinary failed messaging operation and stores nothing.
+    /// A stored event therefore never reports a payment, because no sponsored
+    /// envelope carrying one is accepted.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Clients must sign the version-2
+    /// preimage from this height on. Never `Some(_)` in a committed genesis in
+    /// this branch.
+    #[serde(default)]
+    pub messaging_sponsored_envelope_verification_enabled_from_height: Option<u64>,
+
+    /// Every messaging operation is charged its fee and advances the sender's
+    /// account nonce, once, whether it succeeds or is refused.
+    ///
+    /// PROPOSED NAME, for review; it is the second gate of the draft schema 5
+    /// (`0x1049`, proposed).
+    ///
+    /// Below this height, or while it is unset, the messaging operations
+    /// charge as before. At and above it, the
+    /// messaging executor charges every operation before dispatching it, as
+    /// the other V2 arms charge: the fee leaves the sender, the proposer is
+    /// credited and the sender's account nonce advances, exactly once, on
+    /// success and on refusal alike; the two operations that charged for
+    /// themselves charge nothing more, and end with the balances and nonces
+    /// they ended with before. A refused operation's receipt reports the fee
+    /// it was charged.
+    ///
+    /// Production-safe default `None`, which is what an absent field resolves
+    /// to and what every genesis written before this gate existed carries.
+    /// `None` closes the gate, and a closed gate means a node executes exactly
+    /// what it executed before this field was declared.
+    ///
+    /// Activation is a consensus change and a coordinated validator upgrade:
+    /// every validator must run the identical reviewed binary and observe the
+    /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
+    /// in this branch.
+    #[serde(default)]
+    pub messaging_fee_nonce_accounting_enabled_from_height: Option<u64>,
 
     /// Contract execution is metered (#279).
     ///
@@ -3509,6 +3648,14 @@ impl Default for ChainParams {
             archive_unbonding_own_challenges_enabled_from_height: None,
             // Production-safe default: a storage challenge may target any assigned, Active archive — dormant.
             por_attested_targets_enabled_from_height: None,
+            // Production-safe default: transaction signatures are checked as before — dormant.
+            strict_transaction_signatures_enabled_from_height: None,
+            // Production-safe default: SubmitEvidence executes as before — dormant.
+            staking_submit_evidence_unsupported_enabled_from_height: None,
+            // Production-safe default: a sponsored envelope executes as before — dormant.
+            messaging_sponsored_envelope_verification_enabled_from_height: None,
+            // Production-safe default: messaging operations charge as before — dormant.
+            messaging_fee_nonce_accounting_enabled_from_height: None,
             // Production-safe default: contracts run on the unmetered engine — dormant.
             contract_metering_enabled_from_height: None,
             // No block-level contract gas budget (inert while the metering gate is closed).
@@ -3760,6 +3907,32 @@ impl ChainParams {
                 })
             }
             (Some(_), Some(_)) => {}
+        }
+
+        // ── the two sponsored-messaging gates, at one height ────────────────
+        //
+        //     messaging_sponsored_envelope_verification_enabled_from_height
+        //         == messaging_fee_nonce_accounting_enabled_from_height
+        //
+        // Both unset, or both set to the same height. The envelope gate
+        // authenticates a sponsored envelope and executes its amount as a
+        // payment; the accounting gate charges every refusal once and spends
+        // an authenticated envelope's nonce. Apart, there is a band in which an
+        // authorization is refused and stays valid, or one that is never
+        // authenticated is charged. Checked after the peer-declaration
+        // ordering, which applies to each gate on its own.
+        match (
+            self.messaging_sponsored_envelope_verification_enabled_from_height,
+            self.messaging_fee_nonce_accounting_enabled_from_height,
+        ) {
+            (None, None) => {}
+            (Some(envelope), Some(accounting)) if envelope == accounting => {}
+            (envelope, accounting) => {
+                return Err(GenesisError::MessagingEnvelopeAndAccountingGatesApart {
+                    envelope,
+                    accounting,
+                })
+            }
         }
 
         // ── the healthcare consent-grant ordering, enforced at load ─────────
@@ -4208,6 +4381,22 @@ impl ChainParams {
                 self.por_attested_targets_enabled_from_height,
             ),
             (
+                "strict_transaction_signatures_enabled_from_height",
+                self.strict_transaction_signatures_enabled_from_height,
+            ),
+            (
+                "staking_submit_evidence_unsupported_enabled_from_height",
+                self.staking_submit_evidence_unsupported_enabled_from_height,
+            ),
+            (
+                "messaging_sponsored_envelope_verification_enabled_from_height",
+                self.messaging_sponsored_envelope_verification_enabled_from_height,
+            ),
+            (
+                "messaging_fee_nonce_accounting_enabled_from_height",
+                self.messaging_fee_nonce_accounting_enabled_from_height,
+            ),
+            (
                 "contract_metering_enabled_from_height",
                 self.contract_metering_enabled_from_height,
             ),
@@ -4251,7 +4440,7 @@ impl ChainParams {
     }
 }
 
-/// The forty-eight remediation gates, by field name.
+/// The fifty-two remediation gates, by field name.
 ///
 /// The count in this sentence has been wrong twice, both times because a wave
 /// added gates and nothing checked the prose. It is checked now:
@@ -4320,6 +4509,10 @@ pub const REMEDIATION_GATES: &[&str] = &[
     "node_registry_update_status_unsupported_enabled_from_height",
     "archive_unbonding_own_challenges_enabled_from_height",
     "por_attested_targets_enabled_from_height",
+    "strict_transaction_signatures_enabled_from_height",
+    "staking_submit_evidence_unsupported_enabled_from_height",
+    "messaging_sponsored_envelope_verification_enabled_from_height",
+    "messaging_fee_nonce_accounting_enabled_from_height",
 ];
 
 /// What changed between the activation parameters a database was last started

@@ -173,6 +173,16 @@ const EXCLUDED: &[(&str, &str)] = &[
         "SPAM_THRESHOLD",
         "row key in cf::MESSAGING_CONFIG, not a compiled-in limit",
     ),
+    // ── Storage layout of the envelope-outcome rows. The prefix names where
+    //    the rows live; no committed digest folds the messaging families. Its
+    //    length enters the write-set byte count as every row key's does, a
+    //    property of the code, not a limit.
+    (
+        "ENVELOPE_OUTCOME_PREFIX",
+        "key prefix of the envelope-outcome rows in cf::MESSAGING_SENDER_NONCES; \
+         storage layout, not a compiled-in limit; messaging families are not \
+         digested",
+    ),
     // ── This digest's own domain separator. It cannot fold itself: the value
     //    would have to be in its own preimage.
     (

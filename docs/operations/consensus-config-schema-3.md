@@ -102,8 +102,9 @@ Scheduling the gate means writing two heights into the genesis of every node:
   schedule a gate the chain has already passed: its start is refused, and it
   must be re-synced from genesis under the scheduled configuration.
 
-The order on each node is therefore: stop, take a copy of the data directory,
-install, `--show`, move, write P and H into the genesis, start.
+The order on each node is therefore: stop, take a copy of the data directory
+(for forensics only), install, `--show`, move, write P and H into the genesis,
+start.
 
 ## 4. At and above H
 
@@ -131,10 +132,9 @@ unchanged. Statuses set by `UpdateStatus` before H stay as they are.
   holds the same height as the genesis; it logs "Activation record restored".
   If the record does not verify, or holds another height or none, the start is
   refused once the gate has passed, and the node must be re-synced. Do not
-  start an older binary on a moved node. Returning to one needs the copy of the
-  data directory taken before the move. Restoring that copy discards every
-  block the node accepted after it was taken, so it is a recovery decision,
-  not a routine rollback.
+  start an older binary on a moved node: recovery from a moved node is
+  forward, with a binary that reads its schema. No data copy is written back
+  over accepted blocks (`consensus-config-schema-4.md`, section 5).
 - **After P and H are written:** a binary without this field does not enforce
   the gate, and one that does not refuse unknown genesis fields would ignore it
   silently and diverge at the first `UpdateStatus` at or above H. Do not return

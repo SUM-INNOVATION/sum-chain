@@ -451,6 +451,31 @@ pub mod failpoints {
         /// The local-depth finality record's write fails (`PoAEngine`'s
         /// finality check, after a block is committed).
         FinalityWriteFails,
+        /// The consensus-configuration schema move: its one batch is staged
+        /// and not yet committed (a crash barrier only).
+        SchemaTransitionBeforeCommit,
+        /// The consensus-configuration schema move: its batch is committed,
+        /// and the command has not yet reported (a crash barrier only).
+        SchemaTransitionAfterCommit,
+        /// The pre-start schema revert: its one batch is staged and not yet
+        /// committed (a crash barrier only).
+        SchemaRevertBeforeCommit,
+        /// The pre-start schema revert: its batch is committed, and the
+        /// command has not yet reported (a crash barrier only).
+        SchemaRevertAfterCommit,
+        /// The node's start marker: its batch is staged and not yet committed
+        /// (a crash barrier only).
+        StartMarkerBeforeCommit,
+        /// The node's start marker: its batch is committed, and the start has
+        /// done nothing else yet (a crash barrier only).
+        StartMarkerAfterCommit,
+        /// The node's start marker: its commit fails (an armed failpoint).
+        StartMarkerCommitFails,
+        /// Not a branch-switch failpoint: the proposer's screening pass
+        /// (`PoAEngine::screen_selection`) is skipped and returns the
+        /// selection unchanged, so the fitting loop alone acts on every
+        /// refusal. For tests of the fitting loop's drops.
+        SkipProposalScreening,
     }
 
     impl Failpoint {
@@ -467,6 +492,14 @@ pub mod failpoints {
                 Failpoint::AfterValidation => "after-validation".into(),
                 Failpoint::MidReconcile => "mid-reconcile".into(),
                 Failpoint::FinalityWriteFails => "finality-write-fails".into(),
+                Failpoint::SchemaTransitionBeforeCommit => "schema-transition-before-commit".into(),
+                Failpoint::SchemaTransitionAfterCommit => "schema-transition-after-commit".into(),
+                Failpoint::SchemaRevertBeforeCommit => "schema-revert-before-commit".into(),
+                Failpoint::SchemaRevertAfterCommit => "schema-revert-after-commit".into(),
+                Failpoint::StartMarkerBeforeCommit => "start-marker-before-commit".into(),
+                Failpoint::StartMarkerAfterCommit => "start-marker-after-commit".into(),
+                Failpoint::StartMarkerCommitFails => "start-marker-commit-fails".into(),
+                Failpoint::SkipProposalScreening => "skip-proposal-screening".into(),
             }
         }
     }

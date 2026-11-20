@@ -50,6 +50,9 @@ use sumchain_storage::messaging_store::{
     public_key_key, sender_index_key, sender_nonce_key, spam_score_key, stake_key, INDEX_PRESENT,
     PRESENT,
 };
+use sumchain_storage::messaging_store::{
+    decode_envelope_outcome, encode_envelope_outcome, envelope_outcome_key, EnvelopeOutcome,
+};
 
 use crate::messaging_executor::MessagingExecutor;
 use crate::{Result, StateError};
@@ -182,6 +185,42 @@ impl MessagingExecutor {
         )
         .map_err(StateError::Storage)?;
         Ok(next)
+    }
+
+    /// The envelope-outcome row of `sender`'s envelope at `nonce`.
+    pub fn v_get_envelope_outcome(
+        view: &ExecutionView<'_, '_>,
+        sender: &Address,
+        nonce: u64,
+    ) -> Result<Option<EnvelopeOutcome>> {
+        match view
+            .get(
+                cf::MESSAGING_SENDER_NONCES,
+                &envelope_outcome_key(sender, nonce),
+            )
+            .map_err(StateError::Storage)?
+        {
+            Some(bytes) => Ok(Some(
+                decode_envelope_outcome(&bytes).map_err(StateError::Storage)?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Record what spent `sender`'s envelope nonce `nonce`. Written once per
+    /// nonce, when it is spent: by the envelope's success or by its refusal.
+    pub fn v_set_envelope_outcome(
+        view: &mut ExecutionView<'_, '_>,
+        sender: &Address,
+        nonce: u64,
+        outcome: &EnvelopeOutcome,
+    ) -> Result<()> {
+        view.put(
+            cf::MESSAGING_SENDER_NONCES,
+            &envelope_outcome_key(sender, nonce),
+            &encode_envelope_outcome(outcome),
+        )
+        .map_err(StateError::Storage)
     }
 
     pub fn v_get_daily_message_count(

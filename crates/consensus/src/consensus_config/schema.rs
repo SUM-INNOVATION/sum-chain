@@ -29,19 +29,25 @@
 //! never changes again, and the encoding is pinned by
 //! `crates/consensus/tests/consensus_config_schema2.rs`.
 //!
-//! Schema 3 is frozen: [`PRODUCTION`] writes it. It is schema 2 plus one
+//! Schema 3 is frozen: a release wrote it. It is schema 2 plus one
 //! remediation gate, [`SCHEMA_3_ADDED`], which never changes again; its
 //! encoding is pinned by `schema_3_golden_vectors` in
 //! `crates/consensus/tests/consensus_config.rs`, and the move to it by
 //! `crates/consensus/tests/consensus_config_schema3.rs`.
 //!
-//! # Registering a field after schema 3
+//! Schema 4 is frozen: [`PRODUCTION`] writes it. It is schema 3 plus four
+//! activation gates, [`SCHEMA_4_ADDED`], which never changes again; its
+//! encoding is pinned by `schema_4_golden_vectors` in
+//! `crates/consensus/tests/consensus_config.rs`, and the move to it by
+//! `crates/consensus/tests/consensus_config_schema4.rs`.
 //!
-//! A field registered from now on belongs to a new schema 4: a `SCHEMA_4`
-//! extending [`SCHEMA_3`] with its own append-only list, known by
-//! [`PRODUCTION`] as a draft until a later reviewed change writes it. Use the
-//! next unused id in the field's range (an activation gate: the `0x1000–0x1fff`
-//! range, `source: Source::Gate`, `ty: U64`, named exactly as
+//! # Registering a field after schema 4
+//!
+//! A field registered after schema 4 froze belongs to the draft schema 5
+//! ([`SCHEMA_5`]), extending [`SCHEMA_4`] with its own append-only list, known
+//! by [`PRODUCTION`] as a draft until a later reviewed change writes it. Use
+//! the next unused id in the field's range (an activation gate: the
+//! `0x1000–0x1fff` range, `source: Source::Gate`, `ty: U64`, named exactly as
 //! `ChainParams::activation_heights` names it).
 //! `crates/consensus/tests/consensus_config_census.rs` checks that every gate
 //! has exactly one id in the newest schema and that no id repeats.
@@ -51,6 +57,7 @@ use sumchain_genesis::Genesis;
 use super::codec::{Field, Value, SCHEMA_V1};
 use super::ConfigError;
 use sumchain_primitives::compute_pool_params::ComputePoolParamsV1;
+use sumchain_primitives::SPONSORED_SEND_V2_TAG;
 use sumchain_state::messaging_executor::MESSAGING_TIMESTAMP_MS_PER_SECOND;
 
 use super::fields::{is_gate, FieldSpec, ListOrder, Ty, SCHEMA_V1_FIELDS};
@@ -659,9 +666,9 @@ pub static SCHEMA_2: Schema = Schema {
     added: SCHEMA_2_ADDED,
 };
 
-/// Fields schema 3 adds to schema 2. FROZEN: this binary writes schema 3
-/// ([`PRODUCTION`]), so this list never changes again; a later field belongs
-/// to schema 4. Ids are never reused or reordered.
+/// Fields schema 3 adds to schema 2. FROZEN: a release wrote schema 3, so this
+/// list never changes again; a later field belongs to a later schema. Ids are
+/// never reused or reordered.
 pub const SCHEMA_3_ADDED: &[AddedField] = &[
     // A transaction-borne node-registry `UpdateStatus` is refused.
     AddedField {
@@ -684,14 +691,12 @@ pub static SCHEMA_3: Schema = Schema {
     added: SCHEMA_3_ADDED,
 };
 
-/// Fields schema 4 adds to schema 3. DRAFT: [`PRODUCTION`] knows these fields
-/// but neither writes nor reads schema-4 records, and refuses to start if any
-/// of them is non-absent, so a gate registered here can be declared but never
-/// activated by this binary. Append-only, like every later schema. The
-/// allocation is provisional.
+/// Fields schema 4 adds to schema 3. FROZEN: this binary writes schema 4
+/// ([`PRODUCTION`]), so this list never changes again; a later field belongs
+/// to schema 5. Ids are never reused or reordered.
 pub const SCHEMA_4_ADDED: &[AddedField] = &[
     // BeginUnstake counts only the sender's own open storage challenges
-    // (#369). The field's name is provisional.
+    // (#369).
     AddedField {
         spec: FieldSpec {
             id: 0x1044,
@@ -716,29 +721,131 @@ pub const SCHEMA_4_ADDED: &[AddedField] = &[
         },
         source: Source::Gate,
     },
+    // Transaction signatures are checked with the strict Ed25519 rule
+    // (canonical encodings, no small-order components).
+    AddedField {
+        spec: FieldSpec {
+            id: 0x1046,
+            name: "strict_transaction_signatures_enabled_from_height",
+            ty: Ty::U64,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Gate,
+    },
+    // The legacy staking `SubmitEvidence` operation is refused.
+    AddedField {
+        spec: FieldSpec {
+            id: 0x1047,
+            name: "staking_submit_evidence_unsupported_enabled_from_height",
+            ty: Ty::U64,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Gate,
+    },
 ];
 
-/// Schema 4: schema 3 plus [`SCHEMA_4_ADDED`]. DRAFT.
+/// Schema 4: schema 3 plus [`SCHEMA_4_ADDED`]. FROZEN.
 pub static SCHEMA_4: Schema = Schema {
     number: 4,
     previous: Some(&SCHEMA_3),
     added: SCHEMA_4_ADDED,
 };
 
+/// Field id of [`sponsored_send_v2_tag_value`]: after the schema-2 constant
+/// `0x252a`, the last compiled constant any schema registered.
+pub const SPONSORED_SEND_V2_TAG_ID: u16 = 0x252b;
+
+/// [`SPONSORED_SEND_V2_TAG`] while the sponsored-envelope verification gate is
+/// set, [`Value::Absent`] otherwise: below the gate nothing reads the tag, so
+/// absent is the pre-existing behaviour.
+fn sponsored_send_v2_tag_value(genesis: &Genesis) -> Value {
+    match genesis
+        .params
+        .messaging_sponsored_envelope_verification_enabled_from_height
+    {
+        None => Value::Absent,
+        Some(_) => Value::Bytes(SPONSORED_SEND_V2_TAG.to_vec()),
+    }
+}
+
+/// Fields schema 5 adds to schema 4. DRAFT: [`PRODUCTION`] knows these fields
+/// but neither writes nor reads schema-5 records, and refuses to start if any
+/// of them is non-absent, so a gate registered here can be declared but never
+/// activated by this binary. Append-only, like every later schema. The
+/// allocation is proposed.
+pub const SCHEMA_5_ADDED: &[AddedField] = &[
+    // A sponsored SendMessage carries a version-2 sender envelope, verified
+    // in consensus. The name and the allocation are proposed.
+    AddedField {
+        spec: FieldSpec {
+            id: 0x1048,
+            name: "messaging_sponsored_envelope_verification_enabled_from_height",
+            ty: Ty::U64,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Gate,
+    },
+    // Every messaging operation is charged its fee and advances the sender's
+    // account nonce, once, succeeding or refused. The name and the allocation
+    // are proposed.
+    AddedField {
+        spec: FieldSpec {
+            id: 0x1049,
+            name: "messaging_fee_nonce_accounting_enabled_from_height",
+            ty: Ty::U64,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Gate,
+    },
+    // The compiled domain tag the version-2 envelope preimage begins with,
+    // committed only while that gate is set: below it nothing reads the tag,
+    // so absent is the pre-existing behaviour, and a record carried into
+    // schema 5 stays exact. Setting the gate on an existing chain therefore
+    // also moves this field, which is not a gate, so that start asks for
+    // `acknowledge-consensus-config` rather than recording a reschedule on its
+    // own (as the schema-2 `MESSAGING_TIMESTAMP_MS_PER_SECOND` field does).
+    AddedField {
+        spec: FieldSpec {
+            id: SPONSORED_SEND_V2_TAG_ID,
+            name: "sumchain_wire::messaging::SPONSORED_SEND_V2_TAG",
+            ty: Ty::Bytes,
+            optional: true,
+            item_width: None,
+            list_order: ListOrder::SortedUnique,
+        },
+        source: Source::Param(sponsored_send_v2_tag_value),
+    },
+];
+
+/// Schema 5: schema 4 plus [`SCHEMA_5_ADDED`]. DRAFT.
+pub static SCHEMA_5: Schema = Schema {
+    number: 5,
+    previous: Some(&SCHEMA_4),
+    added: SCHEMA_5_ADDED,
+};
+
 /// What this binary does.
 ///
-/// It writes schema 3: a fresh database records schema 3 directly. It reads
-/// schemas 1, 2 and 3, and keeps reading schemas 1 and 2 for good (see the
-/// module documentation of [`super`]). An existing schema-1 or schema-2 record
-/// is run as it stands, compared in its own schema and never re-encoded at
-/// start; moving it to schema 3 is the stopped-node
-/// `acknowledge-consensus-config-schema`, one step from either, which changes
-/// no rule. Until a node has moved, a schema-2 or schema-3 field set in its
-/// genesis that its record's schema cannot express refuses start and names that
-/// command. It knows the draft schema 4, whose fields must all be absent.
-/// Nothing here sets any gate.
+/// It writes schema 4: a fresh database records schema 4 directly. It reads
+/// schemas 1, 2, 3 and 4, and keeps reading schemas 1, 2 and 3 for good (see
+/// the module documentation of [`super`]). An existing schema-1, schema-2 or
+/// schema-3 record is run as it stands, compared in its own schema and never
+/// re-encoded at start; moving it to schema 4 is the stopped-node
+/// `acknowledge-consensus-config-schema`, one step from any of them, which
+/// changes no rule. Until a node has moved, a field set in its genesis that
+/// its record's schema cannot express refuses start and names that command.
+/// It knows the draft schema 5, whose fields must all be absent. Nothing here
+/// sets any gate.
 pub static PRODUCTION: SchemaPolicy = SchemaPolicy {
-    reads: &[&SCHEMA_1, &SCHEMA_2, &SCHEMA_3],
-    writes: &SCHEMA_3,
-    knows: &SCHEMA_4,
+    reads: &[&SCHEMA_1, &SCHEMA_2, &SCHEMA_3, &SCHEMA_4],
+    writes: &SCHEMA_4,
+    knows: &SCHEMA_5,
 };

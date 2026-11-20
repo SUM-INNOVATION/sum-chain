@@ -35,7 +35,9 @@
 //! disagree after a crash, and every start re-verifies that they agree: the
 //! transitions form an unbroken chain from `initial_commitment` to
 //! `commitment`, each carrying the encoding it replaced. Nothing in this module
-//! deletes a transition.
+//! deletes a transition, with one exception: [`revert_schema_transition`]
+//! removes the schema transition it undoes, and only on a node whose chain
+//! has not moved past the height the move was made at.
 //!
 //! # Schemas
 //!
@@ -47,14 +49,36 @@
 //! [`acknowledge_schema_transition`]: a stopped-node command naming both
 //! commitments, recorded as a [`TransitionKind::SchemaTransition`] that keeps
 //! the old encoding, never an implicit re-encoding at start.
+//!
+//! # Before the first start after a move
+//!
+//! A binary that does not read the newer schema refuses the moved record. A
+//! move that has to be abandoned before the node runs on it — the window is
+//! aborted after the move and before the first normal start — is undone with
+//! [`revert_schema_transition`], a stopped-node command naming both
+//! commitments. It writes back exactly the record the move replaced, which the
+//! transition kept, and removes that transition: the configuration rows are
+//! then byte for byte what they were before the move. It is refused unless the
+//! last transition is that move, into the schema this binary writes, no normal
+//! start has been attempted since ([`super::start_marker`]: the marker every
+//! start writes first is absent, or predates the move), and the chain is still
+//! exactly at the height the move was made at, with no block above it. It
+//! touches no block, no state and no row outside the configuration record and
+//! that one transition, so it rewinds nothing. Once a normal start has been
+//! attempted on the moved record — whether it then ran, imported nothing or was
+//! refused by a later check — recovery is forward only: a binary that reads the
+//! newer schema. The marker, not the chain height, is what decides that, so a
+//! later rewind to the move's height does not reopen the revert.
 
 use sumchain_genesis::Genesis;
 use sumchain_primitives::Hash;
+use sumchain_storage::schema::BlockStore;
 use sumchain_storage::{cf, Database};
 
 use super::codec::{commitment_of, ConsensusConfig, FieldChange};
 use super::fields::{compute, is_gate, is_identity_or_rule, recorded_gates};
 use super::schema::{Schema, SchemaPolicy, PRODUCTION};
+use super::start_marker::{read_start_marker, RecordState, StartMarker};
 use super::ConfigError;
 
 /// Where the baseline lives.
@@ -211,6 +235,41 @@ pub struct SchemaTransitioned {
     pub to: Hash,
     /// The fields the new schema adds, all recorded absent.
     pub added: Vec<u16>,
+}
+
+/// A pre-start revert of a schema transition this binary could perform on
+/// this database ([`pending_schema_revert`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSchemaRevert {
+    /// The transition that would be removed: the record's last.
+    pub seq: u64,
+    /// The chain height the move was made at, and still is.
+    pub at_height: u64,
+    /// The chain head now: the block at `at_height`.
+    pub head_hash: Option<Hash>,
+    /// The start marker this database holds, which predates the move (a
+    /// marker written at or after it refuses the revert).
+    pub start_marker: Option<StartMarker>,
+    /// The schema the record holds now.
+    pub from_schema: u16,
+    /// The schema the move came from, which the revert restores.
+    pub to_schema: u16,
+    /// The recorded commitment: `--old`.
+    pub old: Hash,
+    /// The commitment the move replaced, which the revert restores: `--new`.
+    pub new: Hash,
+}
+
+/// What a pre-start revert did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaReverted {
+    /// The transition removed.
+    pub seq: u64,
+    pub at_height: u64,
+    pub from_schema: u16,
+    pub to_schema: u16,
+    pub from: Hash,
+    pub to: Hash,
 }
 
 /// A schema transition this binary could perform on this database.
@@ -639,6 +698,311 @@ pub fn acknowledge_schema_transition_with(
     })
 }
 
+/// The pre-start revert this binary could perform on this database: undo the
+/// schema transition it made, while the chain has not moved past the height
+/// the move was made at. A refusal says why none is available.
+pub fn pending_schema_revert(db: &Database) -> Result<PendingSchemaRevert, ConfigError> {
+    pending_schema_revert_with(db, &PRODUCTION)
+}
+
+/// [`pending_schema_revert`] under `policy`.
+pub fn pending_schema_revert_with(
+    db: &Database,
+    policy: &SchemaPolicy,
+) -> Result<PendingSchemaRevert, ConfigError> {
+    plan_schema_revert(db, policy).map(|(pending, _, _)| pending)
+}
+
+/// The stopped-node, pre-start revert of a schema transition: write back the
+/// record the move replaced, and remove the move's transition.
+///
+/// It exists for one moment of a coordinated upgrade: the move has been made
+/// on a stopped node, and the upgrade is abandoned before the node first runs
+/// on the moved record. A binary that does not read the newer schema refuses
+/// that record; this restores the one it accepted, byte for byte.
+///
+/// Like [`acknowledge_schema_transition`], the caller holds the database open,
+/// which holds RocksDB's exclusive lock, so a running node and this command
+/// cannot both have it. Accepts only when ALL of these hold:
+/// * a baseline exists and verifies, history included;
+/// * its last transition is a [`TransitionKind::SchemaTransition`] into the
+///   schema this binary writes, from a schema this binary reads, and the
+///   record is exactly that transition's old configuration carried into the
+///   newer schema;
+/// * no normal start has been attempted since the move: the start marker
+///   ([`super::start_marker`]) is absent, or was written at an earlier
+///   transition count and names the commitment the history holds there. A
+///   marker written at the move's own count means a node started on the moved
+///   record, imported or not, refused or not; any marker this binary cannot
+///   read, or that disagrees with the history, is an uncertain state. Both
+///   refuse;
+/// * the chain's head is exactly the height the move was made at, and the
+///   block-height index holds nothing above it;
+/// * `expected_old` is exactly the recorded commitment, and `expected_new`
+///   exactly the commitment the move replaced.
+///
+/// The restored record and the removal of the transition are written in ONE
+/// durable batch: a crash leaves either the moved database or the reverted
+/// one. Nothing else is read for writing or written: no block, no state, no
+/// activation record, and not the start marker. Once a normal start has been
+/// attempted, the only recovery is forward, with a binary that reads the newer
+/// schema; a later rewind of the chain does not reopen the revert.
+///
+/// This is a LOCAL operation. It authorizes nothing on the network.
+pub fn revert_schema_transition(
+    db: &Database,
+    expected_old: Hash,
+    expected_new: Hash,
+) -> Result<SchemaReverted, ConfigError> {
+    revert_schema_transition_with(db, expected_old, expected_new, &PRODUCTION)
+}
+
+/// [`revert_schema_transition`] under `policy`.
+pub fn revert_schema_transition_with(
+    db: &Database,
+    expected_old: Hash,
+    expected_new: Hash,
+    policy: &SchemaPolicy,
+) -> Result<SchemaReverted, ConfigError> {
+    let (pending, record, restored) = plan_schema_revert(db, policy)?;
+    if pending.old != expected_old {
+        return Err(ConfigError::Refused(format!(
+            "--old {expected_old} is not the recorded commitment {}",
+            pending.old
+        )));
+    }
+    if pending.new != expected_new {
+        return Err(ConfigError::Refused(format!(
+            "--new {expected_new} is not the commitment the schema transition replaced, {}",
+            pending.new
+        )));
+    }
+    let previous = BaselineRecord {
+        status: record.status,
+        baseline_height: record.baseline_height,
+        initial_commitment: record.initial_commitment,
+        transition_count: pending.seq - 1,
+        commitment: pending.new,
+        config: restored,
+    };
+    let mut batch = db.batch();
+    batch
+        .delete(cf::META, &transition_key(pending.seq))
+        .and_then(|_| batch.put(cf::META, RECORD_KEY, &encode_record(&previous)))
+        .map_err(|e| ConfigError::Storage(format!("staging the schema revert: {e}")))?;
+    #[cfg(feature = "failpoints")]
+    crate::branch_switch::failpoints::barrier(
+        crate::branch_switch::failpoints::Failpoint::SchemaRevertBeforeCommit,
+    );
+    batch.commit_durable().map_err(|e| {
+        ConfigError::Storage(format!(
+            "reverting consensus configuration transition {}: {e}",
+            pending.seq
+        ))
+    })?;
+    #[cfg(feature = "failpoints")]
+    crate::branch_switch::failpoints::barrier(
+        crate::branch_switch::failpoints::Failpoint::SchemaRevertAfterCommit,
+    );
+    // Read back what was written: it must verify, history included, and be
+    // the record the move replaced.
+    let back = read_record_with(db, policy)?.ok_or_else(|| {
+        ConfigError::RecordCorrupt("the reverted record did not read back".to_string())
+    })?;
+    if back != previous {
+        return Err(ConfigError::RecordCorrupt(
+            "the reverted record read back differently".to_string(),
+        ));
+    }
+    Ok(SchemaReverted {
+        seq: pending.seq,
+        at_height: pending.at_height,
+        from_schema: pending.from_schema,
+        to_schema: pending.to_schema,
+        from: pending.old,
+        to: pending.new,
+    })
+}
+
+/// Everything [`revert_schema_transition_with`] checks before it writes: the
+/// revert, the verified record, and the configuration it restores.
+fn plan_schema_revert(
+    db: &Database,
+    policy: &SchemaPolicy,
+) -> Result<(PendingSchemaRevert, BaselineRecord, ConsensusConfig), ConfigError> {
+    let refused = |why: String| ConfigError::Refused(why);
+    let record = read_record_with(db, policy)?.ok_or_else(|| {
+        refused(
+            "this database has no consensus configuration baseline, so there is no schema \
+             transition to revert"
+                .to_string(),
+        )
+    })?;
+    let history = verify_history(db, &record, policy)?;
+    let Some(last) = history.last() else {
+        return Err(refused(
+            "this database has recorded no transition, so there is no schema transition to \
+             revert"
+                .to_string(),
+        ));
+    };
+    if last.kind != TransitionKind::SchemaTransition {
+        return Err(refused(format!(
+            "the last recorded transition ({}) is a {}, not a schema transition; only a \
+             schema transition the node has not run on can be reverted",
+            last.seq,
+            last.kind.label()
+        )));
+    }
+    let now = record.config.schema();
+    if !std::ptr::eq(now, policy.writes) {
+        return Err(refused(format!(
+            "the record holds schema {}, and this binary writes schema {}; it reverts only \
+             its own schema transition",
+            now.number, policy.writes.number
+        )));
+    }
+    let restored = ConsensusConfig::decode_with(&last.old_encoding, policy.reads)
+        .map_err(|e| ConfigError::RecordCorrupt(format!("the kept encoding: {e}")))?;
+    if std::ptr::eq(restored.schema(), now)
+        || restored.encode() != last.old_encoding
+        || restored.commitment() != last.old_commitment
+        || restored.extend_to(now)? != record.config
+    {
+        return Err(ConfigError::RecordCorrupt(format!(
+            "schema transition {} is not exactly the re-encoding of the configuration it \
+             kept",
+            last.seq
+        )));
+    }
+    // The start marker decides "has run on the moved record". Read first, so
+    // that a started node is refused as such even when its chain position
+    // happens to equal the move's.
+    let uncertain = |why: String| {
+        refused(format!(
+            "uncertain migration state: {why}. The revert needs a start marker that is \
+             absent or that this history accounts for; recovery is forward only, with a \
+             binary that reads the newer schema"
+        ))
+    };
+    let marker = match read_start_marker(db) {
+        Ok(m) => m,
+        Err(ConfigError::RecordCorrupt(why)) => return Err(uncertain(why)),
+        Err(e) => return Err(e),
+    };
+    if let Some(m) = &marker {
+        match m.record {
+            RecordState::Present {
+                transition_count: count,
+                commitment,
+            } => {
+                if count > record.transition_count {
+                    return Err(uncertain(format!(
+                        "the start marker (attempt {}) names transition count {count}, above \
+                         the record's {}",
+                        m.attempt, record.transition_count
+                    )));
+                }
+                let expected = if count == 0 {
+                    record.initial_commitment
+                } else {
+                    history[count as usize - 1].new_commitment
+                };
+                if commitment != expected {
+                    return Err(uncertain(format!(
+                        "the start marker (attempt {}) names commitment {commitment} at \
+                         transition count {count}, but the history holds {expected} there",
+                        m.attempt
+                    )));
+                }
+                if count == last.seq {
+                    return Err(refused(format!(
+                        "a normal start was attempted on the moved record (start marker: \
+                         attempt {}, at transition count {count}, commitment {commitment}, \
+                         head {}); recovery is forward only, with a binary that reads the \
+                         newer schema",
+                        m.attempt,
+                        match m.head {
+                            Some((h, hash)) => format!("{h} {hash}"),
+                            None => "none".to_string(),
+                        }
+                    )));
+                }
+                // count < seq: a start before the move, on the record it replaced.
+            }
+            RecordState::Absent => {
+                return Err(uncertain(format!(
+                    "a normal start (attempt {}) was made while no configuration record \
+                     existed",
+                    m.attempt
+                )));
+            }
+            RecordState::Unreadable => {
+                return Err(uncertain(format!(
+                    "a normal start (attempt {}) was made while the configuration record \
+                     was unreadable",
+                    m.attempt
+                )));
+            }
+        }
+    }
+    let blocks = BlockStore::new(db);
+    let head = blocks
+        .get_latest_height()
+        .map_err(|e| ConfigError::Storage(format!("reading the chain head: {e}")))?
+        .unwrap_or(0);
+    if head != last.at_height {
+        return Err(refused(format!(
+            "the schema transition was made at height {} and the chain is now at height \
+             {head}. {}",
+            last.at_height,
+            if head > last.at_height {
+                "Blocks above the move's height exist: this node has run on the moved record, \
+                 and recovery is forward only, with a binary that reads the newer schema"
+            } else {
+                "The chain is below the move's height; the revert does not follow a rewind \
+                 (a rewind to exactly the move's height after a start is refused by the \
+                 start marker above)"
+            }
+        )));
+    }
+    let head_hash = blocks
+        .get_latest_hash()
+        .map_err(|e| ConfigError::Storage(format!("reading the chain head: {e}")))?;
+    let above = (last.at_height.saturating_add(1)).to_be_bytes();
+    if let Some(entry) = db
+        .iter_checked_from(cf::BLOCK_HEIGHT, Some(&above))
+        .map_err(|e| ConfigError::Storage(format!("scanning the block-height index: {e}")))?
+        .next()
+    {
+        let (key, _) = entry
+            .map_err(|e| ConfigError::Storage(format!("scanning the block-height index: {e}")))?;
+        let at = <[u8; 8]>::try_from(&key[..])
+            .map(|b| u64::from_be_bytes(b).to_string())
+            .unwrap_or_else(|_| format!("an unparseable {}-byte key", key.len()));
+        return Err(refused(format!(
+            "the block-height index holds a block at {at}, above the move's height {}: this \
+             node has run on the moved record, and recovery is forward only, with a binary \
+             that reads the newer schema",
+            last.at_height
+        )));
+    }
+    Ok((
+        PendingSchemaRevert {
+            seq: last.seq,
+            at_height: last.at_height,
+            head_hash,
+            start_marker: marker,
+            from_schema: now.number,
+            to_schema: restored.schema().number,
+            old: record.commitment,
+            new: last.old_commitment,
+        },
+        record,
+        restored,
+    ))
+}
+
 fn refuse_retroactive_gates(
     genesis: &Genesis,
     recorded: &ConsensusConfig,
@@ -753,11 +1117,23 @@ fn write_transition(
         )
         .and_then(|_| batch.put(cf::META, RECORD_KEY, &encode_record(&next)))
         .map_err(|e| ConfigError::Storage(format!("staging the transition: {e}")))?;
+    #[cfg(feature = "failpoints")]
+    if kind == TransitionKind::SchemaTransition {
+        crate::branch_switch::failpoints::barrier(
+            crate::branch_switch::failpoints::Failpoint::SchemaTransitionBeforeCommit,
+        );
+    }
     batch.commit_durable().map_err(|e| {
         ConfigError::Storage(format!(
             "recording consensus configuration transition {seq}: {e}"
         ))
     })?;
+    #[cfg(feature = "failpoints")]
+    if kind == TransitionKind::SchemaTransition {
+        crate::branch_switch::failpoints::barrier(
+            crate::branch_switch::failpoints::Failpoint::SchemaTransitionAfterCommit,
+        );
+    }
     Ok(seq)
 }
 
@@ -1037,5 +1413,87 @@ impl<'a> Cursor<'a> {
                 self.raw.len() - self.pos
             )))
         }
+    }
+}
+
+// ── migration provenance, for the maintenance commands ──────────────────────
+
+/// What a database says about its own migration history: the start marker and
+/// every consensus-configuration row (the record and its transitions), as the
+/// raw bytes stored. `rollback` and `restore` read it before and after they
+/// run, and refuse when it cannot be established or when they would change it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Provenance {
+    pub marker: Option<StartMarker>,
+    /// Every `consensus_config/` row of `cf::META`, in key order, and the
+    /// start-marker row if present.
+    pub rows: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+/// Read and verify the migration provenance of `db`. An unreadable start
+/// marker or an unreadable configuration record is an error: the provenance
+/// cannot be established, and a command that rewrites the database must refuse.
+pub fn migration_provenance(db: &Database) -> Result<Provenance, ConfigError> {
+    let marker = read_start_marker(db)?;
+    read_record(db)?;
+    let mut rows = Vec::new();
+    for entry in db
+        .prefix_iter_checked(cf::META, b"consensus_config/")
+        .map_err(|e| ConfigError::Storage(format!("scanning the configuration rows: {e}")))?
+    {
+        let (key, value) =
+            entry.map_err(|e| ConfigError::Storage(format!("reading a configuration row: {e}")))?;
+        if !key.starts_with(b"consensus_config/") {
+            break;
+        }
+        rows.push((key.to_vec(), value.to_vec()));
+    }
+    if let Some(raw) = db
+        .get(cf::META, super::start_marker::START_MARKER_KEY)
+        .map_err(|e| ConfigError::Storage(format!("reading the start marker: {e}")))?
+    {
+        rows.push((super::start_marker::START_MARKER_KEY.to_vec(), raw));
+    }
+    Ok(Provenance { marker, rows })
+}
+
+/// Whether restoring a database with provenance `backup` over one with
+/// provenance `current` keeps the protection the current database holds:
+/// the configuration record and its history are identical, and a start marker
+/// the current database holds is held by the backup at the same record state
+/// (the same transition count and commitment, which is what the pre-start
+/// revert decides on; the attempt count and head may differ). A backup without
+/// that is one taken before the move or before the start it would erase, and
+/// restoring it would reopen a closed abort window.
+pub fn restore_preserves_provenance(
+    current: &Provenance,
+    backup: &Provenance,
+) -> Result<(), String> {
+    fn config(p: &Provenance) -> Vec<&(Vec<u8>, Vec<u8>)> {
+        p.rows
+            .iter()
+            .filter(|(k, _)| k.starts_with(b"consensus_config/"))
+            .collect()
+    }
+    if config(current) != config(backup) {
+        return Err(
+            "the backup's consensus-configuration record or history differs from the existing \
+             database's; restoring it would change the migration provenance"
+                .to_string(),
+        );
+    }
+    match (&current.marker, &backup.marker) {
+        (None, _) => Ok(()),
+        (Some(_), None) => Err(
+            "the existing database holds a start marker and the backup holds none; restoring \
+             it would clear the record that a normal start was attempted"
+                .to_string(),
+        ),
+        (Some(c), Some(b)) if c.record != b.record => Err(format!(
+            "the existing database's start marker names record state {:?} and the backup's \
+             names {:?}; restoring it would change what the start marker protects",
+            c.record, b.record
+        )),
+        (Some(_), Some(_)) => Ok(()),
     }
 }

@@ -10,6 +10,7 @@
 //! validation and again by [`PoAEngine::new`]; the epoch machinery below stays
 //! inert until canonical validator-set history exists (#266).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -71,31 +72,59 @@ enum Run {
     Account(sumchain_primitives::Address),
     /// Every later sponsored envelope NAMING this sender.
     ///
-    /// A relayed `SendMessage` is a transaction from the relaying account, but
-    /// executing it advances no account nonce — the relay signs every envelope
-    /// at the account's committed nonce — so leaving one out changes nothing
-    /// for the relaying account's other transactions, which validate against
-    /// the same nonce with it or without it. What it does belong to is the
-    /// named sender's messaging-nonce sequence, which the inclusion policy
-    /// carries in order: a later envelope of the same named sender carried
-    /// without it would move the sender's committed messaging nonce past it.
+    /// A relayed `SendMessage` is a transaction from the relaying account.
+    /// Below the messaging fee-and-nonce accounting gate executing it advances
+    /// no account nonce — the relay signs every envelope at the account's
+    /// committed nonce — so leaving one out changes nothing for the relaying
+    /// account's other transactions, which validate against the same nonce
+    /// with it or without it; from that gate on it advances the account's
+    /// nonce like any other transaction, and leaving it out takes the
+    /// account's later transactions too. Either way it belongs to the named
+    /// sender's messaging-nonce sequence, which the inclusion policy carries
+    /// in order: a later envelope of the same named sender carried without it
+    /// would move the sender's committed messaging nonce past it, and from
+    /// the envelope verification gate on is refused. From the accounting gate
+    /// on, a later envelope relayed by another account is not taken: it is
+    /// carried to that refusal, so that its account's queue keeps moving
+    /// ([`Run::goes_with`]).
     Envelope(sumchain_primitives::Address),
 }
 
 impl Run {
-    /// The run `tx` takes with it when it is dropped.
-    fn of_dropped(tx: &SignedTransaction) -> Self {
+    /// The runs `tx` takes with it when it is dropped from a block in which
+    /// the messaging fee-and-nonce accounting gate is open (`accounting`) or
+    /// not: a sponsored envelope its named sender's and, from that gate on,
+    /// its relaying account's; every other transaction its account's.
+    fn of_dropped(tx: &SignedTransaction, accounting: bool) -> Vec<Self> {
         match sumchain_state::mempool::sponsored_envelope_sender(tx) {
-            Some(named) => Run::Envelope(named),
-            None => Run::Account(tx.sender()),
+            Some(named) if accounting => vec![Run::Envelope(named), Run::Account(tx.sender())],
+            Some(named) => vec![Run::Envelope(named)],
+            None => vec![Run::Account(tx.sender())],
         }
     }
 
-    /// Every run `tx` belongs to: its account's and, for a sponsored envelope,
-    /// its named sender's.
-    fn memberships(tx: &SignedTransaction) -> impl Iterator<Item = Run> {
-        std::iter::once(Run::Account(tx.sender()))
-            .chain(sumchain_state::mempool::sponsored_envelope_sender(tx).map(Run::Envelope))
+    /// Whether `tx`, not itself dropped, leaves a proposal with the runs in
+    /// `broken`: when its account's run is broken; and, for a sponsored
+    /// envelope whose named sender's run is broken, only below the accounting
+    /// gate, where leaving it out holds nothing but that sender's sequence.
+    ///
+    /// From the gate on such an envelope advances its own sponsor's nonce:
+    /// left out, it would hold that sponsor's later transactions behind
+    /// another sponsor's dropped one. It is carried instead, to the outcome
+    /// its envelope nonce meets in the block (from the envelope verification
+    /// gate on, a charged refusal: its named sender's earlier envelope is not
+    /// in the block), and its sponsor's queue keeps moving.
+    ///
+    /// A transaction that leaves with a run breaks no run of its own:
+    /// propagation never passes from one account's run into another
+    /// account's transactions.
+    fn goes_with(tx: &SignedTransaction, broken: &HashSet<Run>, accounting: bool) -> bool {
+        if broken.contains(&Run::Account(tx.sender())) {
+            return true;
+        }
+        !accounting
+            && sumchain_state::mempool::sponsored_envelope_sender(tx)
+                .is_some_and(|named| broken.contains(&Run::Envelope(named)))
     }
 }
 
@@ -990,6 +1019,14 @@ impl PoAEngine {
             .read()
             .as_ref()
             .map_or(0, |b| b.height() + 1);
+        // Whether a relayed message advances its sponsor's account nonce in
+        // this block, for the runs a dropped transaction takes with it. Judged
+        // once, at the height of the block being built, for both the
+        // screening pass and the fitting loop below.
+        let accounting = sumchain_state::MessagingExecutor::fee_nonce_accounting_gate_open(
+            &self.params,
+            next_height,
+        );
         let transactions = sumchain_state::select_within_block_contract_gas(
             &self.params,
             next_height,
@@ -1021,7 +1058,7 @@ impl PoAEngine {
         // screening verdict that turns out wrong costs a re-execution, never a
         // bad block — which is the whole reason the loop stays behind it rather
         // than being replaced by it.
-        let mut candidate_txs = self.screen_selection(transactions);
+        let mut candidate_txs = self.screen_selection(transactions, accounting);
         // Two budgets, spent independently: one for shrinks nobody is at fault
         // for, one for drops of a NAMED transaction. See
         // `MAX_REFUSED_TX_DROPS` for what sharing them cost.
@@ -1066,7 +1103,8 @@ impl PoAEngine {
                             );
                         }
                     }
-                    candidate_txs = Self::drop_with_sender_tail(&candidate_txs, tx_index);
+                    candidate_txs =
+                        Self::drop_with_sender_tail(&candidate_txs, tx_index, accounting);
                     drops += 1;
                 }
 
@@ -1088,7 +1126,7 @@ impl PoAEngine {
                              it and evicting it from the mempool: {detail}"
                         );
                         self.mempool.remove_batch(&[offender]);
-                        candidate_txs = Self::drop_with_sender_tail(&candidate_txs, 0);
+                        candidate_txs = Self::drop_with_sender_tail(&candidate_txs, 0, accounting);
                     } else {
                         // It crossed because the prefix spent the budget, not
                         // because of anything it did. Truncated AT it, not
@@ -1250,8 +1288,23 @@ impl PoAEngine {
     /// caller is entitled to, and a screening pass that guessed at them would
     /// be deciding a proposal's fate on a failure that was never about the
     /// proposal.
-    fn screen_selection(&self, transactions: Vec<SignedTransaction>) -> Vec<SignedTransaction> {
+    ///
+    /// `accounting` is whether the block being built is at or above
+    /// `messaging_fee_nonce_accounting_enabled_from_height`, judged once by
+    /// `create_block` for this pass and its fitting loop alike, so the runs a
+    /// refused transaction takes with it are the same in both.
+    fn screen_selection(
+        &self,
+        transactions: Vec<SignedTransaction>,
+        accounting: bool,
+    ) -> Vec<SignedTransaction> {
         if transactions.is_empty() {
+            return transactions;
+        }
+        #[cfg(feature = "failpoints")]
+        if crate::branch_switch::failpoints::hit(
+            crate::branch_switch::failpoints::Failpoint::SkipProposalScreening,
+        ) {
             return transactions;
         }
         let (draft, height) = match self.draft_block(transactions.clone()) {
@@ -1388,7 +1441,8 @@ impl PoAEngine {
         if !evict.is_empty() {
             self.mempool.remove_batch(&evict);
         }
-        let survivors = Self::drop_all_with_sender_tails(&transactions, &drop_indices, keep_prefix);
+        let survivors =
+            Self::drop_all_with_sender_tails(&transactions, &drop_indices, keep_prefix, accounting);
         info!(
             height,
             offered = len,
@@ -1418,35 +1472,32 @@ impl PoAEngine {
         txs: &[SignedTransaction],
         drop_indices: &[usize],
         keep_prefix: usize,
+        accounting: bool,
     ) -> Vec<SignedTransaction> {
         let mut dropped = vec![false; txs.len()];
-        // The EARLIEST dropped index per run. Everything after it in that run
-        // goes too: nonces are contiguous, so a kept transaction behind a
-        // dropped one from the same sender takes an `InvalidNonce` receipt in
-        // this very block and is then deleted from the mempool by
-        // `remove_batch` — a transaction nothing accused, destroyed by the
-        // repair meant to stop exactly that.
-        let mut earliest: std::collections::HashMap<Run, usize> = std::collections::HashMap::new();
         for &index in drop_indices {
-            if index >= txs.len() {
-                continue;
+            if index < txs.len() {
+                dropped[index] = true;
             }
-            dropped[index] = true;
-            earliest
-                .entry(Run::of_dropped(&txs[index]))
-                .and_modify(|first| *first = (*first).min(index))
-                .or_insert(index);
         }
-        txs.iter()
-            .enumerate()
-            .filter(|(index, tx)| {
-                *index < keep_prefix
-                    && !dropped[*index]
-                    && Run::memberships(tx)
-                        .all(|run| earliest.get(&run).is_none_or(|first| *index < *first))
-            })
-            .map(|(_, tx)| tx.clone())
-            .collect()
+        // The runs a dropped transaction has broken. Everything after it in
+        // such a run goes too (`Run::goes_with`): nonces are contiguous, so a
+        // kept transaction behind a dropped one from the same sender takes an
+        // `InvalidNonce` receipt in this very block and is then deleted from
+        // the mempool by `remove_batch` — a transaction nothing accused,
+        // destroyed by the repair meant to stop exactly that.
+        let mut broken: HashSet<Run> = HashSet::new();
+        let mut kept = Vec::new();
+        for (index, tx) in txs.iter().enumerate() {
+            if dropped[index] {
+                broken.extend(Run::of_dropped(tx, accounting));
+            } else if Run::goes_with(tx, &broken, accounting) {
+                continue;
+            } else if index < keep_prefix {
+                kept.push(tx.clone());
+            }
+        }
+        kept
     }
 
     /// The proposal without the transaction at `index`, and without every LATER
@@ -1464,14 +1515,27 @@ impl PoAEngine {
     /// splice rather than a truncation: the honest traffic behind a poisoned
     /// transaction is carried by THIS block rather than waiting for the next
     /// one. The dropped tail is untouched in the mempool and is selected again
-    /// on the next tick.
-    fn drop_with_sender_tail(txs: &[SignedTransaction], index: usize) -> Vec<SignedTransaction> {
-        let run = Run::of_dropped(&txs[index]);
-        txs.iter()
-            .enumerate()
-            .filter(|(i, tx)| *i < index || (*i > index && !Run::memberships(tx).any(|r| r == run)))
-            .map(|(_, tx)| tx.clone())
-            .collect()
+    /// on the next tick. Which later transactions go with the run, and which
+    /// sponsored envelope is carried instead, is [`Run::goes_with`].
+    ///
+    /// `accounting` is whether the messaging fee-and-nonce accounting gate is
+    /// open at the block's height ([`Run::of_dropped`]).
+    fn drop_with_sender_tail(
+        txs: &[SignedTransaction],
+        index: usize,
+        accounting: bool,
+    ) -> Vec<SignedTransaction> {
+        let broken: HashSet<Run> = Run::of_dropped(&txs[index], accounting)
+            .into_iter()
+            .collect();
+        let mut kept = txs[..index].to_vec();
+        kept.extend(
+            txs[index + 1..]
+                .iter()
+                .filter(|tx| !Run::goes_with(tx, &broken, accounting))
+                .cloned(),
+        );
+        kept
     }
 
     /// One proposal attempt: build, execute, sign, accept, publish, announce.
@@ -1665,6 +1729,9 @@ impl PoAEngine {
         // Remove included transactions from mempool
         let tx_hashes: Vec<Hash> = block.transactions.iter().map(|tx| tx.hash()).collect();
         self.mempool.remove_batch(&tx_hashes);
+        // The pool's bound on what it holds above a gap: this head's block
+        // was counted by the selection that built it, if this node made one.
+        self.mempool.at_new_head(height);
 
         info!(
             "Created block {} at height {} with {} txs",
@@ -1776,6 +1843,9 @@ impl PoAEngine {
                 *self.best_block.write() = Some(block.clone());
                 let tx_hashes: Vec<Hash> = block.transactions.iter().map(|tx| tx.hash()).collect();
                 self.mempool.remove_batch(&tx_hashes);
+                // The pool's bound on what it holds above a gap counts this
+                // block, on a node that never proposes as on one that does.
+                self.mempool.at_new_head(height);
                 let _ = self.event_tx.send(ConsensusEvent::BlockImported(block));
             }
 
@@ -2154,6 +2224,11 @@ impl PoAEngine {
         included.sort();
         self.mempool.remove_batch(&included);
         self.mempool.revalidate(&self.state, self.state.chain_id());
+        // The pool's bound on what it holds above a gap counts the switch
+        // once, at its new head, over the reconciled pool.
+        if let Some(tip) = plan.new_branch.last() {
+            self.mempool.at_new_head(tip.height());
+        }
         Ok(())
     }
 
@@ -2530,13 +2605,19 @@ mod tests {
     }
 
     /// Both drop paths, the fitting loop's and the screening pass's, on one
-    /// offender.
+    /// offender, below the accounting gate.
     fn both(txs: &[SignedTransaction], index: usize) -> Vec<Hash> {
-        let one = ids(&PoAEngine::drop_with_sender_tail(txs, index));
+        both_at(txs, index, false)
+    }
+
+    /// [`both`], with the accounting gate open or not.
+    fn both_at(txs: &[SignedTransaction], index: usize, accounting: bool) -> Vec<Hash> {
+        let one = ids(&PoAEngine::drop_with_sender_tail(txs, index, accounting));
         let all = ids(&PoAEngine::drop_all_with_sender_tails(
             txs,
             &[index],
             txs.len(),
+            accounting,
         ));
         assert_eq!(one, all, "the two drop paths agree");
         one
@@ -2610,7 +2691,7 @@ mod tests {
             ids(&[txs[0].clone(), txs[1].clone(), txs[4].clone()])
         );
         assert_eq!(
-            ids(&PoAEngine::drop_all_with_sender_tails(&txs, &[2], 2)),
+            ids(&PoAEngine::drop_all_with_sender_tails(&txs, &[2], 2, false)),
             ids(&[txs[0].clone(), txs[1].clone()])
         );
     }
@@ -2638,9 +2719,287 @@ mod tests {
             ids(&PoAEngine::drop_all_with_sender_tails(
                 &txs,
                 &[0, 1],
-                txs.len()
+                txs.len(),
+                false
             )),
             ids(&[txs[2].clone(), txs[5].clone(), txs[6].clone()])
         );
+    }
+
+    /// From the messaging fee-and-nonce accounting gate on, a relayed envelope
+    /// advances its relaying account's nonce, so a dropped one also takes the
+    /// relay's later transactions. It takes nothing of another account: the
+    /// second relay's envelope for `b`, whose envelope 0 left with the relay,
+    /// is carried (to its refusal, out of `b`'s sequence) rather than held
+    /// with the second relay's queue behind it. Below the gate a dropped
+    /// envelope takes only its named sender's later envelopes.
+    #[test]
+    fn from_the_accounting_gate_a_dropped_envelope_takes_its_relays_later_transactions() {
+        let (relay, a, b, other) = (
+            KeyPair::from_bytes([1u8; 32]),
+            KeyPair::from_bytes([2u8; 32]),
+            KeyPair::from_bytes([3u8; 32]),
+            KeyPair::from_bytes([4u8; 32]),
+        );
+        let second_relay = KeyPair::from_bytes([7u8; 32]);
+        let txs = vec![
+            envelope(&relay, &a, 0),
+            envelope(&relay, &b, 0),
+            transfer(&other, 0),
+            envelope(&second_relay, &b, 1),
+            transfer(&relay, 1),
+        ];
+        assert_eq!(
+            both_at(&txs, 0, false),
+            ids(&[
+                txs[1].clone(),
+                txs[2].clone(),
+                txs[3].clone(),
+                txs[4].clone()
+            ])
+        );
+        assert_eq!(
+            both_at(&txs, 0, true),
+            ids(&[txs[2].clone(), txs[3].clone()])
+        );
+    }
+
+    /// A dropped envelope's named sender's later envelope, relayed by another
+    /// account: below the accounting gate it leaves (main's rule; it holds
+    /// nothing of that account there), and the other relay's transfer stays;
+    /// from the gate it is carried (to its refusal, out of the sender's
+    /// sequence), so that the other relay's transfer, which it would
+    /// otherwise strand behind a missing nonce, executes.
+    #[test]
+    fn another_relays_envelope_for_a_dropped_envelopes_sender_is_carried_from_the_gate() {
+        let (relay, a, second_relay) = (
+            KeyPair::from_bytes([1u8; 32]),
+            KeyPair::from_bytes([2u8; 32]),
+            KeyPair::from_bytes([7u8; 32]),
+        );
+        let txs = vec![
+            envelope(&relay, &a, 0),
+            envelope(&second_relay, &a, 1),
+            transfer(&second_relay, 1),
+            envelope(&relay, &a, 2),
+        ];
+        assert_eq!(both_at(&txs, 0, false), ids(&[txs[2].clone()]));
+        assert_eq!(
+            both_at(&txs, 0, true),
+            ids(&[txs[1].clone(), txs[2].clone()])
+        );
+    }
+
+    /// A transaction that leaves with a run breaks no run of its own, so a
+    /// dropped run never takes another account's transactions: the relay's
+    /// envelope behind a dropped relay transaction leaves with the relay's
+    /// run, and its named sender's later envelope, carried by another relay,
+    /// stays, with that relay's later transfer. Below the accounting gate that
+    /// is main's rule; from the gate the second relay's queue is not held
+    /// behind the first relay's refusal.
+    #[test]
+    fn a_dropped_run_never_takes_another_accounts_transactions() {
+        let (relay, a, second_relay) = (
+            KeyPair::from_bytes([1u8; 32]),
+            KeyPair::from_bytes([2u8; 32]),
+            KeyPair::from_bytes([7u8; 32]),
+        );
+        let txs = vec![
+            transfer(&relay, 0),
+            envelope(&relay, &a, 0),
+            envelope(&second_relay, &a, 1),
+            transfer(&second_relay, 1),
+        ];
+        assert_eq!(
+            both_at(&txs, 0, false),
+            ids(&[txs[2].clone(), txs[3].clone()])
+        );
+        assert_eq!(
+            both_at(&txs, 0, true),
+            ids(&[txs[2].clone(), txs[3].clone()])
+        );
+    }
+
+    /// `Run::of_dropped` as it stands on main (`144784704f`): one run.
+    fn main_of_dropped(tx: &SignedTransaction) -> Run {
+        match sumchain_state::mempool::sponsored_envelope_sender(tx) {
+            Some(named) => Run::Envelope(named),
+            None => Run::Account(tx.sender()),
+        }
+    }
+
+    /// `Run::memberships` as it stands on main.
+    fn main_memberships(tx: &SignedTransaction) -> Vec<Run> {
+        std::iter::once(Run::Account(tx.sender()))
+            .chain(sumchain_state::mempool::sponsored_envelope_sender(tx).map(Run::Envelope))
+            .collect()
+    }
+
+    /// `drop_all_with_sender_tails` as it stands on main, verbatim but for
+    /// the two helpers above.
+    fn main_drop_all_with_sender_tails(
+        txs: &[SignedTransaction],
+        drop_indices: &[usize],
+        keep_prefix: usize,
+    ) -> Vec<SignedTransaction> {
+        let mut dropped = vec![false; txs.len()];
+        let mut earliest: std::collections::HashMap<Run, usize> = std::collections::HashMap::new();
+        for &index in drop_indices {
+            if index >= txs.len() {
+                continue;
+            }
+            dropped[index] = true;
+            earliest
+                .entry(main_of_dropped(&txs[index]))
+                .and_modify(|first| *first = (*first).min(index))
+                .or_insert(index);
+        }
+        txs.iter()
+            .enumerate()
+            .filter(|(index, tx)| {
+                *index < keep_prefix
+                    && !dropped[*index]
+                    && main_memberships(tx)
+                        .iter()
+                        .all(|run| earliest.get(run).is_none_or(|first| *index < *first))
+            })
+            .map(|(_, tx)| tx.clone())
+            .collect()
+    }
+
+    /// `drop_with_sender_tail` as it stands on main, verbatim but for the
+    /// helpers above.
+    fn main_drop_with_sender_tail(
+        txs: &[SignedTransaction],
+        index: usize,
+    ) -> Vec<SignedTransaction> {
+        let run = main_of_dropped(&txs[index]);
+        txs.iter()
+            .enumerate()
+            .filter(|(i, tx)| {
+                *i < index || (*i > index && !main_memberships(tx).iter().any(|r| *r == run))
+            })
+            .map(|(_, tx)| tx.clone())
+            .collect()
+    }
+
+    /// Every ordered choice of `k` of `0..n`.
+    fn arrangements(n: usize, k: usize) -> Vec<Vec<usize>> {
+        if k == 0 {
+            return vec![Vec::new()];
+        }
+        let mut out = Vec::new();
+        for shorter in arrangements(n, k - 1) {
+            for i in 0..n {
+                if !shorter.contains(&i) {
+                    let mut longer = shorter.clone();
+                    longer.push(i);
+                    out.push(longer);
+                }
+            }
+        }
+        out
+    }
+
+    /// Every arrangement of five of seven transactions (two relays' envelopes
+    /// for two senders, a transfer from each relay and from a third account),
+    /// every set of one or two offenders, and three cuts.
+    ///
+    /// - Below the accounting gate both drop paths keep exactly what main's
+    ///   keep.
+    /// - From the gate a transaction leaves only when it is refused itself or
+    ///   follows a refused transaction of its own account: nothing of another
+    ///   account ever leaves with it.
+    #[test]
+    fn below_the_accounting_gate_the_drop_paths_are_mains_and_from_it_no_run_crosses_accounts() {
+        let (r1, r2, a, b, x) = (
+            KeyPair::from_bytes([1u8; 32]),
+            KeyPair::from_bytes([7u8; 32]),
+            KeyPair::from_bytes([2u8; 32]),
+            KeyPair::from_bytes([3u8; 32]),
+            KeyPair::from_bytes([5u8; 32]),
+        );
+        let pool = vec![
+            envelope(&r1, &a, 0),
+            envelope(&r1, &b, 0),
+            envelope(&r2, &a, 1),
+            envelope(&r2, &b, 1),
+            transfer(&r1, 0),
+            transfer(&r2, 0),
+            transfer(&x, 0),
+        ];
+        let mut offender_sets: Vec<Vec<usize>> = (0..5).map(|i| vec![i]).collect();
+        for i in 0..5 {
+            for j in i + 1..5 {
+                offender_sets.push(vec![i, j]);
+            }
+        }
+        let mut checked = 0usize;
+        for arrangement in arrangements(pool.len(), 5) {
+            let txs: Vec<SignedTransaction> =
+                arrangement.iter().map(|&i| pool[i].clone()).collect();
+            for index in 0..txs.len() {
+                assert_eq!(
+                    ids(&PoAEngine::drop_with_sender_tail(&txs, index, false)),
+                    ids(&main_drop_with_sender_tail(&txs, index)),
+                    "{arrangement:?}, offender {index}"
+                );
+                let expected: Vec<Hash> = txs
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, tx)| {
+                        *i < index || (*i > index && tx.sender() != txs[index].sender())
+                    })
+                    .map(|(_, tx)| tx.hash())
+                    .collect();
+                assert_eq!(
+                    ids(&PoAEngine::drop_with_sender_tail(&txs, index, true)),
+                    expected,
+                    "{arrangement:?}, offender {index}, at the gate"
+                );
+                checked += 2;
+            }
+            for offenders in &offender_sets {
+                for keep_prefix in [txs.len(), 3, 1] {
+                    assert_eq!(
+                        ids(&PoAEngine::drop_all_with_sender_tails(
+                            &txs,
+                            offenders,
+                            keep_prefix,
+                            false
+                        )),
+                        ids(&main_drop_all_with_sender_tails(
+                            &txs,
+                            offenders,
+                            keep_prefix
+                        )),
+                        "{arrangement:?}, offenders {offenders:?}, keep {keep_prefix}"
+                    );
+                    let kept: Vec<Hash> = ids(&PoAEngine::drop_all_with_sender_tails(
+                        &txs,
+                        offenders,
+                        keep_prefix,
+                        true,
+                    ));
+                    let expected: Vec<Hash> = txs
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, tx)| {
+                            *i < keep_prefix
+                                && !offenders
+                                    .iter()
+                                    .any(|&o| o <= *i && txs[o].sender() == tx.sender())
+                        })
+                        .map(|(_, tx)| tx.hash())
+                        .collect();
+                    assert_eq!(
+                        kept, expected,
+                        "{arrangement:?}, offenders {offenders:?}, keep {keep_prefix}, at the gate"
+                    );
+                    checked += 2;
+                }
+            }
+        }
+        assert_eq!(checked, 2520 * (5 * 2 + 15 * 3 * 2));
     }
 }

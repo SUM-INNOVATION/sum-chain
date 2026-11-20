@@ -944,9 +944,20 @@ pub struct ConsensusConfigTransitionInfo {
 /// Distinguishes mempool / included-but-unfinalized / finalized states so
 /// clients don't have to compose `get_receipt` + `is_block_finalized` themselves.
 ///
-/// Note: `Dropped` is reserved for mempool evictions but not currently
-/// returned — current mempool does not track eviction history, so an evicted
-/// tx returns `Unknown`. Distinguishing the two requires future mempool work.
+/// `Dropped`: this node's pool evicted the transaction above a gap in its
+/// account's or its named sender's nonces (`GAP_HOLD_SELECTIONS`), with no
+/// receipt, and has not admitted it since. The node keeps a bounded,
+/// in-memory history of such evictions (at most as many entries as its pool
+/// has places, the oldest forgotten first; empty after a restart), so the
+/// same transaction may later read `Unknown`. A canonical receipt takes
+/// precedence, then a place in the pool (`Pending`). `Dropped` is a local
+/// observation: another node may still hold the transaction or carry it in a
+/// block. It is not proof of non-delivery; clients must not sign a new
+/// transaction for the same intent because of it alone, and should keep
+/// checking the canonical receipt and what their intent needs (for a
+/// sponsored envelope, the sender's messaging nonce and whether the message
+/// executed). Other evictions (a full pool, revalidation after a chain
+/// switch) are not recorded and read `Unknown`.
 ///
 /// `Failed { block_height }` reports the block in which the failure was
 /// recorded but does **not** encode whether that block is finalized. Under
@@ -982,7 +993,8 @@ pub enum TxStatusV2 {
     },
     /// Executed and reverted, or rejected pre-execution.
     Failed { block_height: Option<BlockHeight>, reason: String },
-    /// Evicted from mempool without inclusion. Reserved; not currently emitted.
+    /// Evicted from this node's pool above a gap, with no receipt, and not
+    /// admitted since: a local observation (see the type's documentation).
     Dropped,
 }
 
@@ -1889,7 +1901,8 @@ pub struct MessagingSenderNonceInfo {
     pub address: String,
     /// How many messages this address has sent (sponsored or direct), as the
     /// canonical chain records it; the `nonce` the next sponsored envelope
-    /// from this sender must carry.
+    /// from this sender must carry (in consensus from the envelope
+    /// verification gate on).
     pub nonce: u64,
 }
 
@@ -1943,7 +1956,14 @@ pub struct MessageEventInfo {
     pub content_type: u8,
     /// Message flags
     pub flags: u16,
-    /// Whether message has payment attached
+    /// Whether the message moved a payment into escrow: a paid send, or a
+    /// relayed message executed at or above the envelope gate that carried a
+    /// positive amount. It stays true after the payment is claimed or
+    /// refunded; `messaging_getPaymentStatus` reports where it stands. From
+    /// the envelope gate a paid send of amount 0 reports false; below the
+    /// gate it keeps its historical `true` (judged at the message's inclusion
+    /// height), while `messaging_getPaymentStatus` reports it `none` at every
+    /// height.
     pub has_payment: bool,
     /// Payment amount (if has_payment)
     pub payment_amount: Option<String>,
@@ -1964,10 +1984,100 @@ pub struct MessageDataInfo {
     pub message_data: String,
     /// Sender's public key (hex with 0x prefix)
     pub sender_pubkey: String,
-    /// Whether message has payment attached
+    /// Whether the relayed message paid an amount into escrow: only at or
+    /// above the envelope gate, where the named sender funds it; never below
+    /// it. It stays true after the payment is claimed or refunded;
+    /// `messaging_getPaymentStatus` reports where it stands.
     pub has_payment: bool,
     /// Payment amount (if has_payment)
     pub payment_amount: Option<String>,
+}
+
+/// The signed envelope an executed relayed message carried, as the stored
+/// transaction holds it (`messaging_getSponsoredEnvelope`). Every field is
+/// read from the stored transaction; nothing is derived. A client looking
+/// for the exact envelope it signed matches all of them, not the content
+/// alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SponsoredEnvelopeInfo {
+    /// The relayed transaction's hash (hex with 0x prefix)
+    pub tx_hash: String,
+    /// The height of the block that executed it
+    pub block_height: u64,
+    /// The sender's public key the envelope names (hex with 0x prefix)
+    pub sender_pubkey: String,
+    /// Recipient hash (hex with 0x prefix)
+    pub recipient_hash: String,
+    /// Encrypted message data (hex with 0x prefix)
+    pub message_data: String,
+    /// The envelope's signature (hex with 0x prefix)
+    pub envelope_signature: String,
+    /// The envelope's nonce
+    pub envelope_nonce: u64,
+    /// The envelope's expiry, in Unix seconds
+    pub envelope_expiry: u64,
+}
+
+/// What became of a message's payment, as the canonical chain executed it
+/// (`messaging_getPaymentStatus`). A payment exists only where the chain
+/// moved one: an amount named in a payload is never evidence on its own.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentStatusInfo {
+    /// The message id: the transaction's hash (hex with 0x prefix).
+    pub message_id: String,
+    /// `not_included` (no canonical receipt), `refused` (the receipt is not
+    /// a success), `none` (executed, no payment), `escrowed` (executed, the
+    /// escrow row present) or `settled` (executed, the escrow row gone:
+    /// claimed, or refunded after expiry).
+    pub status: String,
+    /// The amount paid, for `escrowed` (from the escrow row) and `settled`
+    /// (from the transaction, which equals what was escrowed).
+    pub amount: Option<String>,
+    /// The paying sender (base58), for `escrowed` and `settled`.
+    pub sender: Option<String>,
+    /// The recipient hash (hex with 0x prefix), for `escrowed` and `settled`.
+    pub recipient_hash: Option<String>,
+    /// The escrow's expiry, for `escrowed`.
+    pub escrow_expiry: Option<u64>,
+    /// The height of the block that executed the transaction.
+    pub included_at_height: Option<u64>,
+    /// The receipt's status, described.
+    pub receipt_status: Option<String>,
+    /// True for a relayed message executed below the envelope gate whose
+    /// envelope named an amount: under that rule no amount moved, and the
+    /// event flag stored for it is not evidence of a payment.
+    pub legacy_amount_unbacked: bool,
+}
+
+/// What spent a sponsored envelope's nonce (`messaging_getEnvelopeOutcome`),
+/// read from the envelope-outcome row the chain wrote when it was spent, or,
+/// for a nonce spent without such a row, that it was spent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvelopeOutcomeInfo {
+    /// The envelope's named sender (base58).
+    pub sender: String,
+    /// The envelope's nonce.
+    pub nonce: u64,
+    /// The transaction that carried the envelope and spent the nonce (hex
+    /// with 0x prefix). Under front-running, the first includer's. Absent
+    /// for `spent_without_outcome`: no row records what spent it.
+    pub tx_hash: Option<String>,
+    /// `executed` or `refused` (from the outcome row), or
+    /// `spent_without_outcome`: the nonce is below the sender's current
+    /// messaging nonce and no outcome row exists. It was spent by the
+    /// sender's own direct or paid send, which revokes any envelope signed
+    /// at that nonce, or by a sponsored message executed below the envelope
+    /// gate.
+    pub outcome: String,
+    /// That transaction's receipt code: 0 for success, otherwise the
+    /// `Failed` code. Absent for `spent_without_outcome`.
+    pub receipt_code: Option<u32>,
+    /// The amount that transaction escrowed (decimal), `0` when none
+    /// (always `0` for `spent_without_outcome`).
+    pub escrowed_amount: String,
+    /// The height of the block that carried it; absent for
+    /// `spent_without_outcome`.
+    pub block_height: Option<u64>,
 }
 
 /// Pending payment info for RPC responses
@@ -2000,7 +2110,9 @@ pub struct SubmitSponsoredMessageRequest {
     pub nonce: u64,
     /// Expiry timestamp
     pub expiry: u64,
-    /// Optional koppa amount
+    /// Optional payment the named sender makes into escrow (decimal); `"0"`
+    /// names none. Relayed only for a block at or above the envelope
+    /// verification height (`messaging_submitSponsored`).
     pub koppa_amount: Option<String>,
 }
 
