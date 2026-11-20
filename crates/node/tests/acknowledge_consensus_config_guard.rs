@@ -181,7 +181,7 @@ fn schema_1_fixture() -> (tempfile::TempDir, std::path::PathBuf, String, String)
     assert_eq!(r.config.schema().number, 1);
     let pending = ccfg::pending_schema_transition(&db)
         .unwrap()
-        .expect("this binary offers schema 4");
+        .expect("this binary offers schema 5");
     (dir, data, r.commitment.to_string(), pending.new.to_string())
 }
 
@@ -196,7 +196,7 @@ fn schema_2_fixture() -> (tempfile::TempDir, std::path::PathBuf, String, String)
     assert_eq!(r.config.schema().number, 2);
     let pending = ccfg::pending_schema_transition(&db)
         .unwrap()
-        .expect("this binary offers schema 4");
+        .expect("this binary offers schema 5");
     (dir, data, r.commitment.to_string(), pending.new.to_string())
 }
 
@@ -211,7 +211,7 @@ fn schema_3_fixture() -> (tempfile::TempDir, std::path::PathBuf, String, String)
     assert_eq!(r.config.schema().number, 3);
     let pending = ccfg::pending_schema_transition(&db)
         .unwrap()
-        .expect("this binary offers schema 4");
+        .expect("this binary offers schema 5");
     (dir, data, r.commitment.to_string(), pending.new.to_string())
 }
 
@@ -246,7 +246,7 @@ fn meta(data: &Path) -> Vec<(Vec<u8>, Vec<u8>)> {
         .collect()
 }
 
-/// The command moves a schema-1 database to schema 4 in one step when told
+/// The command moves a schema-1 database to schema 5 in one step when told
 /// both commitments exactly, keeps the old encoding in the history, and has
 /// nothing left to do afterwards.
 #[test]
@@ -254,11 +254,11 @@ fn the_schema_transition_moves_a_schema_1_database() {
     let (_dir, data, old, new) = schema_1_fixture();
     let out = ack_schema(&data, &old, &new);
     assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("schema 1 -> 4"), "{}", text(&out));
+    assert!(text(&out).contains("schema 1 -> 5"), "{}", text(&out));
 
     let db = Database::open_default(&data).unwrap();
     let r = ccfg::read_record(&db).unwrap().unwrap();
-    assert_eq!(r.config.schema().number, 4);
+    assert_eq!(r.config.schema().number, 5);
     assert_eq!(r.commitment.to_string(), new);
     let history = ccfg::read_transitions(&db).unwrap();
     assert_eq!(history.len(), 1);
@@ -268,7 +268,7 @@ fn the_schema_transition_moves_a_schema_1_database() {
     let again = ack_schema(&data, &new, &new);
     assert!(!again.status.success(), "{}", text(&again));
     assert!(
-        text(&again).contains("already recorded in schema 4"),
+        text(&again).contains("already recorded in schema 5"),
         "{}",
         text(&again)
     );
@@ -276,52 +276,55 @@ fn the_schema_transition_moves_a_schema_1_database() {
     assert_eq!(ccfg::read_transitions(&db).unwrap().len(), 1);
 }
 
-/// A schema-2 database moves to schema 4 the same way, adding 0x1043 and the
-/// four schema-4 gates.
+/// A schema-2 database moves to schema 5 the same way, adding 0x1043, the
+/// four schema-4 gates and the three schema-5 fields.
 #[test]
 fn the_schema_transition_moves_a_schema_2_database() {
     let (_dir, data, old, new) = schema_2_fixture();
     let out = ack_schema(&data, &old, &new);
     assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("schema 2 -> 4"), "{}", text(&out));
+    assert!(text(&out).contains("schema 2 -> 5"), "{}", text(&out));
     assert!(
-        text(&out).contains("5 field(s) added absent"),
+        text(&out).contains("8 field(s) added absent"),
         "{}",
         text(&out)
     );
     let db = Database::open_default(&data).unwrap();
     let r = ccfg::read_record(&db).unwrap().unwrap();
-    assert_eq!(r.config.schema().number, 4);
+    assert_eq!(r.config.schema().number, 5);
     assert_eq!(r.commitment.to_string(), new);
 }
 
-/// A schema-3 database, as a schema-3 release records, moves to schema 4 the same
-/// way, adding exactly the four schema-4 gates.
+/// A schema-3 database, as a schema-3 release records, moves to schema 5 the same
+/// way, adding exactly the four schema-4 gates and the three schema-5 fields.
 #[test]
 fn the_schema_transition_moves_a_schema_3_database() {
     let (_dir, data, old, new) = schema_3_fixture();
     let out = ack_schema(&data, &old, &new);
     assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("schema 3 -> 4"), "{}", text(&out));
+    assert!(text(&out).contains("schema 3 -> 5"), "{}", text(&out));
     assert!(
-        text(&out).contains("4 field(s) added absent"),
+        text(&out).contains("7 field(s) added absent"),
         "{}",
         text(&out)
     );
     let db = Database::open_default(&data).unwrap();
     let r = ccfg::read_record(&db).unwrap().unwrap();
-    assert_eq!(r.config.schema().number, 4);
+    assert_eq!(r.config.schema().number, 5);
     assert_eq!(r.commitment.to_string(), new);
     let history = ccfg::read_transitions(&db).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].kind, ccfg::TransitionKind::SchemaTransition);
-    assert_eq!(history[0].changed_ids, vec![0x1044, 0x1045, 0x1046, 0x1047]);
+    assert_eq!(
+        history[0].changed_ids,
+        vec![0x1044, 0x1045, 0x1046, 0x1047, 0x1048, 0x1049, 0x252b]
+    );
     assert_eq!(history[0].old_commitment.to_string(), old);
 }
 
 /// `--show` prints both commitments exactly as the move takes them and writes
 /// nothing; the operator's sequence — show, then move with what it printed —
-/// lands on schema 4. On a database already in schema 4 it says there is
+/// lands on schema 5. On a database already in schema 5 it says there is
 /// nothing to move.
 #[test]
 fn show_prints_the_exact_move_and_writes_nothing() {
@@ -388,15 +391,15 @@ fn the_schema_transition_refuses_wrong_commitments() {
     assert_eq!(meta(&data), before, "nothing written");
 }
 
-/// A database this binary created records schema 4 already: nothing to move.
+/// A database this binary created records schema 5 already: nothing to move.
 #[test]
-fn the_schema_transition_refuses_a_database_already_in_schema_4() {
+fn the_schema_transition_refuses_a_database_already_in_schema_5() {
     let f = fixture();
     let before = meta(&f.data);
     let out = ack_schema(&f.data, &f.old, &f.old);
     assert!(!out.status.success(), "{}", text(&out));
     assert!(
-        text(&out).contains("already recorded in schema 4"),
+        text(&out).contains("already recorded in schema 5"),
         "{}",
         text(&out)
     );
@@ -488,7 +491,7 @@ fn the_pre_start_revert_restores_exactly_the_rows_the_move_replaced() {
         &shown(&out, "--new").unwrap(),
     );
     assert!(done.status.success(), "{}", text(&done));
-    assert!(text(&done).contains("schema 4 -> 3"), "{}", text(&done));
+    assert!(text(&done).contains("schema 5 -> 3"), "{}", text(&done));
     assert_eq!(all_rows(&data), before, "exactly the rows before the move");
 
     let again = revert_schema(&data, &new, &old);

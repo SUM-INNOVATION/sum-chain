@@ -50,9 +50,9 @@
 //! [`schema`] holds the mechanism: schema 2 is schema 1's registry plus an
 //! append-only list of added fields, each optional with absence meaning the
 //! pre-existing behaviour; schema 3 is schema 2 plus one more such list, and
-//! schema 4 is schema 3 plus another. This binary writes schema 4
-//! ([`schema::PRODUCTION`]), which freezes it: a fresh database records schema
-//! 4, and an existing schema-1, schema-2 or schema-3 record runs unchanged
+//! schemas 4 and 5 each extend the one before the same way. This binary writes
+//! schema 5 ([`schema::PRODUCTION`]), which freezes it: a fresh database
+//! records schema 5, and an existing record of schema 1 to 4 runs unchanged
 //! until its operator moves it, in one step, with the stopped-node schema
 //! transition.
 //!

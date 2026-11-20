@@ -117,14 +117,14 @@ async fn the_rpc_reports_the_recorded_baseline_and_its_history() {
 
     let info = s.server.chain_get_consensus_config().await.unwrap();
     let c = ccfg::build(&g).unwrap().commitment().to_string();
-    assert_eq!(info.schema, 4, "a fresh baseline is recorded in schema 4");
+    assert_eq!(info.schema, 5, "a fresh baseline is recorded in schema 5");
     assert_eq!(info.status, "unverified-local-baseline");
     assert!(!info.network_agreement);
     assert_eq!(info.commitment.as_deref(), Some(c.as_str()));
     assert_eq!(info.initial_commitment.as_deref(), Some(c.as_str()));
     assert_eq!(info.baseline_height, Some(42));
     assert_eq!(info.matches_baseline, Some(true));
-    assert_eq!(info.fields.len(), ccfg::SCHEMA_4.specs().len());
+    assert_eq!(info.fields.len(), ccfg::SCHEMA_5.specs().len());
     assert_eq!(info.rules.quorum, "none");
     assert_eq!(info.rules.membership, "static-genesis");
     assert_eq!(info.rules.unfinalized_production, "unbounded");

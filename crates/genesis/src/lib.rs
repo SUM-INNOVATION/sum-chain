@@ -3079,9 +3079,6 @@ pub struct ChainParams {
     /// A sponsored `SendMessage` carries a version-2 sender envelope, verified
     /// in consensus.
     ///
-    /// PROPOSED NAME, for review; it is the first field of a draft schema 5
-    /// (`0x1048`, proposed).
-    ///
     /// Below this height, or while it is unset, a sponsored `SendMessage`
     /// executes exactly as before, under the earlier envelope rule, so
     /// historical blocks execute, import and replay as they did.
@@ -3107,14 +3104,22 @@ pub struct ChainParams {
     /// same height BEFORE it is reached. Clients must sign the version-2
     /// preimage from this height on. Never `Some(_)` in a committed genesis in
     /// this branch.
+    ///
+    /// It is consensus-configuration field `0x1048`, which only schema 5 can
+    /// express. A node whose recorded configuration is schema 1, 2, 3 or 4
+    /// refuses to start with it set, naming the stopped-node
+    /// `acknowledge-consensus-config-schema` that moves the record to schema 5;
+    /// genesis validation also requires
+    /// `peer_protocol_declaration_required_from_height` at or below it, and
+    /// `messaging_fee_nonce_accounting_enabled_from_height` at the same
+    /// height. Set, it also commits the compiled envelope tag (field `0x252b`),
+    /// so scheduling it on a running chain is an
+    /// `acknowledge-consensus-config`, not a reschedule alone.
     #[serde(default)]
     pub messaging_sponsored_envelope_verification_enabled_from_height: Option<u64>,
 
     /// Every messaging operation is charged its fee and advances the sender's
     /// account nonce, once, whether it succeeds or is refused.
-    ///
-    /// PROPOSED NAME, for review; it is the second gate of the draft schema 5
-    /// (`0x1049`, proposed).
     ///
     /// Below this height, or while it is unset, the messaging operations
     /// charge as before. At and above it, the
@@ -3135,6 +3140,10 @@ pub struct ChainParams {
     /// every validator must run the identical reviewed binary and observe the
     /// same height BEFORE it is reached. Never `Some(_)` in a committed genesis
     /// in this branch.
+    ///
+    /// It is consensus-configuration field `0x1049`, which only schema 5 can
+    /// express, with the same start-up refusal, peer-declaration rule and
+    /// equal-height rule as `0x1048` above.
     #[serde(default)]
     pub messaging_fee_nonce_accounting_enabled_from_height: Option<u64>,
 

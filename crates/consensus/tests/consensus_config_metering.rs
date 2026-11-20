@@ -318,7 +318,7 @@ static RATIFIED_SCHEMA_4: Schema = Schema {
     added: ccfg::schema::SCHEMA_4_ADDED,
 };
 
-/// [`RATIFIED_SCHEMA_4`] plus the draft schema 5, as [`ccfg::PRODUCTION`] knows it.
+/// [`RATIFIED_SCHEMA_4`] plus schema 5, as [`ccfg::PRODUCTION`] knows it.
 static RATIFIED_SCHEMA_5: Schema = Schema {
     number: 5,
     previous: Some(&RATIFIED_SCHEMA_4),

@@ -479,7 +479,7 @@ fn every_schema_2_constant_row_names_a_schema_2_field_and_back() {
     }
 }
 
-/// Constants committed by the draft schema 5: each `COMMITTED schema-5` row
+/// Constants committed by schema 5: each `COMMITTED schema-5` row
 /// names a field `SCHEMA_5_ADDED` registers — the constant's own field — and
 /// every schema-5 field in the compiled-constant range has its row.
 #[test]

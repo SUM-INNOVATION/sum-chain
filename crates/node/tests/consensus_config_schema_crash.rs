@@ -72,7 +72,7 @@ fn schema_3_dir(root: &Path, name: &str) -> (PathBuf, String, String) {
     let db = Database::open_default(&data).unwrap();
     ccfg::record::check_at_startup_with(&db, &genesis(), 0, &SCHEMA_3_RELEASE).unwrap();
     let p = ccfg::pending_schema_transition(&db).unwrap().unwrap();
-    assert_eq!((p.from_schema, p.to_schema), (3, 4));
+    assert_eq!((p.from_schema, p.to_schema), (3, 5));
     (data, p.old.to_string(), p.new.to_string())
 }
 
@@ -238,7 +238,7 @@ fn a_move_killed_after_its_commit_leaves_exactly_the_moved_database() {
     let out = run(&args(MOVE, &data, &old, &new));
     assert!(!out.status.success(), "{}", text(&out));
     assert!(
-        text(&out).contains("already recorded in schema 4"),
+        text(&out).contains("already recorded in schema 5"),
         "{}",
         text(&out)
     );

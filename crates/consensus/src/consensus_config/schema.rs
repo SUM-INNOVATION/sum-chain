@@ -35,18 +35,24 @@
 //! `crates/consensus/tests/consensus_config.rs`, and the move to it by
 //! `crates/consensus/tests/consensus_config_schema3.rs`.
 //!
-//! Schema 4 is frozen: [`PRODUCTION`] writes it. It is schema 3 plus four
+//! Schema 4 is frozen: a release wrote it. It is schema 3 plus four
 //! activation gates, [`SCHEMA_4_ADDED`], which never changes again; its
 //! encoding is pinned by `schema_4_golden_vectors` in
 //! `crates/consensus/tests/consensus_config.rs`, and the move to it by
 //! `crates/consensus/tests/consensus_config_schema4.rs`.
 //!
-//! # Registering a field after schema 4
+//! Schema 5 is frozen: [`PRODUCTION`] writes it. It is schema 4 plus two
+//! messaging activation gates and the compiled tag one of them reads,
+//! [`SCHEMA_5_ADDED`], which never changes again; its encoding is pinned by
+//! `schema_5_golden_vectors` in `crates/consensus/tests/consensus_config.rs`,
+//! and the move to it by `crates/consensus/tests/consensus_config_schema5.rs`.
 //!
-//! A field registered after schema 4 froze belongs to the draft schema 5
-//! ([`SCHEMA_5`]), extending [`SCHEMA_4`] with its own append-only list, known
-//! by [`PRODUCTION`] as a draft until a later reviewed change writes it. Use
-//! the next unused id in the field's range (an activation gate: the
+//! # Registering a field after schema 5
+//!
+//! A field registered from now on belongs to a new schema 6: a `SCHEMA_6`
+//! extending [`SCHEMA_5`] with its own append-only list, known by
+//! [`PRODUCTION`] as a draft until a later reviewed change writes it. Use the
+//! next unused id in the field's range (an activation gate: the
 //! `0x1000–0x1fff` range, `source: Source::Gate`, `ty: U64`, named exactly as
 //! `ChainParams::activation_heights` names it).
 //! `crates/consensus/tests/consensus_config_census.rs` checks that every gate
@@ -691,9 +697,9 @@ pub static SCHEMA_3: Schema = Schema {
     added: SCHEMA_3_ADDED,
 };
 
-/// Fields schema 4 adds to schema 3. FROZEN: this binary writes schema 4
-/// ([`PRODUCTION`]), so this list never changes again; a later field belongs
-/// to schema 5. Ids are never reused or reordered.
+/// Fields schema 4 adds to schema 3. FROZEN: a release wrote schema 4, so this
+/// list never changes again; a later field belongs to a later schema. Ids are
+/// never reused or reordered.
 pub const SCHEMA_4_ADDED: &[AddedField] = &[
     // BeginUnstake counts only the sender's own open storage challenges
     // (#369).
@@ -772,14 +778,12 @@ fn sponsored_send_v2_tag_value(genesis: &Genesis) -> Value {
     }
 }
 
-/// Fields schema 5 adds to schema 4. DRAFT: [`PRODUCTION`] knows these fields
-/// but neither writes nor reads schema-5 records, and refuses to start if any
-/// of them is non-absent, so a gate registered here can be declared but never
-/// activated by this binary. Append-only, like every later schema. The
-/// allocation is proposed.
+/// Fields schema 5 adds to schema 4. FROZEN: this binary writes schema 5
+/// ([`PRODUCTION`]), so this list never changes again; a later field belongs
+/// to schema 6. Ids are never reused or reordered.
 pub const SCHEMA_5_ADDED: &[AddedField] = &[
     // A sponsored SendMessage carries a version-2 sender envelope, verified
-    // in consensus. The name and the allocation are proposed.
+    // in consensus.
     AddedField {
         spec: FieldSpec {
             id: 0x1048,
@@ -792,8 +796,7 @@ pub const SCHEMA_5_ADDED: &[AddedField] = &[
         source: Source::Gate,
     },
     // Every messaging operation is charged its fee and advances the sender's
-    // account nonce, once, succeeding or refused. The name and the allocation
-    // are proposed.
+    // account nonce, once, succeeding or refused.
     AddedField {
         spec: FieldSpec {
             id: 0x1049,
@@ -825,7 +828,7 @@ pub const SCHEMA_5_ADDED: &[AddedField] = &[
     },
 ];
 
-/// Schema 5: schema 4 plus [`SCHEMA_5_ADDED`]. DRAFT.
+/// Schema 5: schema 4 plus [`SCHEMA_5_ADDED`]. FROZEN.
 pub static SCHEMA_5: Schema = Schema {
     number: 5,
     previous: Some(&SCHEMA_4),
@@ -834,18 +837,17 @@ pub static SCHEMA_5: Schema = Schema {
 
 /// What this binary does.
 ///
-/// It writes schema 4: a fresh database records schema 4 directly. It reads
-/// schemas 1, 2, 3 and 4, and keeps reading schemas 1, 2 and 3 for good (see
-/// the module documentation of [`super`]). An existing schema-1, schema-2 or
-/// schema-3 record is run as it stands, compared in its own schema and never
-/// re-encoded at start; moving it to schema 4 is the stopped-node
+/// It writes schema 5: a fresh database records schema 5 directly. It reads
+/// schemas 1 to 5, and keeps reading schemas 1 to 4 for good (see the module
+/// documentation of [`super`]). An existing schema-1, schema-2, schema-3 or
+/// schema-4 record is run as it stands, compared in its own schema and never
+/// re-encoded at start; moving it to schema 5 is the stopped-node
 /// `acknowledge-consensus-config-schema`, one step from any of them, which
 /// changes no rule. Until a node has moved, a field set in its genesis that
 /// its record's schema cannot express refuses start and names that command.
-/// It knows the draft schema 5, whose fields must all be absent. Nothing here
-/// sets any gate.
+/// No field is a draft. Nothing here sets any gate.
 pub static PRODUCTION: SchemaPolicy = SchemaPolicy {
-    reads: &[&SCHEMA_1, &SCHEMA_2, &SCHEMA_3, &SCHEMA_4],
-    writes: &SCHEMA_4,
+    reads: &[&SCHEMA_1, &SCHEMA_2, &SCHEMA_3, &SCHEMA_4, &SCHEMA_5],
+    writes: &SCHEMA_5,
     knows: &SCHEMA_5,
 };

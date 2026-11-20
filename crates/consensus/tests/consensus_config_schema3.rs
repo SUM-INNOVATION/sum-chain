@@ -10,7 +10,7 @@
 //! The releases that wrote schema 3 read schemas 1, 2 and 3 and wrote 3:
 //! [`SCHEMA_3_RELEASE`] models them, and is this file's subject (the
 //! functions below of the same names as the module's run under it). This
-//! binary writes schema 4 ([`PRODUCTION`], `consensus_config_schema4.rs`) and
+//! binary writes schema 5 ([`PRODUCTION`], `consensus_config_schema5.rs`) and
 //! still runs a schema-3 record as it stands.
 //!
 //! What an operator relied on, in order:
@@ -277,10 +277,11 @@ fn schema_3_is_schema_2_plus_the_remediation_gate_and_was_written() {
         [1, 2, 3],
         "older schemas are read for good"
     );
-    // This binary keeps reading it for good and writes schema 4, which
+    // This binary keeps reading it for good and writes schema 5, which
     // extends it; schema 3 itself is unchanged.
     assert!(PRODUCTION.reads.iter().any(|s| std::ptr::eq(*s, &SCHEMA_3)));
-    assert!(std::ptr::eq(PRODUCTION.writes, &SCHEMA_4));
+    assert!(std::ptr::eq(PRODUCTION.writes, &SCHEMA_5));
+    assert!(SCHEMA_5.extends(&SCHEMA_4));
     for p in [&PRODUCTION, &PREVIOUS, &SCHEMA_2_RELEASE, &SCHEMA_3_RELEASE] {
         p.check().unwrap();
     }

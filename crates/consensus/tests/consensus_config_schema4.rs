@@ -1,5 +1,12 @@
 //! ConsensusConfig schema 4 (#268): schema 3 plus exactly four optional U64
-//! gates (0x1044 to 0x1047), which this binary writes.
+//! gates (0x1044 to 0x1047).
+//!
+//! The release that wrote schema 4 read schemas 1 to 4, wrote 4 and knew
+//! schema 5 only as a draft: [`SCHEMA_4_RELEASE`] models it, and is this
+//! file's subject (the functions below of the same names as the module's run
+//! under it), so "this binary" below is that release. The current binary
+//! writes schema 5 ([`PRODUCTION`], `consensus_config_schema5.rs`) and still
+//! runs a schema-4 record as it stands.
 //!
 //! Every upgrade test starts from `tests/data/consensus_config_schema1_db.tsv`:
 //! the exact `cf::META` entries the schema-1 release writes (a baseline, a
@@ -40,8 +47,8 @@ use sumchain_consensus::consensus_config::{
     codec::commitment_of,
     record::{
         acknowledge_schema_transition_with, acknowledge_with, check_at_startup_with,
-        pending_schema_transition_with, read_record_with, read_transitions_with, RECORD_KEY,
-        TRANSITION_PREFIX,
+        pending_schema_revert_with, pending_schema_transition_with, read_record_with,
+        read_transitions_with, revert_schema_transition_with, RECORD_KEY, TRANSITION_PREFIX,
     },
     schema::{SCHEMA_2_ADDED, SCHEMA_3_ADDED, SCHEMA_4_ADDED},
     ConfigError, ConsensusConfig, SchemaPolicy, Source, StartupOutcome, TransitionKind, Value,
@@ -109,6 +116,73 @@ static SCHEMA_3_RELEASE: SchemaPolicy = SchemaPolicy {
     writes: &SCHEMA_3,
     knows: &SCHEMA_5,
 };
+
+/// The release that wrote schema 4: it read schemas 1 to 4, wrote 4, and knew
+/// schema 5 only as a draft whose fields must stay absent.
+static SCHEMA_4_RELEASE: SchemaPolicy = SchemaPolicy {
+    reads: &[&SCHEMA_1, &SCHEMA_2, &SCHEMA_3, &SCHEMA_4],
+    writes: &SCHEMA_4,
+    knows: &SCHEMA_5,
+};
+
+// ── the schema-4 release's operations, this file's subject ──────────────────
+
+fn build(g: &Genesis) -> Result<ConsensusConfig, ConfigError> {
+    ccfg::build_with(g, &SCHEMA_4_RELEASE)
+}
+
+fn check_at_startup(
+    db: &Database,
+    g: &Genesis,
+    height: u64,
+) -> Result<StartupOutcome, ConfigError> {
+    check_at_startup_with(db, g, height, &SCHEMA_4_RELEASE)
+}
+
+fn read_record(db: &Database) -> Result<Option<ccfg::BaselineRecord>, ConfigError> {
+    read_record_with(db, &SCHEMA_4_RELEASE)
+}
+
+fn read_transitions(db: &Database) -> Result<Vec<ccfg::Transition>, ConfigError> {
+    read_transitions_with(db, &SCHEMA_4_RELEASE)
+}
+
+fn pending_schema_transition(
+    db: &Database,
+) -> Result<Option<ccfg::PendingSchemaTransition>, ConfigError> {
+    pending_schema_transition_with(db, &SCHEMA_4_RELEASE)
+}
+
+fn acknowledge_schema_transition(
+    db: &Database,
+    height: u64,
+    old: Hash,
+    new: Hash,
+) -> Result<ccfg::SchemaTransitioned, ConfigError> {
+    acknowledge_schema_transition_with(db, height, old, new, &SCHEMA_4_RELEASE)
+}
+
+fn acknowledge(
+    db: &Database,
+    g: &Genesis,
+    height: u64,
+    old: Hash,
+    new: Hash,
+) -> Result<ccfg::Acknowledged, ConfigError> {
+    acknowledge_with(db, g, height, old, new, &SCHEMA_4_RELEASE)
+}
+
+fn pending_schema_revert(db: &Database) -> Result<ccfg::PendingSchemaRevert, ConfigError> {
+    pending_schema_revert_with(db, &SCHEMA_4_RELEASE)
+}
+
+fn revert_schema_transition(
+    db: &Database,
+    old: Hash,
+    new: Hash,
+) -> Result<ccfg::SchemaReverted, ConfigError> {
+    revert_schema_transition_with(db, old, new, &SCHEMA_4_RELEASE)
+}
 
 // ── the fixtures ────────────────────────────────────────────────────────────
 
@@ -256,9 +330,9 @@ fn all_rows(db: &Database) -> BTreeMap<(String, Vec<u8>), Vec<u8>> {
 /// This binary's one-step move of `db` to schema 4, with the commitments it
 /// offers.
 fn move_to_schema_4(db: &Database, height: u64) -> ccfg::SchemaTransitioned {
-    let p = ccfg::pending_schema_transition(db).unwrap().unwrap();
+    let p = pending_schema_transition(db).unwrap().unwrap();
     assert_eq!(p.to_schema, 4);
-    ccfg::acknowledge_schema_transition(db, height, p.old, p.new).unwrap()
+    acknowledge_schema_transition(db, height, p.old, p.new).unwrap()
 }
 
 fn ids(changes: &[ccfg::FieldChange]) -> Vec<u16> {
@@ -304,12 +378,15 @@ fn schema_4_is_schema_3_plus_the_four_gates_and_this_binary_writes_it() {
         SCHEMA_2_ADDED.len() + SCHEMA_3_ADDED.len() + 4
     );
 
-    assert!(std::ptr::eq(PRODUCTION.writes, &SCHEMA_4));
-    // It knows the draft schema 5, which extends schema 4.
-    assert!(std::ptr::eq(PRODUCTION.knows, &SCHEMA_5));
+    assert!(std::ptr::eq(SCHEMA_4_RELEASE.writes, &SCHEMA_4));
+    // It knew the draft schema 5, which extends schema 4.
+    assert!(std::ptr::eq(SCHEMA_4_RELEASE.knows, &SCHEMA_5));
     assert!(std::ptr::eq(SCHEMA_5.previous.unwrap(), &SCHEMA_4));
+    // The current binary keeps reading schema 4 for good and writes schema 5.
+    assert!(PRODUCTION.reads.iter().any(|s| std::ptr::eq(*s, &SCHEMA_4)));
+    assert!(std::ptr::eq(PRODUCTION.writes, &SCHEMA_5));
     assert_eq!(
-        PRODUCTION
+        SCHEMA_4_RELEASE
             .reads
             .iter()
             .map(|s| s.number)
@@ -319,6 +396,7 @@ fn schema_4_is_schema_3_plus_the_four_gates_and_this_binary_writes_it() {
     );
     for p in [
         &PRODUCTION,
+        &SCHEMA_4_RELEASE,
         &SCHEMA_1_RELEASE,
         &SCHEMA_2_RELEASE,
         &SCHEMA_3_RELEASE,
@@ -345,7 +423,7 @@ fn schema_4_is_schema_3_plus_the_four_gates_and_this_binary_writes_it() {
             None
         );
     }
-    let c = ccfg::build(&g2()).unwrap();
+    let c = build(&g2()).unwrap();
     for id in GATE_IDS {
         assert_eq!(c.get(id), Some(&Value::Absent), "{id:#06x}");
     }
@@ -394,19 +472,19 @@ fn no_tracked_genesis_or_template_sets_a_schema_4_gate() {
 fn a_fresh_database_records_schema_4_directly() {
     let dir = TempDir::new().unwrap();
     let db = Database::open_default(dir.path()).unwrap();
-    let expected = ccfg::build(&g2()).unwrap();
+    let expected = build(&g2()).unwrap();
     assert_eq!(expected.schema().number, 4);
     assert_eq!(
-        ccfg::check_at_startup(&db, &g2(), 0).unwrap(),
+        check_at_startup(&db, &g2(), 0).unwrap(),
         StartupOutcome::Initialized {
             commitment: expected.commitment(),
             baseline_height: 0
         }
     );
-    let r = ccfg::read_record(&db).unwrap().unwrap();
+    let r = read_record(&db).unwrap().unwrap();
     assert_eq!(r.config, expected);
     assert_eq!(r.transition_count, 0);
-    assert_eq!(ccfg::pending_schema_transition(&db).unwrap(), None);
+    assert_eq!(pending_schema_transition(&db).unwrap(), None);
     // And it is the schema-3 configuration plus the four gates, absent.
     assert_eq!(
         ccfg::build_with(&g2(), &SCHEMA_3_RELEASE)
@@ -431,11 +509,11 @@ fn older_databases_run_as_they_stand_and_are_offered_schema_4_in_one_step() {
         ("production-shaped", 3, g_ph(), production_shaped_database()),
     ] {
         let before = all_rows(&db);
-        let r = ccfg::read_record(&db).unwrap().unwrap();
+        let r = read_record(&db).unwrap().unwrap();
         assert_eq!(r.config.schema().number, from, "{label}");
         for _ in 0..3 {
             assert_eq!(
-                ccfg::check_at_startup(&db, &g, HEAD).unwrap(),
+                check_at_startup(&db, &g, HEAD).unwrap(),
                 StartupOutcome::Unchanged {
                     commitment: r.commitment
                 },
@@ -443,7 +521,7 @@ fn older_databases_run_as_they_stand_and_are_offered_schema_4_in_one_step() {
             );
         }
         assert_eq!(all_rows(&db), before, "{label}: nothing written at start");
-        let p = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+        let p = pending_schema_transition(&db).unwrap().unwrap();
         assert_eq!((p.from_schema, p.to_schema), (from, 4), "{label}");
         assert_eq!(p.old, r.commitment, "{label}");
         assert_eq!(
@@ -468,15 +546,15 @@ fn the_one_step_move_keeps_the_rules_and_the_history() {
         ("schema 2", &SCHEMA_2, schema_2_database()),
         ("schema 3", &SCHEMA_3, schema_3_database()),
     ] {
-        let old_history = ccfg::read_transitions(&db).unwrap();
-        let old = ccfg::read_record(&db).unwrap().unwrap();
+        let old_history = read_transitions(&db).unwrap();
+        let old = read_record(&db).unwrap().unwrap();
         let done = move_to_schema_4(&db, HEIGHT);
         assert_eq!((done.from_schema, done.to_schema), (from.number, 4));
         assert_eq!(done.from, old.commitment);
         let expected_added: Vec<u16> = SCHEMA_4.added_since(from).iter().map(|s| s.id).collect();
         assert_eq!(done.added, expected_added, "{label}");
 
-        let r = ccfg::read_record(&db).unwrap().unwrap();
+        let r = read_record(&db).unwrap().unwrap();
         assert_eq!(r.config.schema().number, 4);
         assert_eq!(r.commitment, done.to);
         assert_eq!(r.config, old.config.extend_to(&SCHEMA_4).unwrap());
@@ -487,7 +565,7 @@ fn the_one_step_move_keeps_the_rules_and_the_history() {
         assert_eq!(r.initial_commitment, old.initial_commitment);
         assert_eq!(r.transition_count, old.transition_count + 1);
 
-        let history = ccfg::read_transitions(&db).unwrap();
+        let history = read_transitions(&db).unwrap();
         assert_eq!(history.len(), old_history.len() + 1, "{label}");
         assert_eq!(&history[..old_history.len()], &old_history[..], "{label}");
         let last = history.last().unwrap();
@@ -499,13 +577,13 @@ fn the_one_step_move_keeps_the_rules_and_the_history() {
         assert_eq!(last.changed_ids, expected_added);
 
         assert_eq!(
-            ccfg::check_at_startup(&db, &g2(), HEIGHT).unwrap(),
+            check_at_startup(&db, &g2(), HEIGHT).unwrap(),
             StartupOutcome::Unchanged {
                 commitment: done.to
             },
             "{label}"
         );
-        assert_eq!(ccfg::pending_schema_transition(&db).unwrap(), None);
+        assert_eq!(pending_schema_transition(&db).unwrap(), None);
         landed.push(done.to);
     }
     assert!(landed.windows(2).all(|w| w[0] == w[1]), "{landed:?}");
@@ -518,15 +596,15 @@ fn the_one_step_move_keeps_the_rules_and_the_history() {
 #[test]
 fn the_production_shaped_record_moves_by_exactly_the_four_gates() {
     let (_d, db) = production_shaped_database();
-    let old = ccfg::read_record(&db).unwrap().unwrap();
+    let old = read_record(&db).unwrap().unwrap();
     let done = move_to_schema_4(&db, HEAD);
     assert_eq!((done.from_schema, done.to_schema), (3, 4));
     assert_eq!(done.added, GATE_IDS);
-    let r = ccfg::read_record(&db).unwrap().unwrap();
+    let r = read_record(&db).unwrap().unwrap();
     assert_eq!(r.config.get(PEER), Some(&Value::U64(P)));
     assert_eq!(r.config.get(NODE_REGISTRY), Some(&Value::U64(H_GATE)));
     assert_eq!(r.config, old.config.extend_to(&SCHEMA_4).unwrap());
-    let kinds: Vec<&str> = ccfg::read_transitions(&db)
+    let kinds: Vec<&str> = read_transitions(&db)
         .unwrap()
         .iter()
         .map(|t| t.kind.label())
@@ -536,14 +614,14 @@ fn the_production_shaped_record_moves_by_exactly_the_four_gates() {
         ["schema-transition", "gate-reschedule", "schema-transition"]
     );
     assert_eq!(
-        ccfg::check_at_startup(&db, &g_ph(), HEAD).unwrap(),
+        check_at_startup(&db, &g_ph(), HEAD).unwrap(),
         StartupOutcome::Unchanged {
             commitment: done.to
         }
     );
     // The rules did not change: the moved record is the schema-4 configuration
     // this binary computes from the same genesis.
-    assert_eq!(r.config, ccfg::build(&g_ph()).unwrap());
+    assert_eq!(r.config, build(&g_ph()).unwrap());
 }
 
 /// The move writes exactly two rows — the record, replaced, and one new
@@ -552,7 +630,7 @@ fn the_production_shaped_record_moves_by_exactly_the_four_gates() {
 fn the_move_writes_only_the_record_and_one_transition() {
     let (_d, db) = production_shaped_database();
     let before = all_rows(&db);
-    let r = ccfg::read_record(&db).unwrap().unwrap();
+    let r = read_record(&db).unwrap().unwrap();
     move_to_schema_4(&db, HEAD);
     let after = all_rows(&db);
     let changed: Vec<&(String, Vec<u8>)> = after
@@ -580,9 +658,9 @@ fn a_moved_record_has_nothing_left_to_move_and_a_rerun_writes_nothing() {
     let (_d, db) = production_shaped_database();
     let done = move_to_schema_4(&db, HEAD);
     let before = all_rows(&db);
-    assert_eq!(ccfg::pending_schema_transition(&db).unwrap(), None);
+    assert_eq!(pending_schema_transition(&db).unwrap(), None);
     for (old, new) in [(done.to, done.to), (done.from, done.to)] {
-        let err = ccfg::acknowledge_schema_transition(&db, HEAD, old, new).unwrap_err();
+        let err = acknowledge_schema_transition(&db, HEAD, old, new).unwrap_err();
         assert!(
             err.to_string().contains("already recorded in schema 4"),
             "{err}"
@@ -596,14 +674,14 @@ fn a_moved_record_has_nothing_left_to_move_and_a_rerun_writes_nothing() {
 #[test]
 fn the_move_must_name_both_commitments_exactly() {
     let (_d, db) = production_shaped_database();
-    let p = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+    let p = pending_schema_transition(&db).unwrap().unwrap();
     let zero = Hash::from_hex(&format!("0x{}", "00".repeat(32))).unwrap();
     let before = all_rows(&db);
     for (old, new) in [(zero, p.new), (p.old, zero), (p.new, p.old), (p.old, p.old)] {
-        let err = ccfg::acknowledge_schema_transition(&db, HEAD, old, new).unwrap_err();
+        let err = acknowledge_schema_transition(&db, HEAD, old, new).unwrap_err();
         assert!(matches!(err, ConfigError::Refused(_)), "{err}");
     }
-    let err = ccfg::acknowledge_schema_transition(&db, HEAD, p.old, zero).unwrap_err();
+    let err = acknowledge_schema_transition(&db, HEAD, p.old, zero).unwrap_err();
     assert!(err.to_string().contains(&p.new.to_string()), "{err}");
     assert_eq!(all_rows(&db), before);
 }
@@ -644,7 +722,7 @@ fn a_damaged_record_is_refused_by_the_move_and_nothing_is_written() {
         (
             "a transition the record does not count",
             Box::new(|db| {
-                let n = ccfg::read_record(db).unwrap().unwrap().transition_count;
+                let n = read_record(db).unwrap().unwrap().transition_count;
                 let last = db.get(cf::META, &transition_key(n)).unwrap().unwrap();
                 db.put(cf::META, &transition_key(n + 1), &last).unwrap();
             }),
@@ -656,19 +734,16 @@ fn a_damaged_record_is_refused_by_the_move_and_nothing_is_written() {
     ];
     for (what, damage) in cases {
         let (_d, db) = production_shaped_database();
-        let p = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+        let p = pending_schema_transition(&db).unwrap().unwrap();
         damage(&db);
         let before = all_rows(&db);
-        let err = ccfg::acknowledge_schema_transition(&db, HEAD, p.old, p.new).unwrap_err();
+        let err = acknowledge_schema_transition(&db, HEAD, p.old, p.new).unwrap_err();
         assert!(
             matches!(err, ConfigError::RecordCorrupt(_)),
             "{what}: {err}"
         );
-        assert!(ccfg::pending_schema_transition(&db).is_err(), "{what}");
-        assert!(
-            ccfg::check_at_startup(&db, &g_ph(), HEAD).is_err(),
-            "{what}"
-        );
+        assert!(pending_schema_transition(&db).is_err(), "{what}");
+        assert!(check_at_startup(&db, &g_ph(), HEAD).is_err(), "{what}");
         assert_eq!(all_rows(&db), before, "{what}: nothing written");
     }
 }
@@ -680,7 +755,7 @@ fn a_damaged_record_is_refused_by_the_move_and_nothing_is_written() {
 fn a_record_of_an_unknown_future_schema_is_refused_and_nothing_is_written() {
     let dir = TempDir::new().unwrap();
     let db = Database::open_default(dir.path()).unwrap();
-    ccfg::check_at_startup(&db, &g2(), 0).unwrap();
+    check_at_startup(&db, &g2(), 0).unwrap();
     // Re-label the fresh schema-4 record as schema 5, with a commitment that
     // matches its bytes: a well-formed record of a schema this binary lacks.
     tamper(&db, RECORD_KEY, |r| {
@@ -691,19 +766,19 @@ fn a_record_of_an_unknown_future_schema_is_refused_and_nothing_is_written() {
     });
     let raw = db.get(cf::META, RECORD_KEY).unwrap().unwrap();
     assert_eq!(
-        ConsensusConfig::decode(&raw[87..]),
+        ConsensusConfig::decode_with(&raw[87..], SCHEMA_4_RELEASE.reads),
         Err(ConfigError::UnknownSchema(5))
     );
     let before = all_rows(&db);
-    let err = ccfg::read_record(&db).unwrap_err();
+    let err = read_record(&db).unwrap_err();
     assert!(matches!(err, ConfigError::RecordCorrupt(_)), "{err}");
     assert!(err.to_string().contains("schema 5"), "{err}");
     assert!(err.to_string().contains("newer binary"), "{err}");
     let c = commitment_of(&raw[87..]);
-    let err = ccfg::acknowledge_schema_transition(&db, 0, c, c).unwrap_err();
+    let err = acknowledge_schema_transition(&db, 0, c, c).unwrap_err();
     assert!(err.to_string().contains("newer binary"), "{err}");
-    assert!(ccfg::pending_schema_transition(&db).is_err());
-    assert!(ccfg::check_at_startup(&db, &g2(), 0).is_err());
+    assert!(pending_schema_transition(&db).is_err());
+    assert!(check_at_startup(&db, &g2(), 0).is_err());
     assert_eq!(all_rows(&db), before, "nothing written");
 }
 
@@ -725,7 +800,7 @@ fn a_record_that_disagrees_with_the_genesis_is_refused_before_and_after_the_move
 
     let refused = |db: &Database| {
         let before = all_rows(db);
-        let err = ccfg::check_at_startup(db, &other, HEAD).unwrap_err();
+        let err = check_at_startup(db, &other, HEAD).unwrap_err();
         let text = err.to_string();
         assert!(matches!(err, ConfigError::Refused(_)), "{text}");
         assert!(text.contains("max_contract_gas"), "{text}");
@@ -734,12 +809,12 @@ fn a_record_that_disagrees_with_the_genesis_is_refused_before_and_after_the_move
             "{text}"
         );
         assert_eq!(all_rows(db), before, "nothing written");
-        let r = ccfg::read_record(db).unwrap().unwrap();
+        let r = read_record(db).unwrap().unwrap();
         let computed = ccfg::build_with(
             &other,
             match r.config.schema().number {
                 3 => &SCHEMA_3_RELEASE,
-                _ => &PRODUCTION,
+                _ => &SCHEMA_4_RELEASE,
             },
         )
         .unwrap();
@@ -747,7 +822,7 @@ fn a_record_that_disagrees_with_the_genesis_is_refused_before_and_after_the_move
     };
     assert_eq!(refused(&db), vec![field], "before the move");
     let done = move_to_schema_4(&db, HEAD);
-    assert_eq!(ccfg::read_record(&db).unwrap().unwrap().commitment, done.to);
+    assert_eq!(read_record(&db).unwrap().unwrap().commitment, done.to);
     assert_eq!(refused(&db), vec![field], "after the move: the same field");
 }
 
@@ -768,8 +843,8 @@ fn before_the_move_setting_a_schema_4_gate_refuses_and_names_the_command() {
         ("production-shaped", g_ph(), production_shaped_database()),
     ] {
         let before = all_rows(&db);
-        let r = ccfg::read_record(&db).unwrap().unwrap();
-        let p = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+        let r = read_record(&db).unwrap().unwrap();
+        let p = pending_schema_transition(&db).unwrap().unwrap();
         for (i, (_, name, set_gate)) in GATES.into_iter().enumerate() {
             let mut g = base.clone();
             g.params.peer_protocol_declaration_required_from_height = base
@@ -779,7 +854,7 @@ fn before_the_move_setting_a_schema_4_gate_refuses_and_names_the_command() {
             set_gate(&mut g.params, Some(HEAD + 200 + i as u64));
             g.validate().unwrap();
 
-            let err = ccfg::check_at_startup(&db, &g, HEAD).unwrap_err();
+            let err = check_at_startup(&db, &g, HEAD).unwrap_err();
             let text = err.to_string();
             assert!(matches!(err, ConfigError::Refused(_)), "{label}: {text}");
             assert!(text.contains(name), "{label}: {text}");
@@ -790,7 +865,7 @@ fn before_the_move_setting_a_schema_4_gate_refuses_and_names_the_command() {
                 )),
                 "{label}: {text}"
             );
-            let ack = ccfg::acknowledge(&db, &g, HEAD, r.commitment, r.commitment).unwrap_err();
+            let ack = acknowledge(&db, &g, HEAD, r.commitment, r.commitment).unwrap_err();
             assert!(
                 ack.to_string()
                     .contains("acknowledge-consensus-config-schema"),
@@ -799,7 +874,7 @@ fn before_the_move_setting_a_schema_4_gate_refuses_and_names_the_command() {
             assert_eq!(all_rows(&db), before, "{label}, {name}: nothing written");
         }
         assert_eq!(
-            ccfg::check_at_startup(&db, &base, HEAD).unwrap(),
+            check_at_startup(&db, &base, HEAD).unwrap(),
             StartupOutcome::Unchanged {
                 commitment: r.commitment
             },
@@ -819,7 +894,7 @@ fn after_the_move_a_schema_4_gate_is_a_future_gate_reschedule() {
 
         let before = all_rows(&db);
         for at in [HEAD - 1, HEAD] {
-            let err = ccfg::check_at_startup(&db, &with_gate(i, at), HEAD).unwrap_err();
+            let err = check_at_startup(&db, &with_gate(i, at), HEAD).unwrap_err();
             assert!(
                 err.to_string().contains("already passed"),
                 "{name} {at}: {err}"
@@ -830,23 +905,23 @@ fn after_the_move_a_schema_4_gate_is_a_future_gate_reschedule() {
 
         let g = with_gate(i, HEAD + 100);
         g.validate().unwrap();
-        let out = ccfg::check_at_startup(&db, &g, HEAD).unwrap();
+        let out = check_at_startup(&db, &g, HEAD).unwrap();
         let StartupOutcome::GatesRescheduled { from, to, changes } = out else {
             panic!("{name}: expected a reschedule, got {out:?}");
         };
         assert_eq!(from, moved.to);
-        assert_eq!(to, ccfg::build(&g).unwrap().commitment());
+        assert_eq!(to, build(&g).unwrap().commitment());
         assert_eq!(ids(&changes), vec![id], "{name}");
-        let last = ccfg::read_transitions(&db).unwrap().pop().unwrap();
+        let last = read_transitions(&db).unwrap().pop().unwrap();
         assert_eq!(last.kind, TransitionKind::GateReschedule);
         assert_eq!(last.changed_ids, vec![id]);
         assert_eq!(
-            ccfg::check_at_startup(&db, &g, HEAD + 1).unwrap(),
+            check_at_startup(&db, &g, HEAD + 1).unwrap(),
             StartupOutcome::Unchanged { commitment: to }
         );
         // Still ahead of the chain: it can be unset again.
         assert!(matches!(
-            ccfg::check_at_startup(&db, &g_ph(), HEAD + 2).unwrap(),
+            check_at_startup(&db, &g_ph(), HEAD + 2).unwrap(),
             StartupOutcome::GatesRescheduled { .. }
         ));
     }
@@ -865,7 +940,7 @@ fn older_releases_refuse_a_schema_4_record_and_rewrite_nothing() {
     move_to_schema_4(&moved_from_ph, HEAD);
     let fresh_dir = TempDir::new().unwrap();
     let fresh = Database::open_default(fresh_dir.path()).unwrap();
-    ccfg::check_at_startup(&fresh, &g2(), 0).unwrap();
+    check_at_startup(&fresh, &g2(), 0).unwrap();
 
     for (label, db, g) in [
         ("moved from schema 1", &moved_from_1, g2()),
@@ -902,7 +977,7 @@ fn older_releases_refuse_a_schema_4_record_and_rewrite_nothing() {
             assert_eq!(all_rows(db), before, "{label}, {who}: nothing rewritten");
         }
         assert!(matches!(
-            ccfg::check_at_startup(db, &g, HEAD).unwrap(),
+            check_at_startup(db, &g, HEAD).unwrap(),
             StartupOutcome::Unchanged { .. }
         ));
         assert_eq!(all_rows(db), before, "{label}: nothing rewritten");
@@ -918,9 +993,9 @@ fn older_releases_refuse_a_schema_4_record_and_rewrite_nothing() {
 fn a_move_lost_before_the_commit_leaves_the_old_record_and_can_be_retried() {
     let (dir, db) = production_shaped_database();
     let before = all_rows(&db);
-    let p = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+    let p = pending_schema_transition(&db).unwrap().unwrap();
     {
-        let r = ccfg::read_record(&db).unwrap().unwrap();
+        let r = read_record(&db).unwrap().unwrap();
         let mut batch = db.batch();
         batch
             .put(cf::META, &transition_key(r.transition_count + 1), b"staged")
@@ -935,7 +1010,7 @@ fn a_move_lost_before_the_commit_leaves_the_old_record_and_can_be_retried() {
         check_at_startup_with(&db, &g_ph(), HEAD, &SCHEMA_3_RELEASE).unwrap(),
         StartupOutcome::Unchanged { commitment: p.old }
     );
-    let done = ccfg::acknowledge_schema_transition(&db, HEAD, p.old, p.new).unwrap();
+    let done = acknowledge_schema_transition(&db, HEAD, p.old, p.new).unwrap();
     assert_eq!(done.to, p.new);
 }
 
@@ -945,7 +1020,7 @@ fn a_move_lost_before_the_commit_leaves_the_old_record_and_can_be_retried() {
 #[test]
 fn half_a_move_is_refused_and_never_repaired() {
     let (_dm, moved) = production_shaped_database();
-    let r = ccfg::read_record(&moved).unwrap().unwrap();
+    let r = read_record(&moved).unwrap().unwrap();
     let seq = r.transition_count + 1;
     move_to_schema_4(&moved, HEAD);
     let new_record = moved.get(cf::META, RECORD_KEY).unwrap().unwrap();
@@ -960,7 +1035,7 @@ fn half_a_move_is_refused_and_never_repaired() {
                 .unwrap();
         }
         let before = all_rows(&db);
-        for policy in [&PRODUCTION, &SCHEMA_3_RELEASE] {
+        for policy in [&SCHEMA_4_RELEASE, &SCHEMA_3_RELEASE] {
             let err = check_at_startup_with(&db, &g_ph(), HEAD, policy).unwrap_err();
             assert!(
                 matches!(err, ConfigError::RecordCorrupt(_)),
@@ -1012,17 +1087,17 @@ fn before_the_first_start_the_move_reverts_to_exactly_the_old_rows() {
     ] {
         set_head(&db, HEAD);
         let before = all_rows(&db);
-        let r = ccfg::read_record(&db).unwrap().unwrap();
-        let offered = ccfg::pending_schema_transition(&db).unwrap().unwrap();
+        let r = read_record(&db).unwrap().unwrap();
+        let offered = pending_schema_transition(&db).unwrap().unwrap();
         let moved = move_to_schema_4(&db, HEAD);
 
-        let p = ccfg::pending_schema_revert(&db).unwrap();
+        let p = pending_schema_revert(&db).unwrap();
         assert_eq!(p.seq, r.transition_count + 1, "{label}");
         assert_eq!(p.at_height, HEAD, "{label}");
         assert_eq!((p.from_schema, p.to_schema), (4, from), "{label}");
         assert_eq!((p.old, p.new), (moved.to, r.commitment), "{label}");
 
-        let done = ccfg::revert_schema_transition(&db, p.old, p.new).unwrap();
+        let done = revert_schema_transition(&db, p.old, p.new).unwrap();
         assert_eq!(
             (
                 done.seq,
@@ -1051,11 +1126,11 @@ fn before_the_first_start_the_move_reverts_to_exactly_the_old_rows() {
         );
         assert_eq!(all_rows(&db), before, "{label}: and writes nothing");
         assert_eq!(
-            ccfg::pending_schema_transition(&db).unwrap(),
+            pending_schema_transition(&db).unwrap(),
             Some(offered),
             "{label}: the same move is offered again"
         );
-        assert!(ccfg::pending_schema_revert(&db).is_err(), "{label}");
+        assert!(pending_schema_revert(&db).is_err(), "{label}");
     }
 }
 
@@ -1066,14 +1141,14 @@ fn the_revert_must_name_both_commitments_exactly() {
     let (_d, db) = production_shaped_database();
     set_head(&db, HEAD);
     move_to_schema_4(&db, HEAD);
-    let p = ccfg::pending_schema_revert(&db).unwrap();
+    let p = pending_schema_revert(&db).unwrap();
     let zero = Hash::from_hex(&format!("0x{}", "00".repeat(32))).unwrap();
     let before = all_rows(&db);
     for (old, new) in [(zero, p.new), (p.old, zero), (p.new, p.old), (p.old, p.old)] {
-        let err = ccfg::revert_schema_transition(&db, old, new).unwrap_err();
+        let err = revert_schema_transition(&db, old, new).unwrap_err();
         assert!(matches!(err, ConfigError::Refused(_)), "{err}");
     }
-    let err = ccfg::revert_schema_transition(&db, p.old, zero).unwrap_err();
+    let err = revert_schema_transition(&db, p.old, zero).unwrap_err();
     assert!(err.to_string().contains(&p.new.to_string()), "{err}");
     assert_eq!(all_rows(&db), before);
 }
@@ -1105,12 +1180,12 @@ fn the_revert_is_refused_once_the_chain_has_moved_past_the_move() {
         set_head(&db, HEAD);
         index_block_at(&db, HEAD);
         move_to_schema_4(&db, HEAD);
-        let p = ccfg::pending_schema_revert(&db).unwrap();
+        let p = pending_schema_revert(&db).unwrap();
         advance(&db);
         let before = all_rows(&db);
-        let err = ccfg::pending_schema_revert(&db).unwrap_err();
+        let err = pending_schema_revert(&db).unwrap_err();
         assert!(matches!(err, ConfigError::Refused(_)), "{what}: {err}");
-        let err = ccfg::revert_schema_transition(&db, p.old, p.new).unwrap_err();
+        let err = revert_schema_transition(&db, p.old, p.new).unwrap_err();
         assert!(matches!(err, ConfigError::Refused(_)), "{what}: {err}");
         let text = err.to_string();
         if what != "the head below the move" {
@@ -1118,7 +1193,7 @@ fn the_revert_is_refused_once_the_chain_has_moved_past_the_move() {
         }
         assert_eq!(all_rows(&db), before, "{what}: nothing written");
         assert_eq!(
-            ccfg::read_record(&db).unwrap().unwrap().commitment,
+            read_record(&db).unwrap().unwrap().commitment,
             p.old,
             "{what}: still moved"
         );
@@ -1134,7 +1209,7 @@ fn the_revert_is_refused_without_an_unstarted_move() {
     // A start that recorded a reschedule after the move.
     let (_d1, rescheduled) = production_shaped_database();
     move_to_schema_4(&rescheduled, HEAD);
-    ccfg::check_at_startup(&rescheduled, &with_gate(0, HEAD + 100), HEAD).unwrap();
+    check_at_startup(&rescheduled, &with_gate(0, HEAD + 100), HEAD).unwrap();
     // The schema-3 release's own move (last transition: a schema transition
     // into schema 3).
     let (_d2, schema_3) = schema_3_database();
@@ -1144,7 +1219,7 @@ fn the_revert_is_refused_without_an_unstarted_move() {
     // A fresh schema-4 record (no transition).
     let fresh_dir = TempDir::new().unwrap();
     let fresh = Database::open_default(fresh_dir.path()).unwrap();
-    ccfg::check_at_startup(&fresh, &g2(), 0).unwrap();
+    check_at_startup(&fresh, &g2(), 0).unwrap();
     let empty_dir = TempDir::new().unwrap();
     let empty = Database::open_default(empty_dir.path()).unwrap();
 
@@ -1160,11 +1235,11 @@ fn the_revert_is_refused_without_an_unstarted_move() {
         ("no record", &empty, "no consensus configuration baseline"),
     ] {
         let before = all_rows(db);
-        let err = ccfg::pending_schema_revert(db).unwrap_err();
+        let err = pending_schema_revert(db).unwrap_err();
         assert!(matches!(err, ConfigError::Refused(_)), "{what}: {err}");
         assert!(err.to_string().contains(says), "{what}: {err}");
         let c = h(C2);
-        assert!(ccfg::revert_schema_transition(db, c, c).is_err(), "{what}");
+        assert!(revert_schema_transition(db, c, c).is_err(), "{what}");
         assert_eq!(all_rows(db), before, "{what}: nothing written");
     }
 }
@@ -1176,26 +1251,26 @@ fn the_revert_refuses_a_second_run_and_a_damaged_or_unknown_record() {
     let (_d, db) = production_shaped_database();
     set_head(&db, HEAD);
     move_to_schema_4(&db, HEAD);
-    let p = ccfg::pending_schema_revert(&db).unwrap();
-    ccfg::revert_schema_transition(&db, p.old, p.new).unwrap();
+    let p = pending_schema_revert(&db).unwrap();
+    revert_schema_transition(&db, p.old, p.new).unwrap();
     let before = all_rows(&db);
-    let err = ccfg::revert_schema_transition(&db, p.old, p.new).unwrap_err();
+    let err = revert_schema_transition(&db, p.old, p.new).unwrap_err();
     assert!(matches!(err, ConfigError::Refused(_)), "{err}");
     assert_eq!(all_rows(&db), before, "a second run writes nothing");
 
     let (_d2, db) = production_shaped_database();
     set_head(&db, HEAD);
     move_to_schema_4(&db, HEAD);
-    let p = ccfg::pending_schema_revert(&db).unwrap();
+    let p = pending_schema_revert(&db).unwrap();
     tamper(&db, RECORD_KEY, |r| *r.last_mut().unwrap() ^= 1);
     let before = all_rows(&db);
-    let err = ccfg::revert_schema_transition(&db, p.old, p.new).unwrap_err();
+    let err = revert_schema_transition(&db, p.old, p.new).unwrap_err();
     assert!(matches!(err, ConfigError::RecordCorrupt(_)), "{err}");
     assert_eq!(all_rows(&db), before, "damaged: nothing written");
 
     let dir = TempDir::new().unwrap();
     let db = Database::open_default(dir.path()).unwrap();
-    ccfg::check_at_startup(&db, &g2(), 0).unwrap();
+    check_at_startup(&db, &g2(), 0).unwrap();
     tamper(&db, RECORD_KEY, |r| {
         r[87 + 7..87 + 9].copy_from_slice(&5u16.to_le_bytes());
         let c = commitment_of(&r[87..]);
@@ -1203,7 +1278,7 @@ fn the_revert_refuses_a_second_run_and_a_damaged_or_unknown_record() {
         r[51..83].copy_from_slice(c.as_bytes());
     });
     let before = all_rows(&db);
-    let err = ccfg::pending_schema_revert(&db).unwrap_err();
+    let err = pending_schema_revert(&db).unwrap_err();
     assert!(err.to_string().contains("newer binary"), "{err}");
     assert_eq!(all_rows(&db), before, "schema 5: nothing written");
 }
@@ -1220,7 +1295,7 @@ fn a_lost_revert_leaves_the_moved_record_and_half_a_revert_is_refused() {
     let unmoved = all_rows(&db);
     let original = db.get(cf::META, RECORD_KEY).unwrap().unwrap();
     move_to_schema_4(&db, HEAD);
-    let p = ccfg::pending_schema_revert(&db).unwrap();
+    let p = pending_schema_revert(&db).unwrap();
     let moved = all_rows(&db);
     {
         let mut batch = db.batch();
@@ -1231,7 +1306,7 @@ fn a_lost_revert_leaves_the_moved_record_and_half_a_revert_is_refused() {
     drop(db);
     let db = Database::open_default(dir.path()).unwrap();
     assert_eq!(all_rows(&db), moved);
-    ccfg::revert_schema_transition(&db, p.old, p.new).unwrap();
+    revert_schema_transition(&db, p.old, p.new).unwrap();
     assert_eq!(all_rows(&db), unmoved);
 
     for what in ["the record restored alone", "the transition removed alone"] {
@@ -1244,14 +1319,14 @@ fn a_lost_revert_leaves_the_moved_record_and_half_a_revert_is_refused() {
             db.delete(cf::META, &transition_key(p.seq)).unwrap();
         }
         let before = all_rows(&db);
-        for policy in [&PRODUCTION, &SCHEMA_3_RELEASE] {
+        for policy in [&SCHEMA_4_RELEASE, &SCHEMA_3_RELEASE] {
             let err = check_at_startup_with(&db, &g_ph(), HEAD, policy).unwrap_err();
             assert!(
                 matches!(err, ConfigError::RecordCorrupt(_)),
                 "{what}: {err}"
             );
         }
-        assert!(ccfg::pending_schema_revert(&db).is_err(), "{what}");
+        assert!(pending_schema_revert(&db).is_err(), "{what}");
         assert_eq!(all_rows(&db), before, "{what}: nothing written");
     }
 }
@@ -1296,8 +1371,8 @@ fn a_start_writes_exactly_the_marker_and_the_move_and_revert_leave_it_alone() {
     assert_eq!(read_start_marker(&db).unwrap(), Some(m));
 
     // With a record and a head, both are recorded; the attempt counts.
-    ccfg::check_at_startup(&db, &g2(), 0).unwrap();
-    let r = ccfg::read_record(&db).unwrap().unwrap();
+    check_at_startup(&db, &g2(), 0).unwrap();
+    let r = read_record(&db).unwrap().unwrap();
     set_head(&db, 7);
     sumchain_storage::schema::BlockStore::new(&db)
         .set_latest_hash(&h(C2))
@@ -1327,7 +1402,7 @@ fn a_start_writes_exactly_the_marker_and_the_move_and_revert_leave_it_alone() {
         Some(pre.clone()),
         "the move wrote none"
     );
-    let p = ccfg::pending_schema_revert(&db).unwrap();
+    let p = pending_schema_revert(&db).unwrap();
     assert_eq!(p.start_marker, Some(pre.clone()));
     assert_eq!(
         p.head_hash,
@@ -1335,7 +1410,7 @@ fn a_start_writes_exactly_the_marker_and_the_move_and_revert_leave_it_alone() {
             .get_latest_hash()
             .unwrap()
     );
-    ccfg::revert_schema_transition(&db, moved.to, moved.from).unwrap();
+    revert_schema_transition(&db, moved.to, moved.from).unwrap();
     assert_eq!(all_rows(&db), before, "every row, the marker included");
     assert_eq!(read_start_marker(&db).unwrap(), Some(pre));
 }
@@ -1349,7 +1424,7 @@ fn a_start_marker_at_the_move_refuses_the_revert() {
     let (_d, db) = production_shaped_database();
     set_head(&db, HEAD);
     let moved = move_to_schema_4(&db, HEAD);
-    assert!(ccfg::pending_schema_revert(&db).is_ok());
+    assert!(pending_schema_revert(&db).is_ok());
     // What a normal start leaves first, before anything else, whether it then
     // runs, imports nothing, or is refused.
     let m = record_start(&db).unwrap();
@@ -1362,7 +1437,7 @@ fn a_start_marker_at_the_move_refuses_the_revert() {
     );
     let before = all_rows(&db);
     for attempt in 0..2 {
-        let err = ccfg::revert_schema_transition(&db, moved.to, moved.from).unwrap_err();
+        let err = revert_schema_transition(&db, moved.to, moved.from).unwrap_err();
         assert!(matches!(err, ConfigError::Refused(_)), "{attempt}: {err}");
         let text = err.to_string();
         assert!(
@@ -1371,7 +1446,7 @@ fn a_start_marker_at_the_move_refuses_the_revert() {
         );
         assert!(text.contains("forward only"), "{text}");
         assert!(text.contains(&format!("attempt {}", m.attempt)), "{text}");
-        let err = ccfg::pending_schema_revert(&db).unwrap_err();
+        let err = pending_schema_revert(&db).unwrap_err();
         assert!(
             err.to_string().contains("a normal start was attempted"),
             "{err}"
@@ -1417,7 +1492,7 @@ fn an_inconsistent_or_unreadable_start_marker_refuses_the_revert_as_uncertain() 
     let (_d, db) = production_shaped_database();
     set_head(&db, HEAD);
     let moved = move_to_schema_4(&db, HEAD);
-    let r = ccfg::read_record(&db).unwrap().unwrap();
+    let r = read_record(&db).unwrap().unwrap();
     let zero = Hash::default();
     let cases: Vec<(&str, StartMarker)> = vec![
         (
@@ -1473,13 +1548,13 @@ fn an_inconsistent_or_unreadable_start_marker_refuses_the_revert_as_uncertain() 
     for (what, m) in cases {
         put_marker(&db, &m);
         let before = all_rows(&db);
-        let err = ccfg::revert_schema_transition(&db, moved.to, moved.from).unwrap_err();
+        let err = revert_schema_transition(&db, moved.to, moved.from).unwrap_err();
         assert!(matches!(err, ConfigError::Refused(_)), "{what}: {err}");
         assert!(
             err.to_string().contains("uncertain migration state"),
             "{what}: {err}"
         );
-        assert!(ccfg::pending_schema_revert(&db).is_err(), "{what}");
+        assert!(pending_schema_revert(&db).is_err(), "{what}");
         assert_eq!(all_rows(&db), before, "{what}: nothing written");
     }
     // Bytes this binary cannot read: a newer version, and garbage.
@@ -1494,7 +1569,7 @@ fn an_inconsistent_or_unreadable_start_marker_refuses_the_revert_as_uncertain() 
         db.put(cf::META, START_MARKER_KEY, &raw).unwrap();
         let before = all_rows(&db);
         assert!(read_start_marker(&db).is_err(), "{what}");
-        let err = ccfg::revert_schema_transition(&db, moved.to, moved.from).unwrap_err();
+        let err = revert_schema_transition(&db, moved.to, moved.from).unwrap_err();
         assert!(matches!(err, ConfigError::Refused(_)), "{what}: {err}");
         assert!(
             err.to_string().contains("uncertain migration state"),
@@ -1518,7 +1593,7 @@ fn a_start_marker_from_before_the_move_is_accounted_for_through_the_history() {
     set_head(&db, HEAD);
     // The fixture holds three transitions; a marker at count 0 is checked
     // against the initial commitment.
-    let r = ccfg::read_record(&db).unwrap().unwrap();
+    let r = read_record(&db).unwrap().unwrap();
     record_start(&db).unwrap();
     let raw = db.get(cf::META, START_MARKER_KEY).unwrap().unwrap();
     let mut early = raw.clone();
@@ -1527,9 +1602,9 @@ fn a_start_marker_from_before_the_move_is_accounted_for_through_the_history() {
     db.put(cf::META, START_MARKER_KEY, &early).unwrap();
     let before = all_rows(&db);
     let moved = move_to_schema_4(&db, HEAD);
-    let p = ccfg::pending_schema_revert(&db).unwrap();
+    let p = pending_schema_revert(&db).unwrap();
     assert_eq!(p.seq, moved.seq);
-    ccfg::revert_schema_transition(&db, moved.to, moved.from).unwrap();
+    revert_schema_transition(&db, moved.to, moved.from).unwrap();
     assert_eq!(all_rows(&db), before);
 }
 
@@ -1597,7 +1672,7 @@ fn b2_handshake_digest(g: &Genesis, policy: &SchemaPolicy) -> ([u8; 91], Hash) {
 ///   digest folds it with the compiled limits; neither reads the stored
 ///   record, so the move changes neither;
 /// * B2's handshake digest folds the protocol digest and the RUNNING
-///   commitment (`build(genesis)` in `PRODUCTION.writes`). Changing the
+///   commitment (`build(genesis)` in the written schema). Changing the
 ///   binary's written-schema policy (3 → 4) changes that commitment and so the
 ///   handshake digest; moving the stored record alone does not;
 /// * the same binary and genesis declare the same handshake digest whatever
@@ -1611,10 +1686,10 @@ fn the_move_changes_the_recorded_commitment_but_not_what_b2_would_declare() {
     set_head(&db, HEAD);
     let activation_before = g.activation_digest().unwrap();
     let protocol_before = sumchain_state::protocol_digest::protocol_digest(&g).unwrap();
-    let (preimage_before, handshake_before) = b2_handshake_digest(&g, &PRODUCTION);
-    let recorded_before = ccfg::read_record(&db).unwrap().unwrap().commitment;
+    let (preimage_before, handshake_before) = b2_handshake_digest(&g, &SCHEMA_4_RELEASE);
+    let recorded_before = read_record(&db).unwrap().unwrap().commitment;
     let moved = move_to_schema_4(&db, HEAD);
-    let recorded_after = ccfg::read_record(&db).unwrap().unwrap().commitment;
+    let recorded_after = read_record(&db).unwrap().unwrap().commitment;
     assert_ne!(
         recorded_before, recorded_after,
         "the move changes the RECORDED commitment"
@@ -1625,7 +1700,7 @@ fn the_move_changes_the_recorded_commitment_but_not_what_b2_would_declare() {
         sumchain_state::protocol_digest::protocol_digest(&g).unwrap(),
         protocol_before
     );
-    let (preimage_after, handshake_after) = b2_handshake_digest(&g, &PRODUCTION);
+    let (preimage_after, handshake_after) = b2_handshake_digest(&g, &SCHEMA_4_RELEASE);
     assert_eq!(
         preimage_after, preimage_before,
         "the preimage reads no record"
@@ -1638,21 +1713,21 @@ fn the_move_changes_the_recorded_commitment_but_not_what_b2_would_declare() {
     let fresh_dir = TempDir::new().unwrap();
     let fresh = Database::open_default(fresh_dir.path()).unwrap();
     assert!(matches!(
-        ccfg::check_at_startup(&fresh, &g, HEAD).unwrap(),
+        check_at_startup(&fresh, &g, HEAD).unwrap(),
         StartupOutcome::Initialized { .. }
     ));
     let (_d3, unmoved) = production_shaped_database();
     assert!(matches!(
-        ccfg::check_at_startup(&unmoved, &g, HEAD).unwrap(),
+        check_at_startup(&unmoved, &g, HEAD).unwrap(),
         StartupOutcome::Unchanged { .. }
     ));
     assert!(matches!(
-        ccfg::check_at_startup(&db, &g, HEAD).unwrap(),
+        check_at_startup(&db, &g, HEAD).unwrap(),
         StartupOutcome::Unchanged { .. }
     ));
     let records: Vec<ccfg::BaselineRecord> = [&fresh, &db, &unmoved]
         .iter()
-        .map(|d| ccfg::read_record(d).unwrap().unwrap())
+        .map(|d| read_record(d).unwrap().unwrap())
         .collect();
     assert_eq!(
         records
@@ -1666,12 +1741,12 @@ fn the_move_changes_the_recorded_commitment_but_not_what_b2_would_declare() {
         records[0].commitment, records[1].commitment,
         "the same rules in schema 4"
     );
-    let running = ccfg::build(&g).unwrap();
+    let running = build(&g).unwrap();
     for (i, r) in records.iter().enumerate() {
         // What `Node::new` would declare after each start: `build(genesis)`,
         // which equals the record carried into the written schema.
         assert_eq!(
-            b2_handshake_digest(&g, &PRODUCTION).1,
+            b2_handshake_digest(&g, &SCHEMA_4_RELEASE).1,
             handshake_before,
             "node {i}"
         );
@@ -1730,9 +1805,9 @@ fn what_this_binary_would_declare_for_b2s_golden_genesis() {
         ChainParams::default(),
     );
     let pd = sumchain_state::protocol_digest::protocol_digest(&g).unwrap();
-    let four = ccfg::build(&g).unwrap();
+    let four = build(&g).unwrap();
     let three = ccfg::build_with(&g, &SCHEMA_3_RELEASE).unwrap();
-    let (preimage, handshake) = b2_handshake_digest(&g, &PRODUCTION);
+    let (preimage, handshake) = b2_handshake_digest(&g, &SCHEMA_4_RELEASE);
     // The running commitment's preimage: the schema-3 bytes with the header
     // and the four absent entries.
     let b3 = three.encode();

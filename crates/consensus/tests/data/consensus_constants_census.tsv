@@ -76,8 +76,8 @@ crates/consensus/src/consensus_config/schema.rs	SCHEMA_3	EXCLUDE	consensus-confi
 crates/consensus/src/consensus_config/schema.rs	SCHEMA_3_ADDED	EXCLUDE	consensus-config-self	the configuration format itself (schema 3: schema 2 plus the node-registry remediation gate; written by this binary)
 crates/consensus/src/consensus_config/schema.rs	SCHEMA_4	EXCLUDE	consensus-config-self	the configuration format itself (schema 4: schema 3 plus four activation gates; written by this binary)
 crates/consensus/src/consensus_config/schema.rs	SCHEMA_4_ADDED	EXCLUDE	consensus-config-self	the configuration format itself (schema 4: schema 3 plus four activation gates; written by this binary)
-crates/consensus/src/consensus_config/schema.rs	SCHEMA_5	EXCLUDE	consensus-config-self	the configuration format itself (draft schema 5; never written by this binary)
-crates/consensus/src/consensus_config/schema.rs	SCHEMA_5_ADDED	EXCLUDE	consensus-config-self	the configuration format itself (draft schema 5; never written by this binary)
+crates/consensus/src/consensus_config/schema.rs	SCHEMA_5	EXCLUDE	consensus-config-self	the configuration format itself (schema 5: schema 4 plus the two messaging gates and the envelope tag; written by this binary)
+crates/consensus/src/consensus_config/schema.rs	SCHEMA_5_ADDED	EXCLUDE	consensus-config-self	the configuration format itself (schema 5: schema 4 plus the two messaging gates and the envelope tag; written by this binary)
 crates/consensus/src/consensus_config/schema.rs	SPONSORED_SEND_V2_TAG_ID	EXCLUDE	consensus-config-self	the configuration format itself (schema-5 field id)
 crates/consensus/src/poa.rs	MAX_BLOCK_FIT_ATTEMPTS	EXCLUDE	local-proposer	proposer packing retry budget; importers never read it (doc poa.rs:587-592)
 crates/consensus/src/poa.rs	MAX_PROPOSAL_REFUSAL_BYTES	EXCLUDE	local-proposer	screening-pass budget, proposer policy only (doc poa.rs:661-670); MAX_BLOCK_WRITE_SET_BYTES itself already committed 0x2004

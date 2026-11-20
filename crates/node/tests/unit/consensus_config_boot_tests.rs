@@ -211,7 +211,7 @@ static PREVIOUS: ccfg::SchemaPolicy = ccfg::SchemaPolicy {
 
 /// #277's gate (schema-2 field 0x103f) through the real boot sequence:
 ///
-/// * unset (every committed genesis), a fresh node records schema 4;
+/// * unset (every committed genesis), a fresh node records schema 5;
 /// * set on a fresh directory, the node boots and commits the height;
 /// * set as a future height on a directory this binary records, the boot is an
 ///   ordinary gate reschedule;
@@ -237,11 +237,11 @@ fn the_credential_schema_gate_through_the_boot_sequence() {
         None
     );
 
-    // Unset, fresh: schema 4, the gate absent.
+    // Unset, fresh: schema 5, the gate absent.
     let dir = tempfile::TempDir::new().unwrap();
     boot(dir.path(), &g).unwrap();
     let r = record(dir.path()).expect("recorded at first boot");
-    assert_eq!(r.config.schema().number, 4);
+    assert_eq!(r.config.schema().number, 5);
     assert_eq!(r.config.get(GATE), Some(&ccfg::Value::Absent));
     assert_eq!(r.commitment, ccfg::build(&g).unwrap().commitment());
 
@@ -290,7 +290,7 @@ fn the_credential_schema_gate_through_the_boot_sequence() {
     }
     boot(old.path(), &set(1_000)).unwrap();
     let r = record(old.path()).unwrap();
-    assert_eq!(r.config.schema().number, 4);
+    assert_eq!(r.config.schema().number, 5);
     assert_eq!(r.config.get(GATE), Some(&ccfg::Value::U64(1_000)));
 }
 
@@ -356,7 +356,7 @@ fn the_node_registry_gate_through_the_boot_sequence() {
         let db = Database::open_default(old.path()).unwrap();
         ccfg::pending_schema_transition(&db).unwrap().unwrap()
     };
-    assert_eq!((pending.from_schema, pending.to_schema), (1, 4));
+    assert_eq!((pending.from_schema, pending.to_schema), (1, 5));
     let err = boot(old.path(), &scheduled(900, 1_000)).unwrap_err();
     assert!(err.contains(NAME), "{err}");
     assert!(
@@ -393,7 +393,7 @@ fn the_node_registry_gate_through_the_boot_sequence() {
     );
     boot(old.path(), &scheduled(900, 1_000)).unwrap();
     let r = record(old.path()).unwrap();
-    assert_eq!(r.config.schema().number, 4);
+    assert_eq!(r.config.schema().number, 5);
     assert_eq!(r.config.get(GATE), Some(&ccfg::Value::U64(1_000)));
     {
         let db = Database::open_default(old.path()).unwrap();
@@ -411,7 +411,7 @@ fn the_node_registry_gate_through_the_boot_sequence() {
     let fresh = tempfile::TempDir::new().unwrap();
     boot(fresh.path(), &scheduled(900, 1_000)).unwrap();
     let r = record(fresh.path()).unwrap();
-    assert_eq!(r.config.schema().number, 4);
+    assert_eq!(r.config.schema().number, 5);
     assert_eq!(r.config.get(GATE), Some(&ccfg::Value::U64(1_000)));
 }
 
@@ -496,7 +496,7 @@ async fn extend_to(dir: &Path, g: &Genesis, height: u64) {
 }
 
 /// A directory the schema-1 release recorded, booted by this binary, moved to
-/// schema 4, booted under `scheduled` at height 0, then extended to `height`.
+/// schema 5, booted under `scheduled` at height 0, then extended to `height`.
 async fn moved_and_extended(scheduled: &Genesis, height: u64) -> tempfile::TempDir {
     let dir = tempfile::TempDir::new().unwrap();
     {
@@ -679,7 +679,7 @@ fn schema_3_directory(g: &Genesis) -> tempfile::TempDir {
 ///   next boot accepts that as a future reschedule;
 /// * after the move, the set genesis boots as a future-gate reschedule of
 ///   exactly the gate and its deadline, and a fresh directory commits the gate
-///   from its first boot, in schema 4.
+///   from its first boot, in schema 5.
 #[test]
 fn the_schema_4_gates_through_the_boot_sequence() {
     let peer_gate =
@@ -707,7 +707,7 @@ fn the_schema_4_gates_through_the_boot_sequence() {
             let db = Database::open_default(dir.path()).unwrap();
             ccfg::pending_schema_transition(&db).unwrap().unwrap()
         };
-        assert_eq!((pending.from_schema, pending.to_schema), (3, 4));
+        assert_eq!((pending.from_schema, pending.to_schema), (3, 5));
         let err = boot(dir.path(), &scheduled).unwrap_err();
         assert!(err.contains(name), "{err}");
         assert!(
@@ -735,7 +735,7 @@ fn the_schema_4_gates_through_the_boot_sequence() {
         assert_eq!(record(dir.path()).unwrap().commitment, pending.new);
         boot(dir.path(), &scheduled).unwrap();
         let r = record(dir.path()).unwrap();
-        assert_eq!(r.config.schema().number, 4);
+        assert_eq!(r.config.schema().number, 5);
         assert_eq!(r.config.get(id), Some(&ccfg::Value::U64(1_000)), "{name}");
         {
             let db = Database::open_default(dir.path()).unwrap();
@@ -751,7 +751,7 @@ fn the_schema_4_gates_through_the_boot_sequence() {
         let fresh = tempfile::TempDir::new().unwrap();
         boot(fresh.path(), &scheduled).unwrap();
         let r = record(fresh.path()).unwrap();
-        assert_eq!(r.config.schema().number, 4);
+        assert_eq!(r.config.schema().number, 5);
         assert_eq!(r.config.get(id), Some(&ccfg::Value::U64(1_000)), "{name}");
     }
 }
@@ -1319,9 +1319,9 @@ async fn a_start_killed_around_the_marker_commit_leaves_a_definite_state() {
 
 /// The deployed schema-3 release, started by mistake on a moved node, drops
 /// the two schema-4 names it does not declare from the activation record and
-/// is refused by the schema-4 record. Unset, the missing names change
-/// nothing and this binary boots; scheduled and passed, the verified schema-4
-/// record holds the same height and this binary restores the name.
+/// is refused by the moved record. Unset, the missing names change nothing
+/// and this binary boots; scheduled and passed, the verified moved record
+/// holds the same height and this binary restores the name.
 #[tokio::test]
 async fn names_the_schema_3_release_drops_are_restored_from_a_schema_4_record() {
     let as_the_schema_3_release_records = |dir: &Path| {
@@ -1347,7 +1347,7 @@ async fn names_the_schema_3_release_drops_are_restored_from_a_schema_4_record() 
         g.params.recorded_activation_heights()
     );
 
-    // Scheduled and passed: restored from the verified schema-4 record.
+    // Scheduled and passed: restored from the verified moved record.
     let mut gated = genesis();
     gated.params.peer_protocol_declaration_required_from_height = Some(2);
     gated
