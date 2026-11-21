@@ -44,7 +44,6 @@ ignore = [
     # evidence, removal conditions and the 2026-11-21 review date are in
     # .cargo/audit.toml. Guarded by scripts/check-webpki-shims.sh.
     "RUSTSEC-2026-0381", # webpki-roots 0.26.11 (ureq 2.12.1 <- wasmer 5.0.6 build-dependency)
-    "RUSTSEC-2026-0383", # webpki-root-certs 0.26.11 (rustls-platform-verifier 0.5.3, wasm32 only)
 ]
 
 # ---------------------------------------------------------------------------
