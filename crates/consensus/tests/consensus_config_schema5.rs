@@ -1007,6 +1007,39 @@ fn before_the_move_setting_the_messaging_gates_refuses_and_names_the_command() {
     }
 }
 
+/// The schema-4 release, run on a schema-3 database whose genesis sets the two
+/// messaging gates, does not offer its move for them: schema 4 cannot express
+/// them either, so the move would not help. The refusal says they must stay
+/// absent. This binary, on the same database, names its move. Nothing is
+/// written.
+#[test]
+fn a_release_that_cannot_express_the_gates_does_not_offer_its_move_for_them() {
+    let (_d, db) = schema_3_database();
+    let before = all_rows(&db);
+    let mut g = g2();
+    g.params.peer_protocol_declaration_required_from_height = g
+        .params
+        .peer_protocol_declaration_required_from_height
+        .or(Some(HEAD + 100));
+    g.params
+        .messaging_sponsored_envelope_verification_enabled_from_height = Some(HEAD + 200);
+    g.params.messaging_fee_nonce_accounting_enabled_from_height = Some(HEAD + 200);
+    g.validate().unwrap();
+
+    let err = check_at_startup_with(&db, &g, HEAD, &SCHEMA_4_RELEASE).unwrap_err();
+    let text = err.to_string();
+    assert!(matches!(err, ConfigError::Refused(_)), "{text}");
+    assert!(text.contains(ENVELOPE_NAME), "{text}");
+    assert!(text.contains("schema 3 cannot express"), "{text}");
+    assert!(!text.contains("acknowledge-consensus-config-schema"), "{text}");
+    assert!(text.contains("records schema 4"), "{text}");
+    assert!(text.contains("must stay absent"), "{text}");
+
+    let ours = ccfg::check_at_startup(&db, &g, HEAD).unwrap_err().to_string();
+    assert!(ours.contains("acknowledge-consensus-config-schema"), "{ours}");
+    assert_eq!(all_rows(&db), before, "nothing written");
+}
+
 /// After the move, the two gates at a future height move three fields: the
 /// heights and the envelope tag committed while the envelope gate is set. The
 /// tag is not a gate, so start refuses and names the field-level

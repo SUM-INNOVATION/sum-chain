@@ -417,8 +417,9 @@ enum Commands {
     ///
     /// Local only. It authorizes nothing on the network and activates nothing.
     /// A binary that records the schema the database already holds refuses.
-    /// Until the node first runs on the moved record,
-    /// `revert-consensus-config-schema` can undo the move.
+    /// Until a normal start is first attempted on the moved record,
+    /// `revert-consensus-config-schema` can undo the move; that attempt closes
+    /// the revert, whatever the start then does.
     AcknowledgeConsensusConfigSchema {
         /// Data directory
         #[arg(short, long, default_value = "data")]
@@ -1830,9 +1831,9 @@ async fn main() -> Result<()> {
             println!("  Re-encoded:     {new}");
             println!();
             println!("The recorded rules are unchanged; fields the newer schema adds are");
-            println!("recorded absent. This does not make any other node agree. Until this");
-            println!("node first runs on the moved record, `revert-consensus-config-schema`");
-            println!("can undo it; once a block above this height exists, it cannot.");
+            println!("recorded absent. This does not make any other node agree. Until a");
+            println!("normal start is first attempted on this node, `revert-consensus-config-schema`");
+            println!("can undo it; that attempt closes the revert, whatever the start then does.");
             if !yes {
                 println!();
                 println!("Type 'yes' to proceed:");

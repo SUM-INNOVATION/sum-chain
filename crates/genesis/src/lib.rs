@@ -3082,17 +3082,22 @@ pub struct ChainParams {
     /// Below this height, or while it is unset, a sponsored `SendMessage`
     /// executes exactly as before, under the earlier envelope rule, so
     /// historical blocks execute, import and replay as they did.
-    /// At and above it, the envelope is accepted only when it carries no
-    /// amount, its `signature` verifies strictly, by the key it names as the
-    /// sender, over the version-2 preimage
+    /// At and above it, the envelope is accepted only when its `signature`
+    /// verifies strictly, by the key it names as the sender, over the
+    /// version-2 preimage
     /// (`sumchain_wire::messaging::sponsored_send_v2_signing_preimage`, which
     /// binds the chain, the sender key, the recipient, the message bytes, the
     /// nonce, the expiry and the amount), the sender is registered, and its
     /// `nonce` equals the sender's current messaging nonce; then the nonce is
-    /// advanced and the message stored, as before. An envelope that fails any
-    /// check is an ordinary failed messaging operation and stores nothing.
-    /// A stored event therefore never reports a payment, because no sponsored
-    /// envelope carrying one is accepted.
+    /// advanced and the message stored, as before. A positive amount the
+    /// envelope names is a payment by the named sender, who signed it: the
+    /// sender's balance must cover it, and it is debited from the sender and
+    /// written to the existing pending-payment escrow; the relayer pays only
+    /// the fee. An amount of 0 names no payment. An envelope that fails any
+    /// check, an amount the sender cannot cover included, is an ordinary
+    /// failed messaging operation: no message is stored, and it is charged as
+    /// the accounting gate (set at the same height) charges any refusal. A
+    /// stored event reports a payment exactly when the escrow was written.
     ///
     /// Production-safe default `None`, which is what an absent field resolves
     /// to and what every genesis written before this gate existed carries.

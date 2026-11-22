@@ -330,7 +330,9 @@ pub fn read_transitions_with(
 ///
 /// A non-absent value of a field `schema` does not have is a refusal: the
 /// record cannot describe that rule. When `policy` writes a schema that has
-/// the field, the refusal names the schema transition.
+/// the field, the refusal names the schema transition; when even that schema
+/// cannot express it, moving the record would not help, and the refusal says
+/// the field must stay absent.
 fn computed_in(
     genesis: &Genesis,
     policy: &SchemaPolicy,
@@ -338,10 +340,14 @@ fn computed_in(
     record: Option<&BaselineRecord>,
 ) -> Result<ConsensusConfig, ConfigError> {
     let values = compute(genesis, policy)?;
+    let writable = !matches!(
+        ConsensusConfig::project(values.clone(), policy.knows, policy.writes),
+        Err(ConfigError::BeyondSchema { .. })
+    );
     ConsensusConfig::project(values, policy.knows, schema).map_err(|e| match e {
         ConfigError::BeyondSchema { schema: n, fields } => {
             let how = match (record, pending_schema_transition_for(record, policy)) {
-                (Some(r), Some(p)) => format!(
+                (Some(r), Some(p)) if writable => format!(
                     "This database records schema {n}; this binary can move it to \
                      schema {to}. Stop the node and run `sumchain \
                      acknowledge-consensus-config-schema --old {old} --new {new}` (it \
@@ -352,8 +358,9 @@ fn computed_in(
                     new = p.new,
                 ),
                 _ => format!(
-                    "This binary records schema {n} and can register those fields but \
-                     not activate them; they must stay absent"
+                    "This binary records schema {w} and can register those fields but \
+                     not activate them; they must stay absent",
+                    w = policy.writes.number
                 ),
             };
             ConfigError::Refused(format!(
