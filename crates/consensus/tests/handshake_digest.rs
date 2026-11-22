@@ -21,9 +21,10 @@ use sumchain_consensus::consensus_config::{
     record::{acknowledge_schema_transition_with, pending_schema_transition_with},
     schema::{
         MESSAGING_TIMESTAMP_MS_PER_SECOND_ID, SCHEMA_2_ADDED, SCHEMA_3_ADDED, SCHEMA_4_ADDED,
+        SCHEMA_5_ADDED,
     },
     AddedField, ConsensusConfig, Schema, SchemaPolicy, Source, StartupOutcome, Value,
-    HANDSHAKE_DIGEST_DOMAIN, SCHEMA_1, SCHEMA_2, SCHEMA_4,
+    HANDSHAKE_DIGEST_DOMAIN, SCHEMA_1, SCHEMA_2, SCHEMA_5,
 };
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::{BeaconParamsConfig, ChainParams, Genesis};
@@ -163,11 +164,11 @@ fn the_preimage_layout_and_the_golden_vector() {
 }
 
 const GOLDEN_PROTOCOL_DIGEST: &str =
-    "0xec12eb94a85e3440c93af4086f9d3a1e8883020d507bd95f53068177f0ab9494";
+    "0x9c8c06ddd2fa4db583acb16322a693734cae7d443c41169ab6f67dae996ba748";
 const GOLDEN_RUNNING_COMMITMENT: &str =
-    "0xf94779483d7d0299745c1b0124b0f53aaaadf3321ced737572453e6e774e3cf9";
+    "0x5de567b23540bc5c515371cba8befccee244510feee691b4fcee356894d70989";
 const GOLDEN_HANDSHAKE_DIGEST: &str =
-    "0x16a7c914c53c807992efb6b7d2c8626bc6bafc8d4c84ab71b1a472adff02712f";
+    "0xb2db3b66db0c140ffd4c0ec9f6fac9c89c94746cea406faa18aec565e731a8b6";
 
 /// The configuration [`compiled_stand_in`] builds: [`ccfg::PRODUCTION`] with
 /// the messaging timestamp unit's source replaced, as a binary compiled with a
@@ -212,10 +213,24 @@ static STAND_IN_SCHEMA_4: Schema = Schema {
     added: SCHEMA_4_ADDED,
 };
 
+static STAND_IN_SCHEMA_5: Schema = Schema {
+    number: 5,
+    previous: Some(&STAND_IN_SCHEMA_4),
+    added: SCHEMA_5_ADDED,
+};
+
+/// [`ccfg::PRODUCTION`]'s shape (reads 1 to 5, writes and knows 5) over the
+/// stand-in schemas.
 static COMPILED_STAND_IN: SchemaPolicy = SchemaPolicy {
-    reads: &[&SCHEMA_1, &STAND_IN_SCHEMA_2, &STAND_IN_SCHEMA_3],
-    writes: &STAND_IN_SCHEMA_3,
-    knows: &STAND_IN_SCHEMA_4,
+    reads: &[
+        &SCHEMA_1,
+        &STAND_IN_SCHEMA_2,
+        &STAND_IN_SCHEMA_3,
+        &STAND_IN_SCHEMA_4,
+        &STAND_IN_SCHEMA_5,
+    ],
+    writes: &STAND_IN_SCHEMA_5,
+    knows: &STAND_IN_SCHEMA_5,
 };
 
 /// One value from each range of the configuration that the protocol digest
@@ -324,11 +339,13 @@ fn it_moves_whenever_the_protocol_digest_moves() {
 
 // ── the record does not enter it ────────────────────────────────────────────
 
-/// The release that wrote schema 2.
+/// The release that wrote schema 2. It is given schema 5 to know because a
+/// policy must name every gate `ChainParams` declares to build at all; with
+/// those gates unset that adds nothing to the schema-2 record it writes.
 static SCHEMA_2_RELEASE: SchemaPolicy = SchemaPolicy {
     reads: &[&SCHEMA_1, &SCHEMA_2],
     writes: &SCHEMA_2,
-    knows: &SCHEMA_4,
+    knows: &SCHEMA_5,
 };
 
 /// The genesis `tests/data/consensus_config_schema1_db.tsv` records (as in
@@ -383,7 +400,8 @@ fn schema_2_database() -> (TempDir, Database) {
     (dir, db)
 }
 
-/// Three databases of one genesis: a fresh schema-3 one; a schema-2 record
+/// Three databases of one genesis: a fresh one, recorded in the schema this
+/// binary writes; a schema-2 record
 /// moved by `acknowledge_schema_transition`; and a schema-2 record left as it
 /// is, through a gate reschedule and its restore. Each starts, and records a
 /// different commitment or a different history. The handshake digest is the
@@ -401,7 +419,8 @@ fn it_is_independent_of_the_record_schema_and_history() {
 
     let (_moved_dir, moved) = schema_2_database();
     let p = ccfg::pending_schema_transition(&moved).unwrap().unwrap();
-    assert_eq!((p.from_schema, p.to_schema), (2, 3));
+    let writes = ccfg::PRODUCTION.writes.number;
+    assert_eq!((p.from_schema, p.to_schema), (2, writes));
     ccfg::acknowledge_schema_transition(&moved, HEIGHT, p.old, p.new).unwrap();
     assert!(matches!(
         ccfg::check_at_startup(&moved, &g, HEIGHT).unwrap(),
@@ -425,7 +444,7 @@ fn it_is_independent_of_the_record_schema_and_history() {
         .map(|db| ccfg::read_record(db).unwrap().unwrap())
         .collect();
     let schemas: Vec<u16> = records.iter().map(|r| r.config.schema().number).collect();
-    assert_eq!(schemas, [3, 3, 2]);
+    assert_eq!(schemas, [writes, writes, 2]);
     let histories: Vec<u64> = records.iter().map(|r| r.transition_count).collect();
     assert_eq!(histories[0], 0);
     assert!(histories[1] > 0 && histories[2] > histories[1]);

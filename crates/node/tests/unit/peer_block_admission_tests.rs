@@ -2273,8 +2273,10 @@ async fn dial(from: &NetworkService, to: &NetworkService) -> (PeerId, PeerId) {
     (from.local_peer_id().unwrap(), to.local_peer_id().unwrap())
 }
 
-/// The release that wrote schema 2: what a node not yet moved to schema 3
-/// recorded.
+/// The release that wrote schema 2: what a node that never moved its record
+/// recorded. It knows schema 5 because a policy must name every gate
+/// `ChainParams` declares; with those gates unset that adds nothing to its
+/// schema-2 record.
 static SCHEMA_2_RELEASE: sumchain_consensus::consensus_config::SchemaPolicy =
     sumchain_consensus::consensus_config::SchemaPolicy {
         reads: &[
@@ -2282,11 +2284,11 @@ static SCHEMA_2_RELEASE: sumchain_consensus::consensus_config::SchemaPolicy =
             &sumchain_consensus::consensus_config::SCHEMA_2,
         ],
         writes: &sumchain_consensus::consensus_config::SCHEMA_2,
-        knows: &sumchain_consensus::consensus_config::SCHEMA_4,
+        knows: &sumchain_consensus::consensus_config::SCHEMA_5,
     };
 
 /// Equal inputs, different records: one node's configuration record is in
-/// schema 3, the other's still in schema 2. Their recorded commitments differ;
+/// the schema this binary writes, the other's still in schema 2. Their recorded commitments differ;
 /// they declare the same handshake digest, verify each other both ways, and
 /// blocks flow.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2314,7 +2316,7 @@ async fn two_nodes_with_the_same_rules_verify_each_other_whatever_their_records_
             .iter()
             .map(|r| r.config.schema().number)
             .collect::<Vec<_>>(),
-        [3, 2]
+        [ccfg::PRODUCTION.writes.number, 2]
     );
     assert_ne!(records[0].commitment, records[1].commitment);
     assert_eq!(a.handshake_digest, b.handshake_digest);

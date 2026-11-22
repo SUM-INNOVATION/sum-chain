@@ -1637,9 +1637,10 @@ fn b2_handshake_digest(g: &Genesis, policy: &SchemaPolicy) -> ([u8; 91], Hash) {
 
 /// Writing schema 5 changes no gate name, so neither the activation digest
 /// nor the protocol digest moves; the move changes the RECORDED commitment
-/// only. What B2 would declare follows the binary's written schema: a
-/// schema-5 writer declares a different value from the schema-4 release for
-/// the same genesis, whatever either node has recorded.
+/// only. The handshake digest follows the binary's written schema: a schema-5
+/// writer declares a different value from the schema-4 release for the same
+/// genesis, whatever either node has recorded. The preimage built here by
+/// hand is the one this binary's `handshake_digest_for` declares.
 #[test]
 fn the_move_changes_the_recorded_commitment_but_not_the_digests() {
     let g = g_ph();
@@ -1648,6 +1649,7 @@ fn the_move_changes_the_recorded_commitment_but_not_the_digests() {
     let activation = g.activation_digest().unwrap();
     let protocol = sumchain_state::protocol_digest::protocol_digest(&g).unwrap();
     let (_, handshake_5) = b2_handshake_digest(&g, &PRODUCTION);
+    assert_eq!(ccfg::handshake_digest_for(&g).unwrap(), handshake_5);
     let recorded_before = ccfg::read_record(&db).unwrap().unwrap().commitment;
     let moved = move_to_schema_5(&db, HEAD);
     assert_ne!(
@@ -1715,10 +1717,19 @@ fn the_schema_5_encoding_is_the_schema_4_encoding_plus_three_absent_entries() {
     assert_eq!(&b5[at_gates + 14..at_tag + 14], &b4[at_gates..at_tag]);
     assert_eq!(&b5[at_tag + 14..at_tag + 21], &[0x2b, 0x25, 0, 0, 0, 0, 0]);
     assert_eq!(&b5[at_tag + 21..], &b4[at_tag..]);
-    eprintln!(
-        "B2-GOLDEN\tprotocol_digest={}\trunning_commitment_schema5={}\thandshake_digest={}",
-        sumchain_state::protocol_digest::protocol_digest(&g).unwrap(),
-        five.commitment(),
-        b2_handshake_digest(&g, &PRODUCTION).1
+    // B2's golden vector (`handshake_digest.rs`), from the preimage built here.
+    assert_eq!(
+        (
+            sumchain_state::protocol_digest::protocol_digest(&g)
+                .unwrap()
+                .to_string(),
+            five.commitment().to_string(),
+            b2_handshake_digest(&g, &PRODUCTION).1.to_string(),
+        ),
+        (
+            "0x9c8c06ddd2fa4db583acb16322a693734cae7d443c41169ab6f67dae996ba748".to_string(),
+            "0x5de567b23540bc5c515371cba8befccee244510feee691b4fcee356894d70989".to_string(),
+            "0xb2db3b66db0c140ffd4c0ec9f6fac9c89c94746cea406faa18aec565e731a8b6".to_string(),
+        )
     );
 }

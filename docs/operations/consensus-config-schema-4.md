@@ -256,9 +256,8 @@ Not part of this stage. For reference:
   unchanged, and every consensus rule and constant unchanged unless the change
   is itself a coordinated, acknowledged upgrade.
 - **A release that writes schema 5 is not a recovery binary.** It is a new
-  same-window upgrade with its own window: its running commitment differs, so
-  under B2 (below) it declares a different handshake digest and is refused by
-  schema-4 peers.
+  same-window upgrade with its own window: it declares the handshake digest
+  (below), which this release does not, and is refused by schema-4 peers.
 - **For that future window:** a fresh database's first start records the
   marker before the first baseline is written, so its marker says "no
   configuration record". A node started exactly once since its database was
@@ -289,7 +288,8 @@ Not part of this stage. For reference:
   today. Neither reads the stored configuration record, so **the move changes
   neither**; this release moves both only because it declares four more gate
   names (`0x1046` to `0x1049`).
-- **B2's handshake digest** (public PR #384, when it lands):
+- **B2's handshake digest** (not in this release; the release that writes
+  schema 5 declares it, `consensus-config-schema-5.md` §6):
   `BLAKE3("sumchain/protocol-digest/v2" ‖ protocol digest ‖ running
   commitment)`, where the running commitment is `build(genesis)` in the schema
   the binary **writes**, never the recorded one.

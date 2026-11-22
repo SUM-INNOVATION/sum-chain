@@ -44,15 +44,16 @@ peers or authorizes anything on the network.
   them unset executes exactly what it executed before.
 - **Against the schema-4 release, no gate name moves.** Schema 5 registers
   gates that the schema-4 release already declared (as draft fields it refused
-  to activate). The activation and protocol digests therefore do not move: on
-  the same genesis this binary and the schema-4 release declare the same
-  protocol digest and do not refuse each other at connect while the gates are
-  unset. Whether the move to this binary is nevertheless done in one window is
-  a release decision (section 2), not a digest constraint.
-- **Against any release older than the schema-4 release, the upgrade is
-  same-window,** for the reason `consensus-config-schema-4.md` gives: that
-  release lacks gate names this binary declares, so the two refuse each other
-  by protocol digest.
+  to activate), so the activation and protocol digests do not move.
+- **This release declares the handshake digest** (section 6), in place of the
+  protocol digest every earlier release declares. A handshake digest never
+  equals a protocol digest, so this binary and any earlier release refuse
+  each other at connect, whatever their rules: **the upgrade is same-window
+  from every earlier release**, the schema-4 release included. Every
+  validator and every follower moves in one window.
+- **Against any release older than the schema-4 release** the two also differ
+  in gate names (`consensus-config-schema-4.md`), so they would refuse each
+  other by protocol digest as well.
 - **Fresh data directory:** the node records schema 5 directly.
 - **Data directory recorded in schema 1, 2, 3 or 4:** the node runs it exactly
   as it stands. It is compared in its own schema, never re-encoded at start,
@@ -190,14 +191,24 @@ Not part of this stage, and not authorized by it. For reference:
 - **Activation digest and protocol digest:** unchanged by this release and by
   the move, on every tracked genesis (pinned in
   `genesis_strict_fields_identity.rs`).
-- **B2's handshake digest** (public PR #384, if it lands): it folds the
-  running commitment, `build(genesis)` in the schema the binary writes.
-  Changing the written schema from 4 to 5 changes the running commitment and
-  therefore the handshake digest: under B2 a schema-5 writer and a schema-4
-  writer of the same genesis would refuse each other. Migrating the stored
-  record alone changes nothing in the declaration. Tested in
-  `consensus_config_schema5.rs`
-  (`the_move_changes_the_recorded_commitment_but_not_the_digests`).
+- **The handshake digest** (rule R, `p2p-admission-and-compatibility.md` §2),
+  which this release declares: `BLAKE3("sumchain/protocol-digest/v2" ‖
+  protocol digest ‖ running commitment)`, where the running commitment is
+  `build(genesis)` in the schema the binary writes, never the recorded one.
+  - Changing the written schema from 4 to 5 changes the running commitment and
+    therefore the handshake digest: a schema-5 writer and a schema-4 writer of
+    the same genesis refuse each other even where both declare a handshake
+    digest.
+  - Migrating the stored record alone changes nothing in the declaration: a
+    node whose record is still schema 3 and a node whose record moved declare
+    the same value, and verify each other.
+  - After the window, any change to an input of the running configuration (a
+    gate height, or an acknowledged non-gate value such as `min_fee`) is
+    same-window too: a node restarted on new inputs is refused by the others,
+    and a node that refused it holds that refusal until it restarts itself.
+  - Tested in `consensus_config_schema5.rs`
+    (`the_move_changes_the_recorded_commitment_but_not_the_digests`),
+    `handshake_digest.rs`, and the node's booted multi-node tests.
 
 Earlier steps: `consensus-config-schema-4.md` (the release that wrote schema
 4). Tracker: #298.
