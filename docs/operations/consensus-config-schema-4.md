@@ -100,16 +100,16 @@ common height, peer count, and the consensus-configuration report below.
 An abort returns every node to the release it ran, at the agreed height and
 state. Abort on every node together; the stopped tips must be equal before
 any node starts. **The abort window closes at the first normal start attempt
-of the new binary on either node**, whatever that start then does: a start
-that imports nothing, or that is refused by a later check, closes it as much
-as one that runs. The pair then goes forward (section 5).
+of the new binary on any node**, validator or follower, whatever that start
+then does: a start that imports nothing, or that is refused by a later check,
+closes it as much as one that runs. Every node then goes forward (section 5).
 
 | Abort point | The database | Return to the running release |
 |---|---|---|
 | Before installing | unchanged | start the running release |
 | After installing, before the move | unchanged: `check-finality-record` and `--show` are read-only, and the new binary has not started | reinstall the running release and start it |
-| After the move, before any normal start attempt on either node | the moved record, which the running release refuses ("written by a newer binary"); no start marker | the pair-wide check below on both nodes, then the pre-start revert on both, then reinstall the running release and start it |
-| After a normal start attempt of the new binary on either node | that node holds a start marker written at the move | no abort back for the pair; forward recovery only (section 5) |
+| After the move, before any normal start attempt on any node | the moved record, which the running release refuses ("written by a newer binary"); no start marker | the check below on every node, then the pre-start revert on every node, then reinstall the running release and start it |
+| After a normal start attempt of the new binary on any node | that node holds a start marker, written by that start, recording the moved record's transition count | no abort back for any node; forward recovery only (section 5) |
 
 **The start marker.** Every normal start writes a marker (`cf::META`
 `node/start-marker/v1`) as its first write, immediately after the database is
@@ -126,25 +126,26 @@ the move and the revert.
 node from the stop until the operator's own start, so no auto-start,
 restart policy or hand start can close the window unnoticed.
 
-**The pair-wide check (before any revert).** On both nodes, stopped,
-read-only:
+**The check before any revert.** On every node, each validator and each
+follower, stopped, read-only:
 
 1. `revert-consensus-config-schema --show` prints the start marker (`none`),
    the head, and the move it would undo;
-2. the head height and hash equal the agreed tip, and are equal on both nodes;
+2. the head height and hash equal the agreed tip, and are equal on every node;
 3. each database's full key/value digest equals the digest taken right
    after that node's move (this also catches a start of any other
    binary, and any other command run in between);
 4. the service unit stayed masked or inactive since the stop (no unit start
    in the journal, `ActiveEnterTimestamp` and `NRestarts` unchanged);
-5. the operator's own record shows no start issued to either node since the
+5. the operator's own record shows no start issued to any node since the
    move.
 
-Abort-3 only if all five pass on **both** nodes. If anything fails on either
-node, **both go forward**. If a revert succeeds on one node and fails on the
-other, re-run the move on the reverted node (it is offered again) and go
-forward with both. Reverting only one node would put the two validators on
-binaries that refuse each other by digest, and the chain would halt.
+Abort-3 only if all five pass on **every** node. If anything fails on any
+node, **every node goes forward**. If a revert succeeds on some nodes and
+fails on another, re-run the move on each reverted node (it is offered again)
+and go forward with all of them. Reverting only some nodes would put the
+validators on binaries that refuse each other by digest, and the chain would
+halt; a follower left on the other side stops following.
 
 **The pre-start revert.** With the new binary, on the stopped node:
 
@@ -164,8 +165,9 @@ sumchain revert-consensus-config-schema --data-dir <dir> --old <moved> --new <re
   same move again.
 - **It touches no block, no state and no other row,** the start marker
   included. It is not a restore of any copy and it rewinds nothing.
-- **It is refused, and writes nothing,** when a start marker written at the
-  move exists (a normal start was attempted, imported or not, refused or not);
+- **It is refused, and writes nothing,** when a start marker written since
+  the move exists (a normal start was attempted, imported or not, refused or
+  not);
   when the marker cannot be read or disagrees with the history (an uncertain
   migration state); unless the last recorded change is the move into the
   schema this binary writes and the chain head is exactly the height the move
@@ -190,8 +192,8 @@ sumchain revert-consensus-config-schema --data-dir <dir> --old <moved> --new <re
   schema and marker are printed first); an existing target keeps the
   provenance comparison whatever the flag says. The controls that remain
   operational are part of this procedure: the post-move digest of
-  each database, the masked unit, and the pair-wide check (a
-  reverted-by-restore node fails the digest check, and the pair goes
+  each database, the masked unit, and the check before any revert (a
+  reverted-by-restore node fails the digest check, and every node goes
   forward).
 - **Binaries that write no marker are invisible to it.** The deployed release
   and earlier builds write no marker, so a mistaken start of either leaves
@@ -268,7 +270,7 @@ Not part of this stage. For reference:
   deployed one included. It refuses the moved record ("written by a newer
   binary") and rewrites nothing in it, but its activation-height check runs
   first and rewrites the activation record without the names it does not
-  declare (`0x1046` and `0x1047` for the deployed release). A later start of
+  declare (`0x1046` to `0x1049` for the deployed release). A later start of
   this binary accepts the missing names while those gates are unset, and
   restores a name whose gate has passed when the verified schema-4 record
   holds the same height. Do not start such a release on a moved node.
@@ -285,8 +287,8 @@ Not part of this stage. For reference:
   height (set or not). **Protocol digest:** the activation digest and the
   compiled consensus limits. Peers compare the protocol digest at connect
   today. Neither reads the stored configuration record, so **the move changes
-  neither**; this release moves both only because it declares two more gate
-  names.
+  neither**; this release moves both only because it declares four more gate
+  names (`0x1046` to `0x1049`).
 - **B2's handshake digest** (public PR #384, when it lands):
   `BLAKE3("sumchain/protocol-digest/v2" ‖ protocol digest ‖ running
   commitment)`, where the running commitment is `build(genesis)` in the schema

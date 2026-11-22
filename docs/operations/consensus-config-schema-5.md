@@ -116,8 +116,8 @@ release, or an older one):
 |---|---|---|
 | Before installing | unchanged | start the running release |
 | After installing, before the move | unchanged: `check-finality-record` and `--show` are read-only, and the new binary has not started | reinstall the running release and start it |
-| After the move, before any normal start attempt on any node | the moved record, which the running release refuses ("written by a newer binary") | the pair-wide check of `consensus-config-schema-4.md` §3 on every node, then the pre-start revert on every node, then reinstall the running release and start it |
-| After a normal start attempt of the new binary on any node | that node holds a start marker written at the move | no abort back; forward recovery only (section 5) |
+| After the move, before any normal start attempt on any node | the moved record, which the running release refuses ("written by a newer binary") | the check before any revert of `consensus-config-schema-4.md` §3 on every node, validators and followers alike, then the pre-start revert on every node, then reinstall the running release and start it |
+| After a normal start attempt of the new binary on any node | that node holds a start marker, written by that start, recording the moved record's transition count | no abort back for any node; forward recovery only (section 5) |
 
 - **The revert** is `sumchain revert-consensus-config-schema` exactly as for
   schema 4: it writes back exactly the record the move replaced and removes the
