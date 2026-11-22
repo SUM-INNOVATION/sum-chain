@@ -129,6 +129,14 @@ release, or an older one):
   that ran the schema-4 release holds a marker written at its schema-4
   record's transition count; that marker predates the move and is accounted
   for through the history.
+- **A start attempt of the schema-4 release after the move closes the
+  revert.** That release writes its start marker as its first write, before
+  it reads the record; it then refuses the moved record ("written by a newer
+  binary"), but its marker records the record as unreadable, and the revert
+  refuses that as an uncertain migration state. Recovery from there is forward
+  only, with this binary. So after the move, do not start the running release
+  on that node; abort with the revert first. Releases older than the schema-4
+  release write no marker (`consensus-config-schema-4.md` §3).
 - **A database created by the schema-4 release and started exactly once** holds
   a marker written before its first baseline existed ("no configuration
   record"). The revert of a move made on it is refused as an uncertain
