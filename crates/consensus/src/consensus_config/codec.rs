@@ -500,6 +500,8 @@ fn check_against_registry(schema: &'static Schema, fields: &[Field]) -> Result<(
     }
     // Rules that relate fields, or constrain a byte string's contents.
     super::schema::check_metering_relations(schema, fields).map_err(ConfigError::malformed)?;
+    super::schema::check_sponsored_envelope_relations(schema, fields)
+        .map_err(ConfigError::malformed)?;
     Ok(())
 }
 

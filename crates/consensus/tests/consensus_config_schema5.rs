@@ -515,6 +515,87 @@ fn the_two_gates_are_set_together_or_not_at_all() {
     ));
 }
 
+// ── the envelope tag's value rule ───────────────────────────────────────────
+
+/// An encoding as (id, value tag, value bytes) per field, after the 11-byte
+/// header.
+fn parse(bytes: &[u8]) -> Vec<(u16, u8, Vec<u8>)> {
+    let le16 = |b: &[u8]| u16::from_le_bytes([b[0], b[1]]);
+    let count = le16(&bytes[9..11]) as usize;
+    let mut pos = 11;
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let id = le16(&bytes[pos..]);
+        let tag = bytes[pos + 2];
+        let len = u32::from_le_bytes(bytes[pos + 3..pos + 7].try_into().unwrap()) as usize;
+        out.push((id, tag, bytes[pos + 7..pos + 7 + len].to_vec()));
+        pos += 7 + len;
+    }
+    assert_eq!(pos, bytes.len());
+    out
+}
+
+fn unparse(head: &[u8], fields: &[(u16, u8, Vec<u8>)]) -> Vec<u8> {
+    let mut out = head[..11].to_vec();
+    for (id, tag, value) in fields {
+        out.extend_from_slice(&id.to_le_bytes());
+        out.push(*tag);
+        out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        out.extend_from_slice(value);
+    }
+    out
+}
+
+/// The schema-5 encoding of `g` with the envelope tag replaced by `tag`
+/// (`None` leaves it absent).
+fn with_tag(g: &Genesis, tag: Option<&[u8]>) -> Vec<u8> {
+    let base = ccfg::build(g).unwrap().encode();
+    let mut fields = parse(&base);
+    let f = fields
+        .iter_mut()
+        .find(|(id, _, _)| *id == SPONSORED_SEND_V2_TAG_ID)
+        .unwrap();
+    (f.1, f.2) = tag.map_or((0, vec![]), |b| (4, b.to_vec()));
+    unparse(&base, &fields)
+}
+
+fn decode_any(bytes: &[u8]) -> Result<ConsensusConfig, ConfigError> {
+    ConsensusConfig::decode_with(
+        bytes,
+        &[&SCHEMA_1, &SCHEMA_2, &SCHEMA_3, &SCHEMA_4, &SCHEMA_5],
+    )
+}
+
+fn assert_malformed(bytes: &[u8], why: &str) {
+    match decode_any(bytes) {
+        Err(ConfigError::Malformed(m)) => assert!(m.contains(why), "{why}: {m}"),
+        other => panic!("{why}: {other:?}"),
+    }
+}
+
+/// The envelope tag is committed exactly when the envelope gate is set, and
+/// is then exactly the compiled tag. A record that breaks the rule was not
+/// produced by an encoder and is refused on decode; both shapes the encoder
+/// produces decode and re-encode byte for byte.
+#[test]
+fn the_envelope_tag_is_committed_exactly_when_the_gate_is() {
+    let tag = sumchain_primitives::SPONSORED_SEND_V2_TAG;
+    let set = with_messaging_gates(HEAD + 100);
+    let dormant = g0();
+    for (g, committed) in [(&set, Some(tag)), (&dormant, None)] {
+        let bytes = ccfg::build(g).unwrap().encode();
+        assert_eq!(with_tag(g, committed), bytes, "the encoder's own shape");
+        assert_eq!(decode_any(&bytes).unwrap().encode(), bytes);
+    }
+    assert_malformed(&with_tag(&set, None), "committed exactly when the gate is");
+    assert_malformed(&with_tag(&dormant, Some(tag)), "committed exactly when the gate is");
+    let mut other = tag.to_vec();
+    *other.last_mut().unwrap() = b'3';
+    for wrong in [&other[..], &tag[..tag.len() - 1], b"x"] {
+        assert_malformed(&with_tag(&set, Some(wrong)), "not the compiled tag");
+    }
+}
+
 // ── installing the binary changes nothing ───────────────────────────────────
 
 /// A database of schema 1 to 4, or production-shaped in schema 3 or 4, runs as

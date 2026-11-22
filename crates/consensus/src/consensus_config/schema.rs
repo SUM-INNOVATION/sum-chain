@@ -778,6 +778,48 @@ fn sponsored_send_v2_tag_value(genesis: &Genesis) -> Value {
     }
 }
 
+/// The value rule of the envelope tag. Part of schema 5: checked on every
+/// configuration built or decoded in a schema that registers the tag, so a
+/// record that breaks it was not produced by any encoder and is refused.
+///
+/// - [`SPONSORED_SEND_V2_TAG_ID`] is present exactly when `0x1048` (the
+///   sponsored-envelope verification gate) is: a configuration that verifies
+///   version-2 envelopes commits the tag their preimage begins with, and one
+///   that does not commits none.
+/// - Present, it is exactly [`SPONSORED_SEND_V2_TAG`], the compiled tag.
+pub(crate) fn check_sponsored_envelope_relations(
+    schema: &'static Schema,
+    fields: &[Field],
+) -> Result<(), String> {
+    let (gate, tag) = (0x1048_u16, SPONSORED_SEND_V2_TAG_ID);
+    if schema.spec(tag).is_none() {
+        return Ok(());
+    }
+    let get = |id: u16| {
+        fields
+            .iter()
+            .find(|f| f.id == id)
+            .map_or(&Value::Absent, |f| &f.value)
+    };
+    let verified = *get(gate) != Value::Absent;
+    match get(tag) {
+        Value::Absent if verified => Err(format!(
+            "field {tag:#06x} (the version-2 envelope tag) is absent while the envelope gate \
+             {gate:#06x} is set; the tag is committed exactly when the gate is"
+        )),
+        Value::Absent => Ok(()),
+        _ if !verified => Err(format!(
+            "field {tag:#06x} (the version-2 envelope tag) is present while the envelope gate \
+             {gate:#06x} is absent; the tag is committed exactly when the gate is"
+        )),
+        Value::Bytes(b) if b.as_slice() == SPONSORED_SEND_V2_TAG => Ok(()),
+        _ => Err(format!(
+            "field {tag:#06x} (the version-2 envelope tag) is not the compiled tag \
+             sumchain_wire::messaging::SPONSORED_SEND_V2_TAG"
+        )),
+    }
+}
+
 /// Fields schema 5 adds to schema 4. FROZEN: this binary writes schema 5
 /// ([`PRODUCTION`]), so this list never changes again; a later field belongs
 /// to schema 6. Ids are never reused or reordered.
@@ -815,6 +857,7 @@ pub const SCHEMA_5_ADDED: &[AddedField] = &[
     // also moves this field, which is not a gate, so that start asks for
     // `acknowledge-consensus-config` rather than recording a reschedule on its
     // own (as the schema-2 `MESSAGING_TIMESTAMP_MS_PER_SECOND` field does).
+    // Its value rule is [`check_sponsored_envelope_relations`].
     AddedField {
         spec: FieldSpec {
             id: SPONSORED_SEND_V2_TAG_ID,

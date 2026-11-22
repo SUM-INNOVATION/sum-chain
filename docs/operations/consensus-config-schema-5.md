@@ -11,7 +11,12 @@ optional fields, each meaning "the behaviour that existed before" when absent:
 |---|---|---|
 | `0x1048` | `messaging_sponsored_envelope_verification_enabled_from_height` | from this height a sponsored `SendMessage` carries a version-2 sender envelope, verified in consensus |
 | `0x1049` | `messaging_fee_nonce_accounting_enabled_from_height` | from this height every messaging operation is charged its fee and advances the sender's account nonce, once, succeeding or refused |
-| `0x252b` | `sumchain_wire::messaging::SPONSORED_SEND_V2_TAG` | the compiled domain tag the version-2 envelope preimage begins with; committed only while `0x1048` is set |
+| `0x252b` | `sumchain_wire::messaging::SPONSORED_SEND_V2_TAG` | the compiled domain tag the version-2 envelope preimage begins with; committed exactly while `0x1048` is set |
+
+**One value rule** is part of the schema, checked on every configuration built
+or decoded in it: `0x252b` is present exactly when `0x1048` is, and is then the
+compiled tag byte for byte. A record that breaks it was not produced by any
+encoder and is refused as malformed.
 
 This binary writes schema 5 (`PRODUCTION`: reads 1 to 5, writes 5). That
 freezes schema 5: its registry and encoding never change again, and a later
