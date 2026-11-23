@@ -8,23 +8,38 @@
 //! is. The test follows the operator's procedure for a non-gate change:
 //!
 //! 1. the three run one chain and verify each other;
-//! 2. one is stopped; its genesis's `min_fee` is moved; its start refuses and
-//!    names `acknowledge-consensus-config --old … --new …`; the command is run,
-//!    and the node started again. Its handshake digest differs, so it and the
-//!    other two refuse each other: it is partitioned from them;
-//! 3. it is stopped, its genesis restored, the change acknowledged back, and it
-//!    is started again. A validator that compared and refused its changed
-//!    declaration still holds it `Incompatible`, banned, for the life of that
-//!    process, so it does not admit the restored node;
-//! 4. once the holders restart, all three verify each other and blocks flow.
+//! 2. one (C) is stopped; its genesis's `min_fee` is moved; its start refuses
+//!    and names `acknowledge-consensus-config --old … --new …`; the command is
+//!    run, and the node started again. Its handshake digest differs, so every
+//!    pair it forms with the other two is refused, and it is partitioned;
+//! 3. C is stopped again, and its changed declaration is presented to A and B
+//!    once more, so that both of them hold its refusal (below);
+//! 4. C's genesis is restored, the change acknowledged back, and C started
+//!    again: A and B still hold it `Incompatible`, banned, for the life of their
+//!    processes, and do not admit the restored node;
+//! 5. once the holders restart, all three verify each other and every one of
+//!    them produces blocks again.
 //!
-//! Which side of a refused pair compares the other's declaration first is a
-//! race: the first to compare bans and disconnects, and the other's request
-//! may then fail and leave it holding nothing. A validator that holds nothing
-//! admits the restored node at once, which is the same rule (the refusal lasts
-//! as long as the process that holds it). The changed node is restarted until
-//! at least one of the other two holds the refusal, so that the holder's case
-//! is always exercised.
+//! # Who holds a refusal
+//!
+//! Both sides of a connection ask for the other's declaration as it connects,
+//! and each answers the other's request from its event loop. The first side to
+//! receive an answer it disagrees with refuses, bans and disconnects; if that
+//! happens before its own answer has reached the other side, the other side's
+//! request fails and it holds nothing (it is left `Undeclared`, on a connection
+//! that is closed and that the first side's ban keeps closed). Which side that
+//! is depends on timing: on Linux the side that dialled usually wins, on macOS
+//! both sides usually compare. Step 2 therefore requires, for each pair, that at
+//! least one side refused and the other is proven cut off, and nothing more.
+//!
+//! The holders that step 4 tests are created by construction instead, in step
+//! 3: a bare network service with C's own persisted identity dials A and B,
+//! answers their declaration requests with exactly the digest the changed C
+//! declares, and never asks for theirs. Nothing on its side can refuse first,
+//! so each of A and B compares that declaration and refuses it (or already
+//! holds C's refusal from step 2 and refuses the connection outright).
+//!
+//! Every failure prints every node's logs.
 #![cfg(unix)]
 
 use std::fs;
@@ -32,6 +47,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+use sumchain_genesis::Genesis;
+use sumchain_p2p::{NetworkCommand, NetworkConfig, NetworkEvent, NetworkService};
 
 const BIN: &str = env!("CARGO_BIN_EXE_sumchain");
 
@@ -262,6 +280,33 @@ impl Drop for Validator {
     }
 }
 
+/// Prints every log file of every node when the test fails, whichever
+/// assertion or helper failed.
+struct LogsOnFailure(Vec<PathBuf>);
+
+impl Drop for LogsOnFailure {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        for home in &self.0 {
+            let mut logs: Vec<PathBuf> = fs::read_dir(home)
+                .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
+                .unwrap_or_default();
+            logs.retain(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("log-"))
+            });
+            logs.sort();
+            for log in logs {
+                let text = fs::read_to_string(&log).unwrap_or_default();
+                eprintln!("===== {} =====\n{text}", log.display());
+            }
+        }
+    }
+}
+
 fn wait_until(within: Duration, mut done: impl FnMut() -> bool) -> bool {
     let t = Instant::now();
     while t.elapsed() < within {
@@ -290,6 +335,67 @@ fn produced(log: &str) -> Vec<u64> {
         .collect()
 }
 
+/// The node's request for `peer`'s declaration failed: it holds nothing.
+fn did_not_declare(log: &str, peer: &str) -> bool {
+    log.contains(&format!("Peer {peer} did not declare a handshake digest"))
+}
+
+/// The node's network closed a new connection from or to `peer`, which it
+/// had banned.
+fn refused_connection(log: &str, peer: &str) -> bool {
+    log.contains(&format!("connection from {peer}; closing it again"))
+}
+
+/// A bare network service with the identity in `key_file`, as a node with that
+/// identity: it dials `bootnodes`, answers every declaration request with
+/// `digest`, asks for nobody's, and runs until `done` holds or [`LONG`] passes.
+/// It never refuses anyone, so each node it reaches compares `digest`.
+fn declare_as(
+    key_file: &Path,
+    digest: sumchain_primitives::Hash,
+    bootnodes: Vec<String>,
+    done: impl Fn() -> bool,
+) -> bool {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let (service, command_rx) = NetworkService::new(NetworkConfig {
+            listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
+            bootnodes,
+            enable_mdns: false,
+            node_key_file: Some(key_file.to_path_buf()),
+            ..Default::default()
+        });
+        let service = std::sync::Arc::new(service);
+        let mut events = service.subscribe();
+        let commands = service.command_sender();
+        let runner = std::sync::Arc::clone(&service);
+        let task = tokio::spawn(async move {
+            let _ = runner.run(command_rx).await;
+        });
+        let deadline = Instant::now() + LONG;
+        let mut ok = false;
+        while Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(250), events.recv()).await {
+                Ok(Ok(NetworkEvent::ProtocolIdRequest { request_id, .. })) => {
+                    let _ = commands
+                        .send(NetworkCommand::SendProtocolIdResponse { request_id, digest })
+                        .await;
+                }
+                Ok(Ok(_))
+                | Err(_)
+                | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+            }
+            if done() {
+                ok = true;
+                break;
+            }
+        }
+        task.abort();
+        ok
+    })
+}
+
 fn genesis(path: &Path, validators: &[String], min_fee: u64, time: u128) {
     let list = validators
         .iter()
@@ -307,16 +413,17 @@ fn genesis(path: &Path, validators: &[String], min_fee: u64, time: u128) {
 }
 
 /// Three producing validators. One is restarted with an acknowledged
-/// `min_fee` change: it and the other two refuse each other. Restored and
-/// restarted, it is still refused by every validator that holds the refusal,
-/// until that validator restarts; then all three verify each other and blocks
-/// flow again.
+/// `min_fee` change: every pair it forms with the other two is refused.
+/// Restored and restarted, it is still refused by every validator that holds
+/// its refusal, until that validator restarts; then all three verify each
+/// other and blocks flow again.
 #[test]
 fn a_validator_restarted_with_an_acknowledged_change_is_partitioned_until_the_holders_restart() {
     let root = tempfile::tempdir().unwrap();
     let (mut a, pa) = Validator::new(root.path(), "a");
     let (mut b, pb) = Validator::new(root.path(), "b");
     let (mut c, pc) = Validator::new(root.path(), "c");
+    let _logs = LogsOnFailure(vec![a.home.clone(), b.home.clone(), c.home.clone()]);
     let time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -325,6 +432,10 @@ fn a_validator_restarted_with_an_acknowledged_change_is_partitioned_until_the_ho
     let changed = root.path().join("genesis-min-fee-moved.json");
     genesis(&original, &[pa.clone(), pb.clone(), pc.clone()], 1, time);
     genesis(&changed, &[pa, pb, pc], 2, time);
+    let changed_digest = sumchain_consensus::consensus_config::handshake_digest_for(
+        &Genesis::from_file(&changed).unwrap(),
+    )
+    .unwrap();
 
     // ── 1. The three run one chain. ─────────────────────────────────────────
     a.start(&original, &[]);
@@ -347,82 +458,93 @@ fn a_validator_restarted_with_an_acknowledged_change_is_partitioned_until_the_ho
     };
     assert!(
         wait_until(LONG, || one_chain(&a, &b, &c, [0, 0, 0], 0)),
-        "the three never ran one chain; logs:\n--- a\n{}\n--- b\n{}\n--- c\n{}",
-        a.log_text(),
-        b.log_text(),
-        c.log_text()
+        "the three never ran one chain"
     );
 
-    // ── 2. C restarts with an acknowledged min_fee change. ──────────────────
+    // ── 2. C restarts with an acknowledged min_fee change: refused. ─────────
     c.stop();
     let (old, new) = c.refused_start(&changed, &[a.bootnode(), b.bootnode()]);
     assert_ne!(old, new);
     c.acknowledge(&changed, &old, &new);
-    let mut holders: Vec<&'static str> = Vec::new();
-    for attempt in 1..=3 {
-        let marks = [a.mark(), b.mark()];
-        c.start(&changed, &[a.bootnode(), b.bootnode()]);
-        let apart = |x: &Validator, mark: usize| {
-            refused(&x.since(mark), &c.peer_id) || refused(&c.log_text(), &x.peer_id)
-        };
-        assert!(
-            wait_until(LONG, || apart(&a, marks[0]) && apart(&b, marks[1])),
-            "attempt {attempt}: C and the others never refused each other; logs:\n--- a\n{}\n--- b\n{}\n--- c\n{}",
-            a.since(marks[0]),
-            b.since(marks[1]),
-            c.log_text()
-        );
-        std::thread::sleep(QUIET);
-        for (x, mark) in [(&a, marks[0]), (&b, marks[1])] {
-            assert!(!accepted(&x.since(mark), &c.peer_id), "{} admitted the changed C", x.name);
-            assert!(!accepted(&c.log_text(), &x.peer_id), "the changed C admitted {}", x.name);
-            if refused(&x.since(mark), &c.peer_id) && !holders.contains(&x.name) {
-                holders.push(x.name);
-            }
-        }
-        // C is partitioned: it imports nothing from them; at its own turns it
-        // can only extend its own copy.
-        if !holders.is_empty() {
-            break;
-        }
-        c.stop();
-    }
+    let marks = [a.mark(), b.mark()];
+    c.start(&changed, &[a.bootnode(), b.bootnode()]);
+    // Each pair: at least one side refuses; the other refuses too, or its own
+    // request failed on the closed connection and it holds nothing.
+    let settled = |x: &Validator, mark: usize| {
+        let (xl, cl) = (x.since(mark), c.log_text());
+        let x_refused = refused(&xl, &c.peer_id);
+        let c_refused = refused(&cl, &x.peer_id);
+        (x_refused || c_refused)
+            && (x_refused || did_not_declare(&xl, &c.peer_id))
+            && (c_refused || did_not_declare(&cl, &x.peer_id))
+    };
     assert!(
-        !holders.is_empty(),
-        "in three attempts neither A nor B compared C's declaration first"
+        wait_until(LONG, || settled(&a, marks[0]) && settled(&b, marks[1])),
+        "the changed C and the other two never refused each other"
     );
-    eprintln!("validators holding the changed C's refusal: {holders:?}");
-
-    // ── 3. C restored and restarted: refused by every holder. ───────────────
+    std::thread::sleep(QUIET);
+    let mut phase_2 = Vec::new();
+    for (x, mark) in [(&a, marks[0]), (&b, marks[1])] {
+        let xl = x.since(mark);
+        assert!(!accepted(&xl, &c.peer_id), "{} admitted the changed C", x.name);
+        assert!(!accepted(&c.log_text(), &x.peer_id), "the changed C admitted {}", x.name);
+        if refused(&xl, &c.peer_id) {
+            assert!(
+                xl.contains(&changed_digest.to_string()),
+                "{} refused C for the digest the changed genesis gives",
+                x.name
+            );
+        }
+        phase_2.push(format!(
+            "{} refused C: {}, C refused {}: {}",
+            x.name,
+            refused(&xl, &c.peer_id),
+            x.name,
+            refused(&c.log_text(), &x.peer_id)
+        ));
+    }
+    eprintln!("step 2, who refused: {phase_2:?}");
     c.stop();
+
+    // ── 3. A and B hold C's refusal, by construction. ───────────────────────
+    let holds = |x: &Validator, mark: usize| {
+        let xl = x.since(mark);
+        refused(&xl, &c.peer_id)
+    };
+    assert!(
+        declare_as(
+            &c.data().join("node.key"),
+            changed_digest,
+            vec![a.bootnode(), b.bootnode()],
+            || holds(&a, marks[0]) && holds(&b, marks[1]),
+        ),
+        "A and B do not both hold the refusal of C's changed declaration"
+    );
+
+    // ── 4. C restored and restarted: refused by both holders. ───────────────
     let (old, new) = c.refused_start(&original, &[a.bootnode(), b.bootnode()]);
     c.acknowledge(&original, &old, &new);
     let marks = [a.mark(), b.mark()];
     c.start(&original, &[a.bootnode(), b.bootnode()]);
+    for (x, mark) in [(&a, marks[0]), (&b, marks[1])] {
+        assert!(
+            wait_until(LONG, || refused_connection(&x.since(mark), &c.peer_id)),
+            "{} holds C's refusal and must close the restored C's connection",
+            x.name
+        );
+    }
     std::thread::sleep(QUIET);
     for (x, mark) in [(&a, marks[0]), (&b, marks[1])] {
-        if holders.contains(&x.name) {
-            std::thread::sleep(QUIET);
-            assert!(
-                !accepted(&x.since(mark), &c.peer_id),
-                "{} holds C's refusal and must not admit the restored C; its log:\n{}",
-                x.name,
-                x.since(mark)
-            );
-            assert!(
-                !accepted(&c.log_text(), &x.peer_id),
-                "the restored C must not be admitted by {}, which holds its refusal",
-                x.name
-            );
-        } else {
-            // Only C held this pair's refusal, and C restarted.
-            assert!(
-                wait_until(LONG, || accepted(&x.since(mark), &c.peer_id)
-                    && accepted(&c.log_text(), &x.peer_id)),
-                "{} held nothing and must admit the restored C",
-                x.name
-            );
-        }
+        assert!(
+            !accepted(&x.since(mark), &c.peer_id),
+            "{} holds C's refusal and must not admit the restored C",
+            x.name
+        );
+        assert!(
+            !accepted(&c.log_text(), &x.peer_id),
+            "the restored C must not be admitted by {}, which holds its refusal",
+            x.name
+        );
     }
     let before = [a.log_text(), b.log_text(), c.log_text()]
         .iter()
@@ -430,7 +552,7 @@ fn a_validator_restarted_with_an_acknowledged_change_is_partitioned_until_the_ho
         .max()
         .unwrap_or(0);
 
-    // ── 4. The holders restart: one chain again. ────────────────────────────
+    // ── 5. The holders restart: one chain again. ────────────────────────────
     let c_mark = c.mark();
     a.stop();
     b.stop();
@@ -438,10 +560,6 @@ fn a_validator_restarted_with_an_acknowledged_change_is_partitioned_until_the_ho
     b.start(&original, &[a.bootnode(), c.bootnode()]);
     assert!(
         wait_until(LONG, || one_chain(&a, &b, &c, [0, 0, c_mark], before)),
-        "after the holders restarted the three never ran one chain again (from height {before}); \
-         logs:\n--- a\n{}\n--- b\n{}\n--- c\n{}",
-        a.log_text(),
-        b.log_text(),
-        c.since(c_mark)
+        "after the holders restarted the three never ran one chain again (from height {before})"
     );
 }
